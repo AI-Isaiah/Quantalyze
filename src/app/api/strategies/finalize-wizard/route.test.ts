@@ -864,6 +864,111 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 composite dispatch",
     expect(sentry).toBeDefined();
     fetchSpy.mockRestore();
   });
+
+  it("Finding 6: fails LOUD (stamp + Sentry, no enqueue) when a composite is finalized with USE_COMPUTE_JOBS_QUEUE off", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    // Queue OFF — pre-fix the composite count probe sat BELOW the queue gate, so a
+    // composite created here was silently orphaned (no job, no failure). Post-fix
+    // detection runs regardless and fails loud (stitch_composite has no worker).
+    delete process.env.USE_COMPUTE_JOBS_QUEUE;
+    STATE.strategyKeysCount = 3;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200); // finalize itself is non-blocking (after())
+    await flushAfter();
+
+    // No enqueue AT ALL — never a single-key sync_trades on a composite.
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeUndefined();
+    // Terminal 'failed' stamp so the wizard poller reaches a gate.
+    const stamp = STATE.strategyAnalyticsUpserts.find(
+      (p) => p.computation_status === "failed",
+    );
+    expect(stamp).toBeDefined();
+    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
+    // Escalated to Sentry (Promise.allSettled rejection of the side effect).
+    const sentry = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
+    );
+    expect(sentry).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 86 (COMP-02) / Finding 6 — the unified-backbone finalize path. The
+ * unified path delegates to process_key_long (single-key derive), which cannot
+ * reconstruct a multi-key composite. A member-bearing composite reaching this
+ * path must FAIL LOUD (stamp + reject) rather than be silently orphaned.
+ */
+describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone composite guard", () => {
+  it("fails LOUD (409 + terminal stamp) when a composite reaches the unified path", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.unifiedBackboneActive = true;
+    STATE.strategyKeysCount = 2;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("COMPOSITE_UNSUPPORTED_UNIFIED");
+
+    // Terminal 'failed' stamp so the wizard poller reaches a gate.
+    const stamp = STATE.strategyAnalyticsUpserts.find(
+      (p) => p.computation_status === "failed",
+    );
+    expect(stamp).toBeDefined();
+    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
+    // A composite must NEVER be routed to process_key_long here (no stitch job
+    // either — the unified path doesn't dispatch composites this phase).
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("passes a single-key strategy (0 members) through to the unified path (200)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.unifiedBackboneActive = true;
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    // No composite failed stamp on the single-key unified path.
+    const stamp = STATE.strategyAnalyticsUpserts.find(
+      (p) => p.computation_status === "failed",
+    );
+    expect(stamp).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("fails CLOSED (503 + Sentry + stamp) on an unknowable membership count in the unified path", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.unifiedBackboneActive = true;
+    STATE.strategyKeysCountError = { message: "count boom" };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    const stamp = STATE.strategyAnalyticsUpserts.find(
+      (p) => p.computation_status === "failed",
+    );
+    expect(stamp).toBeDefined();
+    const sentry = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "unified-composite-probe",
+    );
+    expect(sentry).toBeDefined();
+    fetchSpy.mockRestore();
+  });
 });
 
 /**
