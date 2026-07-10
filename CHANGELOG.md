@@ -2,7 +2,7 @@
 
 ## [0.40.0.1] - 2026-07-10
 ### Changed
-- **Node 20 → 22 + puppeteer-core 24 → 25 (tech-debt #595).** Coordinated Node 22 upgrade across CI (`node-version: 22` in ci.yml/contracts.yml/nightly.yml/sql-function-snapshot.yml), `.nvmrc`, and `package.json` `engines` (`>=22`), unblocking puppeteer-core `^25.3.0` (requires Node ≥22.12). puppeteer-core is a production dep (PDF generation); the app code was already puppeteer-25-compatible — all 50 puppeteer-touching tests pass. Vercel derives the runtime from `engines.node` (no dashboard pin in `vercel.json`); the preview deploy's Node version is verified before merge.
+- **Node 20 → 22 (tech-debt #595, part 1).** Coordinated Node 22 upgrade across CI (`node-version: 22` in ci.yml/contracts.yml/nightly.yml/sql-function-snapshot.yml — 15 lines), `.nvmrc`, and `package.json` `engines` (`>=22`). Dependency-neutral (lockfile unchanged), so `npm ci` stays in sync. Vercel derives the runtime from `engines.node` (no dashboard pin in `vercel.json`); the preview deploy's Node version is verified before merge. **Deferred to part 2:** the puppeteer-core 24 → 25 bump (needs Node ≥22.12, which this unblocks) — split out because its transitive `proxy-agent` tree resolves differently between the local Node-25/macOS env and CI's Node-22/Linux, so its `package-lock.json` must be regenerated in a Node-22 environment. puppeteer-core 24 runs fine on Node 22 (needs ≥18), so prod PDF generation is unaffected in the interim.
 
 ## [0.40.0.0] - 2026-07-10
 ### Added
