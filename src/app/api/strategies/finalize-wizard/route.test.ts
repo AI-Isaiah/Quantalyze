@@ -84,8 +84,13 @@ const STATE = vi.hoisted(() => ({
   // Phase 86 (COMP-02) — strategy_keys member count for the composite dispatch
   // branch. >0 ⇒ enqueue stitch_composite; 0 ⇒ legacy sync_trades. The forced
   // error exercises the W-4 fail-CLOSED branch (surface, never enqueue).
-  strategyKeysCount: 0 as number,
+  strategyKeysCount: 0 as number | null,
   strategyKeysCountError: null as { message: string } | null,
+  // F3 / F5(b) — capture strategy_analytics upserts the after() fail-closed
+  // branch stamps (terminal 'failed' so the wizard poller reaches a gate; the
+  // reconcile cron does NOT re-drive composites) so tests can assert the
+  // strategy is NOT left silently spinning in 'pending'.
+  strategyAnalyticsUpserts: [] as Array<Record<string, unknown>>,
   // H-0331 — capture the strategy name actually passed to
   // notifyFounderNewStrategy so tests can assert it came from the DB row.
   notifyFounderCalls: [] as Array<{ name: unknown; managerName: unknown }>,
@@ -222,6 +227,16 @@ vi.mock("@/lib/supabase/admin", () => ({
           }),
         };
       }
+      if (table === "strategy_analytics") {
+        // F3 / F5(b) — the fail-closed branch stamps a terminal 'failed' row via
+        // upsert(payload, { onConflict: 'strategy_id' }).
+        return {
+          upsert: async (patch: Record<string, unknown>) => {
+            STATE.strategyAnalyticsUpserts.push(patch);
+            return { data: null, error: null };
+          },
+        };
+      }
       throw new Error(`unexpected admin from(${table})`);
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -337,6 +352,7 @@ beforeEach(async () => {
   STATE.adminApiKeysSelectError = null;
   STATE.strategyKeysCount = 0;
   STATE.strategyKeysCountError = null;
+  STATE.strategyAnalyticsUpserts = [];
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
@@ -801,6 +817,47 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 composite dispatch",
     );
     expect(enqueueCall).toBeUndefined();
     // The count error is escalated to Sentry (Promise.allSettled rejection).
+    const sentry = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
+    );
+    expect(sentry).toBeDefined();
+    // F3: AND the strategy is stamped terminal 'failed' so the wizard poller
+    // reaches a gate — the reconcile cron does NOT re-drive composites, so
+    // without this the row would spin in 'pending' forever.
+    const stamp = STATE.strategyAnalyticsUpserts.find(
+      (p) => p.computation_status === "failed",
+    );
+    expect(stamp).toBeDefined();
+    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
+    fetchSpy.mockRestore();
+  });
+
+  it("F5(b): fails CLOSED on a null count WITHOUT error — no sync_trades, terminal stamp", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    // PostgREST can return count===null with NO error; `(count ?? 0) > 0` would
+    // fall OPEN to the single-key sync_trades path on a possible composite.
+    STATE.strategyKeysCount = null;
+    STATE.strategyKeysCountError = null;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // Never a single-key enqueue on an unknown-membership strategy.
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeUndefined();
+    // Terminal 'failed' stamp so the wizard surfaces a gate (no infinite spin).
+    const stamp = STATE.strategyAnalyticsUpserts.find(
+      (p) => p.computation_status === "failed",
+    );
+    expect(stamp).toBeDefined();
+    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
+    // Escalated to Sentry as well.
     const sentry = STATE.captureToSentryCalls.find(
       (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
     );

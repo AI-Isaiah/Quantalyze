@@ -750,19 +750,41 @@ async function runLegacyFinalize(args: {
             .from("strategy_keys")
             .select("*", { count: "exact", head: true })
             .eq("strategy_id", resolvedId);
-          if (countErr) {
-            // W-4 FAIL CLOSED: on a count-query error we do NOT know whether this
-            // strategy is a composite. Routing a possible member-bearing composite
-            // through the single-key `sync_trades` path would silently produce a
-            // wrong/partial derivation. Surface the error (Promise.allSettled →
-            // Sentry) instead of enqueuing a single-key kind on a possible
-            // composite. The reconcile cron re-drives stuck 'pending' rows, so the
-            // strategy is not orphaned — it simply is not mis-derived.
-            throw new Error(
-              `strategy_keys count failed: ${countErr.message}`,
+          // W-4 / F3 / F5(b) FAIL CLOSED: on a count-query ERROR — or a null
+          // count with NO error (PostgREST can return count===null without
+          // erroring; `(count ?? 0) > 0` would fall OPEN to the single-key path)
+          // — we do NOT know whether this strategy is a composite. Routing a
+          // possible member-bearing composite through the single-key
+          // `sync_trades` path would silently produce a wrong/partial derivation.
+          //
+          // We CANNOT rely on the reconcile cron to re-drive a stuck composite:
+          // cron/reconcile-strategies filters RECONCILABLE_EXCHANGES (excludes
+          // deribit), requires a strategies→api_keys!inner join a strategy_keys
+          // composite lacks, and enqueues `reconcile_strategy` (not
+          // `stitch_composite`) — so a composite left in 'pending' is NEVER
+          // re-driven and the wizard poller spins forever. Instead stamp a
+          // terminal 'failed' analytics row so the poller surfaces a gate/alert
+          // (retryable reason), THEN throw so Promise.allSettled → Sentry also
+          // captures it for operators.
+          if (countErr || count === null) {
+            const reason = countErr
+              ? `strategy_keys count failed: ${countErr.message}`
+              : "strategy_keys count returned null without an error";
+            await admin.from("strategy_analytics").upsert(
+              {
+                strategy_id: resolvedId,
+                computation_status: "failed",
+                computation_warned: false,
+                computation_error:
+                  "Could not determine composite membership " +
+                  "(strategy_keys count unavailable). Please retry submission.",
+                data_quality_flags: { csv_source: true, composite: true },
+              },
+              { onConflict: "strategy_id" },
             );
+            throw new Error(reason);
           }
-          if ((count ?? 0) > 0) {
+          if (count > 0) {
             const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
               p_strategy_id: resolvedId,
               p_kind: "stitch_composite",
