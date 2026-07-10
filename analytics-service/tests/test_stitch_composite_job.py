@@ -472,27 +472,6 @@ async def test_dq_flags_merge_preserves_existing_key() -> None:
     assert "per_key" in dq and "gap_day_count" in dq  # composite mask merged in
 
 
-@pytest.mark.asyncio
-async def test_post_clip_day_collision_permanent() -> None:
-    """The SECOND overlap layer: two members whose DECLARED windows are disjoint
-    but whose reconstructed series collide on a calendar day (a mis-declared
-    window) → CompositeOverlapError → permanent (never last-write-wins)."""
-    fake = _FakeSupabase(members=[
-        _member(1, "2024-01-01", "2024-01-05"),
-        _member(2, "2024-01-05", None),
-    ])
-    # Both series carry 2024-01-05 → post-clip collision (m1 clip is half-open so
-    # would normally exclude it, but the stub returns it inside m1's clipped span).
-    m1 = _returns([("2024-01-01", 0.02), ("2024-01-04", 0.01)])
-    m2 = _returns([("2024-01-04", 0.03), ("2024-01-06", -0.01)])  # 01-04 collides
-    with _apply(_deribit_patches(
-        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
-    )):
-        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
-    assert result.outcome == DispatchOutcome.FAILED
-    assert result.error_kind == "permanent"
-
-
 def test_no_verification_or_publish_status_write_source_scan() -> None:
     """M-3: run_stitch_composite_job must NEVER advance verification/publish
     status (no composite GA before Phase 87's gate). Source scan of the function

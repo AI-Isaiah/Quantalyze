@@ -264,6 +264,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "refresh_allocator_equity_daily": 3 * 60,   # Phase 07 / D-02 — one-day delta per key (VOICES-ACCEPTED f1)
     "process_key_long": 30 * 60,   # Phase 19 / BACKBONE-09 — 30 min ceiling supports 90-day OKX archive backfill
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
+    "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
 }
 
 
@@ -2783,6 +2784,500 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         ).execute()
 
     await db_execute(_enqueue_csv_analytics)
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
+# Phase 86 (COMP-02, #597 blend): the exchange venues whose returns annualize on
+# the crypto (365) clock. The composite periods_per_year is 365 if ANY member
+# venue is crypto, else 252 — an explicit set so a future non-crypto venue flips
+# the blend to 252 without touching the rule.
+_COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
+    {"deribit", "binance", "okx", "bybit"}
+)
+
+
+async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
+    """Phase 86 (COMP-02 / COMP-04) — the production multi-key composite stitch.
+
+    Fans out over ``strategy_keys`` members ORDER BY ``seq`` (owner-coherent,
+    Phase 85), reconstructs each member's dense daily-return series via the SAME
+    per-key entry points the single-key derive path uses (``build_deribit_native_
+    ledger`` + ``combine_native_ledger`` for Deribit; ``combine_realized_and_
+    funding`` for ccxt), clips each to its half-open ``[window_start, window_end)``
+    window, runs the two-layer fail-loud overlap guard, arithmetic-stitches the
+    clipped series into ONE honest combined series, persists the stitched
+    cash_settlement series to ``csv_daily_returns`` (gap/guarded days ABSENT —
+    never 0.0 as performance), lets the EXISTING ``run_csv_strategy_analytics``
+    compile the single-basis headline row (parity by construction), then
+    ADDITIVELY writes ``metrics_json_by_basis`` (both bases when MTM is admissible)
+    + the coverage-mask ``data_quality_flags`` (OQ-3 write ordering — the by-basis
+    object can never be clobbered by the headline upsert).
+
+    Worker-only key decryption is LOCKED: the ONLY decrypt path is inside
+    ``_allocator_key_preflight`` (per member). The Next.js route enqueues this kind
+    and never decrypts.
+
+    Error taxonomy (T-86-11 DoS): a 0-member composite, overlapping windows
+    (``CompositeOverlapError``), a structurally-incomplete/unvaluable ledger
+    (``LedgerCompletenessError`` / ``LedgerValuationError`` / ``NavReconstruction
+    Error`` …), or a malformed ``returns_denominator_config`` are all PERMANENT
+    (``failed``, never retried-forever) with a scrubbed message (T-86-10). A
+    geo-blocked member crawl is TRANSIENT (retryable). M-3: this job NEVER advances
+    verification/publish status (no composite GA before Phase 87's gate).
+    """
+    strategy_id = job.get("strategy_id")
+    if not strategy_id:
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_stitch_composite_job: strategy_id missing",
+            error_kind="permanent",
+        )
+
+    import pandas as pd
+
+    from services.stitch_composite import (
+        CompositeOverlapError,
+        MemberBasisSignal,
+        MemberWindow,
+        assert_windows_disjoint,
+        clip_to_window,
+        coverage_mask,
+        mark_to_market_available,
+        stitch_clipped_series,
+    )
+    from services.broker_dailies import (
+        combine_native_ledger,
+        gap_fill_daily_returns,
+    )
+    from services.deribit_ingest import (
+        CurrencyEnumerationError,
+        LedgerCompletenessError,
+        LedgerTruncatedError,
+        ScopeAuthError,
+        assert_ledger_complete,
+        build_deribit_native_ledger,
+        fetch_deribit_native_account_state,
+    )
+    from services.deribit_txn import (
+        DEFAULT_PNL_BASIS,
+        PNL_BASIS_MARK_TO_MARKET,
+        LedgerValuationError,
+    )
+    from services.allocated_capital import (
+        ReturnsDenominatorConfigError,
+        exclude_spot_extraction_for,
+        metrics_day_basis,
+        parse_returns_denominator_config,
+    )
+    from services.metrics import (
+        DEFAULT_PERIODS_PER_YEAR,
+        PERIODS_PER_YEAR_CRYPTO,
+        compute_all_metrics,
+    )
+    from services.nav_twr import NavReconstructionError
+    from services.redact import scrub_freeform_string
+
+    supabase = get_supabase()
+
+    async def _stamp_failed(message: str) -> None:
+        """Terminal 'failed' stamp so the wizard poller reaches a gate instead of
+        an infinite 'computing' spinner (mirrors the derive path). Scrubbed
+        (T-86-10). Never touches verification/publish columns (M-3)."""
+        scrubbed = str(scrub_freeform_string(message))
+
+        def _upsert() -> None:
+            supabase.table("strategy_analytics").upsert(
+                {
+                    "strategy_id": strategy_id,
+                    "computation_status": "failed",
+                    "computation_warned": False,
+                    "computation_error": scrubbed,
+                    "data_quality_flags": {"csv_source": True, "composite": True},
+                },
+                on_conflict="strategy_id",
+            ).execute()
+
+        await db_execute(_upsert)
+
+    # 1. Members ORDER BY seq (Phase 85). owner_id in the row is advisory — the
+    # authoritative owner is re-read from the api_keys row inside preflight, never
+    # trusted from the job payload (T-86-09).
+    def _load_members() -> Any:
+        return (
+            supabase.table("strategy_keys")
+            .select("api_key_id, owner_id, window_start, window_end, seq")
+            .eq("strategy_id", strategy_id)
+            .order("seq")
+            .execute()
+        )
+
+    members_res = await db_execute(_load_members)
+    members = list(getattr(members_res, "data", None) or [])
+    if not members:
+        await _stamp_failed("Composite strategy has no member keys.")
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_stitch_composite_job: strategy has 0 strategy_keys members",
+            error_kind="permanent",
+        )
+
+    # 2. Declared-window overlap guard BEFORE any exchange crawl (fail fast, no
+    # wasted fan-out). Either overlap layer → PERMANENT (T-86-11).
+    windows = [
+        MemberWindow(
+            seq=int(m["seq"]),
+            window_start=str(m["window_start"]),
+            window_end=(None if m.get("window_end") is None else str(m["window_end"])),
+        )
+        for m in members
+    ]
+    try:
+        assert_windows_disjoint(windows)
+    except CompositeOverlapError as exc:
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        await _stamp_failed("Composite member windows overlap. " + scrubbed)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "run_stitch_composite_job: overlapping declared windows — " + scrubbed
+            ),
+            error_kind="permanent",
+        )
+
+    # Per-strategy denominator override (Zavara allocated capital) — parsed ONCE,
+    # threaded into combine_native_ledger. Its pnl_basis drives the cash ledger's
+    # accrual basis; malformed → PERMANENT (never ship a guessed capital base).
+    def _load_strategy() -> Any:
+        return (
+            supabase.table("strategies")
+            .select("id, asset_class, returns_denominator_config")
+            .eq("id", strategy_id)
+            .single()
+            .execute()
+        )
+
+    strat_res = await db_execute(_load_strategy)
+    strat_row = getattr(strat_res, "data", None) or {}
+    try:
+        denominator_config = parse_returns_denominator_config(
+            strat_row.get("returns_denominator_config")
+            if isinstance(strat_row, dict)
+            else None
+        )
+    except ReturnsDenominatorConfigError as exc:
+        await _stamp_failed("Composite returns_denominator_config is malformed.")
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "run_stitch_composite_job: malformed returns_denominator_config — "
+                + str(scrub_freeform_string(str(exc)))
+            ),
+            error_kind="permanent",
+        )
+
+    cash_pnl_basis = (
+        denominator_config.pnl_basis
+        if denominator_config is not None
+        else DEFAULT_PNL_BASIS
+    )
+    exclude_spot = exclude_spot_extraction_for(denominator_config)
+
+    _PERMANENT_LEDGER_ERRORS = (
+        LedgerCompletenessError,
+        LedgerTruncatedError,
+        CurrencyEnumerationError,
+        ScopeAuthError,
+        LedgerValuationError,
+        NavReconstructionError,
+    )
+
+    async def _reconstruct_deribit(ctx: Any, basis: str) -> tuple[pd.Series, bool]:
+        """One Deribit member's dense daily-return series for ``basis`` + its
+        option-activity signal, through the EXISTING per-key entry points."""
+        account_state = await fetch_deribit_native_account_state(ctx.exchange)
+        ledger, completeness = await build_deribit_native_ledger(
+            ctx.exchange,
+            account_state=account_state,
+            pnl_basis=basis,
+            exclude_spot_extraction=exclude_spot,
+        )
+        assert_ledger_complete(completeness)
+        returns, _meta = combine_native_ledger(
+            ledger,
+            completeness.indexable_currencies,
+            denominator_config=denominator_config,
+        )
+        return returns, bool(completeness.has_option_activity)
+
+    async def _reconstruct_all(basis: str) -> tuple[
+        list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str]
+    ] | DispatchResult:
+        """Fan out over every member for ``basis``: preflight (worker-only
+        decrypt) → reconstruct → clip. Returns the clipped (seq, series) list +
+        per-member MTM signals + venues, or a DispatchResult on a preflight
+        FAILED/DEFERRED or a typed permanent / transient reconstruction error."""
+        clipped: list[tuple[int, pd.Series]] = []
+        signals: list[MemberBasisSignal] = []
+        venues: list[str] = []
+        for m in members:
+            seq = int(m["seq"])
+            member_job = {"api_key_id": m["api_key_id"], "strategy_id": strategy_id}
+            ctx = await _allocator_key_preflight(member_job, "run_stitch_composite_job")
+            if isinstance(ctx, DispatchResult):
+                # Preflight FAILED (missing/inactive key) or DEFERRED (circuit
+                # breaker) — surface as-is. A geo-block on a live crawl is handled
+                # in the except below.
+                return ctx
+            venue = str(ctx.key_row["exchange"])
+            if venue != "deribit":
+                # SCOPE (Phase 86): the composite ships the Deribit (Zavara-class)
+                # path first. A ccxt (binance/okx/bybit) member requires the derive
+                # path's full flow-valuation + DQ-02 retention-terminus machinery
+                # (job_worker.py:2363-2413) to reconstruct honestly; composing that
+                # here without it would ship a subtly-wrong series (silent
+                # divergence — no-invented-data). Fail LOUD PERMANENT with a clear
+                # message rather than a guessed number; ccxt composite support is a
+                # deliberate follow-up (tracked in the SUMMARY).
+                await aclose_exchange(ctx.exchange)
+                await _stamp_failed(
+                    f"Composite member on venue {venue!r} is not yet supported "
+                    "(Deribit-only this phase)."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: non-Deribit composite member "
+                        f"venue {venue!r} not yet supported"
+                    ),
+                    error_kind="permanent",
+                )
+            try:
+                returns, has_opt = await _reconstruct_deribit(ctx, basis)
+            except _PERMANENT_LEDGER_ERRORS as exc:
+                scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_failed(
+                    "Composite member reconstruction failed structurally "
+                    "(incomplete/unvaluable ledger). " + scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: member ledger unrecoverable — "
+                        + scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+            except Exception as exc:  # noqa: BLE001
+                if is_geo_blocked(exc):
+                    # Worker-egress geo-restriction on a member crawl — RETRYABLE,
+                    # not a structural refusal (Pitfall 4 / T-86 transient).
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "run_stitch_composite_job: member crawl geo-blocked — "
+                            + str(scrub_freeform_string(str(exc)))
+                        ),
+                        error_kind="transient",
+                    )
+                raise
+            finally:
+                await aclose_exchange(ctx.exchange)
+            clipped.append((seq, clip_to_window(returns, m["window_start"], m.get("window_end"))))
+            signals.append(MemberBasisSignal(seq=seq, venue=venue, has_option_activity=has_opt))
+            venues.append(venue)
+        return clipped, signals, venues
+
+    # 3. CASH_SETTLEMENT fan-out (always).
+    cash_result = await _reconstruct_all(cash_pnl_basis)
+    if isinstance(cash_result, DispatchResult):
+        return cash_result
+    clipped_cash, member_signals, venues = cash_result
+
+    # 4. Fail-loud post-clip overlap + arithmetic stitch (T-86-11 second layer).
+    try:
+        stitched_cash = stitch_clipped_series(clipped_cash)
+    except CompositeOverlapError as exc:
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        await _stamp_failed("Composite member series collide on a calendar day. " + scrubbed)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "run_stitch_composite_job: post-clip day collision — " + scrubbed
+            ),
+            error_kind="permanent",
+        )
+
+    mask = coverage_mask(clipped_cash)
+
+    # 5. #597 blend annualization: 365 if ANY member venue crypto else 252. For an
+    # all-crypto composite this equals periods_per_year_for_asset_class('crypto')
+    # so the headline (asset_class-driven) and the by-basis object AGREE.
+    periods_per_year = (
+        PERIODS_PER_YEAR_CRYPTO
+        if any(v in _COMPOSITE_CRYPTO_VENUES for v in venues)
+        else DEFAULT_PERIODS_PER_YEAR
+    )
+    # Metrics conventions mirror run_csv_strategy_analytics: geometric/calendar by
+    # default, simple/active under an allocated-capital override (Zavara).
+    if denominator_config is not None:
+        cumulative_method = denominator_config.cumulative_method
+        day_basis = metrics_day_basis(denominator_config.metrics_basis)
+    else:
+        cumulative_method = "geometric"
+        day_basis = "calendar"
+
+    def _metrics_json_for(clipped_series: list[tuple[int, pd.Series]]) -> dict[str, Any]:
+        """Stitch → gap-fill dense-with-0.0 (Pitfall 2: compute_all_metrics(simple)
+        fails loud on interior NaN) → compute_all_metrics with the composite
+        conventions → the metrics_json dict."""
+        stitched = stitch_clipped_series(clipped_series)
+        dense = gap_fill_daily_returns(stitched)
+        result = compute_all_metrics(
+            dense,
+            None,
+            periods_per_year=periods_per_year,
+            cumulative_method=cumulative_method,
+            day_basis=day_basis,
+        )
+        return dict(result.metrics_json)
+
+    cash_metrics_json = _metrics_json_for(clipped_cash)
+
+    # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
+    # member (research A2 — no single-pass dual-basis path); gated ⇒ omit the MTM
+    # key and carry the reason for Phase 90.
+    mtm_ok, mtm_reason = mark_to_market_available(member_signals)
+    mtm_metrics_json: dict[str, Any] | None = None
+    if mtm_ok:
+        mtm_result = await _reconstruct_all(PNL_BASIS_MARK_TO_MARKET)
+        if isinstance(mtm_result, DispatchResult):
+            return mtm_result
+        clipped_mtm, _mtm_signals, _mtm_venues = mtm_result
+        try:
+            mtm_metrics_json = _metrics_json_for(clipped_mtm)
+        except CompositeOverlapError as exc:
+            scrubbed = str(scrub_freeform_string(str(exc)))
+            await _stamp_failed(
+                "Composite MTM member series collide on a calendar day. " + scrubbed
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: MTM post-clip day collision — " + scrubbed
+                ),
+                error_kind="permanent",
+            )
+
+    # 7. PERSIST (OQ-3 ordering): (1) csv_daily_returns, (2) headline CSV analytics,
+    # (3) additive metrics_json_by_basis + merged DQ flags.
+    #
+    # (1) csv_daily_returns — the stitched cash_settlement series. Gap/guarded days
+    # are honestly ABSENT (NaN-skip, 74-04 policy; never 0.0 as performance). The
+    # reconcile-span-delete is scoped to strategy_id over the reconstructed span so
+    # a re-derive is authoritative and idempotent.
+    rows_payload = [
+        {
+            "strategy_id": strategy_id,
+            "date": ts.date().isoformat(),
+            "daily_return": float(val),
+        }
+        for ts, val in stitched_cash.items()
+        if pd.notna(val)
+    ]
+    if len(rows_payload) < 2:
+        await _stamp_failed(
+            "Composite produced fewer than 2 stitched daily-return days."
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_stitch_composite_job: insufficient stitched history",
+            error_kind="permanent",
+        )
+
+    _span_start = stitched_cash.index.min().date().isoformat()
+    _span_end = stitched_cash.index.max().date().isoformat()
+
+    def _reconcile_span_delete(
+        span_start: str = _span_start, span_end: str = _span_end
+    ) -> None:
+        (
+            supabase.table("csv_daily_returns")
+            .delete()
+            .gte("date", span_start)
+            .lte("date", span_end)
+            .eq("strategy_id", strategy_id)
+            .execute()
+        )
+
+    await db_execute(_reconcile_span_delete)
+
+    _UPSERT_CHUNK = 1000
+    for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
+        _batch = rows_payload[_start:_start + _UPSERT_CHUNK]
+
+        def _upsert_dailies(batch: list[dict[str, Any]] = _batch) -> None:
+            supabase.table("csv_daily_returns").upsert(
+                batch, on_conflict="strategy_id,date"
+            ).execute()
+
+        await db_execute(_upsert_dailies)
+
+    # (2) Headline single-basis row via the EXISTING CSV analytics (parity by
+    # construction — same stitched series, same conventions). Run in-process
+    # (mirrors run_compute_analytics_from_csv_job) so ordering is deterministic and
+    # the additive by-basis write below can never be clobbered by the headline.
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    await run_csv_strategy_analytics(strategy_id)
+
+    # (3) Additive metrics_json_by_basis + merged DQ flags. The by-basis object
+    # OMITS an unavailable basis key (SQL NULL never JSON null — Phase 85 CHECK):
+    # only keys with a computed object are inserted.
+    metrics_json_by_basis: dict[str, Any] = {"cash_settlement": cash_metrics_json}
+    if mtm_metrics_json is not None:
+        metrics_json_by_basis["mark_to_market"] = mtm_metrics_json
+
+    def _read_existing_flags() -> dict[str, Any]:
+        res = (
+            supabase.table("strategy_analytics")
+            .select("data_quality_flags")
+            .eq("strategy_id", strategy_id)
+            .maybe_single()
+            .execute()
+        )
+        row = getattr(res, "data", None) or {}
+        return dict(row.get("data_quality_flags") or {})
+
+    existing_flags = await db_execute(_read_existing_flags)
+    # MERGE (read-modify-write) — preserve every existing flag (e.g. the headline
+    # run's benchmark_unavailable), add the composite coverage-mask fields.
+    merged_flags: dict[str, Any] = dict(existing_flags)
+    merged_flags["composite"] = True
+    merged_flags["per_key"] = mask["per_key"]
+    merged_flags["gap_spans"] = mask["gap_spans"]
+    merged_flags["gap_day_count"] = mask["gap_day_count"]
+    merged_flags["overlap_days"] = mask["overlap_days"]
+    if not mtm_ok and mtm_reason is not None:
+        merged_flags["mtm_gated_reason"] = mtm_reason
+
+    def _write_by_basis() -> None:
+        supabase.table("strategy_analytics").upsert(
+            {
+                "strategy_id": strategy_id,
+                "metrics_json_by_basis": metrics_json_by_basis,
+                "data_quality_flags": merged_flags,
+            },
+            on_conflict="strategy_id",
+        ).execute()
+
+    await db_execute(_write_by_basis)
+
+    logger.info(
+        "stitch_composite: strategy %s stitched %d members (%d days, venues=%s, "
+        "mtm=%s) — by-basis persisted",
+        strategy_id, len(members), len(rows_payload), sorted(set(venues)),
+        "on" if mtm_ok else f"gated:{mtm_reason}",
+    )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
