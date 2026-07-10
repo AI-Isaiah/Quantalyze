@@ -206,6 +206,13 @@ const computeScenarioStateArgs: Array<{
   // the faithful observable of "what series reached the engine for id X" that
   // the old holdings-snapshot returns-lookup arg used to provide.
   returnsById: Record<string, Array<{ date: string; value: number }>>;
+  // Phase 84 (BLEND-01) — the per-leg asset_class the REAL engine set carries,
+  // plus the periodsPerYear basis the composer threads as the 4th arg. Together
+  // they let the blend-basis regression pins observe "≥1 crypto leg → 365 /
+  // all-unknown → 252" directly at the computeScenario call site (the existing
+  // engine-call spy — the harness the plan says to reuse).
+  assetClassById: Record<string, string | null>;
+  periodsPerYear: number | undefined;
   state: Record<string, unknown>;
 }> = [];
 vi.mock("@/lib/scenario", async (importOriginal) => {
@@ -217,15 +224,23 @@ vi.mock("@/lib/scenario", async (importOriginal) => {
         strategies: Parameters<typeof actual.computeScenario>[0],
         state: Parameters<typeof actual.computeScenario>[1],
         cache: Parameters<typeof actual.computeScenario>[2],
+        periodsPerYear?: Parameters<typeof actual.computeScenario>[3],
       ) => {
         computeScenarioStateArgs.push({
           strategyIds: strategies.map((s) => s.id),
           returnsById: Object.fromEntries(
             strategies.map((s) => [s.id, s.daily_returns]),
           ) as Record<string, Array<{ date: string; value: number }>>,
+          assetClassById: Object.fromEntries(
+            strategies.map((s) => [s.id, s.asset_class ?? null]),
+          ) as Record<string, string | null>,
+          periodsPerYear,
           state: state as unknown as Record<string, unknown>,
         });
-        return actual.computeScenario(strategies, state, cache);
+        // Forward the 4th periodsPerYear arg (undefined when a caller omits it →
+        // the engine's own 252 default, byte-identical to the pre-#597 behavior)
+        // so the threaded blend basis actually reaches the real engine.
+        return actual.computeScenario(strategies, state, cache, periodsPerYear);
       },
     ),
   };
@@ -957,6 +972,133 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     return computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
       .returnsById as Record<string, unknown[]>;
   }
+
+  /** The per-leg asset_class the REAL engine set last carried into
+   *  computeScenario — the observable for Task 1's "every added leg resolves an
+   *  honest asset_class (or null)" behavior. */
+  function latestAssetClassLookup(): Record<string, string | null> {
+    expect(computeScenarioStateArgs.length).toBeGreaterThan(0);
+    return computeScenarioStateArgs[computeScenarioStateArgs.length - 1]
+      .assetClassById;
+  }
+
+  it("T_C_ASSETCLASS a drawer-added non-book strategy resolves its asset_class from the widened lazy returns response (the engine leg carries 'crypto')", async () => {
+    let resolveReturns: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return new Promise((resolve) => {
+          resolveReturns = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              // The widened route body carries asset_class alongside the series.
+              json: async () => ({
+                daily_returns: LAZY_SERIES,
+                asset_class: "crypto",
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const payload = makePayload();
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // A catalog strategy NOT in the book (payload.strategies is []): its
+    // asset_class can ONLY come from the lazy returns response.
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    // BEFORE resolve — no lazily-fetched asset_class yet → the leg is null
+    // (unknown, conservative 252 default). Non-vacuous half.
+    await waitFor(() => {
+      expect(latestAssetClassLookup()[LAZY_ID]).toBeDefined();
+    });
+    expect(latestAssetClassLookup()[LAZY_ID]).toBeNull();
+
+    await act(async () => {
+      resolveReturns(undefined);
+      await Promise.resolve();
+    });
+
+    // AFTER resolve — the engine leg now carries the fetched asset_class.
+    await waitFor(() => {
+      expect(latestAssetClassLookup()[LAZY_ID]).toBe("crypto");
+    });
+  });
+
+  it("T_C_ASSETCLASS_PURGE remove + re-add purges the fetched asset_class (a re-add starts clean, re-null until the retry resolves)", async () => {
+    let resolveReturns: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return new Promise((resolve) => {
+          resolveReturns = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                daily_returns: LAZY_SERIES,
+                asset_class: "crypto",
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "Purge Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      resolveReturns(undefined);
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(latestAssetClassLookup()[LAZY_ID]).toBe("crypto");
+    });
+
+    // Remove the strategy (the real CompositionList Remove button) —
+    // handleRemoveAdded must purge the fetched asset_class alongside the returns,
+    // so the id drops out of the engine set entirely.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    await waitFor(() => {
+      expect(latestAssetClassLookup()[LAZY_ID]).toBeUndefined();
+    });
+  });
 
   it("T_C_LAZY1 add a catalog strategy → lazy GET /api/strategies/<id>/returns; once resolved the adapter's returns-lookup carries the non-empty series (and was [] before resolve)", async () => {
     // A deferred fetch so we can observe the in-flight [] state, then resolve.

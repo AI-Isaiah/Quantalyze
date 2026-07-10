@@ -888,6 +888,18 @@ export function ScenarioComposer({
   const [addedReturnsById, setAddedReturnsById] = useState<
     Record<string, DailyPoint[]>
   >({});
+  // Phase 84 (BLEND-01) — the lazily-fetched asset_class for a drawer-added,
+  // NON-book strategy, keyed by id. The book-only SSR payload carries
+  // asset_class for book strategies (84-03), but a strategy added from the
+  // Browse drawer is not in the book, so its classification can only come from
+  // the widened /api/strategies/[id]/returns response. Written by
+  // fetchAddedReturns alongside addedReturnsById and purged identically in
+  // handleRemoveAdded (a re-add starts clean). Fed into
+  // addedStrategyMetadataLookup so the blend basis (blendPeriodsPerYear) reads
+  // an honest class per leg (or null → the conservative 252 default).
+  const [addedAssetClassById, setAddedAssetClassById] = useState<
+    Record<string, string | null>
+  >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
   // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
@@ -1092,9 +1104,12 @@ export function ScenarioComposer({
     };
     // Settle a GENUINE result (a 200 with a real DailyPoint[] body, possibly
     // empty). Writes `addedReturnsById[id]` so the memo merges it and a re-add
-    // reuses it (idempotent) rather than re-fetching.
-    const settle = (series: DailyPoint[]) => {
+    // reuses it (idempotent) rather than re-fetching. BLEND-01: also records the
+    // widened response's asset_class (null when absent — tolerates a stale
+    // deploy that predates the widening) so the blend basis can read it.
+    const settle = (series: DailyPoint[], assetClass: string | null) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
       clearInflight();
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
@@ -1111,16 +1126,21 @@ export function ScenarioComposer({
         }
         return r.json();
       })
-      .then((d: { daily_returns?: unknown }) => {
+      .then((d: { daily_returns?: unknown; asset_class?: unknown }) => {
         // A 200 with a non-array body is a malformed/failed response, NOT a
         // genuine empty series — treat it as a retryable failure (WR-01).
         if (!Array.isArray(d?.daily_returns)) {
           throw new Error("returns route body missing a daily_returns array");
         }
+        // BLEND-01 — accept asset_class only when it is a string; anything else
+        // (absent from a stale deploy, null, or malformed) collapses to null →
+        // the leg keeps the conservative 252 blend default.
+        const assetClass =
+          typeof d.asset_class === "string" ? d.asset_class : null;
         // A genuine 200 with a real array (including an empty one) settles. An
         // empty array here means the strategy legitimately has no published
         // returns yet — distinct from a failure, so it is cached, not retried.
-        settle(d.daily_returns as DailyPoint[]);
+        settle(d.daily_returns as DailyPoint[], assetClass);
       })
       .catch((err: unknown) => {
         // An abort (remove / reset / unmount) is benign — the canceller already
@@ -1811,6 +1831,13 @@ export function ScenarioComposer({
         const { [id]: _drop, ...rest } = prev;
         return rest;
       });
+      // BLEND-01 — purge the fetched asset_class alongside the returns so a
+      // remove + re-add starts clean (mirrors the addedReturnsById purge above).
+      setAddedAssetClassById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropClass, ...rest } = prev;
+        return rest;
+      });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scenario.removeAddedStrategy],
@@ -1819,25 +1846,41 @@ export function ScenarioComposer({
   const addedStrategyMetadataLookup = useMemo<
     Record<
       string,
-      Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      Pick<
+        StrategyForBuilder,
+        "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+      >
     >
   >(() => {
     const map: Record<
       string,
-      Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      Pick<
+        StrategyForBuilder,
+        "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+      >
     > = {};
     for (const a of scenario.draft.addedStrategies) {
       const found = strategyById.get(a.id);
-      if (found) {
-        map[a.id] = {
-          disclosure_tier: found.strategy.disclosure_tier,
-          cagr: found.strategy.strategy_analytics?.cagr ?? null,
-          sharpe: found.strategy.strategy_analytics?.sharpe ?? null,
-        };
-      }
+      // BLEND-01 — build an entry for EVERY added strategy, book or drawer.
+      // Previously only book strategies (`if (found)`) got an entry and a
+      // non-book leg fell through to the adapter's default meta (public / null
+      // / null). We now always emit an entry so a non-book leg's lazily-fetched
+      // asset_class reaches the blend basis. The disclosure_tier / cagr / sharpe
+      // values are byte-identical to before: `found.strategy.*` for a book
+      // strategy, and the adapter's old default (public / null / null) for a
+      // non-book one via the `?? …` fallbacks.
+      map[a.id] = {
+        disclosure_tier: found?.strategy.disclosure_tier ?? "public",
+        cagr: found?.strategy.strategy_analytics?.cagr ?? null,
+        sharpe: found?.strategy.strategy_analytics?.sharpe ?? null,
+        // Book payload asset_class (84-03) wins; else the lazily-fetched value;
+        // else null (unknown → the conservative 252 blend default).
+        asset_class:
+          found?.strategy.asset_class ?? addedAssetClassById[a.id] ?? null,
+      };
     }
     return map;
-  }, [scenario.draft.addedStrategies, strategyById]);
+  }, [scenario.draft.addedStrategies, strategyById, addedAssetClassById]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
@@ -1922,7 +1965,10 @@ export function ScenarioComposer({
         >,
         addedStrategyMetadataLookup as Record<
           import("../lib/scenario-adapter").StrategyForBuilderId,
-          Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+          Pick<
+            StrategyForBuilder,
+            "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+          >
         >,
       );
     }
@@ -1938,7 +1984,10 @@ export function ScenarioComposer({
       >,
       addedStrategyMetadataLookup as Record<
         import("../lib/scenario-adapter").StrategyForBuilderId,
-        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+        Pick<
+          StrategyForBuilder,
+          "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+        >
       >,
     );
   }, [
