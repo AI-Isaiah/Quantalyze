@@ -21,6 +21,18 @@ import { buildEnvelope } from "@/lib/envelope";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { cn } from "@/lib/utils";
+import {
+  CoverageTimeline,
+  type CoverageTimelineRow,
+} from "@/app/(dashboard)/allocations/components/CoverageTimeline";
+import { unionOf, type CoverageSpan } from "@/lib/scenario-window";
+import {
+  partitionAttribution,
+  attributionBasisFromConfig,
+} from "@/lib/composite/compositeAttribution";
+import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 
 /**
  * SyncPreviewStep kicks off /api/keys/sync, polls strategy_analytics
@@ -199,6 +211,46 @@ function formatCagr(value: number | null): string {
   const pct = value * 100;
   const sign = pct >= 0 ? "+" : "";
   return `${sign}${pct.toFixed(1)}%`;
+}
+
+/**
+ * Human name for a composite member row: the nickname when present, else the
+ * `Key {seq} · {exchange}` fallback (mirrors the multi-key summary chip). Pure
+ * — shared by the coverage gantt and the attribution table so both label a
+ * member identically.
+ */
+function memberDisplayName(
+  seq: number,
+  label: string | null,
+  exchange: string | null,
+): string {
+  return label ?? `Key ${seq} · ${exchange ?? "unknown"}`;
+}
+
+/**
+ * Signed percentage contribution string (`+X.X%` / `−X.X%`), or an em dash for
+ * a no-data member (`null` contribution — never a fabricated 0%). Uses the
+ * U+2212 MINUS SIGN for negatives, matching the tabular financial convention.
+ */
+function formatContribution(value: number | null): string {
+  if (value === null) return "—";
+  const pct = value * 100;
+  const sign = pct >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(pct).toFixed(1)}%`;
+}
+
+/**
+ * Inclusive-both-ends day count of a server `gap_span` — the count the warnings
+ * list shows next to the range. Derived via parseIsoDay/utcEpoch (NOT
+ * `new Date(iso)`, which reintroduces the UTC/local off-by-one dateday.ts
+ * exists to kill). Returns 0 for a malformed bound so a bad span degrades
+ * quietly rather than rendering NaN.
+ */
+function inclusiveGapDays(start: string, end: string): number {
+  const s = parseIsoDay(start);
+  const e = parseIsoDay(end);
+  if (!s || !e) return 0;
+  return Math.round((utcEpoch(e) - utcEpoch(s)) / 86_400_000) + 1;
 }
 
 export function SyncPreviewStep({
@@ -902,6 +954,61 @@ export function SyncPreviewStep({
     const rangeClause =
       firstDay && lastDay ? `, ${firstDay} – ${lastDay}` : "";
 
+    // activeWindow (the accent band) = the stitched ACTUAL data span, drawn over
+    // the DECLARED bars. Null when either bound is absent — the gantt degrades.
+    const activeWindow =
+      firstDay && lastDay ? { start: firstDay, end: lastDay } : null;
+
+    // Coverage gantt rows — DECLARED windows as bars, ordered by seq (defensive
+    // re-sort so the render layer never depends on read order). TODAY closes an
+    // open-ended window; inBlend=true for EVERY member (no auto-excluded state).
+    // Two window conventions stay separate: these declared bars are half-open
+    // `[start,end)`; the per_key attribution windows below are inclusive.
+    const ganttToday = new Date().toISOString().slice(0, 10);
+    const sortedMembers = [...composite.members].sort((a, b) => a.seq - b.seq);
+    const ganttSpans: CoverageSpan[] = sortedMembers.map((m) => ({
+      first: m.windowStart,
+      last: m.windowEnd ?? ganttToday,
+    }));
+    const ganttRows: CoverageTimelineRow[] = sortedMembers.map((m) => ({
+      id: m.apiKeyId,
+      name: memberDisplayName(m.seq, m.label, m.exchange),
+      span: { first: m.windowStart, last: m.windowEnd ?? ganttToday },
+      inBlend: true,
+    }));
+    const ganttUnion = unionOf(ganttSpans);
+
+    // Per-key attribution — signed contribution from the 89-01 pure helper on
+    // the SERVED series (never a client re-stitch). Basis mirrors the server
+    // branch VERBATIM via attributionBasisFromConfig. Exactly one call site
+    // each (no duplicate derivation — one-spec discipline).
+    const attributionBasis = attributionBasisFromConfig(
+      composite.rawDenominatorConfig,
+    );
+    const attributionRows = partitionAttribution(
+      composite.series,
+      composite.perKey,
+      attributionBasis,
+    );
+    const perKeyBySeq = new Map(composite.perKey.map((k) => [k.seq, k]));
+    const memberBySeq = new Map(composite.members.map((m) => [m.seq, m]));
+    // Reconciliation caption renders ONLY when the members' present days cover
+    // the whole series — otherwise the "sums/compounds to the cumulative" claim
+    // would not hold (fail-safe honesty; no-invented-data).
+    const attributedDays = attributionRows.reduce((sum, r) => sum + r.days, 0);
+    const showReconciliationCaption =
+      attributedDays === composite.series.length;
+
+    // Pre-submit warnings — gaps rendered VERBATIM from the server mask (the
+    // client never recomputes gaps from windows) + amber DQ caveats. Both are
+    // non-blocking; submit stays enabled on the passed path.
+    const gapSpans = composite.gapSpans;
+    const hasGaps = gapSpans.length > 0;
+    const hasMtmCaveat = composite.mtmGatedReason != null;
+    const hasBenchmarkCaveat = composite.benchmarkUnavailable;
+    const hasDqCaveat = hasMtmCaveat || hasBenchmarkCaveat;
+    const hasWarnings = hasGaps || hasDqCaveat;
+
     return (
       <section aria-labelledby="wizard-sync-heading">
         <h2
@@ -929,7 +1036,182 @@ export function SyncPreviewStep({
           />
         </div>
 
-        {/* 89-04: attribution table + coverage gantt + pre-submit warnings render here */}
+        {/* Per-key attribution — signed contribution (89-01 partition), basis-
+            honest, reconstitutes the composite cumulative. A real <table> per
+            DESIGN.md data-density: no outer border, hairline row borders. */}
+        <div className="mt-6">
+          <p className="text-micro font-medium uppercase tracking-wider text-text-secondary">
+            PER-KEY ATTRIBUTION
+          </p>
+          <table className="mt-2 w-full border-collapse text-left">
+            <caption className="sr-only">
+              Per-key attribution: each member key&rsquo;s data window, day
+              count, and signed contribution to the composite cumulative return.
+            </caption>
+            <thead>
+              <tr className="border-b border-border">
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  #
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  Key
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  Data window
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  Days
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 text-caption font-medium text-text-secondary"
+                >
+                  Contribution
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {attributionRows.map((row) => {
+                const pk = perKeyBySeq.get(row.seq);
+                const member = memberBySeq.get(row.seq);
+                const windowText =
+                  pk?.first_day && pk?.last_day
+                    ? `${pk.first_day} – ${pk.last_day}`
+                    : "—";
+                const contributionClass =
+                  row.contribution === null
+                    ? "text-text-muted"
+                    : row.contribution < 0
+                      ? "text-negative"
+                      : "text-positive";
+                return (
+                  <tr key={row.seq} className="border-b border-border">
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-muted">
+                      {row.seq}
+                    </td>
+                    <td className="py-2 pr-4 text-caption text-text-primary">
+                      <span className="inline-flex items-center gap-2">
+                        {memberDisplayName(
+                          row.seq,
+                          member?.label ?? null,
+                          member?.exchange ?? null,
+                        )}
+                        <TrustTierLabel trustTier="api_verified" />
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary">
+                      {windowText}
+                    </td>
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary">
+                      {pk?.n_days ?? "—"}
+                    </td>
+                    <td
+                      className={cn(
+                        "py-2 font-metric text-caption tabular-nums",
+                        contributionClass,
+                      )}
+                    >
+                      {formatContribution(row.contribution)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            {showReconciliationCaption && (
+              <tfoot>
+                <tr>
+                  <td
+                    colSpan={5}
+                    className="pt-2 text-caption text-text-muted"
+                  >
+                    {attributionBasis === "arithmetic"
+                      ? "Contributions sum to the composite cumulative return."
+                      : "Contributions compound to the composite cumulative return."}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+
+        {/* Coverage mini-gantt — the REUSED CoverageTimeline (never rebuilt),
+            one row per member by seq, declared windows as bars + the stitched
+            actual span as the accent band. Gaps are NOT drawn here (FLAG-5);
+            the warnings list below owns gap display. */}
+        <div className="mt-6">
+          <CoverageTimeline
+            rows={ganttRows}
+            unionWindow={ganttUnion}
+            activeWindow={activeWindow}
+          />
+        </div>
+
+        {/* Pre-submit warnings — neutral gaps (server-authoritative) + amber DQ
+            caveats. Non-blocking; both role="status" aria-live="polite". */}
+        {hasWarnings && (
+          <div className="mt-6">
+            <p className="text-micro font-medium uppercase tracking-wider text-text-secondary">
+              BEFORE YOU SUBMIT
+            </p>
+            {hasGaps && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mt-2 rounded-md border border-border bg-page px-4 py-3"
+              >
+                <p className="text-caption font-medium text-text-primary">
+                  Coverage gaps ({composite.gapDayCount} days total)
+                </p>
+                <ul className="mt-2 space-y-1">
+                  {gapSpans.map((gap) => (
+                    <li
+                      key={`${gap.start}-${gap.end}`}
+                      className="font-metric text-caption tabular-nums text-text-muted"
+                    >
+                      {gap.start} → {gap.end} (
+                      {inclusiveGapDays(gap.start, gap.end)} days). Your
+                      composite shows this as a break, not zero returns.
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {hasDqCaveat && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mt-2 rounded-md border border-warning/30 bg-warning/5 px-4 py-3"
+              >
+                <p className="text-caption font-medium text-warning">
+                  Data quality
+                </p>
+                <div className="mt-1 space-y-1 text-caption text-text-secondary">
+                  {hasMtmCaveat && (
+                    <p>
+                      Mark-to-market view unavailable — {composite.mtmGatedReason}
+                      . Cash-settlement basis shown.
+                    </p>
+                  )}
+                  {hasBenchmarkCaveat && (
+                    <p>Benchmark overlay unavailable for this period.</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="mt-6 flex gap-3">
           <Button onClick={handleUseThisKey} data-testid="wizard-use-this-key">
