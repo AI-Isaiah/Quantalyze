@@ -26,6 +26,15 @@
 --     linked via strategies.api_key_id ONLY (NO strategy_keys row) — the DELETE
 --     succeeds and strategies.api_key_id is SET NULL by the existing FK. Proves the
 --     guard never fires for single-key strategies even when published.
+--   * Part 5 — GDPR sanitize exemption: sanitize_user DELETEs api_keys BEFORE it
+--     archives strategies, so it deletes a member of a still-published composite.
+--     With `quantalyze.sanitize_in_progress = 'on'` (the transaction-local session
+--     var sanitize_user sets, exactly as reject_sentinel_writes reads it) the
+--     published-member DELETE SUCCEEDS (account deletion is not aborted). The same
+--     block then flips the flag off and re-deletes another published member →
+--     the guard RAISEs again, proving the exemption is scoped to the flag (not a
+--     blanket published-composite hole). Regression-locks the FK-violation bug the
+--     RLS + migration reviewers flagged.
 --
 -- pgTAP is NOT installed (CLAUDE.md). Plain PL/pgSQL `DO $$ ... $$` with
 -- RAISE EXCEPTION on failure / RAISE NOTICE on pass, mirroring the other
@@ -263,6 +272,98 @@ BEGIN
   END IF;
 
   RAISE NOTICE 'test_strategy_keys_publish_integrity: ALL PASS (published member blocked, draft member allowed, single-key SET NULL preserved).';
+END
+$$;
+
+ROLLBACK;
+
+-- ==========================================================================
+-- Part 5 — GDPR sanitize exemption: a published-composite member delete is
+-- ALLOWED when quantalyze.sanitize_in_progress = 'on' (sanitize_user's path),
+-- and STILL BLOCKED once the flag is off. Isolated txn, always rolls back.
+-- ==========================================================================
+BEGIN;
+
+DO $$
+DECLARE
+  uid_san     UUID := gen_random_uuid();
+  uid_san2    UUID := gen_random_uuid();
+  key_san     UUID;
+  key_san2    UUID;
+  strat_san   UUID;
+  strat_san2  UUID;
+  row_cnt     INTEGER;
+  raised      BOOLEAN;
+  err_msg     TEXT;
+BEGIN
+  -- ----- SEED: two PUBLISHED composites, each with one member key -------------
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_san, '00000000-0000-0000-0000-000000000000',
+          'test-pub-san-' || uid_san || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid_san, 'pub-san sanitize', 'test-pub-san-' || uid_san || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted)
+  VALUES (uid_san, 'binance', 'pub-san sanitize key', 'x') RETURNING id INTO key_san;
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_san, 'pub-san published composite', 'published', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_san;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (strat_san, key_san, uid_san, '2025-08-01', NULL, 0);
+
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid_san2, '00000000-0000-0000-0000-000000000000',
+          'test-pub-san-' || uid_san2 || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid_san2, 'pub-san flag-off', 'test-pub-san-' || uid_san2 || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role, display_name = EXCLUDED.display_name;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted)
+  VALUES (uid_san2, 'binance', 'pub-san flag-off key', 'x') RETURNING id INTO key_san2;
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_san2, 'pub-san flag-off composite', 'published', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_san2;
+  INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+  VALUES (strat_san2, key_san2, uid_san2, '2025-08-01', NULL, 0);
+
+  -- ----- Part 5a: sanitize path ALLOWED --------------------------------------
+  -- Signal the sanitize path exactly as sanitize_user does (SET LOCAL, txn-local).
+  PERFORM set_config('quantalyze.sanitize_in_progress', 'on', true);
+  raised := FALSE;
+  BEGIN
+    DELETE FROM public.api_keys WHERE id = key_san;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5a): deleting a PUBLISHED composite member during sanitize was BLOCKED — GDPR account deletion would abort (got: %)', err_msg;
+  END IF;
+  SELECT count(*) INTO row_cnt FROM public.api_keys WHERE id = key_san;
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5a): the sanitize-path api_keys row was not deleted (count=%)', row_cnt;
+  END IF;
+
+  -- ----- Part 5b: flag off → STILL BLOCKED (exemption is flag-scoped) ---------
+  -- Reset the session var; the identical published-member delete must RAISE
+  -- again, proving Part 5a's success came from the flag, not a blanket hole.
+  PERFORM set_config('quantalyze.sanitize_in_progress', 'off', true);
+  raised := FALSE;
+  BEGIN
+    DELETE FROM public.api_keys WHERE id = key_san2;
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5b): published-member delete was ACCEPTED with the sanitize flag OFF — the exemption is a blanket hole, not flag-scoped';
+  END IF;
+  IF err_msg NOT LIKE '%published composite%' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5b): delete raised the WRONG error (expected the published-composite guard, got: %)', err_msg;
+  END IF;
+  SELECT count(*) INTO row_cnt FROM public.api_keys WHERE id = key_san2;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 5b): the api_keys row did not survive the aborted flag-off delete (count=%)', row_cnt;
+  END IF;
+
+  RAISE NOTICE 'Part 5 OK: sanitize-flag delete allowed (GDPR account deletion intact), flag-off delete still blocked (exemption is flag-scoped).';
 END
 $$;
 

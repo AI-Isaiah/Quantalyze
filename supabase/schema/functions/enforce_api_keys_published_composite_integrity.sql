@@ -13,6 +13,24 @@ CREATE OR REPLACE FUNCTION public.enforce_api_keys_published_composite_integrity
   SET search_path TO 'public', 'pg_catalog'
 AS $function$
 BEGIN
+  -- GDPR / account-decommission exemption: sanitize_user (the Art. 17
+  -- anonymize-not-delete RPC) DELETEs api_keys BEFORE it archives the tenant's
+  -- strategies, so at key-delete time the composite is still status='published'
+  -- and this guard would abort the entire sanitize transaction (account /
+  -- data-deletion-request approval fails). sanitize_user signals its path via
+  -- `SET LOCAL quantalyze.sanitize_in_progress = 'on'` (transaction-local); the
+  -- reject_sentinel_writes trigger (20260513073518_sanitize_user_hardening.sql:161)
+  -- already exempts that same session var. Mirror that convention: allow the
+  -- delete when the flag is on. This does NOT leave a live holed published
+  -- composite — sanitize archives the strategies in the SAME transaction, so no
+  -- published composite persists past commit. Scoped to the session var ONLY
+  -- (NOT service_role/BYPASSRLS): the normal user key-delete paths (ApiKeyManager,
+  -- delete-allocator-api-key-rpc) also run as service_role and MUST still be
+  -- blocked when they would hole a LIVE published composite — that is M-3's point.
+  IF current_setting('quantalyze.sanitize_in_progress', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
+
   -- M-3: a PUBLISHED composite must never be silently holed by a member-key
   -- delete. RAISE only when OLD.id is a strategy_keys member of a published
   -- strategy — draft/pending_review/archived members and single-key links (which

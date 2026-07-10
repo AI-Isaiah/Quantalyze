@@ -10,6 +10,16 @@
 -- SECURITY DEFINER trigger on api_keys that RAISEs when the key is a strategy_keys
 -- member of a strategy with status='published'.
 --
+-- GDPR EXEMPTION: sanitize_user (Art. 17 anonymize RPC) DELETEs api_keys BEFORE
+-- it archives the tenant's strategies, so without an exemption this guard would
+-- abort account / data-deletion-request approval. The guard therefore allows the
+-- delete when `quantalyze.sanitize_in_progress = 'on'` (the transaction-local
+-- session var sanitize_user sets at entry) — the SAME convention
+-- reject_sentinel_writes uses (20260513073518_sanitize_user_hardening.sql:161).
+-- No live holed composite results: sanitize archives the strategies in the same
+-- transaction. The exemption is scoped to that session var ONLY, NOT
+-- service_role/BYPASSRLS, so ordinary service-role key-delete paths stay blocked.
+--
 -- SCOPE / SC-4 NEUTRALITY: single-key strategies link via strategies.api_key_id
 -- (ON DELETE SET NULL — 20260405061911_initial_schema.sql:51), NEVER via
 -- strategy_keys, so the EXISTS below cannot match them — their key deletes stay
@@ -40,6 +50,24 @@ CREATE OR REPLACE FUNCTION public.enforce_api_keys_published_composite_integrity
   SET search_path TO 'public', 'pg_catalog'
 AS $function$
 BEGIN
+  -- GDPR / account-decommission exemption: sanitize_user (the Art. 17
+  -- anonymize-not-delete RPC) DELETEs api_keys BEFORE it archives the tenant's
+  -- strategies, so at key-delete time the composite is still status='published'
+  -- and this guard would abort the entire sanitize transaction (account /
+  -- data-deletion-request approval fails). sanitize_user signals its path via
+  -- `SET LOCAL quantalyze.sanitize_in_progress = 'on'` (transaction-local); the
+  -- reject_sentinel_writes trigger (20260513073518_sanitize_user_hardening.sql:161)
+  -- already exempts that same session var. Mirror that convention: allow the
+  -- delete when the flag is on. This does NOT leave a live holed published
+  -- composite — sanitize archives the strategies in the SAME transaction, so no
+  -- published composite persists past commit. Scoped to the session var ONLY
+  -- (NOT service_role/BYPASSRLS): the normal user key-delete paths (ApiKeyManager,
+  -- delete-allocator-api-key-rpc) also run as service_role and MUST still be
+  -- blocked when they would hole a LIVE published composite — that is M-3's point.
+  IF current_setting('quantalyze.sanitize_in_progress', true) = 'on' THEN
+    RETURN OLD;
+  END IF;
+
   -- M-3: a PUBLISHED composite must never be silently holed by a member-key
   -- delete. RAISE only when OLD.id is a strategy_keys member of a published
   -- strategy — draft/pending_review/archived members and single-key links (which
@@ -129,6 +157,13 @@ BEGIN
     RAISE EXCEPTION 'publish-integrity migration: guard body is not scoped to status = published';
   END IF;
 
+  -- (c2) the GDPR sanitize exemption is present: the body must reference the
+  --      sanitize_in_progress session var so a future edit that drops the
+  --      exemption (re-breaking account deletion) reddens here at apply.
+  IF v_fn !~* 'sanitize_in_progress' THEN
+    RAISE EXCEPTION 'publish-integrity migration: guard body dropped the sanitize_in_progress exemption (would abort GDPR account deletion)';
+  END IF;
+
   -- (d) least-privilege: EXECUTE not reachable by the API roles.
   IF has_function_privilege('anon', v_oid, 'EXECUTE') THEN
     RAISE EXCEPTION 'publish-integrity migration: anon can EXECUTE the guard function (REVOKE missing)';
@@ -137,5 +172,5 @@ BEGIN
     RAISE EXCEPTION 'publish-integrity migration: authenticated can EXECUTE the guard function (REVOKE missing)';
   END IF;
 
-  RAISE NOTICE 'publish-integrity migration self-check passed (BEFORE DELETE ROW guard, SECDEF + search_path + published scope, EXECUTE revoked).';
+  RAISE NOTICE 'publish-integrity migration self-check passed (BEFORE DELETE ROW guard, SECDEF + search_path + published scope, sanitize exemption present, EXECUTE revoked).';
 END $$;
