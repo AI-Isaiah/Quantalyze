@@ -592,6 +592,82 @@ async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_member_permanent_failure_blocks_publish_terminal_failed() -> None:
+    """PUB-01 (Phase 87) — the publish-blocking contract, made EXPLICIT.
+
+    A >=2-member composite where an EARLIER member reconstructs cleanly but a
+    LATER member fails PERMANENTLY mid-fan-out (missing / inactive key) must fail
+    the WHOLE stitch_composite job loud-permanent and stamp a terminal
+    computation_status='failed' — NEVER a partial 'complete' that would let the
+    composite publish with a silently-holed member ("all-N complete or nothing").
+
+    That 'failed' stamp IS what blocks publish: it is the terminal state
+    isComputedAnalytics (src/lib/closed-sets.ts:263-266) REJECTS, so the admin
+    approve gate (src/app/api/admin/strategy-review/route.ts) returns 400/409 and
+    the composite can never reach strategies.status='published'. A HARD member
+    failure resolves to 'failed' (computation_warned False), NOT
+    'complete_with_warnings' (which is a terminal SUCCESS the gate admits).
+
+    Distinct from test_permanent_preflight_failure_stamps_terminal_failed (a
+    SINGLE-member preflight failure): here member seq-1 is fully reconstructed
+    BEFORE the seq-2 failure, proving the fail-loud fires MID-fan-out — not only
+    on an empty / first-member composite.
+
+    Neuter (executed once in development, recorded in 87-03-SUMMARY): removing the
+    `await _stamp_failed(...)` in the preflight-FAILED permanent branch
+    (job_worker.py:3105-3108) drops the terminal 'failed' row → the failed_stamps
+    scan finds nothing → this reddens, proving the WIRING, not just the helper."""
+    from services.job_worker import DispatchResult
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    # seq-2 preflight fails PERMANENT mid-fan-out (missing / inactive member key),
+    # AFTER seq-1 has already preflighted + reconstructed successfully.
+    inactive = DispatchResult(
+        outcome=DispatchOutcome.FAILED,
+        error_message="run_stitch_composite_job: api_key key-2 is inactive",
+        error_kind="permanent",
+    )
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],  # only the seq-1 member reconstructs
+        has_option_activity=True,     # gate CLOSED → single cash pass
+        preflight_side_effect=[_ctx("deribit"), inactive],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    # The WHOLE job fails loud-permanent — never a partial success.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+
+    # Exactly the terminal-failed publish-blocking stamp (the failed_stamps scan).
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, (
+        "member permanent-failure must stamp a terminal 'failed' analytics row "
+        "(the state isComputedAnalytics rejects — this blocks publish)"
+    )
+    stamp = failed_stamps[-1]
+    # A HARD failure is 'failed', not warnings — computation_warned must be False,
+    # else the gate would admit it as a terminal success.
+    assert stamp.get("computation_warned") is False
+    # The composite marker the worker writes onto the terminal stamp.
+    assert stamp.get("data_quality_flags", {}).get("composite") is True
+
+    # The compute / publish-eligible path was NEVER reached — no csv_daily_returns
+    # write, so no 'complete' could ever be stamped for this holed composite.
+    assert not any(t == "csv_daily_returns" for t, _, _ in fake.upserts)
+
+
+@pytest.mark.asyncio
 async def test_deferred_preflight_does_not_stamp_failed() -> None:
     """Finding 4 (converse): a DEFERRED preflight (circuit-breaker cooldown) is
     legitimately retryable and must NOT be stamped 'failed' — a premature terminal
