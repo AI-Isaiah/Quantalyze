@@ -139,15 +139,22 @@ BEGIN
   -- ----- TRIGGER ARM 3: dangling api_key reference -------------------------
   -- A random api_key_id has no api_keys row; the BEFORE trigger resolves NULL
   -- owner and raises before the FK constraint is evaluated.
+  -- WHEN raise_exception (NOT WHEN OTHERS): the trigger's dangling guard raises
+  -- P0001 '%does not reference%'. Catching WHEN OTHERS would let the FK's
+  -- foreign_key_violation (23503) satisfy this arm even if the trigger guard were
+  -- deleted — a masked arm. Pinning the message proves the TRIGGER caught it.
   raised := FALSE;
   BEGIN
     INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
     VALUES (strat_a, gen_random_uuid(), uid_a, '2026-03-01', NULL, 7);
-  EXCEPTION WHEN OTHERS THEN
+  EXCEPTION WHEN raise_exception THEN
     raised := TRUE; err_msg := SQLERRM;
   END;
   IF NOT raised THEN
     RAISE EXCEPTION 'TEST FAILED (Arm 3): a row with a dangling api_key_id was ACCEPTED — dangling-reference guard missing';
+  END IF;
+  IF err_msg NOT LIKE '%does not reference%' THEN
+    RAISE EXCEPTION 'TEST FAILED (Arm 3): dangling api_key raised the WRONG guard (expected trigger dangling-reference, got: %)', err_msg;
   END IF;
 
   -- ----- CONSTRAINT ARM 4: empty half-open interval (window_end = start) ----
@@ -205,6 +212,19 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (RLS 2b): tenant B sees % of tenant A''s rows, expected 0 — CROSS-TENANT LEAK', row_cnt;
   END IF;
 
+  -- ----- RLS 2c: POSITIVE CONTROL — a tenant CAN write its own coherent row --
+  -- Without this, a policy that blocks ALL client writes (WITH CHECK false, or an
+  -- INSERT-less FOR SELECT policy → default-deny) would pass every negative arm
+  -- while breaking every legitimate write. Still authenticated as tenant B: a
+  -- fully coherent B-owned member (owner_id=B, key_b, strat_b) MUST succeed.
+  BEGIN
+    INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+    VALUES (strat_b, key_b, uid_b, '2026-07-01', NULL, 3);
+  EXCEPTION WHEN OTHERS THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (RLS 2c): tenant B could NOT write its own coherent row — policy blocks all client writes (got: %)', SQLERRM;
+  END;
+
   -- ----- RLS 3: WITH CHECK blocks writing another tenant's row ----------
   -- Still authenticated as tenant B. A coherent row (owner_id=B, key_b, strat_b)
   -- passes the trigger, but owner_id=A would violate WITH CHECK. Here we prove B
@@ -242,6 +262,11 @@ BEGIN
   IF err_msg LIKE '%must match%' OR err_msg LIKE '%cross-tenant%' THEN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (RLS 3b): coherent A-triple was blocked by the owner-coherence TRIGGER (%), not WITH CHECK — WITH CHECK is not independently proven', err_msg;
+  END IF;
+  -- Positively confirm the block is the RLS WITH CHECK, not some unrelated error.
+  IF err_msg NOT LIKE '%row-level security%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (RLS 3b): coherent A-triple was blocked by neither the trigger nor WITH CHECK (got: %)', err_msg;
   END IF;
 
   RESET ROLE;
