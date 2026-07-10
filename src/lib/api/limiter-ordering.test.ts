@@ -83,6 +83,11 @@ const CANONICAL = new Set([
   "preferences/route.ts",
   "simulator/route.ts",
   "strategies/create-with-key/route.ts",
+  // Phase 88 composite draft-assembly — validate-then-limit (B15). add-key
+  // mirrors create-with-key (reads body then checkLimit); set-members safeParses
+  // via keyWindowsSchema before checkLimit, so a 400 never burns a token.
+  "strategies/composite/add-key/route.ts",
+  "strategies/composite/set-members/route.ts",
   "strategies/csv-finalize/route.ts",
   "strategies/csv-validate/route.ts",
   "strategies/draft/[id]/route.ts",
