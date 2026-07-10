@@ -777,6 +777,35 @@ describe("computeCompositeCurve", () => {
     // NOT the late strategy's start_date.
     expect(curve[0].date).toBe(allDates[0]);
   });
+
+  it("[Plan 84-06 invariance] curve is annualization-INVARIANT: 365 basis deep-equals default 252", () => {
+    // computeCompositeCurve now forwards an optional periodsPerYear to the
+    // internal computeScenario (completing the #597-part-2 locked call-site
+    // list). The returned curve is the cumulative-return product only — no
+    // annualized metric enters it — so the basis CANNOT change the output.
+    // This deep-equal is the proof; it would break ONLY if a future edit
+    // rerouted the curve through a basis-dependent figure. A mixed
+    // alternating/positive fixture (vol > 0) so the basis WOULD bite any
+    // metric it actually touched.
+    const dates = buildDates("2022-01-03", 45);
+    const strategies = [
+      alternatingStrategy("a", dates, 0.008, -0.003),
+      constantReturnStrategy("b", dates, 0.001),
+    ];
+    const weights = { a: 0.6, b: 0.4 };
+
+    const curveDefault = computeCompositeCurve(strategies, weights, dates[0]);
+    const curve365 = computeCompositeCurve(
+      strategies,
+      weights,
+      dates[0],
+      undefined,
+      365,
+    );
+
+    expect(curve365).toEqual(curveDefault);
+    expect(curveDefault.length).toBeGreaterThan(0);
+  });
 });
 
 // =========================================================================

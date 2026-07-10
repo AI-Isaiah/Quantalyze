@@ -749,12 +749,25 @@ export function toWealth(points: DailyPoint[]): WealthPoint[] {
  * to starting from this date, but if a strategy's own start_date is
  * later, its include-from is clamped to that later date so the overlay
  * never time-travels.
+ *
+ * `periodsPerYear` (default 252) completes the #597-part-2 locked
+ * computeScenario call-site contract: it is forwarded to the internal
+ * computeScenario call for uniformity, but the returned value is the
+ * wealth-form equity curve — built purely from the cumulative return product
+ * — and NOTHING here consumes the basis (only cagr/vol/sharpe/sortino do, and
+ * none are returned). The curve is therefore annualization-INVARIANT: passing
+ * 365 vs the default 252 yields deep-equal output, so callers (My Allocation
+ * composite, favorites overlay) need no change. The invariance is CI-pinned in
+ * scenario.test.ts rather than assumed; the pin would only break if a future
+ * edit routed the curve through a basis-dependent metric (e.g. rescaling the
+ * points by an annualized figure).
  */
 export function computeCompositeCurve(
   strategies: StrategyForBuilder[],
   weightsById: Record<string, number>,
   inceptionDate: string,
   dateMapCache?: Map<string, Map<string, number>>,
+  periodsPerYear = 252,
 ): DailyPoint[] {
   if (strategies.length === 0) return [];
 
@@ -775,6 +788,7 @@ export function computeCompositeCurve(
     strategies,
     { selected, weights: weightsById, startDates },
     cache,
+    periodsPerYear,
   );
 
   // computeScenario returns the curve as cumulative RETURN (0.18 = +18%).
