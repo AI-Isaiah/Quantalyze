@@ -1635,9 +1635,11 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
   }
 
   it("routes a composite (api_key_id NULL, >=1 members) to stitch_composite under backbone-ON — no 409", async () => {
+    // Fresh Response per call — the O-1 loop probes each member, and a shared
+    // Response body can only be read once.
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockResolvedValue(readOnlyResponse());
+      .mockImplementation(async () => readOnlyResponse());
     STATE.strategyRow = { api_key_id: null }; // composite
     STATE.strategyKeysCount = 2;
     STATE.strategyKeysList = [

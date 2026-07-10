@@ -514,6 +514,112 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (!probe.ok) return probe.response;
   }
 
+  // ── Composite-first finalize routing ──────────────────────────────
+  // Phase 88 / ONB-01, D-LOCKED (CONTEXT 2026-07-10, Option A). Prod runs
+  // `process_key_unified_backbone = on` (since 2026-05-25), so
+  // isUnifiedBackboneActive() below is TRUE in prod and the unified arm
+  // REJECTS composites (COMPOSITE_UNSUPPORTED_UNIFIED, ~:1004). Without this
+  // hoist every wizard composite dies at submit with a 409. Branch
+  // composite-vs-single-key HERE, ahead of the flag: a strategy with >=1
+  // strategy_keys member ALWAYS enqueues stitch_composite (via
+  // runLegacyFinalize's after() arm, :776-811) regardless of the backbone
+  // flag. Single-key strategies fall through to the EXISTING unified-vs-legacy
+  // split byte-unchanged.
+  //
+  // The hoist engages only for apiKeyId === null. A composite has
+  // strategies.api_key_id = NULL (members live in strategy_keys); a strategy
+  // with api_key_id SET is definitively single-key (the two are mutually
+  // exclusive by construction). Scoping the branch to apiKeyId === null keeps
+  // the fail-closed W-4 posture aimed at a POSSIBLE composite (never a known
+  // single-key) and leaves every api_key_id-bearing path untouched.
+  if (apiKeyId === null) {
+    const compositeAdmin = createAdminClient();
+    let compositeMemberCountN: number;
+    try {
+      // compositeMemberCount fails CLOSED (stamps a terminal 'failed' row,
+      // then throws) on an unknowable count — never falls open to a single-key
+      // dispatch of a possible composite (W-4 / T-88-10).
+      compositeMemberCountN = await compositeMemberCount(
+        compositeAdmin,
+        fields.strategy_id,
+      );
+    } catch (err) {
+      // Fail CLOSED: the terminal 'failed' row is already stamped inside
+      // compositeMemberCount. Surface to Sentry and return 503 rather than
+      // fall through to the single-key unified/legacy split. Reuses the
+      // unified path's COMPOSITE_MEMBERSHIP_UNKNOWN code so the wizard client
+      // maps the same retry copy off `code`.
+      console.error(
+        `[strategies/finalize-wizard] composite membership probe failed: ${safeErrorString(err)}`,
+      );
+      captureToSentry(err, {
+        tags: {
+          surface: "finalize-wizard",
+          step: "composite-membership-probe",
+        },
+        extra: { strategy_id: fields.strategy_id },
+      });
+      return NextResponse.json(
+        {
+          error: "Could not determine composite membership; please retry.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (compositeMemberCountN > 0) {
+      // O-1 (T-88-09) — per-member scope-broadening re-probe. The single-key
+      // defense above (the apiKeyId probe) only covers strategies.api_key_id,
+      // which is NULL for composites, so composite members would otherwise
+      // skip the connect→submit broadening defense entirely. Re-probe EACH
+      // member key (ordered by seq) BEFORE any enqueue; the first !ok returns
+      // the same 403 KEY_SCOPE_BROADENED / 502 KEY_NETWORK_TIMEOUT the
+      // single-key path returns. Ownership is already established by the
+      // owner-scoped strategy lookup above (:427-432); membership ids are not
+      // sensitive, so the admin client is used only to enumerate them.
+      const { data: members, error: membersErr } = await compositeAdmin
+        .from("strategy_keys")
+        .select("api_key_id")
+        .eq("strategy_id", fields.strategy_id)
+        .order("seq", { ascending: true });
+      if (membersErr) {
+        // A member-list read error also fails CLOSED — never enqueue a
+        // composite whose members we could not enumerate to re-probe.
+        console.error(
+          `[strategies/finalize-wizard] composite member list read failed: ${scrubInternalToken(membersErr.message)}`,
+        );
+        captureToSentry(membersErr, {
+          tags: {
+            surface: "finalize-wizard",
+            step: "composite-member-list",
+          },
+          extra: { strategy_id: fields.strategy_id },
+        });
+        return NextResponse.json(
+          {
+            error: "Could not load composite members; please retry.",
+            code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+      for (const member of members ?? []) {
+        const memberKeyId =
+          typeof member.api_key_id === "string" ? member.api_key_id : null;
+        if (!memberKeyId) continue;
+        const probe = await runScopeBroadeningProbe(memberKeyId);
+        if (!probe.ok) return probe.response;
+      }
+      // Route to the legacy finalize whose after() block enqueues
+      // stitch_composite (memberCount re-count + USE_COMPUTE_JOBS_QUEUE
+      // fail-loud + enqueue, :776-811) — independent of the backbone flag.
+      return await runLegacyFinalize({ supabase, user, fields });
+    }
+    // compositeMemberCountN === 0 (CSV / no-member draft with api_key_id NULL)
+    // → fall through to the existing unified-vs-legacy split byte-unchanged.
+  }
+
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag. The
   // force-refresh probe above ALREADY ran for both code paths.
   if (await isUnifiedBackboneActive()) {
