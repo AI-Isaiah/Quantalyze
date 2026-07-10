@@ -386,3 +386,76 @@ async def test_shrinking_rederive_deletes_stale_out_of_span_rows() -> None:
     for _table, eqs, gte, lte in csv_deletes:
         assert ("strategy_id", _STRATEGY_ID) in eqs
         assert gte is None and lte is None, "re-derive delete must not bound by date"
+
+
+@pytest.mark.asyncio
+async def test_traditional_default_composite_headline_equals_by_basis_and_no_guard_fabrication() -> None:
+    """ROOT CAUSE regression (collapses F1/F2/F7). A composite with the DEFAULT
+    asset_class='traditional' AND an interior guard day (NaN) AND an inter-member
+    gap. Pre-fix the headline was delegated to
+    run_csv_strategy_analytics(composite_dense_gap_fill=True), which annualized on
+    periods_per_year_for_asset_class('traditional') = √252 while the by-basis object
+    used the venue blend (deribit → √365) — so headline volatility/sharpe diverged
+    ~√(365/252) from metrics_json_by_basis.cash_settlement (proven: 0.313 vs 0.377
+    vol). It ALSO 0.0-gap-filled the guard day (fabricating flat performance) while
+    the by-basis series honestly leaves it a chain break.
+
+    Post-fix the headline IS the same cash_metrics_json spread into
+    metrics_json_by_basis.cash_settlement (computed ONCE, venue-blend √365), so:
+      (a) headline == by-basis for cumulative_return/volatility/sharpe/max_drawdown,
+      (b) the guard day is absent from csv_daily_returns (never fabricated as 0.0),
+      (c) the reference number is the honest √365 dense one, not two identically-
+          wrong √252 sparse ones.
+    Neuter (route the headline back through the asset_class recompute) → (a) reddens.
+    """
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-04"),  # half-open: Jan-01..Jan-03
+        _member(2, "2024-01-10", None),
+    ])
+    # asset_class DEFAULT 'traditional' — nothing forces a composite to crypto.
+    fake.strategy_row["asset_class"] = "traditional"
+    # m1 carries an INTERIOR guard day (Jan-02 = NaN) — a refused/guarded day the
+    # honest series must leave as a chain break, never 0.0-fabricate.
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", float("nan")), ("2024-01-03", 0.01)])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.05)])
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    # (b) the guard day is honestly ABSENT from csv_daily_returns — not fabricated.
+    assert "2024-01-02" not in fake.csv_rows, (
+        "interior guard day fabricated into csv_daily_returns as flat performance"
+    )
+    assert set(fake.csv_rows) == {
+        "2024-01-01", "2024-01-03", "2024-01-10", "2024-01-11",
+    }
+
+    headline = _headline_metrics(fake)
+    cash = _by_basis_cash(fake)
+
+    # (c) pin the reference to the honest venue-blend √365 dense series with the
+    # guard day left as a chain break (NaN survives gap_fill; stats skip it).
+    stitched = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", float("nan")), ("2024-01-03", 0.01),
+        ("2024-01-10", 0.03), ("2024-01-11", -0.05),
+    ])
+    dense = gap_fill_daily_returns(stitched)
+    reference = compute_all_metrics(
+        dense, None,
+        periods_per_year=PERIODS_PER_YEAR_CRYPTO,  # venue blend, NOT asset_class √252
+        cumulative_method="geometric",
+        day_basis="calendar",
+    ).metrics_json
+    # A guard NaN must survive gap_fill (chain break), not become a 0.0 day.
+    assert bool(dense.isna().any()), "guard day must remain NaN in the honest series"
+
+    for key in ("cumulative_return", "volatility", "sharpe", "max_drawdown"):
+        assert cash[key] == pytest.approx(reference[key]), (
+            f"by-basis {key} is not the honest venue-blend √365 dense number"
+        )
+        # (a) headline == by-basis byte-for-byte — the root-cause parity.
+        assert headline[key] == pytest.approx(cash[key]), (
+            f"ROOT-CAUSE divergence: headline {key}={headline[key]} != "
+            f"by-basis cash_settlement {key}={cash[key]} on a traditional-default "
+            f"composite (asset_class √252 recompute vs venue-blend √365 by-basis)"
+        )

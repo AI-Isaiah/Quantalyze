@@ -506,6 +506,108 @@ async def test_dq_flags_merge_preserves_existing_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_member_guard_meta_promotes_complete_with_warnings() -> None:
+    """Finding 3: run_stitch_composite_job previously DISCARDED each member's
+    NavTWRMeta (`returns, _meta = combine_native_ledger(...)`). A composite built
+    from a guard-day / heuristic-capital / chain-broken member must union those
+    flags into the composite DQ flags and promote status to
+    complete_with_warnings (mirror the single-key bridge). Neuter (drop the meta
+    union) → the row stamps a clean 'complete' with no caveat → this reddens."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # seq-1 member reconstructed with a chain-broken guard day + heuristic capital.
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[
+            (m1, {"twr_chain_broken": True, "used_heuristic_capital": True}),
+            (m2, {}),
+        ],
+        has_option_activity=True,  # gate CLOSED → single cash pass, metas honored
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    # The headline row carries complete_with_warnings + the unioned flags.
+    headline = None
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and "metrics_json_by_basis" in payload
+        ):
+            headline = payload
+            break
+    assert headline is not None
+    assert headline["computation_status"] == "complete_with_warnings"
+    assert headline["computation_warned"] is True
+    dq = headline["data_quality_flags"]
+    assert dq.get("twr_chain_broken") is True
+    assert dq.get("used_heuristic_capital") is True
+
+
+@pytest.mark.asyncio
+async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
+    """Finding 4: a PERMANENT member-key preflight failure (missing / inactive key)
+    used to `return ctx` WITHOUT stamping strategy_analytics — the wizard poller
+    then spins on 'pending' forever. Post-fix a terminal 'failed' is stamped so the
+    poller reaches a gate. Neuter (drop the stamp) → no failed row → this reddens."""
+    from services.job_worker import DispatchResult
+
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    inactive = DispatchResult(
+        outcome=DispatchOutcome.FAILED,
+        error_message="run_stitch_composite_job: api_key key-1 is inactive",
+        error_kind="permanent",
+    )
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[],
+        has_option_activity=True,
+        preflight_side_effect=[inactive],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, (
+        "permanent preflight failure must stamp a terminal 'failed' analytics row"
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_preflight_does_not_stamp_failed() -> None:
+    """Finding 4 (converse): a DEFERRED preflight (circuit-breaker cooldown) is
+    legitimately retryable and must NOT be stamped 'failed' — a premature terminal
+    stamp would mask a recoverable condition and abort a re-runnable job."""
+    from services.job_worker import DispatchResult
+
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    deferred = DispatchResult(outcome=DispatchOutcome.DEFERRED)
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[],
+        has_option_activity=True,
+        preflight_side_effect=[deferred],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DEFERRED
+    assert not any(
+        isinstance(payload, dict) and payload.get("computation_status") == "failed"
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+    ), "a DEFERRED (retryable) preflight must not stamp a terminal failed row"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_stitch_composite_kind() -> None:
     """dispatch(kind='stitch_composite') routes to run_stitch_composite_job."""
     from services.job_worker import DispatchResult, dispatch

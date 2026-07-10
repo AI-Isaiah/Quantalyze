@@ -2991,9 +2991,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         NavReconstructionError,
     )
 
-    async def _reconstruct_deribit(ctx: Any, basis: str) -> tuple[pd.Series, bool]:
+    async def _reconstruct_deribit(
+        ctx: Any, basis: str
+    ) -> tuple[pd.Series, bool, dict[str, Any]]:
         """One Deribit member's dense daily-return series for ``basis`` + its
-        option-activity signal, through the EXISTING per-key entry points."""
+        option-activity signal + the NavTWRMeta guard dict, through the EXISTING
+        per-key entry points."""
         account_state = await fetch_deribit_native_account_state(ctx.exchange)
         ledger, completeness = await build_deribit_native_ledger(
             ctx.exchange,
@@ -3002,31 +3005,47 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             exclude_spot_extraction=exclude_spot,
         )
         assert_ledger_complete(completeness)
-        returns, _meta = combine_native_ledger(
+        returns, member_meta = combine_native_ledger(
             ledger,
             completeness.indexable_currencies,
             denominator_config=denominator_config,
         )
-        return returns, bool(completeness.has_option_activity)
+        return returns, bool(completeness.has_option_activity), dict(member_meta)
 
     async def _reconstruct_all(basis: str) -> tuple[
-        list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str]
+        list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
+        list[dict[str, Any]],
     ] | DispatchResult:
         """Fan out over every member for ``basis``: preflight (worker-only
         decrypt) → reconstruct → clip. Returns the clipped (seq, series) list +
-        per-member MTM signals + venues, or a DispatchResult on a preflight
-        FAILED/DEFERRED or a typed permanent / transient reconstruction error."""
+        per-member MTM signals + venues + per-member NavTWRMeta guard dicts
+        (Finding 3), or a DispatchResult on a preflight FAILED/DEFERRED or a
+        typed permanent / transient reconstruction error."""
         clipped: list[tuple[int, pd.Series]] = []
         signals: list[MemberBasisSignal] = []
         venues: list[str] = []
+        metas: list[dict[str, Any]] = []
         for m in members:
             seq = int(m["seq"])
             member_job = {"api_key_id": m["api_key_id"], "strategy_id": strategy_id}
             ctx = await _allocator_key_preflight(member_job, "run_stitch_composite_job")
             if isinstance(ctx, DispatchResult):
-                # Preflight FAILED (missing/inactive key) or DEFERRED (circuit
-                # breaker) — surface as-is. A geo-block on a live crawl is handled
-                # in the except below.
+                # Finding 4: a PERMANENT preflight failure (missing / inactive
+                # member key) returned here WITHOUT stamping strategy_analytics —
+                # the wizard poller then spins on 'pending' forever with no gate.
+                # Stamp a terminal 'failed' so the poller reaches a gate. DEFERRED
+                # (circuit-breaker cooldown) and transient failures stay untouched:
+                # they are legitimately retryable and re-run the job (a premature
+                # 'failed' stamp would mask a recoverable condition). A geo-block on
+                # a LIVE crawl is a separate transient handled in the except below.
+                if (
+                    ctx.outcome == DispatchOutcome.FAILED
+                    and ctx.error_kind == "permanent"
+                ):
+                    await _stamp_failed(
+                        "Composite member key preflight failed permanently "
+                        "(missing or inactive member key)."
+                    )
                 return ctx
             venue = str(ctx.key_row["exchange"])
             if venue != "deribit":
@@ -3052,7 +3071,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             try:
-                returns, has_opt = await _reconstruct_deribit(ctx, basis)
+                returns, has_opt, member_meta = await _reconstruct_deribit(ctx, basis)
             except _PERMANENT_LEDGER_ERRORS as exc:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_failed(
@@ -3085,13 +3104,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             clipped.append((seq, clip_to_window(returns, m["window_start"], m.get("window_end"))))
             signals.append(MemberBasisSignal(seq=seq, venue=venue, has_option_activity=has_opt))
             venues.append(venue)
-        return clipped, signals, venues
+            metas.append(member_meta)
+        return clipped, signals, venues, metas
 
     # 3. CASH_SETTLEMENT fan-out (always).
     cash_result = await _reconstruct_all(cash_pnl_basis)
     if isinstance(cash_result, DispatchResult):
         return cash_result
-    clipped_cash, member_signals, venues = cash_result
+    clipped_cash, member_signals, venues, member_metas = cash_result
 
     # 4. Fail-loud post-clip overlap + arithmetic stitch (T-86-11 second layer).
     try:
@@ -3146,22 +3166,31 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         cumulative_method = "geometric"
         day_basis = "calendar"
 
-    def _metrics_json_for(clipped_series: list[tuple[int, pd.Series]]) -> dict[str, Any]:
-        """Stitch → gap-fill dense-with-0.0 (Pitfall 2: compute_all_metrics(simple)
-        fails loud on interior NaN) → compute_all_metrics with the composite
-        conventions → the metrics_json dict."""
+    def _metrics_result_for(clipped_series: list[tuple[int, pd.Series]]) -> Any:
+        """Stitch → gap-fill dense-with-0.0 → compute_all_metrics with the composite
+        conventions → the full MetricsResult (metrics_json + sibling_kinds).
+
+        This is the ONE canonical composite compute. Its ``metrics_json`` is used
+        for BOTH the headline ``strategy_analytics`` scalars AND
+        ``metrics_json_by_basis.cash_settlement`` so the two can never diverge —
+        the root-cause fix that retires the divergent single-key recompute the
+        headline previously went through (``run_csv_strategy_analytics`` applied
+        ``periods_per_year_for_asset_class(asset_class)`` — √252 for the 'traditional'
+        default — and reinstated NaN/0.0 gap semantics that disagreed with this
+        in-memory series). Benchmark is None here (a composite has no single
+        benchmark series); the four headline scalars are benchmark-invariant."""
         stitched = stitch_clipped_series(clipped_series)
         dense = gap_fill_daily_returns(stitched)
-        result = compute_all_metrics(
+        return compute_all_metrics(
             dense,
             None,
             periods_per_year=periods_per_year,
             cumulative_method=cumulative_method,
             day_basis=day_basis,
         )
-        return dict(result.metrics_json)
 
-    cash_metrics_json = _metrics_json_for(clipped_cash)
+    cash_metrics_result = _metrics_result_for(clipped_cash)
+    cash_metrics_json = dict(cash_metrics_result.metrics_json)
 
     # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
     # member (research A2 — no single-pass dual-basis path); gated ⇒ omit the MTM
@@ -3172,9 +3201,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         mtm_result = await _reconstruct_all(PNL_BASIS_MARK_TO_MARKET)
         if isinstance(mtm_result, DispatchResult):
             return mtm_result
-        clipped_mtm, _mtm_signals, _mtm_venues = mtm_result
+        clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas = mtm_result
         try:
-            mtm_metrics_json = _metrics_json_for(clipped_mtm)
+            mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)
         except CompositeOverlapError as exc:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
@@ -3235,27 +3264,52 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
         await db_execute(_upsert_dailies)
 
-    # (2) Headline single-basis row via the EXISTING CSV analytics (parity by
-    # construction — same stitched series, same conventions). Run in-process
-    # (mirrors run_compute_analytics_from_csv_job) so ordering is deterministic and
-    # the additive by-basis write below can never be clobbered by the headline.
-    from services.analytics_runner import run_csv_strategy_analytics
+    # (2) + (3) ONE atomic headline + by-basis write (root-cause fix). The composite
+    # HEADLINE metrics_json is the SAME cash_metrics_json spread into
+    # metrics_json_by_basis.cash_settlement — computed ONCE from the in-memory
+    # stitched series (same NaN handling, same venue-blend periods_per_year, same
+    # cumulative/day-basis conventions). Previously the headline was delegated to
+    # run_csv_strategy_analytics(composite_dense_gap_fill=True), which re-read the
+    # SPARSE csv_daily_returns and applied SINGLE-KEY semantics that diverged:
+    # periods_per_year_for_asset_class(strategies.asset_class) annualized a
+    # 'traditional'-default composite on √252 while the by-basis object used the
+    # venue blend (deribit → 365), and its 0.0 gap-fill fabricated flat performance
+    # for refused/guard days the honest by-basis series leaves as chain breaks.
+    # csv_daily_returns above stays for charting only; the headline no longer routes
+    # through that recompute, so headline == by-basis.cash_settlement by construction.
+    from services.allocated_capital import ALLOCATED_CAPITAL_GUARD_KEYS
+    from services.nav_twr import NAV_TWR_GUARD_KEYS
 
-    # F1: COMPOSITE dense-gap-fill mode — the headline computes on the SAME dense
-    # 0.0-gap-filled series _metrics_json_for uses, so the headline cash_settlement
-    # and metrics_json_by_basis.cash_settlement are byte-identical (same
-    # cumulative_return AND same vol/sharpe/maxdd), never silently divergent on a
-    # gapped composite. WITHOUT this, the headline reads the SPARSE csv_daily_returns
-    # (gap days absent) and diverges on vol/sharpe (and, if the composite were
-    # broker-sourced, on cumulative via a suffix-only TWR break).
-    await run_csv_strategy_analytics(strategy_id, composite_dense_gap_fill=True)
-
-    # (3) Additive metrics_json_by_basis + merged DQ flags. The by-basis object
-    # OMITS an unavailable basis key (SQL NULL never JSON null — Phase 85 CHECK):
-    # only keys with a computed object are inserted.
+    # The by-basis object OMITS an unavailable basis key (SQL NULL never JSON null —
+    # Phase 85 CHECK): only computed bases are inserted.
     metrics_json_by_basis: dict[str, Any] = {"cash_settlement": cash_metrics_json}
     if mtm_metrics_json is not None:
         metrics_json_by_basis["mark_to_market"] = mtm_metrics_json
+
+    # Finding 3: union each member's NavTWRMeta guard flags into the composite DQ
+    # flags and promote to complete_with_warnings — mirror the single-key bridge in
+    # run_csv_strategy_analytics (~2334-2347). run_stitch_composite_job previously
+    # DISCARDED the per-member meta (`returns, _meta = combine_native_ledger(...)`),
+    # so a composite built from a guard-day / heuristic-capital / chain-broken member
+    # shipped a clean 'complete' factsheet with no honest caveat. The cash pass metas
+    # carry the authoritative guard signal (the MTM pass is discarded on purpose).
+    member_warn_flags: dict[str, bool] = {}
+    member_warned = False
+    for _member_meta in member_metas:
+        for _flag in NAV_TWR_GUARD_KEYS:
+            if _member_meta.get(_flag):
+                member_warn_flags[_flag] = True
+                member_warned = True
+        for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
+            if _member_meta.get(_flag):
+                member_warn_flags[_flag] = True
+                member_warned = True
+        # used_heuristic_capital is a NON-guard NavTWRMeta key (kept OUT of
+        # NAV_TWR_GUARD_KEYS by design) but still an honest data-quality caveat —
+        # a member whose NAV denominator fell back to a heuristic capital base.
+        if _member_meta.get("used_heuristic_capital"):
+            member_warn_flags["used_heuristic_capital"] = True
+            member_warned = True
 
     def _read_existing_flags() -> dict[str, Any]:
         res = (
@@ -3269,28 +3323,73 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         return dict(row.get("data_quality_flags") or {})
 
     existing_flags = await db_execute(_read_existing_flags)
-    # MERGE (read-modify-write) — preserve every existing flag (e.g. the headline
-    # run's benchmark_unavailable), add the composite coverage-mask fields.
+    # MERGE (read-modify-write) — preserve every existing flag (e.g. a prior derive's
+    # benchmark_unavailable), add the composite coverage-mask fields.
     merged_flags: dict[str, Any] = dict(existing_flags)
+    merged_flags["csv_source"] = True
     merged_flags["composite"] = True
     merged_flags["per_key"] = mask["per_key"]
     merged_flags["gap_spans"] = mask["gap_spans"]
     merged_flags["gap_day_count"] = mask["gap_day_count"]
     merged_flags["overlap_days"] = mask["overlap_days"]
+    # Finding 5 (composite direction): mtm_gated_reason is the only conditionally-
+    # present coverage-mask key. DROP a stale one when THIS derive ADMITS MTM, else a
+    # prior gated run's reason would linger next to a now-present mark_to_market basis
+    # (the per_key / gap_* keys are unconditionally overwritten above, so no stale).
     if not mtm_ok and mtm_reason is not None:
         merged_flags["mtm_gated_reason"] = mtm_reason
+    else:
+        merged_flags.pop("mtm_gated_reason", None)
+    for _flag, _val in member_warn_flags.items():
+        merged_flags[_flag] = _val
 
-    def _write_by_basis() -> None:
+    composite_status = "complete_with_warnings" if member_warned else "complete"
+
+    headline_payload: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "computation_status": composite_status,
+        "computation_warned": member_warned,
+        "computation_error": None,
+        "trade_metrics": None,     # composite has no fills
+        "volume_metrics": None,
+        "exposure_metrics": None,
+        "metrics_json_by_basis": metrics_json_by_basis,
+        "data_quality_flags": merged_flags,
+    }
+    # Spread the canonical composite scalars into the headline — the SAME object as
+    # metrics_json_by_basis.cash_settlement. A single upsert also REPLACES
+    # metrics_json_by_basis wholesale (Finding 5) so a prior mark_to_market basis
+    # can't survive a now-gated re-derive.
+    headline_payload.update(cash_metrics_json)
+
+    def _write_headline_and_by_basis() -> None:
         supabase.table("strategy_analytics").upsert(
-            {
-                "strategy_id": strategy_id,
-                "metrics_json_by_basis": metrics_json_by_basis,
-                "data_quality_flags": merged_flags,
-            },
-            on_conflict="strategy_id",
+            headline_payload, on_conflict="strategy_id"
         ).execute()
 
-    await db_execute(_write_by_basis)
+    await db_execute(_write_headline_and_by_basis)
+
+    # Above-the-fold sibling series (rolling metrics, drawdown curve) for the
+    # composite factsheet charts — computed from the SAME canonical cash compute so
+    # they agree with the headline. Guarded exactly like run_csv_strategy_analytics:
+    # a transient RPC blip is logged, never fails the (already-persisted) derive.
+    if cash_metrics_result.sibling_kinds:
+        try:
+            def _upsert_siblings() -> None:
+                supabase.rpc(
+                    "upsert_strategy_analytics_series_batch",
+                    {
+                        "p_strategy_id": strategy_id,
+                        "p_kinds": cash_metrics_result.sibling_kinds,
+                    },
+                ).execute()
+
+            await db_execute(_upsert_siblings)
+        except Exception as sibling_exc:  # noqa: BLE001
+            logger.warning(
+                "stitch_composite: sibling-series batch upsert failed for %s: %s",
+                strategy_id, str(sibling_exc),
+            )
 
     logger.info(
         "stitch_composite: strategy %s stitched %d members (%d days, venues=%s, "
