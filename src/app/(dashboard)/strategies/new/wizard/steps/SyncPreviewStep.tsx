@@ -113,6 +113,45 @@ const POLL_BACKOFF_MS = [3000, 3000, 5000, 5000, 10_000] as const;
  */
 const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
+/**
+ * A single composite member key, ordered by `seq`. Sourced from
+ * `strategy_keys` (owner-RLS) with the `api_keys(exchange, label)` embed
+ * (null-safe — the embed can be absent if the join is unavailable).
+ */
+export interface CompositeMemberKeyRow {
+  apiKeyId: string;
+  windowStart: string;
+  windowEnd: string | null;
+  seq: number;
+  exchange: string | null;
+  label: string | null;
+}
+
+/**
+ * Additive composite preview payload. Populated ONLY on the composite branch
+ * (membership probe count > 0). The stitched result already lives in one
+ * `strategy_analytics` row + `csv_daily_returns` — this is a READ, never a
+ * re-stitch. Plan 89-04 layers the attribution table / gantt / warnings on top
+ * of these fields; `rawDenominatorConfig` is mapped to the attribution basis
+ * there (via `attributionBasisFromConfig`).
+ */
+export interface CompositePreviewData {
+  members: CompositeMemberKeyRow[];
+  perKey: {
+    seq: number;
+    first_day: string | null;
+    last_day: string | null;
+    n_days: number;
+  }[];
+  gapSpans: { start: string; end: string }[]; // inclusive both ends — render verbatim
+  gapDayCount: number;
+  mtmGatedReason: string | null;
+  benchmarkUnavailable: boolean;
+  benchmarkNote: string | null;
+  series: { date: string; daily_return: number }[]; // full stitched series
+  rawDenominatorConfig: unknown;
+}
+
 export interface SyncPreviewSnapshot {
   tradeCount: number;
   /**
@@ -127,6 +166,12 @@ export interface SyncPreviewSnapshot {
   metrics: FactsheetPreviewMetric[];
   sparkline: number[] | null;
   computedAt: string | null;
+  /**
+   * Additive composite payload — present only on the composite branch. The
+   * single-key snapshot shape and the MetadataStep/SubmitStep consumers of
+   * detectedMarkets/exchange/tradeCount/sparkline are unaffected (SC-4).
+   */
+  composite?: CompositePreviewData;
 }
 
 export interface SyncPreviewStepProps {
@@ -171,6 +216,12 @@ export function SyncPreviewStep({
   const [expandLog, setExpandLog] = useState(false);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
   const [computationError, setComputationError] = useState<string | null>(null);
+  // Composite discriminator (Pitfall 1): a composite is identified by a
+  // `strategy_keys` membership-count probe (count > 0), NEVER by
+  // `apiKeyId === null` — the prop is the FIRST member's key id (a UUID). Init
+  // false so a single-key run never re-renders from the probe and the poll
+  // effect never restarts on the single-key path (SC-4 neutrality).
+  const [isComposite, setIsComposite] = useState(false);
   // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
   const [correlationId] = useState<string>(() => readCorrelationId());
   // useRef initializer must be a non-impure value for React Compiler's
@@ -194,6 +245,25 @@ export function SyncPreviewStep({
         // on the first poll. Stale rows still kick off as before so
         // a long-paused session doesn't show outdated metrics.
         const supabase = createClient();
+        // Composite membership probe (mirror finalize's compositeMemberCount,
+        // client-side RLS analog — Pitfall 1). A head-count read: count > 0 ⇒
+        // composite. On a Supabase error, console.error and REMAIN single-key
+        // (never silently composite — the shared failed/gate branch still
+        // blocks a broken composite as a fail-safe). Placed before the
+        // freshness read; neutrality holds regardless of position because a
+        // single-key run resolves count 0 and never calls setIsComposite.
+        const { count: memberCount, error: memberProbeError } = await supabase
+          .from("strategy_keys")
+          .select("*", { count: "exact", head: true })
+          .eq("strategy_id", strategyId);
+        if (memberProbeError) {
+          console.error(
+            "[wizard:SyncPreviewStep] composite membership probe error:",
+            memberProbeError,
+          );
+        } else if ((memberCount ?? 0) > 0 && mountedRef.current) {
+          setIsComposite(true);
+        }
         const { data: existing } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computed_at")
@@ -388,6 +458,200 @@ export function SyncPreviewStep({
         // `consecutiveErrors = 0` reset. One transient heavy fault is still
         // tolerated; the threshold matches the status-read path.
         try {
+          // COMPOSITE ARM (Pitfall 1/4/5): the composite reads the stitched
+          // result directly (analytics mask + members + full series +
+          // denominator config) and NEVER routes through checkStrategyGate or
+          // queries `trades` (a composite has 0 trades — the single-key gate
+          // would false-fail INSUFFICIENT_TRADES). Its only gate is the shared
+          // `nextStatus === "failed"` branch above, which fires before this
+          // read. Supabase error-as-value on any read throws so the existing
+          // heavyFetchErrors escalation (H-0197) applies unchanged.
+          if (isComposite) {
+            const [analyticsRes, membersRes, seriesRes, stratRes] =
+              await Promise.all([
+                supabase
+                  .from("strategy_analytics")
+                  .select(
+                    "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, metrics_json_by_basis, data_quality_flags, computed_at",
+                  )
+                  .eq("strategy_id", strategyId)
+                  .maybeSingle(),
+                supabase
+                  .from("strategy_keys")
+                  .select(
+                    "api_key_id, window_start, window_end, seq, api_keys(exchange, label)",
+                  )
+                  .eq("strategy_id", strategyId)
+                  .order("seq", { ascending: true }),
+                supabase
+                  .from("csv_daily_returns")
+                  .select("date, daily_return")
+                  .eq("strategy_id", strategyId)
+                  .order("date", { ascending: true })
+                  // Flat safety ceiling, T-36-03-03 precedent (queries.ts).
+                  .limit(20000),
+                supabase
+                  .from("strategies")
+                  .select("returns_denominator_config")
+                  .eq("id", strategyId)
+                  .maybeSingle(),
+              ]);
+
+            if (analyticsRes.error) {
+              throw new Error(
+                `composite analytics read failed: ${analyticsRes.error.message}`,
+              );
+            }
+            if (membersRes.error) {
+              throw new Error(
+                `composite members read failed: ${membersRes.error.message}`,
+              );
+            }
+            if (seriesRes.error) {
+              throw new Error(
+                `composite series read failed: ${seriesRes.error.message}`,
+              );
+            }
+            if (stratRes.error) {
+              throw new Error(
+                `composite denominator-config read failed: ${stratRes.error.message}`,
+              );
+            }
+
+            if (!mountedRef.current) return;
+
+            const analyticsRow =
+              (analyticsRes.data as Record<string, unknown> | null) ?? null;
+            const dq = (analyticsRow?.data_quality_flags ?? {}) as {
+              per_key?: {
+                seq: number;
+                first_day: string | null;
+                last_day: string | null;
+                n_days: number;
+              }[];
+              gap_spans?: { start: string; end: string }[];
+              gap_day_count?: number;
+              mtm_gated_reason?: string | null;
+              benchmark_unavailable?: boolean;
+              benchmark_note?: string | null;
+            };
+
+            const members: CompositeMemberKeyRow[] = (
+              (membersRes.data as
+                | {
+                    api_key_id: string;
+                    window_start: string;
+                    window_end: string | null;
+                    seq: number;
+                    api_keys?:
+                      | { exchange: string | null; label: string | null }
+                      | { exchange: string | null; label: string | null }[]
+                      | null;
+                  }[]
+                | null) ?? []
+            )
+              .map((r) => {
+                // The api_keys embed is many-to-one; supabase-js may return it
+                // as an object OR a single-element array. Normalize null-safely.
+                const embed = Array.isArray(r.api_keys)
+                  ? r.api_keys[0]
+                  : r.api_keys;
+                return {
+                  apiKeyId: r.api_key_id,
+                  windowStart: r.window_start,
+                  windowEnd: r.window_end ?? null,
+                  seq: r.seq,
+                  exchange: embed?.exchange ?? null,
+                  label: embed?.label ?? null,
+                };
+              })
+              .sort((a, b) => a.seq - b.seq);
+
+            const perKey = Array.isArray(dq.per_key)
+              ? [...dq.per_key].sort((a, b) => a.seq - b.seq)
+              : [];
+            const series =
+              (seriesRes.data as
+                | { date: string; daily_return: number }[]
+                | null) ?? [];
+
+            const compositeMetrics: FactsheetPreviewMetric[] = [
+              {
+                label: "CAGR",
+                value: formatCagr((analyticsRow?.cagr as number) ?? null),
+              },
+              {
+                label: "Sharpe",
+                value: formatMetric((analyticsRow?.sharpe as number) ?? null),
+              },
+              {
+                label: "Sortino",
+                value: formatMetric((analyticsRow?.sortino as number) ?? null),
+              },
+              {
+                label: "Max DD",
+                value:
+                  analyticsRow?.max_drawdown != null
+                    ? formatCagr(analyticsRow.max_drawdown as number)
+                    : "—",
+              },
+              {
+                label: "Volatility",
+                value:
+                  analyticsRow?.volatility != null
+                    ? formatMetric(analyticsRow.volatility as number, "%")
+                    : "—",
+              },
+              {
+                label: "Cumulative",
+                value:
+                  analyticsRow?.cumulative_return != null
+                    ? formatCagr(analyticsRow.cumulative_return as number)
+                    : "—",
+              },
+            ];
+
+            // A1 fallback: use the served sparkline_returns if present, else
+            // the daily_return values from the stitched series — served data
+            // only, NEVER recomputed.
+            const compositeSparkline: number[] | null = Array.isArray(
+              analyticsRow?.sparkline_returns,
+            )
+              ? (analyticsRow!.sparkline_returns as number[])
+              : series.map((d) => d.daily_return);
+
+            const compositeSnapshot: SyncPreviewSnapshot = {
+              tradeCount: 0,
+              csvRowCount: series.length,
+              earliestTradeAt: null,
+              latestTradeAt: null,
+              detectedMarkets: [],
+              exchange: null,
+              metrics: compositeMetrics,
+              sparkline: compositeSparkline,
+              computedAt: (analyticsRow?.computed_at as string) ?? null,
+              composite: {
+                members,
+                perKey,
+                gapSpans: Array.isArray(dq.gap_spans) ? dq.gap_spans : [],
+                gapDayCount:
+                  typeof dq.gap_day_count === "number" ? dq.gap_day_count : 0,
+                mtmGatedReason: dq.mtm_gated_reason ?? null,
+                benchmarkUnavailable: dq.benchmark_unavailable === true,
+                benchmarkNote: dq.benchmark_note ?? null,
+                series,
+                rawDenominatorConfig:
+                  (stratRes.data as { returns_denominator_config?: unknown } | null)
+                    ?.returns_denominator_config ?? null,
+              },
+            };
+
+            stopped = true;
+            setSnapshot(compositeSnapshot);
+            setPhase("passed");
+            return;
+          }
+
           const [
             { data: analytics },
             { count: tradeCount },
@@ -574,7 +838,7 @@ export function SyncPreviewStep({
       stopped = true;
       if (timerId !== undefined) window.clearTimeout(timerId);
     };
-  }, [phase, strategyId, apiKeyId, wizardSessionId]);
+  }, [phase, strategyId, apiKeyId, wizardSessionId, isComposite]);
 
   const handleUseThisKey = useCallback(() => {
     if (snapshot) onComplete(snapshot);
@@ -597,9 +861,15 @@ export function SyncPreviewStep({
           id="wizard-sync-heading"
           className="font-sans text-h3 font-semibold text-text-primary"
         >
-          We could not verify this strategy
+          {isComposite
+            ? "We could not verify this composite"
+            : "We could not verify this strategy"}
         </h2>
         <div className="mt-4">
+          {/* The envelope names the offending member: computation_error is
+              server-scrubbed and already threaded via buildEnvelope → the
+              GATE_ANALYTICS_FAILED cause gains "Details: {computation_error}."
+              (zero new plumbing). */}
           <WizardErrorEnvelope envelope={errorEnvelope} />
         </div>
         <div className="mt-6 flex gap-3">
@@ -608,7 +878,69 @@ export function SyncPreviewStep({
             onClick={onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
-            Try another key
+            {isComposite ? "Review your keys" : "Try another key"}
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
+  if (phase === "passed" && snapshot && isComposite && snapshot.composite) {
+    const composite = snapshot.composite;
+    const memberCount = composite.members.length;
+    // firstDay/lastDay = union of the per_key ACTUAL data days (min non-null
+    // first_day / max non-null last_day). Omit the range clause when either is
+    // absent (no-invented-data).
+    const firstDays = composite.perKey
+      .map((k) => k.first_day)
+      .filter((d): d is string => d != null);
+    const lastDays = composite.perKey
+      .map((k) => k.last_day)
+      .filter((d): d is string => d != null);
+    const firstDay = firstDays.length > 0 ? firstDays.reduce((a, b) => (a < b ? a : b)) : null;
+    const lastDay = lastDays.length > 0 ? lastDays.reduce((a, b) => (a > b ? a : b)) : null;
+    const rangeClause =
+      firstDay && lastDay ? `, ${firstDay} – ${lastDay}` : "";
+
+    return (
+      <section aria-labelledby="wizard-sync-heading">
+        <h2
+          id="wizard-sync-heading"
+          className="font-sans text-h3 font-semibold text-text-primary"
+        >
+          Your verified composite factsheet is ready
+        </h2>
+        <p className="mt-2 text-body text-text-secondary">
+          {memberCount} key{memberCount === 1 ? "" : "s"} stitched into one
+          continuous track record{rangeClause}. Review the composite below and
+          continue to add metadata.
+        </p>
+
+        {/* KeyPermissionBadge OMITTED on the composite branch (FLAG-3) — a
+            single badge would show only the first member's scopes and mislead. */}
+
+        <div className="mt-6">
+          <FactsheetPreview
+            strategyName={"Your draft composite"}
+            metrics={snapshot.metrics}
+            sparklineReturns={snapshot.sparkline}
+            computedAt={snapshot.computedAt}
+            verificationState="draft"
+          />
+        </div>
+
+        {/* 89-04: attribution table + coverage gantt + pre-submit warnings render here */}
+
+        <div className="mt-6 flex gap-3">
+          <Button onClick={handleUseThisKey} data-testid="wizard-use-this-key">
+            Use this composite and continue
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={onTryAnotherKey}
+            data-testid="wizard-try-another-key"
+          >
+            Review your keys
           </Button>
         </div>
       </section>
@@ -701,11 +1033,14 @@ export function SyncPreviewStep({
         id="wizard-sync-heading"
         className="font-sans text-h3 font-semibold text-text-primary"
       >
-        Computing your verified factsheet
+        {isComposite
+          ? "Stitching your composite track record"
+          : "Computing your verified factsheet"}
       </h2>
       <p className="mt-2 text-body text-text-secondary">
-        We are fetching your trade history from the exchange and computing risk
-        metrics. Usually takes 15–30 seconds.
+        {isComposite
+          ? "We are reconstructing each key's history and stitching them into one continuous track. Usually takes 20–40 seconds."
+          : "We are fetching your trade history from the exchange and computing risk metrics. Usually takes 15–30 seconds."}
       </p>
 
       <div className="mt-6 rounded-md border border-border bg-page px-4 py-3">
@@ -716,9 +1051,11 @@ export function SyncPreviewStep({
               ? "Sync reported a failure"
               : phase === "kicking_off"
                 ? "Contacting exchange..."
-                : computationStatus === "computing"
-                  ? "Computing analytics..."
-                  : "Fetching trades..."}
+                : isComposite
+                  ? "Stitching composite…"
+                  : computationStatus === "computing"
+                    ? "Computing analytics..."
+                    : "Fetching trades..."}
           </p>
           <span className="ml-auto font-metric text-caption tabular-nums text-text-muted">
             {elapsedSeconds}s
