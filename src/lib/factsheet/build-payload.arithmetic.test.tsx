@@ -26,9 +26,7 @@ import { buildFactsheetPayload } from "./build-payload";
 // `buildFactsheetPayload` signature cast does NOT fix, so each needs its own
 // directive on the line directly above it.
 
-// @ts-expect-error export lands in 90-03 — arithmeticEquity
 import { arithmeticEquity } from "./compute";
-// @ts-expect-error export lands in 90-03 — arithmeticUnderwater
 import { arithmeticUnderwater } from "./compute";
 // @ts-expect-error export lands in 90-03 — deriveSegmentMarkers
 import { deriveSegmentMarkers } from "./build-payload";

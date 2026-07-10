@@ -238,6 +238,51 @@ export function cumEq(rets: number[]): number[] {
   return out;
 }
 
+/**
+ * Phase 90 (D3) — ARITHMETIC cumulative equity: `out[i] = 1 + running Σr`.
+ * Mirrors `metrics.py:561-564` (`cumulative = 1.0 + returns.cumsum()`). Used for
+ * COMPOSITE factsheets over the SPARSE `csv_daily_returns` series so the chart
+ * endpoint equals the persisted (arithmetic) `cumulative_return` by construction.
+ *
+ * Gap-day invariant: an injected 0.0 return adds nothing to the running sum, so
+ * the sparse-series endpoint == the dense-0.0-filled twin's endpoint (D3). This
+ * is DISTINCT from the geometric {@link cumEq} (`∏(1+r)`) used on single-key
+ * factsheets, which stays untouched.
+ */
+export function arithmeticEquity(rets: number[]): number[] {
+  const out: number[] = new Array(rets.length);
+  let s = 0;
+  for (let i = 0; i < rets.length; i++) {
+    s += rets[i];
+    out[i] = 1 + s;
+  }
+  return out;
+}
+
+/**
+ * Phase 90 (D3) — inception-seeded SUBTRACTIVE underwater: `cum = Σr`,
+ * `peak = running max seeded at 0.0`, `out[i] = cum − peak` (≤ 0). Mirrors
+ * `metrics.py:607-611` (`underwater = dd_cumsum − cummax().clip(lower=0)`).
+ *
+ * NOTE: this is NOT the geometric ratio {@link drawdowns} (`eq/peak − 1`). A
+ * negative-first series is underwater from day 1 here (peak floored at 0),
+ * whereas the geometric drawdown reports 0 on a monotone-up-from-inception leg.
+ * Gap-day invariant: a 0.0 return advances neither `cum` nor `peak`, so the
+ * trough (`min`) is identical between the sparse series and its dense-0.0 twin
+ * (D3). Used only on the composite arithmetic branch.
+ */
+export function arithmeticUnderwater(rets: number[]): number[] {
+  const out: number[] = new Array(rets.length);
+  let cum = 0;
+  let peak = 0; // seed at 0.0 → the running max is floored at inception
+  for (let i = 0; i < rets.length; i++) {
+    cum += rets[i];
+    if (cum > peak) peak = cum;
+    out[i] = cum - peak;
+  }
+  return out;
+}
+
 /** Drawdown from running peak. `drawdowns(eq) = eq/running_peak - 1`. */
 export function drawdowns(eq: number[]): number[] {
   const out: number[] = new Array(eq.length);

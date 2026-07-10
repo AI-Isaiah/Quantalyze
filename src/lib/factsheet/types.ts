@@ -457,6 +457,47 @@ export type FactsheetCommon = {
   stressWindows: StressWindowPayload;
   /** Quantile box-plot summary on the strategy's daily-return distribution. */
   quantiles: QuantilePayload;
+
+  // ---- Phase 90 (FS-01/FS-02/FS-03) composite marker + basis fields ----
+  // All OPTIONAL + absent-by-default so single-key payloads stay byte-identical
+  // (the object-spread over the discriminated union at page.tsx preserves the
+  // `ingestSource` discriminant). Populated ONLY on the composite (csv-arm)
+  // branch of the read path (page.tsx `fetchAndBuildPayload`).
+  /**
+   * FS-01 — per-key handoff seams on the stitched equity track. One entry per
+   * `data_quality_flags.per_key[]` with `seq > 1` (seq 1 = inception, NOT a
+   * seam); `date` is that key's `first_day`, `label` the display seq.
+   */
+  segmentBoundaries?: { date: string; seq: number; label: string }[];
+  /**
+   * FS-02 — data-gap spans (from `data_quality_flags.gap_spans`), never
+   * zero-filled and excluded from compounding by construction (the sparse
+   * series never contains gap days). `days` is INCLUSIVE both ends. `kind` is
+   * `"gap"` only for v1.9 (`"pre-rollout"` deferred per CONTEXT open-item 2).
+   */
+  missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
+  /**
+   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` always
+   * present on a composite; `mark_to_market` OMITTED (never JSON null) when the
+   * venue/book can't produce an MTM basis. Drives the KpiStrip/MetricsColumn
+   * basis relabel (D5) and the D3 cash-scalar overlay onto `strategyMetrics`.
+   */
+  metricsByBasis?: {
+    cash_settlement: Record<string, number>;
+    mark_to_market?: Record<string, number>;
+  };
+  /**
+   * FS-03 — server-truth MTM gate (D1). `available` = the `mark_to_market` key
+   * is present in `metrics_json_by_basis`; `reason` is the mapped disabled-copy
+   * key from `data_quality_flags.mtm_gated_reason` (closed set + string
+   * fallback for the generic-copy case).
+   */
+  mtmGate?: {
+    available: boolean;
+    reason?: "unsmoothed_options_book" | "mtm_basis_unavailable_for_venue" | string;
+  };
+  /** Server-truth composite discriminator (`data_quality_flags.composite`). */
+  dataQuality?: { composite: boolean };
 };
 
 /**
