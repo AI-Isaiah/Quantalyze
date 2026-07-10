@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.40.0.1] - 2026-07-10
+### Changed
+- **Node 20 → 22 + puppeteer-core 24 → 25 (tech-debt #595).** Coordinated Node 22 upgrade across CI (`node-version: 22` in ci.yml/contracts.yml/nightly.yml/sql-function-snapshot.yml), `.nvmrc`, and `package.json` `engines` (`>=22`), unblocking puppeteer-core `^25.3.0` (requires Node ≥22.12). puppeteer-core is a production dep (PDF generation); the app code was already puppeteer-25-compatible — all 50 puppeteer-touching tests pass. Vercel derives the runtime from `engines.node` (no dashboard pin in `vercel.json`); the preview deploy's Node version is verified before merge.
+
 ## [0.40.0.0] - 2026-07-10
 ### Added
 - **Asset-class annualization for blend & allocation KPIs (#597 part 2).** Extends the single-strategy asset-class clock to every BLENDED / multi-strategy surface. A blended series annualizes on the **blend rule: √365 if ANY constituent leg is crypto, else √252** (`blendPeriodsPerYear(legs)`, `closed-sets.ts`) — the blended daily return series is calendar-daily the moment a crypto leg is present, so it has ~365 obs/year; a pure-tradfi blend stays √252. Threaded (via each engine function's trailing `periodsPerYear = 252` default, byte-identical for pure-tradfi/unknown blends) through: the scenario-composer (all five `computeScenario`/`buildBlendPanels`/`sampleBasisRatios` KPI consumers), the saved-draft compare engine, the public share page, the scenario-factsheet preview, the actual allocation/portfolio factsheet + allocator reference panels (60/40 pure-tradfi stays √252 byte-identical; BTC/ETH-legged panels → √365) + the attribution alpha. `asset_class` reaches those surfaces through three projections (dashboard SSR select, the lazy returns route, and a zero-DDL published-only service-role read on the share page — no scenario/share migration, honoring the phase-29 gate).
