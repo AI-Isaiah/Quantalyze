@@ -73,6 +73,17 @@ type RouteCtx = { params: Promise<{ id: string }> };
  */
 export interface ReturnsResponse {
   daily_returns: DailyPoint[];
+  /**
+   * #597 part 2 (BLEND-01) — the strategy's asset class ('crypto' |
+   * 'traditional', null when unset). Carried so a drawer-added, NON-book
+   * strategy (whose asset_class is absent from the book-only SSR payload) can
+   * still feed the composer's blend basis (`blendPeriodsPerYear`, √365 if any
+   * leg is crypto else √252). This is PUBLIC classification data — it is already
+   * rendered on public factsheets since #597 — and it is sourced from the SAME
+   * published-only probe below, so widening the response leaks nothing the 404
+   * existence-oracle didn't already gate (T-84-05a: accept).
+   */
+  asset_class: string | null;
 }
 
 export async function GET(
@@ -130,9 +141,24 @@ export async function GET(
       // `status='published'` (via withPublishedOnly + the analytics_read RLS
       // policy) covers BOTH verified AND example published rows — `is_example`
       // is a flag, not a separate gate.
-      const { data: strat } = await withPublishedOnly(
-        supabase.from("strategies").select("id").eq("id", id),
+      // #597 part 2 (BLEND-01) — widen the probe to also read `asset_class`. It
+      // is public classification data (rendered on public factsheets since #597)
+      // and stays behind the SAME published-only gate, so this reveals nothing
+      // the existing existence-oracle didn't already gate (404 on unpublished /
+      // cross-tenant is unchanged — T-84-05a).
+      const { data: strat, error: probeError } = await withPublishedOnly(
+        supabase.from("strategies").select("id, asset_class").eq("id", id),
       ).maybeSingle();
+      if (probeError) {
+        // error-absent ≠ legit-absent: a PostgREST error (e.g. asset_class column
+        // schema drift) returns {data:null,error} and would 404 a REAL published
+        // strategy with no signal. The 404 stays (never an oracle), but log the
+        // breadcrumb server-side so a schema fault is debuggable (Rule 12).
+        console.error("[api/strategies/returns] probe error:", probeError);
+        captureToSentry(probeError, {
+          tags: { route: "api/strategies/returns", stage: "probe" },
+        });
+      }
       if (!strat) {
         return NextResponse.json(
           { error: "Not found" },
@@ -175,7 +201,12 @@ export async function GET(
       const raw = (data as { daily_returns: unknown } | null)?.daily_returns;
       const daily_returns: DailyPoint[] = normalizeDailyReturns(raw);
 
-      const body: ReturnsResponse = { daily_returns };
+      // BLEND-01 — forward the published strategy's asset_class (null when
+      // unset). `strat` is the widened probe row; a stale build that predates the
+      // widening simply omits it → null (the composer tolerates absence).
+      const asset_class =
+        (strat as { asset_class?: string | null }).asset_class ?? null;
+      const body: ReturnsResponse = { daily_returns, asset_class };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },
   )(req);

@@ -46,15 +46,45 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: () => "203.0.113.7",
 }));
 
-// Admin client — the SOLE Supabase read. `rpcMock` drives the RPC result and
-// counts calls. A guard table proves the page never reads an arbitrary table.
+// Admin client — the RPC is the primary read. Phase 84 (BLEND-01) adds ONE
+// narrow non-RPC read: the published-only `strategies` (id, asset_class)
+// enrichment for the blend basis. `rpcMock` drives the RPC result; the
+// `strategies` builder's terminal `.eq()` resolves `strategiesReadMock`
+// (default: no rows → empty lookup → √252). Any OTHER table still THROWS — the
+// leak guard proving the page reads nothing arbitrary.
 const rpcMock = vi.hoisted(() => vi.fn());
 const adminFromMock = vi.hoisted(() => vi.fn());
+const strategiesReadMock = vi.hoisted(() =>
+  vi.fn(
+    async (
+      _cols?: string,
+      _ids?: unknown,
+      _statusCol?: string,
+      _statusVal?: unknown,
+      _inCol?: string,
+    ) => ({
+      data: [] as Array<{ id: string; asset_class: string | null }>,
+      error: null,
+    }),
+  ),
+);
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: (fn: string, args: unknown) => rpcMock(fn, args),
     from: (table: string) => {
       adminFromMock(table);
+      // The ONLY non-RPC read this page is allowed (BLEND-01): the narrow
+      // published-only strategies (id, asset_class) blend-basis enrichment.
+      if (table === "strategies") {
+        return {
+          select: (cols: string) => ({
+            in: (inCol: string, ids: unknown) => ({
+              eq: (statusCol: string, statusVal: unknown) =>
+                strategiesReadMock(cols, ids, statusCol, statusVal, inCol),
+            }),
+          }),
+        };
+      }
       throw new Error(`page read an arbitrary table: ${table}`);
     },
   }),
@@ -95,11 +125,13 @@ vi.mock(
   () => ({
     ScenarioBenchmarkSection: ({
       benchmarkAvailable,
+      periodsPerYear,
     }: {
       benchmarkAvailable: boolean;
+      periodsPerYear?: number;
     }) => (
       <div data-testid="benchmark-section">
-        benchmark:{String(benchmarkAvailable)}
+        benchmark:{String(benchmarkAvailable)} basis:{String(periodsPerYear)}
       </div>
     ),
   }),
@@ -182,6 +214,8 @@ beforeEach(() => {
   notFoundMock.mockClear();
   rpcMock.mockReset();
   adminFromMock.mockClear();
+  strategiesReadMock.mockReset();
+  strategiesReadMock.mockResolvedValue({ data: [], error: null });
   dashboardMock.mockClear();
   vi.stubGlobal(
     "fetch",
@@ -212,10 +246,15 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
 
     const html = await renderPage();
 
-    // RPC was the read, hashed-token arg, never an arbitrary table or dashboard.
+    // RPC was the primary read, hashed-token arg, never the dashboard helper.
     expect(rpcMock).toHaveBeenCalledWith("get_shared_scenario", expect.any(Object));
-    expect(adminFromMock).not.toHaveBeenCalled();
     expect(dashboardMock).not.toHaveBeenCalled();
+    // BLEND-01 — the page performs exactly ONE non-RPC read: the narrow
+    // published-only `strategies` asset_class enrichment. It must NEVER touch any
+    // OTHER table (the guard `from()` throws for anything but "strategies").
+    expect(
+      adminFromMock.mock.calls.every(([t]) => t === "strategies"),
+    ).toBe(true);
     expect(notFoundMock).not.toHaveBeenCalled();
 
     // Name + persistent PROJECTED framing rendered.
@@ -242,6 +281,47 @@ describe("ScenarioSharePage (SHARE-02 / SHARE-03)", () => {
     // surfaced the RPC row's identity-shaped fields, both assertions fail loud.
     expect(html).not.toContain("owner@quantalyze.app");
     expect(html.toLowerCase()).not.toContain("@");
+  });
+
+  it("BLEND-01 — reads asset_class from a PUBLISHED-only strategies query bounded to the RPC series ids, and threads the √365 basis into the benchmark section", async () => {
+    // The RPC series carries STRAT_A. The page must read strategies id+asset_class
+    // for EXACTLY those ids, filtered to status='published' — never book / value /
+    // api-key columns (phase-29 leak-scan) and never an unbounded scan. A crypto
+    // row flips the blend basis to √365, which must reach ScenarioBenchmarkSection.
+    strategiesReadMock.mockResolvedValueOnce({
+      data: [{ id: STRAT_A, asset_class: "crypto" }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const html = await renderPage("crypto-blend");
+
+    // Exactly one strategies read, with the EXACT projection + filters.
+    expect(strategiesReadMock).toHaveBeenCalledTimes(1);
+    const [cols, ids, statusCol, statusVal, inCol] =
+      strategiesReadMock.mock.calls[0]!;
+    expect(cols).toBe("id, asset_class"); // projection: id + asset_class ONLY
+    expect(inCol).toBe("id");
+    expect(ids).toEqual([STRAT_A]); // bounded to the RPC-returned series ids
+    expect(statusCol).toBe("status");
+    expect(statusVal).toBe("published"); // published-only, mirrors the RPC rule
+
+    // End-to-end: crypto leg → √365 basis threaded into the benchmark section.
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("basis:365");
+  });
+
+  it("BLEND-01 — a failed/empty strategies read degrades to the √252 default, never throws the page", async () => {
+    // The read rejects (a transient DB hiccup). The page must swallow it, fall
+    // back to the empty lookup → √252, and still render — never a thrown page.
+    strategiesReadMock.mockRejectedValueOnce(new Error("transient db error"));
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const html = await renderPage("degrade");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(html).toContain("My Q3 Blend");
+    expect(html).toContain("basis:252"); // honest default, no crash
   });
 
   it("unknown token (RPC 0 rows) → notFound()", async () => {

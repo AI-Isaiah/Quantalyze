@@ -76,6 +76,7 @@ import {
 } from "@/lib/scenario";
 import { buildScenarioPeerRankRequest } from "@/lib/scenario-peer-request";
 import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import {
   coverageSpanOf,
   covers,
@@ -888,6 +889,18 @@ export function ScenarioComposer({
   const [addedReturnsById, setAddedReturnsById] = useState<
     Record<string, DailyPoint[]>
   >({});
+  // Phase 84 (BLEND-01) — the lazily-fetched asset_class for a drawer-added,
+  // NON-book strategy, keyed by id. The book-only SSR payload carries
+  // asset_class for book strategies (84-03), but a strategy added from the
+  // Browse drawer is not in the book, so its classification can only come from
+  // the widened /api/strategies/[id]/returns response. Written by
+  // fetchAddedReturns alongside addedReturnsById and purged identically in
+  // handleRemoveAdded (a re-add starts clean). Fed into
+  // addedStrategyMetadataLookup so the blend basis (blendPeriodsPerYear) reads
+  // an honest class per leg (or null → the conservative 252 default).
+  const [addedAssetClassById, setAddedAssetClassById] = useState<
+    Record<string, string | null>
+  >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
   // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
@@ -1092,9 +1105,12 @@ export function ScenarioComposer({
     };
     // Settle a GENUINE result (a 200 with a real DailyPoint[] body, possibly
     // empty). Writes `addedReturnsById[id]` so the memo merges it and a re-add
-    // reuses it (idempotent) rather than re-fetching.
-    const settle = (series: DailyPoint[]) => {
+    // reuses it (idempotent) rather than re-fetching. BLEND-01: also records the
+    // widened response's asset_class (null when absent — tolerates a stale
+    // deploy that predates the widening) so the blend basis can read it.
+    const settle = (series: DailyPoint[], assetClass: string | null) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
       clearInflight();
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
@@ -1111,16 +1127,21 @@ export function ScenarioComposer({
         }
         return r.json();
       })
-      .then((d: { daily_returns?: unknown }) => {
+      .then((d: { daily_returns?: unknown; asset_class?: unknown }) => {
         // A 200 with a non-array body is a malformed/failed response, NOT a
         // genuine empty series — treat it as a retryable failure (WR-01).
         if (!Array.isArray(d?.daily_returns)) {
           throw new Error("returns route body missing a daily_returns array");
         }
+        // BLEND-01 — accept asset_class only when it is a string; anything else
+        // (absent from a stale deploy, null, or malformed) collapses to null →
+        // the leg keeps the conservative 252 blend default.
+        const assetClass =
+          typeof d.asset_class === "string" ? d.asset_class : null;
         // A genuine 200 with a real array (including an empty one) settles. An
         // empty array here means the strategy legitimately has no published
         // returns yet — distinct from a failure, so it is cached, not retried.
-        settle(d.daily_returns as DailyPoint[]);
+        settle(d.daily_returns as DailyPoint[], assetClass);
       })
       .catch((err: unknown) => {
         // An abort (remove / reset / unmount) is benign — the canceller already
@@ -1811,6 +1832,13 @@ export function ScenarioComposer({
         const { [id]: _drop, ...rest } = prev;
         return rest;
       });
+      // BLEND-01 — purge the fetched asset_class alongside the returns so a
+      // remove + re-add starts clean (mirrors the addedReturnsById purge above).
+      setAddedAssetClassById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropClass, ...rest } = prev;
+        return rest;
+      });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scenario.removeAddedStrategy],
@@ -1819,25 +1847,41 @@ export function ScenarioComposer({
   const addedStrategyMetadataLookup = useMemo<
     Record<
       string,
-      Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      Pick<
+        StrategyForBuilder,
+        "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+      >
     >
   >(() => {
     const map: Record<
       string,
-      Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+      Pick<
+        StrategyForBuilder,
+        "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+      >
     > = {};
     for (const a of scenario.draft.addedStrategies) {
       const found = strategyById.get(a.id);
-      if (found) {
-        map[a.id] = {
-          disclosure_tier: found.strategy.disclosure_tier,
-          cagr: found.strategy.strategy_analytics?.cagr ?? null,
-          sharpe: found.strategy.strategy_analytics?.sharpe ?? null,
-        };
-      }
+      // BLEND-01 — build an entry for EVERY added strategy, book or drawer.
+      // Previously only book strategies (`if (found)`) got an entry and a
+      // non-book leg fell through to the adapter's default meta (public / null
+      // / null). We now always emit an entry so a non-book leg's lazily-fetched
+      // asset_class reaches the blend basis. The disclosure_tier / cagr / sharpe
+      // values are byte-identical to before: `found.strategy.*` for a book
+      // strategy, and the adapter's old default (public / null / null) for a
+      // non-book one via the `?? …` fallbacks.
+      map[a.id] = {
+        disclosure_tier: found?.strategy.disclosure_tier ?? "public",
+        cagr: found?.strategy.strategy_analytics?.cagr ?? null,
+        sharpe: found?.strategy.strategy_analytics?.sharpe ?? null,
+        // Book payload asset_class (84-03) wins; else the lazily-fetched value;
+        // else null (unknown → the conservative 252 blend default).
+        asset_class:
+          found?.strategy.asset_class ?? addedAssetClassById[a.id] ?? null,
+      };
     }
     return map;
-  }, [scenario.draft.addedStrategies, strategyById]);
+  }, [scenario.draft.addedStrategies, strategyById, addedAssetClassById]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
@@ -1922,7 +1966,10 @@ export function ScenarioComposer({
         >,
         addedStrategyMetadataLookup as Record<
           import("../lib/scenario-adapter").StrategyForBuilderId,
-          Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+          Pick<
+            StrategyForBuilder,
+            "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+          >
         >,
       );
     }
@@ -1938,7 +1985,10 @@ export function ScenarioComposer({
       >,
       addedStrategyMetadataLookup as Record<
         import("../lib/scenario-adapter").StrategyForBuilderId,
-        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+        Pick<
+          StrategyForBuilder,
+          "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
+        >
       >,
     );
   }, [
@@ -2313,9 +2363,36 @@ export function ScenarioComposer({
     [engineSet, coverageWindow],
   );
 
+  // Phase 84 (BLEND-01) — the ONE blend basis for every DISPLAY KPI on this
+  // surface. Derived from the SELECTED engine-set legs' asset_class via the
+  // single blend rule (blendPeriodsPerYear, closed-sets.ts): √365 the moment any
+  // selected leg is crypto (the blended daily series is then calendar-daily),
+  // else √252. Unselected legs do NOT flip it. In book mode the per-key legs
+  // carry asset_class 'crypto' (84-01), so every real book blend derives 365; a
+  // pure-CSV-tradfi / all-unknown added-only blend derives 252 (byte-identical
+  // to the pre-#597 default). Deps mirror engineState (the selected set + axis
+  // the engine sees). NOTE: this is the DISPLAY basis only — the peer-rank path
+  // below stays on the engine's RAW annualized values (see the fence there).
+  // KNOWN NUANCE (documented, spec-compliant): the basis reads the SELECTED set,
+  // not the engine's coverage-window `members`. A selected crypto leg whose span
+  // does not bracket the analytical window contributes no in-window returns yet
+  // still derives 365 — so a blend whose in-window series is effectively
+  // pure-tradfi can annualize risk at √365. This only ever affects
+  // crypto-selected scenarios (never breaks tradfi byte-identity); deriving over
+  // `members` would mean replicating the engine's coverage filter caller-side.
+  // The composer's auto-exclude UX makes a fully-out-of-window selected leg rare.
+  const blendBasis = useMemo(
+    () =>
+      blendPeriodsPerYear(
+        engineSet.strategies.filter((s) => engineState.selected[s.id]),
+      ),
+    [engineSet, engineState],
+  );
+
   const scenarioMetrics = useMemo(
-    () => computeScenario(engineSet.strategies, engineState, dateMapCache),
-    [engineSet, engineState, dateMapCache],
+    () =>
+      computeScenario(engineSet.strategies, engineState, dateMapCache, blendBasis),
+    [engineSet, engineState, dateMapCache, blendBasis],
   );
 
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
@@ -2575,6 +2652,13 @@ export function ScenarioComposer({
   // limiter token a `cancelled` boolean alone would still burn). The n>=252 gate
   // is unchanged: a sub-floor / non-finite blend returns a null body → no timer,
   // no fetch, scenarioPeer reset to null synchronously.
+  // BLEND-01 PEER-RANK FENCE (raw-value contract — DO NOT RESCALE). The peer
+  // percentile ranks the engine's RAW annualized Sharpe/Sortino/maxDD verbatim.
+  // Annualized Sharpe is FREQUENCY-INVARIANT, so a √(252/365) or (365/252)
+  // "correction" here would double-penalize a 24/7 crypto sleeve (~17%) — it was
+  // EXPLICITLY REJECTED in #597. The blend DISPLAY metrics (KPIs, panels, own-
+  // book delta, factsheet preview, benchmark) move to `blendBasis`; the peer-rank
+  // inputs below stay exactly `scenarioMetrics.*` with NO basis factor.
   const peerSharpe = scenarioMetrics.sharpe;
   const peerSortino = scenarioMetrics.sortino;
   const peerMaxDD = scenarioMetrics.max_drawdown;
@@ -2644,8 +2728,10 @@ export function ScenarioComposer({
     [scenarioMetrics.portfolio_daily_returns],
   );
   const blendPanels = useMemo(
-    () => buildBlendPanels(portfolioDaily, rollingWindow),
-    [portfolioDaily, rollingWindow],
+    // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
+    // basis as the headline KPIs (√365 if any selected leg is crypto, else 252).
+    () => buildBlendPanels(portfolioDaily, rollingWindow, blendBasis),
+    [portfolioDaily, rollingWindow, blendBasis],
   );
 
   // PEER-04 (Phase 42) — per-constituent mandate chips for the blend. Built ONLY
@@ -2666,16 +2752,18 @@ export function ScenarioComposer({
     return constituents.length > 0 ? { constituents } : undefined;
   }, [engineSet]);
 
-  // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the SAME
-  // sample/252 basis as the peer rank (T-42-15). The own-book leg recomputes the
-  // live book's Sharpe/Sortino/maxDD via `sampleBasisRatios` on the OWN-BOOK
-  // DAILY RETURNS — derived here from `baselineEquityDailyPoints` (absolute-USD
-  // equity LEVELS: value[i]/value[i-1] − 1), NOT `liveBaselineMetrics` (a
-  // different/population basis). The blend leg uses `scenarioMetrics`
-  // (already the engine's sample/252 output). Each delta = blend − book; null
-  // when a leg is null. `null` (→ undefined) when there is no live book series
-  // (blank mode or a no-book allocator) so the panel is silently absent. Keyed on
-  // the engine output + the own-book series.
+  // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the sample basis
+  // at the blend's periodsPerYear (like-for-like legs; #597 BLEND-01). The
+  // own-book leg recomputes the live book's Sharpe/Sortino/maxDD via
+  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — derived here from
+  // `baselineEquityDailyPoints` (absolute-USD equity LEVELS: value[i]/value[i-1]
+  // − 1), NOT `liveBaselineMetrics` (a different/population basis). BLEND-01: the
+  // book leg is annualized at the SAME `blendBasis` the engine used for the blend
+  // leg (`scenarioMetrics`), so the delta stays like-for-like in BASIS at 365 as
+  // well as 252 — a crypto book's blend and own-book legs both ride √365. Each
+  // delta = blend − book; null when a leg is null. `null` (→ undefined) when
+  // there is no live book series (blank mode or a no-book allocator) so the panel
+  // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
     const levels = baselineEquityDailyPoints;
     // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
@@ -2689,10 +2777,11 @@ export function ScenarioComposer({
       }
     }
     if (bookReturns.length < 2) return undefined;
-    const book = sampleBasisRatios(bookReturns);
-    // Blend ratios are the engine's already-rounded sample/252 output — the SAME
-    // FORMULA as `book` (which `sampleBasisRatios` rounds identically), so the
-    // subtraction is like-for-like in BASIS. The two legs do NOT necessarily span
+    const book = sampleBasisRatios(bookReturns, blendBasis);
+    // Blend ratios are the engine's already-rounded sample-basis output at the
+    // SAME `blendBasis` — the SAME FORMULA as `book` (which `sampleBasisRatios`
+    // rounds identically at that basis), so the subtraction is like-for-like in
+    // BASIS. The two legs do NOT necessarily span
     // the SAME calendar window, though: the blend leg is the engine's overlap
     // window (`scenarioMetrics.n` obs from the constituents' include-from dates),
     // while the book leg is the allocator's full live-book equity history
@@ -2718,6 +2807,9 @@ export function ScenarioComposer({
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
     scenarioMetrics.max_drawdown,
+    // BLEND-01 — the own-book leg is annualized at `blendBasis`, so a basis flip
+    // (a crypto leg added/removed) must re-derive the like-for-like delta.
+    blendBasis,
   ]);
 
   // CORR-01 — axis labels for the CorrelationHeatmap. Keyed on the SAME engine
@@ -3751,6 +3843,9 @@ export function ScenarioComposer({
           scenarioSeries={scenarioWealthSeries}
           benchmark={btcWealth}
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
+          // BLEND-01 — the factsheet-preview KPIs ride the same derived blend
+          // basis (√365 if any selected leg is crypto, else 252).
+          periodsPerYear={blendBasis}
           // PEER-01: the live peer rank (or null below the sample floor / min-N)
           // flows onto the synth csv payload's scenarioPeer carve-out.
           scenarioPeer={scenarioPeer ?? undefined}
@@ -3807,6 +3902,9 @@ export function ScenarioComposer({
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
           btcDaily={btcDaily}
           benchmarkAvailable={btcAvailable}
+          // BLEND-01 — TE/IR/alpha ride the same derived blend basis
+          // (√periodsPerYear); the correlation/beta terms are basis-invariant.
+          periodsPerYear={blendBasis}
         />
       </Card>
 

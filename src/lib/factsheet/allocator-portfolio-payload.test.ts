@@ -5,6 +5,7 @@ import {
   resolveDailyReturnSeries,
 } from "./allocator-portfolio-payload";
 import { buildFactsheetPayload } from "./build-payload";
+import type { DailyReturn } from "./types";
 
 describe("equityCurveToDailyReturns", () => {
   it("returns an empty array when fewer than two valid points are supplied", () => {
@@ -83,6 +84,63 @@ describe("buildAllocatorPortfolioFactsheetPayload", () => {
       allocatorId: "alloc-default-name",
     });
     expect(payload?.strategyName).toBe("My Portfolio");
+  });
+
+  it("BLEND-02: risk metrics ride the √365 crypto basis; CAGR byte-identical (calendar clock)", () => {
+    // A varied wealth curve: sinusoidal + drift so the derived daily returns have
+    // a non-zero std AND negatives (so sharpe / ann_vol / sortino are non-trivial).
+    const base = Date.UTC(2025, 0, 1);
+    const wealth = Array.from({ length: 60 }).map((_, i) => ({
+      date: new Date(base + i * 86_400_000).toISOString().slice(0, 10),
+      value: 1 + 0.02 * Math.sin(i / 5) + i * 0.002,
+    }));
+    const dailyReturns: DailyReturn[] = equityCurveToDailyReturns(wealth);
+
+    // Reference payloads built from the SAME derived series — the only knob that
+    // differs is the annualization basis. strategyMetrics (sharpe/ann_vol/cagr)
+    // depend ONLY on the return series + periodsPerYear, so these are exact
+    // hand-computed references at 252 vs 365.
+    const ref = (assetClass?: string) =>
+      buildFactsheetPayload(
+        {
+          id: "ref",
+          name: "ref",
+          types: [],
+          markets: [],
+          computedAt: "2025-01-01T00:00:00Z",
+          trustTier: null,
+          ...(assetClass ? { assetClass } : {}),
+        },
+        dailyReturns,
+      );
+    const p252 = ref(); // default 252 basis
+    const p365 = ref("crypto"); // 365 basis
+    expect(p252).not.toBeNull();
+    expect(p365).not.toBeNull();
+
+    const alloc = buildAllocatorPortfolioFactsheetPayload(wealth, {
+      allocatorId: "alloc-basis",
+    });
+    expect(alloc).not.toBeNull();
+
+    // Risk metrics MOVED to the 365 basis (exact-engine identity to the 365 ref).
+    expect(alloc!.strategyMetrics.sharpe).toBe(p365!.strategyMetrics.sharpe);
+    expect(alloc!.strategyMetrics.ann_vol).toBe(p365!.strategyMetrics.ann_vol);
+    expect(alloc!.strategyMetrics.sortino).toBe(p365!.strategyMetrics.sortino);
+    // …and they scale by √(365/252) vs the 252 basis (annVol = s×√N).
+    expect(
+      alloc!.strategyMetrics.ann_vol / p252!.strategyMetrics.ann_vol,
+    ).toBeCloseTo(Math.sqrt(365 / 252), 6);
+    expect(
+      alloc!.strategyMetrics.sharpe / p252!.strategyMetrics.sharpe,
+    ).toBeCloseTo(Math.sqrt(365 / 252), 6);
+    // Falsifiable: the two bases genuinely differ (so an allocator payload still
+    // on the 252 default would fail the `=== p365` pins above).
+    expect(p365!.strategyMetrics.sharpe).not.toBe(p252!.strategyMetrics.sharpe);
+
+    // CAGR is the CALENDAR clock (days/365.25) — asset-class-INVARIANT.
+    expect(alloc!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
+    expect(p365!.strategyMetrics.cagr).toBe(p252!.strategyMetrics.cagr);
   });
 });
 

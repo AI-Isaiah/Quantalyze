@@ -4,7 +4,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
 import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
-import { isComputedAnalytics } from "./closed-sets";
+import { blendPeriodsPerYear, isComputedAnalytics } from "./closed-sets";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
@@ -1545,6 +1545,15 @@ export interface MyAllocationDashboardPayload {
        * the client falls through to `codename` when this is null.
        */
       organization_name: string | null;
+      /**
+       * #597 part 2 (BLEND-02) — the strategy's asset class
+       * ('crypto' | 'traditional'), projected from the SSR select so the
+       * wave-3 scenario composer's `addedStrategyMetadataLookup` can derive the
+       * blend basis (`blendPeriodsPerYear`, √365 if any leg is crypto else √252)
+       * for the actual-allocation KPI surfaces. Non-sensitive classification
+       * enum already exposed on public factsheets (#597); no tier redaction.
+       */
+      asset_class?: string | null;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -2147,6 +2156,14 @@ export function liveBaselineMetricsFromPerKeyDailies(
       sharpe: null,
       volatility: null,
       max_drawdown: null,
+      // Phase 84 (BLEND-02): a per-key unit IS a connected exchange data source
+      // (id === api_key_id), and every SUPPORTED_EXCHANGE is a crypto venue today
+      // (isCryptoExchange, closed-sets.ts) — so a per-key leg is a crypto leg
+      // under the blend rule (84-CONTEXT.md D). This feeds blendPeriodsPerYear at
+      // the computeScenario call below → the live-baseline blend annualizes √365.
+      // When a non-crypto venue is ever added to SUPPORTED_EXCHANGES this literal
+      // must derive from the key's exchange instead.
+      asset_class: "crypto",
     });
     selected[apiKeyId] = true;
     // Clamp negative equity (deeply-losing derivative) to 0 for the weight so
@@ -2166,7 +2183,16 @@ export function liveBaselineMetricsFromPerKeyDailies(
   // directly over the per-key strategies.
   const state: ScenarioState = { selected, weights, startDates };
   const cache = buildDateMapCache(strategies);
-  const liveCM = computeScenario(strategies, state, cache);
+  // Every unit in this helper is selected=true by construction (set above), so
+  // blendPeriodsPerYear over `strategies` reads the whole active blend. Every leg
+  // carries asset_class "crypto" (per-key = crypto venue), so the live baseline
+  // annualizes √365 (BLEND-02). A future pure-tradfi key would return 252 here.
+  const liveCM = computeScenario(
+    strategies,
+    state,
+    cache,
+    blendPeriodsPerYear(strategies),
+  );
 
   if (liveCM.n === 0 || liveCM.equity_curve.length === 0) return emptyDefault;
 
@@ -3073,6 +3099,7 @@ export const getMyAllocationDashboard = cache(
             strategy_types,
             markets,
             start_date,
+            asset_class,
             organization:organizations(name),
             strategy_analytics (
               daily_returns,

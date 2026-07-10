@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { normalizeDailyReturns, compound } from "@/lib/portfolio-math-utils";
 import { computeAlphaBeta } from "@/lib/portfolio-stats";
+import { annualizationPeriods } from "@/lib/closed-sets";
 import {
   BarChart,
   Bar,
@@ -87,7 +88,16 @@ function AlphaBetaDecompositionInner({ data }: { data: RiskWidgetData } & BaseWi
 
     if (portfolioReturns.length < 10) return null;
 
-    const { alpha, beta } = computeAlphaBeta(portfolioReturns, benchmarkReturns);
+    // #597 part 2 (BLEND-02): `portfolioReturns` is the allocator's LIVE book
+    // (weighted per-strategy daily returns). Every supported venue is crypto
+    // today, so the blended series is calendar-daily → alpha annualizes ×365 via
+    // the closed-set registry (beta is a slope — basis-invariant). Kept greppable
+    // to the one registry (annualizationPeriods) rather than a bare 365 literal.
+    const { alpha, beta } = computeAlphaBeta(
+      portfolioReturns,
+      benchmarkReturns,
+      annualizationPeriods("crypto"),
+    );
     const totalReturn = compound(portfolioReturns);
     const benchmarkReturn = compound(benchmarkReturns);
     const betaContribution = beta * benchmarkReturn;

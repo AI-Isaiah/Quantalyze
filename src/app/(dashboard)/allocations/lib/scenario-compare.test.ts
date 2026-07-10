@@ -1,7 +1,13 @@
 import { describe, it, expect } from "vitest";
 import type { DailyPoint } from "@/lib/scenario";
+import { computeScenario, buildDateMapCache } from "@/lib/scenario";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
+import {
+  buildAddedOnlySet,
+  buildPerKeyStrategyForBuilderSet,
+  type StrategyForBuilderId,
+} from "./scenario-adapter";
 import {
   computeMetricsForDraft,
   buildLiveBookDraft,
@@ -712,9 +718,10 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
 
   it("golden: the Atlas-class book-only 40-day blend is preserved for an upgraded/derived-membership column", () => {
     // The upgraded-book column the panel models by deriving membership = all
-    // eligible ids. Its metrics must equal the pre-change per-key blend byte for
-    // byte — the regression the naive `?? []` default would break. (Synthetic
-    // stand-in for the prod Atlas golden Cum/Sharpe @ 40-day book-only window.)
+    // eligible ids. Its RETURN-space metrics (twr, member set, bounds) must equal
+    // the pre-change per-key blend byte for byte — the regression the naive
+    // `?? []` default would break. (Synthetic stand-in for the prod Atlas golden
+    // Cum/Sharpe @ 40-day book-only window.)
     const m = computeMetricsForDraft(
       draft({ memberKeyIds: ["key-A", "key-B"] }),
       perKeyInputs(),
@@ -723,8 +730,15 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(m.member_count).toBe(2);
     expect(m.effective_start).toBe(PK_DATES[0]);
     expect(m.effective_end).toBe(PK_DATES[39]);
+    // twr is basis-invariant (return space) → unchanged by BLEND-01.
     expect(m.twr).toBeCloseTo(0.04074, 4);
-    expect(m.sharpe).toBeCloseTo(10.45, 1);
+    // Phase 84 (BLEND-01) RE-BASELINE: per-key units carry asset_class 'crypto'
+    // (84-01), so this book blend now correctly annualizes on √365 — the whole
+    // point of the phase. The Sharpe moves from its pre-84 √252 value (10.45) to
+    // 10.45·√(365/252) = 12.576; the underlying daily series (and twr) are
+    // unchanged, only the RISK-clock basis. Pinning the new √365 value keeps this
+    // golden honest to the shipped blend rule.
+    expect(m.sharpe).toBeCloseTo(12.576, 1);
   });
 
   it("live-book union lock: buildLiveBookDraft(eligibleApiKeyIds) with { liveBook: true } stays byte-identical on the union path", () => {
@@ -774,5 +788,216 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     );
     // Gate on ⇒ the per-key blend selects both eligible keys.
     expect(gateOn.member_count).toBe(2);
+  });
+});
+
+// =========================================================================
+// Phase 84 (BLEND-01) — blend-basis threading in computeMetricsForDraft.
+//
+// A saved/compare draft must annualize on the SAME rule as the live composer:
+// √365 if ANY SELECTED leg is crypto, else √252 (blendPeriodsPerYear over the
+// SELECTED units — the engine's activeStrategies gate). Risk metrics
+// (vol/sharpe/sortino) ride √periodsPerYear; twr/max_drawdown are
+// basis-invariant. CAGR is DELIBERATELY not asserted here: scenario.ts still
+// computes CAGR on the count clock (years = n/periodsPerYear), so it shifts
+// with the basis until 84-06 converts it to the calendar clock this same
+// phase — a whole-object deep-equal including cagr would go RED once 84-06
+// lands, so every deep-equal below DESTRUCTURES cagr out of BOTH sides.
+// =========================================================================
+describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () => {
+  const SA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const SB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  // The engine ROUNDS its outputs (scenario.ts: volatility toFixed(5), sharpe
+  // toFixed(3), …), so a ratio of two rounded metrics drifts from the exact
+  // √(365/252) at the ~1e-5 level. The rounding-robust oracle is therefore a
+  // BYTE-IDENTICAL reference computed straight through the engine at the exact
+  // basis (365) — identical rounding on both sides — not an √-ratio tolerance.
+
+  /** A branded AddedStrategy fixture. */
+  function addedStrat(id: string, name: string): AddedStrategy {
+    return {
+      id: id as AddedStrategy["id"],
+      name,
+      markets: ["BTC"],
+      strategy_types: ["trend"],
+    };
+  }
+
+  /** Added-only live inputs: one metadata entry per series id, asset_class from
+   *  `assetClassById` (absent → null, the conservative 252 leg). */
+  function addedInputs(
+    series: Record<string, DailyPoint[]>,
+    assetClassById: Record<string, string | null> = {},
+  ): ScenarioCompareInputs {
+    const addedStrategyMetadataLookup: ScenarioCompareInputs["addedStrategyMetadataLookup"] =
+      {};
+    for (const id of Object.keys(series)) {
+      addedStrategyMetadataLookup[id] = {
+        disclosure_tier: "public",
+        cagr: null,
+        sharpe: null,
+        asset_class: assetClassById[id] ?? null,
+      };
+    }
+    return { addedStrategyReturnsLookup: series, addedStrategyMetadataLookup };
+  }
+
+  it("a per-key-membership draft (per-key units are crypto) annualizes on √365 — byte-identical to the engine at 365, distinct from 252", () => {
+    // Per-key units carry asset_class 'crypto' (84-01 buildPerKeyStrategyForBuilderSet),
+    // so a per-key blend rides √365. Oracle: the helper's metrics must be
+    // BYTE-IDENTICAL (cagr stripped — the 84-06 clock carve-out) to a direct
+    // computeScenario over the SAME per-key set at basis 365, and NOT equal to
+    // the 252 reference. RED against the pre-change engine (per-key computed at
+    // the inert 252 default → equals ref252, not ref365).
+    const dates = buildDates("2024-01-02", 80);
+    const S = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[3], end: dates[75] }; // explicit → deterministic reference
+
+    const perKey = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"], window: win }),
+      perKeyLiveInputs({ "key-A": S }, { "key-A": 5000 }),
+    );
+
+    // Reference: the SAME per-key engine set (raw equity weights, all selected)
+    // at each basis. The helper's plain-draft per-key path reproduces exactly
+    // this set + state (single eligible member, no toggle/weight overrides).
+    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 });
+    const refState = { ...set.state, window: win };
+    const cache = buildDateMapCache(set.strategies);
+    const ref365 = computeScenario(set.strategies, refState, cache, 365);
+    const ref252 = computeScenario(set.strategies, refState, cache, 252);
+
+    expect(perKey.twr).not.toBeNull(); // non-vacuous
+    const { cagr: _pC, ...pRest } = perKey;
+    const { cagr: _rC, ...r365 } = ref365;
+    expect(pRest).toEqual(r365); // rides √365
+    // Non-vacuous: the √252 reference is genuinely different (basis is load-bearing).
+    expect(perKey.volatility).not.toBe(ref252.volatility);
+  });
+
+  it("an added-only draft with one crypto-tagged lookup entry annualizes on √365 (byte-identical to the engine at 365, distinct from 252)", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const S = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[3], end: dates[75] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A")],
+      toggleByScopeRef: { [SA]: true },
+      weightOverrides: { [SA]: 1 },
+      window: win,
+    });
+    const cryptoInputs = addedInputs({ [SA]: S }, { [SA]: "crypto" });
+    const crypto = computeMetricsForDraft(d, cryptoInputs);
+
+    // Reference: the SAME added-only engine set at each basis.
+    const set = buildAddedOnlySet(
+      d.addedStrategies,
+      cryptoInputs.addedStrategyReturnsLookup as Record<StrategyForBuilderId, DailyPoint[]>,
+      cryptoInputs.addedStrategyMetadataLookup as Record<
+        StrategyForBuilderId,
+        (typeof cryptoInputs.addedStrategyMetadataLookup)[string]
+      >,
+    );
+    const refState = {
+      selected: { [SA]: true },
+      weights: { [SA]: 1 },
+      startDates: set.state.startDates,
+      window: win,
+    };
+    const cache = buildDateMapCache(set.strategies);
+    const ref365 = computeScenario(set.strategies, refState, cache, 365);
+    const ref252 = computeScenario(set.strategies, refState, cache, 252);
+
+    expect(crypto.twr).not.toBeNull();
+    const { cagr: _cC, ...cRest } = crypto;
+    const { cagr: _rC, ...r365 } = ref365;
+    expect(cRest).toEqual(r365); // one crypto leg → √365
+    expect(crypto.volatility).not.toBe(ref252.volatility);
+  });
+
+  it("an added-only all-null draft is BYTE-IDENTICAL to the plain default-252 engine path (cagr destructured out)", () => {
+    // The default pin: an all-unknown blend derives blendPeriodsPerYear → 252,
+    // the engine's own default, so the helper's output must deep-equal a direct
+    // computeScenario call with NO periodsPerYear arg over the SAME added-only
+    // engine set. Explicit window + weights make the reference deterministic
+    // (no default-window ambiguity). cagr is stripped from BOTH sides (84-06
+    // will move it to the calendar clock; it is out of scope for this default
+    // pin, which asserts the RISK fields are byte-identical).
+    const dates = buildDates("2024-01-02", 80);
+    const seriesA = altReturns(dates, 0.01, -0.008);
+    const seriesB = altReturns(dates, 0.012, -0.009);
+    const win = { start: dates[5], end: dates[70] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A"), addedStrat(SB, "B")],
+      toggleByScopeRef: { [SA]: true, [SB]: true },
+      weightOverrides: { [SA]: 0.5, [SB]: 0.5 },
+      window: win,
+    });
+    const inputs = addedInputs({ [SA]: seriesA, [SB]: seriesB }); // both null → 252
+
+    const m = computeMetricsForDraft(d, inputs);
+
+    // Reference: the plain default-252 engine path over the SAME added-only set.
+    const set = buildAddedOnlySet(
+      d.addedStrategies,
+      inputs.addedStrategyReturnsLookup as Record<StrategyForBuilderId, DailyPoint[]>,
+      inputs.addedStrategyMetadataLookup as Record<
+        StrategyForBuilderId,
+        (typeof inputs.addedStrategyMetadataLookup)[string]
+      >,
+    );
+    const ref = computeScenario(
+      set.strategies,
+      {
+        selected: { [SA]: true, [SB]: true },
+        weights: { [SA]: 0.5, [SB]: 0.5 },
+        startDates: set.state.startDates,
+        window: win,
+      },
+      buildDateMapCache(set.strategies),
+    ); // NO 4th arg → default 252
+
+    expect(m.n).toBeGreaterThanOrEqual(10); // non-vacuous
+    const { cagr: _mCagr, ...mRest } = m;
+    const { cagr: _rCagr, ...rRest } = ref;
+    expect(mRest).toEqual(rRest);
+  });
+
+  it("a toggled-OFF crypto leg does NOT flip a tradfi selection to √365 (SELECTED-only basis)", () => {
+    // Basis is derived over SELECTED legs only (the engine's activeStrategies
+    // gate). A crypto leg toggled OFF must not pull a tradfi selection onto √365.
+    // Proof: the same draft with the off leg tagged crypto vs tagged null must be
+    // byte-identical (cagr stripped) — and since the null variant's SELECTED set
+    // is all-null (definitionally √252), the crypto variant is √252 too. RED
+    // against a naive basis over ALL adapter units (off crypto → √365 → divergent).
+    const dates = buildDates("2024-01-02", 80);
+    const cryptoSeries = altReturns(dates, 0.02, -0.015);
+    const tradfiSeries = altReturns(dates, 0.01, -0.008);
+    const base = {
+      addedStrategies: [addedStrat(SA, "A-crypto"), addedStrat(SB, "B-tradfi")],
+      toggleByScopeRef: { [SA]: false, [SB]: true }, // crypto leg OFF, tradfi leg ON
+      weightOverrides: { [SB]: 1 },
+    };
+
+    const cryptoOff = computeMetricsForDraft(
+      draft(base),
+      addedInputs(
+        { [SA]: cryptoSeries, [SB]: tradfiSeries },
+        { [SA]: "crypto", [SB]: null },
+      ),
+    );
+    const nullOff = computeMetricsForDraft(
+      draft(base),
+      addedInputs(
+        { [SA]: cryptoSeries, [SB]: tradfiSeries },
+        { [SA]: null, [SB]: null },
+      ),
+    );
+
+    expect(cryptoOff.twr).not.toBeNull(); // non-vacuous — the tradfi leg computes
+    const { cagr: _c1, ...cryptoRest } = cryptoOff;
+    const { cagr: _c2, ...nullRest } = nullOff;
+    // The excluded crypto leg's asset_class is irrelevant to the basis → identical.
+    expect(cryptoRest).toEqual(nullRest);
   });
 });

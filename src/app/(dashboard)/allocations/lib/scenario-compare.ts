@@ -55,6 +55,7 @@ import {
   type ScenarioState,
   type StrategyForBuilder,
 } from "@/lib/scenario";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import {
   buildAddedOnlySet,
@@ -80,7 +81,9 @@ export interface ScenarioCompareInputs {
   addedStrategyReturnsLookup: Record<string, DailyPoint[]>;
   addedStrategyMetadataLookup: Record<
     string,
-    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+    // Phase 84 (BLEND-01): asset_class widened in to match the 84-01 adapter Pick
+    // so an added leg's class flows through to the blend basis (blendPeriodsPerYear).
+    Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
   >;
   /**
    * P61-BUG-2 — the per-key channel. When a SAVED draft's persisted membership
@@ -182,7 +185,7 @@ export function computeMetricsForDraft(
       >,
       liveInputs.addedStrategyMetadataLookup as Record<
         StrategyForBuilderId,
-        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
       >,
     );
   } else {
@@ -206,7 +209,7 @@ export function computeMetricsForDraft(
       >,
       liveInputs.addedStrategyMetadataLookup as Record<
         StrategyForBuilderId,
-        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe">
+        Pick<StrategyForBuilder, "disclosure_tier" | "cagr" | "sharpe" | "asset_class">
       >,
     );
   }
@@ -281,10 +284,21 @@ export function computeMetricsForDraft(
     ? { ...projectionState, window: engineWindow }
     : projectionState;
 
+  // Phase 84 (BLEND-01) — the blend annualization basis: √365 if ANY SELECTED
+  // leg is crypto, else √252 (blendPeriodsPerYear). SELECTED legs only — the
+  // engine's activeStrategies gate — so a toggled-off crypto leg cannot flip a
+  // tradfi blend onto √365. Per-key units carry asset_class 'crypto' (84-01);
+  // added legs carry the lookup's asset_class (null → the conservative 252 leg).
+  // An all-unknown / empty blend derives 252, byte-identical to the pre-84
+  // default (regression-pinned in scenario-compare.test.ts).
+  const basis = blendPeriodsPerYear(
+    adapterOutput.strategies.filter((s) => projectionState.selected[s.id]),
+  );
+
   // Degenerate sets (empty active set, n < 10, NaN-poisoned) return null-metric
   // ComputedMetrics — flow it straight through, NO `?? 0`. The caller renders
   // an honest em-dash via formatPercent/formatNumber.
-  return computeScenario(adapterOutput.strategies, engineState, dateMapCache);
+  return computeScenario(adapterOutput.strategies, engineState, dateMapCache, basis);
 }
 
 /**

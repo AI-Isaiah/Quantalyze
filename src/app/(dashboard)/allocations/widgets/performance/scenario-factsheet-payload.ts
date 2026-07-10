@@ -123,6 +123,16 @@ export interface ScenarioFactsheetPayloadArgs {
    * sample/252 basis. Additive + optional + silently absent without a live book.
    */
   scenarioOwnBookDelta?: OwnBookDeltaPayload;
+  /**
+   * Phase 84 (#597 part 2) — the blend annualization basis from
+   * `blendPeriodsPerYear` (√365 if any constituent leg is crypto, else √252).
+   * Additive + optional: 252 default keeps every existing call site
+   * byte-identical (the whole payload deep-equals the pre-#597 output). Threaded
+   * to compute() + the three rolling panels + bootstrapCI — mirroring
+   * build-payload.ts's single-strategy threading. RISK metrics ride
+   * √periodsPerYear; compute()'s CAGR rides the calendar clock and is invariant.
+   */
+  periodsPerYear?: number;
 }
 
 /** Zeroed scalar metrics — no KpiStrip mounts in the composer, so the two
@@ -277,7 +287,10 @@ type ReturnsBody = {
   quantiles: FactsheetCsvPayload["quantiles"];
 };
 
-function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
+function buildReturnsBody(
+  portfolioDaily: DailyPoint[],
+  periodsPerYear: number,
+): ReturnsBody {
   const rets = portfolioDaily.map((p) => p.value);
   const datesR = portfolioDaily.map((p) => p.date);
 
@@ -314,7 +327,8 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
   }
 
   // Populated path — mirror build-payload.ts:123-231 (csv arm), population
-  // convention (252 vol/Sharpe, 365.25 CAGR). compute() sets n = rets.length →
+  // convention (periodsPerYear vol/Sharpe — 252 default / 365 crypto blend per
+  // #597 part 2 — and 365.25-calendar CAGR). compute() sets n = rets.length →
   // PAYLOAD-04 automatic. The chart LINE is now full-res too (WR-01): the equity
   // line is `cumEq(rets)` — the same curve `equity_curve` downsamples, just
   // full-res/unrounded — and the underwater line is `drawdowns(cumEq(rets))`.
@@ -329,7 +343,7 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
   // those (`eq = cumEq(rets)`, `dd = drawdowns(eq)`, compute.ts:21-22), so we
   // reuse its `eq`/`dd` directly (no redundant second pass) — strategyDrawdowns
   // and the Worst-10 table (also off `dd`) are the SAME series by construction.
-  const { eq, dd, ...strategyMetrics } = compute(rets, datesR);
+  const { eq, dd, ...strategyMetrics } = compute(rets, datesR, 0, periodsPerYear);
   const { wins, losses } = streakLengths(rets);
   const MAX_LEN = 14;
 
@@ -338,9 +352,9 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
     strategyEquity: eq,
     strategyDrawdowns: dd,
     strategyReturns: rets,
-    strategyRollingVol: rollingVol(rets, rollWindow.window),
-    strategyRollingSharpe: rollingSharpe(rets, rollWindow.window),
-    strategyRollingSortino: rollingSortino(rets, rollWindow.window),
+    strategyRollingVol: rollingVol(rets, rollWindow.window, periodsPerYear),
+    strategyRollingSharpe: rollingSharpe(rets, rollWindow.window, periodsPerYear),
+    strategyRollingSortino: rollingSortino(rets, rollWindow.window, periodsPerYear),
     rollingWindow: rollWindow,
     rollingBetaWindow: rollBetaWindow,
     strategyWorst10: worstDrawdowns(dd, 10),
@@ -355,7 +369,9 @@ function buildReturnsBody(portfolioDaily: DailyPoint[]): ReturnsBody {
       maxLen: MAX_LEN,
     },
     calmarByYear: calmarByYear(rets, datesR),
-    bootstrapCI: bootstrapCI(rets),
+    // periodsPerYear at build-payload.ts:237's positional slot; the 2000/5/42
+    // resample/block/seed defaults are unchanged (byte-identical at 252).
+    bootstrapCI: bootstrapCI(rets, 2000, 5, 42, periodsPerYear),
     monthlyReturns: monthlyReturnsMatrix(rets, datesR),
     dailyHeatmap: dailyReturnsByYear(rets, datesR),
     // D-4 / Pitfall 5: the blend has no separate benchmark daily series, so pass
@@ -391,13 +407,14 @@ export function buildScenarioFactsheetPayload(
     scenarioPeer,
     scenarioMandate,
     scenarioOwnBookDelta,
+    periodsPerYear = 252,
   } = args;
   const id = strategyId ?? DEFAULT_SCENARIO_ID;
 
   // The single returns-derived body — chart line + scalars + panel arrays, all
   // on one full-res axis. Self-guards its returns-degenerate gate before any
   // compute() call (PAYLOAD-01..05, WR-01). Degenerate → every field safe-empty.
-  const body = buildReturnsBody(portfolioDaily ?? []);
+  const body = buildReturnsBody(portfolioDaily ?? [], periodsPerYear);
   const { dates, strategyEquity, strategyDrawdowns } = body;
   const degenerate = dates.length === 0;
 

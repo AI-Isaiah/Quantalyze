@@ -777,6 +777,35 @@ describe("computeCompositeCurve", () => {
     // NOT the late strategy's start_date.
     expect(curve[0].date).toBe(allDates[0]);
   });
+
+  it("[Plan 84-06 invariance] curve is annualization-INVARIANT: 365 basis deep-equals default 252", () => {
+    // computeCompositeCurve now forwards an optional periodsPerYear to the
+    // internal computeScenario (completing the #597-part-2 locked call-site
+    // list). The returned curve is the cumulative-return product only — no
+    // annualized metric enters it — so the basis CANNOT change the output.
+    // This deep-equal is the proof; it would break ONLY if a future edit
+    // rerouted the curve through a basis-dependent figure. A mixed
+    // alternating/positive fixture (vol > 0) so the basis WOULD bite any
+    // metric it actually touched.
+    const dates = buildDates("2022-01-03", 45);
+    const strategies = [
+      alternatingStrategy("a", dates, 0.008, -0.003),
+      constantReturnStrategy("b", dates, 0.001),
+    ];
+    const weights = { a: 0.6, b: 0.4 };
+
+    const curveDefault = computeCompositeCurve(strategies, weights, dates[0]);
+    const curve365 = computeCompositeCurve(
+      strategies,
+      weights,
+      dates[0],
+      undefined,
+      365,
+    );
+
+    expect(curve365).toEqual(curveDefault);
+    expect(curveDefault.length).toBeGreaterThan(0);
+  });
 });
 
 // =========================================================================
@@ -1154,6 +1183,127 @@ describe("toWealth (pure constructor, RSC-safe home)", () => {
     ]);
     expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+  });
+});
+
+// =========================================================================
+// Plan 84-06 — CAGR rides the CALENDAR clock (days / 365.25), NOT the count
+// clock (n / periodsPerYear). This is a DELIBERATE VALUE change, re-derived
+// (never blind-updated) per the [73-02] metrics.py TWR-05 landing precedent.
+// The two-clocks ruling: RETURN/CAGR = calendar clock, asset-class-INVARIANT;
+// risk (vol/sharpe/sortino) = frequency clock (√periodsPerYear).
+// =========================================================================
+
+/** N monthly ISO dates (same day-of-month) starting at `startISO`. */
+function buildMonthlyDates(startISO: string, n: number): string[] {
+  const out: string[] = [];
+  const d = new Date(startISO + "T00:00:00Z");
+  for (let i = 0; i < n; i++) {
+    out.push(d.toISOString().slice(0, 10));
+    d.setUTCMonth(d.getUTCMonth() + 1);
+  }
+  return out;
+}
+
+/**
+ * Independent calendar-year span — deliberately NOT importing calendarYears
+ * from the source, so this fixture cannot tautologically mirror the
+ * implementation. Pure Date.parse arithmetic on the 365.25-day civil clock.
+ */
+const CAL_MS_PER_YEAR = 365.25 * 86_400_000;
+function calendarYearsIndep(firstISO: string, lastISO: string): number {
+  return (Date.parse(lastISO) - Date.parse(firstISO)) / CAL_MS_PER_YEAR;
+}
+
+describe("computeScenario — CAGR calendar clock (Plan 84-06, [73-02] precedent)", () => {
+  it("[gap-axis] calendar-span CAGR diverges from the retired count-based CAGR", () => {
+    // 24 MONTHLY observations span ~1.9 calendar years but only 24 counts.
+    // Old count clock: years = 24/252 ≈ 0.095 → annualizes ~10.5× (a wildly
+    // over-stated CAGR). Calendar clock: years ≈ 1.9 → the honest span. This
+    // fixture makes the two clocks visibly disagree, so the assertions below
+    // FAIL on the pre-84-06 count source and PASS after the calendar edit.
+    const dates = buildMonthlyDates("2022-01-01", 24);
+    const r = 0.01;
+    const strat = constantReturnStrategy("a", dates, r);
+    const cache = buildDateMapCache([strat]);
+    const metrics = computeScenario([strat], defaultState([strat]), cache);
+
+    const n = dates.length;
+    // Derive the expected CAGR from the engine's OWN twr (not a naïve
+    // recompute) so this pin isolates the calendar CLOCK and is robust to the
+    // engine's internal per-day return rounding.
+    const twrActual = metrics.twr!;
+    expect(twrActual).toBeGreaterThan(0.26); // sanity: ~1.01^24 - 1 ≈ 0.2697
+    const calYears = calendarYearsIndep(dates[0], dates[n - 1]);
+    const expectedCalendarCagr = Math.pow(1 + twrActual, 1 / calYears) - 1;
+    const retiredCountCagr = Math.pow(1 + twrActual, 1 / (n / 252)) - 1;
+
+    // CAGR now rides the calendar clock… (4-dp tolerance: the engine rounds
+    // both twr and cagr to 5 decimals — toFixed(5) — so an expectation built
+    // from the rounded twr lands within ~5e-5 of the rounded cagr).
+    expect(metrics.cagr).toBeCloseTo(expectedCalendarCagr, 4);
+    // …and is demonstrably NOT the retired count-based value (they diverge by
+    // an order of magnitude here — ~0.13 calendar vs ~11 count — the
+    // falsifiable half of this pin).
+    expect(metrics.cagr).not.toBeCloseTo(retiredCountCagr, 2);
+  });
+
+  it("[invariance] CAGR is basis-INVARIANT (252 vs 365 identical) while Sharpe/vol ride the frequency clock", () => {
+    // Alternating returns → vol > 0, so Sharpe is defined and basis-sensitive.
+    const dates = buildDates("2022-01-03", 60);
+    const strat = alternatingStrategy("a", dates, 0.01, -0.005);
+    const cache = buildDateMapCache([strat]);
+    const state = defaultState([strat]);
+
+    const at252 = computeScenario([strat], state, cache, 252);
+    const at365 = computeScenario([strat], state, cache, 365);
+
+    // RETURN/CAGR = calendar clock → byte-identical across bases.
+    expect(at365.cagr).toBe(at252.cagr);
+    expect(at365.twr).toBe(at252.twr); // twr is basis-free too
+    // RISK = frequency clock → Sharpe & volatility MUST differ by the √ ratio.
+    expect(at365.sharpe).not.toBe(at252.sharpe);
+    expect(at365.volatility).not.toBe(at252.volatility);
+  });
+
+  it("[gap-robustness] same returns & same n but a wider date span → different CAGR, identical Sharpe/vol", () => {
+    // Two series with IDENTICAL return SEQUENCES and IDENTICAL n. Series A is
+    // business-daily; series B is stretched to monthly. CAGR is span-driven so
+    // it MUST differ; twr/vol/sharpe are count-driven so they MUST match.
+    // Under the retired count clock CAGR would have been identical — this pins
+    // that a sparse track no longer over-annualizes.
+    const n = 30;
+    const denseDates = buildDates("2022-01-03", n); // ~business-daily
+    const sparseDates = buildMonthlyDates("2022-01-03", n); // monthly
+    const up = 0.01;
+    const down = -0.004;
+    const mkReturns = (dts: string[]) =>
+      dts.map((date, i) => ({ date, value: i % 2 === 0 ? up : down }));
+
+    const dense = constantReturnStrategy("a", denseDates, 0, {
+      daily_returns: mkReturns(denseDates),
+    });
+    const sparse = constantReturnStrategy("a", sparseDates, 0, {
+      daily_returns: mkReturns(sparseDates),
+    });
+
+    const mDense = computeScenario(
+      [dense],
+      defaultState([dense]),
+      buildDateMapCache([dense]),
+    );
+    const mSparse = computeScenario(
+      [sparse],
+      defaultState([sparse]),
+      buildDateMapCache([sparse]),
+    );
+
+    // Same return values, same n → identical twr, vol, sharpe (count-driven).
+    expect(mSparse.twr).toBeCloseTo(mDense.twr!, 12);
+    expect(mSparse.volatility).toBeCloseTo(mDense.volatility!, 12);
+    expect(mSparse.sharpe).toBeCloseTo(mDense.sharpe!, 12);
+    // Different calendar span → DIFFERENT cagr (the gap-robustness contract).
+    expect(mSparse.cagr).not.toBeCloseTo(mDense.cagr!, 4);
   });
 });
 

@@ -69,6 +69,13 @@ interface ScenarioBenchmarkSectionProps {
    * section degrades to the honest no-overlap empty state, never an error.
    */
   benchmarkAvailable: boolean;
+  /**
+   * Phase 84 (#597 part 2) — the blend annualization basis (√365 crypto-legged /
+   * √252 pure-tradfi) forwarded to `computeScenarioBenchmark`. Optional +
+   * additive: omitted → 252, byte-identical for every existing caller. beta and
+   * correlation are basis-invariant; TE/IR/alpha ride √periodsPerYear.
+   */
+  periodsPerYear?: number;
 }
 
 /** One label/value metric row mirroring the ScenarioCompareTable row tokens. */
@@ -101,6 +108,7 @@ export function ScenarioBenchmarkSection({
   portfolioDaily,
   btcDaily,
   benchmarkAvailable,
+  periodsPerYear = 252,
 }: ScenarioBenchmarkSectionProps) {
   // Inner-join FIRST so {N} is the intersection count, not the union window.
   const { p } = innerJoinByDate(portfolioDaily, btcDaily);
@@ -131,7 +139,7 @@ export function ScenarioBenchmarkSection({
   }
 
   // Metrics path. Each value flows through a formatter so null → "—".
-  const m = computeScenarioBenchmark(portfolioDaily, btcDaily);
+  const m = computeScenarioBenchmark(portfolioDaily, btcDaily, periodsPerYear);
 
   return (
     <div>

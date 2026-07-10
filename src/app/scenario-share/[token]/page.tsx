@@ -1,18 +1,21 @@
 // SECURITY BOUNDARY:
-// This is a PUBLIC, sessionless route. The ONLY Supabase read here is the
-// token-scoped `get_shared_scenario` SECURITY DEFINER RPC, which self-scopes on
-// `token_hash + revoked_at IS NULL` and returns ONLY name/draft/schema_version +
-// the draft's addedStrategies[].id PUBLISHED series. The admin client is used
-// purely as transport (service_role) — the RPC is the gate. NEVER add a query
-// that reads an arbitrary id, NEVER call the allocator-dashboard query helper,
-// and NEVER read holdings / AUM / api_keys / portfolios on this page. The
-// recipient sees the scenario in return / percentage form only, never an
-// allocator identity.
+// This is a PUBLIC, sessionless route. Two Supabase reads happen here, both on
+// the admin (service_role) transport: (1) the token-scoped `get_shared_scenario`
+// SECURITY DEFINER RPC — the gate — which self-scopes on `token_hash +
+// revoked_at IS NULL` and returns ONLY name/draft/schema_version + the draft's
+// addedStrategies[].id PUBLISHED series; and (2) a Phase-84 sibling read of
+// `strategies(id, asset_class)` bounded to those RPC-returned series ids and
+// `status='published'` (via withPublishedOnly), purely for the blend
+// annualization basis. NEVER add a query that reads an arbitrary id, NEVER call
+// the allocator-dashboard query helper, and NEVER read holdings / AUM / api_keys
+// / portfolios on this page. The recipient sees the scenario in return /
+// percentage form only, never an allocator identity.
 
 import { notFound } from "next/navigation";
 import { headers } from "next/headers";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { withPublishedOnly } from "@/lib/visibility";
 import {
   publicIpLimiter,
   checkLimit,
@@ -144,12 +147,62 @@ export default async function ScenarioSharePage({
     notFound();
   }
 
+  // 3b. Phase 84 (BLEND-01) — per-leg asset_class for the blend annualization
+  //     basis. SECURITY: this is a service_role read on the SAME admin transport
+  //     client, but it is deliberately NARROWER than the RPC — the projection is
+  //     EXACTLY `id, asset_class`, filtered to `status = 'published'` (mirroring
+  //     get_shared_scenario's own published-only rule) AND bounded to the
+  //     RPC-returned series ids ONLY. It NEVER selects book / value / api-key /
+  //     identity columns (the phase-29 leak-scan forbids those on this page). We
+  //     read asset_class here rather than widen the get_shared_scenario RPC
+  //     because the phase-29 exit gate (FORBIDDEN_MIGRATION_RE = /scenario|share/i)
+  //     forbids any new scenarios/share migration. A failed / empty read degrades
+  //     to an empty lookup → the √252 default (honest), never a throw on this
+  //     public page.
+  const assetClassById: Record<string, string | null> = {};
+  const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
+  if (seriesIds.length > 0) {
+    try {
+      // Published-only via withPublishedOnly (service-role-safe, visibility.ts):
+      // keeps the `no-raw-published-predicate` lint tripwire ACTIVE on this
+      // high-risk BYPASSRLS file — a future unguarded `strategies` read here still
+      // gets caught — while guaranteeing the published gate by construction. The
+      // projection is bounded to id + asset_class and the ids to the RPC series,
+      // so no draft/book/api-key row can leak even if RLS widened.
+      const { data: acRows, error: acError } = await withPublishedOnly(
+        admin.from("strategies").select("id, asset_class").in("id", seriesIds),
+      );
+      if (acError) {
+        // error-absent ≠ legit-absent: a PostgREST error (renamed/re-typed column,
+        // RLS change) returns {data:null,error} WITHOUT throwing, and a silent
+        // empty lookup would understate a crypto book's risk at √252 with no
+        // signal. Log so a schema/RLS fault is debuggable; still degrade to 252.
+        console.error("[scenario-share/page] asset_class basis read failed", {
+          message: (acError as { message?: string }).message,
+        });
+      }
+      for (const r of (acRows ?? []) as Array<{
+        id: string;
+        asset_class: string | null;
+      }>) {
+        assetClassById[r.id] = r.asset_class ?? null;
+      }
+    } catch (e) {
+      // Transport/throw path degrades to the empty lookup (→ √252 default). The
+      // public page never throws on this optional annualization-basis enrichment,
+      // but log the breadcrumb (mirrors the get_shared_scenario error above).
+      console.error("[scenario-share/page] asset_class basis read threw", {
+        message: (e as { message?: string }).message,
+      });
+    }
+  }
+
   // 4. Public BTC benchmark series (cacheable — NOT no-store). 5. Resolve.
   // The resolve layer no longer consumes btcDaily (the benchmark is recomputed
   // inside ScenarioBenchmarkSection from portfolioDaily + btcDaily); the page
   // still fetches it here to feed the chart overlay + the section directly.
   const btcDaily = await fetchBtcDaily();
-  const resolved = resolveSharedScenario(row);
+  const resolved = resolveSharedScenario(row, assetClassById);
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
   // absence, NEVER a live-book substitution and NEVER a 404 (the link IS valid).
@@ -168,7 +221,8 @@ export default async function ScenarioSharePage({
     );
   }
 
-  const { name, metrics, portfolioDaily, strategyNames, isMixed } = resolved;
+  const { name, metrics, portfolioDaily, strategyNames, isMixed, periodsPerYear } =
+    resolved;
   const btcAvailable = btcDaily.length > 0;
 
   // EquityChart needs cumulative-WEALTH form (start ~1.0). The engine's
@@ -258,6 +312,9 @@ export default async function ScenarioSharePage({
           portfolioDaily={portfolioDaily}
           btcDaily={btcDaily}
           benchmarkAvailable={btcAvailable}
+          // Phase 84 (BLEND-01): ride the SAME basis the projection used, so the
+          // vs-BTC TE/IR/alpha risk math matches the KPI strip's clock.
+          periodsPerYear={periodsPerYear}
         />
       </Card>
 

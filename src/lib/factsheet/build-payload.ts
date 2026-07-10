@@ -280,19 +280,34 @@ export function buildFactsheetPayload(
           key: "sixty_forty",
           name: "60/40 Stocks/Bonds",
           composition: "60% S&P 500 · 40% IEF (US 10y Treasury)",
+          // #597 part 2 (BLEND-02): pure-tradfi legs (SPX + IEF) → √252. Passes
+          // NO basis arg on purpose — the buildAllocatorMetrics default keeps this
+          // panel BYTE-IDENTICAL to the pre-#597 math (the locked 252 case).
           ...buildAllocatorMetrics(blend([0.6, 0.4], [spxRet, iefRet]), stratRet),
         },
         {
           key: "multi_asset",
           name: "Multi-Asset Risk Parity",
           composition: "25% S&P 500 · 25% Gold · 25% IEF · 25% BTC",
-          ...buildAllocatorMetrics(blend([0.25, 0.25, 0.25, 0.25], [spxRet, gldRet, iefRet, btcRet]), stratRet),
+          // #597 part 2 (BLEND-02): the BTC leg makes the joined series
+          // calendar-daily → √365 under the blend rule (via the closed-set
+          // registry, kept greppable rather than a bare 365 literal).
+          ...buildAllocatorMetrics(
+            blend([0.25, 0.25, 0.25, 0.25], [spxRet, gldRet, iefRet, btcRet]),
+            stratRet,
+            annualizationPeriods("crypto"),
+          ),
         },
         {
           key: "crypto_book",
           name: "Diversified Crypto Book",
           composition: "70% BTC · 30% ETH",
-          ...buildAllocatorMetrics(blend([0.7, 0.3], [btcRet, ethRet]), stratRet),
+          // #597 part 2 (BLEND-02): BTC + ETH legs → √365 under the blend rule.
+          ...buildAllocatorMetrics(
+            blend([0.7, 0.3], [btcRet, ethRet]),
+            stratRet,
+            annualizationPeriods("crypto"),
+          ),
         },
       ],
       eventSignatures: computeEventSignatures(stratRet, btcRet, stratEquity),

@@ -39,6 +39,7 @@ import {
   type StrategyForBuilder,
   type DailyPoint,
 } from "@/lib/scenario";
+import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 
@@ -79,6 +80,15 @@ export interface ResolvedOk {
    * RPC/SQL change, zero private data.
    */
   isMixed: boolean;
+  /**
+   * Phase 84 (BLEND-01) — the blend annualization basis actually used for this
+   * projection: √365 if ANY SELECTED leg is crypto, else √252
+   * (blendPeriodsPerYear). The page threads this IDENTICAL value into
+   * ScenarioBenchmarkSection so the vs-BTC risk math rides the same clock as the
+   * KPI strip. An all-unknown / empty-lookup blend → 252, byte-identical to the
+   * pre-84 default (the whole no-lookup suite is that regression pin).
+   */
+  periodsPerYear: number;
 }
 
 /** Undecodable / version-ahead / unparseable draft — render the honest-absence
@@ -129,6 +139,14 @@ function neutralDefaultDraft(): ScenarioDraft {
  */
 export function resolveSharedScenario(
   row: SharedScenarioRow,
+  /**
+   * Phase 84 (BLEND-01) — strategy id → asset_class, sourced by the SSR caller
+   * (page.tsx) from a published-rows-only `strategies` read of the RPC series
+   * ids (a zero-DDL sibling read; the phase-29 exit gate forbids widening the
+   * get_shared_scenario RPC/migration). Absent id / undefined lookup → null, the
+   * conservative √252 leg, byte-identical to the pre-84 default.
+   */
+  assetClassById?: Record<string, string | null>,
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -177,6 +195,9 @@ export function resolveSharedScenario(
       sharpe: null,
       volatility: null,
       max_drawdown: null,
+      // Phase 84 (BLEND-01): the leg's asset_class from the caller's published-
+      // only lookup (absent → null, the √252 leg). Feeds the blend basis below.
+      asset_class: assetClassById?.[id] ?? null,
     });
     // An added strategy is "selected" when its ref is toggled on (default true
     // when the toggle entry is absent — added strategies enter enabled). This
@@ -270,7 +291,13 @@ export function resolveSharedScenario(
     ...(window ? { window } : {}),
   };
   const dateMapCache = buildDateMapCache(strategies);
-  const metrics = computeScenario(strategies, state, dateMapCache);
+  // Phase 84 (BLEND-01) — the blend annualizes √365 if ANY SELECTED leg is
+  // crypto, else √252 (blendPeriodsPerYear). SELECTED-only (the engine's
+  // activeStrategies gate) — a toggled-off crypto leg must not flip a tradfi
+  // blend. All-unknown / empty lookup → 252, byte-identical to the pre-84
+  // default (the whole no-lookup suite is that regression pin).
+  const basis = blendPeriodsPerYear(strategies.filter((s) => selected[s.id]));
+  const metrics = computeScenario(strategies, state, dateMapCache, basis);
 
   const portfolioDaily = metrics.portfolio_daily_returns ?? [];
 
@@ -289,5 +316,8 @@ export function resolveSharedScenario(
     // the required-at-v4 type → falsy → false → no caption for unknown
     // membership.
     isMixed: (draft.memberKeyIds ?? []).length > 0,
+    // Phase 84 (BLEND-01) — the basis the projection actually used, so the page
+    // threads the IDENTICAL clock into ScenarioBenchmarkSection.
+    periodsPerYear: basis,
   };
 }
