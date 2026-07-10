@@ -14,10 +14,20 @@ supabase / exchange mocks (no live DB / creds); run with
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pandas as pd
+import pytest
+
 from services.deribit_ingest import (
     CompletenessReport,
     deribit_raw_rows_have_option_activity,
 )
+from services.native_nav import NativeLedger
+from services.job_worker import DispatchOutcome, run_stitch_composite_job
 
 
 # ---------------------------------------------------------------------------
@@ -63,3 +73,432 @@ def test_completeness_report_defaults_has_option_activity_false() -> None:
     """Additive field with a False default — every existing constructor call
     site (no kwarg) is byte-unaffected."""
     assert CompletenessReport().has_option_activity is False
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — run_stitch_composite_job harness (pure-stub supabase / exchange)
+# ---------------------------------------------------------------------------
+
+_STRATEGY_ID = "s-composite-1"
+
+# A minimal VALID allocated-capital config so the by-basis metrics ride the
+# arithmetic (simple) + active-day convention the composite reports on. The
+# per-key reconstruction (combine_native_ledger) is MOCKED, so the schedule is
+# never actually consulted — it only has to parse.
+_TEST_CONFIG = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "cash_settlement",
+    "capital_schedule": [{"effective_from": "2024-01-01", "capital_usd": 1_000_000}],
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+}
+
+
+class _FakeQuery:
+    def __init__(self, fake: "_FakeSupabase", table: str) -> None:
+        self.fake = fake
+        self.table = table
+        self._op = "select"
+        self._eqs: list[tuple[str, Any]] = []
+        self._single = False
+        self._maybe = False
+        self._payload: Any = None
+        self._conflict: str | None = None
+
+    def select(self, *a: Any, **k: Any) -> "_FakeQuery":
+        self._op = "select"
+        return self
+
+    def eq(self, col: str, val: Any) -> "_FakeQuery":
+        self._eqs.append((col, val))
+        return self
+
+    def order(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def gte(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def lte(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def single(self) -> "_FakeQuery":
+        self._single = True
+        return self
+
+    def maybe_single(self) -> "_FakeQuery":
+        self._maybe = True
+        return self
+
+    def delete(self) -> "_FakeQuery":
+        self._op = "delete"
+        return self
+
+    def upsert(self, payload: Any, on_conflict: str | None = None) -> "_FakeQuery":
+        self._op = "upsert"
+        self._payload = payload
+        self._conflict = on_conflict
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        if self._op == "upsert":
+            self.fake.upserts.append((self.table, self._payload, self._conflict))
+            return SimpleNamespace(data=self._payload)
+        if self._op == "delete":
+            self.fake.deletes.append((self.table, list(self._eqs)))
+            return SimpleNamespace(data=[])
+        # select
+        if self.table == "strategy_keys":
+            return SimpleNamespace(data=list(self.fake.members))
+        if self.table == "strategies":
+            return SimpleNamespace(data=dict(self.fake.strategy_row))
+        if self.table == "strategy_analytics":
+            return SimpleNamespace(
+                data={"data_quality_flags": dict(self.fake.existing_flags)}
+            )
+        return SimpleNamespace(data=None)
+
+
+class _FakeSupabase:
+    def __init__(
+        self,
+        *,
+        members: list[dict[str, Any]],
+        strategy_row: dict[str, Any] | None = None,
+        existing_flags: dict[str, Any] | None = None,
+    ) -> None:
+        self.members = members
+        self.strategy_row = strategy_row if strategy_row is not None else {
+            "id": _STRATEGY_ID, "asset_class": "crypto",
+            "returns_denominator_config": _TEST_CONFIG,
+        }
+        self.existing_flags = existing_flags or {}
+        self.upserts: list[tuple[str, Any, str | None]] = []
+        self.deletes: list[tuple[str, list[tuple[str, Any]]]] = []
+        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def table(self, name: str) -> _FakeQuery:
+        return _FakeQuery(self, name)
+
+    def rpc(self, name: str, args: dict[str, Any]) -> SimpleNamespace:
+        self.rpc_calls.append((name, args))
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=None))
+
+
+def _member(seq: int, window_start: str, window_end: str | None) -> dict[str, Any]:
+    return {
+        "api_key_id": f"key-{seq}",
+        "owner_id": "owner-1",
+        "window_start": window_start,
+        "window_end": window_end,
+        "seq": seq,
+    }
+
+
+def _ctx(exchange_id: str = "deribit") -> MagicMock:
+    ctx = MagicMock()
+    ctx.exchange = AsyncMock()
+    ctx.supabase = MagicMock()
+    ctx.strategy_row = None
+    ctx.key_row = {"id": "key-x", "user_id": "owner-1", "exchange": exchange_id}
+    return ctx
+
+
+def _stub_ledger() -> NativeLedger:
+    return NativeLedger(
+        native_pnl={"BTC": pd.Series([1.0], index=pd.DatetimeIndex(["2024-01-01"]))},
+        terminal_native_equity={"BTC": 1.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+def _returns(pairs: list[tuple[str, float]]) -> pd.Series:
+    idx = pd.DatetimeIndex([d for d, _ in pairs]).as_unit("us")
+    return pd.Series([v for _, v in pairs], index=idx, dtype="float64")
+
+
+def _apply(patchers: list) -> ExitStack:
+    stack = ExitStack()
+    for p in patchers:
+        stack.enter_context(p)
+    return stack
+
+
+def _deribit_patches(
+    fake: _FakeSupabase,
+    *,
+    combine_returns: list[tuple[pd.Series, dict[str, Any]]],
+    has_option_activity: bool,
+    ctx_exchange: str = "deribit",
+    csv_analytics: AsyncMock | None = None,
+    preflight_side_effect: object = None,
+) -> list:
+    """Patch set driving run_stitch_composite_job over stubbed per-key ledgers.
+    ``combine_returns`` is the (returns, meta) each combine_native_ledger call
+    yields in seq order (cash pass, then MTM pass if the gate opens)."""
+    report = CompletenessReport(
+        total_return_rows=2,
+        indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=has_option_activity,
+    )
+    if preflight_side_effect is not None:
+        preflight = AsyncMock(side_effect=preflight_side_effect)
+    else:
+        preflight = AsyncMock(return_value=_ctx(ctx_exchange))
+    return [
+        patch("services.job_worker.get_supabase", new=MagicMock(return_value=fake)),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+        patch("services.job_worker._allocator_key_preflight", new=preflight),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=AsyncMock(return_value=MagicMock(
+                balance_error=False, native_equity={"BTC": 1.0},
+            )),
+        ),
+        patch(
+            "services.deribit_ingest.build_deribit_native_ledger",
+            new=AsyncMock(return_value=(_stub_ledger(), report)),
+        ),
+        patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
+        patch(
+            "services.broker_dailies.combine_native_ledger",
+            new=MagicMock(side_effect=list(combine_returns)),
+        ),
+        patch(
+            "services.analytics_runner.run_csv_strategy_analytics",
+            new=csv_analytics or AsyncMock(return_value={"status": "complete"}),
+        ),
+    ]
+
+
+def _by_basis(fake: _FakeSupabase) -> dict[str, Any] | None:
+    """The metrics_json_by_basis object from the last strategy_analytics upsert
+    that carried it (the additive by-basis write)."""
+    for table, payload, _ in reversed(fake.upserts):
+        if table == "strategy_analytics" and isinstance(payload, dict) \
+                and "metrics_json_by_basis" in payload:
+            return payload["metrics_json_by_basis"]
+    return None
+
+
+@pytest.mark.asyncio
+async def test_zero_members_permanent_failed() -> None:
+    """A composite with no strategy_keys members is structurally broken —
+    permanent FAILED (never enqueued-forever), and a terminal analytics stamp."""
+    fake = _FakeSupabase(members=[])
+    with _apply(_deribit_patches(fake, combine_returns=[], has_option_activity=False)):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert any(u[0] == "strategy_analytics" for u in fake.upserts)
+
+
+@pytest.mark.asyncio
+async def test_declared_window_overlap_permanent_before_any_crawl() -> None:
+    """Overlapping DECLARED windows fail loud BEFORE any exchange crawl —
+    permanent, and build_deribit_native_ledger is never reached."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-15"),
+        _member(2, "2024-02-01", None),  # overlaps seq 1
+    ])
+    ledger_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport()))
+    patches = _deribit_patches(fake, combine_returns=[], has_option_activity=False)
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=ledger_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    ledger_spy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_happy_path_two_member_fanout_combined_scalars() -> None:
+    """W-1 worker↔acceptance seam: drive run_stitch_composite_job end-to-end over
+    two stubbed per-key ledgers through the REAL clip→overlap→arithmetic-stitch→
+    gap-fill→compute_all_metrics orchestration and assert the combined scalars —
+    arithmetic-sum cumulative (Σr) + inception-seeded maxDD. Option-active members
+    keep the MTM gate CLOSED (cash-only)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    meta: dict[str, Any] = {}
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, meta), (m2, meta)],
+        has_option_activity=True,  # gate CLOSED → cash-only
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert "cash_settlement" in by_basis
+    assert "mark_to_market" not in by_basis  # gated off (option-active)
+    cash = by_basis["cash_settlement"]
+    assert cash["cumulative_return"] == pytest.approx(0.05)
+    assert cash["max_drawdown"] == pytest.approx(-0.10)
+
+
+@pytest.mark.asyncio
+async def test_gap_days_absent_from_csv_upsert_but_dense_for_metrics() -> None:
+    """Pitfall 2: the calendar gap between the two member windows is ABSENT from
+    the csv_daily_returns payload (never 0.0-written as flat performance), yet the
+    metrics see a dense gap-filled series (cumulative still computes)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-03"),
+        _member(2, "2024-01-10", None),  # 6-day gap Jan-04..Jan-09
+    ])
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.01)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    # The csv_daily_returns upsert payload carries ONLY the 4 real days.
+    csv_rows = [
+        row
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for row in payload
+    ]
+    written_dates = {r["date"] for r in csv_rows}
+    assert written_dates == {"2024-01-01", "2024-01-02", "2024-01-10", "2024-01-11"}
+    assert "2024-01-05" not in written_dates  # gap day never written
+
+
+@pytest.mark.asyncio
+async def test_mtm_admitted_perp_only_second_pass_writes_both_bases() -> None:
+    """Perp-only members (no option activity, all deribit) → MTM gate OPEN → a
+    SECOND ledger pass with pnl_basis='mark_to_market' → metrics_json_by_basis
+    carries BOTH bases."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # cash pass (m1, m2) then MTM pass (m1, m2) → 4 combine calls.
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=False,
+    )))
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=False,  # gate OPEN
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert set(by_basis) == {"cash_settlement", "mark_to_market"}
+    # The second pass built the ledger with the MTM basis.
+    mtm_calls = [
+        c for c in build_spy.await_args_list
+        if c.kwargs.get("pnl_basis") == "mark_to_market"
+    ]
+    assert mtm_calls, "MTM-admitted composite must run a mark_to_market ledger pass"
+
+
+@pytest.mark.asyncio
+async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
+    """An option-active member gates MTM off; the reason is carried in
+    data_quality_flags for Phase 90 (never JSON null in the by-basis object)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert list(by_basis) == ["cash_settlement"]  # exactly one key, no null
+    # mtm_gated_reason surfaced in the merged DQ flags.
+    dq = None
+    for table, payload, _ in reversed(fake.upserts):
+        if table == "strategy_analytics" and isinstance(payload, dict) \
+                and "data_quality_flags" in payload \
+                and "metrics_json_by_basis" in payload:
+            dq = payload["data_quality_flags"]
+            break
+    assert dq is not None
+    assert dq.get("mtm_gated_reason") == "unsmoothed_options_book"
+
+
+@pytest.mark.asyncio
+async def test_dq_flags_merge_preserves_existing_key() -> None:
+    """The additive DQ-flag write MERGES (read-modify-write) — a pre-existing
+    flag key set by the headline CSV run survives the composite coverage-mask
+    merge, never replaced wholesale."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        existing_flags={"csv_source": True, "benchmark_unavailable": True},
+    )
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    dq = None
+    for table, payload, _ in reversed(fake.upserts):
+        if table == "strategy_analytics" and isinstance(payload, dict) \
+                and "metrics_json_by_basis" in payload:
+            dq = payload["data_quality_flags"]
+            break
+    assert dq is not None
+    assert dq.get("benchmark_unavailable") is True  # preserved
+    assert "per_key" in dq and "gap_day_count" in dq  # composite mask merged in
+
+
+@pytest.mark.asyncio
+async def test_post_clip_day_collision_permanent() -> None:
+    """The SECOND overlap layer: two members whose DECLARED windows are disjoint
+    but whose reconstructed series collide on a calendar day (a mis-declared
+    window) → CompositeOverlapError → permanent (never last-write-wins)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-05"),
+        _member(2, "2024-01-05", None),
+    ])
+    # Both series carry 2024-01-05 → post-clip collision (m1 clip is half-open so
+    # would normally exclude it, but the stub returns it inside m1's clipped span).
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-04", 0.01)])
+    m2 = _returns([("2024-01-04", 0.03), ("2024-01-06", -0.01)])  # 01-04 collides
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+
+
+def test_no_verification_or_publish_status_write_source_scan() -> None:
+    """M-3: run_stitch_composite_job must NEVER advance verification/publish
+    status (no composite GA before Phase 87's gate). Source scan of the function
+    body — reintroducing a verification_status / published write reddens."""
+    import inspect
+
+    src = inspect.getsource(run_stitch_composite_job)
+    assert "verification_status" not in src
+    assert "published" not in src
