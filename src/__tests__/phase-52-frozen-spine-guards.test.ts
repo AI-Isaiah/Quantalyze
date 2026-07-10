@@ -184,6 +184,22 @@ const FROZEN_ISLANDS: string[] = [
   // category as the scenario.ts carve-out above; compute.ts's own
   // compute.*.test.ts suites pin the reviewed behavior (default-252 identity +
   // explicit 365 cases).
+  //
+  // v1.9 Phase 90 (FS-01/FS-02): `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx`
+  // is likewise REMOVED from the array below (8 islands remain frozen). Same
+  // category as the scenario.ts / #597 compute.ts carve-outs — a deliberate,
+  // reviewed ADDITIVE edit, NOT a v1.4 VISUAL restyle reshape. Phase 90 adds an
+  // optional `segmentMarkers` SVG overlay <g> (per-key boundary seams + gap
+  // markers) that MIRRORS the already-frozen-but-load-bearing in-file
+  // warmupBand/ddHighlights overlay idioms, gated by an optional
+  // ChartConfig.segmentMarkers flag set only on the key:"cumulative" config.
+  // Single-key payloads OMIT the marker fields, so their render stays
+  // byte-identical (no flag, no overlay). The reviewed behavior is pinned by its
+  // OWN suites: TimeSeriesChart.markers.test.tsx (marker geometry/copy + the
+  // flag-off / fields-absent zero-marker parity — the replacement behavior
+  // pin), GUARD-02 (FactsheetBody.scenario-mode.test.tsx, byte-identity), and
+  // FactsheetView.kpistrip.test.tsx (the composite basis relabel). The other two
+  // factsheet SVGs (HistogramChart/MasterBrush) STAY FROZEN below.
   // The remaining NINE islands below STAY FROZEN — no RSC-ification / reshape
   // of the FactsheetProvider, useBreakpoint, the MC worker, the chart-
   // interactivity island (EquityChart/TouchTooltip/useTapPin), or the 3 SVGs.
@@ -198,7 +214,6 @@ const FROZEN_ISLANDS: string[] = [
   // golden re-baseline). The off-glob removes lint protection, so freeze them
   // here — otherwise a future raw-px / render edit to them is caught by NO gate
   // (lint off + goldens deferred). Zero-diff vs the baseline today.
-  "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx",
   "src/app/factsheet/[id]/v2/HistogramChart.tsx",
   "src/app/factsheet/[id]/v2/MasterBrush.tsx",
 ];

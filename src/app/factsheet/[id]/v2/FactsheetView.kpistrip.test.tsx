@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { render } from "@testing-library/react";
+import { render, fireEvent } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
@@ -154,5 +155,110 @@ describe("FactsheetView KPI strip — @container + fluid-type migration (52-06 /
     const html = container.innerHTML;
     expect(html).not.toContain("NaN");
     expect(html).not.toContain("Infinity");
+  });
+});
+
+/**
+ * Phase 90 Wave-0 (90-02 Task 3) — TDD RED scaffold for the FS-03 KpiStrip-ONLY
+ * basis relabel (CONTEXT D5, 2026-07-11 refinement): toggling cash↔MTM swaps
+ * ONLY the KpiStrip scalar values + the "BASIS · …" eyebrow, while MetricsColumn
+ * stays pinned to cash and the charts keep the cash series behind a caption.
+ * Lands in 90-05.
+ *
+ * DOM-level only — imports NO not-yet-existing module. The composite optional
+ * fields are supplied via casts (per 90-02 <interfaces>). The RED tests fail
+ * today because the toggle + eyebrow + basis hook do not exist yet; the GREEN
+ * pin proves single-key emits no "BASIS ·" eyebrow (byte-identity scope). Does
+ * NOT modify any existing test above.
+ */
+
+// Sentinel per-basis scalars — MTM cum. return 0.5000 is distinguishable from
+// the cash 0.6266 so the relabel swap is observable. Server key names per D3.
+const KP_CASH = {
+  cumulative_return: 0.6266,
+  volatility: 0.12,
+  max_drawdown: -0.041,
+  cagr: 0.31,
+  sharpe: 1.4,
+  sortino: 2.1,
+  calmar: 3.0,
+};
+const KP_MTM = {
+  cumulative_return: 0.5,
+  volatility: 0.11,
+  max_drawdown: -0.038,
+  cagr: 0.26,
+  sharpe: 1.2,
+  sortino: 1.9,
+  calmar: 2.7,
+};
+
+function compositeKpiPayload(): FactsheetPayload {
+  const p = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(300),
+    benchmark: null,
+  });
+  // Pin the cash Cum. Return the current (cash-only) KpiStrip shows to the
+  // sentinel, so the post-90-05 relabel swap is a visible 0.6266 → 0.5000.
+  p.strategyMetrics.cum_ret = KP_CASH.cumulative_return;
+  return {
+    ...p,
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: KP_CASH, mark_to_market: KP_MTM },
+    mtmGate: { available: true },
+  } as unknown as FactsheetPayload;
+}
+
+function renderComposite(payload: FactsheetPayload) {
+  return render(
+    <FactsheetProvider payload={payload} persist={false}>
+      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+    </FactsheetProvider>,
+  );
+}
+
+describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED until 90-05)", () => {
+  it("RED: toggling to Mark-to-market swaps Cum. Return to the MTM sentinel + 'BASIS · MARK-TO-MARKET' eyebrow; toggling back restores cash", () => {
+    const { getByText } = renderComposite(compositeKpiPayload());
+
+    // No basis toggle exists yet → getByText throws (RED). After 90-05 this
+    // drives the KpiStrip relabel.
+    fireEvent.click(getByText("Mark-to-market"));
+    expect(getByText("BASIS · MARK-TO-MARKET")).toBeTruthy();
+    expect(getByText("+50.0%")).toBeTruthy(); // MTM cumulative_return sentinel
+
+    fireEvent.click(getByText("Cash settlement"));
+    expect(getByText("BASIS · CASH SETTLEMENT")).toBeTruthy();
+    expect(getByText("+62.7%")).toBeTruthy(); // cash cumulative_return sentinel
+  });
+
+  it("RED: under MTM, MetricsColumn stays cash-pinned (D5) and the cash-series chart caption is a role=status region", () => {
+    const { getByText, container } = renderComposite(compositeKpiPayload());
+
+    // RED today (no toggle). After 90-05: only the KpiStrip relabels; the
+    // MetricsColumn distributional stats keep their CASH values, and the charts
+    // keep the cash series behind an announced caption.
+    fireEvent.click(getByText("Mark-to-market"));
+
+    const caption = container.querySelector('[role="status"]');
+    expect(caption?.textContent).toContain(
+      "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only.",
+    );
+    // A MetricsColumn distributional stat (no MTM counterpart) still renders its
+    // cash value — MetricsColumn is NOT relabeled (KpiStrip-only, D5).
+    expect(getByText(/Skew/i)).toBeTruthy();
+  });
+
+  it("GREEN: a single-key payload's KpiStrip emits no 'BASIS ·' eyebrow", () => {
+    const payload = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    const { container } = render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      </FactsheetProvider>,
+    );
+    expect(container.innerHTML).not.toContain("BASIS ·");
   });
 });
