@@ -378,6 +378,39 @@ async def test_gap_days_absent_from_csv_upsert_but_dense_for_metrics() -> None:
 
 
 @pytest.mark.asyncio
+async def test_degenerate_under_two_day_composite_permanent_not_raised() -> None:
+    """F2 (Phase 86): a near-fully-clipped / ≤1-day-history composite yields a
+    stitched series with <2 PRESENT days. The <2-day guard must fire BEFORE
+    _metrics_json_for → compute_all_metrics (which raises a BARE ValueError that
+    classify_exception maps to RETRYABLE → retry-forever, wizard poller spins).
+
+    Post-fix: the job RETURNS a permanent FAILED with a terminal 'failed' stamp,
+    never raising. Neuter (drop the hoisted guard) → compute_all_metrics raises
+    ValueError uncaught → this test reddens (the raise escapes)."""
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    m1 = _returns([("2024-01-01", 0.05)])  # exactly ONE present day
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {})], has_option_activity=True,
+    )):
+        # Must NOT raise — a degenerate composite is a classified permanent, not
+        # an unclassified ValueError.
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # Terminal 'failed' analytics stamp so the wizard poller reaches a gate.
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "degenerate composite must stamp a terminal failed row"
+    # The compute path must NOT have been reached — no csv_daily_returns write.
+    assert not any(t == "csv_daily_returns" for t, _, _ in fake.upserts)
+
+
+@pytest.mark.asyncio
 async def test_mtm_admitted_perp_only_second_pass_writes_both_bases() -> None:
     """Perp-only members (no option activity, all deribit) → MTM gate OPEN → a
     SECOND ledger pass with pnl_basis='mark_to_market' → metrics_json_by_basis

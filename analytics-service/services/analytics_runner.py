@@ -2087,7 +2087,9 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Analytics computation failed")
 
 
-async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
+async def run_csv_strategy_analytics(
+    strategy_id: str, *, composite_dense_gap_fill: bool = False
+) -> dict[str, Any]:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
 
     Analytics pipeline for source='csv' strategies. Loads
@@ -2226,7 +2228,25 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # gap-filled, so its missing dates are legitimately absent and must stay
         # sparse — NaN-filling them would fabricate a break and corrupt the
         # headline of legitimate data.
-        if _is_broker_sourced and not returns.empty:
+        if composite_dense_gap_fill and not returns.empty:
+            # Phase 86 F1: a COMPOSITE headline MUST derive from the SAME dense,
+            # 0.0-gap-filled series the by-basis cash_settlement metrics use
+            # (run_stitch_composite_job._metrics_json_for → gap_fill_daily_returns)
+            # so the headline cash_settlement and
+            # metrics_json_by_basis.cash_settlement are byte-identical BY
+            # CONSTRUCTION — never two disagreeing "cash_settlement" numbers on a
+            # gapped composite (Zavara is gapless so it never surfaced). Mirror
+            # broker_dailies.gap_fill_daily_returns EXACTLY: reindex to the dense
+            # [min,max] daily calendar and fill inter-member gap days with 0.0
+            # (flat capital — NOT NaN). A composite gap is a genuinely flat day,
+            # distinct from a broker guard-refused interior day (elif below) which
+            # must reinstate NaN to BREAK the TWR chain.
+            dense_index = pd.date_range(
+                returns.index.min(), returns.index.max(), freq="D"
+            ).as_unit("us")
+            returns = returns.reindex(dense_index, fill_value=0.0).astype("float64")
+            returns.name = "returns"
+        elif _is_broker_sourced and not returns.empty:
             dense_index = pd.date_range(
                 returns.index.min(), returns.index.max(), freq="D"
             )

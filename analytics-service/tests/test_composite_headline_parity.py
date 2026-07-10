@@ -1,0 +1,388 @@
+"""Phase 86 — F1 headline↔by-basis parity + F5(a) authoritative re-derive.
+
+These drive ``run_stitch_composite_job`` end-to-end over stubbed per-key ledgers
+BUT run the REAL ``run_csv_strategy_analytics`` (NOT stubbed) against a stateful
+fake supabase that stores, serves, and deletes ``csv_daily_returns`` — so the
+headline path is genuinely exercised and compared against the by-basis object.
+
+F1 (HIGH): on a composite with a genuine inter-member GAP, the headline
+``cash_settlement`` metrics (top-level scalars on the ``complete`` stamp) MUST
+equal ``metrics_json_by_basis.cash_settlement`` — same cumulative_return AND same
+vol/sharpe/maxdd. Pre-fix the headline read the SPARSE csv_daily_returns (gap days
+absent) while the by-basis computed on the DENSE 0.0-gap-filled series, so vol and
+sharpe silently diverged on any gapped composite (Zavara is gapless → never
+surfaced). The fix threads ``composite_dense_gap_fill=True`` so the headline
+derives from the identical dense series.
+
+F5(a) (LOW): the composite re-derive must delete the WHOLE csv_daily_returns
+series for the strategy (it fully OWNS it), not just the new [span_start,
+span_end] — otherwise a SHRUNK re-derive leaves stale out-of-span rows that the
+headline folds back in. Pure-stub supabase / exchange mocks (no live DB / creds);
+run with ``--no-file-parallelism`` if local contention flakes.
+"""
+from __future__ import annotations
+
+from contextlib import ExitStack
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pandas as pd
+import pytest
+
+from services.broker_dailies import gap_fill_daily_returns
+from services.deribit_ingest import CompletenessReport
+from services.job_worker import DispatchOutcome, run_stitch_composite_job
+from services.metrics import PERIODS_PER_YEAR_CRYPTO, compute_all_metrics
+from services.native_nav import NativeLedger
+
+_STRATEGY_ID = "s-composite-parity"
+
+# A GAPLESS-config composite (no allocated-capital override) → geometric/calendar,
+# asset_class-driven √365. This is exactly the convention parity both the headline
+# (periods_per_year_for_asset_class('crypto')) and the by-basis (venue-driven 365)
+# resolve to, so any divergence is purely the SERIES (sparse vs dense), which is
+# what F1 closes.
+_STRATEGY_ROW = {
+    "id": _STRATEGY_ID,
+    "user_id": "owner-1",
+    "api_key_id": None,  # composite: keys live in strategy_keys, not api_key_id
+    "asset_class": "crypto",
+    "returns_denominator_config": None,
+}
+
+
+class _StatefulQuery:
+    def __init__(self, fake: "_StatefulSupabase", table: str) -> None:
+        self.fake = fake
+        self.table = table
+        self._op = "select"
+        self._eqs: list[tuple[str, Any]] = []
+        self._gte: tuple[str, Any] | None = None
+        self._lte: tuple[str, Any] | None = None
+        self._single = False
+        self._maybe = False
+        self._range: tuple[int, int] | None = None
+        self._payload: Any = None
+        self._conflict: str | None = None
+
+    def select(self, *a: Any, **k: Any) -> "_StatefulQuery":
+        self._op = "select"
+        return self
+
+    def eq(self, col: str, val: Any) -> "_StatefulQuery":
+        self._eqs.append((col, val))
+        return self
+
+    def gte(self, col: str, val: Any) -> "_StatefulQuery":
+        self._gte = (col, val)
+        return self
+
+    def lte(self, col: str, val: Any) -> "_StatefulQuery":
+        self._lte = (col, val)
+        return self
+
+    def order(self, *a: Any, **k: Any) -> "_StatefulQuery":
+        return self
+
+    def range(self, start: int, end: int) -> "_StatefulQuery":
+        self._range = (start, end)
+        return self
+
+    def single(self) -> "_StatefulQuery":
+        self._single = True
+        return self
+
+    def maybe_single(self) -> "_StatefulQuery":
+        self._maybe = True
+        return self
+
+    def delete(self) -> "_StatefulQuery":
+        self._op = "delete"
+        return self
+
+    def upsert(self, payload: Any, on_conflict: str | None = None) -> "_StatefulQuery":
+        self._op = "upsert"
+        self._payload = payload
+        self._conflict = on_conflict
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        if self._op == "upsert":
+            return self.fake._do_upsert(self.table, self._payload, self._conflict)
+        if self._op == "delete":
+            return self.fake._do_delete(
+                self.table, list(self._eqs), self._gte, self._lte
+            )
+        return self.fake._do_select(
+            self.table, list(self._eqs), self._single, self._maybe, self._range
+        )
+
+
+class _StatefulSupabase:
+    def __init__(
+        self,
+        *,
+        members: list[dict[str, Any]],
+        seed_csv: dict[str, float] | None = None,
+    ) -> None:
+        self.members = members
+        self.strategy_row = dict(_STRATEGY_ROW)
+        # date(iso str) -> daily_return; the authoritative composite series store.
+        self.csv_rows: dict[str, float] = dict(seed_csv or {})
+        self.analytics_flags: dict[str, Any] = {}
+        self.upserts: list[tuple[str, Any, str | None]] = []
+        self.deletes: list[tuple[str, list[tuple[str, Any]], Any, Any]] = []
+        self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+
+    def table(self, name: str) -> _StatefulQuery:
+        return _StatefulQuery(self, name)
+
+    def rpc(self, name: str, args: dict[str, Any]) -> SimpleNamespace:
+        self.rpc_calls.append((name, args))
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=None))
+
+    def _do_upsert(
+        self, table: str, payload: Any, conflict: str | None
+    ) -> SimpleNamespace:
+        self.upserts.append((table, payload, conflict))
+        if table == "csv_daily_returns" and isinstance(payload, list):
+            for row in payload:
+                self.csv_rows[str(row["date"])] = float(row["daily_return"])
+        if table == "strategy_analytics" and isinstance(payload, dict):
+            flags = payload.get("data_quality_flags")
+            if isinstance(flags, dict):
+                self.analytics_flags = dict(flags)
+        return SimpleNamespace(data=payload)
+
+    def _do_delete(
+        self, table: str, eqs: list[tuple[str, Any]], gte: Any, lte: Any
+    ) -> SimpleNamespace:
+        self.deletes.append((table, eqs, gte, lte))
+        if table == "csv_daily_returns":
+            keep: dict[str, float] = {}
+            for date, val in self.csv_rows.items():
+                # Honor an optional [gte, lte] date window (the PRE-fix span
+                # delete); post-fix there is no window so every row is removed.
+                in_window = True
+                if gte is not None and date < str(gte[1]):
+                    in_window = False
+                if lte is not None and date > str(lte[1]):
+                    in_window = False
+                if not in_window:
+                    keep[date] = val
+            self.csv_rows = keep
+        return SimpleNamespace(data=[])
+
+    def _do_select(
+        self,
+        table: str,
+        eqs: list[tuple[str, Any]],
+        single: bool,
+        maybe: bool,
+        rng: tuple[int, int] | None,
+    ) -> SimpleNamespace:
+        if table == "strategy_keys":
+            return SimpleNamespace(data=list(self.members))
+        if table == "strategies":
+            return SimpleNamespace(data=dict(self.strategy_row))
+        if table == "strategy_analytics":
+            return SimpleNamespace(
+                data={"data_quality_flags": dict(self.analytics_flags)}
+            )
+        if table == "csv_daily_returns":
+            rows = [
+                {"date": d, "daily_return": v}
+                for d, v in sorted(self.csv_rows.items())
+            ]
+            if rng is not None:
+                start, end = rng
+                rows = rows[start : end + 1]
+            return SimpleNamespace(data=rows)
+        return SimpleNamespace(data=None)
+
+
+def _member(seq: int, window_start: str, window_end: str | None) -> dict[str, Any]:
+    return {
+        "api_key_id": f"key-{seq}",
+        "owner_id": "owner-1",
+        "window_start": window_start,
+        "window_end": window_end,
+        "seq": seq,
+    }
+
+
+def _ctx() -> MagicMock:
+    ctx = MagicMock()
+    ctx.exchange = AsyncMock()
+    ctx.supabase = MagicMock()
+    ctx.strategy_row = None
+    ctx.key_row = {"id": "key-x", "user_id": "owner-1", "exchange": "deribit"}
+    return ctx
+
+
+def _stub_ledger() -> NativeLedger:
+    return NativeLedger(
+        native_pnl={"BTC": pd.Series([1.0], index=pd.DatetimeIndex(["2024-01-01"]))},
+        terminal_native_equity={"BTC": 1.0},
+        marks={},
+        native_flows=[],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+def _returns(pairs: list[tuple[str, float]]) -> pd.Series:
+    idx = pd.DatetimeIndex([d for d, _ in pairs]).as_unit("us")
+    return pd.Series([v for _, v in pairs], index=idx, dtype="float64")
+
+
+def _patches(
+    fake: _StatefulSupabase,
+    *,
+    combine_returns: list[tuple[pd.Series, dict[str, Any]]],
+) -> list:
+    """Patch set driving run_stitch_composite_job over stubbed per-key ledgers,
+    with the REAL run_csv_strategy_analytics + compute_all_metrics exercised. The
+    SAME stateful fake backs both job_worker and analytics_runner get_supabase."""
+    report = CompletenessReport(
+        total_return_rows=2,
+        indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,  # gate CLOSED → single cash pass (simpler)
+    )
+    preflight = AsyncMock(return_value=_ctx())
+    return [
+        patch("services.job_worker.get_supabase", new=MagicMock(return_value=fake)),
+        patch("services.analytics_runner.get_supabase", new=MagicMock(return_value=fake)),
+        patch("services.job_worker.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+        patch("services.analytics_runner.db_execute", new=AsyncMock(side_effect=lambda fn: fn())),
+        patch("services.job_worker._allocator_key_preflight", new=preflight),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.analytics_runner.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ),
+        patch(
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=AsyncMock(return_value=MagicMock(
+                balance_error=False, native_equity={"BTC": 1.0},
+            )),
+        ),
+        patch(
+            "services.deribit_ingest.build_deribit_native_ledger",
+            new=AsyncMock(return_value=(_stub_ledger(), report)),
+        ),
+        patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
+        patch(
+            "services.broker_dailies.combine_native_ledger",
+            new=MagicMock(side_effect=list(combine_returns)),
+        ),
+    ]
+
+
+def _apply(patchers: list) -> ExitStack:
+    stack = ExitStack()
+    for p in patchers:
+        stack.enter_context(p)
+    return stack
+
+
+def _headline_metrics(fake: _StatefulSupabase) -> dict[str, Any]:
+    """The top-level scalars from the headline `_mark_complete` upsert (the
+    strategy_analytics row stamped complete / complete_with_warnings that carries
+    the spread metrics_json)."""
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and str(payload.get("computation_status", "")).startswith("complete")
+        ):
+            return payload
+    raise AssertionError("no headline `complete` strategy_analytics upsert found")
+
+
+def _by_basis_cash(fake: _StatefulSupabase) -> dict[str, Any]:
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and "metrics_json_by_basis" in payload
+        ):
+            return payload["metrics_json_by_basis"]["cash_settlement"]
+    raise AssertionError("no by-basis strategy_analytics upsert found")
+
+
+@pytest.mark.asyncio
+async def test_gapped_composite_headline_equals_by_basis_cash_settlement() -> None:
+    """F1: on a composite with a genuine inter-member gap (Jan-03..Jan-09), the
+    headline cash_settlement scalars are byte-identical to
+    metrics_json_by_basis.cash_settlement — same cumulative_return AND same
+    vol/sharpe/maxdd. Neuter (drop composite_dense_gap_fill=True at the job's
+    run_csv_strategy_analytics call, OR the analytics_runner dense branch) → the
+    headline computes on the SPARSE series → vol/sharpe diverge → this reddens."""
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-03"),
+        _member(2, "2024-01-10", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.05)])
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    headline = _headline_metrics(fake)
+    cash = _by_basis_cash(fake)
+
+    # Independently confirm the by-basis reference IS the dense 0.0-gap-filled
+    # metric object (the honest composite convention) so the parity assertion
+    # pins the RIGHT number, not two identically-wrong sparse ones.
+    stitched = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", 0.01),
+        ("2024-01-10", 0.03), ("2024-01-11", -0.05),
+    ])
+    dense = gap_fill_daily_returns(stitched)
+    reference = compute_all_metrics(
+        dense, None,
+        periods_per_year=PERIODS_PER_YEAR_CRYPTO,
+        cumulative_method="geometric",
+        day_basis="calendar",
+    ).metrics_json
+    for key in ("cumulative_return", "volatility", "sharpe", "max_drawdown"):
+        assert cash[key] == pytest.approx(reference[key]), f"by-basis {key} not dense"
+        assert headline[key] == pytest.approx(cash[key]), (
+            f"F1 divergence: headline {key}={headline[key]} != "
+            f"by-basis cash_settlement {key}={cash[key]} on a gapped composite"
+        )
+
+
+@pytest.mark.asyncio
+async def test_shrinking_rederive_deletes_stale_out_of_span_rows() -> None:
+    """F5(a): the composite re-derive OWNS the whole series — it must delete every
+    csv_daily_returns row for the strategy before the upsert. Seed a stale row
+    OUTSIDE the new span (Feb-20); after a re-derive over Jan-01..Jan-11 it must
+    be GONE. Neuter (restore the [span_start, span_end] delete) → the stale Feb-20
+    row survives → the headline folds it back in → this reddens."""
+    fake = _StatefulSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-01-03"),
+            _member(2, "2024-01-10", None),
+        ],
+        seed_csv={"2024-02-20": 0.99},  # stale row from a prior, WIDER re-derive
+    )
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.05)])
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert "2024-02-20" not in fake.csv_rows, (
+        "stale out-of-span row survived the authoritative composite re-derive"
+    )
+    assert set(fake.csv_rows) == {
+        "2024-01-01", "2024-01-02", "2024-01-10", "2024-01-11",
+    }
+    # The delete that ran must be UNBOUNDED by date (whole-series ownership).
+    csv_deletes = [d for d in fake.deletes if d[0] == "csv_daily_returns"]
+    assert csv_deletes, "expected a csv_daily_returns delete on re-derive"
+    for _table, eqs, gte, lte in csv_deletes:
+        assert ("strategy_id", _STRATEGY_ID) in eqs
+        assert gte is None and lte is None, "re-derive delete must not bound by date"

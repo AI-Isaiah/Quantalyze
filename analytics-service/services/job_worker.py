@@ -3107,6 +3107,26 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             error_kind="permanent",
         )
 
+    # F2 (Phase 86): a near-fully-clipped or ≤1-day-history composite yields a
+    # stitched series with <2 PRESENT days. compute_all_metrics (invoked just
+    # below via _metrics_json_for → gap_fill → compute) raises a BARE
+    # ValueError("...2 trading days...") on such a series; classify_exception maps
+    # that to RETRYABLE → retry-forever, so the wizard poller spins and the row
+    # never reaches terminal 'failed'. Hoist the terminal <2-day guard ABOVE the
+    # compute so a degenerate composite is stamped PERMANENT failed instead of
+    # raising unclassified. Counts PRESENT stitched days (gap/guarded days are
+    # honestly absent — exactly the rows persisted to csv_daily_returns below).
+    _present_day_count = int(stitched_cash.notna().sum())
+    if _present_day_count < 2:
+        await _stamp_failed(
+            "Composite produced fewer than 2 stitched daily-return days."
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_stitch_composite_job: insufficient stitched history",
+            error_kind="permanent",
+        )
+
     mask = coverage_mask(clipped_cash)
 
     # 5. #597 blend annualization: 365 if ANY member venue crypto else 252. For an
@@ -3184,32 +3204,25 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         for ts, val in stitched_cash.items()
         if pd.notna(val)
     ]
-    if len(rows_payload) < 2:
-        await _stamp_failed(
-            "Composite produced fewer than 2 stitched daily-return days."
-        )
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="run_stitch_composite_job: insufficient stitched history",
-            error_kind="permanent",
-        )
+    # (The <2-present-day guard is hoisted ABOVE the compute — see F2 above —
+    # so rows_payload is guaranteed to carry ≥2 rows here.)
 
-    _span_start = stitched_cash.index.min().date().isoformat()
-    _span_end = stitched_cash.index.max().date().isoformat()
-
-    def _reconcile_span_delete(
-        span_start: str = _span_start, span_end: str = _span_end
-    ) -> None:
+    def _reconcile_full_delete() -> None:
+        # F5(a): the composite fully OWNS its csv_daily_returns series — an
+        # authoritative re-derive replaces it WHOLESALE. Deleting only the NEW
+        # [span_start, span_end] left stale rows OUTSIDE a SHRUNK span (e.g. a
+        # re-derive after a member window shortened or a member was removed),
+        # which run_csv_strategy_analytics then folded back into the headline.
+        # Delete EVERY row for this strategy_id before the upsert so a shrinking
+        # re-derive is idempotent and can't resurrect orphaned days.
         (
             supabase.table("csv_daily_returns")
             .delete()
-            .gte("date", span_start)
-            .lte("date", span_end)
             .eq("strategy_id", strategy_id)
             .execute()
         )
 
-    await db_execute(_reconcile_span_delete)
+    await db_execute(_reconcile_full_delete)
 
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
@@ -3228,7 +3241,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # the additive by-basis write below can never be clobbered by the headline.
     from services.analytics_runner import run_csv_strategy_analytics
 
-    await run_csv_strategy_analytics(strategy_id)
+    # F1: COMPOSITE dense-gap-fill mode — the headline computes on the SAME dense
+    # 0.0-gap-filled series _metrics_json_for uses, so the headline cash_settlement
+    # and metrics_json_by_basis.cash_settlement are byte-identical (same
+    # cumulative_return AND same vol/sharpe/maxdd), never silently divergent on a
+    # gapped composite. WITHOUT this, the headline reads the SPARSE csv_daily_returns
+    # (gap days absent) and diverges on vol/sharpe (and, if the composite were
+    # broker-sourced, on cumulative via a suffix-only TWR break).
+    await run_csv_strategy_analytics(strategy_id, composite_dense_gap_fill=True)
 
     # (3) Additive metrics_json_by_basis + merged DQ flags. The by-basis object
     # OMITS an unavailable basis key (SQL NULL never JSON null — Phase 85 CHECK):
