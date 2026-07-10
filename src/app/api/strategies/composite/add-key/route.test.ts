@@ -32,13 +32,15 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, MOCK_USER),
 }));
 
-const checkLimitMock = vi.fn(async () => ({ success: true }) as {
-  success: boolean;
-  retryAfter?: number;
-});
+const checkLimitMock = vi.fn<
+  (limiter: unknown, key: string) => Promise<{
+    success: boolean;
+    retryAfter?: number;
+  }>
+>();
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: {},
-  checkLimit: (...args: unknown[]) => checkLimitMock(...args),
+  checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
 }));
 
 const validateKeyMock = vi.fn();
@@ -244,7 +246,7 @@ describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () =
     expect((await res.json()).code).toBe("KEY_RATE_LIMIT");
     // Route-distinct limiter key so composite adds don't share the single-key
     // bucket.
-    const [, limiterKey] = checkLimitMock.mock.calls[0] as [unknown, string];
+    const [, limiterKey] = checkLimitMock.mock.calls[0];
     expect(limiterKey).toContain("composite-add-key");
     expect(limiterKey).toContain(MOCK_USER.id);
     // Rate-limited before any Railway spend.

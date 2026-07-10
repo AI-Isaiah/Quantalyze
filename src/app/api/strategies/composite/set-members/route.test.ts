@@ -27,13 +27,15 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, MOCK_USER),
 }));
 
-const checkLimitMock = vi.fn(async () => ({ success: true }) as {
-  success: boolean;
-  retryAfter?: number;
-});
+const checkLimitMock = vi.fn<
+  (limiter: unknown, key: string) => Promise<{
+    success: boolean;
+    retryAfter?: number;
+  }>
+>();
 vi.mock("@/lib/ratelimit", () => ({
   userActionLimiter: {},
-  checkLimit: (...args: unknown[]) => checkLimitMock(...args),
+  checkLimit: (limiter: unknown, key: string) => checkLimitMock(limiter, key),
 }));
 
 const rpcMock = vi.fn();
@@ -48,7 +50,7 @@ async function importPost() {
   return mod.POST;
 }
 
-const STRATEGY_ID = "ssssssss-ssss-4sss-8sss-ssssssssssss";
+const STRATEGY_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const AKID1 = "a1111111-1111-4111-8111-111111111111";
 const AKID2 = "a2222222-2222-4222-8222-222222222222";
 const AKID3 = "a3333333-3333-4333-8333-333333333333";
@@ -229,7 +231,7 @@ describe("POST /api/strategies/composite/set-members — B15 limiter ordering", 
     );
 
     expect(res.status).toBe(429);
-    const [, limiterKey] = checkLimitMock.mock.calls[0] as [unknown, string];
+    const [, limiterKey] = checkLimitMock.mock.calls[0];
     expect(limiterKey).toContain("composite-set-members");
     expect(limiterKey).toContain(MOCK_USER.id);
     expect(rpcMock).not.toHaveBeenCalled();
