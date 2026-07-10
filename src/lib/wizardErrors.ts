@@ -65,6 +65,14 @@ export type WizardErrorCode =
   // The per-issue lines are supplied by the component (from keyWindowsSchema);
   // this code carries the interpolated summary TITLE only.
   | "MULTI_KEY_WINDOWS_INVALID"
+  // Phase 88 / W-4 (T-88-10) — composite membership probe fail-closed.
+  // finalize-wizard returns a 503 with this code when it cannot determine
+  // whether the draft is a multi-key composite (the membership probe threw,
+  // or the member-list read failed). It is a transient server-side fault:
+  // the draft is intact and nothing was submitted, so the envelope is
+  // RECOVERABLE and the Retry affordance renders. Both the unified and legacy
+  // finalize arms emit this same code so the client maps ONE consistent copy.
+  | "COMPOSITE_MEMBERSHIP_UNKNOWN"
   // Fallback
   | "UNKNOWN";
 
@@ -594,6 +602,20 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [],
     docsHref: "/security",
     actions: [],
+  },
+
+  COMPOSITE_MEMBERSHIP_UNKNOWN: {
+    title: "We couldn't confirm this strategy's key membership.",
+    cause:
+      "A transient check couldn't determine whether this draft is a multi-key composite. Your draft is saved and nothing was submitted — this is on our side, not your key.",
+    fix: [
+      "Wait a moment and try again — the check usually succeeds on retry.",
+      "If it keeps failing, contact security@quantalyze.com with your draft ID.",
+    ],
+    docsHref: "/security#sync-timing",
+    // Recoverable transient fault: keep `clear_and_retry` so the Retry control
+    // renders instead of falling through to the generic UNKNOWN envelope.
+    actions: ["clear_and_retry", "request_call"],
   },
 
   UNKNOWN: {
