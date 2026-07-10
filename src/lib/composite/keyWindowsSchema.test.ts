@@ -121,6 +121,27 @@ describe("keyWindowsSchema — 4 LOCKED superRefine rules", () => {
     ).toBe(true);
   });
 
+  it("RULE calendar validity: a structurally-valid but calendar-invalid window_start (2024-02-31) is rejected at the schema, not the DB cast", () => {
+    // ISO_DATE_RE matches shape only, so "2024-02-31" passed zod pre-fix and
+    // only failed at the DB `::date` cast (generic 409). The schema is now the
+    // single authoritative gate.
+    const issues = issuesFor({
+      keys: [{ window_start: "2024-02-31", window_end: null, seq: 1 }],
+    });
+    expect(
+      hasIssue(issues, ["keys", 0, "window_start"], "Use a real calendar date."),
+    ).toBe(true);
+  });
+
+  it("RULE calendar validity: a calendar-invalid window_end (2024-13-45) is rejected", () => {
+    const issues = issuesFor({
+      keys: [{ window_start: "2024-01-01", window_end: "2024-13-45", seq: 1 }],
+    });
+    expect(
+      hasIssue(issues, ["keys", 0, "window_end"], "Use a real calendar date."),
+    ).toBe(true);
+  });
+
   it("PASS: a 3-key Zavara-style sequential handoff (adjacency, last open-ended) validates clean", () => {
     const res = keyWindowsSchema.safeParse({
       keys: [

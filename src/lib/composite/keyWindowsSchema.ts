@@ -25,14 +25,43 @@ import { windowsOverlap } from "./windowOverlap";
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
+ * True when `s` (already matching ISO_DATE_RE) is a REAL calendar date. The
+ * regex only checks SHAPE, so "2024-13-45" / "2024-02-31" pass it but are not
+ * valid dates — left unchecked they slip through to the DB `::date` cast and
+ * surface as a generic 409 instead of a window error. Round-trip through a UTC
+ * Date and require the parsed Y-M-D to equal the input components: JS Date
+ * normalizes overflow (2024-02-31 → 2024-03-02, 2024-13-01 → 2025-01-01), so a
+ * mismatch means the input was not a real date. This makes the schema the
+ * single authoritative gate (one spec, both surfaces).
+ */
+function isCalendarDate(s: string): boolean {
+  const [y, m, d] = s.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return (
+    dt.getUTCFullYear() === y &&
+    dt.getUTCMonth() === m - 1 &&
+    dt.getUTCDate() === d
+  );
+}
+
+const CALENDAR_DATE_MESSAGE = "Use a real calendar date.";
+
+/**
  * One composite member. `api_key_id` is optional here: the live UI form
  * accumulates windows before a key is minted server-side, whereas 88-04's
  * set-members route supplies it. Both reuse this same member shape.
  */
 export const keyWindowSchema = z.object({
   api_key_id: z.string().uuid().optional(),
-  window_start: z.string().regex(ISO_DATE_RE, "Use a YYYY-MM-DD date."),
-  window_end: z.string().regex(ISO_DATE_RE, "Use a YYYY-MM-DD date.").nullable(),
+  window_start: z
+    .string()
+    .regex(ISO_DATE_RE, "Use a YYYY-MM-DD date.")
+    .refine(isCalendarDate, CALENDAR_DATE_MESSAGE),
+  window_end: z
+    .string()
+    .regex(ISO_DATE_RE, "Use a YYYY-MM-DD date.")
+    .refine(isCalendarDate, CALENDAR_DATE_MESSAGE)
+    .nullable(),
   seq: z.number().int().min(1),
 });
 
