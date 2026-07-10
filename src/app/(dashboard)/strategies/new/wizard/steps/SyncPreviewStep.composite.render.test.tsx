@@ -24,7 +24,7 @@
  * Mock idioms (chainable pure-stub, column-string discrimination, fake-timer
  * act-flush) mirror the frozen render test verbatim.
  */
-import { render, screen, act, fireEvent } from "@testing-library/react";
+import { render, screen, act, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SyncPreviewStep } from "./SyncPreviewStep";
 
@@ -433,5 +433,324 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
 
     const snap = baseProps.onComplete.mock.calls[0][0];
     expect(snap.sparkline).toEqual(DEFAULT_SERIES.map((d) => d.daily_return));
+  });
+});
+
+/**
+ * Phase 89 Plan 04 — passed-render additions (attribution table, coverage
+ * gantt, pre-submit warnings). Same sibling file, new describe. These pins are
+ * RED against the 89-03 shell (the placeholder comment, no table/gantt/
+ * warnings) and GREEN once 89-04's render lands. The 89-03 pins above stay
+ * untouched and green.
+ */
+
+// Gantt members supplied DELIBERATELY out of seq order (seq 2 first) so a
+// forgotten sort at the render layer is falsifiable. seq 2 has NO label →
+// exercises the `Key {seq} · {exchange}` fallback; seq 1 has a label.
+const GANTT_MEMBERS: MemberRow[] = [
+  {
+    api_key_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    window_start: "2025-01-08",
+    window_end: "2025-01-13",
+    seq: 2,
+    api_keys: { exchange: "deribit", label: null },
+  },
+  {
+    api_key_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    window_start: "2025-01-01",
+    window_end: "2025-01-06",
+    seq: 1,
+    api_keys: { exchange: "bybit", label: "Alpha Key" },
+  },
+];
+
+// Attribution fixture: two disjoint members whose signed contributions differ
+// by basis. Arithmetic Σr: +20.0% / −20.0%. Geometric Π(1+r)−1: +21.0% / −19.0%.
+const ATTR_SERIES = [
+  { date: "2025-01-01", daily_return: 0.1 },
+  { date: "2025-01-02", daily_return: 0.1 },
+  { date: "2025-01-03", daily_return: -0.1 },
+  { date: "2025-01-04", daily_return: -0.1 },
+];
+const ATTR_PERKEY = [
+  { seq: 1, first_day: "2025-01-01", last_day: "2025-01-02", n_days: 2 },
+  { seq: 2, first_day: "2025-01-03", last_day: "2025-01-04", n_days: 2 },
+];
+const ATTR_MEMBERS: MemberRow[] = [
+  {
+    api_key_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    window_start: "2025-01-01",
+    window_end: "2025-01-02",
+    seq: 1,
+    api_keys: { exchange: "deribit", label: "Key A" },
+  },
+  {
+    api_key_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    window_start: "2025-01-03",
+    window_end: "2025-01-04",
+    seq: 2,
+    api_keys: { exchange: "deribit", label: "Key B" },
+  },
+];
+
+describe("[89-04] SyncPreviewStep — composite passed render", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  async function renderPassed(opts: Partial<CompositeMockOpts>) {
+    installCompositeSupabaseMock({
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+      ...opts,
+    });
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+  }
+
+  // Pin 1 — GANTT ROWS BY SEQ. The reused CoverageTimeline renders one row per
+  // member; rows follow ascending seq even when the mock supplies them out of
+  // order (falsifies a forgotten sort). The label / `Key {seq} · {exchange}`
+  // fallback both render.
+  it("renders the coverage gantt with one row per member ordered by seq", async () => {
+    await renderPassed({ members: GANTT_MEMBERS });
+
+    const body = screen.getByTestId("scenario-coverage-timeline-body");
+    const seq1 = within(body).getByText("Alpha Key");
+    const seq2 = within(body).getByText("Key 2 · deribit");
+    // seq 1 (Alpha Key) must precede seq 2 in DOM despite the out-of-order mock.
+    expect(
+      seq1.compareDocumentPosition(seq2) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Exactly one bar per member.
+    expect(
+      within(body).getAllByTestId(/^coverage-bar-/).length,
+    ).toBe(2);
+  });
+
+  // Pin 2 — GAP FROM SERVER (falsifiable). The gaps block renders the server
+  // gap_spans VERBATIM; mutating the mock changes the text (the client never
+  // recomputes gaps from windows); an empty gap_spans renders no block.
+  it("renders coverage gaps verbatim from the server gap_spans (fixture A)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [{ start: "2025-09-25", end: "2025-09-26" }],
+          gap_day_count: 2,
+        },
+      }),
+    });
+
+    expect(screen.getByText(/Coverage gaps \(2 days total\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/2025-09-25 → 2025-09-26 \(2 days\)/),
+    ).toBeInTheDocument();
+    // Non-blocking: submit stays enabled.
+    expect(
+      screen.getByRole("button", { name: /use this composite and continue/i }),
+    ).toBeEnabled();
+  });
+
+  it("tracks the mutated gap_spans mock, proving no client-side gap recompute (fixture B)", async () => {
+    // SAME series/windows as fixture A — only the server mask changes. If the
+    // client recomputed gaps from member windows, the text could not follow.
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [{ start: "2025-10-01", end: "2025-10-03" }],
+          gap_day_count: 3,
+        },
+      }),
+    });
+
+    expect(screen.getByText(/Coverage gaps \(3 days total\)/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/2025-10-01 → 2025-10-03 \(3 days\)/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/2025-09-25/)).not.toBeInTheDocument();
+  });
+
+  it("renders no gaps block when gap_spans is empty (fixture C)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+        },
+      }),
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /your verified composite factsheet is ready/i,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Coverage gaps/)).not.toBeInTheDocument();
+  });
+
+  // Pin 3 — DQ CAVEATS (amber). mtm_gated_reason and benchmark_unavailable each
+  // render their caveat line; neither flag → no caveat block. Submit stays
+  // enabled (warnings never block).
+  it("renders the MTM-gated DQ caveat and keeps submit enabled", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          mtm_gated_reason: "unsmoothed_options_book",
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(
+        /Mark-to-market view unavailable — unsmoothed_options_book\. Cash-settlement basis shown\./,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /use this composite and continue/i }),
+    ).toBeEnabled();
+  });
+
+  it("renders the benchmark-unavailable DQ caveat", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          benchmark_unavailable: true,
+          benchmark_note: "no overlapping benchmark data",
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(/Benchmark overlay unavailable for this period\./),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no DQ caveat block when neither flag is set", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: { ...DEFAULT_DQ, gap_spans: [], gap_day_count: 0 },
+      }),
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /your verified composite factsheet is ready/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Mark-to-market view unavailable/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Benchmark overlay unavailable/),
+    ).not.toBeInTheDocument();
+  });
+
+  // Pin 4 — ATTRIBUTION TABLE (both basis directions). Arithmetic config
+  // (cumulative_method "simple") → signed Σr cells; null config → geometric
+  // Π(1+r)−1 cells. A hardcoded basis in EITHER direction fails one of these.
+  it("renders arithmetic signed-Σr contributions when the config is cumulative_method 'simple'", async () => {
+    await renderPassed({
+      members: ATTR_MEMBERS,
+      series: ATTR_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: { per_key: ATTR_PERKEY, gap_spans: [], gap_day_count: 0 },
+      }),
+      config: { returns_denominator_config: { cumulative_method: "simple" } },
+    });
+
+    expect(screen.getByText("+20.0%")).toBeInTheDocument();
+    const negative = screen.getByText("−20.0%");
+    expect(negative).toBeInTheDocument();
+    expect(negative.className).toContain("text-negative");
+    // Data-window column shows per_key ACTUAL inclusive days; Days shows n_days.
+    expect(screen.getByText("2025-01-01 – 2025-01-02")).toBeInTheDocument();
+    // Reconciliation caption in the arithmetic (sum) direction.
+    expect(
+      screen.getByText(/Contributions sum to the composite cumulative return\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Contributions compound to/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders geometric compounded contributions when the config is null", async () => {
+    await renderPassed({
+      members: ATTR_MEMBERS,
+      series: ATTR_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: { per_key: ATTR_PERKEY, gap_spans: [], gap_day_count: 0 },
+      }),
+      config: { returns_denominator_config: null },
+    });
+
+    expect(screen.getByText("+21.0%")).toBeInTheDocument();
+    expect(screen.getByText("−19.0%")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Contributions compound to the composite cumulative return\./,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Contributions sum to/)).not.toBeInTheDocument();
+  });
+
+  // Pin 5 — CAPTION SUPPRESSION (fail-safe honesty). When the per_key windows
+  // cover only PART of the series (Σ member days < series.length) the table
+  // still renders but claims NO reconciliation caption.
+  it("suppresses the reconciliation caption when member days do not cover the series", async () => {
+    await renderPassed({
+      members: ATTR_MEMBERS,
+      series: ATTR_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          // seq 1 covers only 01-01, seq 2 only 01-04 → Σ days 2 < series 4.
+          per_key: [
+            { seq: 1, first_day: "2025-01-01", last_day: "2025-01-01", n_days: 1 },
+            { seq: 2, first_day: "2025-01-04", last_day: "2025-01-04", n_days: 1 },
+          ],
+          gap_spans: [],
+          gap_day_count: 0,
+        },
+      }),
+      config: { returns_denominator_config: { cumulative_method: "simple" } },
+    });
+
+    // Table still renders (eyebrow present)…
+    expect(screen.getByText("PER-KEY ATTRIBUTION")).toBeInTheDocument();
+    // …but no reconciliation claim in either basis direction.
+    expect(screen.queryByText(/Contributions sum to/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Contributions compound to/)).not.toBeInTheDocument();
   });
 });
