@@ -221,6 +221,29 @@ BEGIN
     RESET ROLE;
     RAISE EXCEPTION 'TEST FAILED (RLS 3): tenant B wrote a row with owner_id = tenant A — WITH CHECK / trigger not enforcing owner';
   END IF;
+
+  -- ----- RLS 3b: WITH CHECK in ISOLATION (trigger must NOT be what blocks) ---
+  -- Still authenticated as tenant B. A FULLY COHERENT tenant-A triple
+  -- (owner_id=A, key_a owned by A, strat_a owned by A) PASSES the owner-coherence
+  -- trigger (all three equal A), so the ONLY thing that can reject it is the RLS
+  -- WITH CHECK (owner_id = auth.uid() = B). This pins WITH CHECK independently of
+  -- the trigger — Arm RLS 3 above is masked by the trigger's '%must match%' arm.
+  raised := FALSE;
+  BEGIN
+    INSERT INTO strategy_keys (strategy_id, api_key_id, owner_id, window_start, window_end, seq)
+    VALUES (strat_a, key_a, uid_a, '2026-06-01', NULL, 5);
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (RLS 3b): tenant B inserted a coherent tenant-A row — RLS WITH CHECK missing or asymmetric with USING';
+  END IF;
+  IF err_msg LIKE '%must match%' OR err_msg LIKE '%cross-tenant%' THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (RLS 3b): coherent A-triple was blocked by the owner-coherence TRIGGER (%), not WITH CHECK — WITH CHECK is not independently proven', err_msg;
+  END IF;
+
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
 

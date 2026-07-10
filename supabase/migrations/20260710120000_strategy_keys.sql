@@ -84,15 +84,20 @@ BEGIN
       'strategy_keys.strategy_id (%) does not reference an existing strategies row',
       NEW.strategy_id;
   END IF;
+  -- Least-disclosure (ADR-0020): this fn is SECURITY DEFINER and reads api_keys /
+  -- strategies past their owner-only RLS, so it MUST NOT echo the resolved owner
+  -- ids (v_key_owner / v_strategy_owner) into the client-facing error — that would
+  -- turn a failed INSERT into a per-tenant ownership-disclosure + existence oracle.
+  -- Only caller-supplied NEW.* values may appear; keep the '%must match%' and
+  -- '%cross-tenant%' arms distinct (pinned by test_strategy_keys_rls.sql).
   IF NEW.owner_id IS DISTINCT FROM v_key_owner THEN
     RAISE EXCEPTION
-      'strategy_keys.owner_id (%) must match api_keys.user_id (%) for api_key_id %',
-      NEW.owner_id, v_key_owner, NEW.api_key_id;
+      'strategy_keys.owner_id (%) must match the owner of api_key_id %',
+      NEW.owner_id, NEW.api_key_id;
   END IF;
   IF v_strategy_owner IS DISTINCT FROM v_key_owner THEN
     RAISE EXCEPTION
-      'strategy_keys: strategy owner (%) must match api_key owner (%) — cross-tenant attach blocked',
-      v_strategy_owner, v_key_owner;
+      'strategy_keys: strategy owner must match api_key owner — cross-tenant attach blocked';
   END IF;
   RETURN NEW;
 END;
