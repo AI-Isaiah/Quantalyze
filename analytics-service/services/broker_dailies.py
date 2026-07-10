@@ -128,7 +128,12 @@ def gap_fill_daily_returns(returns: pd.Series) -> pd.Series:
     if returns.empty:
         return returns
     returns = returns.sort_index()
-    full_idx = pd.date_range(returns.index.min(), returns.index.max(), freq="D")
+    # Pin the datetime unit to `[us]` (the canonical analytics unit) so the
+    # gap-filled index matches the returns index it reindexes and does not
+    # depend on pandas' version-inferred `date_range` unit (#593 pandas 3.0).
+    full_idx = pd.date_range(
+        returns.index.min(), returns.index.max(), freq="D"
+    ).as_unit("us")
     return returns.reindex(full_idx, fill_value=0.0).astype("float64")
 
 

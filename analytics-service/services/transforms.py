@@ -192,7 +192,13 @@ def trades_to_daily_returns_with_status(
         # prev_equity.replace(0, ...) base swap — a zeroed/negative base FLAGS.
         core_input = pd.Series(
             daily_pnl.to_numpy(),
-            index=pd.DatetimeIndex(daily_pnl.index),
+            # pandas 3.0 infers a coarser unit (`[s]`) when a DatetimeIndex is
+            # built from python `date` objects (the `.dt.date` + groupby("date")
+            # index above), whereas every other construction path (date_range,
+            # to_datetime, DatetimeIndex(Timestamp)) yields `[us]`. Pin the unit
+            # so byte-identity old-vs-new does not diverge on index dtype alone
+            # (issue #593 pandas 3.0 migration).
+            index=pd.DatetimeIndex(daily_pnl.index).as_unit("us"),
             name="daily_pnl",
         )
         returns, nav_meta = reconstruct_nav_and_twr(
@@ -233,7 +239,10 @@ def trades_to_daily_returns_with_status(
 
     core_input = pd.Series(
         daily_pnl_series.to_numpy(),
-        index=pd.DatetimeIndex(daily_pnl_series.index),
+        # Pin the datetime unit to `[us]` — the index comes from a groupby on
+        # python `date` objects which pandas 3.0 infers as `[s]` (see the
+        # daily_pnl branch above); #593 pandas 3.0 migration.
+        index=pd.DatetimeIndex(daily_pnl_series.index).as_unit("us"),
         name="daily_pnl",
     )
     returns, nav_meta = reconstruct_nav_and_twr(

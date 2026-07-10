@@ -91,7 +91,11 @@ def old_anchor_to_today_returns(
 
     return pd.Series(
         returns_values.values,
-        index=pd.DatetimeIndex(returns_values.index),
+        # `returns_values.index` is the groupby("date") index of python `date`
+        # objects, which pandas 3.0 infers as `[s]`; the witness in
+        # test_golden_parity is built via `pd.to_datetime([...])` (`[us]`), so
+        # pin the oracle to the same `[us]` unit for byte-identity (#593).
+        index=pd.DatetimeIndex(returns_values.index).as_unit("us"),
         name="returns",
     )
 
@@ -294,7 +298,10 @@ def old_anchor_to_today_returns_from_trades(
 
     return pd.Series(
         returns_values.values,
-        index=pd.DatetimeIndex(returns_values.index),
+        # See the daily_pnl-branch oracle above: pin the `date`-object groupby
+        # index to `[us]` so pandas 3.0's `[s]` inference does not break
+        # byte-identity against the `[us]` witness (#593).
+        index=pd.DatetimeIndex(returns_values.index).as_unit("us"),
         name="returns",
     )
 

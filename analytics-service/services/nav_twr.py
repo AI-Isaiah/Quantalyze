@@ -232,7 +232,12 @@ def _flows_to_daily_usd(external_flows: Sequence[Any] | None) -> pd.Series:
         sums[day] += usd
 
     ordered_days = sorted(sums)
-    index = pd.DatetimeIndex([pd.Timestamp(d) for d in ordered_days])
+    # Pin the datetime unit to `[us]` — the single canonical unit the analytics
+    # daily-returns path uses so a flow index unions cleanly with the pnl index
+    # regardless of pandas' version-dependent unit inference (#593 pandas 3.0).
+    index = pd.DatetimeIndex(
+        [pd.Timestamp(d) for d in ordered_days]
+    ).as_unit("us")
     return pd.Series([sums[d] for d in ordered_days], index=index, name="flows")
 
 
