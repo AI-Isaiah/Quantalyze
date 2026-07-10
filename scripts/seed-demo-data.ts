@@ -927,7 +927,7 @@ async function main() {
   );
   for (let i = 0; i < STRATEGY_PROFILES.length; i++) {
     const profile = STRATEGY_PROFILES[i];
-    const { error: sErr } = await supabase.from("strategies").insert({
+    const { error: sErr } = await supabase.from("strategies").upsert({
       id: profile.id,
       user_id: profile.user_id,
       // Link to crypto-sma category so /discovery/crypto-sma can find
@@ -947,11 +947,11 @@ async function main() {
       benchmark: "BTC",
       disclosure_tier: profile.disclosure_tier,
       codename: profile.codename ?? null,
-    });
+    }, { onConflict: "id" });
     if (sErr) throw sErr;
 
     const analytics = generateAnalytics(profile, 1000 + i);
-    const { error: aErr } = await supabase.from("strategy_analytics").insert({
+    const { error: aErr } = await supabase.from("strategy_analytics").upsert({
       strategy_id: profile.id,
       computation_status: "complete",
       benchmark: "BTC",
@@ -964,7 +964,7 @@ async function main() {
       max_drawdown: analytics.max_drawdown,
       six_month_return: analytics.six_month_return,
       sparkline_returns: analytics.sparkline_returns,
-    });
+    }, { onConflict: "strategy_id" });
     if (aErr) throw aErr;
   }
 
