@@ -397,6 +397,17 @@ export function MultiKeyConnectStep({
           apiKeyId: data.api_key_id,
           errorCode: null,
           confirmingRemove: false,
+          // T-88-18: the key now exists server-side (referenced by api_key_id)
+          // and the plaintext is no longer read on any validated-panel path
+          // (the Continue payload sends only {api_key_id, window_start,
+          // window_end}; the validated panel renders a read-only summary chip,
+          // not the credential inputs). Clear the plaintext from React state so
+          // it does not linger for the lifetime of the step while other keys
+          // are added/reordered — mirroring single-key ConnectKeyStep, which
+          // unmounts on success.
+          apiKey: "",
+          apiSecret: "",
+          passphrase: "",
         });
       } catch (err) {
         updatePanel(idx, {
@@ -436,7 +447,27 @@ export function MultiKeyConnectStep({
       : null;
 
   const continueErrorEnvelope = continueError
-    ? buildEnvelope(continueError, correlationId)
+    ? continueError === "MULTI_KEY_WINDOWS_INVALID"
+      ? {
+          // The set-members route rejected the key windows the client passed —
+          // reachable via browser-vs-server clock skew tripping the future-window
+          // rule server-side only. MULTI_KEY_WINDOWS_INVALID is a SUMMARY-ONLY
+          // table entry (empty cause/fix, recoverable:false) built for the inline
+          // client-summary path, where the component supplies the live per-issue
+          // lines (summaryEnvelope above). On THIS server-reject path client
+          // validation already passed, so there are no field-level issues to
+          // highlight — a bare summary envelope would show an empty box with no
+          // Retry. Mirror the summaryEnvelope spread+override pattern: spread
+          // buildEnvelope then override with a populated cause and force
+          // recoverable so ErrorEnvelope renders Retry (showRetry = recoverable
+          // && Boolean(onRetry)). Keep the table entry summary-only — do NOT
+          // pollute wizardErrors.ts.
+          ...buildEnvelope(continueError, correlationId),
+          cause:
+            "We couldn't save these key windows — the server rejected them, most likely a clock or timing mismatch between your browser and our servers. Review the dates and try again.",
+          recoverable: true,
+        }
+      : buildEnvelope(continueError, correlationId)
     : null;
 
   const handleContinue = useCallback(async () => {

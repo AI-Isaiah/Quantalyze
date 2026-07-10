@@ -372,6 +372,87 @@ describe("[ONB-01] MultiKeyConnectStep — loud dual-surface validation", () => 
   });
 });
 
+describe("[88-review] MultiKeyConnectStep — Continue server-reject envelope (regression from 6b8237d4)", () => {
+  // add-key succeeds so both panels validate; set-members rejects the windows
+  // the client already passed (reachable via browser-vs-server clock skew). The
+  // rejected code MULTI_KEY_WINDOWS_INVALID is a SUMMARY-ONLY table entry
+  // (empty cause/fix, recoverable:false), so a bare buildEnvelope on the
+  // Continue path produced a dead box: title only, no cause, no Retry. Pre-fix
+  // (before the spread+override) this test fails on both the cause and Retry
+  // assertions. Before 6b8237d4 the server returned INVALID_KEY_WINDOWS →
+  // UNKNOWN → populated + recoverable, so this is a true regression guard.
+  function fetchWithSetMembersReject() {
+    return vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        if (url.includes("composite/set-members")) {
+          return jsonResponse({ code: "MULTI_KEY_WINDOWS_INVALID" }, 400);
+        }
+        return jsonResponse({}, 200);
+      });
+  }
+
+  async function validatePanel(panelIdx: number, start: string, end: string) {
+    const panel = screen.getByTestId(`key-panel-${panelIdx}`);
+    fireEvent.change(within(panel).getByTestId(`key-${panelIdx}-api-key`), {
+      target: { value: `AK_${panelIdx}` },
+    });
+    fireEvent.change(within(panel).getByTestId(`key-${panelIdx}-api-secret`), {
+      target: { value: `SECRET_${panelIdx}` },
+    });
+    fireEvent.change(within(panel).getByTestId(`key-${panelIdx}-window-start`), {
+      target: { value: start },
+    });
+    if (end) {
+      fireEvent.change(within(panel).getByTestId(`key-${panelIdx}-window-end`), {
+        target: { value: end },
+      });
+    }
+    fireEvent.click(within(panel).getByTestId(`key-${panelIdx}-validate`));
+    await waitFor(() =>
+      expect(screen.getByTestId(`key-${panelIdx}-summary`)).toBeInTheDocument(),
+    );
+  }
+
+  it("renders a POPULATED, recoverable envelope (non-empty cause + Retry) when set-members rejects windows client validation passed — not a dead summary-only box", async () => {
+    fetchWithSetMembersReject();
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    // Adjacent handoff (a.end === b.start) does NOT overlap → client validation
+    // passes, so there is no inline/summary highlight to fall back on.
+    await validatePanel(0, "2024-01-01", "2024-06-01");
+    await validatePanel(1, "2024-06-01", "2024-09-01");
+
+    // Precondition for the dead-box bug: client validation passed, so the
+    // step-level summary envelope is absent (nothing to "highlight").
+    expect(screen.queryByTestId("multi-key-validation-summary")).toBeNull();
+
+    const cont = screen.getByTestId("multi-continue");
+    expect(cont).not.toBeDisabled();
+    fireEvent.click(cont);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute(
+      "data-error-code",
+      "MULTI_KEY_WINDOWS_INVALID",
+    );
+    // Non-empty cause (pre-fix: empty — summary-only table entry).
+    expect(envelope).toHaveTextContent(/server rejected them/i);
+    // Recoverable → the Retry affordance renders (pre-fix: recoverable=false).
+    expect(
+      within(envelope).getByRole("button", { name: "Retry" }),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — credential posture (T-88-18/19)", () => {
   it("never persists credential material to localStorage and never logs secrets", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
