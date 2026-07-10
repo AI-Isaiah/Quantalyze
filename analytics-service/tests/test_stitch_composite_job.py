@@ -472,6 +472,22 @@ async def test_dq_flags_merge_preserves_existing_key() -> None:
     assert "per_key" in dq and "gap_day_count" in dq  # composite mask merged in
 
 
+@pytest.mark.asyncio
+async def test_dispatch_routes_stitch_composite_kind() -> None:
+    """dispatch(kind='stitch_composite') routes to run_stitch_composite_job."""
+    from services.job_worker import DispatchResult, dispatch
+
+    handler = AsyncMock(
+        return_value=DispatchResult(outcome=DispatchOutcome.DONE)
+    )
+    with patch("services.job_worker.run_stitch_composite_job", new=handler):
+        result = await dispatch(
+            {"kind": "stitch_composite", "strategy_id": _STRATEGY_ID}
+        )
+    handler.assert_awaited_once()
+    assert result.outcome == DispatchOutcome.DONE
+
+
 def test_no_verification_or_publish_status_write_source_scan() -> None:
     """M-3: run_stitch_composite_job must NEVER advance verification/publish
     status (no composite GA before Phase 87's gate). Source scan of the function

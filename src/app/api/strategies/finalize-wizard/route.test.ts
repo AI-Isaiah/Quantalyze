@@ -81,6 +81,11 @@ const STATE = vi.hoisted(() => ({
   // H-0323 — forced error on admin api_keys.exchange SELECT (unified
   // path) so the keyRowErr fallback branch is reachable from tests.
   adminApiKeysSelectError: null as { message: string } | null,
+  // Phase 86 (COMP-02) — strategy_keys member count for the composite dispatch
+  // branch. >0 ⇒ enqueue stitch_composite; 0 ⇒ legacy sync_trades. The forced
+  // error exercises the W-4 fail-CLOSED branch (surface, never enqueue).
+  strategyKeysCount: 0 as number,
+  strategyKeysCountError: null as { message: string } | null,
   // H-0331 — capture the strategy name actually passed to
   // notifyFounderNewStrategy so tests can assert it came from the DB row.
   notifyFounderCalls: [] as Array<{ name: unknown; managerName: unknown }>,
@@ -202,6 +207,21 @@ vi.mock("@/lib/supabase/admin", () => ({
           }),
         };
       }
+      if (table === "strategy_keys") {
+        // Phase 86 — composite member-count probe: select('*', {count, head}).eq().
+        // The chain resolves to { count, error } (PostgREST head+count shape).
+        return {
+          select: () => ({
+            eq: async () => ({
+              count: STATE.strategyKeysCountError
+                ? null
+                : STATE.strategyKeysCount,
+              error: STATE.strategyKeysCountError,
+              data: null,
+            }),
+          }),
+        };
+      }
       throw new Error(`unexpected admin from(${table})`);
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -315,6 +335,8 @@ beforeEach(async () => {
   STATE.adminStrategiesError = null;
   STATE.adminApiKeysExchange = "okx";
   STATE.adminApiKeysSelectError = null;
+  STATE.strategyKeysCount = 0;
+  STATE.strategyKeysCountError = null;
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
@@ -712,6 +734,78 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", 
       (c) => c.name === "enqueue_compute_job",
     );
     expect(enqueueCall).toBeUndefined();
+  });
+});
+
+/**
+ * Phase 86 (COMP-02) — composite dispatch. A strategy with >=1 strategy_keys
+ * members enqueues `stitch_composite`; zero members keeps the byte-identical
+ * `sync_trades`. W-4: a strategy_keys count-query ERROR fails CLOSED — it must
+ * NOT silently enqueue the single-key `sync_trades` on a possible composite.
+ */
+describe("POST /api/strategies/finalize-wizard — Phase 86 composite dispatch", () => {
+  it("enqueues stitch_composite when the strategy has >=1 strategy_keys members", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.strategyKeysCount = 3;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeDefined();
+    expect(enqueueCall!.args.p_kind).toBe("stitch_composite");
+    expect(enqueueCall!.args.p_strategy_id).toBe(STRATEGY_ID);
+    fetchSpy.mockRestore();
+  });
+
+  it("keeps sync_trades (byte-identical) when the strategy has zero members", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.strategyKeysCount = 0;
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+    await flushAfter();
+
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeDefined();
+    expect(enqueueCall!.args.p_kind).toBe("sync_trades");
+    fetchSpy.mockRestore();
+  });
+
+  it("W-4: fails CLOSED on a strategy_keys count error — never enqueues sync_trades", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.strategyKeysCountError = { message: "count boom" };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    // The finalize itself still returns 200 (the enqueue is a non-blocking
+    // after() side effect); the count error is surfaced to Sentry, not enqueued.
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // No enqueue_compute_job AT ALL — never a single-key kind on a possible composite.
+    const enqueueCall = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueueCall).toBeUndefined();
+    // The count error is escalated to Sentry (Promise.allSettled rejection).
+    const sentry = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
+    );
+    expect(sentry).toBeDefined();
+    fetchSpy.mockRestore();
   });
 });
 

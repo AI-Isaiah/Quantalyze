@@ -738,6 +738,44 @@ async function runLegacyFinalize(args: {
         label: "enqueue_sync_trades_job",
         run: async () => {
           if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+          // Phase 86 (COMP-02) — composite dispatch. A strategy with one or more
+          // strategy_keys members is a MULTI-KEY composite: enqueue
+          // `stitch_composite` (the worker fans out over the members, decrypts
+          // each key worker-side, clips + stitches). A strategy with zero members
+          // is the legacy single-key path → `sync_trades`, byte-identical.
+          //
+          // The route reads ONLY a count — it NEVER decrypts (worker-only
+          // decryption, LOCKED). resolvedId scoping is unchanged (T-86-14).
+          const { count, error: countErr } = await admin
+            .from("strategy_keys")
+            .select("*", { count: "exact", head: true })
+            .eq("strategy_id", resolvedId);
+          if (countErr) {
+            // W-4 FAIL CLOSED: on a count-query error we do NOT know whether this
+            // strategy is a composite. Routing a possible member-bearing composite
+            // through the single-key `sync_trades` path would silently produce a
+            // wrong/partial derivation. Surface the error (Promise.allSettled →
+            // Sentry) instead of enqueuing a single-key kind on a possible
+            // composite. The reconcile cron re-drives stuck 'pending' rows, so the
+            // strategy is not orphaned — it simply is not mis-derived.
+            throw new Error(
+              `strategy_keys count failed: ${countErr.message}`,
+            );
+          }
+          if ((count ?? 0) > 0) {
+            const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+              p_strategy_id: resolvedId,
+              p_kind: "stitch_composite",
+              p_metadata: { source: "finalize-wizard" },
+            });
+            if (enqueueErr) {
+              throw new Error(
+                `enqueue_compute_job failed: ${enqueueErr.message}`,
+              );
+            }
+            return;
+          }
+          // Legacy single-key path (zero strategy_keys members) — unchanged.
           if (!keyLink?.api_key_id) return;
           const { error: enqueueErr } = await admin.rpc(
             "enqueue_compute_job",

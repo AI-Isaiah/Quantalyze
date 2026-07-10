@@ -4311,6 +4311,10 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
     elif kind == "derive_broker_dailies":
         # Broker key full-history → dailies → standard CSV route.
         handler = run_derive_broker_dailies_job
+    elif kind == "stitch_composite":
+        # Phase 86 / COMP-02 — multi-key composite: fan out over strategy_keys
+        # members → clip → fail-loud overlap → arithmetic stitch → both-basis persist.
+        handler = run_stitch_composite_job
     elif kind == "reconcile_strategy":
         handler = run_reconcile_strategy_job
     elif kind == "compute_intro_snapshot":
