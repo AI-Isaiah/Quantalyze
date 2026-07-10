@@ -59,6 +59,12 @@ export type WizardErrorCode =
   // caller) when wizard_session_id was already submitted; the UI shows
   // a friendly "you already submitted this" envelope.
   | "WIZARD_DUPLICATE"
+  // Phase 88 / ONB-01 — multi-key connect step (MultiKeyConnectStep).
+  // CLIENT-side validation code for the step-level cross-key window summary
+  // (A4: route the summary through buildEnvelope rather than a bespoke shell).
+  // The per-issue lines are supplied by the component (from keyWindowsSchema);
+  // this code carries the interpolated summary TITLE only.
+  | "MULTI_KEY_WINDOWS_INVALID"
   // Fallback
   | "UNKNOWN";
 
@@ -578,6 +584,18 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["leave_and_return", "request_call"],
   },
 
+  MULTI_KEY_WINDOWS_INVALID: {
+    // The `{n}` count is interpolated by formatKeyError via `issueCount`; the
+    // default (no context) keeps a sensible non-interpolated title. The bulleted
+    // fix list is REPLACED at render time by the component with the live
+    // per-issue field messages (from keyWindowsSchema) — one spec, one copy.
+    title: "Fix the highlighted issues before continuing.",
+    cause: "",
+    fix: [],
+    docsHref: "/security",
+    actions: [],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -606,6 +624,8 @@ export interface WizardErrorContext {
   computationError?: string | null;
   /** File size in MB, formatted as a string with 1 decimal (for CSV_FILE_TOO_LARGE). */
   sizeMb?: string;
+  /** Count of blocking cross-key window issues (for MULTI_KEY_WINDOWS_INVALID). */
+  issueCount?: number;
 }
 
 /**
@@ -662,6 +682,17 @@ export function formatKeyError(
     return {
       ...base,
       title: base.title.replace(SIZE_MB_PLACEHOLDER, context.sizeMb),
+    };
+  }
+
+  if (
+    code === "MULTI_KEY_WINDOWS_INVALID" &&
+    context?.issueCount !== undefined
+  ) {
+    const n = context.issueCount;
+    return {
+      ...base,
+      title: `Fix ${n} issue${n === 1 ? "" : "s"} before continuing`,
     };
   }
 
