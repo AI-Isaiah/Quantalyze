@@ -6,9 +6,10 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
-import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveIngestSource, deriveSegmentMarkers } from "@/lib/factsheet/build-payload";
+import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
+import type { DailyReturn, FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
 
 /**
@@ -38,7 +39,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
         `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
-       strategy_analytics ( daily_returns, returns_series, computed_at )`,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis )`,
       )
       .eq("id", id),
   )
@@ -64,13 +65,72 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   //       real series lives in `returns_series` as a cumprod equity curve.
   // Both gates have to fall before we render the "still computing"
   // placeholder.
-  const dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
+  let dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
   // no-invented-data rationale (NEW-C20-01) live in deriveIngestSource — the
   // single source of truth shared with the discovery page and pinned by
   // audit-c20's RED-TEAM-H1.
   const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
+
+  // Phase 90 (D6) — composite discriminator is SERVER TRUTH
+  // (`data_quality_flags.composite`), NEVER `apiKeyId === null` (Phase-89
+  // Pitfall 1). A stitched multi-key composite has `daily_returns=NULL` (so
+  // `deriveIngestSource` above classifies it "api" on the RAW column — LEFT
+  // UNTOUCHED, pinned by audit-c20 RED-TEAM-H1) but its honest cash series lives
+  // sparse in `csv_daily_returns`. We read that series, route the payload down
+  // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
+  // the arithmetic running-cumulative curve, and thread the marker/basis fields.
+  const dqf = analytics?.data_quality_flags as
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown }
+    | null
+    | undefined;
+  const isComposite = dqf?.composite === true;
+  let buildOpts: BuildFactsheetOpts | undefined;
+  if (isComposite) {
+    // rls-policy-auditor: this read REUSES the in-scope service-role admin
+    // `supabase` handle already created at the top of this function under the
+    // SAME `withPublishedOnly` visibility boundary — NO new client, NO broader
+    // privilege. `csv_daily_returns` has service_role/owner/admin RLS only
+    // (migration 20260522111839), so the admin handle is the ONLY correct
+    // client; the outer request-scoped RLS signature probe + notFound() remains
+    // the unchanged auth gate. Parameterized `.eq` + `.limit(20000)` ceiling.
+    const { data: sparseRows, error: sparseErr } = await supabase
+      .from("csv_daily_returns")
+      .select("date, daily_return")
+      .eq("strategy_id", id)
+      .order("date", { ascending: true })
+      .limit(20000); // Flat safety ceiling, T-36-03-03 precedent
+    if (sparseErr) {
+      console.warn("[factsheet] fetchAndBuildPayload — composite csv_daily_returns read failed", {
+        id,
+        errorMessage: sparseErr.message,
+      });
+    }
+    dailyReturns = (sparseRows ?? []).map(
+      (r): DailyReturn => ({ date: r.date as string, value: r.daily_return as number }),
+    );
+    const markers = deriveSegmentMarkers(dqf);
+    const metricsByBasis = (analytics?.metrics_json_by_basis ?? undefined) as
+      | BuildFactsheetOpts["metricsByBasis"]
+      | undefined;
+    // D1 own-property check: the `mark_to_market` key is OMITTED (never JSON
+    // null) when the venue/book can't produce an MTM basis — presence IS the gate.
+    const mtmAvailable =
+      !!metricsByBasis &&
+      Object.prototype.hasOwnProperty.call(metricsByBasis, "mark_to_market");
+    buildOpts = {
+      cumulativeMethod: "arithmetic",
+      segmentBoundaries: markers.segmentBoundaries,
+      missingSegments: markers.missingSegments,
+      metricsByBasis,
+      dataQuality: { composite: true },
+      mtmGate: {
+        available: mtmAvailable,
+        reason: typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined,
+      },
+    };
+  }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an
   // api-verified strategy as csv if the ingester later back-fills the column.
@@ -125,7 +185,10 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       markets: strategy.markets ?? [],
       computedAt,
       trustTier: null,
-      ingestSource,
+      // Composites route down the csv arm EXPLICITLY (suppresses the three
+      // synthesized panels via the existing discriminated union — no new
+      // logic). Single-key keeps the raw-column-derived classification.
+      ingestSource: isComposite ? "csv" : ingestSource,
       description: strategy.description ?? null,
       subtypes: strategy.subtypes ?? [],
       supportedExchanges: strategy.supported_exchanges ?? [],
@@ -138,6 +201,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       assetClass: strategy.asset_class ?? null,
     },
     dailyReturns,
+    buildOpts,
   );
 }
 
@@ -160,7 +224,13 @@ function buildFactsheetPayloadCached(
     // which evaluates !== "api" and silently suppresses all gated panels
     // (PeerPercentile, AllocatorSection, Signatures) for legitimate API
     // strategies during the TTL drain window. (RED-TEAM-C1)
-    ["factsheet-v2-payload-v3", id],
+    // Bumped v3→v4 (Phase 90): composite payloads now carry five OPTIONAL
+    // fields (segmentBoundaries / missingSegments / metricsByBasis / mtmGate /
+    // dataQuality). Because they are optional-absent, a stale v3 entry
+    // deserialized as v4 degrades gracefully (missing marker/basis fields → no
+    // toggle / no markers during the TTL drain, never a crash) — the bump is
+    // belt-and-suspenders. `computedAt` in the key busts on any re-stitch.
+    ["factsheet-v2-payload-v4", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
