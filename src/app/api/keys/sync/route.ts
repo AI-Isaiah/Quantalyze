@@ -35,6 +35,13 @@ import type { User } from "@supabase/supabase-js";
  *
  * Response shape is identical on both legacy paths: 202 {accepted, strategy_id, status}.
  *
+ * Phase 89 / PREV-01 — composite-first kickoff. A member-bearing composite
+ * (strategies.api_key_id === null AND a strategy_keys count > 0) enqueues the
+ * SAME `stitch_composite` job finalize dispatches, HOISTED ahead of
+ * isUnifiedBackboneActive() (prod runs unified='on', whose single-key arm
+ * cannot honestly derive a NULL-api_key composite). This mirrors the Phase-88
+ * finalize-wizard hoist and fails CLOSED on an unknowable membership count.
+ *
  * ─── Direct-writes audit (D.10) ───────────────────────────────────────
  * Post-2.9 R2 writers of strategy_analytics.computation_status:
  *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — sole
@@ -104,7 +111,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const supabase = await createClient();
   const { data: strategy } = await supabase
     .from("strategies")
-    .select("id, user_id")
+    // 89-02: api_key_id joins the ownership select so the composite-first
+    // branch below can gate on api_key_id === null with ZERO extra queries for
+    // single-key (api_key_id-bearing) strategies.
+    .select("id, user_id, api_key_id")
     .eq("id", strategy_id)
     .eq("user_id", user.id)
     .single();
@@ -120,6 +130,107 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { error: "Strategy not found" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
+  }
+
+  // ── Composite-first kickoff ────────────────────────────────────────────
+  // Phase 89 / PREV-01. The preview step (wizard index 2) POSTs /api/keys/sync
+  // BEFORE finalize; a member-bearing composite must kick off the SAME
+  // production `stitch_composite` job finalize enqueues — NOT sync_trades /
+  // the unified single-key resync — so the stitched strategy_analytics row the
+  // preview reads actually exists. Placed AHEAD of isUnifiedBackboneActive()
+  // because prod runs process_key_unified_backbone='on' and the unified arm
+  // cannot honestly derive a NULL-api_key composite (it would mis-route to a
+  // single-key path). This MIRRORS the Phase-88 finalize-wizard hoist
+  // (finalize-wizard/route.ts:517-621).
+  //
+  // Scoped to api_key_id === null: a composite has strategies.api_key_id NULL
+  // (members live in strategy_keys); api_key_id SET is definitively single-key
+  // (mutually exclusive by construction), so single-key strategies pay ZERO
+  // extra queries. The probe reads a COUNT only — never key material (all key
+  // handling is worker-only, LOCKED).
+  if (strategy.api_key_id === null) {
+    const admin = createAdminClient();
+    let memberCount: number;
+    try {
+      // compositeMemberCount fails CLOSED (stamps a terminal 'failed' row, then
+      // throws) on an unknowable count — never falls open to a single-key
+      // sync_trades dispatch of a POSSIBLE composite (W-4 / T-88-10).
+      memberCount = await compositeMemberCount(admin, strategy_id);
+    } catch (err) {
+      console.error(
+        `[keys/sync] composite membership probe failed for ${strategy_id}:`,
+        err,
+      );
+      return NextResponse.json(
+        { error: "Could not start sync. Try again in a moment." },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (memberCount > 0) {
+      // stitch_composite is a compute_jobs kind — without the queue there is NO
+      // worker to derive it. Fail LOUD (terminal 'failed' stamp + 503) rather
+      // than orphan a composite that never derives. Mirrors finalize :889-906.
+      if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
+        await admin.from("strategy_analytics").upsert(
+          {
+            strategy_id,
+            computation_status: "failed",
+            computation_warned: false,
+            computation_error:
+              "Composite strategy requires the compute-jobs queue " +
+              "(USE_COMPUTE_JOBS_QUEUE) to derive; enable it and retry.",
+            data_quality_flags: { csv_source: true, composite: true },
+          },
+          { onConflict: "strategy_id" },
+        );
+        return NextResponse.json(
+          { error: "Could not start sync. Try again in a moment." },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+
+      // Thread the inbound correlation_id like the sync_trades arm (:253-259)
+      // so the forensic chain stays queryable end-to-end.
+      const correlation_id = await getCorrelationId();
+      const { data: rpcData, error: rpcError } = await admin.rpc(
+        "enqueue_compute_job",
+        {
+          p_strategy_id: strategy_id,
+          p_kind: "stitch_composite",
+          p_metadata: { source: "keys/sync", correlation_id },
+        },
+      );
+      if (rpcError) {
+        console.error(
+          `[keys/sync] enqueue_compute_job (stitch_composite) RPC failed for ${strategy_id}:`,
+          rpcError,
+        );
+        return NextResponse.json(
+          { error: "Could not start sync. Try again in a moment." },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+      console.log(
+        `[keys/sync] enqueued stitch_composite job=${rpcData} for strategy=${strategy_id}`,
+      );
+
+      // Idempotent double-submit is handled by the compute_jobs partial unique
+      // index (finalize comment :860-864); repeated preview mounts re-POST safely.
+      logAuditEventAsUser(admin, user.id, {
+        action: "sync.start",
+        entity_type: "sync",
+        entity_id: strategy_id,
+        metadata: { path: "queue", kind: "stitch_composite" },
+      });
+
+      return NextResponse.json(
+        { ok: true, accepted: true, strategy_id, status: "syncing" },
+        { status: 202, headers: NO_STORE_HEADERS },
+      );
+    }
+    // memberCount === 0 (CSV strategy, api_key_id null, no members) → fall
+    // through to the existing unified/legacy split byte-unchanged.
   }
 
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
@@ -154,6 +265,57 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   return await legacyKeysSyncHandler({ supabase, strategy_id, userId: user.id });
 });
+
+/**
+ * Composite membership head-count probe.
+ *
+ * DUPLICATED (Rule 7, consciously) from finalize-wizard/route.ts
+ * `compositeMemberCount` (:1027-1058). Extracting a shared helper would touch
+ * the just-verified, frozen Phase-88 finalize surface for ZERO behavior change,
+ * against this milestone's additive-only discipline — flagged for Phase-91
+ * consolidation.
+ *
+ * Fails CLOSED (stamps a terminal 'failed' analytics row so the wizard poller
+ * reaches a gate, then throws) when the count is unknowable — a query error, or
+ * a null count with NO error (PostgREST can return count===null without
+ * erroring; `(count ?? 0) > 0` would fall OPEN to a single-key path). Routing a
+ * possible member-bearing composite through a single-key path would silently
+ * produce a wrong/partial derivation, and the reconcile cron never re-drives a
+ * composite.
+ *
+ * Reads ONLY a count — never key material (all key handling is worker-only, LOCKED).
+ */
+async function compositeMemberCount(
+  admin: ReturnType<typeof createAdminClient>,
+  strategyId: string,
+): Promise<number> {
+  const { count, error: countErr } = await admin
+    .from("strategy_keys")
+    .select("*", { count: "exact", head: true })
+    .eq("strategy_id", strategyId);
+  if (countErr || count === null) {
+    const reason = countErr
+      ? `strategy_keys count failed: ${countErr.message}`
+      : "strategy_keys count returned null without an error";
+    // Finding 10 (mirrored): membership is UNKNOWN here — do NOT assert
+    // `composite: true`, which claims a fact we could not establish. An honest
+    // `membership_unknown` reason avoids mislabeling a single-key strategy.
+    await admin.from("strategy_analytics").upsert(
+      {
+        strategy_id: strategyId,
+        computation_status: "failed",
+        computation_warned: false,
+        computation_error:
+          "Could not determine composite membership " +
+          "(strategy_keys count unavailable). Please retry.",
+        data_quality_flags: { csv_source: true, membership_unknown: true },
+      },
+      { onConflict: "strategy_id" },
+    );
+    throw new Error(reason);
+  }
+  return count;
+}
 
 /**
  * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
