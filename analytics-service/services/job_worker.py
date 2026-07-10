@@ -2795,6 +2795,41 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
     {"deribit", "binance", "okx", "bybit"}
 )
 
+# Phase 86 / Finding 8 — a composite fans out over its members with (worst case,
+# when MTM is admissible) TWO sequential exchange crawls per member. The
+# stitch_composite handler runs under a FIXED TIMEOUT_PER_KIND["stitch_composite"]
+# budget that does NOT scale with member count, so a large-N composite would
+# deterministically exceed the budget and be classified TRANSIENT → retried
+# FOREVER (the wizard poller spins, never reaching a terminal gate). Rather than
+# ship a silently-doomed job, cap the member count and fail LOUD PERMANENT above
+# it. The cap is DERIVED from the budget and a conservative per-crawl estimate so
+# it tracks the timeout automatically; ops can override via COMPOSITE_MAX_MEMBERS
+# (a larger timeout + faster egress may justify a higher cap) without a code
+# change. Scaling the actual budget by member count is the follow-up (it needs the
+# member count plumbed into the dispatch-level wait_for AND the main_worker
+# watchdog stale threshold — out of scope for this fail-safe).
+_COMPOSITE_PER_CRAWL_SECONDS = 120.0  # ~90-day Deribit native backfill, conservative
+
+
+def _composite_max_members() -> int:
+    """The largest member count whose worst-case 2-crawls-per-member fan-out fits
+    (with headroom) inside the stitch_composite timeout budget. Env-overridable via
+    COMPOSITE_MAX_MEMBERS."""
+    override = os.environ.get("COMPOSITE_MAX_MEMBERS")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            logger.warning(
+                "COMPOSITE_MAX_MEMBERS=%r is not a positive int; using derived cap",
+                override,
+            )
+    budget = TIMEOUT_PER_KIND.get("stitch_composite", 20 * 60)
+    # 2 crawls/member worst case; keep ~20% headroom for stitch + compute + persist.
+    return max(1, int((budget * 0.8) / (2 * _COMPOSITE_PER_CRAWL_SECONDS)))
+
 
 async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 86 (COMP-02 / COMP-04) — the production multi-key composite stitch.
@@ -2918,6 +2953,27 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message="run_stitch_composite_job: strategy has 0 strategy_keys members",
+            error_kind="permanent",
+        )
+
+    # Finding 8: fail LOUD PERMANENT (before any crawl) above the member cap. A
+    # composite with more members than the fixed timeout budget can crawl would
+    # deterministically time out and be retried FOREVER as 'transient' — the wizard
+    # poller spins with no terminal gate. A clear permanent failure is honest and
+    # actionable (split the composite or raise COMPOSITE_MAX_MEMBERS / the timeout).
+    _max_members = _composite_max_members()
+    if len(members) > _max_members:
+        await _stamp_failed(
+            f"Composite has {len(members)} member keys, above the safe maximum of "
+            f"{_max_members} for the current derive-timeout budget. Reduce members "
+            "or contact support to raise the limit."
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                f"run_stitch_composite_job: {len(members)} members exceeds cap "
+                f"{_max_members} (would deterministically time out)"
+            ),
             error_kind="permanent",
         )
 

@@ -608,6 +608,39 @@ async def test_deferred_preflight_does_not_stamp_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_member_count_above_cap_permanent_before_any_crawl() -> None:
+    """Finding 8: a composite whose member count exceeds the derive-timeout cap
+    (4 for the default 20-min budget) would deterministically exceed the FIXED
+    stitch_composite timeout and be retried FOREVER as 'transient'. It must fail
+    LOUD PERMANENT with a terminal stamp BEFORE any exchange crawl. Neuter (drop
+    the cap) → the job proceeds to crawl N members → this reddens (build called)."""
+    from services.job_worker import _composite_max_members
+
+    cap = _composite_max_members()
+    fake = _FakeSupabase(members=[
+        _member(i, f"2024-{i:02d}-01", f"2024-{i:02d}-15")
+        for i in range(1, cap + 2)  # cap + 1 members (disjoint monthly windows)
+    ])
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport()))
+    patches = _deribit_patches(fake, combine_returns=[], has_option_activity=False)
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    build_spy.assert_not_called()  # capped BEFORE any crawl
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "over-cap composite must stamp a terminal failed row"
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_stitch_composite_kind() -> None:
     """dispatch(kind='stitch_composite') routes to run_stitch_composite_job."""
     from services.job_worker import DispatchResult, dispatch
