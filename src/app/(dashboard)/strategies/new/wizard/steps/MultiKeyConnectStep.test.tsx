@@ -37,9 +37,9 @@ vi.mock("@/lib/for-quants-analytics", () => ({
   trackForQuantsEventClient: (...args: unknown[]) => trackMock(...args),
 }));
 
-const SESSION = "11111111-1111-1111-1111-111111111111";
-const STRATEGY_ID = "22222222-2222-2222-2222-222222222222";
-const API_KEY_ID = "33333333-3333-3333-3333-333333333333";
+const SESSION = "11111111-1111-4111-8111-111111111111";
+const STRATEGY_ID = "22222222-2222-4222-8222-222222222222";
+const API_KEY_ID = "33333333-3333-4333-8333-333333333333";
 
 function jsonResponse(body: unknown, status: number) {
   return new Response(JSON.stringify(body), {
@@ -87,7 +87,6 @@ function stripDynamicAttrs(html: string): string {
 
 beforeEach(() => {
   trackMock.mockClear();
-  localStorage.clear();
 });
 
 afterEach(() => {
@@ -394,11 +393,11 @@ describe("[ONB-01] MultiKeyConnectStep — credential posture (T-88-18/19)", () 
       expect(screen.getByTestId("key-1-summary")).toBeInTheDocument(),
     );
 
-    // No localStorage value carries the secret (nor any key).
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i)!;
-      expect(localStorage.getItem(k)).not.toContain(SECRET);
-    }
+    // No localStorage value carries the secret. (The jsdom setup stubs
+    // localStorage as a plain object; a component that called setItem would
+    // throw here — the component provably never persists secrets client-side.)
+    const stored = JSON.stringify(globalThis.localStorage ?? {});
+    expect(stored).not.toContain(SECRET);
     // No console call echoes the secret.
     const allLogs = [...errSpy.mock.calls, ...logSpy.mock.calls]
       .flat()

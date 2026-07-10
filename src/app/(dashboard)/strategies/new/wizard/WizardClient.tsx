@@ -7,7 +7,8 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { RequestCallModal } from "@/app/(marketing)/for-quants/RequestCallModal";
 import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
-import { ConnectKeyStep, type ConnectKeySuccess } from "./steps/ConnectKeyStep";
+import { type ConnectKeySuccess } from "./steps/ConnectKeyStep";
+import { MultiKeyConnectStep } from "./steps/MultiKeyConnectStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
 import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
 import { canonicalizeExchangeList } from "@/lib/constants";
@@ -627,7 +628,11 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         {source === "api" ? (
           <>
             {step === "connect_key" && (
-              <ConnectKeyStep
+              // Phase 88 / ONB-01: the multi-key step. Its State A delegates to
+              // ConnectKeyStep with identical wizardSessionId + onSuccess, so the
+              // single-key WizardClient-observable behavior is unchanged (the
+              // frozen WizardClient.test.tsx passes unmodified).
+              <MultiKeyConnectStep
                 wizardSessionId={wizardSessionId}
                 onSuccess={handleConnectSuccess}
               />
