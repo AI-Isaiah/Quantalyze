@@ -98,7 +98,11 @@ BEGIN
 END;
 $function$;
 
-REVOKE ALL ON FUNCTION public.enforce_strategy_keys_owner_coherence() FROM PUBLIC;
+-- Trigger function: never invocable via PostgREST RPC. Revoke from the API
+-- roles too (not just PUBLIC) — matches the tenant-check trigger convention
+-- (check_strategy_api_key_ownership, guard_wizard_draft_updates) and clears the
+-- anon/authenticated SECURITY DEFINER-executable advisor.
+REVOKE ALL ON FUNCTION public.enforce_strategy_keys_owner_coherence() FROM PUBLIC, anon, authenticated;
 
 CREATE TRIGGER strategy_keys_owner_coherence
   BEFORE INSERT OR UPDATE ON public.strategy_keys
