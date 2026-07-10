@@ -162,6 +162,13 @@ export interface CompositePreviewData {
   benchmarkNote: string | null;
   series: { date: string; daily_return: number }[]; // full stitched series
   rawDenominatorConfig: unknown;
+  /**
+   * Server-computed composite cumulative return (raw, from
+   * `strategy_analytics.cumulative_return`). Used by the reconciliation caption
+   * to epsilon-verify that the per-key attribution reconstitutes it — a count
+   * match (`Σ member days == series.length`) is not a value identity (R2-4).
+   */
+  cumulativeReturn: number | null;
 }
 
 export interface SyncPreviewSnapshot {
@@ -253,6 +260,26 @@ function inclusiveGapDays(start: string, end: string): number {
   return Math.round((utcEpoch(e) - utcEpoch(s)) / 86_400_000) + 1;
 }
 
+/**
+ * Convert a declared HALF-OPEN `[start, end)` window's EXCLUSIVE `end` into the
+ * INCLUSIVE last calendar day WITH data (`end − 1 day`) for the coverage gantt,
+ * whose `CoverageSpan.last` is documented as "last calendar day with data"
+ * (R2-3). Passing the half-open `window_end` straight through draws member N's
+ * bar THROUGH member N+1's first owned day, so adjacent disjoint windows appear
+ * to overlap. UTC-epoch math + UTC accessors keep this timezone-stable and
+ * lexicographically ordered (dateday.ts discipline — no local-Date drift). A
+ * malformed bound degrades to pass-through rather than rendering garbage.
+ */
+function halfOpenEndToInclusiveLast(halfOpenEnd: string): string {
+  const parsed = parseIsoDay(halfOpenEnd);
+  if (!parsed) return halfOpenEnd;
+  const prev = new Date(utcEpoch(parsed) - 86_400_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${prev.getUTCFullYear()}-${pad(prev.getUTCMonth() + 1)}-${pad(
+    prev.getUTCDate(),
+  )}`;
+}
+
 export function SyncPreviewStep({
   strategyId,
   apiKeyId,
@@ -322,7 +349,32 @@ export function SyncPreviewStep({
           Number.isFinite(computedAtMs) &&
           Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
         if (isFresh) {
-          if (mountedRef.current) setPhase("waiting_for_complete");
+          // R2-2 (freshness-skip resume): the kickoff POST is SKIPPED here, so
+          // there is no server `composite` field to thread. Determine
+          // composite-ness DETERMINISTICALLY from the marker the stitch worker
+          // persists (`data_quality_flags.composite`) via a SEPARATE lightweight
+          // read — we do NOT re-derive/re-enqueue a fresh composite, and we do
+          // NOT touch the frozen `computation_status, computed_at` read above.
+          // Fail CLOSED to SYNC_FAILED when the marker row can't be read (error
+          // or missing row) rather than silently routing a possible composite
+          // through the single-key arm. A present row WITHOUT the marker is
+          // definitively single-key/CSV → byte-neutral resume.
+          const { data: dqRow, error: dqErr } = await supabase
+            .from("strategy_analytics")
+            .select("data_quality_flags")
+            .eq("strategy_id", strategyId)
+            .maybeSingle();
+          if (!mountedRef.current) return;
+          if (dqErr || !dqRow) {
+            setErrorCode("SYNC_FAILED");
+            setPhase("gate_failed");
+            return;
+          }
+          const dqFlags = (dqRow.data_quality_flags ?? {}) as {
+            composite?: unknown;
+          };
+          if (dqFlags.composite === true) setIsComposite(true);
+          setPhase("waiting_for_complete");
           return;
         }
         const res = await fetch("/api/keys/sync", {
@@ -636,6 +688,20 @@ export function SyncPreviewStep({
                 | { date: string; daily_return: number }[]
                 | null) ?? [];
 
+            // R2-5 (stale-complete race): the stitch_composite worker does a
+            // wholesale delete→re-upsert of csv_daily_returns. A poll landing
+            // inside that window can read a 'complete' status with 0 series
+            // rows — rendering an empty attribution table + gantt beside stale
+            // metrics. Treat an empty series as NOT-yet-terminal: stay in the
+            // waiting/computing state and re-poll until the re-upsert lands
+            // (bounded by the same elapsed WARN/RETRY affordances). A genuine
+            // stitched composite always persists ≥1 day, so this never hides a
+            // real result.
+            if (series.length === 0) {
+              scheduleNext();
+              return;
+            }
+
             const compositeMetrics: FactsheetPreviewMetric[] = [
               {
                 label: "CAGR",
@@ -704,6 +770,12 @@ export function SyncPreviewStep({
                 rawDenominatorConfig:
                   (stratRes.data as { returns_denominator_config?: unknown } | null)
                     ?.returns_denominator_config ?? null,
+                // R2-4: the SERVER-computed composite cumulative return, kept raw
+                // so the reconciliation caption can epsilon-check that the
+                // per-key attribution actually reconstitutes it (a count match
+                // alone is not a value identity).
+                cumulativeReturn:
+                  (analyticsRow?.cumulative_return as number | null) ?? null,
               },
             };
 
@@ -975,14 +1047,23 @@ export function SyncPreviewStep({
     // `[start,end)`; the per_key attribution windows below are inclusive.
     const ganttToday = new Date().toISOString().slice(0, 10);
     const sortedMembers = [...composite.members].sort((a, b) => a.seq - b.seq);
+    // R2-3: the declared `window_end` is HALF-OPEN (exclusive). The gantt's
+    // `last` is the INCLUSIVE last day WITH data, so convert `end → end − 1 day`;
+    // a still-live member (null `window_end`) keeps its open-ended treatment
+    // (drawn through TODAY). Without this, adjacent disjoint windows overlap by
+    // one day and contradict the correct inclusive attribution windows beside.
+    const ganttLast = (m: (typeof sortedMembers)[number]): string =>
+      m.windowEnd != null
+        ? halfOpenEndToInclusiveLast(m.windowEnd)
+        : ganttToday;
     const ganttSpans: CoverageSpan[] = sortedMembers.map((m) => ({
       first: m.windowStart,
-      last: m.windowEnd ?? ganttToday,
+      last: ganttLast(m),
     }));
     const ganttRows: CoverageTimelineRow[] = sortedMembers.map((m) => ({
       id: m.apiKeyId,
       name: memberDisplayName(m.seq, m.label, m.exchange),
-      span: { first: m.windowStart, last: m.windowEnd ?? ganttToday },
+      span: { first: m.windowStart, last: ganttLast(m) },
       inBlend: true,
     }));
     const ganttUnion = unionOf(ganttSpans);
@@ -1005,8 +1086,29 @@ export function SyncPreviewStep({
     // the whole series — otherwise the "sums/compounds to the cumulative" claim
     // would not hold (fail-safe honesty; no-invented-data).
     const attributedDays = attributionRows.reduce((sum, r) => sum + r.days, 0);
+    // R2-4: the count gate (`Σ member days == series.length`) is necessary but
+    // NOT sufficient — corrupted `per_key` windows or a `.limit(20000)` series
+    // truncation could satisfy it while the VALUE identity is false. Cheap
+    // insurance: also reconstitute the composite return from the per-key
+    // contributions (arithmetic Σ, or geometric Π(1+c)−1; a null no-data member
+    // contributes 0 / factor 1) and epsilon-compare it to the SERVER's
+    // cumulative_return. Suppress the "sums/compounds to the cumulative" claim
+    // when they diverge (fail-safe honesty — never assert a false identity).
+    const RECONCILE_EPSILON = 1e-4;
+    const reconstitutedReturn =
+      attributionBasis === "arithmetic"
+        ? attributionRows.reduce((sum, r) => sum + (r.contribution ?? 0), 0)
+        : attributionRows.reduce(
+            (prod, r) => prod * (1 + (r.contribution ?? 0)),
+            1,
+          ) - 1;
+    const cumulativeReturn = composite.cumulativeReturn;
+    const valueReconciles =
+      cumulativeReturn != null &&
+      Number.isFinite(cumulativeReturn) &&
+      Math.abs(reconstitutedReturn - cumulativeReturn) <= RECONCILE_EPSILON;
     const showReconciliationCaption =
-      attributedDays === composite.series.length;
+      attributedDays === composite.series.length && valueReconciles;
 
     // Pre-submit warnings — gaps rendered VERBATIM from the server mask (the
     // client never recomputes gaps from windows) + amber DQ caveats. Both are

@@ -42,6 +42,8 @@ const {
   // probe (hoisted so each test drives count/error) plus a spy on the select
   // call so the neutrality pins can assert the probe is (not) issued.
   strategyKeysProbe,
+  // R2-1: existing strategy_analytics row the fail-closed stamp guard reads.
+  analyticsExisting,
   mockStrategyKeysSelect,
   // 89-02: the unified-backbone flag (default OFF) + a spy on the unified
   // delegate so the hoist-ordering pin can prove the composite branch wins
@@ -67,6 +69,14 @@ const {
   },
   strategyKeysProbe: {
     count: 0 as number | null,
+    error: null as { message: string } | null,
+  },
+  // R2-1: the existing strategy_analytics row the guard reads before stamping a
+  // terminal 'failed'. Default (no prior derive) → the stamp proceeds; set
+  // `data.computation_status = 'complete'` to simulate a PUBLISHED composite the
+  // fail-closed stamp must NOT clobber.
+  analyticsExisting: {
+    data: null as { computation_status?: string } | null,
     error: null as { message: string } | null,
   },
   mockStrategyKeysSelect: vi.fn(),
@@ -139,6 +149,22 @@ vi.mock("@/lib/supabase/admin", () => ({
                 }),
             };
           },
+        };
+      }
+      if (table === "strategy_analytics") {
+        // R2-1: the guard reads the existing row (select→eq→maybeSingle) before
+        // the fail-closed stamp; the stamp itself is the upsert seam.
+        return {
+          upsert: mockUpsert,
+          select: (_cols: string) => ({
+            eq: (_col: string, _val: unknown) => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: analyticsExisting.data,
+                  error: analyticsExisting.error,
+                }),
+            }),
+          }),
         };
       }
       return { upsert: mockUpsert };
@@ -238,6 +264,9 @@ describe("POST /api/keys/sync", () => {
     // unless a fixture explicitly sets api_key_id: null).
     strategyKeysProbe.count = 0;
     strategyKeysProbe.error = null;
+    // R2-1: default to NO prior derive so the existing stamp pins still stamp.
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
     unifiedActive.value = false;
     mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
     delete process.env.USE_COMPUTE_JOBS_QUEUE;
@@ -972,6 +1001,97 @@ describe("POST /api/keys/sync", () => {
         ),
         expect.objectContaining({ message: "stamp write denied" }),
       );
+      consoleSpy.mockRestore();
+    });
+
+    // ── R2-1 (MEDIUM): fail-closed stamp must NOT clobber a mature/published row ─
+    // keys/sync runs REPEATEDLY on mature rows (ApiKeyManager resync, wizard
+    // revisit). A raw upsert of computation_status:'failed' replaces
+    // data_quality_flags WHOLESALE, so ONE transient strategy_keys 5xx would
+    // flip a PUBLISHED complete composite to 'failed' and drop
+    // per_key/gap_spans/... The stamp is now guarded on an existing complete row.
+
+    // R2-1 (a) — membership-unknown path: existing 'complete' + count error →
+    // row preserved (no clobber), 503 returned.
+    it("[R2-1] preserves an existing 'complete' row when the membership probe errors (no clobber)", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = { message: "connection reset" };
+      // A PUBLISHED, COMPLETE composite already exists.
+      analyticsExisting.data = { computation_status: "complete" };
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      // Still fails the request closed (503) — but the destructive stamp is
+      // SKIPPED, so the live completed derive (and its data_quality_flags) survive.
+      expect(res.status).toBe(503);
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("preserving existing completed derive"),
+      );
+      // Never falls open to a single-key dispatch either.
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "sync_trades" }),
+      );
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+
+    // R2-1 (b) — queue-off composite path: existing 'complete' → row preserved.
+    it("[R2-1] preserves an existing 'complete' row on the queue-off composite path (no clobber)", async () => {
+      // USE_COMPUTE_JOBS_QUEUE unset (default OFF) → composite fails loud.
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      analyticsExisting.data = { computation_status: "complete" };
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("preserving existing completed derive"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    // R2-1 (c) — a genuine first-derive (NO existing row) still stamps 'failed'
+    // loud, so the guard doesn't swallow the fail-loud signal for real failures.
+    it("[R2-1] still stamps 'failed' loud on a genuine first-derive (no existing complete row)", async () => {
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      analyticsExisting.data = null; // no prior derive
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(mockUpsert).toHaveBeenCalledTimes(1);
+      const stamp = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
+      expect(stamp).toMatchObject({
+        strategy_id: TEST_STRATEGY_ID,
+        computation_status: "failed",
+        data_quality_flags: { csv_source: true, composite: true },
+      });
       consoleSpy.mockRestore();
     });
   });

@@ -10,6 +10,7 @@ import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -172,12 +173,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // worker to derive it. Fail LOUD (terminal 'failed' stamp + 503) rather
       // than orphan a composite that never derives. Mirrors finalize :889-906.
       if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
-        // The terminal 'failed' stamp is best-effort, but its write result must
-        // be LOGGED on failure — a swallowed error silently discards the
-        // fail-loud signal (mirrors the enqueue-error pattern at :204-213).
-        const { error: stampErr } = await admin.from("strategy_analytics").upsert(
+        await stampCompositeFailedUnlessComplete(
+          admin,
+          strategy_id,
           {
-            strategy_id,
             computation_status: "failed",
             computation_warned: false,
             computation_error:
@@ -185,14 +184,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
               "(USE_COMPUTE_JOBS_QUEUE) to derive; enable it and retry.",
             data_quality_flags: { csv_source: true, composite: true },
           },
-          { onConflict: "strategy_id" },
+          "queue-off composite",
         );
-        if (stampErr) {
-          console.error(
-            `[keys/sync] failed to stamp terminal 'failed' (queue-off composite) for ${strategy_id}:`,
-            stampErr,
-          );
-        }
         return NextResponse.json(
           { error: "Could not start sync. Try again in a moment." },
           { status: 503, headers: NO_STORE_HEADERS },
@@ -282,6 +275,71 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 });
 
 /**
+ * Stamp a terminal 'failed' analytics row ONLY when doing so won't DESTROY a
+ * prior successful derive (R2-1, red-team).
+ *
+ * keys/sync runs REPEATEDLY on MATURE rows — the wizard revisits it and
+ * ApiKeyManager POSTs it on every resync — unlike finalize's mirror, which runs
+ * ONCE on a fresh draft. A raw upsert of `computation_status:'failed'` +
+ * `computation_warned:false` REPLACES `data_quality_flags` WHOLESALE, so a
+ * single transient `strategy_keys` 5xx on a PUBLISHED, COMPLETE composite would
+ * flip its live analytics row to `failed` AND drop
+ * `per_key`/`gap_spans`/`gap_day_count`/`overlap_days`/`mtm_gated_reason` —
+ * degrading the public factsheet until a full re-derive.
+ *
+ * Guard-on-complete: read the existing row first; if a completed derive already
+ * exists, SKIP the destructive write (the transient error must not clobber it) —
+ * the caller still returns 503, so the request fails closed. Only stamp when
+ * there is genuinely no completed row (a real first-derive that can't proceed).
+ * On an inconclusive read we also skip (preserve) rather than risk clobbering.
+ * The stamp remains best-effort; a write error is logged, never swallowed.
+ */
+async function stampCompositeFailedUnlessComplete(
+  admin: ReturnType<typeof createAdminClient>,
+  strategyId: string,
+  payload: Record<string, unknown>,
+  logLabel: string,
+): Promise<void> {
+  const { data: existing, error: readErr } = await admin
+    .from("strategy_analytics")
+    .select("computation_status")
+    .eq("strategy_id", strategyId)
+    .maybeSingle();
+
+  if (isComputedAnalytics(existing?.computation_status)) {
+    console.warn(
+      `[keys/sync] skipped terminal 'failed' stamp (${logLabel}) — ` +
+        `preserving existing completed derive for ${strategyId}`,
+    );
+    return;
+  }
+  if (readErr) {
+    // Inconclusive: we could not confirm the absence of a completed row, so we
+    // do NOT risk clobbering one. The 503 the caller returns still fails the
+    // request closed; the stamp is best-effort.
+    console.error(
+      `[keys/sync] could not read existing analytics before stamping 'failed' ` +
+        `(${logLabel}) for ${strategyId}:`,
+      readErr,
+    );
+    return;
+  }
+
+  const { error: stampErr } = await admin.from("strategy_analytics").upsert(
+    { strategy_id: strategyId, ...payload },
+    { onConflict: "strategy_id" },
+  );
+  if (stampErr) {
+    // A swallowed failure hides the fail-loud signal (mirrors the enqueue-error
+    // pattern in the POST handler above).
+    console.error(
+      `[keys/sync] failed to stamp terminal 'failed' (${logLabel}) for ${strategyId}:`,
+      stampErr,
+    );
+  }
+}
+
+/**
  * Composite membership head-count probe.
  *
  * DUPLICATED (Rule 7, consciously) from finalize-wizard/route.ts
@@ -315,9 +373,10 @@ async function compositeMemberCount(
     // Finding 10 (mirrored): membership is UNKNOWN here — do NOT assert
     // `composite: true`, which claims a fact we could not establish. An honest
     // `membership_unknown` reason avoids mislabeling a single-key strategy.
-    const { error: stampErr } = await admin.from("strategy_analytics").upsert(
+    await stampCompositeFailedUnlessComplete(
+      admin,
+      strategyId,
       {
-        strategy_id: strategyId,
         computation_status: "failed",
         computation_warned: false,
         computation_error:
@@ -325,16 +384,8 @@ async function compositeMemberCount(
           "(strategy_keys count unavailable). Please retry.",
         data_quality_flags: { csv_source: true, membership_unknown: true },
       },
-      { onConflict: "strategy_id" },
+      "membership_unknown",
     );
-    if (stampErr) {
-      // Best-effort stamp, but a swallowed failure hides the fail-loud signal
-      // (mirrors the enqueue-error pattern in the POST handler above).
-      console.error(
-        `[keys/sync] failed to stamp terminal 'failed' (membership_unknown) for ${strategyId}:`,
-        stampErr,
-      );
-    }
     throw new Error(reason);
   }
   return count;

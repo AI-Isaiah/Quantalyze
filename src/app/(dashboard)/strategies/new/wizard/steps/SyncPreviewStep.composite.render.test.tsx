@@ -73,6 +73,12 @@ interface CompositeMockOpts {
   series: { date: string; daily_return: number }[];
   config: Record<string, unknown> | null;
   pollOutcome: () => PollOutcome;
+  // R2-2 (freshness-skip resume): the freshness probe's computed_at (default a
+  // stale year-2000 → NOT fresh → kickoff POST fires) and the SEPARATE
+  // data_quality_flags read the freshness-skip path issues to learn composite-
+  // ness deterministically (default null → freshness-skip fails CLOSED).
+  freshnessComputedAt: string;
+  freshnessDqRow: { data_quality_flags: unknown } | null;
 }
 
 // 2 members (seq 1-2, deribit); per_key windows with a 2-day interior gap
@@ -156,6 +162,8 @@ function installCompositeSupabaseMock(opts: Partial<CompositeMockOpts> = {}) {
     series: DEFAULT_SERIES,
     config: { returns_denominator_config: null },
     pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+    freshnessComputedAt: "2000-01-01T00:00:00.000Z",
+    freshnessDqRow: null,
     ...opts,
   };
 
@@ -178,17 +186,29 @@ function installCompositeSupabaseMock(opts: Partial<CompositeMockOpts> = {}) {
       return {
         select: (cols: string, selectOpts?: { head?: boolean }) => {
           if (cols === "computation_status, computed_at") {
-            // Stale complete freshness probe → kickoff POST still fires.
+            // Freshness probe. Default computed_at is stale → NOT fresh →
+            // kickoff POST fires; R2-2 tests set a fresh timestamp to exercise
+            // the freshness-skip resume path.
             return {
               eq: () => ({
                 maybeSingle: () =>
                   Promise.resolve({
                     data: {
                       computation_status: "complete",
-                      computed_at: "2000-01-01T00:00:00.000Z",
+                      computed_at: o.freshnessComputedAt,
                     },
                     error: null,
                   }),
+              }),
+            };
+          }
+
+          // R2-2: the freshness-skip path's SEPARATE composite-marker read.
+          if (cols === "data_quality_flags") {
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({ data: o.freshnessDqRow, error: null }),
               }),
             };
           }
@@ -514,6 +534,102 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     const snap = baseProps.onComplete.mock.calls[0][0];
     expect(snap.sparkline).toEqual(DEFAULT_SERIES.map((d) => d.daily_return));
   });
+
+  // R2-2 (freshness-skip resume) — a FRESH (complete <5min) composite resume
+  // skips the kickoff POST, so the discriminator comes from the persisted
+  // data_quality_flags.composite marker via a SEPARATE read (NOT a re-derive).
+  // The composite arm renders and NO /api/keys/sync POST fires.
+  it("[R2-2] a fresh composite resume renders the composite arm without re-enqueuing", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, composite: true }), { status: 200 }),
+    );
+    vi.setSystemTime(new Date("2026-07-10T00:00:00.000Z"));
+    installCompositeSupabaseMock({
+      // Fresh (0ms old) → freshness-skip path taken.
+      freshnessComputedAt: "2026-07-10T00:00:00.000Z",
+      freshnessDqRow: { data_quality_flags: { composite: true } },
+      pollOutcome: () => ({ kind: "row", status: "computing" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /stitching your composite track record/i,
+      }),
+    ).toBeInTheDocument();
+    // The fresh row is reused — never re-enqueued.
+    const syncPosts = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncPosts).toHaveLength(0);
+  });
+
+  // R2-2 (sibling) — a FRESH single-key resume stays byte-neutral: a present
+  // analytics row WITHOUT the composite marker is definitively single-key
+  // (NOT fail-closed), the single-key arm renders, and no POST fires.
+  it("[R2-2] a fresh single-key resume stays byte-neutral (single-key arm, no POST)", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, composite: false }), { status: 200 }),
+    );
+    vi.setSystemTime(new Date("2026-07-10T00:00:00.000Z"));
+    installCompositeSupabaseMock({
+      freshnessComputedAt: "2026-07-10T00:00:00.000Z",
+      // Present row, NO composite marker → single-key (not fail-closed).
+      freshnessDqRow: { data_quality_flags: {} },
+      pollOutcome: () => ({ kind: "row", status: "computing" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /computing your verified factsheet/i,
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/we could not verify/i)).not.toBeInTheDocument();
+    const syncPosts = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncPosts).toHaveLength(0);
+  });
+
+  // R2-5 (stale-complete race) — a 'complete' status with an EMPTY series (the
+  // worker's delete→re-upsert window) must stay in the WAITING state, NOT render
+  // an empty attribution table beside stale metrics. Old code passed straight
+  // through to the passed render; the guard keeps polling.
+  it("[R2-5] renders the waiting state (not an empty table) when complete but series is empty", async () => {
+    installCompositeSupabaseMock({
+      series: [],
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /stitching your composite track record/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", {
+        name: /your verified composite factsheet is ready/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("PER-KEY ATTRIBUTION")).not.toBeInTheDocument();
+  });
 });
 
 /**
@@ -772,6 +888,9 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
       members: ATTR_MEMBERS,
       series: ATTR_SERIES,
       analyticsRow: defaultAnalyticsRow({
+        // R2-4: arithmetic Σ of member contributions (+0.2, −0.2) = 0, so the
+        // server cumulative_return must be 0 for the value identity to hold.
+        cumulative_return: 0,
         data_quality_flags: { per_key: ATTR_PERKEY, gap_spans: [], gap_day_count: 0 },
       }),
       config: { returns_denominator_config: { cumulative_method: "simple" } },
@@ -797,6 +916,9 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
       members: ATTR_MEMBERS,
       series: ATTR_SERIES,
       analyticsRow: defaultAnalyticsRow({
+        // R2-4: geometric Π(1+c)−1 = (1.21)(0.81)−1 = −0.0199, so the server
+        // cumulative_return must match for the value identity to hold.
+        cumulative_return: -0.0199,
         data_quality_flags: { per_key: ATTR_PERKEY, gap_spans: [], gap_day_count: 0 },
       }),
       config: { returns_denominator_config: null },
@@ -838,5 +960,73 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     // …but no reconciliation claim in either basis direction.
     expect(screen.queryByText(/Contributions sum to/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Contributions compound to/)).not.toBeInTheDocument();
+  });
+
+  // R2-4 — VALUE IDENTITY (not just a count match). Full coverage (Σ member
+  // days == series.length) satisfies the count gate, but if the attribution does
+  // NOT reconstitute the server cumulative_return (corrupted per_key / truncated
+  // series) the caption must be SUPPRESSED. Old count-only code shows it → fails.
+  it("[R2-4] suppresses the caption when attribution does not reconstitute cumulative_return", async () => {
+    await renderPassed({
+      members: ATTR_MEMBERS,
+      series: ATTR_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        // Full coverage (Σ days 4 == series 4) but a cumulative_return that
+        // matches NEITHER the arithmetic Σ (0) NOR the geometric Π−1 (−0.0199).
+        cumulative_return: 0.5,
+        data_quality_flags: { per_key: ATTR_PERKEY, gap_spans: [], gap_day_count: 0 },
+      }),
+      config: { returns_denominator_config: { cumulative_method: "simple" } },
+    });
+
+    // Table renders…
+    expect(screen.getByText("PER-KEY ATTRIBUTION")).toBeInTheDocument();
+    // …but the false reconciliation claim is withheld.
+    expect(screen.queryByText(/Contributions sum to/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Contributions compound to/)).not.toBeInTheDocument();
+  });
+
+  // R2-3 — GANTT OFF-BY-ONE. The declared window_end is HALF-OPEN; the gantt's
+  // inclusive `last` must be window_end − 1 day so ADJACENT disjoint members
+  // (member1.window_end === member2.window_start) do NOT overlap. Old code drew
+  // member1 THROUGH member2's first owned day.
+  it("[R2-3] draws adjacent member bars with no overlap (half-open end → inclusive last)", async () => {
+    const ADJACENT_MEMBERS: MemberRow[] = [
+      {
+        api_key_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        window_start: "2025-01-01",
+        window_end: "2025-01-08", // half-open; member 2 starts here
+        seq: 1,
+        api_keys: { exchange: "deribit", label: "Key A" },
+      },
+      {
+        api_key_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+        window_start: "2025-01-08",
+        window_end: "2025-01-13",
+        seq: 2,
+        api_keys: { exchange: "deribit", label: "Key B" },
+      },
+    ];
+    await renderPassed({ members: ADJACENT_MEMBERS });
+
+    // Member 1's inclusive last day is 2025-01-07 (window_end 01-08 − 1), NOT
+    // 01-08 — so it does not reach member 2's first owned day (01-08).
+    expect(
+      screen.getByRole("img", {
+        name: /Key A: covers 2025-01-01.2025-01-07, in blend/,
+      }),
+    ).toBeInTheDocument();
+    // Member 2: window_end 01-13 → inclusive 01-12.
+    expect(
+      screen.getByRole("img", {
+        name: /Key B: covers 2025-01-08.2025-01-12, in blend/,
+      }),
+    ).toBeInTheDocument();
+    // The old half-open pass-through (member 1 through 01-08) must be gone.
+    expect(
+      screen.queryByRole("img", {
+        name: /Key A: covers 2025-01-01.2025-01-08/,
+      }),
+    ).not.toBeInTheDocument();
   });
 });
