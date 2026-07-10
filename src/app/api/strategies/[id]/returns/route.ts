@@ -146,9 +146,19 @@ export async function GET(
       // and stays behind the SAME published-only gate, so this reveals nothing
       // the existing existence-oracle didn't already gate (404 on unpublished /
       // cross-tenant is unchanged — T-84-05a).
-      const { data: strat } = await withPublishedOnly(
+      const { data: strat, error: probeError } = await withPublishedOnly(
         supabase.from("strategies").select("id, asset_class").eq("id", id),
       ).maybeSingle();
+      if (probeError) {
+        // error-absent ≠ legit-absent: a PostgREST error (e.g. asset_class column
+        // schema drift) returns {data:null,error} and would 404 a REAL published
+        // strategy with no signal. The 404 stays (never an oracle), but log the
+        // breadcrumb server-side so a schema fault is debuggable (Rule 12).
+        console.error("[api/strategies/returns] probe error:", probeError);
+        captureToSentry(probeError, {
+          tags: { route: "api/strategies/returns", stage: "probe" },
+        });
+      }
       if (!strat) {
         return NextResponse.json(
           { error: "Not found" },
