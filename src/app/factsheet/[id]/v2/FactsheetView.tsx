@@ -6,6 +6,8 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
+import { BasisProvider, useBasis, useBasisMetrics, mtmDisabledReasonCopy, type Basis } from "./basis-context";
+import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
@@ -182,7 +184,10 @@ export function FactsheetBody({
   const { key: cmpKey } = useActiveComparator();
   const hasComparator = cmpKey !== "none";
   return (
-    <>
+    // Phase 90 (FS-03): BasisProvider wraps the tree so useBasis() resolves in
+    // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
+    // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
+    <BasisProvider>
       <article
         id="factsheet-main"
         tabIndex={-1}
@@ -275,7 +280,7 @@ export function FactsheetBody({
             </CollapsibleSection>
           </section>
           <div id="factsheet-metrics" className="contents" />
-          <MetricsColumn scenarioMode={scenarioMode} />
+          <MetricsColumnWithBasis scenarioMode={scenarioMode} />
         </div>
 
         {/* AllocatorSection uses demo blended portfolios — derivable data only
@@ -291,7 +296,34 @@ export function FactsheetBody({
 
         {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
-    </>
+    </BasisProvider>
+  );
+}
+
+/**
+ * Phase 90 (FS-03, D5) — MetricsColumn stays pinned to CASH always (its
+ * distributional stats have no persisted MTM counterpart, so it is never passed
+ * the basis hook). When the KpiStrip has diverged to MTM we surface a static
+ * "BASIS · CASH SETTLEMENT" eyebrow atop the column so the reader knows the
+ * right-rail metrics did NOT follow the toggle. Composite-only; when the eyebrow
+ * is not shown (single-key OR composite-cash) this renders EXACTLY the bare
+ * <MetricsColumn> — byte-identical to before (GUARD-02).
+ */
+function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
+  const payload = usePayload();
+  const { basis } = useBasis();
+  const showEyebrow =
+    payload.dataQuality?.composite === true && basis === "mark_to_market";
+  if (!showEyebrow) {
+    return <MetricsColumn scenarioMode={scenarioMode} />;
+  }
+  return (
+    <div className="flex flex-col gap-4 min-w-0">
+      <p className="text-micro uppercase tracking-wider text-text-muted">
+        BASIS · CASH SETTLEMENT
+      </p>
+      <MetricsColumn scenarioMode={scenarioMode} />
+    </div>
   );
 }
 
@@ -312,6 +344,10 @@ const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSorti
 function PerformanceCharts() {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
+  // Phase 90 (FS-03): charts stay cash always; under MTM we caption that. Plus
+  // the FS-01/02 visually-hidden AT summary for the stitched track. Composite-only.
+  const { basis } = useBasis();
+  const composite = payload.dataQuality?.composite === true;
   // Defensive fallbacks: a cache entry created before the rollingWindow
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
@@ -362,6 +398,28 @@ function PerformanceCharts() {
       {configs.map(cfg => (
         <TimeSeriesChart key={cfg.key} config={cfg} />
       ))}
+      {/* FS-01/02 (composite-only): visually-hidden AT summary for the sparse
+          stitched cumulative track. The seam/gap markers are pointerEvents-none,
+          so this is the authoritative AT surface. */}
+      {composite && (
+        <span className="sr-only">
+          Stitched from {(payload.segmentBoundaries?.length ?? 0) + 1} keys. Seam
+          markers at each key handoff; {payload.missingSegments?.length ?? 0} gap(s)
+          shown as breaks, never as zero returns.
+        </span>
+      )}
+      {/* FS-03 (composite-only): charts never swap basis. Under MTM, announce
+          that the series stays cash-settlement (role=status → AT announces). */}
+      {composite && basis === "mark_to_market" && (
+        <p
+          role="status"
+          aria-live="polite"
+          className="text-caption text-text-secondary"
+        >
+          Charts show the cash-settlement series. Mark-to-market applies to
+          summary metrics only.
+        </p>
+      )}
       {!roll.enough && (
         <NotEnoughDataPanel
           title="Rolling Metrics — Not enough data"
@@ -588,7 +646,11 @@ function CapacityChip({
 function KpiStrip() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
-  const m = payload.strategyMetrics;
+  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE and only
+  // here. Cash returns strategyMetrics untouched → single-key is bit-identical
+  // (the existing kpistrip pins prove it). α/IR + MetricsColumn stay cash.
+  const { basis, m } = useBasisMetrics(payload);
+  const composite = payload.dataQuality?.composite === true;
   const j = cmp.joint;
   const cn = cmp.shortName;
 
@@ -641,13 +703,26 @@ function KpiStrip() {
   const containerCols =
     items.length === 9 ? "@5xl:grid-cols-9" : "@5xl:grid-cols-7";
   return (
-    <section
-      className="mt-6 overflow-hidden @container"
-      style={{
-        backgroundColor: "var(--color-surface)",
-        border: "1px solid var(--color-border)",
-      }}
-    >
+    <>
+      {/* Phase 90 (FS-03): persistent composite-only basis eyebrow. Reserved
+          height, only the TEXT swaps on toggle → zero reflow. aria-live announces
+          the basis switch (the MTM chart caption below carries role="status"). */}
+      {composite && (
+        <p
+          aria-live="polite"
+          className="mt-6 text-micro uppercase tracking-wider text-text-muted"
+        >
+          BASIS ·{" "}
+          {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
+        </p>
+      )}
+      <section
+        className="mt-6 overflow-hidden @container"
+        style={{
+          backgroundColor: "var(--color-surface)",
+          border: "1px solid var(--color-border)",
+        }}
+      >
       <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
@@ -692,7 +767,8 @@ function KpiStrip() {
           ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -847,6 +923,14 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
   const shareMode = useShareMode();
+  // Phase 90 (FS-03, D2/D5): composite-only cash↔MTM toggle. NEVER apiKeyId —
+  // the server-truth `dataQuality.composite` marker. MTM enabled iff the
+  // persisted `mark_to_market` basis exists (`mtmGate.available`); otherwise
+  // disabled with the mapped closed-set reason (D1). Default cash.
+  const { basis, setBasis } = useBasis();
+  const composite = payload.dataQuality?.composite === true;
+  const mtmAvailable = payload.mtmGate?.available === true;
+  const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
   const resetView = () => {
     resetXRange();
     setComparator(payload.activeComparator);
@@ -860,6 +944,32 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   };
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
+      {composite && (
+        <div className="mr-auto flex flex-col items-start gap-1">
+          <SegmentedControl
+            ariaLabel="Metrics basis"
+            activeId={basis}
+            onChange={(id) => setBasis(id as Basis)}
+            options={[
+              { id: "cash_settlement", label: "Cash settlement" },
+              {
+                id: "mark_to_market",
+                label: "Mark-to-market",
+                disabled: !mtmAvailable,
+                disabledReason: mtmReason,
+              },
+            ]}
+          />
+          {!mtmAvailable && (
+            <p
+              className="text-caption"
+              style={{ color: "var(--color-warning, #B45309)" }}
+            >
+              {mtmReason}
+            </p>
+          )}
+        </div>
+      )}
       <DisplayMenu />
       <button
         type="button"

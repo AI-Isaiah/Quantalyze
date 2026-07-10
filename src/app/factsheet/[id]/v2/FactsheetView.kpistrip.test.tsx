@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, fireEvent } from "@testing-library/react";
+import { render, fireEvent, within } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
@@ -219,17 +219,28 @@ function renderComposite(payload: FactsheetPayload) {
 
 describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED until 90-05)", () => {
   it("RED: toggling to Mark-to-market swaps Cum. Return to the MTM sentinel + 'BASIS · MARK-TO-MARKET' eyebrow; toggling back restores cash", () => {
-    const { getByText } = renderComposite(compositeKpiPayload());
+    const { getByText, container } = renderComposite(compositeKpiPayload());
+
+    // Scope the VALUE assertions to the KPI strip grid: the equity chart's Y-axis
+    // also renders a round "+50.0%" tick, so a body-scoped getByText("+50.0%")
+    // would match the axis label too. The eyebrow strings are unique in the body
+    // (the MetricsColumn eyebrow, when shown, reads CASH), so they stay body-scoped.
+    const kpiGrid = () =>
+      within(
+        Array.from(container.querySelectorAll<HTMLElement>("div.grid")).find(
+          (el) => /@[\w[\]-]*:grid-cols-\d/.test(el.className),
+        )!,
+      );
 
     // No basis toggle exists yet → getByText throws (RED). After 90-05 this
     // drives the KpiStrip relabel.
     fireEvent.click(getByText("Mark-to-market"));
     expect(getByText("BASIS · MARK-TO-MARKET")).toBeTruthy();
-    expect(getByText("+50.0%")).toBeTruthy(); // MTM cumulative_return sentinel
+    expect(kpiGrid().getByText("+50.0%")).toBeTruthy(); // MTM cumulative_return sentinel
 
     fireEvent.click(getByText("Cash settlement"));
     expect(getByText("BASIS · CASH SETTLEMENT")).toBeTruthy();
-    expect(getByText("+62.7%")).toBeTruthy(); // cash cumulative_return sentinel
+    expect(kpiGrid().getByText("+62.7%")).toBeTruthy(); // cash cumulative_return sentinel
   });
 
   it("RED: under MTM, MetricsColumn stays cash-pinned (D5) and the cash-series chart caption is a role=status region", () => {
@@ -246,7 +257,9 @@ describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED un
     );
     // A MetricsColumn distributional stat (no MTM counterpart) still renders its
     // cash value — MetricsColumn is NOT relabeled (KpiStrip-only, D5).
-    expect(getByText(/Skew/i)).toBeTruthy();
+    // "Skew" appears in BOTH the Main-Metrics and Extended-Metrics panels
+    // (pre-existing), so assert presence rather than uniqueness.
+    expect(within(container).getAllByText(/Skew/i).length).toBeGreaterThan(0);
   });
 
   it("GREEN: a single-key payload's KpiStrip emits no 'BASIS ·' eyebrow", () => {

@@ -167,14 +167,18 @@ describe("FactsheetBody — Phase 90 FS-03 basis toggle (RED until 90-05)", () =
   });
 
   it("MTM gate = server truth (RED): available → enabled; gated → aria-disabled with EXACT reason copy", () => {
+    // Scope each fixture's query to its OWN container: the three renders below
+    // accumulate in document.body within this single test (RTL cleanup only runs
+    // afterEach), so a body-scoped `getByText("Mark-to-market")` would match every
+    // prior render. `within(x.container)` isolates each render's toggle.
     // (c) available: MTM segment is NOT disabled.
     const c = renderBody(fixtureCompositeAvailable());
-    const cMtm = c.getByText("Mark-to-market");
+    const cMtm = within(c.container).getByText("Mark-to-market");
     expect(cMtm.getAttribute("aria-disabled")).not.toBe("true");
 
     // (b) gated on un-smoothed options: disabled + verbatim D1 copy.
     const b = renderBody(fixtureCompositeGated());
-    const bMtm = b.getByText("Mark-to-market");
+    const bMtm = within(b.container).getByText("Mark-to-market");
     expect(bMtm.getAttribute("aria-disabled")).toBe("true");
     expect(bMtm.getAttribute("title")).toBe(
       "Mark-to-market disabled: un-smoothed options book (Phase-83 daily-mark smoothing not applied)",
@@ -182,7 +186,7 @@ describe("FactsheetBody — Phase 90 FS-03 basis toggle (RED until 90-05)", () =
 
     // (d) gated with no reason: generic composite fallback copy.
     const d = renderBody(fixtureCompositeNoReason());
-    const dMtm = d.getByText("Mark-to-market");
+    const dMtm = within(d.container).getByText("Mark-to-market");
     expect(dMtm.getAttribute("aria-disabled")).toBe("true");
     expect(dMtm.getAttribute("title")).toBe(
       "Mark-to-market unavailable for this composite.",
