@@ -23,7 +23,9 @@ import { join, relative } from "node:path";
  * ── HEURISTIC (deliberately broad on the 'published' literal + strategies-table
  *    proximity so it cannot be trivially evaded) ─────────────────────────────
  *
- * Scan A (TypeScript, src/**.ts[x]) — a file is an OFFENDER when it BOTH:
+ * Scan A (TypeScript, src/**.ts[x] AND supabase/functions/**.ts[x] — the
+ *    Deno edge functions, e.g. compute-trigger / notify-admin) — a file is an
+ *    OFFENDER when it BOTH:
  *   (1) writes to the strategies table — `from("strategies")` AND a
  *       `.update(` / `.upsert(` call somewhere in the file; AND
  *   (2) carries a publish WRITE payload — `status: "published"` (object literal)
@@ -68,6 +70,10 @@ import { join, relative } from "node:path";
 
 const REPO_ROOT = join(__dirname, "..", "..");
 const SRC_DIR = join(REPO_ROOT, "src");
+// Deno/TS edge functions are a production write surface too — a future edge
+// function writing strategies.status='published' would bypass the admin gate
+// just as a src/ writer would, so Scan A walks them alongside src/**.
+const FUNCTIONS_DIR = join(REPO_ROOT, "supabase", "functions");
 const MIGRATIONS_DIR = join(REPO_ROOT, "supabase", "migrations");
 
 /** The ONE sanctioned production writer of strategies.status='published'. */
@@ -129,10 +135,11 @@ function latestDefFile(fnName: string): string {
 }
 
 describe("Phase 87 PUB-01 / W-1 — strategies.status='published' sole-writer guard", () => {
-  // ── Scan A: TypeScript ────────────────────────────────────────────────────
-  const tsFiles = walk(SRC_DIR, [".ts", ".tsx"]).filter(
-    (f) => !isTestPath(relative(REPO_ROOT, f)),
-  );
+  // ── Scan A: TypeScript (src/** + supabase/functions/** edge functions) ─────
+  const tsFiles = [
+    ...walk(SRC_DIR, [".ts", ".tsx"]),
+    ...walk(FUNCTIONS_DIR, [".ts", ".tsx"]),
+  ].filter((f) => !isTestPath(relative(REPO_ROOT, f)));
 
   it("sanity: the allow-listed admin route IS detected by the heuristic (guard is live)", () => {
     const src = readFileSync(join(REPO_ROOT, ALLOWED_TS_WRITER), "utf8");
