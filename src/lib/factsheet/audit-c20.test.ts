@@ -682,3 +682,74 @@ describe("#597: asset-class annualization end-to-end", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 90 (D6) — composite → csv arm. A stitched multi-key composite routes
+// down the EXISTING csv arm (build-payload.ts:246-318): the discriminated union
+// structurally omits the three synthesized panels (peerPercentile /
+// allocatorPortfolios / eventSignatures) — NO new suppression logic (D6).
+//
+// CLASSIFICATION NOTE (RED-TEAM-H1 preserved): `deriveIngestSource` stays on the
+// raw `daily_returns` COLUMN (null for composites). The Phase-90 composite branch
+// sets `ingestSource:"csv"` EXPLICITLY on the buildFactsheetPayload call — it
+// NEVER re-derives from the new sparse `csv_daily_returns` read. The RED-TEAM-H1
+// block above is therefore left byte-for-byte untouched by this Phase-90 append.
+// ---------------------------------------------------------------------------
+
+// Local typed cast for the not-yet-existing third `opts` arg (lands in 90-03).
+// The current 2-arg signature won't accept a third argument, so we cast the
+// function through a typed alias rather than the call site.
+type Phase90Opts = {
+  cumulativeMethod?: "geometric" | "arithmetic";
+  segmentBoundaries?: { date: string; seq: number; label: string }[];
+  missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
+  metricsByBasis?: { cash_settlement: Record<string, number>; mark_to_market?: Record<string, number> };
+  dataQuality?: { composite: boolean };
+  mtmGate?: { available: boolean; reason?: string };
+};
+const buildWithOpts = buildFactsheetPayload as unknown as (
+  s: Parameters<typeof buildFactsheetPayload>[0],
+  d: Parameters<typeof buildFactsheetPayload>[1],
+  o?: Phase90Opts,
+) => ReturnType<typeof buildFactsheetPayload>;
+
+describe("Phase 90 composite → csv arm", () => {
+  const SYNTH = ["peerPercentile", "allocatorPortfolios", "eventSignatures"] as const;
+
+  it("PIN: csv arm suppresses the three synthesized panels by construction (D6)", () => {
+    // The composite routes down the csv arm exactly as a user-uploaded csv does:
+    // ingestSource:"csv" set explicitly → the discriminated union omits the
+    // synthesized demo panels. No Phase-90-specific suppression logic exists.
+    const payload = buildFactsheetPayload(
+      makeStrategy({ ingestSource: "csv" }),
+      makeReturns(),
+    );
+    expect(payload).not.toBeNull();
+    expect(payload!.ingestSource).toBe("csv");
+    for (const f of SYNTH) {
+      expect(f in payload!, `${f} must be absent on the csv-arm composite payload`).toBe(false);
+    }
+  });
+
+  it("PIN: deriveIngestSource still classifies on the raw daily_returns column", () => {
+    // RED-TEAM-H1 invariant restated at the Phase-90 seam: a composite's raw
+    // column is null → "api" by the shared derivation, but the composite branch
+    // OVERRIDES with an explicit ingestSource:"csv" on the build call. The two
+    // concerns stay separate; the classifier is never fed csv_daily_returns.
+    expect(deriveIngestSource(null)).toBe("api");
+    expect(deriveIngestSource([])).toBe("csv");
+  });
+
+  it("RED (90-03): opts.segmentBoundaries + dataQuality thread onto the csv-arm payload", () => {
+    const segmentBoundaries = [{ date: "2025-10-01", seq: 2, label: "2" }];
+    const dataQuality = { composite: true };
+    const payload = buildWithOpts(
+      makeStrategy({ ingestSource: "csv" }),
+      makeReturns(),
+      { cumulativeMethod: "arithmetic", segmentBoundaries, dataQuality },
+    )!;
+    const f = payload as unknown as Record<string, unknown>;
+    expect(f.segmentBoundaries).toEqual(segmentBoundaries);
+    expect(f.dataQuality).toEqual(dataQuality);
+  });
+});
