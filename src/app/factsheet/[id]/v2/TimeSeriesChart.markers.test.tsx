@@ -107,8 +107,12 @@ const cumulativeCfg = CHART_CONFIGS.find((c) => c.key === "cumulative")!;
 // The real cumulative config + the additive opt-in flag (lands on ChartConfig in
 // 90-04). Cast per 90-02 <interfaces>.
 const markersConfig = { ...cumulativeCfg, segmentMarkers: true } as ChartConfig;
-// Fields present but the flag absent → the overlay must stay off.
-const noMarkersConfig = cumulativeCfg;
+// Fields present but the flag OFF → the overlay must stay off. Explicitly
+// disable the flag: 90-04 Task 1 lands `segmentMarkers: true` on the REAL
+// cumulative config (load-bearing — the feature is dead in prod without it), so
+// the raw `cumulativeCfg` is now flag-ON. Force it off here to keep this pin's
+// stated intent ("segmentMarkers OFF → zero markers") honest.
+const noMarkersConfig = { ...cumulativeCfg, segmentMarkers: false } as ChartConfig;
 
 function renderChart(payload: FactsheetPayload, config: ChartConfig) {
   return render(
