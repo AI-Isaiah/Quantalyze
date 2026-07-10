@@ -137,7 +137,33 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     /** when true, the first-pass api_keys exchange lookup returns an error, so
      *  the route must fail loud (503) rather than coercing isLedgerBacked=false. */
     mockKeyExchangeError?: boolean;
+    /**
+     * PUB-01 (Phase 87) — number of strategy_keys members. Default 0 (single-key
+     * / CSV: SC-4 byte-unchanged path). When >= 1 the route's defense-in-depth
+     * re-check consults the latest stitch_composite compute_jobs row.
+     */
+    strategyKeysCount?: number;
+    /**
+     * PUB-01 — status of the latest stitch_composite compute_jobs row (ordered
+     * created_at DESC, limit 1). Default undefined (no row). Only consulted when
+     * strategyKeysCount >= 1.
+     */
+    latestStitchJobStatus?:
+      | "pending"
+      | "running"
+      | "done"
+      | "done_pending_children"
+      | "failed"
+      | "failed_final"
+      | undefined;
+    /** when true, the strategy_keys head-count read errors → fail-loud 503. */
+    strategyKeysCountError?: boolean;
+    /** when true, the compute_jobs stitch-job lookup errors → fail-loud 503. */
+    stitchJobLookupError?: boolean;
   };
+
+  /** Tracks whether the route issued the compute_jobs read (SC-4 assertion). */
+  type RecheckTracker = { computeJobsQueried: boolean };
 
   /**
    * Install an admin-client mock that routes from('trades') and
@@ -145,10 +171,56 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
    * exactly the values this test wants, then a strategies UPDATE that
    * returns `updateAffected` to simulate row-match / no-match.
    */
-  function mockAdminClient(opts: RecheckMock): void {
+  function mockAdminClient(opts: RecheckMock): RecheckTracker {
+    const tracker: RecheckTracker = { computeJobsQueried: false };
     vi.doMock("@/lib/supabase/admin", () => ({
       createAdminClient: () => ({
         from: (table: string) => {
+          if (table === "strategy_keys") {
+            // PUB-01 defense-in-depth: head-count of composite members.
+            // .select("api_key_id", { count, head }).eq("strategy_id", id)
+            return {
+              select: () => ({
+                eq: async () =>
+                  opts.strategyKeysCountError
+                    ? { count: null, data: null, error: { message: "boom" } }
+                    : {
+                        count: opts.strategyKeysCount ?? 0,
+                        data: null,
+                        error: null,
+                      },
+              }),
+            };
+          }
+          if (table === "compute_jobs") {
+            // Only reached when strategyKeysCount >= 1 — recording the query
+            // proves SC-4 (zero-member approve never consults it).
+            tracker.computeJobsQueried = true;
+            // .select("status").eq("strategy_id").eq("kind")
+            //   .order("created_at",{ascending:false}).limit(1).maybeSingle()
+            return {
+              select: () => ({
+                eq: () => ({
+                  eq: () => ({
+                    order: () => ({
+                      limit: () => ({
+                        maybeSingle: async () =>
+                          opts.stitchJobLookupError
+                            ? { data: null, error: { message: "boom" } }
+                            : {
+                                data:
+                                  opts.latestStitchJobStatus === undefined
+                                    ? null
+                                    : { status: opts.latestStitchJobStatus },
+                                error: null,
+                              },
+                      }),
+                    }),
+                  }),
+                }),
+              }),
+            };
+          }
           if (table === "trades") {
             return {
               // First-pass gate: head:true count + earliest/latest probes.
@@ -272,6 +344,7 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
         },
       }),
     }));
+    return tracker;
   }
 
   async function postApprove(): Promise<Response> {
@@ -513,6 +586,101 @@ describe("POST /api/admin/strategy-review — C-0060 TOCTOU re-check", () => {
     expect(res.status).toBe(503);
     expect((await res.json()).error).toMatch(/verify strategy data source/i);
   });
+
+  // --- PUB-01 (Phase 87) composite gate: OQ-1 defense-in-depth pure READ. A
+  //     composite (api_key_id NULL, csv series) with >=1 strategy_keys member
+  //     must, atop the isComputedAnalytics primary gate, require the LATEST
+  //     stitch_composite compute_jobs row to be status='done'. Pure read — no
+  //     re-derive, no write (LOCKED / Pitfall 4). Scoped to >=1 member so the
+  //     single-key/CSV approve path is byte-unchanged (SC-4). ---
+
+  it("PUB-01: composite with all-done members + complete_with_warnings publishes -> 200", async () => {
+    // The success shape the plan pins explicitly: 2 members, latest
+    // stitch_composite job 'done', analytics complete_with_warnings (terminal
+    // success). The defense-in-depth read admits it → UPDATE fires → published.
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete_with_warnings",
+      strategyKeysCount: 2,
+      latestStitchJobStatus: "done",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+  });
+
+  it("PUB-01: composite whose latest stitch job is 'running' -> 409, never published", async () => {
+    // Laundered-complete guard: computation_status reads complete but the
+    // member-fan-out stitch job never finished. The pure read blocks publish
+    // with a 409 BEFORE the UPDATE (updateAffected would give 200 if reached).
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      strategyKeysCount: 2,
+      latestStitchJobStatus: "running",
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/composite computation is not complete/i);
+  });
+
+  it("PUB-01: composite with NO stitch_composite job row -> 409, never published", async () => {
+    // No latest stitch job at all (absent) is treated identically to not-done:
+    // a composite whose stitch generation is missing cannot publish.
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      strategyKeysCount: 2,
+      latestStitchJobStatus: undefined,
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/composite computation is not complete/i);
+  });
+
+  it("PUB-01: fails LOUD (503) when the strategy_keys count read errors — never coerces to 0", async () => {
+    // A transient strategy_keys read error must not coerce memberCount=0 and
+    // silently skip the composite check (which could publish a holed composite).
+    // Mirrors the csvCountError 503 guard.
+    mockAdminClient({
+      recheckApiKeyId: null,
+      recheckTradeCount: 0,
+      recheckCsvCount: 30,
+      recheckStatus: "complete",
+      strategyKeysCountError: true,
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(503);
+    expect((await res.json()).error).toMatch(/verify strategy data source/i);
+  });
+
+  it("SC-4: single-key approve (0 members) never issues the compute_jobs read", async () => {
+    // The compute_jobs read is consulted ONLY when strategyKeysCount >= 1. A
+    // single-key strategy (0 members, default) must reach 200 WITHOUT the route
+    // ever querying compute_jobs — proving the composite path is inert for every
+    // pre-existing single-key/CSV strategy.
+    const tracker = mockAdminClient({
+      recheckApiKeyId: "key-1",
+      recheckTradeCount: 12,
+      recheckStatus: "complete",
+      // strategyKeysCount defaults to 0.
+      updateAffected: [{ id: "strat-1" }],
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    expect(tracker.computeJobsQueried).toBe(false);
+  });
 });
 
 /**
@@ -554,9 +722,13 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
       | "pending"
       | "computing"
       | "complete"
+      | "complete_with_warnings"
       | "failed"
       | null;
     computationError: string | null;
+    /** csv_daily_returns row count. Composites (apiKeyId null) source history
+     *  here — supply >=7 so the gate reaches the analytics-status arm. */
+    csvRowCount?: number;
   };
 
   /**
@@ -621,6 +793,19 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
                           },
                     error: null,
                   }),
+                }),
+              }),
+            };
+          }
+          if (table === "csv_daily_returns") {
+            // Composite / CSV strategies source history here. .select().eq()
+            // resolves to a head:true count shape.
+            return {
+              select: () => ({
+                eq: async () => ({
+                  count: fx.csvRowCount ?? 0,
+                  data: null,
+                  error: null,
                 }),
               }),
             };
@@ -695,6 +880,29 @@ describe("POST /api/admin/strategy-review — M-0285 gate.reason error shape", (
       tradeCount: 50,
       earliest: "2026-01-01T00:00:00Z",
       latest: "2026-03-01T00:00:00Z", // > 7 day span
+      computationStatus: "failed",
+      computationError: null,
+    });
+    const res = await postApprove();
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/^Cannot approve: /);
+    expect(body.error).toContain("Analytics computation failed");
+    expect(body.error).not.toContain("ANALYTICS_FAILED");
+  });
+
+  it("PUB-01: a COMPOSITE (api_key_id NULL, csv series) with computation_status='failed' -> 400 blocked at the first-pass gate", async () => {
+    // A composite routes down isDailyReturnsSourced (api_key_id NULL + 0 trades
+    // + csv rows >= 7); a failed member fan-out surfaces as
+    // computation_status='failed', which the first-pass gate blocks with
+    // ANALYTICS_FAILED (400) BEFORE any UPDATE. Pins PUB-01's route direction
+    // for composites at the first pass (previously implicit / untested).
+    mockGateAdminClient({
+      apiKeyId: null,
+      tradeCount: 0,
+      csvRowCount: 30,
+      earliest: "2026-01-01T00:00:00Z",
+      latest: "2026-03-01T00:00:00Z",
       computationStatus: "failed",
       computationError: null,
     });
