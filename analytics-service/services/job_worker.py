@@ -2842,11 +2842,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     window, runs the two-layer fail-loud overlap guard, arithmetic-stitches the
     clipped series into ONE honest combined series, persists the stitched
     cash_settlement series to ``csv_daily_returns`` (gap/guarded days ABSENT —
-    never 0.0 as performance), lets the EXISTING ``run_csv_strategy_analytics``
-    compile the single-basis headline row (parity by construction), then
-    ADDITIVELY writes ``metrics_json_by_basis`` (both bases when MTM is admissible)
-    + the coverage-mask ``data_quality_flags`` (OQ-3 write ordering — the by-basis
-    object can never be clobbered by the headline upsert).
+    never 0.0 as performance, charting only), then computes the metrics ONCE from
+    the in-memory stitched series (``_metrics_result_for`` → ``compute_all_metrics``
+    with the venue-blend periods_per_year + the global BTC benchmark) and writes the
+    HEADLINE ``strategy_analytics`` row DIRECTLY in a single atomic upsert: the
+    headline scalars ARE ``metrics_json_by_basis.cash_settlement`` (both bases when
+    MTM is admissible) spread into the row, so headline == by-basis by construction
+    (the divergent single-key ``run_csv_strategy_analytics`` recompute is retired) +
+    the coverage-mask/member-guard ``data_quality_flags``.
 
     Worker-only key decryption is LOCKED: the ONLY decrypt path is inside
     ``_allocator_key_preflight`` (per member). The Next.js route enqueues this kind
@@ -3295,7 +3298,29 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             day_basis=day_basis,
         )
 
-    cash_metrics_result = _metrics_result_for(clipped_cash)
+    try:
+        cash_metrics_result = _metrics_result_for(clipped_cash)
+    except ValueError as exc:
+        # F-5 (convergence red team): compute_all_metrics raises a BARE ValueError
+        # on a cumulative_method='simple' series with an interior NaN guard day (the
+        # arithmetic Σr cannot honour a chain-break). classify_exception buckets a
+        # bare ValueError as 'unknown' → retries BURN the attempt budget before the
+        # terminal gate (the <2-day hoist above only covered the length ValueError).
+        # Stamp PERMANENT so the wizard poller reaches a gate immediately. Honest
+        # today (the allocated path gap-fills 0.0, so this is defense-in-depth), just
+        # fail-fast-loud instead of slow-loud.
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        await _stamp_failed(
+            "Composite metrics compute rejected the stitched series "
+            "(interior chain-break under the arithmetic convention). " + scrubbed
+        )
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "run_stitch_composite_job: composite metrics ValueError — " + scrubbed
+            ),
+            error_kind="permanent",
+        )
     cash_metrics_json = dict(cash_metrics_result.metrics_json)
 
     # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
@@ -3332,6 +3357,21 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 outcome=DispatchOutcome.FAILED,
                 error_message=(
                     "run_stitch_composite_job: MTM post-clip day collision — " + scrubbed
+                ),
+                error_kind="permanent",
+            )
+        except ValueError as exc:
+            # F-5: same bare-ValueError guard as the cash compute — a simple-basis
+            # interior chain-break must fail PERMANENT, not retry-forever as 'unknown'.
+            scrubbed = str(scrub_freeform_string(str(exc)))
+            await _stamp_failed(
+                "Composite MTM metrics compute rejected the stitched series "
+                "(interior chain-break under the arithmetic convention). " + scrubbed
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: MTM metrics ValueError — " + scrubbed
                 ),
                 error_kind="permanent",
             )

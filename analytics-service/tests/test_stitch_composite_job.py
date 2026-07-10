@@ -616,6 +616,36 @@ async def test_deferred_preflight_does_not_stamp_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_simple_basis_interior_nan_guard_permanent_not_unclassified() -> None:
+    """F-5: under the allocated-capital ('simple') convention, an interior NaN guard
+    day makes compute_all_metrics raise a BARE ValueError (arithmetic Σr cannot
+    honour a chain-break). classify_exception would bucket that 'unknown' → retries
+    burn the attempt budget before the terminal gate. The composite must catch it
+    and stamp PERMANENT failed. Neuter (drop the ValueError catch) → the ValueError
+    escapes uncaught → this reddens (the raise propagates out of the job)."""
+    # _FakeSupabase default strategy_row carries _TEST_CONFIG (simple / active_day).
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-05"),
+        _member(2, "2024-01-10", None),
+    ])
+    # m1 has an interior guard day (Jan-02 = NaN) that survives gap_fill as a
+    # chain break; the simple-basis compute rejects it.
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", float("nan")), ("2024-01-03", 0.01)])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.01)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        # Must NOT raise — a bare ValueError becomes a classified permanent.
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert any(
+        isinstance(p, dict) and p.get("computation_status") == "failed"
+        for _t, p, _c in fake.upserts
+    ), "simple-basis interior-NaN composite must stamp a terminal failed row"
+
+
+@pytest.mark.asyncio
 async def test_member_count_above_cap_permanent_before_any_crawl() -> None:
     """Finding 8: a composite whose member count exceeds the derive-timeout cap
     (4 for the default 20-min budget) would deterministically exceed the FIXED

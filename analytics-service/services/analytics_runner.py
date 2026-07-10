@@ -2087,9 +2087,7 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail="Analytics computation failed")
 
 
-async def run_csv_strategy_analytics(
-    strategy_id: str, *, composite_dense_gap_fill: bool = False
-) -> dict[str, Any]:
+async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
 
     Analytics pipeline for source='csv' strategies. Loads
@@ -2228,25 +2226,16 @@ async def run_csv_strategy_analytics(
         # gap-filled, so its missing dates are legitimately absent and must stay
         # sparse — NaN-filling them would fabricate a break and corrupt the
         # headline of legitimate data.
-        if composite_dense_gap_fill and not returns.empty:
-            # Phase 86 F1: a COMPOSITE headline MUST derive from the SAME dense,
-            # 0.0-gap-filled series the by-basis cash_settlement metrics use
-            # (run_stitch_composite_job._metrics_json_for → gap_fill_daily_returns)
-            # so the headline cash_settlement and
-            # metrics_json_by_basis.cash_settlement are byte-identical BY
-            # CONSTRUCTION — never two disagreeing "cash_settlement" numbers on a
-            # gapped composite (Zavara is gapless so it never surfaced). Mirror
-            # broker_dailies.gap_fill_daily_returns EXACTLY: reindex to the dense
-            # [min,max] daily calendar and fill inter-member gap days with 0.0
-            # (flat capital — NOT NaN). A composite gap is a genuinely flat day,
-            # distinct from a broker guard-refused interior day (elif below) which
-            # must reinstate NaN to BREAK the TWR chain.
-            dense_index = pd.date_range(
-                returns.index.min(), returns.index.max(), freq="D"
-            ).as_unit("us")
-            returns = returns.reindex(dense_index, fill_value=0.0).astype("float64")
-            returns.name = "returns"
-        elif _is_broker_sourced and not returns.empty:
+        #
+        # F-4 (convergence red team): the former `composite_dense_gap_fill` branch
+        # (a 0.0-gap-filled COMPOSITE headline) is GONE. run_stitch_composite_job now
+        # persists the composite headline DIRECTLY from its in-memory stitched series
+        # (headline == metrics_json_by_basis.cash_settlement by construction) and no
+        # longer routes through this function, so the flag had zero callers. Its
+        # 0.0-fill for guard days was exactly the dishonest fabrication the root-cause
+        # fix removed — keeping the dead branch invited re-routing the headline back
+        # through the divergent path.
+        if _is_broker_sourced and not returns.empty:
             dense_index = pd.date_range(
                 returns.index.min(), returns.index.max(), freq="D"
             )
@@ -2357,11 +2346,11 @@ async def run_csv_strategy_analytics(
         # single-key headline — silent disagreement. Null it so a stale composite
         # object can't linger. Gate on the prior row's `composite` flag so a pure
         # single-key strategy (never a composite) is byte-identical (no extra
-        # column write). composite_dense_gap_fill is the composite-owned headline
-        # path (run_stitch_composite_job owns its OWN by-basis write) — it never
-        # nulls here.
+        # column write). run_stitch_composite_job owns its OWN by-basis write and
+        # never routes through this function, so any recompute HERE is genuinely
+        # single-key.
         _was_composite = bool(existing_flags.get("composite"))
-        _clear_stale_by_basis = _was_composite and not composite_dense_gap_fill
+        _clear_stale_by_basis = _was_composite
 
         def _mark_complete() -> None:
             payload: dict[str, Any] = {

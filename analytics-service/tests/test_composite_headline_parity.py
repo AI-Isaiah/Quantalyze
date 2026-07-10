@@ -1,18 +1,18 @@
-"""Phase 86 — F1 headline↔by-basis parity + F5(a) authoritative re-derive.
+"""Phase 86 — headline↔by-basis parity + F5(a) authoritative re-derive.
 
 These drive ``run_stitch_composite_job`` end-to-end over stubbed per-key ledgers
-BUT run the REAL ``run_csv_strategy_analytics`` (NOT stubbed) against a stateful
-fake supabase that stores, serves, and deletes ``csv_daily_returns`` — so the
-headline path is genuinely exercised and compared against the by-basis object.
+against a stateful fake supabase that stores, serves, and deletes
+``csv_daily_returns`` — so the headline path is genuinely exercised and compared
+against the by-basis object.
 
-F1 (HIGH): on a composite with a genuine inter-member GAP, the headline
-``cash_settlement`` metrics (top-level scalars on the ``complete`` stamp) MUST
-equal ``metrics_json_by_basis.cash_settlement`` — same cumulative_return AND same
-vol/sharpe/maxdd. Pre-fix the headline read the SPARSE csv_daily_returns (gap days
-absent) while the by-basis computed on the DENSE 0.0-gap-filled series, so vol and
-sharpe silently diverged on any gapped composite (Zavara is gapless → never
-surfaced). The fix threads ``composite_dense_gap_fill=True`` so the headline
-derives from the identical dense series.
+Root cause (HIGH): the headline ``cash_settlement`` metrics (top-level scalars on
+the ``complete`` stamp) MUST equal ``metrics_json_by_basis.cash_settlement`` —
+same cumulative_return AND same vol/sharpe/maxdd. Pre-fix the headline was
+delegated to the divergent single-key ``run_csv_strategy_analytics`` recompute
+(asset_class-driven periods + sparse/0.0-gap semantics). Post-fix
+run_stitch_composite_job writes the headline DIRECTLY from the SAME in-memory
+compute that produces the by-basis object, so headline == by-basis by construction
+(the divergent recompute is retired entirely).
 
 F5(a) (LOW): the composite re-derive must delete the WHOLE csv_daily_returns
 series for the strategy (it fully OWNS it), not just the new [span_start,
@@ -243,8 +243,8 @@ def _patches(
     combine_returns: list[tuple[pd.Series, dict[str, Any]]],
 ) -> list:
     """Patch set driving run_stitch_composite_job over stubbed per-key ledgers,
-    with the REAL run_csv_strategy_analytics + compute_all_metrics exercised. The
-    SAME stateful fake backs both job_worker and analytics_runner get_supabase."""
+    with the REAL compute_all_metrics exercised. The SAME stateful fake backs both
+    job_worker and analytics_runner get_supabase."""
     report = CompletenessReport(
         total_return_rows=2,
         indexable_currencies=frozenset({"BTC"}),
@@ -321,12 +321,12 @@ def _by_basis_cash(fake: _StatefulSupabase) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_gapped_composite_headline_equals_by_basis_cash_settlement() -> None:
-    """F1: on a composite with a genuine inter-member gap (Jan-03..Jan-09), the
-    headline cash_settlement scalars are byte-identical to
+    """Root cause: on a composite with a genuine inter-member gap (Jan-03..Jan-09),
+    the headline cash_settlement scalars are byte-identical to
     metrics_json_by_basis.cash_settlement — same cumulative_return AND same
-    vol/sharpe/maxdd. Neuter (drop composite_dense_gap_fill=True at the job's
-    run_csv_strategy_analytics call, OR the analytics_runner dense branch) → the
-    headline computes on the SPARSE series → vol/sharpe diverge → this reddens."""
+    vol/sharpe/maxdd. Neuter (route the headline back through a separate recompute
+    of the SPARSE csv_daily_returns instead of the in-memory compute) → vol/sharpe
+    diverge → this reddens."""
     fake = _StatefulSupabase(members=[
         _member(1, "2024-01-01", "2024-01-03"),
         _member(2, "2024-01-10", None),
