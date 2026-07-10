@@ -267,8 +267,14 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     vi.useFakeTimers();
     baseProps.onComplete = vi.fn();
     baseProps.onTryAnotherKey = vi.fn();
+    // The composite discriminator is now threaded from the /api/keys/sync
+    // kickoff response's `composite` field (server truth), NOT a client
+    // strategy_keys count probe. Default the kickoff to a composite 202.
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(null, { status: 200 }),
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
     );
   });
 
@@ -287,10 +293,10 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     });
   });
 
-  // Pin 1 — DISCRIMINATOR (Pitfall 1). A UUID apiKeyId + memberCount 2 must
-  // render the composite waiting heading. An `apiKeyId === null` implementation
-  // would render the single-key heading here.
-  it("discriminates a composite by membership count, not the apiKeyId prop", async () => {
+  // Pin 1 — DISCRIMINATOR (Finding-H / Pitfall 1). A UUID apiKeyId + a
+  // composite:true kickoff must render the composite waiting heading. An
+  // `apiKeyId === null` implementation would render the single-key heading.
+  it("discriminates a composite by the server kickoff flag, not the apiKeyId prop", async () => {
     installCompositeSupabaseMock({
       pollOutcome: () => ({ kind: "row", status: "computing" }),
     });
@@ -311,6 +317,80 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     ).toBeInTheDocument();
     expect(
       screen.queryByText(/computing your verified factsheet/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // Finding-H (HIGH) regression — the discriminator is the SERVER kickoff flag,
+  // NOT the fail-open client strategy_keys probe. A composite whose kickoff
+  // returned composite:true renders the composite arm EVEN WHEN the client
+  // head-count probe would report 0/null (single-key). Against the old
+  // probe-based code (memberCount 0 → isComposite false) this renders the
+  // single-key heading and FAILS.
+  it("[Finding-H] renders the composite arm from the kickoff flag even when the client probe would say single-key", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
+    );
+    installCompositeSupabaseMock({
+      // The (removed) client head-count probe would resolve 0 → single-key.
+      memberCount: 0,
+      pollOutcome: () => ({ kind: "row", status: "computing" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /stitching your composite track record/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/computing your verified factsheet/i),
+    ).not.toBeInTheDocument();
+  });
+
+  // Finding-H (sibling) — a composite:false kickoff renders the SINGLE-KEY arm
+  // EVEN WHEN member rows exist (the old probe with memberCount 2 → isComposite
+  // true → composite heading, which FAILS this assertion). Proves the flag,
+  // not the probe, is authoritative in BOTH directions.
+  it("[Finding-H] renders the single-key arm from a composite:false kickoff even when member rows exist", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: false }),
+        { status: 200 },
+      ),
+    );
+    installCompositeSupabaseMock({
+      // The (removed) client head-count probe would resolve 2 → composite.
+      memberCount: 2,
+      pollOutcome: () => ({ kind: "row", status: "computing" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    expect(
+      screen.getByRole("heading", {
+        name: /computing your verified factsheet/i,
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/stitching your composite track record/i),
     ).not.toBeInTheDocument();
   });
 
@@ -498,8 +578,14 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     vi.useFakeTimers();
     baseProps.onComplete = vi.fn();
     baseProps.onTryAnotherKey = vi.fn();
+    // The composite discriminator is now threaded from the /api/keys/sync
+    // kickoff response's `composite` field (server truth), NOT a client
+    // strategy_keys count probe. Default the kickoff to a composite 202.
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(null, { status: 200 }),
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
     );
   });
 

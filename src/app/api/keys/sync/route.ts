@@ -172,7 +172,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // worker to derive it. Fail LOUD (terminal 'failed' stamp + 503) rather
       // than orphan a composite that never derives. Mirrors finalize :889-906.
       if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
-        await admin.from("strategy_analytics").upsert(
+        // The terminal 'failed' stamp is best-effort, but its write result must
+        // be LOGGED on failure — a swallowed error silently discards the
+        // fail-loud signal (mirrors the enqueue-error pattern at :204-213).
+        const { error: stampErr } = await admin.from("strategy_analytics").upsert(
           {
             strategy_id,
             computation_status: "failed",
@@ -184,6 +187,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           },
           { onConflict: "strategy_id" },
         );
+        if (stampErr) {
+          console.error(
+            `[keys/sync] failed to stamp terminal 'failed' (queue-off composite) for ${strategy_id}:`,
+            stampErr,
+          );
+        }
         return NextResponse.json(
           { error: "Could not start sync. Try again in a moment." },
           { status: 503, headers: NO_STORE_HEADERS },
@@ -224,8 +233,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         metadata: { path: "queue", kind: "stitch_composite" },
       });
 
+      // PREV-01 / Finding-H: `composite: true` is the AUTHORITATIVE discriminator
+      // the preview step threads into `isComposite` — derived from server truth
+      // (this is the branch that took `stitch_composite`), NOT a fragile client
+      // `strategy_keys` count re-read. An unknowable membership fails CLOSED
+      // above (compositeMemberCount → 503, never a 2xx), so every 2xx carries a
+      // definite boolean and the client never has to assume single-key.
       return NextResponse.json(
-        { ok: true, accepted: true, strategy_id, status: "syncing" },
+        { ok: true, accepted: true, strategy_id, status: "syncing", composite: true },
         { status: 202, headers: NO_STORE_HEADERS },
       );
     }
@@ -300,7 +315,7 @@ async function compositeMemberCount(
     // Finding 10 (mirrored): membership is UNKNOWN here — do NOT assert
     // `composite: true`, which claims a fact we could not establish. An honest
     // `membership_unknown` reason avoids mislabeling a single-key strategy.
-    await admin.from("strategy_analytics").upsert(
+    const { error: stampErr } = await admin.from("strategy_analytics").upsert(
       {
         strategy_id: strategyId,
         computation_status: "failed",
@@ -312,6 +327,14 @@ async function compositeMemberCount(
       },
       { onConflict: "strategy_id" },
     );
+    if (stampErr) {
+      // Best-effort stamp, but a swallowed failure hides the fail-loud signal
+      // (mirrors the enqueue-error pattern in the POST handler above).
+      console.error(
+        `[keys/sync] failed to stamp terminal 'failed' (membership_unknown) for ${strategyId}:`,
+        stampErr,
+      );
+    }
     throw new Error(reason);
   }
   return count;
@@ -367,6 +390,8 @@ async function unifiedKeysSyncHandler(args: {
           queued: false,
           code: "WIZARD_DUPLICATE",
           idempotent: true,
+          // Unified is a single-key resync path — never a composite.
+          composite: false,
         },
         { status: 200, headers: NO_STORE_HEADERS },
       );
@@ -379,6 +404,8 @@ async function unifiedKeysSyncHandler(args: {
         status: "syncing",
         verification_id: upstream.verification_id ?? null,
         queued: upstream.queued ?? true,
+        // Unified is a single-key resync path — never a composite.
+        composite: false,
       },
       { status: 202, headers: NO_STORE_HEADERS },
     );
@@ -445,7 +472,9 @@ async function legacyKeysSyncHandler(args: {
     });
 
     return NextResponse.json(
-      { ok: true, accepted: true, strategy_id, status: "syncing" },
+      // Single-key/CSV legacy queue path — `composite: false` so the preview
+      // step's discriminator stays byte-neutral for non-composite strategies.
+      { ok: true, accepted: true, strategy_id, status: "syncing", composite: false },
       { status: 202, headers: NO_STORE_HEADERS },
     );
   }
@@ -530,7 +559,8 @@ async function legacyKeysSyncHandler(args: {
   });
 
   return NextResponse.json(
-    { ok: true, accepted: true, strategy_id, status: "syncing" },
+    // Single-key/CSV legacy after() path — `composite: false` (see above).
+    { ok: true, accepted: true, strategy_id, status: "syncing", composite: false },
     { status: 202, headers: NO_STORE_HEADERS },
   );
 }

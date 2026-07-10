@@ -271,6 +271,9 @@ describe("POST /api/keys/sync", () => {
       accepted: true,
       strategy_id: TEST_STRATEGY_ID,
       status: "syncing",
+      // 89-02 / Finding-H: single-key queue path threads composite:false so the
+      // preview step's discriminator stays byte-neutral for non-composites.
+      composite: false,
     });
 
     // RPC was called with correct args, including the correlation_id
@@ -301,6 +304,8 @@ describe("POST /api/keys/sync", () => {
       accepted: true,
       strategy_id: TEST_STRATEGY_ID,
       status: "syncing",
+      // 89-02 / Finding-H: single-key legacy path is composite:false too.
+      composite: false,
     });
 
     // after() was called with a function
@@ -686,6 +691,9 @@ describe("POST /api/keys/sync", () => {
         accepted: true,
         strategy_id: TEST_STRATEGY_ID,
         status: "syncing",
+        // 89-02 / Finding-H: the AUTHORITATIVE discriminator the preview step
+        // threads into isComposite — server truth, not a fragile client probe.
+        composite: true,
       });
 
       // The SAME stitch_composite job finalize dispatches, with the source tag
@@ -906,6 +914,65 @@ describe("POST /api/keys/sync", () => {
         "enqueue_compute_job",
         expect.objectContaining({ p_kind: "stitch_composite" }),
       );
+    });
+
+    // ── Finding-M (MEDIUM): terminal-stamp write errors must be LOGGED ──────
+    // Both fail-loud stamps (queue-off composite + membership-unknown) upsert a
+    // terminal 'failed' row. The upsert result was previously discarded, so a
+    // failed "fail-loud" stamp was silently swallowed. Capturing { error } and
+    // logging it is the fix; these pins neuter by asserting the log fires.
+
+    // Finding-M (a) — queue-off composite stamp failure is logged, not swallowed.
+    it("[Finding-M] logs a failed terminal 'failed' stamp on the queue-off composite path", async () => {
+      // USE_COMPUTE_JOBS_QUEUE unset (default OFF) → composite fails loud.
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      mockUpsert.mockReturnValue({ error: { message: "stamp write denied" } });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      // The swallowed-error bug: without capturing the upsert result the failure
+      // is silently discarded. Assert it is logged with the stamp-failure marker.
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "failed to stamp terminal 'failed' (queue-off composite)",
+        ),
+        expect.objectContaining({ message: "stamp write denied" }),
+      );
+      consoleSpy.mockRestore();
+    });
+
+    // Finding-M (b) — membership-unknown stamp failure is logged, not swallowed.
+    it("[Finding-M] logs a failed membership_unknown stamp on the fail-closed path", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = { message: "connection reset" };
+      mockUpsert.mockReturnValue({ error: { message: "stamp write denied" } });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "failed to stamp terminal 'failed' (membership_unknown)",
+        ),
+        expect.objectContaining({ message: "stamp write denied" }),
+      );
+      consoleSpy.mockRestore();
     });
   });
 });

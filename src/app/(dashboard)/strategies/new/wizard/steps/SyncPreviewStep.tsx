@@ -268,11 +268,16 @@ export function SyncPreviewStep({
   const [expandLog, setExpandLog] = useState(false);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
   const [computationError, setComputationError] = useState<string | null>(null);
-  // Composite discriminator (Pitfall 1): a composite is identified by a
-  // `strategy_keys` membership-count probe (count > 0), NEVER by
-  // `apiKeyId === null` — the prop is the FIRST member's key id (a UUID). Init
-  // false so a single-key run never re-renders from the probe and the poll
-  // effect never restarts on the single-key path (SC-4 neutrality).
+  // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
+  // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
+  // the route took the `stitch_composite` branch). NEVER from a client
+  // `strategy_keys` count re-read: that probe falls OPEN on a transient error
+  // or a null-without-error count, silently routing an already-stitched
+  // composite through the single-key arm (false INSUFFICIENT_TRADES / a
+  // degraded first-member factsheet). The route fails CLOSED (503) on an
+  // unknowable membership, so `!res.ok` → SYNC_FAILED covers that end to end.
+  // Init false so a single-key run never re-renders and the poll effect never
+  // restarts on the single-key path (SC-4 neutrality).
   const [isComposite, setIsComposite] = useState(false);
   // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
   const [correlationId] = useState<string>(() => readCorrelationId());
@@ -297,25 +302,12 @@ export function SyncPreviewStep({
         // on the first poll. Stale rows still kick off as before so
         // a long-paused session doesn't show outdated metrics.
         const supabase = createClient();
-        // Composite membership probe (mirror finalize's compositeMemberCount,
-        // client-side RLS analog — Pitfall 1). A head-count read: count > 0 ⇒
-        // composite. On a Supabase error, console.error and REMAIN single-key
-        // (never silently composite — the shared failed/gate branch still
-        // blocks a broken composite as a fail-safe). Placed before the
-        // freshness read; neutrality holds regardless of position because a
-        // single-key run resolves count 0 and never calls setIsComposite.
-        const { count: memberCount, error: memberProbeError } = await supabase
-          .from("strategy_keys")
-          .select("*", { count: "exact", head: true })
-          .eq("strategy_id", strategyId);
-        if (memberProbeError) {
-          console.error(
-            "[wizard:SyncPreviewStep] composite membership probe error:",
-            memberProbeError,
-          );
-        } else if ((memberCount ?? 0) > 0 && mountedRef.current) {
-          setIsComposite(true);
-        }
+        // NOTE: composite-ness is NOT probed client-side here (the removed
+        // fail-open `strategy_keys` count read). It is threaded from the
+        // kickoff response below. On the freshness-skip resume path the row is
+        // already complete+fresh; that path stays byte-neutral for single-key,
+        // and a broken composite is still caught by the shared failed-gate
+        // fail-safe in the poll effect.
         const { data: existing } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computed_at")
@@ -338,12 +330,29 @@ export function SyncPreviewStep({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
         });
-        if (!res.ok && mountedRef.current) {
-          setErrorCode("SYNC_FAILED");
-          setPhase("gate_failed");
+        if (!res.ok) {
+          // A non-2xx kickoff — INCLUDING the 503 the route returns when
+          // composite membership is UNKNOWABLE — fails CLOSED: surface the
+          // recoverable SYNC_FAILED envelope, never silently assume single-key.
+          if (mountedRef.current) {
+            setErrorCode("SYNC_FAILED");
+            setPhase("gate_failed");
+          }
           return;
         }
-        if (mountedRef.current) setPhase("waiting_for_complete");
+        // AUTHORITATIVE composite discriminator from server truth. The route
+        // returns `composite: true` ONLY on the stitch_composite branch and
+        // fails CLOSED (503, handled above) on an unknowable membership, so a
+        // 2xx always carries a definite boolean. A parse failure can only be a
+        // legacy/empty body (never a real composite, which always emits
+        // `composite: true`), so it safely defaults to the single-key arm.
+        const kickoff = (await res.json().catch(() => null)) as {
+          composite?: boolean;
+        } | null;
+        if (mountedRef.current) {
+          if (kickoff?.composite === true) setIsComposite(true);
+          setPhase("waiting_for_complete");
+        }
       } catch (err) {
         console.error("[wizard:SyncPreviewStep] kickoff threw:", err);
         if (mountedRef.current) {
