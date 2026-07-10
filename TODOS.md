@@ -12,6 +12,31 @@
 
 ---
 
+## 🔮 Future milestone candidate — GUI multi-key composite / "key-stitching" (#596)
+
+**The shape:** expose the currently *founder-only* key-stitching to USERS in the
+GUI. Today a multi-key / allocated-mandate track record (Zavara's 3 keys, the
+Deribit LTP keys) is assembled **backend-only** and works — the founder stitched
+the keys and the results match the managers' claims. But there is **no
+user-facing surface**:
+- Data model is **1 strategy = 1 `api_key_id`** (single FK; no `strategy_keys`
+  join table, no composite type).
+- Stitching = `strategies.returns_denominator_config` (jsonb allocated-capital
+  denominator + `capital_schedule`, set by a **reviewed SQL data change**) +
+  `allocated_capital.py` + the native ledger. `src/` has **zero** references to
+  `returns_denominator_config` — nothing reads or writes it from the app.
+
+**For the milestone (design decisions still open — may grow in scope):**
+- Data-model choice: a composite-strategy type, a keys-array on the strategy, or
+  a guided GUI over `returns_denominator_config`.
+- Wizard UI: select multiple keys, define the capital schedule / mandate window,
+  pick pnl_basis + cumulative/metrics conventions.
+- Backend mostly EXISTS (`allocated_capital.py`, `combine_native_ledger`,
+  native ledger) — this is primarily a data-model + frontend build, not new math.
+- Tracked as GH issue #596. User may bundle additional features into this milestone.
+
+---
+
 ## v1.8 complete_with_warnings surfacing follow-ups (from /ship red-team + Fable specialist fan-out, 2026-07-07)
 
 ### P2: CI guard against fresh `computation_status === 'complete'` exact-matches
