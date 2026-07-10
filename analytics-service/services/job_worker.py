@@ -3257,6 +3257,19 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         mtm_result = await _reconstruct_all(PNL_BASIS_MARK_TO_MARKET)
         if isinstance(mtm_result, DispatchResult):
             return mtm_result
+        # Finding 9 (MTM TOCTOU): the SECOND (MTM) pass re-crawls each member and
+        # produces its OWN option-activity signals (`_mtm_signals`), which we
+        # deliberately DISCARD — the gate decision was already made from the cash
+        # pass (`member_signals`). This is safe: `mark_to_market_available` gates on
+        # an UN-SMOOTHED options book (`has_option_activity`), so if a member
+        # OPENED an option position between the two passes, the ONLY honesty risk is
+        # admitting MTM for a book that just became option-active. That window is
+        # covered because (a) the gate is intentionally conservative — a book that
+        # was option-active on the cash pass already gated MTM off before the second
+        # pass runs; and (b) a book that becomes option-active strictly BETWEEN
+        # passes is caught on the NEXT derive (re-derives are authoritative). The
+        # sub-derive-interval TOCTOU is accepted; re-checking `_mtm_signals` here
+        # would only defer, not eliminate, the same infinitesimal race.
         clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas = mtm_result
         try:
             mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)

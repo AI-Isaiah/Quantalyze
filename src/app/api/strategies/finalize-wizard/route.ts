@@ -916,7 +916,11 @@ async function compositeMemberCount(
         computation_error:
           "Could not determine composite membership " +
           "(strategy_keys count unavailable). Please retry submission.",
-        data_quality_flags: { csv_source: true, composite: true },
+        // Finding 10: membership is UNKNOWN here (the count query failed) — do NOT
+        // assert `composite: true`, which claims a fact we could not establish.
+        // An honest `membership_unknown` reason avoids mislabeling a single-key
+        // strategy as a composite in the DQ flags.
+        data_quality_flags: { csv_source: true, membership_unknown: true },
       },
       { onConflict: "strategy_id" },
     );
