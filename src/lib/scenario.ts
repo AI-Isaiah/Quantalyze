@@ -72,6 +72,7 @@
 import type { DailyPoint } from "./portfolio-math-utils";
 export type { DailyPoint } from "./portfolio-math-utils";
 import { coverageSpanOf, covers } from "./scenario-window";
+import { calendarYears } from "./closed-sets";
 
 export interface StrategyForBuilder {
   id: string;
@@ -506,23 +507,25 @@ export function computeScenario(
   }
 
   const twr = cumulative[n - 1] - 1;
-  // #597 — annualize on the asset-class basis (default 252). years = n / N,
-  // vol/sharpe/sortino use √N and mean·N. Default 252 keeps every existing
-  // caller byte-identical.
+  // TWO CLOCKS (#597 / TWR-05 governing ruling; see compute.ts + metrics.py):
+  //   • RETURN / CAGR ride the CALENDAR clock — elapsed days / 365.25 — and are
+  //     asset-class / periodsPerYear-INVARIANT. Below, `years` is the real
+  //     calendar span of the ACTUAL return axis (first→last commonDate), so a
+  //     sparse/gappy track no longer over-annualizes the way n/periodsPerYear
+  //     did (the retired count clock). A 252-basis run and a 365-basis run
+  //     produce the SAME cagr (pinned in scenario.test.ts).
+  //   • RISK (volatility / sharpe / sortino, below) rides the FREQUENCY clock —
+  //     √periodsPerYear and mean·periodsPerYear — 365 crypto / 252 traditional.
   //
-  // ⚠️ #597-blend FOLLOW-UP — CAGR CLOCK APPROXIMATION. This `years = n /
-  // periodsPerYear` is a COUNT-based CAGR clock, NOT the calendar clock the
-  // governing ruling mandates ("CAGR rides the calendar clock — days/365.25;
-  // risk metrics ride the frequency clock — 365 crypto / 252 traditional";
-  // see compute.ts / metrics.py TWR-05). It is left as-is DELIBERATELY: the
-  // scenario engine composes DENSE, calendar-ALIGNED axes, for which
-  // n/periodsPerYear ≈ calendar span — the ruling's acceptable-approximation
-  // case — and byte-identity of the default (252) path is a PR-#597 invariant.
-  // When the blend follow-up PR flips periodsPerYear toward 365, it MUST also
-  // convert this to a real calendar-span year count derived from the date axis
-  // (calendarYears(firstMs, lastMs) in closed-sets.ts). Do NOT blindly trust
-  // n/365 on a gappy series — a sparse track would over-annualize the CAGR.
-  const years = n / periodsPerYear;
+  // Plan 84-06 discharged the #597-blend FOLLOW-UP that this block previously
+  // carried: the count-based approximation (`years = n / periodsPerYear`) is
+  // replaced by the calendar span. This is a DELIBERATE, reviewed VALUE change
+  // — re-derived, never blind-updated — per the [73-02] metrics.py TWR-05
+  // precedent. We derive the span from the SERIES dates (mirroring compute.ts),
+  // NOT from any window bound: a window wider than member coverage would
+  // overstate the span. The `years > 0 ? … : null` guard is preserved verbatim
+  // (calendarYears returns 0 on a non-positive/non-finite span).
+  const years = calendarYears(Date.parse(commonDates[0]), Date.parse(commonDates[n - 1]));
   const cagr = years > 0 ? Math.pow(1 + twr, 1 / years) - 1 : null;
 
   // Vol (sample std), Sharpe (rf=0), Sortino (rf=0).
