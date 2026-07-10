@@ -28,7 +28,6 @@ import { buildFactsheetPayload } from "./build-payload";
 
 import { arithmeticEquity } from "./compute";
 import { arithmeticUnderwater } from "./compute";
-// @ts-expect-error export lands in 90-03 — deriveSegmentMarkers
 import { deriveSegmentMarkers } from "./build-payload";
 
 // ---------------------------------------------------------------------------

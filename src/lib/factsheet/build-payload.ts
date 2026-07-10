@@ -1,6 +1,7 @@
 import type { CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, TrustTierKind, IngestSource } from "./types";
 import { alignReturns } from "./align";
-import { compute, cumEq, worstDrawdowns } from "./compute";
+import { compute, cumEq, worstDrawdowns, arithmeticEquity, arithmeticUnderwater } from "./compute";
+import { overlayBasisScalars } from "./basis-metrics";
 import { rollingVol, rollingSharpe, rollingSortino, pickRollingWindow, ROLL_WINDOW_90D, ROLL_WINDOW_30D } from "./rolling";
 import { buildComparatorBlock, noneComparatorBlock } from "./comparator-block";
 import {
@@ -47,6 +48,69 @@ export function deriveIngestSource(dailyRaw: unknown): IngestSource {
 }
 
 /**
+ * Phase 90 (D3/D6) — optional composite opts. Additive + defaulted-undefined so
+ * every existing 2-arg call site is byte-identical (GUARD-02). The field types
+ * are anchored to {@link FactsheetCommon} so the payload contract and the opts
+ * contract can't drift.
+ */
+export type BuildFactsheetOpts = {
+  /** "arithmetic" swaps the three curve fields (composite branch); default geometric. */
+  cumulativeMethod?: "geometric" | "arithmetic";
+  segmentBoundaries?: FactsheetCommon["segmentBoundaries"];
+  missingSegments?: FactsheetCommon["missingSegments"];
+  metricsByBasis?: FactsheetCommon["metricsByBasis"];
+  dataQuality?: FactsheetCommon["dataQuality"];
+  mtmGate?: FactsheetCommon["mtmGate"];
+};
+
+/**
+ * Derive FS-01 segment boundaries + FS-02 missing segments from a persisted
+ * `data_quality_flags` object (Phase 86). Pure + defensive: tolerates absent /
+ * malformed `per_key` / `gap_spans` by returning empty arrays (A1 — optional
+ * fields degrade gracefully).
+ *
+ * - segmentBoundaries: one per `per_key[]` with `seq > 1` (seq 1 = inception,
+ *   NOT a seam per UI-SPEC §2); `date` = that key's `first_day`, label = seq.
+ * - missingSegments: one per `gap_spans[]`, `kind:"gap"`, `days` computed
+ *   INCLUSIVE both ends (UTC date diff + 1). `gap_spans` are inclusive both
+ *   ends (stitch_composite), CONTRAST the half-open `[start,end)` member-window
+ *   convention in windowOverlap.ts — normalized here at the ONE assembly seam.
+ */
+export function deriveSegmentMarkers(dqf: {
+  per_key?: Array<{ seq?: unknown; first_day?: unknown }> | unknown;
+  gap_spans?: Array<{ start?: unknown; end?: unknown }> | unknown;
+} | null | undefined): {
+  segmentBoundaries: NonNullable<FactsheetCommon["segmentBoundaries"]>;
+  missingSegments: NonNullable<FactsheetCommon["missingSegments"]>;
+} {
+  const perKey = Array.isArray(dqf?.per_key) ? (dqf!.per_key as Array<{ seq?: unknown; first_day?: unknown }>) : [];
+  const gapSpans = Array.isArray(dqf?.gap_spans) ? (dqf!.gap_spans as Array<{ start?: unknown; end?: unknown }>) : [];
+
+  const segmentBoundaries = perKey
+    .filter(k => k && typeof k.seq === "number" && k.seq > 1 && typeof k.first_day === "string")
+    .map(k => ({ date: k.first_day as string, seq: k.seq as number, label: String(k.seq) }));
+
+  const missingSegments = gapSpans
+    .filter(g => g && typeof g.start === "string" && typeof g.end === "string")
+    .map(g => ({
+      start: g.start as string,
+      end: g.end as string,
+      kind: "gap" as const,
+      days: inclusiveDayCount(g.start as string, g.end as string),
+    }));
+
+  return { segmentBoundaries, missingSegments };
+}
+
+/** UTC calendar days between two YYYY-MM-DD dates, INCLUSIVE both ends. */
+function inclusiveDayCount(start: string, end: string): number {
+  const s = Date.parse(`${start}T00:00:00Z`);
+  const e = Date.parse(`${end}T00:00:00Z`);
+  if (!Number.isFinite(s) || !Number.isFinite(e)) return 0;
+  return Math.round((e - s) / 86_400_000) + 1;
+}
+
+/**
  * Build the full FactsheetPayload from a strategy's daily-return rows.
  *
  * Behavior:
@@ -85,6 +149,7 @@ export function buildFactsheetPayload(
     benchmark?: string | null;
   },
   dailyReturns: DailyReturn[],
+  opts?: BuildFactsheetOpts,
 ): FactsheetPayload | null {
   if (!dailyReturns.length) return null;
 
@@ -142,8 +207,25 @@ export function buildFactsheetPayload(
   const fullMetrics = compute(stratRet, dates, 0, periodsPerYear);
   // Strip eq/dd before serialization — already shipped as strategyEquity / strategyDrawdowns
   // at the top level; carrying them twice burns ~16 KB on a 1049-day series.
-  const { eq: _eq, dd: stratDd, ...strategyMetrics } = fullMetrics;
-  const stratEquity = cumEq(stratRet);
+  const { eq: _eq, dd: geoDd, ...computedMetrics } = fullMetrics;
+
+  // Phase 90 (D3) — arithmetic curve set for COMPOSITES. When
+  // opts.cumulativeMethod==="arithmetic", all THREE curve fields move together
+  // (RESEARCH §Resolved-1): the underwaterAcc chart + Worst-DD bands must agree
+  // with the equity curve or they'd render on a different basis. Single-key
+  // (geometric) path untouched → byte-identical.
+  const isArithmetic = opts?.cumulativeMethod === "arithmetic";
+  const stratEquity = isArithmetic ? arithmeticEquity(stratRet) : cumEq(stratRet);
+  const stratDd = isArithmetic ? arithmeticUnderwater(stratRet) : geoDd;
+
+  // Phase 90 (D3) — cash-scalar overlay. The persisted composite headline is
+  // ARITHMETIC (Zavara 62.66% acceptance); the client `compute()` is GEOMETRIC.
+  // KpiStrip AND MetricsColumn both read `strategyMetrics`, so both must carry
+  // the persisted cash scalars to agree with discovery / ranking / acceptance
+  // (D3, Rule-7 resolution — supersedes the RESEARCH "inert" remark). Only the
+  // seven mapped headline scalars are overlaid; every other key stays the
+  // client-computed cash value. No-op (byte-identical) when metricsByBasis absent.
+  const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
 
   const btcRet = alignReturns(BTC_DAILY, dates);
   const spxRet = alignReturns(SPX_DAILY, dates);
@@ -241,6 +323,14 @@ export function buildFactsheetPayload(
     correlationMatrix: { labels, matrix },
     stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", strategy.markets),
     quantiles,
+    // Phase 90 — composite marker/basis fields. Optional-absent when opts
+    // omitted (undefined values are dropped from the serialized RSC blob), so
+    // single-key payloads stay byte-identical.
+    segmentBoundaries: opts?.segmentBoundaries,
+    missingSegments: opts?.missingSegments,
+    metricsByBasis: opts?.metricsByBasis,
+    mtmGate: opts?.mtmGate,
+    dataQuality: opts?.dataQuality,
   };
 
   // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized
