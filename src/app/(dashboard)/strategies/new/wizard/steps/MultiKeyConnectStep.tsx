@@ -299,7 +299,10 @@ export function MultiKeyConnectStep({
     focusRef.current = p2.id;
     setPanels([p1, p2]);
     setMode("multi");
-    setAnnouncement("Key 2 added");
+    // The State-A→State-B transition creates BOTH panels at once, so announce
+    // the two-key start rather than "Key 2 added" (which implies key 1 already
+    // existed). Matches the terse "Key N added" style used by addPanel below.
+    setAnnouncement("Multi-key mode on — 2 keys added");
   }, []);
 
   const addPanel = useCallback(() => {

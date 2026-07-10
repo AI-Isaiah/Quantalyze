@@ -160,8 +160,11 @@ describe("[ONB-01] MultiKeyConnectStep — Add converts to State B", () => {
     expect(within(panel0).getByTestId("key-0-remove")).toBeInTheDocument();
 
     // Non-blocking announcement + focus on the new panel's first control.
+    // The State-A→State-B transition creates BOTH panels at once, so the
+    // announcement reflects the two-key start (not "Key 2 added", which would
+    // imply key 1 pre-existed).
     expect(screen.getByTestId("multi-key-announce")).toHaveTextContent(
-      "Key 2 added",
+      "Multi-key mode on — 2 keys added",
     );
     expect(screen.getByTestId("key-1-exchange-binance")).toHaveFocus();
   });
