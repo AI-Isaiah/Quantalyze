@@ -58,9 +58,13 @@ const STATE = vi.hoisted(() => ({
   // happy-path tests pass without rewiring. R2 flips this to 'manager' to
   // exercise the 403 gate.
   profileRole: "allocator" as "allocator" | "both" | "manager" | null,
-  // The published-existence probe resolves { id } when true, null when false.
-  // null ⇒ 404 (unpublished / non-existent / cross-tenant under RLS).
+  // The published-existence probe resolves { id, asset_class } when true, null
+  // when false. null ⇒ 404 (unpublished / non-existent / cross-tenant under RLS).
   publishedExists: true,
+  // #597 part 2 (BLEND-01) — the asset_class the widened probe row carries. The
+  // route forwards it on the 200 body (null models a strategy with no class /
+  // a stale build that predates the widened select).
+  publishedAssetClass: "crypto" as string | null,
   // The strategy_analytics row the series read resolves. `null` models an
   // absent analytics row → honest empty [].
   analyticsRow: { daily_returns: [] as unknown } as
@@ -136,7 +140,9 @@ vi.mock("@/lib/supabase/server", () => ({
             return builder;
           },
           maybeSingle: async () => ({
-            data: STATE.publishedExists ? { id: PUBLISHED_ID } : null,
+            data: STATE.publishedExists
+              ? { id: PUBLISHED_ID, asset_class: STATE.publishedAssetClass }
+              : null,
             error: null,
           }),
         };
@@ -212,6 +218,7 @@ beforeEach(() => {
   };
   STATE.profileRole = "allocator";
   STATE.publishedExists = true;
+  STATE.publishedAssetClass = "crypto";
   STATE.analyticsRow = { daily_returns: [] };
   STATE.analyticsQueryError = null;
   STATE.observedFilters = {
@@ -306,6 +313,29 @@ describe("GET /api/strategies/[id]/returns", () => {
       { date: "2022-01-10", value: -0.007462 },
       { date: "2022-01-11", value: 0.0031 },
     ]);
+  });
+
+  it("R4c — #597 BLEND-01: the widened probe forwards asset_class on the 200 body (published rows only), null when unset", async () => {
+    // The widened `.select("id, asset_class")` probe row carries the strategy's
+    // public classification; the route forwards it so a drawer-added, NON-book
+    // strategy can feed the composer's blend basis. This is the runtime pin for
+    // "the response body carries asset_class" (the type is compile-pinned via
+    // ReturnsResponse; this proves the VALUE flows from the probe row).
+    STATE.publishedAssetClass = "crypto";
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    let body = await res.json();
+    expect(body.asset_class).toBe("crypto");
+    // The probe select was widened to include asset_class (non-vacuous — the
+    // route reads it from the SAME published-gated probe, not a second query).
+    expect(STATE.observedFilters.strategiesSelect).toBe("id, asset_class");
+
+    // A strategy with no class (or a stale build) → null, never fabricated.
+    STATE.publishedAssetClass = null;
+    const res2 = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    body = await res2.json();
+    expect(body.asset_class).toBeNull();
   });
 
   it("R5 — absent analytics row → 200 + { daily_returns: [] } (honest empty)", async () => {
