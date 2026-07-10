@@ -40,6 +40,7 @@ import pandas as pd
 
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
+    _NATIVE_OPTIONS_SUMMARY_TYPES,
     CASH_BEARING_TYPES,
     DEFAULT_PNL_BASIS,
     PNL_BASIS_MARK_TO_MARKET,
@@ -47,6 +48,7 @@ from services.deribit_txn import (
     _option_activity_after_coverage,
     _pre_coverage_option_days,
     assert_balance_identity,
+    classify_instrument,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
@@ -770,6 +772,36 @@ class CompletenessReport:
     # normal state (§5 ``_assert_inception_reconciled`` is the authoritative
     # reconciliation), so this is NOT a warning and never promotes the status.
     balance_identity_open_option_ccys: list[str] = field(default_factory=list)
+    # Phase 86 (COMP-04) — the MTM-gate signal consumed by
+    # ``services.stitch_composite.mark_to_market_available`` (threaded per member
+    # by ``run_stitch_composite_job``). True iff the crawl's RAW rows carry option
+    # evidence — a ``options_settlement_summary``-typed row (deribit_txn.py:603, the
+    # MTM channel) OR an option-instrument row (``-C``/``-P``). Read from RAW rows,
+    # NOT the basis-dependent classification, so an un-smoothed options book is
+    # detected under CASH_SETTLEMENT too (summary rows may be ABSENT pre-rollout /
+    # on the cash basis — the instrument-name fallback covers that case). Default
+    # False (perp-only / USD-native) — additive, no existing constructor changes.
+    has_option_activity: bool = False
+
+
+def deribit_raw_rows_have_option_activity(
+    raw_rows: Sequence[Mapping[str, Any]],
+) -> bool:
+    """True iff ANY raw crawl row is option-book evidence: a
+    ``options_settlement_summary``-typed row (the MTM channel — present only under
+    MARK_TO_MARKET / post-rollout) OR an option-instrument row (``-C``/``-P``,
+    the cash-basis fallback since summary rows may be absent). Basis-agnostic — it
+    reads the BOOK, never the accrual classification (deribit_txn.py:603). Pure /
+    never raises on untrusted exchange input (T-70-05): a non-Mapping row is
+    skipped and ``classify_instrument`` never raises."""
+    for row in raw_rows:
+        if not isinstance(row, Mapping):
+            continue
+        if str(row.get("type", "")) in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            return True
+        if classify_instrument(str(row.get("instrument_name", ""))) == "option":
+            return True
+    return False
 
 
 def _now_ms() -> int:
@@ -1779,6 +1811,11 @@ async def build_deribit_native_ledger(
         for ccy, day_map in native_daily.items()
     }
     native_flows = report.dated_external_flows
+    # Phase 86 (COMP-04) MTM-gate signal — additive crawl artifact set from the RAW
+    # rows (like dated_external_flows / pre_coverage_option_days). Basis-agnostic:
+    # an options book is flagged under BOTH pnl_basis values so
+    # ``mark_to_market_available`` gates a composite's MTM off honestly.
+    report.has_option_activity = deribit_raw_rows_have_option_activity(raw_rows)
     # HIGH-1/MEDIUM-1 (D5 one-read): use the anchor the caller already read from
     # the SAME get_account_summaries response so the core's anchor + the caller's
     # materiality/C2 basis judge ONE response. Standalone / test callers pass
