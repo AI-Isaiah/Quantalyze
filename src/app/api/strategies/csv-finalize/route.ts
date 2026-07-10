@@ -242,6 +242,10 @@ interface CsvMetadataPayload {
   leverage_range?: string;
   aum?: string;
   max_capacity?: string;
+  // #597 part 2 — the wizard's asset_class picker value (drives √365 crypto /
+  // √252 traditional KPI annualization). Closed set; the CSV branch keeps the
+  // user's choice (traditional is legitimate here — no API-key force-derive).
+  asset_class?: "crypto" | "traditional";
 }
 
 const MAX_DESCRIPTION_CHARS = MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS;
@@ -391,6 +395,24 @@ export function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
     }
   }
 
+  // #597 part 2 — asset_class closed-set validation. The CSV wizard forwards
+  // the picker value (CsvSubmitStep); it drives √365 crypto / √252 traditional
+  // KPI annualization. Mirror the NEW-C14-03 fail-loud contract: an absent /
+  // null field is the legitimate metadata-less path (omit → column default,
+  // byte-identical to today); a present-but-invalid value is a caller error →
+  // 400 CSV_INVALID_FORMAT. No case-folding — the DB closed set is lowercase,
+  // so 'CRYPTO' is a rejected value, not a silently-coerced one.
+  if (obj.asset_class !== undefined && obj.asset_class !== null) {
+    if (obj.asset_class !== "crypto" && obj.asset_class !== "traditional") {
+      return {
+        ok: false,
+        field: "metadata.asset_class",
+        message: `asset_class must be "crypto" or "traditional" (got ${JSON.stringify(obj.asset_class)}).`,
+      };
+    }
+    out.asset_class = obj.asset_class;
+  }
+
   return { ok: true, payload: out };
 }
 
@@ -400,7 +422,10 @@ export function parseCsvMetadata(raw: unknown): ParseCsvMetadataResult {
  * cannot drift. Returns an empty object if there's nothing to write,
  * so the caller can early-skip the UPDATE roundtrip.
  */
-function buildMetadataUpdatePayload(
+// Exported for direct unit testing (mirrors parseCsvMetadata): pins the
+// #597-part-2 contract that a validated asset_class rides this UPDATE and an
+// absent field is omitted from it — independent of the route call site.
+export function buildMetadataUpdatePayload(
   metadata: CsvMetadataPayload | null,
 ): Record<string, unknown> {
   const updatePayload: Record<string, unknown> = {};
@@ -438,6 +463,17 @@ function buildMetadataUpdatePayload(
   }
   if (metadata.max_capacity !== undefined) {
     updatePayload.max_capacity = Number(metadata.max_capacity);
+  }
+  // #597 part 2 — persist the picker choice VERBATIM. parseCsvMetadata already
+  // confirmed it is exactly 'crypto' or 'traditional'. LOCKED DECISION: the CSV
+  // path keeps the user's choice — the finalize-wizard `apiKeyId ? "crypto"`
+  // force-derive is API-key-only and must NOT be copied here (a genuinely
+  // traditional CSV track record is the phase's one real √252 blend leg). An
+  // absent field stays absent → column default null → 252 downstream. This
+  // rides the existing owner-scoped, @audit-skipped strategies UPDATE in
+  // applyCsvMetadataUpdate (no new mutation, no new pragma needed).
+  if (metadata.asset_class !== undefined) {
+    updatePayload.asset_class = metadata.asset_class;
   }
   return updatePayload;
 }

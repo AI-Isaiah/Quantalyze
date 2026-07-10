@@ -27,8 +27,22 @@
  *   npx vitest run src/__tests__/csv-finalize-rpc.test.ts
  */
 
-import { describe, it, expect, afterAll, beforeAll } from "vitest";
+// #597 part 2 (Plan 84-07): the pure-function asset_class blocks below import
+// the csv-finalize route module, which pulls in `server-only`. Run in the node
+// environment and stub `server-only` so the import resolves (mirrors
+// csv-finalize-c14-regression.test.ts). The live-DB integration tests in this
+// file are node-oriented (supabase client, no DOM) and unaffected.
+// @vitest-environment node
+
+import { describe, it, expect, afterAll, beforeAll, vi } from "vitest";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+vi.mock("server-only", () => ({}));
+
+import {
+  parseCsvMetadata,
+  buildMetadataUpdatePayload,
+} from "@/app/api/strategies/csv-finalize/route";
 import {
   HAS_LIVE_DB,
   LIVE_DB_URL,
@@ -300,5 +314,94 @@ describe("finalize_csv_strategy RPC (Phase 15 / CSV-01)", () => {
   it("advertises skip reason when live DB is unavailable", () => {
     advertiseLiveDbSkipReason("csv-finalize-rpc");
     expect(true).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #597 part 2 — asset_class boundary validation + persistence (Plan 84-07).
+//
+// Pure-function coverage (NO live DB): the wizard's CSV branch now forwards an
+// asset_class picker value to csv-finalize (CsvSubmitStep). These tests pin the
+// route-side contract that closes the deferred upload-picker gap:
+//   - the two closed-set values 'crypto'/'traditional' parse into the payload
+//     VERBATIM — CSV strategies keep the user's choice (NO force-derive to
+//     'crypto'; that rule is API-key-only, per the locked #597 decision);
+//   - a present-but-invalid value fails loud (ok:false, field
+//     'metadata.asset_class') → the route 400s CSV_INVALID_FORMAT (NEW-C14-03);
+//   - an ABSENT field is omitted from the UPDATE payload (back-compat: the
+//     column stays null → annualizationPeriods default 252 downstream). This is
+//     byte-identical to the metadata-less finalize behavior shipped today.
+// ---------------------------------------------------------------------------
+
+describe("parseCsvMetadata — asset_class closed-set validation (#597 part 2)", () => {
+  it("carries 'crypto' into the payload verbatim", () => {
+    const result = parseCsvMetadata({ asset_class: "crypto" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected acceptance");
+    expect(result.payload?.asset_class).toBe("crypto");
+  });
+
+  it("carries 'traditional' into the payload verbatim (NO force-crypto on the CSV path)", () => {
+    const result = parseCsvMetadata({ asset_class: "traditional" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected acceptance");
+    expect(result.payload?.asset_class).toBe("traditional");
+  });
+
+  it("rejects a wrong-case value ('CRYPTO') — no case-folding, DB set is lowercase", () => {
+    const result = parseCsvMetadata({ asset_class: "CRYPTO" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected rejection");
+    expect(result.field).toBe("metadata.asset_class");
+  });
+
+  it("rejects an out-of-set value ('equities')", () => {
+    const result = parseCsvMetadata({ asset_class: "equities" });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected rejection");
+    expect(result.field).toBe("metadata.asset_class");
+  });
+
+  it("rejects a non-string value (42)", () => {
+    const result = parseCsvMetadata({ asset_class: 42 });
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected rejection");
+    expect(result.field).toBe("metadata.asset_class");
+  });
+
+  it("omits asset_class from the payload when the field is absent (back-compat)", () => {
+    const result = parseCsvMetadata({ description: "no asset_class here" });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected acceptance");
+    expect(result.payload?.asset_class).toBeUndefined();
+  });
+
+  it("omits asset_class when the field is explicitly null (back-compat)", () => {
+    const result = parseCsvMetadata({ asset_class: null });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected acceptance");
+    expect(result.payload?.asset_class).toBeUndefined();
+  });
+});
+
+describe("buildMetadataUpdatePayload — asset_class UPDATE persistence (#597 part 2)", () => {
+  it("writes a validated asset_class into the UPDATE payload verbatim", () => {
+    const payload = buildMetadataUpdatePayload({ asset_class: "traditional" });
+    expect(payload.asset_class).toBe("traditional");
+  });
+
+  it("writes 'crypto' when the picker chose crypto", () => {
+    const payload = buildMetadataUpdatePayload({ asset_class: "crypto" });
+    expect(payload.asset_class).toBe("crypto");
+  });
+
+  it("omits the asset_class key entirely when absent (column stays null → 252 default)", () => {
+    const payload = buildMetadataUpdatePayload({ description: "x" });
+    expect("asset_class" in payload).toBe(false);
+  });
+
+  it("omits asset_class for a null metadata blob (metadata-less finalize unchanged)", () => {
+    const payload = buildMetadataUpdatePayload(null);
+    expect("asset_class" in payload).toBe(false);
   });
 });
