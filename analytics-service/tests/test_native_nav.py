@@ -1141,3 +1141,55 @@ def test_inverse_perpetual_pnl_dominated_day_is_guarded() -> None:
         "un-guarded P&L-dominated return(s) emitted (HARD-01 blow-up): "
         f"{exploded.to_dict()}"
     )
+
+
+def test_blowup_fixture_nav_valuation_matches_hand_model() -> None:
+    """Branch-selector diagnostic (research §b / §h Q1) — is the small denominator
+    ECONOMICALLY REAL (fix branch b1: add a magnitude guard) or a VALUATION ARTIFACT
+    (fix branch b2: fix native_nav._value_over_calendar / equity sourcing)?
+
+    Under CORRECT valuation NAV(d) = Σ_c B_c(d)×mark_c(d); with a single BTC bucket
+    and a CONSTANT mark ($88,000) the mark cancels in the ratio, so each emitted
+    per-day return equals pnl_t / B_{t-1} (flow-free days). Hand-computed backward
+    roll (see _pnl_dominated_blowup_ledger docstring): B(d1)=0.027, B(d2)=0.030,
+    B(d3)=0.550, B(d4)=0.555, B(d5)=0.559, B(d6)=0.565.
+
+        r(d2 2024-01-02) = pnl_d2 / B_d1 = 0.003 / 0.027  ≈ 0.111111
+        r(d4 2024-01-04) = pnl_d4 / B_d3 = 0.005 / 0.550  ≈ 0.009091
+        r(d5 2024-01-05) = pnl_d5 / B_d4 = 0.004 / 0.555  ≈ 0.007207
+        r(d6 2024-01-06) = pnl_d6 / B_d5 = 0.006 / 0.559  ≈ 0.010734
+        r(d7 2024-01-07) = pnl_d7 / B_d6 = 0.002 / 0.565  ≈ 0.003540
+
+    We assert ONLY the non-dominated days (d2, d4..d7 — they survive both pre- and
+    post-fix). d3 is deliberately NOT asserted: post-fix it becomes a guarded NaN,
+    and its pre-fix magnitude (r ≈ 17.33) is already captured by Task 1's --runxfail
+    RED evidence. If these match → the reconstruction VALUES the equity correctly
+    and the tiny denominator is real → SELECT BRANCH b1. If they diverge → the NAV
+    is mis-valued → SELECT BRANCH b2. The assertion outcome IS the selector."""
+    ledger = _pnl_dominated_blowup_ledger()
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+
+    d1, d2, d3, d4, d5, d6, d7 = (
+        pd.Timestamp(f"2024-01-0{n}") for n in range(1, 8)
+    )
+    # Day 1 is a leading terminus (prev0 ≈ 0 → negative_nav_guard).
+    assert pd.isna(returns.loc[d1])
+
+    p = _BLOWUP_PNL_BTC
+    # Hand-model per-day returns on the CORRECT valuation (mark cancels).
+    expected = {
+        d2: p[1] / 0.027,   # 0.003 / B_d1
+        d4: p[3] / 0.550,   # 0.005 / B_d3
+        d5: p[4] / 0.555,   # 0.004 / B_d4
+        d6: p[5] / 0.559,   # 0.006 / B_d5
+        d7: p[6] / 0.565,   # 0.002 / B_d6
+    }
+    for day, want in expected.items():
+        assert returns.loc[day] == pytest.approx(want, rel=1e-9), (
+            f"NAV valuation diverges from the hand model on {day.date()} "
+            f"(emitted {returns.loc[day]} vs hand {want}) → selects fix branch b2"
+        )
+    # d3 (the P&L-dominated day) is intentionally NOT asserted here.
+    assert d3 in returns.index  # present, magnitude captured by the xfail repro
