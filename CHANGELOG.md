@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.41.0.2] - 2026-07-11
+### Changed
+- **Analytics-service Python CI suite now runs in parallel (`pytest -n auto --dist loadgroup`).** The ~3.6k offline tests distribute across the runner's workers; the handful that hit the shared remote Supabase test project are pinned to a single xdist worker via a content-based `xdist_group` in `tests/conftest.py` (detects the PostgREST `SUPABASE_TEST_URL`/`_need_supabase` idiom AND the psycopg `TEST_SUPABASE_DB_URL`/`HAS_LIVE_DB` idiom — but deliberately not the broad `SUPABASE_URL`, which names offline env references). This preserves the no-intra-run-race property the old serial job had; the repo-wide `concurrency: shared-test-db` group still guards cross-run contention. `pytest-cov` combines per-worker coverage so `--cov-fail-under=80` is unaffected (union coverage is `>=` the serial number). Local A/B: 34.6s → 15.0s on 10 cores. The Makefile `test:` target stays byte-identical with CI.
+
 ## [0.41.0.1] - 2026-07-11
 ### Fixed
 - **Multi-key composite onboarding UAT fixes (v1.9 follow-up, from live dogfooding).**
