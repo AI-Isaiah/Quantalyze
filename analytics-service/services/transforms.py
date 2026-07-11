@@ -318,22 +318,19 @@ def _merge_status_meta(
             "complete_with_warnings" if warn else "complete"
         ),
     }
-    # Explicit assignments (not a loop) keep the TypedDict literal-key types
-    # checkable under mypy --strict, mirroring nav_twr._build_nav_meta.
-    if nav_meta.get("dust_nav_guard"):
-        meta["dust_nav_guard"] = True
-    if nav_meta.get("negative_nav_guard"):
-        meta["negative_nav_guard"] = True
-    if nav_meta.get("flow_dominated_guard"):
-        meta["flow_dominated_guard"] = True
-    if nav_meta.get("flow_coverage_incomplete"):
-        meta["flow_coverage_incomplete"] = True
-    if nav_meta.get("unrealized_pnl_in_anchor"):
-        meta["unrealized_pnl_in_anchor"] = True
-    if nav_meta.get("unrealized_pnl_unreadable"):
-        meta["unrealized_pnl_unreadable"] = True
-    if nav_meta.get("twr_chain_broken"):
-        meta["twr_chain_broken"] = True
+    # SHOULD-1 (Phase 92 hardening): carry every fired BOOL guard key BY
+    # CONSTRUCTION from the ONE shared NAV_TWR_GUARD_KEYS source. A hand-maintained
+    # per-key allowlist here silently DROPPED a newly-added key (pnl_dominated_guard
+    # was omitted, so on the CCXT broker path the specific DQ flag vanished while the
+    # coarse guard_fired promotion still worked). The downstream consumers
+    # (job_worker pre-stamp :2757, analytics_runner lift :1829) already
+    # `# type: ignore[literal-required]` for exactly this str-key-into-TypedDict
+    # assignment, so mypy --strict stays happy without the manual literal list.
+    # The one non-bool special-case (pre_summary_rollout_option_dailies, a list
+    # value) is preserved below and OVERWRITES the bool set by this loop.
+    for _guard_key in NAV_TWR_GUARD_KEYS:
+        if nav_meta.get(_guard_key):
+            meta[_guard_key] = True  # type: ignore[literal-required]
     # Phase 82: this in-meta merge carries the pre-coverage option-dailies bucket
     # LIST additively; a non-empty list already fired guard_fired above →
     # complete_with_warnings. NOTE (F3): the list is NOT persisted to the factsheet.

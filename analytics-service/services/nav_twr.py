@@ -542,20 +542,16 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
             "complete_with_warnings" if warn else "complete"
         ),
     }
-    if flags.get("dust_nav_guard"):
-        meta["dust_nav_guard"] = True
-    if flags.get("negative_nav_guard"):
-        meta["negative_nav_guard"] = True
-    if flags.get("flow_dominated_guard"):
-        meta["flow_dominated_guard"] = True
-    if flags.get("pnl_dominated_guard"):
-        meta["pnl_dominated_guard"] = True
-    if flags.get("flow_coverage_incomplete"):
-        meta["flow_coverage_incomplete"] = True
-    if flags.get("unrealized_pnl_in_anchor"):
-        meta["unrealized_pnl_in_anchor"] = True
-    if flags.get("twr_chain_broken"):
-        meta["twr_chain_broken"] = True
+    # SHOULD-1 (Phase 92 hardening): derive the additive per-key carry BY
+    # CONSTRUCTION from the ONE shared NAV_TWR_GUARD_KEYS source (mirroring
+    # transforms._merge_status_meta) so a newly-added guard key can never be
+    # silently dropped by a stale hand-maintained allowlist. The core only ever
+    # sets bool guard keys here (the list-valued pre_summary_rollout_option_dailies
+    # originates in the broker wiring, never in these flags), so a bool set is
+    # correct for every key it can carry.
+    for _guard_key in NAV_TWR_GUARD_KEYS:
+        if flags.get(_guard_key):
+            meta[_guard_key] = True  # type: ignore[literal-required]
     return meta
 
 
