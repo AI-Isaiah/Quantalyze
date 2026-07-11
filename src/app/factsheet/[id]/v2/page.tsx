@@ -103,7 +103,13 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       .order("date", { ascending: true })
       .limit(20000); // Flat safety ceiling, T-36-03-03 precedent
     if (sparseErr) {
-      console.warn("[factsheet] fetchAndBuildPayload — composite csv_daily_returns read failed", {
+      // F3: a composite depends ENTIRELY on this sparse read — a real DB failure
+      // hides the whole published factsheet behind the "still computing"
+      // placeholder. Log at ERROR (→ Sentry) so a persistent read failure is
+      // observable rather than looking like an un-computed strategy. Control flow
+      // is unchanged (fail-SAFE: still returns the placeholder below, never the
+      // api arm / flat-zero line).
+      console.error("[factsheet] fetchAndBuildPayload — composite csv_daily_returns read failed", {
         id,
         errorMessage: sparseErr.message,
       });
