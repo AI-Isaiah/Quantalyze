@@ -1,10 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
 import { compute } from "@/lib/factsheet/compute";
+// SFH-2 — sanitizeLeverage emits a Sentry warning on a real coercion (e.g. the
+// L=999 hook exercise below clamps to 10×). Mock the helper so that signal is
+// assertable and no real @sentry import fires under jsdom.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+import { captureToSentry } from "@/lib/sentry-capture";
 import { BasisProvider, useBasisMetrics } from "./basis-context";
 import {
   LeverageProvider,
@@ -149,6 +154,8 @@ describe("leverage-context", () => {
     // `appliedLeverage`, so the label can never diverge from the computed KPIs.
     expect(result.current.levered.modeled).toBe(true);
     expect(result.current.levered.appliedLeverage).toBe(10);
+    // SFH-2 — the out-of-band 999 is a real coercion → Sentry-visible.
+    expect(captureToSentry).toHaveBeenCalled();
   });
 
   it("Test 6 — GUARD-04: source has no storage/URL/cookie/history access", () => {

@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { compute } from "@/lib/factsheet/compute";
+
+// SFH-2 — a real coercion emits a Sentry warning; mock the helper so the unit
+// tests can assert the signal fires (and don't trigger a real @sentry import).
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+import { captureToSentry } from "@/lib/sentry-capture";
 
 import { MAX_LEVERAGE, sanitizeLeverage, sanitizeLeverageMap } from "./leverage";
 
@@ -56,6 +61,52 @@ describe("sanitizeLeverageMap — LEV-02 rehydrate helper (per-entry sanitize on
       c: 1,
       d: 10,
     });
+  });
+});
+
+describe("SFH-2 — a REAL coercion is Sentry-visible; the identity path is silent", () => {
+  beforeEach(() => {
+    vi.mocked(captureToSentry).mockClear();
+  });
+
+  it("does NOT log on the identity path (0/2/10 → itself)", () => {
+    sanitizeLeverage(0);
+    sanitizeLeverage(2);
+    sanitizeLeverage(MAX_LEVERAGE);
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("logs a warning with an errorId + input/output when a finite value is clamped down (999 → 10)", () => {
+    sanitizeLeverage(999);
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    const [, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(options.tags.errorId).toBe("LEV_SANITIZE_COERCION");
+    expect(options.level).toBe("warning");
+    expect(options.extra).toMatchObject({ input: 999, output: 10 });
+  });
+
+  it("logs when a negative value is coerced to 1 (−5 → 1)", () => {
+    sanitizeLeverage(-5);
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(captureToSentry).mock.calls[0][1].extra).toMatchObject({
+      input: -5,
+      output: 1,
+    });
+  });
+
+  it("does NOT log on unpersistable non-finite input (NaN/Infinity — JSON can't carry them)", () => {
+    sanitizeLeverage(NaN);
+    sanitizeLeverage(Infinity);
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("threads the offending KEY through the map path (corrupt persisted value is diagnosable by ref)", () => {
+    sanitizeLeverageMap({ good: 2, bad: 999 });
+    // Only the coerced entry logs; the identity entry stays silent.
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+    const [, options] = vi.mocked(captureToSentry).mock.calls[0];
+    expect(options.tags.source).toBe("sanitizeLeverageMap");
+    expect(options.extra).toMatchObject({ key: "bad", input: 999, output: 10 });
   });
 });
 

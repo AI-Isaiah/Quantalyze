@@ -25,6 +25,8 @@
  * not the loop).
  */
 
+import { captureToSentry } from "./sentry-capture";
+
 /**
  * R4 — leverage v1 bounds. No shorting (L ≥ 0); a 10× ceiling keeps the
  * projection in a sane range. Lifted from ScenarioComposer.tsx:178 so the
@@ -34,24 +36,62 @@
 export const MAX_LEVERAGE = 10;
 
 /**
+ * Optional provenance for a sanitize call, used ONLY to enrich the SFH-2
+ * coercion signal (below). Absent on the hot render path (the factsheet
+ * ControlBar pre-clamps, so it never coerces in production); present on the
+ * rehydrate path so a corrupt persisted value carries its offending key.
+ */
+interface SanitizeContext {
+  source: string;
+  key?: string;
+}
+
+/**
  * Read-side leverage clamp. Non-finite or negative → 1 (mirrors the engine
  * `lev()`); anything above the ceiling → MAX_LEVERAGE; otherwise identity
  * (0 is a valid, allowed multiplier).
+ *
+ * SFH-2 — the clamp is a fail-SAFE (a bad value can never poison the curve),
+ * but a silent coercion of a *defined* value would leave corrupt persisted
+ * leverage looking like an honest 1×/clamped multiplier with no signal. So a
+ * REAL coercion (a finite input whose sanitized output differs — e.g. a
+ * tampered persisted `999 → 10`, or a `-5 → 1`) emits a Sentry warning with an
+ * errorId + the offending key/value. The identity path (0/2/10 → itself) and
+ * unpersistable non-finite inputs (JSON can't carry NaN/Infinity) never log —
+ * that would be pure noise. Behavior of the return value is UNCHANGED.
  */
-export function sanitizeLeverage(v: number): number {
-  return Number.isFinite(v) && v >= 0 ? Math.min(MAX_LEVERAGE, v) : 1;
+export function sanitizeLeverage(v: number, context?: SanitizeContext): number {
+  const out = Number.isFinite(v) && v >= 0 ? Math.min(MAX_LEVERAGE, v) : 1;
+  if (Number.isFinite(v) && out !== v) {
+    captureToSentry(
+      new Error(
+        `sanitizeLeverage coerced an out-of-range leverage (${v} → ${out})`,
+      ),
+      {
+        tags: {
+          errorId: "LEV_SANITIZE_COERCION",
+          source: context?.source ?? "sanitizeLeverage",
+        },
+        extra: { key: context?.key ?? null, input: v, output: out },
+        level: "warning",
+      },
+    );
+  }
+  return out;
 }
 
 /**
  * Per-entry `sanitizeLeverage` over a leverage-override map (the LEV-02
- * rehydrate helper; D3 sanitize-on-read). `undefined` → `{}`.
+ * rehydrate helper; D3 sanitize-on-read). `undefined` → `{}`. Threads each
+ * entry's key into the SFH-2 coercion signal so a corrupt persisted value is
+ * diagnosable by ref.
  */
 export function sanitizeLeverageMap(
   m: Record<string, number> | undefined,
 ): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [k, v] of Object.entries(m ?? {})) {
-    out[k] = sanitizeLeverage(v);
+    out[k] = sanitizeLeverage(v, { source: "sanitizeLeverageMap", key: k });
   }
   return out;
 }
