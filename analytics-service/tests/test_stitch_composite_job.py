@@ -885,3 +885,106 @@ async def test_stamp_failed_first_derive_no_existing_row_falls_back() -> None:
     assert failed_stamps
     dq = failed_stamps[-1]["data_quality_flags"]
     assert dq == {"csv_source": True, "composite": True}
+
+
+# ---------------------------------------------------------------------------
+# M-1 — composite member 429 handling (defer parent job + stamp rate-limit)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_member_cooldown_defers_parent_job_no_keyerror() -> None:
+    """M-1 part 1: member_job must carry the PARENT job's `id` + `claim_token`.
+    _allocator_key_preflight → _check_circuit_breaker → _defer reads job["id"] /
+    job.get("claim_token"). A member key with a live last_429_at cooldown drives
+    the REAL circuit-breaker defer; pre-fix member_job lacked `id`, so _defer
+    raised KeyError('id') → the 429 was misclassified and RETRIED instead of
+    DEFERRED. Post-fix the parent stitch job is deferred cleanly. Neuter (drop
+    id/claim_token from member_job) → _defer raises KeyError → this reddens (the
+    job raises instead of returning DEFERRED)."""
+    from services.job_worker import _check_circuit_breaker
+
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    defer_calls: list[dict[str, Any]] = []
+
+    def _rpc(name: str, args: dict[str, Any]) -> SimpleNamespace:
+        fake.rpc_calls.append((name, args))
+        data: Any = None
+        if name == "api_key_cooldown_remaining":
+            data = 30  # live cooldown → circuit breaker trips
+        elif name == "defer_compute_job":
+            defer_calls.append(args)
+        return SimpleNamespace(execute=lambda d=data: SimpleNamespace(data=d))
+
+    fake.rpc = _rpc  # type: ignore[assignment]
+
+    captured_jobs: list[dict[str, Any]] = []
+
+    async def _preflight(job: dict[str, Any], handler_name: str) -> Any:
+        # Exercise the REAL circuit-breaker path with the member_job the composite
+        # built. A member key row carrying a live last_429_at trips the breaker.
+        captured_jobs.append(job)
+        key_row = {
+            "id": "key-1",
+            "exchange": "deribit",
+            "last_429_at": "2024-01-01T00:00:00Z",
+        }
+        result = await _check_circuit_breaker(fake, job, key_row)
+        return result if result is not None else _ctx("deribit")
+
+    with _apply([
+        patch("services.job_worker.get_supabase", new=MagicMock(return_value=fake)),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+        patch("services.job_worker._allocator_key_preflight", new=_preflight),
+    ]):
+        # No KeyError: the parent stitch job is deferred cleanly.
+        result = await run_stitch_composite_job({
+            "strategy_id": _STRATEGY_ID,
+            "id": "job-parent-1",
+            "claim_token": "tok-abc",
+        })
+
+    assert result.outcome == DispatchOutcome.DEFERRED
+    # member_job carried the PARENT job's id + claim_token.
+    assert captured_jobs, "preflight must have been invoked for the member"
+    member_job = captured_jobs[0]
+    assert member_job.get("id") == "job-parent-1"
+    assert member_job.get("claim_token") == "tok-abc"
+    # _defer fired against the PARENT job id (no KeyError, correct fencing).
+    assert defer_calls, "the circuit breaker must have deferred the parent job"
+    assert defer_calls[0]["p_job_id"] == "job-parent-1"
+    assert defer_calls[0]["p_claim_token"] == "tok-abc"
+
+
+@pytest.mark.asyncio
+async def test_member_crawl_rate_limited_stamps_429_and_transient() -> None:
+    """M-1 part 2: a member crawl raising ccxt.RateLimitExceeded must stamp
+    api_keys.last_429_at for the MEMBER key (so the circuit breaker defers
+    sibling jobs during the exchange cooldown) and classify the failure
+    TRANSIENT. Pre-fix the member `except Exception` had NO RateLimitExceeded arm,
+    so _stamp_429 was NEVER called on a member crawl (every other exchange-
+    touching handler stamps it). Neuter (drop the new arm) → _stamp_429 uncalled
+    (and the 429 re-raises unstamped) → this reddens."""
+    import ccxt
+
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    stamp_spy = AsyncMock()
+    with _apply(_deribit_patches(
+        fake, combine_returns=[], has_option_activity=True,
+    )), patch(
+        "services.deribit_ingest.build_deribit_native_ledger",
+        new=AsyncMock(side_effect=ccxt.RateLimitExceeded("429 too many requests")),
+    ), patch(
+        "services.job_worker._stamp_429", new=stamp_spy,
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    # The 429 is classified TRANSIENT (retryable), not raised uncaught.
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    # _stamp_429 was invoked for the MEMBER key (default _ctx key_row id=key-x).
+    stamp_spy.assert_awaited_once()
+    stamped_key_row = stamp_spy.await_args.args[1]
+    assert stamped_key_row["id"] == "key-x"

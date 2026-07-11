@@ -3116,7 +3116,21 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         metas: list[dict[str, Any]] = []
         for m in members:
             seq = int(m["seq"])
-            member_job = {"api_key_id": m["api_key_id"], "strategy_id": strategy_id}
+            # M-1: thread the PARENT stitch job's id + claim_token into the member
+            # preflight job. _allocator_key_preflight → _check_circuit_breaker →
+            # _defer reads job["id"] / job.get("claim_token"); a member key with a
+            # live last_429_at cooldown (e.g. 429'd in another crawl) would
+            # otherwise raise KeyError('id') → the 429 is misclassified and RETRIED
+            # instead of DEFERRED. Passing the parent job's id defers the PARENT
+            # stitch job correctly (the composite has no per-member job row). The
+            # dispatched compute_jobs row always carries its PK `id`; .get keeps
+            # this defensive (a malformed job yields id=None, never a KeyError).
+            member_job = {
+                "api_key_id": m["api_key_id"],
+                "strategy_id": strategy_id,
+                "id": job.get("id"),
+                "claim_token": job.get("claim_token"),
+            }
             ctx = await _allocator_key_preflight(member_job, "run_stitch_composite_job")
             if isinstance(ctx, DispatchResult):
                 # Finding 4: a PERMANENT preflight failure (missing / inactive
@@ -3174,6 +3188,25 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                         + scrubbed
                     ),
                     error_kind="permanent",
+                )
+            except ccxt.RateLimitExceeded as exc:
+                # M-1: every other exchange-touching handler stamps last_429_at on
+                # a 429 so the circuit breaker defers sibling jobs for this api_key
+                # during the exchange cooldown; the member crawl was the one
+                # omission (copy-paste-not-adapted — no RateLimitExceeded arm, so
+                # _stamp_429 was never called here). Stamp the MEMBER key row, then
+                # yield TRANSIENT (RateLimitExceeded is retryable) — mirror the
+                # geo-block transient DispatchResult idiom below. _stamp_429
+                # internally skips a geo-block mis-mapped to RateLimitExceeded, so
+                # no phantom cooldown is introduced.
+                await _stamp_429(ctx.supabase, ctx.key_row, exc)
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: member crawl rate-limited (429) — "
+                        + str(scrub_freeform_string(str(exc)))
+                    ),
+                    error_kind="transient",
                 )
             except Exception as exc:  # noqa: BLE001
                 if is_geo_blocked(exc):
