@@ -21,7 +21,7 @@
  */
 import { render, screen, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SyncPreviewStep } from "./SyncPreviewStep";
+import { SyncPreviewStep, type SyncPreviewSnapshot } from "./SyncPreviewStep";
 
 // Supabase mock. `createClient()` delegates to a mutable module-level
 // factory so individual tests can swap in a richer client (the polling
@@ -968,5 +968,192 @@ describe("[UAT] SyncPreviewStep — data-heavy warn copy + 15-min retry threshol
       screen.queryByText(/taking much longer than expected/i),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/up to 15 minutes/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [94-03 / WIZ-05] Cached crawl snapshot + COMPLETE-composite durability skip.
+//
+// Pin 1 — a held cachedSnapshot short-circuits the mount effect BEFORE any
+//   createClient()/strategy_analytics read or /api/keys/sync POST: back-nav to
+//   sync_preview renders the cached result with zero re-crawl.
+// Pin 2 — durability: a COMPLETE composite whose computed_at is older than the
+//   5-min freshness window still SKIPS the kickoff (a finished stitch never
+//   needs re-running merely to display — the hard-reload case).
+// Pin 3 — byte-neutral: a COMPLETE-but-stale SINGLE-KEY row still POSTs
+//   /api/keys/sync (the incremental re-sync stays desirable for single keys).
+//
+// RED before Task 2: (1) cachedSnapshot did not exist → the mount effect ran
+// and POSTed; (2) the dq-flags read only ran on the FRESH path, so a stale
+// complete composite fell through to the POST.
+// ---------------------------------------------------------------------------
+describe("[94-03/WIZ-05] SyncPreviewStep — cached snapshot + durability skip", () => {
+  // A minimal single-key snapshot: enough to render the "passed" factsheet card
+  // without any composite payload. The short-circuit is snapshot-shape-agnostic;
+  // composite-ness on the cached path is exercised by the durability pin below.
+  const CACHED_SNAPSHOT: SyncPreviewSnapshot = {
+    tradeCount: 42,
+    csvRowCount: 0,
+    earliestTradeAt: "2025-01-01T00:00:00.000Z",
+    latestTradeAt: "2025-02-01T00:00:00.000Z",
+    detectedMarkets: ["BTC"],
+    exchange: "binance",
+    metrics: [],
+    sparkline: [0.01, -0.02, 0.03],
+    computedAt: "2025-02-01T00:00:00.000Z",
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-11T00:00:00.000Z"));
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  it("Pin 1 — cachedSnapshot renders the passed factsheet with no createClient read and no /api/keys/sync POST", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    // If the short-circuit fires, createClient() is never invoked, so the
+    // factory (and therefore `from`) is never touched.
+    const fromSpy = vi.fn();
+    currentClientFactory = () => {
+      fromSpy();
+      return {
+        from: () => ({
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () => Promise.resolve({ data: null, error: null }),
+            }),
+          }),
+        }),
+      };
+    };
+
+    render(<SyncPreviewStep {...baseProps} cachedSnapshot={CACHED_SNAPSHOT} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Reached "passed" directly from the cached snapshot.
+    expect(
+      screen.getByRole("heading", { name: /your verified factsheet is ready/i }),
+    ).toBeInTheDocument();
+    // No strategy_analytics read: createClient was never called.
+    expect(fromSpy).not.toHaveBeenCalled();
+    // No kickoff.
+    const syncPosts = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncPosts).toHaveLength(0);
+  });
+
+  it("Pin 2 — a COMPLETE composite 10 minutes old skips the kickoff (durability, no POST)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    // computed_at is 10 min old → STALE (window is 5 min). The dq marker says
+    // composite → the finished stitch must NOT be re-kicked just to display.
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: (cols: string) => ({
+          eq: () => ({
+            maybeSingle: () => {
+              if (cols === "computation_status, computed_at") {
+                return Promise.resolve({
+                  data: { computation_status: "complete", computed_at: tenMinAgo },
+                  error: null,
+                });
+              }
+              if (cols === "data_quality_flags") {
+                return Promise.resolve({
+                  data: { data_quality_flags: { composite: true } },
+                  error: null,
+                });
+              }
+              // Status poll: stay computing so it holds in waiting_for_complete.
+              return Promise.resolve({
+                data: { computation_status: "computing", computation_error: null },
+                error: null,
+              });
+            },
+          }),
+        }),
+      }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Walk a couple of poll ticks to be sure nothing re-posts later.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+
+    const syncPosts = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncPosts).toHaveLength(0);
+  });
+
+  it("Pin 3 — a COMPLETE-but-stale SINGLE-KEY row still POSTs /api/keys/sync (byte-neutral)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: (cols: string) => ({
+          eq: () => ({
+            maybeSingle: () => {
+              if (cols === "computation_status, computed_at") {
+                return Promise.resolve({
+                  data: { computation_status: "complete", computed_at: tenMinAgo },
+                  error: null,
+                });
+              }
+              if (cols === "data_quality_flags") {
+                // Present row, NO composite marker → single-key: fall through.
+                return Promise.resolve({
+                  data: { data_quality_flags: {} },
+                  error: null,
+                });
+              }
+              return Promise.resolve({
+                data: { computation_status: "computing", computation_error: null },
+                error: null,
+              });
+            },
+          }),
+        }),
+      }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const syncPosts = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncPosts).toHaveLength(1);
   });
 });

@@ -12,7 +12,7 @@
  *   plus the wizard_start telemetry gating on `hydrated`.
  */
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // --- Navigation ---
 const pushMock = vi.fn();
@@ -62,6 +62,10 @@ const clearWizardStateMock = vi.fn();
 // Phase 15: capture saveWizardState so the CSV autosave test can assert the
 // debounced write of the typed strategy name.
 const saveWizardStateMock = vi.fn(async (..._args: unknown[]) => {});
+// WIZ-03: a spy (not a bare arrow) so a test can assert whether the wizard
+// regenerated its session id. Only the DESTRUCTIVE "Try another key" path calls
+// it after mount; the non-destructive "Review your keys" path must NOT.
+const newWizardSessionIdMock = vi.fn(() => "ssr-session-throwaway");
 vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
@@ -69,10 +73,51 @@ vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
     loadWizardState: vi.fn(async () => null),
     saveWizardState: saveWizardStateMock,
     clearWizardState: () => clearWizardStateMock(),
-    newWizardSessionId: () => "ssr-session-throwaway",
+    newWizardSessionId: () => newWizardSessionIdMock(),
     deriveWizardResumeOverrides: () => resumeOverrides,
   };
 });
+
+// WIZ-03: stub the two step children so this WizardClient-level test drives the
+// step machine + callback wiring directly, not the children's internals.
+// SyncPreviewStep exposes BOTH review affordances as separate buttons so each
+// WizardClient callback (non-destructive onReviewKeys vs destructive
+// onTryAnotherKey) can be exercised in isolation. MultiKeyConnectStep renders a
+// marker so "step is now connect_key" is observable. None of the pre-existing
+// tests assert either child's content, so these stubs are inert for them.
+vi.mock("./steps/SyncPreviewStep", () => ({
+  SyncPreviewStep: (props: {
+    wizardSessionId: string;
+    onReviewKeys?: () => void;
+    onTryAnotherKey: () => void;
+  }) => (
+    <div data-testid="mock-sync-preview">
+      <span data-testid="sync-session">{props.wizardSessionId}</span>
+      <button
+        type="button"
+        data-testid="sync-review-keys"
+        onClick={() => props.onReviewKeys?.()}
+      >
+        Review your keys
+      </button>
+      <button
+        type="button"
+        data-testid="sync-try-another"
+        onClick={() => props.onTryAnotherKey()}
+      >
+        Try another key
+      </button>
+    </div>
+  ),
+}));
+
+vi.mock("./steps/MultiKeyConnectStep", () => ({
+  MultiKeyConnectStep: (props: { wizardSessionId: string }) => (
+    <div data-testid="mock-connect-step">
+      <span data-testid="connect-session">{props.wizardSessionId}</span>
+    </div>
+  ),
+}));
 
 const DRAFT = {
   id: "draft-1",
@@ -102,6 +147,7 @@ beforeEach(async () => {
   saveWizardStateMock.mockClear();
   onAuthStateChangeMock.mockClear();
   unsubscribeMock.mockClear();
+  newWizardSessionIdMock.mockClear();
   ({ WizardClient } = await import("./WizardClient"));
 });
 
@@ -295,5 +341,72 @@ describe("[Phase 15] WizardClient — CSV strategy-name autosave (BUG P1)", () =
       return arg?.strategyName === "A";
     });
     expect(intermediateWrite).toBeUndefined();
+  });
+});
+
+describe("[94-03] WizardClient — non-destructive composite review (WIZ-03)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // RED before Task 1: WizardClient passed NO onReviewKeys prop, so the mock's
+  // `props.onReviewKeys?.()` was a no-op — the step stayed sync_preview and
+  // mock-connect-step never appeared. GREEN once onReviewKeys wires
+  // setStep("connect_key") + persistPointer.
+  it("Review your keys navigates to connect_key WITHOUT deleting the draft or minting a new session", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    // initialDraft present → the wizard mounts on sync_preview.
+    const reviewBtn = await screen.findByTestId("sync-review-keys");
+    const sessionBefore = screen.getByTestId("sync-session").textContent;
+    // newWizardSessionId is called once at mount (the useState initializer).
+    const sessionGensAtMount = newWizardSessionIdMock.mock.calls.length;
+
+    fireEvent.click(reviewBtn);
+
+    // Step transitioned to connect_key (where the composite rehydrates, WIZ-02).
+    expect(await screen.findByTestId("mock-connect-step")).toBeInTheDocument();
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+
+    // Non-destructive: NO DELETE fetch to the draft route was issued.
+    const deleteCalls = fetchSpy.mock.calls.filter(
+      (c) =>
+        String(c[0]).includes("/api/strategies/draft/") &&
+        (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deleteCalls).toHaveLength(0);
+
+    // Session id survives the round-trip: no NEW session was minted after mount,
+    // and the connect step received the same id the sync step held.
+    expect(newWizardSessionIdMock.mock.calls.length).toBe(sessionGensAtMount);
+    expect(screen.getByTestId("connect-session").textContent).toBe(sessionBefore);
+  });
+
+  // Destructive pin (research Pitfall 3): the split must NOT blanket-remove the
+  // single-key "Try another key" delete. This fails if onTryAnotherKey were
+  // pointed at the non-destructive callback.
+  it("Try another key (single-key destructive path) still issues the draft DELETE", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    fireEvent.click(await screen.findByTestId("sync-try-another"));
+
+    await waitFor(() => {
+      const deleteCalls = fetchSpy.mock.calls.filter(
+        (c) =>
+          String(c[0]).includes("/api/strategies/draft/draft-1") &&
+          (c[1] as RequestInit | undefined)?.method === "DELETE",
+      );
+      expect(deleteCalls).toHaveLength(1);
+    });
+    // And the destructive path re-arms the F6 fence by minting a fresh session.
+    expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(1);
   });
 });
