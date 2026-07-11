@@ -11,6 +11,7 @@ import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -190,6 +191,45 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           { error: "Could not start sync. Try again in a moment." },
           { status: 503, headers: NO_STORE_HEADERS },
         );
+      }
+
+      // #597 / F-1 (UAT): a composite annualizes its headline on the venue blend
+      // — every supported member venue is crypto, so √365 — but strategies.asset_class
+      // carries the NOT NULL DEFAULT 'traditional' (√252) until finalize force-derives
+      // it (finalize-wizard :492-499). The stitch runs HERE, at the PREVIEW kickoff,
+      // BEFORE finalize — so without this the worker reads 'traditional', the
+      // run_stitch_composite_job guard trips (`asset_class 252 != venue-blend 365`),
+      // and every composite preview fails-loud. Force 'crypto' before the dispatch so
+      // preview and finalize agree. Best-effort + logged (ownership was verified by the
+      // select above; the worker guard remains the hard backstop) — mirrors finalize.
+      //
+      // ⚠️ HARDCODED 'crypto' is correct ONLY while every SUPPORTED_EXCHANGES venue is
+      // crypto. When a traditional venue (e.g. MetaTrader5, √252) is added, this must
+      // become a per-member-venue derive — `isCryptoExchange` over the members,
+      // mirroring the worker's "365 if ANY leg crypto else 252" blend. The tripwire in
+      // keys/sync route.test.ts reddens the instant the supported set changes so this
+      // (and the finalize sibling) can't silently mis-annualize an MT5 composite.
+      const { error: assetClassErr } = await admin
+        .from("strategies")
+        .update({ asset_class: "crypto" })
+        .eq("id", strategy_id)
+        // Belt-and-braces owner scope, mirroring the finalize sibling
+        // (finalize-wizard :497-499). strategy_id is already proven owned by the
+        // user-scoped ownership select above, but keeping the invariant local to
+        // the admin (RLS-bypassing) statement is cheap defense-in-depth.
+        .eq("user_id", user.id);
+      if (assetClassErr) {
+        console.warn(
+          `[keys/sync] composite asset_class derive failed (non-blocking) for ${strategy_id}:`,
+          assetClassErr,
+        );
+        // Parity with finalize (:504-507): a persistent write failure would
+        // otherwise be invisible in Sentry and surface only as recurring
+        // composite-preview fail-louds (the worker √365-vs-asset_class guard).
+        captureToSentry(assetClassErr, {
+          tags: { op: "keys-sync.composite_asset_class_derive" },
+          level: "warning",
+        });
       }
 
       // Thread the inbound correlation_id like the sync_trades arm (:253-259)

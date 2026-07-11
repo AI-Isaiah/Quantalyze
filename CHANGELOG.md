@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.41.0.1] - 2026-07-11
+### Fixed
+- **Multi-key composite onboarding UAT fixes (v1.9 follow-up, from live dogfooding).**
+  - **Composite preview no longer fails with `asset_class 252 != venue-blend 365`.** The composite stitch is dispatched at the wizard *preview* step, before finalize runs — but `strategies.asset_class` carries the `NOT NULL DEFAULT 'traditional'` (√252) until finalize force-derives it, while the venue blend is √365 (crypto), so the worker's annualization guard failed loud on every composite preview. The preview kickoff (`/api/keys/sync`) now force-derives `asset_class='crypto'` for a composite before enqueuing the stitch (owner-scoped, Sentry-logged, ordering-pinned before the enqueue). This is also why a composite carried an `asset_class` the user never chose — the column default.
+  - **"+ Add another key window" no longer erases the first key.** Entering a key in the single-key form then switching to multi-key mode carried the in-progress draft into the first panel instead of discarding it. The affordance also now sits above "Validate key and continue".
+  - **Data-heavy stitch copy.** The slow-path message now says the operation is data-heavy and can take up to 15 minutes; the "taking much longer than expected" retry prompt no longer fires at 3 minutes (moved to 15 min) so it stops contradicting that copy.
+  - **MetaTrader5 foresight.** A CI tripwire guards the composite `asset_class='crypto'` hardcode (correct only while every supported venue is crypto) so adding a traditional venue like MetaTrader5 forces a per-member-venue derive in both the preview and finalize paths.
+
 ## [0.41.0.0] - 2026-07-11
 ### Added
 - **Multi-Key Composite Strategy (milestone v1.9, #596).** A user can onboard ONE strategy composed of several exchange keys — each with its own active date window and sequence — through the wizard, see them stitched into one continuous track record, and view the factsheet with missing-data segments marked and an honestly-gated `cash_settlement ↔ mark_to_market` basis toggle. End to end in the GUI. The 3-key **Zavara** composite is the acceptance fixture (cum ~62.66% / maxDD ~−4.13% on `cash_settlement`), reproduced live through the production stitch core (86-04: 62.6646% / −4.1328%).

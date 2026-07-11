@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -116,6 +116,20 @@ export interface ConnectKeySuccess {
   exchange: ExchangeId;
 }
 
+/**
+ * The unvalidated credential draft the user has typed so far. Reported to the
+ * parent via `onDraftChange` so a transition OUT of this component (multi-key
+ * mode) can carry the in-progress key over instead of discarding it (UAT/F-4:
+ * entering a key then clicking "+ Add another key window" must not erase it).
+ */
+export interface ConnectKeyDraft {
+  exchange: ExchangeId;
+  nickname: string;
+  apiKey: string;
+  apiSecret: string;
+  passphrase: string;
+}
+
 export interface ConnectKeyStepProps {
   wizardSessionId: string;
   onSuccess: (result: ConnectKeySuccess) => void;
@@ -127,9 +141,16 @@ export interface ConnectKeyStepProps {
    * undefined, `{footerSlot}` renders nothing, so the DOM is unchanged.
    */
   footerSlot?: ReactNode;
+  /**
+   * UAT/F-4. Optional draft reporter. Fires whenever the credential fields
+   * change so the parent (MultiKeyConnectStep) can seed the first key panel with
+   * the in-progress draft when the user switches to multi-key mode. Absent for
+   * the standalone single-key wizard → no behavior change.
+   */
+  onDraftChange?: (draft: ConnectKeyDraft) => void;
 }
 
-export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot }: ConnectKeyStepProps) {
+export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraftChange }: ConnectKeyStepProps) {
   const [exchange, setExchange] = useState<ExchangeId>("binance");
   const [nickname, setNickname] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -144,6 +165,13 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot }: Conne
   // is not yet present (Plan 16-02 lands in a parallel wave; this step
   // ships first to avoid blocking on cross-wave merge ordering).
   const [correlationId] = useState<string>(() => readCorrelationId());
+
+  // UAT/F-4: report the in-progress draft up so a switch to multi-key mode can
+  // carry it into the first panel instead of discarding it. No-op (single-key
+  // wizard) when onDraftChange is absent.
+  useEffect(() => {
+    onDraftChange?.({ exchange, nickname, apiKey, apiSecret, passphrase });
+  }, [onDraftChange, exchange, nickname, apiKey, apiSecret, passphrase]);
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
   const requiresPassphrase = activeExchange?.requiresPassphrase ?? false;
@@ -366,6 +394,12 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot }: Conne
           />
         )}
 
+        {/* UAT/F-5: the "+ Add another key window" affordance (footerSlot) sits
+            ABOVE the primary CTA — you decide to go multi-key BEFORE validating a
+            single key, so the add-window action must precede "Validate key and
+            continue". Absent for the single-key wizard → renders nothing. */}
+        {footerSlot}
+
         <div className="flex gap-3">
           <Button
             type="submit"
@@ -375,8 +409,6 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot }: Conne
             {submitting ? "Validating..." : "Validate key and continue"}
           </Button>
         </div>
-
-        {footerSlot}
 
         {/* Phase 15 follow-up (2026-05-07): the CSV branch shipped without a
             GUI entry point — only reachable via direct URL — so founders

@@ -9,7 +9,11 @@ import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { keyWindowsSchema } from "@/lib/composite/keyWindowsSchema";
 import { windowsOverlap } from "@/lib/composite/windowOverlap";
-import { ConnectKeyStep, type ConnectKeySuccess } from "./ConnectKeyStep";
+import {
+  ConnectKeyStep,
+  type ConnectKeySuccess,
+  type ConnectKeyDraft,
+} from "./ConnectKeyStep";
 import { type WizardErrorCode } from "@/lib/wizardErrors";
 import type { SupportedExchange } from "@/lib/utils";
 
@@ -276,6 +280,13 @@ export function MultiKeyConnectStep({
   }, [panels]);
   const focusRef = useRef<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
+  // UAT/F-4: the latest unvalidated draft the user typed into the single-key
+  // (State A) ConnectKeyStep form. enterMulti seeds the first panel from this so
+  // switching to multi-key mode carries the in-progress key over.
+  const singleDraftRef = useRef<ConnectKeyDraft | null>(null);
+  const onSingleDraftChange = useCallback((draft: ConnectKeyDraft) => {
+    singleDraftRef.current = draft;
+  }, []);
 
   const registerCardRef = useCallback(
     (id: string, el: HTMLButtonElement | null) => {
@@ -294,7 +305,19 @@ export function MultiKeyConnectStep({
   });
 
   const enterMulti = useCallback(() => {
+    // UAT/F-4: carry the in-progress single-key draft into the first panel rather
+    // than discarding it. ConnectKeyStep reports its draft via onSingleDraftChange;
+    // if the user typed anything, seed panel 1 with it (windows stay empty — the
+    // single-key form has no window field, so the user fills them in multi mode).
+    const draft = singleDraftRef.current;
     const p1 = newPanel();
+    if (draft) {
+      p1.exchange = draft.exchange;
+      p1.nickname = draft.nickname;
+      p1.apiKey = draft.apiKey;
+      p1.apiSecret = draft.apiSecret;
+      p1.passphrase = draft.passphrase;
+    }
     const p2 = newPanel();
     focusRef.current = p2.id;
     setPanels([p1, p2]);
@@ -515,6 +538,7 @@ export function MultiKeyConnectStep({
       <ConnectKeyStep
         wizardSessionId={wizardSessionId}
         onSuccess={onSuccess}
+        onDraftChange={onSingleDraftChange}
         footerSlot={
           <Button
             type="button"

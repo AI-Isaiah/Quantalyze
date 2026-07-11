@@ -170,6 +170,48 @@ describe("[ONB-01] MultiKeyConnectStep — Add converts to State B", () => {
   });
 });
 
+describe("[UAT] MultiKeyConnectStep — add-another-key UX (F-4 / F-5)", () => {
+  // F-4: entering a key in the State-A single-key form and THEN clicking
+  // "+ Add another key window" must carry that draft into panel 1 — not erase
+  // it (the reported bug: the first key vanished on the switch to multi-key).
+  it("F-4: carries the in-progress single-key draft into panel 1 instead of erasing it", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+
+    // Type a key into the State-A ConnectKeyStep form…
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "GeSKFf5E" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "zav1-secret" },
+    });
+
+    // …then switch to multi-key mode.
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    // Panel 1 (index 0) retains the typed credentials — NOT reset to blank.
+    const panel0 = screen.getByTestId("key-panel-0");
+    expect(within(panel0).getByTestId("key-0-api-key")).toHaveValue("GeSKFf5E");
+    expect(within(panel0).getByTestId("key-0-api-secret")).toHaveValue(
+      "zav1-secret",
+    );
+  });
+
+  // F-5: the add-another-key affordance must sit BEFORE the primary
+  // "Validate key and continue" CTA (you decide to go multi-key before
+  // validating a single key). Falsifiable on DOM order.
+  it("F-5: '+ Add another key window' precedes 'Validate key and continue' in the DOM", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    const add = screen.getByTestId("multi-add-key");
+    const validate = screen.getByTestId("wizard-connect-submit");
+    // add.compareDocumentPosition(validate) carries DOCUMENT_POSITION_FOLLOWING
+    // iff `validate` comes AFTER `add`.
+    expect(
+      add.compareDocumentPosition(validate) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — per-key validate", () => {
   function enterMultiAndFillKey2() {
     const fetchSpy = routeFetch();

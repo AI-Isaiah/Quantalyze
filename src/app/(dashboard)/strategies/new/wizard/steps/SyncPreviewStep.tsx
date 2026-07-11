@@ -102,13 +102,20 @@ function readCorrelationId(): string {
 
 const SLOW_HINT_MS = 15_000;
 const WARN_THRESHOLD_MS = 60_000;
-const RETRY_THRESHOLD_MS = 180_000;
+// A composite stitch over multi-year, multi-key history is a data-heavy job that
+// can legitimately run up to ~15 minutes (the WARN copy promises this). The
+// "taking much longer than expected" retry affordance must therefore only appear
+// AFTER that ceiling — firing it at 3 min would contradict the WARN message and
+// alarm the user mid-normal-run. The poll loop itself has no time-based abort
+// (it stops only on success / terminal failure / 3 consecutive network errors),
+// so raising this shifts copy only, never the polling.
+const RETRY_THRESHOLD_MS = 900_000;
 
 /**
  * Status-poll backoff schedule. Each entry is the delay BEFORE the next
  * poll; the loop walks the ladder and then holds at the final step.
  * Capping at 10s keeps DB load and background-tab timer churn down on
- * slow first-of-day syncs (~45s) and the 3-minute worst case, while the
+ * slow first-of-day syncs (~45s) and the ~15-minute worst case, while the
  * first few ticks stay snappy so a fast sync still feels instant. The
  * elapsed-time UI thresholds are wall-clock, not poll-count, so backing
  * off the poll cadence does not shift the SLOW/WARN/RETRY copy.
@@ -1464,8 +1471,8 @@ export function SyncPreviewStep({
 
         {showWarn && !showRetry && (
           <p className="mt-2 text-caption text-amber-600">
-            This is taking longer than usual. Large accounts with multi-year
-            history can take up to 3 minutes. Your draft is saved.
+            This is a data-heavy operation and can take up to 15 minutes for
+            large accounts with a long history. Your draft is saved.
           </p>
         )}
 
