@@ -676,15 +676,20 @@ function KpiStrip() {
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
+    // F2 (no-invented-data): α / IR are series-derived and exist for the CASH
+    // basis only (D5 — they are never recomputed per-basis). Under the
+    // "BASIS · MARK-TO-MARKET" eyebrow a cash α/IR number would be mislabeled, so
+    // render "—" instead of inheriting the cash value.
+    const onMtm = basis === "mark_to_market";
     items.push({
       label: `α vs ${cn}`,
-      value: pctSigned(j.alpha, 1),
-      tone: signTone(j.alpha),
+      value: onMtm ? "—" : pctSigned(j.alpha, 1),
+      tone: onMtm ? undefined : signTone(j.alpha),
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: num(j.info_ratio),
-      tone: signTone(j.info_ratio),
+      value: onMtm ? "—" : num(j.info_ratio),
+      tone: onMtm ? undefined : signTone(j.info_ratio),
     });
   }
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`

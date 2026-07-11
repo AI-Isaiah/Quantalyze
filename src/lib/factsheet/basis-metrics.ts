@@ -50,3 +50,56 @@ export function overlayBasisScalars<T extends Record<string, unknown>>(
   }
   return out as T;
 }
+
+/**
+ * Phase 90 (F1/F2) — the ONE availability criterion for a by-basis scalar set.
+ *
+ * True iff `obj` is a non-null object carrying a FINITE number for ALL seven
+ * mapped {@link BASIS_KPI_MAP} scalars. This is the single predicate trusted by
+ * BOTH server gates:
+ *   - F1 (page.tsx): a composite whose persisted `cash_settlement` fails this
+ *     is a DATA DEFECT — the page refuses to render the client-geometric
+ *     headline (which would silently disagree with the arithmetic acceptance
+ *     number) and shows the "still computing" placeholder instead.
+ *   - F2 (page.tsx MTM gate): `mark_to_market` must pass this for the toggle to
+ *     ENABLE. A null / empty / partial object ⇒ toggle DISABLED — never a
+ *     cash-value-under-an-MTM-label leak.
+ *
+ * Using ONE criterion for the gate and the display overlay ({@link overlayMtmScalars})
+ * closes the "gate trusts key-presence, display trusts value-finiteness" skew
+ * that let a partial persist show cash as MTM (no-invented-data, D5).
+ */
+export function hasAllBasisScalars(obj: unknown): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  const rec = obj as Record<string, unknown>;
+  return BASIS_KPI_MAP.every(({ serverKey }) => {
+    const v = rec[serverKey];
+    return typeof v === "number" && Number.isFinite(v);
+  });
+}
+
+/**
+ * Phase 90 (F2) — STRICT MTM display overlay for the KpiStrip.
+ *
+ * UNLIKE {@link overlayBasisScalars} (which leaves the base value untouched for
+ * an absent/non-finite server scalar — correct for the CASH overlay, whose base
+ * is already the coherent cash value), this overlay is used when the reader has
+ * switched to the MARK-TO-MARKET label: any mapped scalar absent / non-finite in
+ * the persisted MTM object renders `NaN` (→ "—" via the formatters), NEVER the
+ * cash fallback. Displaying a cash number under an MTM eyebrow is the exact
+ * no-invented-data violation D5 forbids.
+ *
+ * Only the seven mapped keys are rewritten; every other key on `base` (e.g. the
+ * observation count `n`, and the cash-only distributional stats) is preserved.
+ */
+export function overlayMtmScalars<T extends Record<string, unknown>>(
+  base: T,
+  mtmScalars: Record<string, unknown> | undefined | null,
+): T {
+  const out: Record<string, unknown> = { ...base };
+  for (const { tsKey, serverKey } of BASIS_KPI_MAP) {
+    const v = mtmScalars?.[serverKey];
+    out[tsKey] = typeof v === "number" && Number.isFinite(v) ? v : NaN;
+  }
+  return out as T;
+}

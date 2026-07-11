@@ -8,6 +8,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource, deriveSegmentMarkers } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
+import { hasAllBasisScalars } from "@/lib/factsheet/basis-metrics";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -114,11 +115,31 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     const metricsByBasis = (analytics?.metrics_json_by_basis ?? undefined) as
       | BuildFactsheetOpts["metricsByBasis"]
       | undefined;
-    // D1 own-property check: the `mark_to_market` key is OMITTED (never JSON
-    // null) when the venue/book can't produce an MTM basis — presence IS the gate.
-    const mtmAvailable =
-      !!metricsByBasis &&
-      Object.prototype.hasOwnProperty.call(metricsByBasis, "mark_to_market");
+    // F1 (no-invented-data): a composite renders the ARITHMETIC headline curve
+    // (cumulativeMethod:"arithmetic" below) and overlays the persisted
+    // `cash_settlement` scalars onto the KpiStrip. If those scalars are absent /
+    // partial / non-finite (metrics_json_by_basis NULL or a defective persist),
+    // the overlay silently no-ops and the KpiStrip would fall back to the
+    // client-GEOMETRIC compute() values — disagreeing with the arithmetic chart,
+    // the acceptance number, and the cash-by-construction discovery/ranking
+    // headline. A composite lacking its persisted cash scalars is a DATA DEFECT,
+    // NOT a renderable state: fail loud (→ Sentry) and return null so the page
+    // renders the existing "still computing" placeholder instead.
+    if (!hasAllBasisScalars(metricsByBasis?.cash_settlement)) {
+      console.error(
+        "[factsheet] composite missing persisted cash_settlement scalars — refusing to render client-geometric headline",
+        { strategyId: id },
+      );
+      return null;
+    }
+    // F2 MTM gate: compute availability from the SAME criterion the display
+    // overlay trusts (a non-null object with FINITE values for all seven mapped
+    // scalars), NOT bare key-presence. A `mark_to_market:null` or partial object
+    // ⇒ toggle DISABLED — never enable a toggle that would show cash values under
+    // an MTM label (the `mtm_gated_reason` / generic-fallback copy still applies).
+    const mtmAvailable = hasAllBasisScalars(
+      (metricsByBasis as { mark_to_market?: unknown } | undefined)?.mark_to_market,
+    );
     buildOpts = {
       cumulativeMethod: "arithmetic",
       segmentBoundaries: markers.segmentBoundaries,

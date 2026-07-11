@@ -275,3 +275,82 @@ describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED un
     expect(container.innerHTML).not.toContain("BASIS ·");
   });
 });
+
+/**
+ * Phase 90 review-fix (F2, HIGH) — the MTM toggle must NEVER fail open: a
+ * PARTIAL persisted `mark_to_market` object (present but missing some of the
+ * seven mapped scalars) must render "—" for the missing cells under the
+ * "BASIS · MARK-TO-MARKET" eyebrow, NEVER the cash value. The pre-fix overlay
+ * (`overlayBasisScalars(..., mark_to_market ?? {})`) left the cash number in
+ * place — a mislabeled cash-as-MTM leak (no-invented-data violation D5).
+ *
+ * This fixture forces the display path with `mtmGate.available:true` while the
+ * MTM object carries ONLY `cumulative_return`; a correct implementation shows
+ * the MTM cumulative and "—" for the six absent scalars.
+ */
+function readKpiCell(container: HTMLElement, label: string): string | null {
+  const kpiGrid = Array.from(
+    container.querySelectorAll<HTMLElement>("div.grid"),
+  ).find((el) => /@[\w[\]-]*:grid-cols-\d/.test(el.className));
+  if (!kpiGrid) return null;
+  for (const tile of Array.from(kpiGrid.children) as HTMLElement[]) {
+    const ps = Array.from(tile.querySelectorAll("p"));
+    if (ps.length === 2 && ps[0].textContent?.trim() === label) {
+      return ps[1].textContent?.trim() ?? null;
+    }
+  }
+  return null;
+}
+
+describe("FactsheetView KPI strip — Phase 90 F2: MTM never fails open", () => {
+  function partialMtmPayload(): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    // Pin cash sentinels so the pre-fix (leaked-cash) values are deterministic
+    // and unmistakably NOT "—".
+    p.strategyMetrics.cum_ret = KP_CASH.cumulative_return;
+    p.strategyMetrics.sharpe = KP_CASH.sharpe;
+    p.strategyMetrics.sortino = KP_CASH.sortino;
+    p.strategyMetrics.calmar = KP_CASH.calmar;
+    p.strategyMetrics.ann_vol = KP_CASH.volatility;
+    p.strategyMetrics.max_dd = KP_CASH.max_drawdown;
+    p.strategyMetrics.cagr = KP_CASH.cagr;
+    return {
+      ...p,
+      dataQuality: { composite: true },
+      // MTM present but PARTIAL — only cumulative_return; the other six absent.
+      metricsByBasis: {
+        cash_settlement: KP_CASH,
+        mark_to_market: { cumulative_return: 0.5 },
+      },
+      mtmGate: { available: true },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("under MTM, the six ABSENT mapped scalars render '—', not the cash value", () => {
+    const { getByText, container } = renderComposite(partialMtmPayload());
+    fireEvent.click(getByText("Mark-to-market"));
+
+    // The one present MTM scalar shows its MTM value.
+    expect(readKpiCell(container, "Cum. Return")).toBe("+50.0%");
+    // The six absent scalars must be "—" (NaN), NEVER the cash sentinel.
+    expect(readKpiCell(container, "Sharpe")).toBe("—");
+    expect(readKpiCell(container, "Sortino")).toBe("—");
+    expect(readKpiCell(container, "Calmar")).toBe("—");
+    expect(readKpiCell(container, "Ann. Vol")).toBe("—");
+    expect(readKpiCell(container, "Max DD")).toBe("—");
+    expect(readKpiCell(container, "CAGR")).toBe("—");
+    // Explicit anti-regression: pre-fix these showed the leaked cash numbers.
+    expect(readKpiCell(container, "Sharpe")).not.toBe("1.40");
+  });
+
+  it("toggling back to cash restores every cash value", () => {
+    const { getByText, container } = renderComposite(partialMtmPayload());
+    fireEvent.click(getByText("Mark-to-market"));
+    fireEvent.click(getByText("Cash settlement"));
+    expect(readKpiCell(container, "Sharpe")).toBe("1.40");
+    expect(readKpiCell(container, "Cum. Return")).toBe("+62.7%");
+  });
+});
