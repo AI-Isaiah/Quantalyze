@@ -15,6 +15,7 @@ supabase / exchange mocks (no live DB / creds); run with
 from __future__ import annotations
 
 from contextlib import ExitStack
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +28,7 @@ from services.deribit_ingest import (
     deribit_raw_rows_have_option_activity,
 )
 from services.native_nav import NativeLedger
+from services.nav_twr import NavReconstructionError
 from services.job_worker import DispatchOutcome, run_stitch_composite_job
 
 
@@ -225,6 +227,101 @@ def _apply(patchers: list) -> ExitStack:
     for p in patchers:
         stack.enter_context(p)
     return stack
+
+
+# --- Plan 93-04: ccxt member reconstruction fixtures --------------------------
+# The FETCH primitives are mocked at their SOURCE modules (the helper imports them
+# function-locally, so patching the job_worker namespace would miss); the
+# valuation/combine/terminus MATH runs REAL (the 92-02 Layer-3 pattern).
+
+
+def _ccxt_realized(day: str, pnl: float) -> dict[str, Any]:
+    """A daily-pnl realized record (mirrors services.exchange.fetch_daily_pnl /
+    the test_broker_dailies fixture shape) — fed REAL to combine_realized_and_
+    funding."""
+    return {
+        "exchange": "bybit",
+        "symbol": "PORTFOLIO",
+        "side": "buy" if pnl >= 0 else "sell",
+        "price": abs(pnl),
+        "quantity": 1,
+        "fee": 0,
+        "fee_currency": "USDT",
+        "timestamp": f"{day}T00:00:00+00:00",
+        "order_type": "daily_pnl",
+    }
+
+
+def _ccxt_funding(day: str, amount: float) -> dict[str, Any]:
+    return {
+        "amount": amount,
+        "timestamp": datetime.fromisoformat(f"{day}T08:00:00+00:00"),
+    }
+
+
+def _ccxt_fetch_patches(
+    *,
+    equity: tuple[Any, bool, float, bool] = (10_000.0, False, 0.0, False),
+    realized: list[dict[str, Any]] | None = None,
+    funding: list[dict[str, Any]] | None = None,
+    deposits: list[dict[str, Any]] | None = None,
+    withdrawals: list[dict[str, Any]] | None = None,
+    price_index: dict[Any, float] | None = None,
+    flows_raise: BaseException | None = None,
+    fetch_raise: BaseException | None = None,
+) -> list:
+    """Patch the ccxt member reconstruction FETCH layer (Plan 93-04, Plan-checker
+    Note 2 — SOURCE-module sites). ``flows_raise`` makes the REAL-math seam
+    (``ccxt_rows_to_dated_flows``) raise a structural error → the member degrades;
+    ``fetch_raise`` makes the equity fetch raise (e.g. a 429 / geo transient)."""
+    _deposits = list(deposits or [])
+    _withdrawals = list(withdrawals or [])
+
+    async def _transfers(_exchange: Any, kind: str, _since: int, _now: int) -> list:
+        return _deposits if kind == "deposits" else _withdrawals
+
+    equity_mock = (
+        AsyncMock(side_effect=fetch_raise)
+        if fetch_raise is not None
+        else AsyncMock(return_value=equity)
+    )
+    patches = [
+        patch(
+            "services.exchange.fetch_account_equity_and_upnl_usd", new=equity_mock
+        ),
+        patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=list(realized or [])),
+        ),
+        patch(
+            "services.funding_fetch.fetch_funding_bybit",
+            new=AsyncMock(return_value=list(funding or [])),
+        ),
+        patch(
+            "services.funding_fetch.fetch_funding_binance",
+            new=AsyncMock(return_value=list(funding or [])),
+        ),
+        patch(
+            "services.funding_fetch.fetch_funding_okx",
+            new=AsyncMock(return_value=list(funding or [])),
+        ),
+        patch(
+            "services.ccxt_flow_fetch.fetch_ccxt_transfers",
+            new=AsyncMock(side_effect=_transfers),
+        ),
+        patch(
+            "services.job_worker._resolve_ccxt_flow_price_index",
+            new=AsyncMock(return_value=dict(price_index or {})),
+        ),
+    ]
+    if flows_raise is not None:
+        patches.append(
+            patch(
+                "services.ccxt_flows.ccxt_rows_to_dated_flows",
+                new=MagicMock(side_effect=flows_raise),
+            )
+        )
+    return patches
 
 
 def _deribit_patches(
@@ -643,16 +740,19 @@ def _degraded_members(fake: _FakeSupabase) -> Any:
 @pytest.mark.asyncio
 async def test_ccxt_member_degrades_not_permanent_fail() -> None:
     """HARD-05: a 2-member composite (seq 1 Deribit + seq 2 Bybit) NO LONGER fails
-    PERMANENT on the venue check. The Deribit member stitches; the Bybit member
-    DEGRADES out of the stitch with a machine-readable DQ reason, computation_status
-    promotes to complete_with_warnings, and the ccxt member appears in per_key with
-    n_days 0 (honest zero coverage). The stitched csv equals the Deribit-only stitch.
+    PERMANENT on the venue check. The Deribit member stitches; the Bybit member whose
+    honest reconstruction fails STRUCTURALLY DEGRADES out of the stitch with a
+    machine-readable DQ reason, computation_status promotes to complete_with_warnings,
+    and the ccxt member appears in per_key with n_days 0 (honest zero coverage). The
+    stitched csv equals the Deribit-only stitch.
 
-    RED on pre-change code: the `venue != "deribit"` rejection returned a permanent
-    FAILED, so result.outcome would be FAILED and no degraded_members flag exists."""
+    Plan 93-04 contract update: the reason is now `reconstruction_failed` (the member
+    ATTEMPTS reconstruction first — here the flow valuation raises structurally — and
+    falls back to the 93-03 degrade channel), not the old unconditional
+    `venue_reconstruction_unavailable`."""
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-02-01"),   # deribit
-        _member(2, "2024-02-01", None),           # bybit — degrades
+        _member(2, "2024-02-01", None),           # bybit — reconstruction fails → degrades
     ])
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     with _apply(_deribit_patches(
@@ -660,6 +760,8 @@ async def test_ccxt_member_degrades_not_permanent_fail() -> None:
         combine_returns=[(m1, {})],   # ONLY the Deribit member reconstructs
         has_option_activity=True,     # gate CLOSED → single cash pass
         preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        flows_raise=NavReconstructionError("unpriceable non-stable flow"),
     )):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
@@ -669,7 +771,7 @@ async def test_ccxt_member_degrades_not_permanent_fail() -> None:
     assert headline["computation_warned"] is True
     # The degrade record: fixed enum reason, closed keys.
     assert _degraded_members(fake) == [
-        {"seq": 2, "venue": "bybit", "reason": "venue_reconstruction_unavailable"},
+        {"seq": 2, "venue": "bybit", "reason": "reconstruction_failed"},
     ]
     # per_key visibility: the degraded member is present with honest zero coverage.
     per_key = headline["data_quality_flags"]["per_key"]
@@ -699,6 +801,10 @@ async def test_all_ccxt_composite_permanent_no_member_reconstructed() -> None:
         combine_returns=[],           # nothing reconstructs
         has_option_activity=True,
         preflight_side_effect=[_ctx("okx")],
+    ) + _ccxt_fetch_patches(
+        # The single okx member ATTEMPTS reconstruction and fails structurally →
+        # degrades → clipped_cash empty → the zero-reconstructed floor fails PERMANENT.
+        flows_raise=NavReconstructionError("unpriceable non-stable flow"),
     )):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.FAILED
@@ -765,16 +871,18 @@ async def test_degraded_member_leak_discipline_closed_keys_no_magnitude() -> Non
         combine_returns=[(m1, {})],
         has_option_activity=True,
         preflight_side_effect=[_ctx("deribit"), _ctx("binance")],
+    ) + _ccxt_fetch_patches(
+        flows_raise=NavReconstructionError("unpriceable non-stable flow"),
     )):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
     entries = _degraded_members(fake)
     assert entries == [
-        {"seq": 2, "venue": "binance", "reason": "venue_reconstruction_unavailable"},
+        {"seq": 2, "venue": "binance", "reason": "reconstruction_failed"},
     ]
     for entry in entries:
         assert set(entry) == {"seq", "venue", "reason"}  # EXACTLY these keys
-        assert entry["reason"] == "venue_reconstruction_unavailable"  # fixed literal
+        assert entry["reason"] == "reconstruction_failed"  # fixed literal
         # No account-size / exception text anywhere in the entry values.
         blob = repr(entry)
         assert "$" not in blob
@@ -810,6 +918,10 @@ async def test_mtm_runs_on_deribit_remainder_with_degraded_ccxt_member() -> None
             _ctx("deribit"), _ctx("bybit"),   # cash pass
             _ctx("deribit"), _ctx("bybit"),   # MTM pass
         ],
+    ) + _ccxt_fetch_patches(
+        # bybit reconstruction fails structurally on BOTH passes → degrades both →
+        # member_signals stays Deribit-only → MTM admits the perp-only remainder.
+        flows_raise=NavReconstructionError("unpriceable non-stable flow"),
     )
     with _apply(patches), patch(
         "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
@@ -821,7 +933,7 @@ async def test_mtm_runs_on_deribit_remainder_with_degraded_ccxt_member() -> None
     assert set(by_basis) == {"cash_settlement", "mark_to_market"}
     # The degrade record still rides through (from the authoritative cash pass).
     assert _degraded_members(fake) == [
-        {"seq": 2, "venue": "bybit", "reason": "venue_reconstruction_unavailable"},
+        {"seq": 2, "venue": "bybit", "reason": "reconstruction_failed"},
     ]
 
 
@@ -853,6 +965,235 @@ async def test_unknown_venue_member_still_permanent_fail() -> None:
         and payload.get("computation_status") == "failed"
     ]
     assert failed_stamps, "unknown-venue member must stamp a terminal failed row"
+
+
+# --- Plan 93-04: honest ccxt member reconstruction (Option A) ------------------
+# The FETCH primitives are mocked (offline, no live keys / network); the
+# valuation/combine/terminus MATH runs REAL. Recent (within-retention) member
+# windows keep the DQ-02 flow-coverage terminus a no-op so the byte-consistency
+# reference is combine+clip exactly.
+
+_CCXT_REALIZED = [
+    _ccxt_realized("2026-06-01", 120.0),
+    _ccxt_realized("2026-06-02", -60.0),
+    _ccxt_realized("2026-06-03", 90.0),
+]
+_CCXT_FUNDING = [_ccxt_funding("2026-06-01", 20.0)]
+
+
+@pytest.mark.asyncio
+async def test_ccxt_member_reconstructs_and_joins_stitch() -> None:
+    """Plan 93-04 Test 1 (Option A happy path): a 2-member composite (seq 1 Deribit
+    + seq 2 Bybit) where the Bybit member RECONSTRUCTS honestly through the shared
+    derive primitives (combine_realized_and_funding runs REAL over mocked fetches)
+    joins the stitch: NO degraded_members flag, seq-2 per_key n_days > 0, and the
+    persisted csv carries rows inside the Bybit member's window.
+
+    RED on pre-Task-1 code: the ccxt arm degraded the member unconditionally →
+    degraded_members present + seq-2 n_days == 0 + no 2026-06 csv rows."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit
+        _member(2, "2026-06-01", None),           # bybit — reconstructs
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],   # ONLY the deribit combine is mocked
+        has_option_activity=True,     # gate CLOSED → single cash pass
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=_CCXT_REALIZED,
+        funding=_CCXT_FUNDING,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    # The reconstructed member is NOT degraded — the empty degrade list is popped.
+    assert "degraded_members" not in dq
+    # seq-2 contributes real coverage (n_days > 0).
+    seq2 = next(e for e in dq["per_key"] if e["seq"] == 2)
+    assert seq2["n_days"] > 0
+    # The persisted csv carries rows inside the Bybit window (2026-06).
+    written_dates = {
+        r["date"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+    }
+    assert any(d.startswith("2026-06") for d in written_dates)
+
+
+@pytest.mark.asyncio
+async def test_ccxt_reconstructed_series_byte_consistent_with_primitives() -> None:
+    """Plan 93-04 Test 2 (research A3 / SC-4 byte-consistency pin): the seq-2 rows
+    persisted THROUGH the stitch equal, at rtol 1e-12, a reference series computed
+    in-test by calling combine_realized_and_funding DIRECTLY on the SAME fixture
+    inputs then clipping with clip_to_window. A forked / silently-divergent
+    orchestration goes RED here."""
+    from services.broker_dailies import combine_realized_and_funding
+    from services.ccxt_flows import ccxt_rows_to_dated_flows
+    from services.stitch_composite import clip_to_window
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit
+        _member(2, "2026-06-01", None),           # bybit — reconstructs
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=_CCXT_REALIZED,
+        funding=_CCXT_FUNDING,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    # Reference: the derive primitives called DIRECTLY on the SAME inputs the helper
+    # composed (mirroring _reconstruct_ccxt_member — terminus is a no-op for a
+    # within-retention window, so combine+clip is the exact reference).
+    ref_flows = ccxt_rows_to_dated_flows([], venue="bybit", price_index={})
+    ref_returns, _ = combine_realized_and_funding(
+        list(_CCXT_REALIZED),
+        list(_CCXT_FUNDING),
+        account_balance=10_000.0,
+        balance_error=False,
+        external_flows=ref_flows,
+        open_unrealized_usd=0.0,
+    )
+    ref_clipped = clip_to_window(ref_returns, "2026-06-01", None)
+    ref_map = {
+        ts.date().isoformat(): float(v)
+        for ts, v in ref_clipped.items()
+        if pd.notna(v)
+    }
+    assert ref_map, "reference must contribute at least one seq-2 day"
+
+    persisted = {
+        r["date"]: r["daily_return"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+        if r["date"] >= "2026-06-01"
+    }
+    assert set(persisted) == set(ref_map), (
+        f"seq-2 persisted days {sorted(persisted)} != reference {sorted(ref_map)}"
+    )
+    for day, ref_val in ref_map.items():
+        assert persisted[day] == pytest.approx(ref_val, rel=1e-12, abs=0.0), (
+            f"byte-consistency broke on {day}: {persisted[day]} != {ref_val}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_ccxt_structural_failure_degrades_stitch_is_deribit_only() -> None:
+    """Plan 93-04 Test 3 (structural failure → degrade): the Bybit member's flow
+    valuation raises NavReconstructionError → the composite completes
+    complete_with_warnings, the degrade record carries reason `reconstruction_failed`,
+    and the stitched csv is the Deribit-only series (the Bybit member contributes
+    zero rows)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit
+        _member(2, "2026-06-01", None),           # bybit — reconstruction raises
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=_CCXT_REALIZED,
+        flows_raise=NavReconstructionError("unpriceable non-stable flow"),
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["computation_status"] == "complete_with_warnings"
+    assert _degraded_members(fake) == [
+        {"seq": 2, "venue": "bybit", "reason": "reconstruction_failed"},
+    ]
+    written_dates = {
+        r["date"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+    }
+    assert written_dates == {"2026-05-01", "2026-05-02"}  # deribit-only
+
+
+@pytest.mark.asyncio
+async def test_ccxt_rate_limit_is_transient_not_a_degrade() -> None:
+    """Plan 93-04 Test 4 (transient passthrough): a 429 on the Bybit member crawl is
+    a whole-job TRANSIENT retry (mirroring the deribit arm) — _stamp_429 is called and
+    NO degrade record is persisted (a rate limit is not a member defect)."""
+    import ccxt
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit
+        _member(2, "2026-06-01", None),           # bybit — 429 during crawl
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    stamp_429 = AsyncMock()
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        fetch_raise=ccxt.RateLimitExceeded("429 too many requests"),
+    ) + [patch("services.job_worker._stamp_429", new=stamp_429)]):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"   # whole-job retry
+    stamp_429.assert_awaited_once()
+    # No terminal degrade / failed stamp persisted for a transient.
+    assert not any(
+        isinstance(payload, dict)
+        and payload.get("data_quality_flags", {}).get("degraded_members")
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ccxt_member_guard_flag_unions_into_merged_flags() -> None:
+    """Plan 93-04 Test 5 (guard-flag union): the reconstructed Bybit member carries a
+    NAV_TWR_GUARD_KEYS flag (unrealized_pnl_unreadable — MUST-2, stamped by the helper
+    on an unreadable wedge over a trustworthy anchor) → the flag unions into
+    merged_flags via the EXISTING per-member meta loop and the status is
+    complete_with_warnings (no new wiring)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit
+        _member(2, "2026-06-01", None),           # bybit — reconstructs with a guard
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        # Healthy anchor ($10k, no balance_error, above dust) with an UNREADABLE
+        # open-uPnL field → the helper's MUST-2 stamp fires unrealized_pnl_unreadable.
+        equity=(10_000.0, False, 0.0, True),
+        realized=_CCXT_REALIZED,
+        funding=_CCXT_FUNDING,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["computation_status"] == "complete_with_warnings"
+    # The member's guard flag surfaced in merged_flags by construction.
+    assert headline["data_quality_flags"].get("unrealized_pnl_unreadable") is True
+    # It reconstructed (joined the stitch), not degraded.
+    assert "degraded_members" not in headline["data_quality_flags"]
 
 
 @pytest.mark.asyncio
