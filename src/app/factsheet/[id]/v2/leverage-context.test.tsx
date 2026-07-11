@@ -92,6 +92,10 @@ describe("leverage-context", () => {
     // Same object reference as the cash-basis result — no recompute at L=1.
     expect(result.current.levered.m).toBe(result.current.base.m);
     expect(result.current.levered.m).toBe(payload.strategyMetrics);
+    // SFH-3 / IN-01 — the label gate mirrors the recompute gate: no recompute
+    // ran, so `modeled` is false and the applied multiplier is exactly 1.
+    expect(result.current.levered.modeled).toBe(false);
+    expect(result.current.levered.appliedLeverage).toBe(1);
   });
 
   it("Test 3 — L=2 recomputes: vol ~2x, Sharpe/Sortino invariant, cum is compute-truth (not 2x)", () => {
@@ -124,6 +128,11 @@ describe("leverage-context", () => {
     act(() => result.current.lev.setLeverage(2));
     // No annualization basis => hook refuses to recompute => base object.
     expect(result.current.levered.m).toBe(payload.strategyMetrics);
+    // SFH-3 / IN-01 — fail-closed: no recompute ran, so `modeled` is false (the
+    // eyebrow must NOT show a "MODELED · 2×" label over un-levered numbers) even
+    // though the sanitized multiplier the hook resolved is 2.
+    expect(result.current.levered.modeled).toBe(false);
+    expect(result.current.levered.appliedLeverage).toBe(2);
   });
 
   it("Test 5 — L=999 recompute clamps via sanitizeLeverage to 10x, not 999x", () => {
@@ -135,6 +144,11 @@ describe("leverage-context", () => {
     const levered = result.current.levered.m;
     expect(relClose(levered.ann_vol, 10 * base.ann_vol)).toBe(true);
     expect(relClose(levered.ann_vol, 999 * base.ann_vol)).toBe(false);
+    // SFH-3 / IN-01 — the recompute ran at the SANITIZED 10×, so `modeled` is
+    // true and `appliedLeverage` is 10 (NOT the raw 999). The eyebrow prints
+    // `appliedLeverage`, so the label can never diverge from the computed KPIs.
+    expect(result.current.levered.modeled).toBe(true);
+    expect(result.current.levered.appliedLeverage).toBe(10);
   });
 
   it("Test 6 — GUARD-04: source has no storage/URL/cookie/history access", () => {

@@ -74,21 +74,46 @@ export function useLeverage(): LeverageContextValue {
 export function useLeveragedMetrics(payload: FactsheetPayload): {
   basis: Basis;
   m: ComputeSummary;
-  leverage: number;
+  /**
+   * TRUE iff a leverage recompute actually ran — i.e. the sanitized multiplier
+   * is a real (non-1) leverage AND the annualization basis is present. SFH-3 /
+   * IN-01: the eyebrow gate is driven off THIS, not the raw `leverage !== 1`, so
+   * the "MODELED" label can never decouple from the numbers (an out-of-range or
+   * basis-absent state that silently short-circuits to the un-levered `m` shows
+   * NO modeled label).
+   */
+  modeled: boolean;
+  /** The sanitized leverage actually applied to the recompute (clamped to the
+   *  valid band). The eyebrow prints THIS so display == compute always. */
+  appliedLeverage: number;
 } {
   const { basis, m } = useBasisMetrics(payload);
   const { leverage } = useLeverage();
-  const levered = useMemo<ComputeSummary>(() => {
-    if (leverage === 1 || payload.periodsPerYear == null) return m;
-    const Ls = sanitizeLeverage(leverage);
-    if (Ls === 1) return m;
+  const result = useMemo<{
+    m: ComputeSummary;
+    modeled: boolean;
+    appliedLeverage: number;
+  }>(() => {
+    const appliedLeverage = sanitizeLeverage(leverage);
+    // Fail-closed / identity short-circuit: no recompute when the applied
+    // multiplier is 1 (covers both L=1 and a bad value sanitized to 1) or the
+    // annualization basis is absent (stale v4 cache). Same object reference →
+    // byte-identity; `modeled` false so no label ever shows.
+    if (appliedLeverage === 1 || payload.periodsPerYear == null) {
+      return { m, modeled: false, appliedLeverage };
+    }
     const { eq: _eq, dd: _dd, ...summary } = compute(
-      payload.strategyReturns.map(r => Ls * r),
+      payload.strategyReturns.map(r => appliedLeverage * r),
       payload.dates,
       0,
       payload.periodsPerYear,
     );
-    return summary;
+    return { m: summary as ComputeSummary, modeled: true, appliedLeverage };
   }, [leverage, payload, m]);
-  return { basis, m: levered, leverage };
+  return {
+    basis,
+    m: result.m,
+    modeled: result.modeled,
+    appliedLeverage: result.appliedLeverage,
+  };
 }

@@ -79,6 +79,40 @@ function v4SingleKey(): FactsheetPayload {
   });
 }
 
+// WR-01 fixture — a single-key v5 payload with an ACTIVE comparator carrying a
+// populated `joint` (α / IR), so the KpiStrip renders the two benchmark-relative
+// cells. The scenario builder's comparator block is inert (joint === null), so we
+// inject a real joint the same way the production route's build-payload does. A
+// benchmark series is passed so `activeComparator` flips to "btc" and the
+// comparator's cumulative line is populated (no null-series chart crash).
+function v5SingleKeyWithComparator(): FactsheetPayload {
+  const p = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(300),
+    benchmark: makeReturnsSeries(300, 0.001),
+  });
+  return {
+    ...p,
+    periodsPerYear: 365,
+    comparators: {
+      ...p.comparators,
+      btc: {
+        ...p.comparators.btc,
+        joint: {
+          alpha: 0.1234,
+          beta: 1.1,
+          corr: 0.6,
+          r2: 0.36,
+          info_ratio: 0.85,
+          treynor: 0.1,
+          tracking_error: 0.05,
+          up_capture: 1.05,
+          down_capture: 0.95,
+        },
+      },
+    },
+  } as FactsheetPayload;
+}
+
 const KP_CASH = {
   cumulative_return: 0.6266,
   volatility: 0.12,
@@ -258,6 +292,36 @@ describe("FactsheetView — LEV-01 modeled state (L != 1)", () => {
     expect(queryByText("Reset 1×")).toBeNull();
     expect(readCell(container, "Ann. Vol")).toBe(baseline);
     expect(levInput(container)!.value).toBe("1");
+  });
+});
+
+describe("FactsheetView — WR-01: α / IR are suppressed under a modeled leverage (mislabel guard)", () => {
+  it("at L=1 the α/IR cells show the real values; at L≠1 they render '—' (benchmark-relative stats stay on the 1× track); Reset restores them byte-identically", () => {
+    const { container, getByText } = renderBody(v5SingleKeyWithComparator());
+
+    // Baseline (L=1): the two comparator cells render REAL series-derived values.
+    const alphaBase = readCell(container, "α vs BTC");
+    const irBase = readCell(container, "IR vs BTC");
+    expect(alphaBase).not.toBeNull();
+    expect(irBase).not.toBeNull();
+    expect(alphaBase).not.toBe("—");
+    expect(irBase).not.toBe("—");
+
+    // Modeled (L≠1): α (α → L·α) and IR sit beside a LEVERED Sharpe/Vol but the
+    // strip only carries the un-levered payload values → mislabel. Render "—".
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "3" } });
+    });
+    expect(readCell(container, "α vs BTC")).toBe("—");
+    expect(readCell(container, "IR vs BTC")).toBe("—");
+
+    // Reset to 1× restores the exact baseline values (byte-identical) — the
+    // suppression is display-only and fully recoverable.
+    act(() => {
+      fireEvent.click(getByText("Reset 1×"));
+    });
+    expect(readCell(container, "α vs BTC")).toBe(alphaBase);
+    expect(readCell(container, "IR vs BTC")).toBe(irBase);
   });
 });
 

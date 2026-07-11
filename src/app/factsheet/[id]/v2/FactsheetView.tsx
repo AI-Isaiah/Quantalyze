@@ -679,8 +679,13 @@ function CapacityChip({
 // verbatim beneath the MODELED eyebrow at every L!=1 (persistent visible line,
 // NOT tooltip-only; AT-robust). Kept as a const so the apostrophe/arrow glyphs
 // don't trip JSX entity-escaping lint.
+// WR-01 — the caveat is scoped to what the LEV-01 lighter recompute actually
+// re-derives (the headline KPIs). The equity/drawdown chart, the rolling panels,
+// and the benchmark-relative stats (α, IR) below the strip stay on the base 1×
+// track, so the copy must NOT claim the charts scale (they don't) — an honest,
+// coherent statement of exactly which numbers are levered.
 const LEVERAGE_CAVEAT =
-  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). This is a modeled what-if — not the strategy's realized track record.";
+  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage in the headline KPIs above; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). The equity and drawdown charts and the benchmark-relative stats (α, IR) below stay on the base 1× track. This is a modeled what-if — not the strategy's realized track record.";
 
 function KpiStrip() {
   const payload = usePayload();
@@ -692,7 +697,7 @@ function KpiStrip() {
   // basis metrics UNTOUCHED at L=1 (byte-identity; the frozen kpistrip pins prove
   // it) and a client recompute of the SAME scalars at L!=1. items[] read m.*
   // unchanged.
-  const { basis, m, leverage } = useLeveragedMetrics(payload);
+  const { basis, m, modeled, appliedLeverage } = useLeveragedMetrics(payload);
   const composite = payload.dataQuality?.composite === true;
   const j = cmp.joint;
   const cn = cmp.shortName;
@@ -723,16 +728,23 @@ function KpiStrip() {
     // basis only (D5 — they are never recomputed per-basis). Under the
     // "BASIS · MARK-TO-MARKET" eyebrow a cash α/IR number would be mislabeled, so
     // render "—" instead of inheriting the cash value.
-    const onMtm = basis === "mark_to_market";
+    // WR-01 — the SAME suppression applies under a MODELED leverage: the LEV-01
+    // lighter recompute levers only the seven headline scalars, NOT the
+    // benchmark-relative stats. α (r_strat = α + β·r_bench) transforms as α → L·α
+    // and β → L·β under r→L·r, but the strip pulls the UN-levered `j.alpha` /
+    // `j.info_ratio` from the payload — so beside a levered Sharpe/Vol they would
+    // be an internally-inconsistent mislabel. Render "—" instead (matching the
+    // MTM branch shape) rather than an unrescaled benchmark-relative number.
+    const suppressRelative = basis === "mark_to_market" || modeled;
     items.push({
       label: `α vs ${cn}`,
-      value: onMtm ? "—" : pctSigned(j.alpha, 1),
-      tone: onMtm ? undefined : signTone(j.alpha),
+      value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
+      tone: suppressRelative ? undefined : signTone(j.alpha),
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: onMtm ? "—" : num(j.info_ratio),
-      tone: onMtm ? undefined : signTone(j.info_ratio),
+      value: suppressRelative ? "—" : num(j.info_ratio),
+      tone: suppressRelative ? undefined : signTone(j.info_ratio),
     });
   }
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
@@ -769,7 +781,7 @@ function KpiStrip() {
           leveraged KPI is a projection, not the realized track, so it must be
           unmistakable (not the BASIS eyebrow's neutral grey). The eyebrow is the
           authoritative modeled-state live region. */}
-      {leverage !== 1 && (
+      {modeled && (
         <>
           <p
             className="mt-6 text-micro font-mono uppercase tracking-wider"
@@ -777,7 +789,7 @@ function KpiStrip() {
             role="status"
             aria-live="polite"
           >
-            MODELED · {leverage}×
+            MODELED · {appliedLeverage}×
           </p>
           <p className="mt-2 text-caption text-text-muted">{LEVERAGE_CAVEAT}</p>
         </>
