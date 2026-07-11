@@ -76,7 +76,12 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
     expect(out!.dailyReturns.map((d) => d.date)).toEqual(SPARSE_ROWS.map((r) => r.date));
     expect(out!.buildOpts.cumulativeMethod).toBe("geometric"); // C-1: NULL config
     // HARD-04 (#67): DQF without insufficient_window → insufficientWindow false.
-    expect(out!.buildOpts.dataQuality).toEqual({ composite: true, insufficientWindow: false });
+    // HARD-05 (Phase 93): DQF without degraded_members → degradedMembers [].
+    expect(out!.buildOpts.dataQuality).toEqual({
+      composite: true,
+      insufficientWindow: false,
+      degradedMembers: [],
+    });
     // FS-01 boundary for seq 2; FS-02 gap span threaded.
     expect(out!.buildOpts.segmentBoundaries).toEqual([
       { date: "2025-08-07", seq: 2, label: "2" },
@@ -91,7 +96,11 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
       metricsJsonByBasis: { cash_settlement: FULL_CASH },
       returnsDenominatorConfig: null,
     });
-    expect(out!.buildOpts.dataQuality).toEqual({ composite: true, insufficientWindow: true });
+    expect(out!.buildOpts.dataQuality).toEqual({
+      composite: true,
+      insufficientWindow: true,
+      degradedMembers: [],
+    });
   });
 
   it("HARD-04: malformed dqf.insufficient_window (string 'true') → insufficientWindow false (strict server-truth)", async () => {
@@ -102,7 +111,72 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
       returnsDenominatorConfig: null,
     });
     // A non-boolean value must NEVER render the caveat (T-92-05 tampering guard).
-    expect(out!.buildOpts.dataQuality).toEqual({ composite: true, insufficientWindow: false });
+    expect(out!.buildOpts.dataQuality).toEqual({
+      composite: true,
+      insufficientWindow: false,
+      degradedMembers: [],
+    });
+  });
+
+  it("HARD-05: dqf.degraded_members → dataQuality.degradedMembers (reason dropped)", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: {
+        ...DQF,
+        degraded_members: [
+          { seq: 2, venue: "bybit", reason: "venue_reconstruction_unavailable" },
+        ],
+      },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    // The server `reason` enum is dropped — only { seq, venue } reaches the render.
+    expect(out!.buildOpts.dataQuality?.degradedMembers).toEqual([
+      { seq: 2, venue: "bybit" },
+    ]);
+  });
+
+  it("HARD-05: malformed degraded_members shapes strict-coerce to [] (T-93-03-02)", async () => {
+    const malformed: unknown[] = [
+      "bybit", // a string (not an array of objects)
+      [{ seq: "x", venue: "bybit" }], // non-numeric seq
+      [{ seq: 2 }], // missing venue
+      [{ venue: "bybit" }], // missing seq
+      [{ seq: Infinity, venue: "bybit" }], // non-finite seq
+      [{ seq: 2, venue: "" }], // empty venue
+      [42], // a number entry
+      [{}], // an empty object
+      {}, // not an array
+    ];
+    for (const degraded_members of malformed) {
+      const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+        strategyId: "s1",
+        dqf: { ...DQF, degraded_members: degraded_members as unknown },
+        metricsJsonByBasis: { cash_settlement: FULL_CASH },
+        returnsDenominatorConfig: null,
+      });
+      expect(out!.buildOpts.dataQuality?.degradedMembers).toEqual([]);
+    }
+  });
+
+  it("HARD-05: mixed valid + junk entries keep only the well-formed records", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: {
+        ...DQF,
+        degraded_members: [
+          { seq: 2, venue: "bybit", reason: "venue_reconstruction_unavailable" },
+          { seq: "x", venue: "okx" }, // junk — dropped
+          { seq: 3, venue: "binance" },
+        ] as unknown,
+      },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.dataQuality?.degradedMembers).toEqual([
+      { seq: 2, venue: "bybit" },
+      { seq: 3, venue: "binance" },
+    ]);
   });
 
   it("'simple' config → arithmetic method (Zavara override preserved)", async () => {

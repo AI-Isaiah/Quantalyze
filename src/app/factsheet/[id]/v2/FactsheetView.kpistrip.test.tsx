@@ -445,3 +445,57 @@ describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth 
     ).not.toBeInTheDocument();
   });
 });
+
+describe("FactsheetView hero strip — HARD-05 degraded_members server-truth caveat", () => {
+  // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire —
+  // isolating the SERVER-truth degraded-member signal.
+  function degradedPayload(
+    degradedMembers: Array<{ seq: number; venue: string }>,
+  ): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: { composite: true, degradedMembers },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the degraded-member caveat naming the excluded key + venue", () => {
+    const { getByText } = renderComposite(
+      degradedPayload([{ seq: 2, venue: "bybit" }]),
+    );
+    expect(getByText(/Key 2 \(bybit\)/)).toBeInTheDocument();
+    expect(
+      getByText(/excluded from this track record/),
+    ).toBeInTheDocument();
+  });
+
+  it("names every excluded member for a multi-degrade composite", () => {
+    const { getByText } = renderComposite(
+      degradedPayload([
+        { seq: 2, venue: "bybit" },
+        { seq: 3, venue: "okx" },
+      ]),
+    );
+    expect(getByText(/Key 2 \(bybit\), Key 3 \(okx\)/)).toBeInTheDocument();
+    // Plural pronoun for >1 excluded member.
+    expect(getByText(/their data is excluded/)).toBeInTheDocument();
+  });
+
+  it("does NOT render the caveat when degradedMembers is empty/absent", () => {
+    const { queryByText } = renderComposite(degradedPayload([]));
+    expect(queryByText(/excluded from this track record/)).not.toBeInTheDocument();
+    const { queryByText: q2 } = renderComposite(
+      {
+        ...buildScenarioFactsheetPayload({
+          portfolioDaily: makeReturnsSeries(300),
+          benchmark: null,
+        }),
+        dataQuality: { composite: true },
+      } as unknown as FactsheetPayload,
+    );
+    expect(q2(/excluded from this track record/)).not.toBeInTheDocument();
+  });
+});

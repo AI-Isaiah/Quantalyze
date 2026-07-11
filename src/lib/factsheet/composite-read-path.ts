@@ -54,6 +54,7 @@ export async function readCompositeFactsheet(
           per_key?: unknown;
           gap_spans?: unknown;
           insufficient_window?: unknown;
+          degraded_members?: unknown;
           cumulative_method?: unknown;
         }
       | null
@@ -135,7 +136,15 @@ export async function readCompositeFactsheet(
       // HARD-04 (#67): server-truth short-window flag. Strict `=== true`
       // coercion so a malformed dqf value (string/object) can never render the
       // caveat (T-92-05).
-      dataQuality: { composite: true, insufficientWindow: dqf?.insufficient_window === true },
+      dataQuality: {
+        composite: true,
+        insufficientWindow: dqf?.insufficient_window === true,
+        // HARD-05 (Phase 93): strict-coerce the degraded-member records. Malformed
+        // jsonb (string / non-object entries / missing seq/venue) yields [] so junk
+        // renders nothing (T-92-05 / T-93-03-02). The server `reason` enum is dropped
+        // — the components own the user copy.
+        degradedMembers: parseDegradedMembers(dqf?.degraded_members),
+      },
       mtmGate: {
         available: mtmAvailable,
         reason: typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined,
@@ -168,4 +177,27 @@ export function singleKeyDataQuality(
   dqf: { insufficient_window?: unknown } | null | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
   return { composite: false, insufficientWindow: dqf?.insufficient_window === true };
+}
+
+/**
+ * HARD-05 (Phase 93) — strict coercion of the server `degraded_members` DQ list
+ * into the closed render shape `{ seq, venue }[]`. A degraded member is a composite
+ * member EXCLUDED from the stitch (a ccxt venue not yet reconstructed). ONLY an
+ * array whose entries are objects carrying a finite numeric `seq` and a non-empty
+ * string `venue` survive; anything else (a string, a number entry, a `{}`, a
+ * non-finite seq) is dropped so malformed jsonb renders nothing (T-92-05 /
+ * T-93-03-02). The server `reason` enum is intentionally DROPPED here — it is
+ * server vocabulary; the render surfaces own the user-facing copy.
+ */
+export function parseDegradedMembers(raw: unknown): Array<{ seq: number; venue: string }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ seq: number; venue: string }> = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { seq, venue } = entry as { seq?: unknown; venue?: unknown };
+    if (typeof seq !== "number" || !Number.isFinite(seq)) continue;
+    if (typeof venue !== "string" || venue.length === 0) continue;
+    out.push({ seq, venue });
+  }
+  return out;
 }

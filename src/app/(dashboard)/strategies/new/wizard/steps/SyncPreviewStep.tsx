@@ -170,6 +170,10 @@ export interface CompositePreviewData {
   // HARD-04 (#67): server-truth sub-90-day annualization-window flag
   // (data_quality_flags.insufficient_window).
   insufficientWindow: boolean;
+  // HARD-05 (Phase 93): composite members EXCLUDED from the stitch (a ccxt venue
+  // not yet reconstructed) — a closed { seq, venue } shape (the server `reason`
+  // enum is server-only vocabulary, dropped on parse). Empty => nothing renders.
+  degradedMembers: { seq: number; venue: string }[];
   series: { date: string; daily_return: number }[]; // full stitched series
   rawDenominatorConfig: unknown;
   /**
@@ -658,6 +662,7 @@ export function SyncPreviewStep({
               benchmark_unavailable?: boolean;
               benchmark_note?: string | null;
               insufficient_window?: boolean;
+              degraded_members?: unknown;
             };
 
             const members: CompositeMemberKeyRow[] = (
@@ -780,6 +785,19 @@ export function SyncPreviewStep({
                 // HARD-04 (#67): strict server-truth coercion (mirror
                 // benchmark_unavailable) — a malformed value renders nothing.
                 insufficientWindow: dq.insufficient_window === true,
+                // HARD-05 (Phase 93): strict-coerce the degraded-member records —
+                // ONLY objects with a finite numeric seq + non-empty string venue
+                // survive; malformed jsonb yields [] (renders nothing, T-92-05).
+                // The server `reason` enum is dropped (server-only vocabulary).
+                degradedMembers: Array.isArray(dq.degraded_members)
+                  ? dq.degraded_members.flatMap((e): { seq: number; venue: string }[] => {
+                      if (typeof e !== "object" || e === null) return [];
+                      const { seq, venue } = e as { seq?: unknown; venue?: unknown };
+                      if (typeof seq !== "number" || !Number.isFinite(seq)) return [];
+                      if (typeof venue !== "string" || venue.length === 0) return [];
+                      return [{ seq, venue }];
+                    })
+                  : [],
                 series,
                 rawDenominatorConfig:
                   (stratRes.data as { returns_denominator_config?: unknown } | null)
@@ -1132,8 +1150,12 @@ export function SyncPreviewStep({
     const hasMtmCaveat = composite.mtmGatedReason != null;
     const hasBenchmarkCaveat = composite.benchmarkUnavailable;
     const hasInsufficientWindowCaveat = composite.insufficientWindow;
+    const hasDegradedMembers = composite.degradedMembers.length > 0;
     const hasDqCaveat =
-      hasMtmCaveat || hasBenchmarkCaveat || hasInsufficientWindowCaveat;
+      hasMtmCaveat ||
+      hasBenchmarkCaveat ||
+      hasInsufficientWindowCaveat ||
+      hasDegradedMembers;
     const hasWarnings = hasGaps || hasDqCaveat;
 
     return (
@@ -1347,6 +1369,16 @@ export function SyncPreviewStep({
                     <p>
                       Short track record — annualized metrics are computed on an
                       insufficient window and may not be meaningful.
+                    </p>
+                  )}
+                  {hasDegradedMembers && (
+                    <p>
+                      {composite.degradedMembers
+                        .map((d) => `Key ${d.seq} (${d.venue})`)
+                        .join(", ")}{" "}
+                      could not be included —{" "}
+                      {composite.degradedMembers.length > 1 ? "their" : "its"} data
+                      is excluded from this composite.
                     </p>
                   )}
                 </div>

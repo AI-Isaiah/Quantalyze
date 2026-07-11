@@ -882,6 +882,68 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).toBeEnabled();
   });
 
+  it("renders the degraded-member DQ caveat (HARD-05)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          degraded_members: [
+            { seq: 2, venue: "bybit", reason: "venue_reconstruction_unavailable" },
+          ],
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(/Key 2 \(bybit\)/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/data is excluded from this composite/),
+    ).toBeInTheDocument();
+    // Warnings never block — submit stays enabled.
+    expect(
+      screen.getByRole("button", { name: /use this composite and continue/i }),
+    ).toBeEnabled();
+  });
+
+  it("renders the degraded-member caveat as the ONLY caveat (hasDqCaveat OR extended)", async () => {
+    // No mtm/benchmark/insufficient flags — the amber Data quality block appears
+    // solely because degraded_members is present.
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          degraded_members: [
+            { seq: 3, venue: "okx", reason: "venue_reconstruction_unavailable" },
+          ],
+        },
+      }),
+    });
+
+    expect(screen.getByText(/Data quality/)).toBeInTheDocument();
+    expect(screen.getByText(/Key 3 \(okx\)/)).toBeInTheDocument();
+  });
+
+  it("strict-coerces malformed degraded_members to nothing (T-93-03-02)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          degraded_members: "bybit" as unknown, // malformed (not an array of objects)
+        },
+      }),
+    });
+    expect(
+      screen.queryByText(/data is excluded from this composite/),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders no DQ caveat block when neither flag is set", async () => {
     await renderPassed({
       analyticsRow: defaultAnalyticsRow({
@@ -903,6 +965,10 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     // HARD-04: the insufficient-window caveat must NOT render when the flag is absent.
     expect(
       screen.queryByText(/annualized metrics are computed on an insufficient window/),
+    ).not.toBeInTheDocument();
+    // HARD-05: the degraded-member caveat must NOT render when the flag is absent.
+    expect(
+      screen.queryByText(/data is excluded from this composite/),
     ).not.toBeInTheDocument();
   });
 

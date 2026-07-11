@@ -884,6 +884,25 @@ function KpiStrip() {
           ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
         </p>
       )}
+      {/* HARD-05 (Phase 93): server-truth degraded-member flag from
+          data_quality_flags.degraded_members — composite members EXCLUDED from
+          the stitch (a venue not yet reconstructed). Honest disclosure: their data
+          is NOT in the track record. Reuses the identical NEW-C20-08 amber caveat
+          pattern; strict-coerced to [] upstream so junk never renders. */}
+      {(payload.dataQuality?.degradedMembers?.length ?? 0) > 0 && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ {payload.dataQuality!.degradedMembers!
+            .map((d) => `Key ${d.seq} (${d.venue})`)
+            .join(", ")}{" "}
+          could not be included — {payload.dataQuality!.degradedMembers!.length > 1 ? "their" : "its"} data is excluded from this track record.
+        </p>
+      )}
       </section>
     </>
   );
