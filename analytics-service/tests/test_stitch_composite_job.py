@@ -513,6 +513,77 @@ async def test_dq_flags_merge_preserves_existing_key() -> None:
     assert "per_key" in dq and "gap_day_count" in dq  # composite mask merged in
 
 
+def _headline_row(fake: _FakeSupabase) -> dict[str, Any] | None:
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and "metrics_json_by_basis" in payload
+        ):
+            return payload
+    return None
+
+
+@pytest.mark.asyncio
+async def test_insufficient_window_short_composite_stamps_flag_status_unchanged() -> None:
+    """HARD-04 (#67): a short-window composite (stitched span < 90 calendar days)
+    persists data_quality_flags.insufficient_window == True, while the CAGR-site
+    flag does NOT change computation_status — a clean short-window composite stays
+    exact-string 'complete' (the flag is deliberately NOT a NAV_TWR_GUARD_KEYS
+    member). Neuter the lift (drop the merged_flags set) → the flag is absent →
+    this reddens."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    # ~32-calendar-day stitched span → under MIN_ANNUALIZATION_DAYS (90).
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["data_quality_flags"].get("insufficient_window") is True
+    # Status invariant: the annotation flag never promotes computation_status.
+    assert headline["computation_status"] == "complete"
+    assert headline["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_insufficient_window_drop_stale_on_long_restitch() -> None:
+    """HARD-04 heal-on-re-stitch: a composite that GROWS past MIN_ANNUALIZATION_DAYS
+    (stitched span >= 90 days) DROPS a pre-existing stale insufficient_window
+    (mtm_gated_reason drop-stale mirror), while an unrelated seeded flag survives
+    the merge. Neuter the else-branch pop → the stale flag lingers → this reddens."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-04-14"),
+            _member(2, "2024-04-15", None),
+        ],
+        existing_flags={
+            "csv_source": True,
+            "insufficient_window": True,   # stale from a prior short-window derive
+            "benchmark_unavailable": True,  # unrelated — must survive the merge
+        },
+    )
+    # ~106-calendar-day stitched span (2024-01-01 .. 2024-04-16) → >= 90.
+    m1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    m2 = _returns([("2024-04-15", -0.01), ("2024-04-16", 0.015)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "insufficient_window" not in dq  # healed (drop-stale)
+    assert dq.get("benchmark_unavailable") is True  # unrelated key preserved
+
+
 @pytest.mark.asyncio
 async def test_member_guard_meta_promotes_complete_with_warnings() -> None:
     """Finding 3: run_stitch_composite_job previously DISCARDED each member's

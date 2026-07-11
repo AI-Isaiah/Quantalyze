@@ -78,18 +78,21 @@ def test_metrics_result_dataclass_contract_shape():
     assert dataclasses.is_dataclass(MetricsResult)
 
     field_names = {f.name for f in dataclasses.fields(MetricsResult)}
-    assert field_names == {"metrics_json", "sibling_kinds"}, (
+    assert field_names == {"metrics_json", "sibling_kinds", "insufficient_window"}, (
         "MetricsResult contract drifted. The mock literals in this module "
         "encode `MetricsResult(metrics_json=..., sibling_kinds=...)`; a new "
         "or renamed field means those mocks no longer match production. "
+        "HARD-04 (#67) added `insufficient_window: bool = False` — a DQ "
+        "annotation lifted into data_quality_flags, NOT a metrics_json key. "
         f"Got fields: {sorted(field_names)}"
     )
 
-    # Both fields default to empty containers (field(default_factory=dict)) so
+    # All fields default (dict factories + insufficient_window=False) so
     # MetricsResult() is constructible with no args — relied on by callers.
     empty = MetricsResult()
     assert empty.metrics_json == {}
     assert empty.sibling_kinds == {}
+    assert empty.insufficient_window is False
 
     # Split-storage invariant: subscript / `in` proxy ONLY to metrics_json.
     # A series key that lives in sibling_kinds must NOT be visible via the
@@ -2338,14 +2341,19 @@ async def test_consumer_migration_fully_clean_run_status_complete_no_flags():
         api_key_balance=10000.0,
     )
 
-    # A valid, non-stale benchmark series aligned to the patched returns
-    # window (15 business days from 2024-01-01).
-    bench_dates = pd.bdate_range("2024-01-01", periods=15)
-    valid_benchmark = pd.Series([0.0005] * 15, index=bench_dates, name="BTC")
+    # HARD-04 (#67): a GENUINELY clean run also needs a SUFFICIENT annualization
+    # window — under MIN_ANNUALIZATION_DAYS (90 calendar days) the CAGR-site
+    # insufficient_window flag legitimately fires, so this "zero flags" invariant
+    # must run on a window past the threshold. 120 business days ≈ 168 calendar
+    # days, comfortably clear of 90, so the ONLY reason a flag could appear is a
+    # spurious leak — exactly what this test guards.
+    bench_dates = pd.bdate_range("2024-01-01", periods=120)
+    valid_benchmark = pd.Series([0.0005] * 120, index=bench_dates, name="BTC")
 
     upsert = await _run_and_get_success_upsert(
         mock_supabase,
         sa_upsert_calls,
+        daily_rows_count=120,
         benchmark_return=(valid_benchmark, False),  # (series, stale=False)
     )
 
@@ -2358,6 +2366,63 @@ async def test_consumer_migration_fully_clean_run_status_complete_no_flags():
         "A fully clean run must carry zero data_quality_flags. "
         f"Got: {flags!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_insufficient_window_single_key_short_lifts_flag_status_unchanged():
+    """HARD-04 (#67): a single-key run whose annualization window is under
+    MIN_ANNUALIZATION_DAYS (90 calendar days) lifts
+    data_quality_flags.insufficient_window == True WITHOUT promoting
+    computation_status — a young-but-otherwise-clean account stays exact-string
+    'complete' (the flag is deliberately NOT a NAV_TWR_GUARD_KEYS member).
+    Neuter the analytics_runner lift → the flag is absent → this reddens."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    # 15 business days (~20 calendar days) → under the 90-day threshold.
+    bench_dates = pd.bdate_range("2024-01-01", periods=15)
+    valid_benchmark = pd.Series([0.0005] * 15, index=bench_dates, name="BTC")
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        daily_rows_count=15,
+        benchmark_return=(valid_benchmark, False),
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert flags.get("insufficient_window") is True
+    # Status invariant: the annotation flag never promotes computation_status.
+    assert upsert.get("computation_status") == "complete", (
+        "insufficient_window must NOT promote computation_status; got: "
+        f"{upsert.get('computation_status')!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_insufficient_window_single_key_long_carries_no_key():
+    """HARD-04 (#67): a single-key run past MIN_ANNUALIZATION_DAYS carries NO
+    insufficient_window key (present-only additive — a sufficient window is not
+    annotated)."""
+    sa_upsert_calls: list[dict] = []
+    mock_supabase = _build_balance_flag_mock_supabase(
+        daily_pnl_rows=_minimal_daily_rows(),
+        sa_upsert_calls=sa_upsert_calls,
+        strategy_api_key_id="00000000-0000-0000-0000-000000000001",
+        api_key_balance=10000.0,
+    )
+    bench_dates = pd.bdate_range("2024-01-01", periods=120)
+    valid_benchmark = pd.Series([0.0005] * 120, index=bench_dates, name="BTC")
+    upsert = await _run_and_get_success_upsert(
+        mock_supabase,
+        sa_upsert_calls,
+        daily_rows_count=120,
+        benchmark_return=(valid_benchmark, False),
+    )
+    flags = upsert.get("data_quality_flags") or {}
+    assert "insufficient_window" not in flags
 
 
 # ---------------------------------------------------------------------------

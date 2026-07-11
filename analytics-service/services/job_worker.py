@@ -3561,6 +3561,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["mtm_gated_reason"] = mtm_reason
     else:
         merged_flags.pop("mtm_gated_reason", None)
+    # HARD-04 (#67): lift the CAGR-site insufficient_window annotation, mirroring
+    # the mtm_gated_reason drop-stale pattern above — a composite that GROWS past
+    # MIN_ANNUALIZATION_DAYS heals (loses the flag) on the next re-stitch. Read
+    # from the CANONICAL cash headline result (`cash_metrics_result`, the ONE
+    # composite compute); the MTM second pass shares the same window by
+    # construction. Annotation only — it deliberately does NOT touch
+    # computation_status (not a NAV_TWR_GUARD_KEYS member).
+    if cash_metrics_result.insufficient_window:
+        merged_flags["insufficient_window"] = True
+    else:
+        merged_flags.pop("insufficient_window", None)
     # F-2: surface benchmark availability so the factsheet renders the "benchmark
     # unavailable" note instead of a silently-missing BTC family. DROP a stale flag
     # when the fetch succeeded this derive (the benchmark healed).
