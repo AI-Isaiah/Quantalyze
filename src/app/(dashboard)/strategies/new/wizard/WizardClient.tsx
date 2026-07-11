@@ -78,6 +78,19 @@ const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4 | 5> = {
 };
 
 /**
+ * Phase 94 / WIZ-04: the ordered API-branch step keys the clickable-stepper
+ * forward-navigability check walks. Only the API branch is clickable this
+ * phase (composite-wizard scope); the CSV branch stays inert.
+ */
+const API_STEP_ORDER: WizardStepKey[] = [
+  "connect_key",
+  "sync_preview",
+  "metadata",
+  "review",
+  "submit",
+];
+
+/**
  * Phase 15 fix: debounce window for the CSV strategy-name autosave (below).
  * Named to match the same-directory `*_MS` timing-constant convention
  * (SyncPreviewStep.tsx: SLOW_HINT_MS, POLL_BACKOFF_MS, …). The autosave test
@@ -392,6 +405,59 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     [wizardSessionId],
   );
 
+  // Phase 94 / WIZ-04 — clickable free stepper (API branch only).
+  //
+  // Completion predicate mirrors the render guards exactly (connect_key ⇔
+  // strategyId, sync_preview ⇔ syncSnapshot, metadata/review ⇔ metadataDraft)
+  // so free navigation can never reach a step whose data prerequisites are
+  // absent — the review/submit guards below (strategyId && syncSnapshot &&
+  // metadataDraft) would otherwise render a blank (research Pitfall 4).
+  const stepCompleted = useCallback(
+    (key: WizardStepKey): boolean => {
+      switch (key) {
+        case "connect_key":
+          return strategyId != null;
+        case "sync_preview":
+          return syncSnapshot != null;
+        case "metadata":
+        case "review":
+          return metadataDraft != null;
+        // submit is never pre-completed; CSV keys are out of scope this phase.
+        default:
+          return false;
+      }
+    },
+    [strategyId, syncSnapshot, metadataDraft],
+  );
+
+  const stepNavigable = useCallback(
+    (key: WizardStepKey): boolean => {
+      // The active step is a no-op (not navigable).
+      if (key === step) return false;
+      const target = STEP_INDEX[key];
+      const current = STEP_INDEX[step];
+      // Backward is always allowed (state persists ⇒ no rework on return).
+      if (target < current) return true;
+      // Forward is allowed only when every lower-ordinal step is complete —
+      // this blocks skipping past an incomplete step into a guard-failed blank.
+      return API_STEP_ORDER.every(
+        (s) => STEP_INDEX[s] >= target || stepCompleted(s),
+      );
+    },
+    [step, stepCompleted],
+  );
+
+  // Clicking a step navigates and persists the resume pointer — nothing else.
+  // No state clearing, no session regen: syncSnapshot/metadataDraft stay intact
+  // so a backward-then-forward round-trip redoes no work (T-94-16).
+  const handleStepSelect = useCallback(
+    (key: WizardStepKey) => {
+      setStep(key);
+      persistPointer(key, strategyId);
+    },
+    [persistPointer, strategyId],
+  );
+
   const handleConnectSuccess = useCallback(
     (result: ConnectKeySuccess) => {
       setStrategyId(result.strategyId);
@@ -568,6 +634,12 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         toastKey={toastKey}
         steps={source === "csv" ? WIZARD_STEPS_CSV : undefined}
         source={source}
+        // Phase 94 / WIZ-04: clickable stepper on the API/composite branch
+        // only. The CSV branch passes undefined for both props, so WizardChrome
+        // renders its inert <div> cells byte-identically (WIZ-04 scope is the
+        // composite wizard; CSV clickability is out of this phase).
+        onStepSelect={source === "api" ? handleStepSelect : undefined}
+        stepNavigable={source === "api" ? stepNavigable : undefined}
       >
         {sessionExpired && (
           <div className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-caption text-text-secondary">
