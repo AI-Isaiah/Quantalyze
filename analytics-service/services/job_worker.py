@@ -3662,15 +3662,39 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # sub-derive-interval TOCTOU is accepted; re-checking `_mtm_signals` here
         # would only defer, not eliminate, the same infinitesimal race.
         # HARD-05: the MTM pass re-runs the SAME member fan-out and produces its OWN
-        # degraded list (`_mtm_degraded`), which is identical to the cash pass's by
-        # construction — the venue routing is basis-independent. We DISCARD it and
-        # take the authoritative degraded list from the cash pass (`degraded_members`
-        # above), mirroring how the MTM option-activity signals are discarded. NOTE:
-        # the MTM pass DOES run for a composite that contains a degraded ccxt member —
-        # that member is `continue`d before its signal is appended, so
-        # `member_signals` is Deribit-only and `mark_to_market_available` can return
-        # True on the perp-only Deribit remainder.
+        # degraded list (`_mtm_degraded`). The venue routing is basis-independent, so
+        # the two passes SHOULD degrade the same members — BUT each pass re-crawls
+        # every member LIVE, and `_reconstruct_ccxt_member` does live network reads, so
+        # a ccxt member that degraded in the cash pass could momentarily RECONSTRUCT in
+        # the MTM re-crawl (e.g. a same-UTC-day flow price now cached) or vice versa.
+        # If that happens the MTM basis would be computed over a DIFFERENT member set
+        # than the cash headline while the factsheet says "Key N excluded" — mismatched
+        # bases. So ENFORCE the invariant rather than assume it: compare the two
+        # degraded seq-sets and FAIL LOUD on divergence. We take the authoritative
+        # degraded list from the CASH pass (`degraded_members` above), mirroring how
+        # the MTM option-activity signals are discarded. NOTE: the MTM pass DOES run
+        # for a composite that contains a degraded ccxt member — that member is
+        # `continue`d before its signal is appended, so `member_signals` is
+        # Deribit-only and `mark_to_market_available` can return True on the perp-only
+        # Deribit remainder.
         clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas, _mtm_degraded = mtm_result
+        _cash_degraded_seqs = {int(d["seq"]) for d in degraded_members}
+        _mtm_degraded_seqs = {int(d["seq"]) for d in _mtm_degraded}
+        if _mtm_degraded_seqs != _cash_degraded_seqs:
+            # TRANSIENT (retryable, NO terminal `_stamp_failed`): a re-run re-crawls
+            # BOTH passes and they re-converge; this is a live-read race, not a
+            # structural defect. Mirrors the 429 / geo-block transient returns above,
+            # which likewise skip the terminal stamp so the retry re-runs cleanly.
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: MTM pass degraded-member set "
+                    f"{sorted(_mtm_degraded_seqs)} diverges from the cash pass "
+                    f"{sorted(_cash_degraded_seqs)} — the two bases would be computed "
+                    "over different member sets; retry to re-crawl both consistently"
+                ),
+                error_kind="transient",
+            )
         try:
             mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)
         except CompositeOverlapError as exc:

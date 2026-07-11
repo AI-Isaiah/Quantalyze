@@ -1196,6 +1196,76 @@ async def test_ccxt_member_guard_flag_unions_into_merged_flags() -> None:
     assert "degraded_members" not in headline["data_quality_flags"]
 
 
+# --- Phase 93.1 hardening: MTM/cash degraded-set divergence + seam pins ---------
+
+
+@pytest.mark.asyncio
+async def test_mtm_cash_degraded_member_divergence_fails_transient() -> None:
+    """Phase 93.1 FIX 1 (MTM/cash degraded-set invariant ENFORCED, not assumed):
+    each of the cash and MTM passes re-crawls every member LIVE, so a ccxt member can
+    degrade in the cash pass but momentarily RECONSTRUCT in the MTM re-crawl (a
+    same-UTC-day price now cached). If that happens the MTM basis would be computed
+    over a DIFFERENT member set than the cash headline while the factsheet says
+    "Key N excluded" — mismatched bases. The job must now FAIL LOUD TRANSIENT on the
+    divergence rather than ship the mismatch (a re-run re-crawls both passes
+    consistently). RED before the fix: the job returned DONE with both bases written
+    over divergent member sets.
+
+    `_reconstruct_ccxt_member` is a closure (not module-patchable), so the divergence
+    is injected at the REAL-math flow seam: `ccxt_rows_to_dated_flows` raises on the
+    FIRST (cash-pass seq-2) call and succeeds on the SECOND (MTM-pass seq-2) call, so
+    seq 2 degrades in cash but reconstructs in MTM."""
+    from services.ccxt_flows import ccxt_rows_to_dated_flows as _real_flows
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit, perp-only → MTM gate OPEN
+        _member(2, "2024-02-01", None),           # bybit — degrades cash, reconstructs MTM
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    _flows_calls = {"n": 0}
+
+    def _flows_side_effect(rows: Any, *, venue: str, price_index: Any) -> Any:
+        _flows_calls["n"] += 1
+        if _flows_calls["n"] == 1:
+            # Cash pass seq-2: a transient live-read failure → seq 2 degrades.
+            raise NavReconstructionError("cash-pass transient unpriceable flow")
+        # MTM pass seq-2: the re-crawl now succeeds → seq 2 reconstructs.
+        return _real_flows(rows, venue=venue, price_index=price_index)
+
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m1, {})],   # cash seq1 + MTM seq1
+        has_option_activity=False,              # perp-only → MTM gate OPEN
+        preflight_side_effect=[
+            _ctx("deribit"), _ctx("bybit"),     # cash pass
+            _ctx("deribit"), _ctx("bybit"),     # MTM pass
+        ],
+    ) + _ccxt_fetch_patches(
+        realized=_CCXT_REALIZED,
+        funding=_CCXT_FUNDING,
+    ) + [
+        patch(
+            "services.ccxt_flows.ccxt_rows_to_dated_flows",
+            new=MagicMock(side_effect=_flows_side_effect),
+        ),
+    ]
+    with _apply(patches):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"    # retryable — re-crawl re-converges
+    assert result.error_message is not None and "diverge" in result.error_message
+    # Both flow seams were hit exactly once per pass (cash raised, MTM succeeded).
+    assert _flows_calls["n"] == 2
+    # Fail-loud is TERMINAL-STAMP-FREE (transient): no headline / degrade persisted.
+    assert _headline_row(fake) is None
+    assert not any(
+        isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+    )
+
+
 @pytest.mark.asyncio
 async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
     """Finding 4: a PERMANENT member-key preflight failure (missing / inactive key)
