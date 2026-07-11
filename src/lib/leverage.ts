@@ -42,8 +42,24 @@ export const MAX_LEVERAGE = 10;
  * rehydrate path so a corrupt persisted value carries its offending key.
  */
 interface SanitizeContext {
-  source: string;
+  source?: string;
   key?: string;
+  /**
+   * LOW-1 (round-3) — set `false` to SUPPRESS the coercion Sentry warning.
+   * Default `true` (keep the actionable signal on the owner-facing interactive /
+   * rehydrate path). Suppressed on non-actionable, high-volume readers: the
+   * PUBLIC anonymous share page (a quota-burn vector — a corrupt persisted value
+   * would fire on EVERY anonymous view) and the read-twice compare path (panel +
+   * engine = 2 events per corrupt entry per compute). Behavior of the returned
+   * value is IDENTICAL either way — only the observability emission is gated.
+   */
+  signal?: boolean;
+}
+
+/** Options for {@link sanitizeLeverageMap}. */
+interface SanitizeMapOptions {
+  /** See {@link SanitizeContext.signal}. Forwarded to every per-entry sanitize. */
+  signal?: boolean;
 }
 
 /**
@@ -62,7 +78,7 @@ interface SanitizeContext {
  */
 export function sanitizeLeverage(v: number, context?: SanitizeContext): number {
   const out = Number.isFinite(v) && v >= 0 ? Math.min(MAX_LEVERAGE, v) : 1;
-  if (Number.isFinite(v) && out !== v) {
+  if (Number.isFinite(v) && out !== v && context?.signal !== false) {
     captureToSentry(
       new Error(
         `sanitizeLeverage coerced an out-of-range leverage (${v} → ${out})`,
@@ -88,10 +104,15 @@ export function sanitizeLeverage(v: number, context?: SanitizeContext): number {
  */
 export function sanitizeLeverageMap(
   m: Record<string, number> | undefined,
+  options?: SanitizeMapOptions,
 ): Record<string, number> {
   const out: Record<string, number> = {};
   for (const [k, v] of Object.entries(m ?? {})) {
-    out[k] = sanitizeLeverage(v, { source: "sanitizeLeverageMap", key: k });
+    out[k] = sanitizeLeverage(v, {
+      source: "sanitizeLeverageMap",
+      key: k,
+      signal: options?.signal,
+    });
   }
   return out;
 }

@@ -10,7 +10,7 @@ import { BasisProvider, useBasis, mtmDisabledReasonCopy, type Basis } from "./ba
 // Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
 // wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
 // L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
-import { LeverageProvider, useLeverage, useLeveragedMetrics } from "./leverage-context";
+import { LeverageProvider, useLeverage, useLeveragedMetrics, useModeledLeverage } from "./leverage-context";
 import { MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -321,11 +321,13 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const { basis } = useBasis();
   // M-3 (round-2) — the single-key leverage recompute (LEV-01) levers ONLY the
   // KpiStrip's headline scalars; the right-rail MetricsColumn duplicates
-  // Cum/CAGR/Vol/Sharpe/Sortino/MaxDD from the UN-levered payload. Reuse the ONE
-  // modeled predicate (no duplicate derivation) to surface a symmetric
-  // "BASE · 1× TRACK" eyebrow atop the rail while modeled, so a levered strip
-  // scalar is never read as un-bridged against the rail's base-track value.
-  const { modeled } = useLeveragedMetrics(payload);
+  // Cum/CAGR/Vol/Sharpe/Sortino/MaxDD from the UN-levered payload. Surface a
+  // symmetric "BASE · 1× TRACK" eyebrow atop the rail while modeled, so a levered
+  // strip scalar is never read as un-bridged against the rail's base-track value.
+  // Round-3 perf — read the CHEAP `useModeledLeverage` predicate (no compute()),
+  // NOT `useLeveragedMetrics`, so the eyebrow never re-runs the O(n) recompute
+  // the KpiStrip already ran at L≠1.
+  const { modeled } = useModeledLeverage(payload);
   const composite = payload.dataQuality?.composite === true;
   // Non-composite at L=1: bare column, byte-identical to before (GUARD-02). Under
   // a MODELED leverage (single-key only — the control is composite-hidden), the

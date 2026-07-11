@@ -108,6 +108,25 @@ describe("SFH-2 — a REAL coercion is Sentry-visible; the identity path is sile
     expect(options.tags.source).toBe("sanitizeLeverageMap");
     expect(options.extra).toMatchObject({ key: "bad", input: 999, output: 10 });
   });
+
+  it("LOW-1 — signal:false SUPPRESSES the Sentry warning on a real coercion (value still clamps)", () => {
+    // The clamp behavior is IDENTICAL — only the emission is gated.
+    expect(sanitizeLeverage(999, { source: "public", signal: false })).toBe(10);
+    expect(sanitizeLeverage(-5, { source: "public", signal: false })).toBe(1);
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("LOW-1 — sanitizeLeverageMap({ signal:false }) suppresses on every entry (public share / read-twice compare path)", () => {
+    expect(sanitizeLeverageMap({ a: 999, b: -5, c: 2 }, { signal: false })).toEqual({
+      a: 10,
+      b: 1,
+      c: 2,
+    });
+    expect(captureToSentry).not.toHaveBeenCalled();
+    // …and the default (signal on) STILL logs — the owner-facing path is intact.
+    sanitizeLeverageMap({ a: 999 });
+    expect(captureToSentry).toHaveBeenCalledTimes(1);
+  });
 });
 
 /**

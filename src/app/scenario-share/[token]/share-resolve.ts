@@ -303,7 +303,14 @@ export function resolveSharedScenario(
         return span ? [span] : [];
       }),
     );
-  const leverage = sanitizeLeverageMap(draft.leverageOverrides);
+  // LOW-1 (round-3) — signal:false: this is the PUBLIC anonymous share render.
+  // A corrupt persisted value would otherwise fire a Sentry warning on EVERY
+  // anonymous view (a quota-burn vector on a public URL). The coercion still
+  // clamps identically; the actionable owner-facing signal lives on the
+  // composer rehydrate path.
+  const leverage = sanitizeLeverageMap(draft.leverageOverrides, {
+    signal: false,
+  });
   const state: ScenarioState = {
     selected,
     weights,

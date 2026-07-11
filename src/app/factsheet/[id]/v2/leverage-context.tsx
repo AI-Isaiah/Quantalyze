@@ -58,6 +58,28 @@ export function useLeverage(): LeverageContextValue {
 }
 
 /**
+ * Round-3 perf — the CHEAP modeled predicate, WITHOUT re-running `compute()`.
+ * `modeled` is exactly the condition under which {@link useLeveragedMetrics}
+ * runs a recompute (the sanitized multiplier is a real non-1 leverage AND the
+ * annualization basis is present), so a consumer that only needs the label/gate
+ * (the M-3 "BASE · 1× TRACK" rail eyebrow) reads it here for O(1) instead of
+ * paying the O(n) KPI-slice recompute a second time. `signal: false` — the
+ * interactive recompute path (`useLeveragedMetrics`) owns the SFH-2 coercion
+ * signal; this predicate read must not double-fire it.
+ */
+export function useModeledLeverage(payload: FactsheetPayload): {
+  modeled: boolean;
+  appliedLeverage: number;
+} {
+  const { leverage } = useLeverage();
+  const appliedLeverage = sanitizeLeverage(leverage, { signal: false });
+  return {
+    modeled: appliedLeverage !== 1 && payload.periodsPerYear != null,
+    appliedLeverage,
+  };
+}
+
+/**
  * The display-side leverage mapping hook. Composes {@link useBasisMetrics}
  * (payload-as-arg, same convention) and applies the leverage switch on top of
  * the resolved basis metrics.

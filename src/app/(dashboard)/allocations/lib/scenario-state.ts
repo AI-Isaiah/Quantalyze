@@ -510,7 +510,6 @@ export function removeAddedStrategy(
   // the draft no longer contains. `?? {}` keeps a pre-LEV-02 (field-absent)
   // draft byte-identical: no field in, no field out.
   const nextLeverage = { ...(draft.leverageOverrides ?? {}) };
-  const hadLeverageEntry = strategyId in nextLeverage;
   delete nextLeverage[strategyId];
 
   return {
@@ -518,9 +517,9 @@ export function removeAddedStrategy(
     addedStrategies: nextAdded,
     toggleByScopeRef: nextToggle,
     weightOverrides: clampAllWeights(nextWeights),
-    // Only emit the field when the source draft had one (or the removed leg
-    // carried an entry) — otherwise leave the draft field-shape untouched.
-    ...(draft.leverageOverrides !== undefined || hadLeverageEntry
+    // Only emit the field when the source draft carried one — otherwise leave
+    // the draft field-shape untouched (a field-absent draft stays field-absent).
+    ...(draft.leverageOverrides !== undefined
       ? { leverageOverrides: nextLeverage }
       : {}),
     lastEditedAt: new Date().toISOString(),

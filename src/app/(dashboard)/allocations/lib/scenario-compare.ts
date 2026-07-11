@@ -232,7 +232,13 @@ export function computeMetricsForDraft(
   // clamped at use, never fails the whole-draft parse), EXACTLY mirroring the
   // composer's `projectionState.leverage`. We read draft.toggleByScopeRef /
   // draft.weightOverrides / draft.leverageOverrides — the full saved projection.
-  const sanitizedLeverage = sanitizeLeverageMap(draft.leverageOverrides);
+  // LOW-1 (round-3) — signal:false: the compare surface reads leverage TWICE per
+  // corrupt entry per compute (here + the panel's draftHasEffectiveLeverage), and
+  // re-computes on every payload change — a noisy, non-actionable duplicate of
+  // the owner's rehydrate signal. Suppress here; clamp behavior is unchanged.
+  const sanitizedLeverage = sanitizeLeverageMap(draft.leverageOverrides, {
+    signal: false,
+  });
   const selected: Record<string, boolean> = {};
   const weights: Record<string, number> = {};
   const leverage: Record<string, number> = {};

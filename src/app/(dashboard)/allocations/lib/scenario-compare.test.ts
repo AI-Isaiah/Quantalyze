@@ -1,7 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { DailyPoint } from "@/lib/scenario";
 import { computeScenario, buildDateMapCache } from "@/lib/scenario";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
+// LOW-1 (round-3) — the compare engine reads leverage with signal:false, so a
+// corrupt persisted value must NOT emit a Sentry warning here. Mock the helper
+// to assert the suppression.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
 import {
   buildAddedOnlySet,
@@ -440,6 +445,23 @@ describe("computeMetricsForDraft", () => {
     // TWR diverges from the un-levered curve.
     expect(levered.twr).not.toBe(base.twr);
     expect(levered.volatility! > base.volatility!).toBe(true);
+  });
+
+  it("LOW-1 — a corrupt persisted leverage (999) is clamped but emits NO Sentry warning on the compare path (quota-safe)", () => {
+    vi.mocked(captureToSentry).mockClear();
+    const dates = buildDates("2024-01-02", 80);
+    const inputs = perKeyLiveInputs(
+      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": 5000 },
+    );
+    // 999 → clamped to 10 at read; the metrics still compute honestly.
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"], leverageOverrides: { "key-A": 999 } }),
+      inputs,
+    );
+    expect(m.twr).not.toBeNull();
+    // …but the coercion signal is suppressed on this read-twice compare path.
+    expect(captureToSentry).not.toHaveBeenCalled();
   });
 
   it("a legacy top-level `leverage` field (NOT the schema's leverageOverrides) stays ignored — only the persisted schema field is read", () => {
