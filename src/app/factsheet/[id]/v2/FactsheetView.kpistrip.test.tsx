@@ -385,3 +385,32 @@ describe("FactsheetView — Phase 90 F6: sr-only stitched summary grammar", () =
     expect(text).not.toContain("handoff");
   });
 });
+
+describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth caveat", () => {
+  // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire —
+  // isolating the SERVER-truth insufficient_window signal.
+  function insufficientWindowPayload(insufficientWindow: boolean): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: { composite: true, insufficientWindow },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the server-truth caveat when dataQuality.insufficientWindow is true", () => {
+    const { getByText } = renderComposite(insufficientWindowPayload(true));
+    expect(
+      getByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).toBeInTheDocument();
+  });
+
+  it("does NOT render the caveat when insufficientWindow is absent/false", () => {
+    const { queryByText } = renderComposite(insufficientWindowPayload(false));
+    expect(
+      queryByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).not.toBeInTheDocument();
+  });
+});

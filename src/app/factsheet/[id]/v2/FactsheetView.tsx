@@ -868,6 +868,22 @@ function KpiStrip() {
           ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
+      {/* HARD-04 (#67): server-truth short-window flag from
+          data_quality_flags.insufficient_window (the CAGR-site DQ annotation).
+          Distinct from the n<252 client-count heuristic above — this is the
+          server's authoritative sub-90-day annualization-window signal. Reuses
+          the identical NEW-C20-08 amber caveat pattern. */}
+      {payload.dataQuality?.insufficientWindow === true && (
+        <p
+          className="px-3 sm:px-4 py-2 text-micro font-mono"
+          style={{
+            borderTop: "1px solid var(--color-border)",
+            color: "var(--color-warning, #B45309)",
+          }}
+        >
+          ⚠ Track record under 90 days — annualized metrics are flagged as computed on an insufficient window.
+        </p>
+      )}
       </section>
     </>
   );

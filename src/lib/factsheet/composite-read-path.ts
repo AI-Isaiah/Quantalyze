@@ -48,7 +48,13 @@ export async function readCompositeFactsheet(
   input: {
     strategyId: string;
     dqf:
-      | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown }
+      | {
+          composite?: unknown;
+          mtm_gated_reason?: unknown;
+          per_key?: unknown;
+          gap_spans?: unknown;
+          insufficient_window?: unknown;
+        }
       | null
       | undefined;
     metricsJsonByBasis: unknown;
@@ -109,7 +115,10 @@ export async function readCompositeFactsheet(
       segmentBoundaries: markers.segmentBoundaries,
       missingSegments: markers.missingSegments,
       metricsByBasis,
-      dataQuality: { composite: true },
+      // HARD-04 (#67): server-truth short-window flag. Strict `=== true`
+      // coercion so a malformed dqf value (string/object) can never render the
+      // caveat (T-92-05).
+      dataQuality: { composite: true, insufficientWindow: dqf?.insufficient_window === true },
       mtmGate: {
         available: mtmAvailable,
         reason: typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined,

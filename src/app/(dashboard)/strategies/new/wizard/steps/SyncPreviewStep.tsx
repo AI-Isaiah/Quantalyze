@@ -167,6 +167,9 @@ export interface CompositePreviewData {
   mtmGatedReason: string | null;
   benchmarkUnavailable: boolean;
   benchmarkNote: string | null;
+  // HARD-04 (#67): server-truth sub-90-day annualization-window flag
+  // (data_quality_flags.insufficient_window).
+  insufficientWindow: boolean;
   series: { date: string; daily_return: number }[]; // full stitched series
   rawDenominatorConfig: unknown;
   /**
@@ -654,6 +657,7 @@ export function SyncPreviewStep({
               mtm_gated_reason?: string | null;
               benchmark_unavailable?: boolean;
               benchmark_note?: string | null;
+              insufficient_window?: boolean;
             };
 
             const members: CompositeMemberKeyRow[] = (
@@ -773,6 +777,9 @@ export function SyncPreviewStep({
                 mtmGatedReason: dq.mtm_gated_reason ?? null,
                 benchmarkUnavailable: dq.benchmark_unavailable === true,
                 benchmarkNote: dq.benchmark_note ?? null,
+                // HARD-04 (#67): strict server-truth coercion (mirror
+                // benchmark_unavailable) — a malformed value renders nothing.
+                insufficientWindow: dq.insufficient_window === true,
                 series,
                 rawDenominatorConfig:
                   (stratRes.data as { returns_denominator_config?: unknown } | null)
@@ -1124,7 +1131,9 @@ export function SyncPreviewStep({
     const hasGaps = gapSpans.length > 0;
     const hasMtmCaveat = composite.mtmGatedReason != null;
     const hasBenchmarkCaveat = composite.benchmarkUnavailable;
-    const hasDqCaveat = hasMtmCaveat || hasBenchmarkCaveat;
+    const hasInsufficientWindowCaveat = composite.insufficientWindow;
+    const hasDqCaveat =
+      hasMtmCaveat || hasBenchmarkCaveat || hasInsufficientWindowCaveat;
     const hasWarnings = hasGaps || hasDqCaveat;
 
     return (
@@ -1324,6 +1333,12 @@ export function SyncPreviewStep({
                   )}
                   {hasBenchmarkCaveat && (
                     <p>Benchmark overlay unavailable for this period.</p>
+                  )}
+                  {hasInsufficientWindowCaveat && (
+                    <p>
+                      Short track record — annualized metrics are computed on an
+                      insufficient window and may not be meaningful.
+                    </p>
                   )}
                 </div>
               </div>

@@ -860,6 +860,28 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the insufficient-window DQ caveat (HARD-04)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          insufficient_window: true,
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(
+        /Short track record — annualized metrics are computed on an insufficient window and may not be meaningful\./,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /use this composite and continue/i }),
+    ).toBeEnabled();
+  });
+
   it("renders no DQ caveat block when neither flag is set", async () => {
     await renderPassed({
       analyticsRow: defaultAnalyticsRow({
@@ -877,6 +899,10 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByText(/Benchmark overlay unavailable/),
+    ).not.toBeInTheDocument();
+    // HARD-04: the insufficient-window caveat must NOT render when the flag is absent.
+    expect(
+      screen.queryByText(/annualized metrics are computed on an insufficient window/),
     ).not.toBeInTheDocument();
   });
 

@@ -74,12 +74,34 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
     // Honest SPARSE series (gap days absent — never zero-filled).
     expect(out!.dailyReturns.map((d) => d.date)).toEqual(SPARSE_ROWS.map((r) => r.date));
     expect(out!.buildOpts.cumulativeMethod).toBe("geometric"); // C-1: NULL config
-    expect(out!.buildOpts.dataQuality).toEqual({ composite: true });
+    // HARD-04 (#67): DQF without insufficient_window → insufficientWindow false.
+    expect(out!.buildOpts.dataQuality).toEqual({ composite: true, insufficientWindow: false });
     // FS-01 boundary for seq 2; FS-02 gap span threaded.
     expect(out!.buildOpts.segmentBoundaries).toEqual([
       { date: "2025-08-07", seq: 2, label: "2" },
     ]);
     expect(out!.buildOpts.missingSegments?.length).toBe(1);
+  });
+
+  it("HARD-04: dqf.insufficient_window===true → dataQuality.insufficientWindow true", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: { ...DQF, insufficient_window: true },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.dataQuality).toEqual({ composite: true, insufficientWindow: true });
+  });
+
+  it("HARD-04: malformed dqf.insufficient_window (string 'true') → insufficientWindow false (strict server-truth)", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: { ...DQF, insufficient_window: "true" as unknown },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null,
+    });
+    // A non-boolean value must NEVER render the caveat (T-92-05 tampering guard).
+    expect(out!.buildOpts.dataQuality).toEqual({ composite: true, insufficientWindow: false });
   });
 
   it("'simple' config → arithmetic method (Zavara override preserved)", async () => {
