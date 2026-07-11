@@ -60,6 +60,7 @@ import { buildAxe } from "./helpers/axe";
 import {
   seedCompositeStrategy,
   seedStrategyWithHistory,
+  cleanupStrategiesByNamePrefix,
 } from "./helpers/seed-test-project";
 
 const HAS_SEED_ENV =
@@ -123,9 +124,19 @@ test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () 
     // complete; mtm "available" → distinct mark_to_market scalars so the basis
     // toggle is provable.
     const seeded = await seedCompositeStrategy({
-      name: "e2e-composite-p91-render",
+      name: "e2e-p91-render",
     });
     compositeStrategyId = seeded.strategyId;
+  });
+
+  test.afterAll(async () => {
+    // Best-effort GC of BOTH this spec's fixtures (render + leverage-axe), both
+    // under the `e2e-p91-` prefix. De-collided from the onboarding spec's
+    // `e2e-composite-` namespace so its afterAll can no longer delete these live
+    // fixtures under fullyParallel. strategy_analytics/strategy_keys cascade.
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix("e2e-p91-");
+    }
   });
 
   test("seeded Zavara composite renders ~62.66% / -4.13% headline (D1 piece 1)", async ({
