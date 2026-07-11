@@ -118,6 +118,7 @@ import { CollapsibleSection } from "@/components/ui/CollapsibleSection";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
+import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -126,6 +127,7 @@ import {
   isDraftDrifted,
   MAX_MEMBER_KEY_IDS,
   scenarioDraftCodec,
+  setLeverageOverrides,
   setMemberKeyIds,
   type AddedStrategy,
 } from "../lib/scenario-state";
@@ -172,10 +174,11 @@ import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 /**
  * R4 — leverage v1 bounds. No shorting (L ≥ 0); a 10× ceiling keeps the
- * projection in a sane range. Module-scoped so the composer's fail-loud change
- * handler and the CompositionList input share a single source of truth.
+ * projection in a sane range. The single source of truth is the shared leverage
+ * contract in `@/lib/leverage` (D5, Phase 90.5) — consumed by the composer's
+ * fail-loud change handler, the CompositionList input, the LEV-02 rehydrate
+ * sanitizer, and the factsheet recompute alike, so no derivation can diverge.
  */
-const MAX_LEVERAGE = 10;
 
 /**
  * WR-01 — debounce window (ms) for the peer-rank fetch effect. Rapid weight /
@@ -840,12 +843,12 @@ export function ScenarioComposer({
   //       displayed value that doesn't match underlying state.
   const [commitError, setCommitError] = useState<string | null>(null);
 
-  // R4 — per-strategy leverage multipliers (ref → L). Ephemeral exploration
-  // state: NOT persisted to the draft and NOT part of the commit diff. Leverage
-  // is a what-if overlay on the projection, so it resets on reload and is never
-  // recorded as a mandate decision (default 1.0 when a ref is absent).
-  // ponytail: ephemeral useState; promote to the persisted draft only if
-  // allocators ask for leverage to survive a reload.
+  // R4 / LEV-02 — per-strategy leverage multipliers (ref → L). Persisted to a
+  // SAVED scenario's draft (stamped at Save via setLeverageOverrides at the
+  // POST/PUT boundary, rehydrated-REPLACE on open via sanitizeLeverageMap), but
+  // still NOT localStorage-autosave-maintained and NOT a commit-diff input:
+  // leverage is a what-if overlay on the projection, never recorded as a mandate
+  // decision (default 1.0 when a ref is absent).
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
   // DSRC-02/03 — per-data-source include/exclude map (api_key_id → included?).
@@ -1415,6 +1418,11 @@ export function ScenarioComposer({
         // the ephemeral per-source include map (it is not persisted) → the
         // opened scenario starts with every data source included.
         setIncludeByApiKeyId({});
+        // LEV-02 (T-90.5-12) — REPLACE leverage from the saved draft (never
+        // merge): closes the latent session-bleed (leverageByRef was never reset
+        // on open). sanitizeLeverageMap clamps a tampered/legacy value on read
+        // (T-90.5-09); an absent field → {} (every ref back to the 1× default).
+        setLeverageByRef(sanitizeLeverageMap(decoded.value.leverageOverrides));
         // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
         // newer-version blob may carry a window; seed it verbatim so the
         // read-only view recomputes at the owner's saved window. If absent (a
@@ -1453,6 +1461,11 @@ export function ScenarioComposer({
       // Review WR-02 — clear the ephemeral per-source include map on open (it is
       // not persisted) → the opened scenario starts with every source included.
       setIncludeByApiKeyId({});
+      // LEV-02 (T-90.5-12) — REPLACE leverage from the saved draft (never merge):
+      // closes the latent session-bleed (leverageByRef was never reset on open).
+      // sanitizeLeverageMap clamps a tampered/legacy value on read (T-90.5-09);
+      // an absent field → {} (every ref back to the 1× default).
+      setLeverageByRef(sanitizeLeverageMap(decoded.value.leverageOverrides));
       // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
       // let the existing engineState memo recompute TODAY's numbers at it (no
       // stored series is replayed — no-invented-data lock).
@@ -1654,7 +1667,10 @@ export function ScenarioComposer({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name,
-          draft: setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
+          draft: setLeverageOverrides(
+            setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
+            leverageByRef,
+          ),
         }),
       });
       if (!res.ok) {
@@ -1694,7 +1710,10 @@ export function ScenarioComposer({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: loadedScenarioName ?? "Scenario",
-            draft: setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
+            draft: setLeverageOverrides(
+              setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
+              leverageByRef,
+            ),
           }),
         },
       );
@@ -3813,8 +3832,8 @@ export function ScenarioComposer({
           Leverage modeled as daily-return scaling; excludes borrow / funding
           cost. The correlation matrix is leverage-invariant; risk-adjusted
           ratios (Sharpe, Sortino) shift when you lever individual legs, since
-          per-leg leverage re-tilts the blend. This is an exploration-only
-          what-if overlay; it is not recorded when you commit this scenario.
+          per-leg leverage re-tilts the blend. This is a modeled what-if overlay;
+          it is saved with the scenario but is not part of the committed mandate.
         </p>
       )}
 

@@ -1095,9 +1095,16 @@ describe("ScenarioComposer — LEV-02: per-strategy leverage round-trips through
     };
   }
 
-  /** okDraft + one added strategy; `over` seeds leverageOverrides etc. */
+  /** okDraft + one added strategy; `over` seeds leverageOverrides etc. The
+   *  added-strategy `id` is a branded StrategyForBuilderId at compile time but a
+   *  plain string at runtime (the codec re-parses row.draft), so the cast is the
+   *  same `as unknown as` convention scenario-state's codec + T_SAVE6 use. */
   function okDraftWithStrat(over: Partial<ScenarioDraft> = {}): ScenarioDraft {
-    return { ...okDraft(), addedStrategies: [stratLevRow()], ...over };
+    return {
+      ...okDraft(),
+      addedStrategies: [stratLevRow()] as unknown as ScenarioDraft["addedStrategies"],
+      ...over,
+    };
   }
 
   function leverageInput(): HTMLInputElement {
