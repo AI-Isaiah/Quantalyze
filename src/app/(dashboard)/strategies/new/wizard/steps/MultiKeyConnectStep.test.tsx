@@ -794,12 +794,15 @@ describe("[94.1 F3/F4] MultiKeyConnectStep — rehydration status + draft protec
     );
 
     const err = await screen.findByTestId("rehydrate-error");
-    // Distinguishable, actionable error — not a silent blank fallback.
+    // Distinguishable, actionable error — not a silent blank fallback. The
+    // neutral WIZARD_KEYS_LOAD_FAILED code (RT-3) is used, and (RT-2) the error
+    // renders as a banner ABOVE the still-usable form (not form-replacing), so
+    // the single-key submit CTA remains present rather than being unmounted.
     expect(within(err).getByTestId("error-envelope")).toHaveAttribute(
       "data-error-code",
-      "COMPOSITE_MEMBERSHIP_UNKNOWN",
+      "WIZARD_KEYS_LOAD_FAILED",
     );
-    expect(screen.queryByTestId("wizard-connect-submit")).toBeNull();
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
 
     // Retry re-issues the members GET (recoverable envelope → Retry control).
     const membersCallsBefore = fetchSpy.mock.calls.filter((c) =>
@@ -856,6 +859,82 @@ describe("[94.1 F3/F4] MultiKeyConnectStep — rehydration status + draft protec
     expect(screen.getByLabelText("API Secret")).toHaveValue(
       "IN_PROGRESS_SECRET",
     );
+  });
+
+  // RT-2 — Root cause: the F3 error branch was a form-REPLACING early return. A
+  // user who typed single-key credentials during the loading window then hit a
+  // transient GET failure had ConnectKeyStep unmounted (its useState creds
+  // destroyed — the exact clobber F4 exists to prevent, on the error path). The
+  // fix renders the error as a banner ABOVE the still-mounted form.
+  it("RT-2: a failed rehydrate keeps the in-progress single-key credentials mounted and never strands the user on a blank form", async () => {
+    const d = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return d.promise;
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // Type credentials during the loading window…
+    fireEvent.change(await screen.findByLabelText("API Key"), {
+      target: { value: "TYPED_KEY" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "TYPED_SECRET" },
+    });
+
+    // …then the GET fails transiently.
+    d.resolve(jsonResponse({}, 500));
+
+    // The error banner appears, but the form is STILL mounted with the typed
+    // credentials intact (RED pre-fix: the form-replacing return unmounts the
+    // ConnectKeyStep, destroying both values and the submit CTA).
+    await screen.findByTestId("rehydrate-error");
+    expect(screen.getByLabelText("API Key")).toHaveValue("TYPED_KEY");
+    expect(screen.getByLabelText("API Secret")).toHaveValue("TYPED_SECRET");
+    // Not stranded: the primary submit CTA is present alongside the Retry.
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("rehydrate-error")).getByRole("button", {
+        name: "Retry",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  // RT-3 — Root cause: the rehydration GET fires for ANY api draft, and on a
+  // transient failure it hard-blocked behind COMPOSITE_MEMBERSHIP_UNKNOWN whose
+  // copy asserts "multi-key composite" — wrong for a resumed SINGLE-KEY draft
+  // (membership definitionally empty). The fix uses neutral WIZARD_KEYS_LOAD_FAILED
+  // copy and keeps the single-key form usable.
+  it("RT-3: a failed rehydration surfaces neutral copy (no 'composite' assertion) and leaves the single-key form usable", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return jsonResponse({}, 500);
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    expect(within(err).getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "WIZARD_KEYS_LOAD_FAILED",
+    );
+    // The copy must NOT assert composite/multi-key to a (possibly single-key) user.
+    expect(err.textContent ?? "").not.toMatch(/composite/i);
+    // Not hard-blocked: the single-key form remains available.
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
   });
 });
 

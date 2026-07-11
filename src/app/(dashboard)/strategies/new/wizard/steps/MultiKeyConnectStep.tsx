@@ -758,47 +758,22 @@ export function MultiKeyConnectStep({
     }
   }, [continuing, strategyId, onSuccess]);
 
-  // ── Rehydration failed (F3) ─────────────────────────────────────────────────
-  // A composite draft re-mount (draftStrategyId present) fetches its stored
-  // members before deciding State A vs State B. If that GET FAILS, DON'T fall
-  // through to the blank single-key State-A form (indistinguishable from "keys
-  // lost") — surface a distinguishable, retryable error. Only reachable with a
-  // draftStrategyId, so the standalone single-key wizard (no draft) stays
-  // byte-neutral (rehydrateStatus stays "idle" → State A below).
-  if (mode === "single" && rehydrateStatus === "error") {
-    return (
-      <section aria-labelledby="wizard-connect-key-heading">
-        <h2
-          id="wizard-connect-key-heading"
-          className="font-sans text-h3 font-semibold text-text-primary"
-        >
-          Connect your exchange
-        </h2>
-        <div className="mt-6" data-testid="rehydrate-error">
-          <WizardErrorEnvelope
-            envelope={buildEnvelope(
-              "COMPOSITE_MEMBERSHIP_UNKNOWN",
-              correlationId,
-            )}
-            onRetry={() => {
-              setRehydrateStatus("loading");
-              setRetryTick((t) => t + 1);
-            }}
-          />
-        </div>
-      </section>
-    );
-  }
-
   // ── State A: byte-identical ConnectKeyStep + the ONE ghost affordance ───────
+  // The rehydration loading/error affordances (F3) render as NON-form-replacing
+  // banners ABOVE a still-mounted ConnectKeyStep — NOT as early returns that
+  // unmount it. RT-FINDING-2: an early-return error branch destroyed the
+  // in-progress single-key credentials the user typed during the loading window
+  // (ConnectKeyStep's useState unmounts), and stranded them on a blank form
+  // after Retry (a stale singleDraftDirtyRef then bailed the guard, and the
+  // rehydration effect never re-ran). Keeping the form mounted across
+  // loading→error→retry preserves typed credentials and F4's guard reasoning,
+  // and never strands the user. No draftStrategyId ⇒ status stays "idle" ⇒ no
+  // banner ⇒ byte-neutral single-key wizard.
   if (mode === "single") {
     return (
       <>
-        {/* F3 — a NON-BLOCKING "loading your saved keys" banner ABOVE the form
-            while the members GET is in flight. It is deliberately additive
-            (not a form-replacing skeleton): a still-usable form is what lets an
-            in-progress single-key draft survive a slow rehydrate (F4). No
-            draftStrategyId ⇒ status stays "idle" ⇒ no banner ⇒ byte-neutral. */}
+        {/* F3 — non-blocking "loading your saved keys" banner while the members
+            GET is in flight. Additive, not a form-replacing skeleton (F4). */}
         {rehydrateStatus === "loading" && (
           <div
             role="status"
@@ -809,6 +784,21 @@ export function MultiKeyConnectStep({
             <p className="text-caption text-text-secondary">
               Loading your saved keys…
             </p>
+          </div>
+        )}
+        {/* F3 + RT-2 — retryable error banner ABOVE the form (not replacing it),
+            symmetric with the loading banner. RT-3: WIZARD_KEYS_LOAD_FAILED
+            carries NEUTRAL copy (no "composite" assertion) so it reads correctly
+            for a resumed single-key draft, whose membership is empty. */}
+        {rehydrateStatus === "error" && (
+          <div className="mb-4" data-testid="rehydrate-error">
+            <WizardErrorEnvelope
+              envelope={buildEnvelope("WIZARD_KEYS_LOAD_FAILED", correlationId)}
+              onRetry={() => {
+                setRehydrateStatus("loading");
+                setRetryTick((t) => t + 1);
+              }}
+            />
           </div>
         )}
         <ConnectKeyStep
