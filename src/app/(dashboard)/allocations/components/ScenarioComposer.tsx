@@ -130,6 +130,7 @@ import {
   setLeverageOverrides,
   setMemberKeyIds,
   type AddedStrategy,
+  type ScenarioDraft,
 } from "../lib/scenario-state";
 import { useScenarioState } from "../hooks/useScenarioState";
 import {
@@ -716,6 +717,33 @@ async function readSaveIssues(res: Response): Promise<SaveIssue[] | undefined> {
     // Non-JSON / truncated body — generic copy is honest here.
   }
   return undefined;
+}
+
+/**
+ * LEV-02 (round-2 M-2) — belt-and-suspenders at the Save fold: drop any leverage
+ * entry whose ref the draft no longer contains, so a stranded multiplier (a
+ * removed leg that slipped past the handleRemoveAdded purge, or any other
+ * lifecycle gap) can never persist into `leverageOverrides`. A ref is "current"
+ * iff it is an added strategy OR carries a toggle/weight entry — every live-book
+ * holding seeds both, so this keeps legit book-leg and added-leg leverage while
+ * dropping genuinely-removed/stale refs. The engine reads leverage only for
+ * iterated legs anyway, so this changes no projection — it only keeps the SAVED
+ * blob honest.
+ */
+function pruneLeverageToDraftRefs(
+  leverageByRef: Record<string, number>,
+  draft: ScenarioDraft,
+): Record<string, number> {
+  const current = new Set<string>([
+    ...draft.addedStrategies.map((s) => s.id as string),
+    ...Object.keys(draft.toggleByScopeRef),
+    ...Object.keys(draft.weightOverrides),
+  ]);
+  const out: Record<string, number> = {};
+  for (const [id, L] of Object.entries(leverageByRef)) {
+    if (current.has(id)) out[id] = L;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1434,7 +1462,15 @@ export function ScenarioComposer({
         // merge): closes the latent session-bleed (leverageByRef was never reset
         // on open). sanitizeLeverageMap clamps a tampered/legacy value on read
         // (T-90.5-09); an absent field → {} (every ref back to the 1× default).
-        setLeverageByRef(sanitizeLeverageMap(decoded.value.leverageOverrides));
+        // M-1 (round-2) — on DRIFT the saved draft is NOT applied (the hook falls
+        // back to the windowless default working draft), so its leverage must NOT
+        // seed either — mirror the window drift-branch below. Seeding refused-
+        // draft multipliers onto the fresh default would project it under
+        // leverage it never had, and an "Update" would persist default-draft +
+        // stale leverage.
+        setLeverageByRef(
+          drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
+        );
         // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
         // newer-version blob may carry a window; seed it verbatim so the
         // read-only view recomputes at the owner's saved window. If absent (a
@@ -1477,7 +1513,14 @@ export function ScenarioComposer({
       // closes the latent session-bleed (leverageByRef was never reset on open).
       // sanitizeLeverageMap clamps a tampered/legacy value on read (T-90.5-09);
       // an absent field → {} (every ref back to the 1× default).
-      setLeverageByRef(sanitizeLeverageMap(decoded.value.leverageOverrides));
+      // M-1 (round-2) — on DRIFT the saved draft is NOT applied (the working
+      // draft is the windowless default), so its leverage must NOT seed either —
+      // the SAME drift-branch rule the window below follows. Otherwise the fresh
+      // default draft projects under the refused draft's multipliers, and an
+      // "Update portfolio" would persist the default draft + stale leverage.
+      setLeverageByRef(
+        drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
+      );
       // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
       // let the existing engineState memo recompute TODAY's numbers at it (no
       // stored series is replayed — no-invented-data lock).
@@ -1681,7 +1724,8 @@ export function ScenarioComposer({
           name,
           draft: setLeverageOverrides(
             setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
-            leverageByRef,
+            // M-2 — prune stranded refs so a removed leg's leverage never persists.
+            pruneLeverageToDraftRefs(leverageByRef, scenario.draft),
           ),
         }),
       });
@@ -1724,7 +1768,8 @@ export function ScenarioComposer({
             name: loadedScenarioName ?? "Scenario",
             draft: setLeverageOverrides(
               setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
-              leverageByRef,
+              // M-2 — prune stranded refs so a removed leg's leverage never persists.
+              pruneLeverageToDraftRefs(leverageByRef, scenario.draft),
             ),
           }),
         },
@@ -1868,6 +1913,18 @@ export function ScenarioComposer({
       setAddedAssetClassById((prev) => {
         if (!(id in prev)) return prev;
         const { [id]: _dropClass, ...rest } = prev;
+        return rest;
+      });
+      // LEV-02 (round-2 M-2) — purge the removed leg's leverage overlay too, or
+      // it strands: leverageByRef is folded into the draft at Save
+      // (setLeverageOverrides), so a removed leg's multiplier would persist into a
+      // scenario that no longer contains the leg AND re-apply the instant the leg
+      // is re-added (breaking the seam's "starts clean" contract — the same class
+      // the addedReturnsById purge above fixes for series). Mirrors the draft
+      // mutator's toggle/weight prune (scenario-state.removeAddedStrategy).
+      setLeverageByRef((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropLev, ...rest } = prev;
         return rest;
       });
     },

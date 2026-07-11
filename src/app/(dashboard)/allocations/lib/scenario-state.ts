@@ -485,8 +485,8 @@ export function addStrategyBridge(
 
 /**
  * Remove an added strategy from the draft entirely (from `addedStrategies`,
- * `toggleByScopeRef`, and `weightOverrides`). Renormalizes the remaining
- * enabled set so sum === 1.0.
+ * `toggleByScopeRef`, `weightOverrides`, and — LEV-02 round-2 M-2 —
+ * `leverageOverrides`). Renormalizes the remaining enabled set so sum === 1.0.
  */
 export function removeAddedStrategy(
   draft: ScenarioDraft,
@@ -505,11 +505,24 @@ export function removeAddedStrategy(
   );
   const nextWeights = renormalizeWeights(remainingWeights, nextEnabled);
 
+  // LEV-02 (round-2 M-2) — prune the removed leg's persisted leverage too, so a
+  // hydrated draft's `leverageOverrides` field never strands an entry for a leg
+  // the draft no longer contains. `?? {}` keeps a pre-LEV-02 (field-absent)
+  // draft byte-identical: no field in, no field out.
+  const nextLeverage = { ...(draft.leverageOverrides ?? {}) };
+  const hadLeverageEntry = strategyId in nextLeverage;
+  delete nextLeverage[strategyId];
+
   return {
     ...draft,
     addedStrategies: nextAdded,
     toggleByScopeRef: nextToggle,
     weightOverrides: clampAllWeights(nextWeights),
+    // Only emit the field when the source draft had one (or the removed leg
+    // carried an entry) — otherwise leave the draft field-shape untouched.
+    ...(draft.leverageOverrides !== undefined || hadLeverageEntry
+      ? { leverageOverrides: nextLeverage }
+      : {}),
     lastEditedAt: new Date().toISOString(),
   };
 }

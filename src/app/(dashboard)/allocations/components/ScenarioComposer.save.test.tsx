@@ -1220,6 +1220,40 @@ describe("ScenarioComposer — LEV-02: per-strategy leverage round-trips through
     expect(leverageInput().value).toBe("1");
   });
 
+  it("T_LEV_DRIFT1 (M-1) a DRIFTED open of a leverage-carrying scenario does NOT seed the refused draft's leverage — a later Update POSTs leverageOverrides {}", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Drifted levered" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    // A drifted fingerprint means the saved draft is NOT applied (the working
+    // draft falls back to the default live book); its leverage must NOT seed
+    // leverageByRef. Key the leverage to a LIVE HOLDINGS leg (BTC) so, without
+    // the fix, it would both project 3× onto the fresh default's BTC leg AND
+    // persist on the next Update — the M-1 bug in full.
+    openRow({
+      id: SAVED_ID,
+      name: "Drifted levered",
+      draft: { ...driftedDraft(), leverageOverrides: { [REF_BTC]: 3 } },
+    });
+
+    // Update the (loaded, editable) scenario and inspect the POST body.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Update portfolio/i }),
+    );
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // With the drift-branch fix leverageByRef seeded {} → Update persists {}.
+    // Without it, the refused draft's {REF_BTC:3} seeded and would persist here.
+    expect(body.draft.leverageOverrides).toEqual({});
+  });
+
   it("T_LEV_LOAD3 (clamp-on-read) an out-of-range persisted leverage rehydrates CLAMPED to MAX (999 → 10) — sanitizeLeverageMap, D3 sanitize-on-read", () => {
     renderComposer();
     openRow({
@@ -1229,6 +1263,51 @@ describe("ScenarioComposer — LEV-02: per-strategy leverage round-trips through
     });
     // Garbage jsonb clamps to the ceiling on read — never reaches the input raw.
     expect(leverageInput().value).toBe(String(MAX_LEVERAGE));
+  });
+
+  it("T_LEV_REMOVE1 (M-2) removing a leg drops its leverage — the next Save POSTs leverageOverrides without that ref (no strand/re-apply)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "After remove" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    openRow({
+      id: SAVED_ID,
+      name: "Levered",
+      draft: okDraftWithStrat({ leverageOverrides: { [STRAT_LEV]: 3 } }),
+    });
+    expect(leverageInput().value).toBe("3");
+
+    // Remove the added leg (the single remove seam, handleRemoveAdded).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    // Its leverage input is gone (the leg is out of the draft).
+    expect(document.getElementById(`leverage-${STRAT_LEV}`)).toBeNull();
+
+    // Save-as-new → the removed leg's 3× must NOT fold into the persisted draft.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Save as new portfolio/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "After remove" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // Without the fix (handleRemoveAdded purge + Save-fold prune) this POSTs
+    // {STRAT_LEV:3} into a scenario that no longer contains the leg.
+    expect(body.draft.leverageOverrides).not.toHaveProperty(STRAT_LEV);
+    expect(body.draft.leverageOverrides).toEqual({});
   });
 
   it("T_LEV_COMMIT1 (mandate untouched) changing leverage does NOT change the commit diff count — leverage is a what-if overlay, never a mandate input", () => {

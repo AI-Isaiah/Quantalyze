@@ -950,6 +950,29 @@ describe("LEV-02 leverageOverrides", () => {
   it("Test 5 — version discipline: SCENARIO_SCHEMA_VERSION is still 4 (no bump for this additive field)", () => {
     expect(SCENARIO_SCHEMA_VERSION).toBe(4);
   });
+
+  it("Test 6 (round-2 M-2) — removeAddedStrategy PRUNES the removed leg's leverageOverrides entry (keeps the rest)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const withStrategy = addStrategyBrowse(initial, STRAT_A);
+    const withLev: ScenarioDraft = {
+      ...withStrategy,
+      leverageOverrides: { [STRAT_A.id]: 3, "holding:binance:BTC:spot": 2 },
+    };
+    const removed = removeAddedStrategy(withLev, STRAT_A.id);
+    // The removed leg's leverage is gone; a surviving book leg's leverage stays.
+    expect(removed.leverageOverrides).toEqual({ "holding:binance:BTC:spot": 2 });
+    expect(removed.addedStrategies).toEqual([]);
+  });
+
+  it("Test 7 (round-2 M-2) — removeAddedStrategy on a draft WITHOUT leverageOverrides leaves the field ABSENT (byte-compat)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const withStrategy = addStrategyBrowse(initial, STRAT_A);
+    expect(withStrategy.leverageOverrides).toBeUndefined();
+    const removed = removeAddedStrategy(withStrategy, STRAT_A.id);
+    // No field in → no field out (never fabricates an empty leverage map).
+    expect(removed.leverageOverrides).toBeUndefined();
+    expect("leverageOverrides" in removed).toBe(false);
+  });
 });
 
 describe("renormalizeWeights", () => {
