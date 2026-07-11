@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
@@ -139,7 +139,7 @@ describe("leverage-context", () => {
 
   it("Test 6 — GUARD-04: source has no storage/URL/cookie/history access", () => {
     const src = readFileSync(
-      fileURLToPath(new URL("./leverage-context.tsx", import.meta.url)),
+      join(process.cwd(), "src/app/factsheet/[id]/v2/leverage-context.tsx"),
       "utf8",
     );
     // Strip comment lines so header prose can't self-invalidate the grep.
