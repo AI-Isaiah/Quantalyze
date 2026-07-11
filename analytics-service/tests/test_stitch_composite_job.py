@@ -988,3 +988,131 @@ async def test_member_crawl_rate_limited_stamps_429_and_transient() -> None:
     stamp_spy.assert_awaited_once()
     stamped_key_row = stamp_spy.await_args.args[1]
     assert stamped_key_row["id"] == "key-x"
+
+
+# ---------------------------------------------------------------------------
+# Phase 92 HARD-01 (Layer 3) — worker persist on the P&L-dominated blow-up
+# ledger, through the REAL native reconstruction (combine_native_ledger is NOT
+# mocked here, unlike the other tests) so the pnl_dominated_guard source fix
+# actually FIRES and its effect reaches persistence. denominator_config is None
+# (returns_denominator_config=None) → the native path
+# reconstruct_native_nav_and_twr → the guard. All quantities synthetic (T-92-01);
+# fully offline (_FakeSupabase + patched crawl, no live DB / creds — Pitfall 6).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_blowup_member_persists_finite_series_and_plausible_contribution() -> None:
+    """The blow-up NativeLedger, driven through the worker's REAL native
+    reconstruction (no combine_native_ledger mock), persists ONLY finite
+    csv_daily_returns (the guarded ~17x/day day is ABSENT), a plausible per-key
+    contribution compound, finite by-basis headline scalars, and lifts
+    pnl_dominated_guard into data_quality_flags with a complete_with_warnings
+    status.
+
+    Mutation-honest: reverting the source guard re-admits day 3 (r ≈ 17.33) →
+    the persisted rows carry it (reddens the |r| < PNL_DOM_RATIO and the < 5.0
+    asserts), the contribution compound jumps from ~0.15 to ~21 (reddens < 10),
+    and pnl_dominated_guard never lifts (reddens the flag/status asserts)."""
+    import math
+
+    from services.deribit_ingest import CompletenessReport
+    from services.nav_twr import PNL_DOM_RATIO
+    from tests.test_native_nav import _pnl_dominated_blowup_ledger
+
+    fake = _FakeSupabase(
+        members=[_member(1, "2024-01-01", None)],
+        strategy_row={
+            "id": _STRATEGY_ID,
+            "asset_class": "crypto",
+            # None → combine_native_ledger takes the NAV reconstruction path (the
+            # blow-up path, research §a), NOT the allocated-capital branch.
+            "returns_denominator_config": None,
+        },
+    )
+    report = CompletenessReport(
+        total_return_rows=7,
+        indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,  # gate CLOSED → a single cash pass
+    )
+    # NOTE: combine_native_ledger is deliberately NOT patched — the REAL native
+    # core runs so the pnl_dominated_guard actually fires on the blow-up ledger.
+    patches = [
+        patch("services.job_worker.get_supabase", new=MagicMock(return_value=fake)),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+        patch(
+            "services.job_worker._allocator_key_preflight",
+            new=AsyncMock(return_value=_ctx("deribit")),
+        ),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=AsyncMock(return_value=MagicMock(
+                balance_error=False, native_equity={"BTC": 0.567},
+            )),
+        ),
+        patch(
+            "services.deribit_ingest.build_deribit_native_ledger",
+            new=AsyncMock(return_value=(_pnl_dominated_blowup_ledger(), report)),
+        ),
+        patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
+        patch(
+            "services.analytics_runner.run_csv_strategy_analytics",
+            new=AsyncMock(return_value={"status": "complete"}),
+        ),
+        patch(
+            "services.benchmark.get_benchmark_returns",
+            new=AsyncMock(return_value=(None, True)),
+        ),
+    ]
+    with _apply(patches):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    # (a) every persisted csv_daily_returns row is finite with |r| < PNL_DOM_RATIO
+    # — the guarded ~17x/day day is NaN → honestly ABSENT, never written.
+    csv_rows = [
+        row
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for row in payload
+    ]
+    assert csv_rows, "the stitched series must reach csv_daily_returns persistence"
+    persisted = [float(r["daily_return"]) for r in csv_rows]
+    assert all(math.isfinite(r) for r in persisted)
+    assert all(abs(r) < PNL_DOM_RATIO for r in persisted)
+    assert not any(abs(r) >= 5.0 for r in persisted)  # the exploded day is gone
+
+    # (b) the geometric compound Π(1+r)−1 of the persisted rows — the exact
+    # compositeAttribution per-key contribution basis (research §a) — is plausible
+    # (< 10, i.e. < 1,000%), versus the live +1,489,363.8%. Pre-fix ≈ 21.
+    compound = 1.0
+    for r in persisted:
+        compound *= 1.0 + r
+    compound -= 1.0
+    assert compound < 10.0
+
+    # (c) metrics_json_by_basis["cash_settlement"] headline scalars are finite.
+    by_basis = _by_basis(fake)
+    assert by_basis is not None and "cash_settlement" in by_basis
+    cash = by_basis["cash_settlement"]
+    assert cash["cumulative_return"] is not None and math.isfinite(
+        cash["cumulative_return"]
+    )
+    assert cash["cagr"] is not None and math.isfinite(cash["cagr"])
+
+    # (d) data_quality_flags carries pnl_dominated_guard (the NAV_TWR_GUARD_KEYS
+    # member lift) and computation_status is complete_with_warnings.
+    analytics = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and "data_quality_flags" in payload
+    ]
+    assert analytics, "a strategy_analytics headline row must be upserted"
+    final = analytics[-1]
+    assert final["data_quality_flags"].get("pnl_dominated_guard") is True
+    assert final["computation_status"] == "complete_with_warnings"

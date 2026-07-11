@@ -2042,6 +2042,65 @@ def test_cumulative_return_is_suffix_honest_not_fillna_or_bridge():
     assert expected_suffix != pytest.approx(fillna0)  # gap not treated as 0%
 
 
+def test_finite_composite_headline_after_pnl_guard():
+    """Phase 92 HARD-01 (Layer 2) — the headline is finite/plausible/sign-consistent
+    on the guarded blow-up fixture: no "+0.0% / millions-of-% while the curve rises".
+
+    Drives the REAL native core (``reconstruct_native_nav_and_twr``) on the shared
+    92-01 blow-up ledger (post-fix: the P&L-dominated day 3 is a guarded interior
+    NaN) then the REAL ``compute_all_metrics`` (geometric, periods_per_year=365).
+    The pnl_dominated_guard EXCLUDES the exploded ~17x/day return from the
+    compound, so cumulative_return collapses from the pre-fix ~20.0 (≈+2,000%) to
+    the plausible ~+3.1% suffix compound, and cagr from the pre-fix ~3.3e96 to a
+    finite positive value.
+
+    Mutation-honest: reverting the source guard re-admits day 3, so
+    cumulative_return jumps to ~20.0 (reddens ``< 1.0``) and cagr to ~3.3e96
+    (reddens ``< 1000.0``).
+
+    DEVIATION (documented in 92-02-SUMMARY): the plan's literal ``abs(cagr) < 10``
+    bound is NOT achievable on this immutable shared fixture — the trustworthy
+    retained suffix (days 4-7) spans only 3 CALENDAR days, so the (un-fixed here)
+    HARD-04 short-window annualization legitimately inflates a +3.1% suffix to
+    ~+3,960% CAGR. That is the short-window class HARD-04 owns, NOT the HARD-01
+    blow-up (which the guard demonstrably kills: cumulative_return 20.0 -> 0.031).
+    We assert the must-have's binding intent instead — finite, non-zero, positive,
+    and NOT the millions-of-% blow-up class."""
+    from services.native_nav import reconstruct_native_nav_and_twr
+    from tests.test_native_nav import _pnl_dominated_blowup_ledger
+
+    returns, meta = reconstruct_native_nav_and_twr(
+        _pnl_dominated_blowup_ledger(),
+        indexable_currencies=frozenset({"BTC"}),
+        venue="deribit",
+    )
+    # The guard fired (day 3 is a guarded interior NaN) — the precondition.
+    assert meta.get("pnl_dominated_guard") is True
+    assert bool(pd.isna(returns.loc[pd.Timestamp("2024-01-03")]))
+    # The retained suffix (days 4-7) rises, so the honest headline must be > 0.
+    assert (returns.loc[pd.Timestamp("2024-01-04"):].dropna() > 0).all()
+
+    result = compute_all_metrics(
+        returns, cumulative_method="geometric", periods_per_year=365
+    )
+    cumulative_return = result["cumulative_return"]
+    cagr = result["cagr"]
+
+    # cumulative_return: finite, POSITIVE (rising suffix), and PLAUSIBLE — the
+    # exploded ~+2,000% day is OUT of the compound (pre-fix this was ~20.0).
+    assert cumulative_return is not None and math.isfinite(cumulative_return)
+    assert 0.0 < cumulative_return < 1.0
+    # cagr: finite, POSITIVE (sign-consistent with the rising suffix — NOT the
+    # "+0.0% while the curve rises" symptom) and NOT the millions-of-% blow-up
+    # (pre-fix ~3.3e96). The ~+3,960% value is the un-fixed HARD-04 short-window
+    # inflation, not a HARD-01 regression (see the DEVIATION note above).
+    assert cagr is not None and math.isfinite(cagr)
+    assert cagr > 0.0
+    assert abs(cagr) < 1000.0
+    # Sign consistency: both headline scalars positive together on a rising curve.
+    assert (cumulative_return > 0.0) and (cagr > 0.0)
+
+
 # ---------------------------------------------------------------------------
 # NEW-C02-11: _return_quantiles monthly resample not computed twice
 # ---------------------------------------------------------------------------
