@@ -752,6 +752,15 @@ function eachUtcDay(startInclusive: string, endExclusive: string): string[] {
  *                      the composite add-key route inserts (wizard_composite
  *                      migration:118) + `computation_status:"failed"` naming the
  *                      offending member (the #338 fixture; NOT published).
+ *                      `"resumable"` (Plan 94-05) → the SAME `draft` status but
+ *                      `source='wizard'` + a COMPLETE analytics row
+ *                      (`computation_status:"complete"`, `data_quality_flags`
+ *                      `composite:true`, deliberately STALE `computed_at`). This
+ *                      is an in-progress wizard onboarding the walking user MUST
+ *                      resume — the exact opposite of the `failed` variant's
+ *                      `source='legacy'` escape hatch. Pair with `ownerUserId`
+ *                      (the logged-in allocator) so the RLS-bound wizard reads
+ *                      resolve (Ph91 owner-match lesson).
  * @param opts.mtm     `"available"` (default) → a complete `mark_to_market`
  *                      basis object. `"gated"` → OMIT `mark_to_market` and stamp
  *                      `data_quality_flags.mtm_gated_reason`
@@ -760,7 +769,7 @@ function eachUtcDay(startInclusive: string, endExclusive: string): string[] {
  */
 export async function seedCompositeStrategy(opts?: {
   name?: string;
-  variant?: "published" | "failed";
+  variant?: "published" | "failed" | "resumable";
   mtm?: "available" | "gated";
   ownerUserId?: string;
 }): Promise<{
@@ -807,33 +816,41 @@ export async function seedCompositeStrategy(opts?: {
 
   // 2. strategies row. A composite carries api_key_id = NULL (the single-key
   //    link is never set — add-key/route.ts DIVERGENCE (1)). `published` for the
-  //    default variant; the `failed` variant stays at the SAME pre-publish
-  //    `draft` status the composite add-key RPC inserts
-  //    (20260710180000_wizard_composite.sql:118) so the #338 assertion "NOT
-  //    published" holds. `returns_denominator_config` left SQL NULL (geometric
-  //    mainline; the render spec asserts the persisted headline, config-
-  //    independent — PATTERNS §1).
+  //    default variant; the `failed` AND `resumable` variants stay at the SAME
+  //    pre-publish `draft` status the composite add-key RPC inserts
+  //    (20260710180000_wizard_composite.sql:118). `returns_denominator_config`
+  //    left SQL NULL (geometric mainline; the render spec asserts the persisted
+  //    headline, config-independent — PATTERNS §1).
+  //
+  //    (status, source) matrix — the two together decide resume-eligibility:
+  //      published → ("published", "wizard"): terminal, never matched by the
+  //        wizard's `.eq("status","draft")` resume query, so `source` is moot.
+  //      failed    → ("draft", "legacy"): a draft-shaped #338 failed-gate target
+  //        that is DELIBERATELY out of resume — `source='legacy'` (a valid CHECK
+  //        value: legacy/wizard/admin_import) keeps it OUT of the wizard's
+  //        `.eq("source","wizard").eq("status","draft")` query
+  //        (strategies/new/wizard/page.tsx:85-86), which would otherwise hydrate
+  //        WizardClient's initialDraft and suppress the fresh connect step (the
+  //        `multi-add-key` ghost affordance), timing out the #338 walk.
+  //      resumable → ("draft", "wizard"): the EXACT OPPOSITE intent of `failed`
+  //        (Plan 94-05) — an in-progress wizard onboarding the walking user MUST
+  //        resume. draft + wizard is precisely what the resume query matches, so
+  //        WizardClient inits step "sync_preview" (WizardClient.tsx:143-144).
   const name = opts?.name ?? `e2e-composite-${uniqueSuffix(6)}`;
   const { data: strategy, error: sErr } = await admin
     .from("strategies")
     .insert({
       user_id: ownerUserId,
       name,
-      status: variant === "failed" ? "draft" : "published",
+      // published → "published"; failed AND resumable → the pre-publish "draft".
+      status: variant === "published" ? "published" : "draft",
       benchmark: "BTC",
       supported_exchanges: ["deribit"],
       strategy_types: ["spot"],
       subtypes: [],
       markets: ["BTC"],
-      // The `failed` variant seeds `status='draft'` data that the #338 walk polls
-      // (via the stub) as its failed-gate target — it is NOT an in-progress
-      // onboarding the walking user should resume. Give it `source='legacy'` (a
-      // valid CHECK value: legacy/wizard/admin_import) so it stays OUT of the
-      // wizard's draft-resume query — `.eq("source","wizard").eq("status","draft")`
-      // in strategies/new/wizard/page.tsx:85-86 — which would otherwise hydrate
-      // WizardClient's initialDraft and suppress the fresh connect step (the
-      // `multi-add-key` ghost affordance), timing out the walk. The published
-      // default never matches the `status='draft'` filter, so it keeps 'wizard'.
+      // Only the `failed` variant escapes resume via source='legacy'; published
+      // (terminal) and resumable (draft, in-progress) both keep 'wizard'.
       source: variant === "failed" ? "legacy" : "wizard",
     })
     .select("id")
