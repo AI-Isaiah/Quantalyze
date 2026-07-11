@@ -262,9 +262,13 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // Allocator created FIRST so both composites can be owned by it — the
     // RLS-bound wizard reads only resolve for the logged-in owner.
     const allocator = await seedTestAllocator();
+    // Known name so the absence assertion below can prove the draft did NOT
+    // leak its content (not merely that a not-found page rendered).
+    const failedName = `e2e-composite-failed-${Date.now()}`;
     const failed = await seedCompositeStrategy({
       variant: "failed",
       ownerUserId: allocator.userId,
+      name: failedName,
     });
     // A published composite as the false-green POSITIVE CONTROL for the
     // discoverability assertion below (proves the id-based lookup surface
@@ -335,13 +339,27 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
         "false green (the lookup surface itself is broken)",
     ).toBeLessThan(400);
 
-    // …THEN the failed composite is ABSENT (404) — absence attributable to the
+    // …THEN the failed composite is ABSENT — absence attributable to the
     // unpublished status, via the SAME id-based lookup.
-    const failedRes = await page.goto(`/strategy/${failed.strategyId}`);
-    expect(
-      failedRes?.status(),
-      "the #338 failed-member composite must NOT be publicly discoverable — " +
-        "a permanent-failed composite must never reach published status",
-    ).toBe(404);
+    //
+    // Status-code note: /strategy/[id] has a loading.tsx, so Next.js opens a
+    // Suspense boundary and flushes the 200 loading shell BEFORE the page's
+    // getPublicStrategyDetail resolves and notFound() throws. The HTTP status is
+    // therefore committed as 200 even though the root not-found UI streams in —
+    // asserting res.status() === 404 is unwinnable on any streamed route. We
+    // assert the honest invariant instead: the rendered page IS the not-found
+    // page (proves the lookup returned nothing) AND the draft's name is absent
+    // (proves the draft content did not leak).
+    await page.goto(`/strategy/${failed.strategyId}`);
+    await expect(
+      page.getByRole("heading", { name: /page not found/i }),
+      "the #338 failed-member composite must NOT be publicly discoverable — a " +
+        "permanent-failed composite must never reach published status; the " +
+        "public detail route must render the not-found page for a draft",
+    ).toBeVisible({ timeout: 15_000 });
+    await expect(
+      page.getByText(failedName),
+      "the draft composite's content must NOT leak on its public detail route",
+    ).toHaveCount(0);
   });
 });
