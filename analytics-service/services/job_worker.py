@@ -3110,6 +3110,155 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         )
         return returns, bool(completeness.has_option_activity), dict(member_meta)
 
+    async def _reconstruct_ccxt_member(
+        ctx: Any, venue: str
+    ) -> tuple[pd.Series, bool, dict[str, Any]]:
+        """HARD-05 (Plan 93-04) — one ccxt (binance/okx/bybit) member's dense
+        daily-return series reconstructed HONESTLY through the SAME derive-path
+        primitives the single-key broker path uses (``run_derive_broker_dailies_
+        job``, :2318-2560). NOT a fork: the math lives in the reused primitives
+        (``combine_realized_and_funding`` + ``ccxt_rows_to_dated_flows`` + the
+        evidence-gated flow-coverage terminus), so the reconstructed series is
+        byte-consistent with the derive semantics (research A3 / SC-4). The derive
+        path (``run_derive_broker_dailies_job``) is DELIBERATELY not refactored —
+        composing the shared primitives here avoids extracting an orchestrator
+        while keeping the MATH single-sourced (research Pitfall 3).
+
+        Returns ``(returns, has_option_activity=False, meta)`` in the SAME shape as
+        ``_reconstruct_deribit``. ``has_option_activity=False`` keeps the MTM gate
+        OFF: ``mark_to_market_available`` already gates OFF any non-native (ccxt)
+        venue, so the MTM second pass can never meaningfully request a ccxt member
+        (it ships cash-only — no options book signal).
+
+        Plan-checker Note 2: the derive primitives are imported FUNCTION-LOCALLY
+        inside ``run_derive_broker_dailies_job`` (NOT in this scope), so they are
+        re-imported here. ``fetch_all_trades`` is a module global and
+        ``_resolve_ccxt_flow_price_index`` is module-level — both referenced
+        directly.
+        """
+        from services.broker_dailies import combine_realized_and_funding
+        from services.nav_twr import (
+            DUST_NAV_FLOOR,
+            apply_flow_coverage_terminus,
+            flow_coverage_gap_evidence,
+            flow_coverage_terminus_day,
+            flow_retention_floor,
+            negative_nav_guard_pre_terminus,
+        )
+        from services.exchange import fetch_account_equity_and_upnl_usd
+        from services.ccxt_flow_fetch import fetch_ccxt_transfers
+        from services.ccxt_flows import ccxt_rows_to_dated_flows
+        from services.funding_fetch import (
+            fetch_funding_binance,
+            fetch_funding_bybit,
+            fetch_funding_okx,
+        )
+
+        # Current total equity anchor + the venue-gated companion open-uPnL wedge
+        # (OKX totalEq; Bybit/Binance realized-basis walletBalance → structural 0.0).
+        equity, balance_error, open_unrealized_usd, upnl_unreadable = (
+            await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
+        )
+        # since_ms=None ⇒ ENTIRE account history (mirrors the derive block).
+        realized = await fetch_all_trades(ctx.exchange, since_ms=None)
+        # Funding label is a log/match-key only (it never scopes the exchange call);
+        # strategy_id is a stable label and the rows are consumed IN-MEMORY only
+        # (fed straight to combine — NEVER upserted per-key here).
+        if venue == "binance":
+            funding = await fetch_funding_binance(ctx.exchange, strategy_id, None)
+        elif venue == "okx":
+            funding = await fetch_funding_okx(ctx.exchange, strategy_id, None)
+        elif venue == "bybit":
+            funding = await fetch_funding_bybit(ctx.exchange, strategy_id, None)
+        else:  # pragma: no cover — routing only ever passes the 3 ccxt venues
+            raise NavReconstructionError(
+                f"unsupported ccxt composite venue {venue!r}"
+            )
+
+        # Bound the flow lookback to the venue's deposit-history retention via the
+        # SHARED normalized floor (LOW-2 — the SAME source the DQ-02 terminus gate
+        # uses, so the two "retention" definitions can never drift).
+        _now_utc = datetime.now(timezone.utc)
+        now_ms = int(_now_utc.timestamp() * 1000)
+        _retention_floor = flow_retention_floor(venue, _now_utc)
+        _flow_since_ms = (
+            0
+            if _retention_floor is None
+            else max(0, int(_retention_floor.timestamp() * 1000))
+        )
+        _deposits = await fetch_ccxt_transfers(
+            ctx.exchange, "deposits", _flow_since_ms, now_ms
+        )
+        _withdrawals = await fetch_ccxt_transfers(
+            ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+        )
+        _flow_rows = list(_deposits) + list(_withdrawals)
+        _price_index = await _resolve_ccxt_flow_price_index(
+            ctx.exchange, venue, ctx.supabase, _flow_rows
+        )
+        # ccxt_rows_to_dated_flows raises NavReconstructionError (structural) on an
+        # unpriceable non-stable flow — the routing catches it and DEGRADES.
+        external_flows = ccxt_rows_to_dated_flows(
+            _flow_rows, venue=venue, price_index=_price_index
+        )
+
+        # FLOW-04 noise guard (Pitfall 5 / T-77-08): the open-uPnL wedge is only
+        # trustworthy relative to a trustworthy anchor. Force it to 0.0 on a
+        # balance-error read, a missing equity, or a dust base.
+        if balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR:
+            open_unrealized_usd = 0.0
+
+        returns, meta = combine_realized_and_funding(
+            realized,
+            funding,
+            account_balance=equity,
+            balance_error=balance_error,
+            external_flows=external_flows,
+            open_unrealized_usd=open_unrealized_usd,
+        )
+
+        # MUST-2: an unreadable open-uPnL field on a TRUSTWORTHY anchor →
+        # unrealized_pnl_unreadable (LOUD complete_with_warnings), so a wrong/renamed
+        # field name never silently coalesces to a flat book. Gated on a healthy
+        # anchor (the wedge is already force-zeroed on a dust/heuristic base above).
+        if upnl_unreadable and not (
+            balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR
+        ):
+            meta["unrealized_pnl_unreadable"] = True
+
+        # DQ-02 (CRITICAL-1) evidence-gated flow-coverage terminus. When the return
+        # window extends BEFORE the venue's deposit-history retention, the earliest
+        # capital moves are UNFETCHABLE — segment ONLY on EVIDENCE of a real
+        # truncation (a pre-terminus negative-NAV guard OR a fetched flow at the
+        # retention floor); a flow-less account with clean NAV keeps FULL history.
+        if not returns.empty:
+            _flow_coverage_start_day = flow_coverage_terminus_day(
+                venue,
+                first_return_day=returns.index[0],
+                now_utc=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            if _flow_coverage_start_day is not None:
+                _guard_pre_terminus = negative_nav_guard_pre_terminus(
+                    returns,
+                    terminus=_flow_coverage_start_day,
+                    negative_nav_guard_fired=bool(meta.get("negative_nav_guard")),
+                )
+                if not flow_coverage_gap_evidence(
+                    external_flows=external_flows,
+                    retention_floor=_retention_floor,
+                    pre_terminus_nav_guard_fired=_guard_pre_terminus,
+                ):
+                    _flow_coverage_start_day = None
+            returns, _coverage_flags = apply_flow_coverage_terminus(
+                returns, _flow_coverage_start_day
+            )
+            if _coverage_flags.get("flow_coverage_incomplete"):
+                meta["flow_coverage_incomplete"] = True
+
+        # Cash basis only — has_option_activity is False for ccxt (no options book
+        # signal; mark_to_market_available gates OFF non-native venues).
+        return returns, False, dict(meta)
+
     async def _reconstruct_all(basis: str) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
         list[dict[str, Any]], list[dict[str, Any]],
@@ -3164,26 +3313,79 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 return ctx
             venue = str(ctx.key_row["exchange"])
             if venue in _COMPOSITE_DEGRADE_VENUES:
-                # HARD-05 (Phase 93): a ccxt (binance/okx/bybit) member DEGRADES
-                # rather than killing the whole composite. This plan does NOT attempt
-                # its reconstruction (Plan 93-04 adds the honest flow-valuation +
-                # DQ-02 retention-terminus attempt on this same channel) — the member
-                # is EXCLUDED from the stitch and stamped with a fixed, machine-
-                # readable DQ reason the user sees. Leak discipline (T-93-03-01): the
-                # record is a CLOSED key-set {seq, venue, reason} with `reason` a
-                # FIXED enum literal — NEVER exception text, USD, or account size.
-                # Still append `venue` to `venues` so the #597 blend annualization
-                # decision (:3279) keeps seeing the crypto venue (a deribit+ccxt mix
-                # is 365 either way, but keep the signal honest and explicit).
-                await aclose_exchange(ctx.exchange)
-                degraded.append(
-                    {
-                        "seq": seq,
-                        "venue": venue,
-                        "reason": "venue_reconstruction_unavailable",
-                    }
+                # HARD-05 (Plan 93-04): try-reconstruct-then-degrade. ATTEMPT honest
+                # reconstruction of the ccxt (binance/okx/bybit) member through the
+                # SAME derive-path primitives the single-key broker path uses. On
+                # success the member joins the stitch exactly like a Deribit member
+                # (its guard flags union into merged_flags by the EXISTING per-member
+                # meta loop). On a STRUCTURAL failure it falls back to Plan 93-03's
+                # degrade channel with the additive reason `reconstruction_failed`
+                # (never a whole-job PERMANENT); a 429 / geo-block stays TRANSIENT
+                # (whole-job retry — a rate limit is not a member defect). The close
+                # discipline mirrors the deribit arm: `finally` closes the exchange on
+                # EVERY path (success, degrade-continue, transient-return), so there
+                # is no double-close.
+                try:
+                    returns, has_opt, member_meta = await _reconstruct_ccxt_member(
+                        ctx, venue
+                    )
+                except (NavReconstructionError, *_PERMANENT_LEDGER_ERRORS):
+                    # Structural: this MEMBER cannot be honestly reconstructed →
+                    # DEGRADE visibly (the composite still completes). Leak discipline
+                    # (T-93-04-01): the record stays the CLOSED {seq, venue, reason}
+                    # set with `reason` the FIXED literal — the scrubbed exception
+                    # text is DROPPED (never USD / NAV / raw error in the DQ flag).
+                    degraded.append(
+                        {
+                            "seq": seq,
+                            "venue": venue,
+                            "reason": "reconstruction_failed",
+                        }
+                    )
+                    venues.append(venue)
+                    continue
+                except ccxt.RateLimitExceeded as exc:
+                    # Mirror the deribit arm EXACTLY: stamp the member key row so the
+                    # circuit breaker defers siblings during the cooldown, then yield
+                    # TRANSIENT (retryable — a 429 is not a member defect).
+                    await _stamp_429(ctx.supabase, ctx.key_row, exc)
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "run_stitch_composite_job: ccxt member crawl "
+                            "rate-limited (429) — "
+                            + str(scrub_freeform_string(str(exc)))
+                        ),
+                        error_kind="transient",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if is_geo_blocked(exc):
+                        # Worker-egress geo-restriction on a member crawl — RETRYABLE,
+                        # not a structural refusal (mirror the deribit arm).
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=(
+                                "run_stitch_composite_job: ccxt member crawl "
+                                "geo-blocked — "
+                                + str(scrub_freeform_string(str(exc)))
+                            ),
+                            error_kind="transient",
+                        )
+                    raise
+                finally:
+                    await aclose_exchange(ctx.exchange)
+                # Success: the reconstructed ccxt member joins the stitch. Cash-only
+                # (has_option_activity=False → mark_to_market_available gates MTM off
+                # for the non-native venue). Append `venue` so the #597 blend
+                # annualization keeps seeing the crypto venue.
+                clipped.append(
+                    (seq, clip_to_window(returns, m["window_start"], m.get("window_end")))
+                )
+                signals.append(
+                    MemberBasisSignal(seq=seq, venue=venue, has_option_activity=False)
                 )
                 venues.append(venue)
+                metas.append(member_meta)
                 continue
             if venue != "deribit":
                 # A venue OUTSIDE _COMPOSITE_CRYPTO_VENUES is a truly UNKNOWN
