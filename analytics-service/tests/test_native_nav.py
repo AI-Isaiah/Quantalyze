@@ -1046,3 +1046,98 @@ def test_material_value_orphan_still_refuses_after_fold() -> None:
         )
     assert exc.value.currencies == ["BTC"]
     assert exc.value.venue == "deribit"
+
+
+# ---------------------------------------------------------------------------
+# Phase 92 HARD-01 — inverse-perpetual P&L-dominated near-zero-equity blow-up.
+#
+# A pure, offline repro on the REAL reconstruct_native_nav_and_twr (research §a
+# root cause, §f fixture design). A single INDEXED "BTC" bucket over 7 UTC days
+# whose day-3 native P&L (0.52 BTC ≈ $45,760) dwarfs a small-but-ABOVE-dust prev
+# NAV (0.030 BTC × $88,000 ≈ $2,640) → an un-guarded per-day return r ≈ 17.3/day
+# (the ~1,700%/day live blow-up class). None of the three existing denominator
+# guards (negative / dust<$1000 / flow-dominated) fires (research §a A3), because
+# there is NO P&L-magnitude guard — the defect under test. Plan 92-02 adds the
+# guard and flips the strict-xfail below to enforced.
+#
+# All quantities are SYNTHETIC (0.025 BTC deposit / $88k mark) — never a real
+# account balance (T-92-01). No network / no shared Supabase test DB (Pitfall 6).
+# ---------------------------------------------------------------------------
+
+_BLOWUP_MARK = 88000.0  # constant USD mark for BTC across all 7 days
+_BLOWUP_DEPOSIT_BTC = 0.025  # inception deposit on day 1 (seeds pre-history ≈ 0)
+# Per-day native BTC P&L. Day 3 is the P&L-DOMINATED day (0.52 BTC on a ~0.030
+# BTC book). Days 4–7 are small POSITIVE gains so the post-fix retained suffix
+# (after the guarded d3 break) is a rising ≥4-day window (Plan 92-02 asserts
+# CAGR > 0 on it while the curve rises).
+_BLOWUP_PNL_BTC = [0.002, 0.003, 0.52, 0.005, 0.004, 0.006, 0.002]
+
+
+def _pnl_dominated_blowup_ledger() -> NativeLedger:
+    """A full_history=True single-BTC ledger reproducing the HARD-01 blow-up.
+
+    Backward roll (B(d-1) = B(d) − pnl(d) − flow(d)), terminal = deposit + Σpnl:
+
+        Σpnl        = 0.002+0.003+0.52+0.005+0.004+0.006+0.002 = 0.542 BTC
+        terminal    = 0.025 (deposit) + 0.542                  = 0.567 BTC
+        B(d7)=0.567 B(d6)=0.565 B(d5)=0.559 B(d4)=0.555
+        B(d3)=0.550 B(d2)=0.030 B(d1)=0.027 B(pre)=0.000  ✓ inception ≈ 0
+
+    Pre-history balance rolls to EXACTLY 0 (0.027 − pnl_d1 0.002 − deposit 0.025),
+    so the §5 inception gate reconciles under full_history=True and valuation
+    proceeds to the divide. prev0 = 0 ⇒ day 1 is guarded NaN (negative_nav_guard,
+    a leading terminus — NOT the bug). The blow-up is day 3:
+
+        prev(d3) = B(d2)×mark = 0.030 × 88000 = $2,640  (> DUST_NAV_FLOOR $1000)
+        cur(d3)  = B(d3)×mark = 0.550 × 88000 = $48,400
+        r(d3)    = (48400 − 2640 − 0) / 2640  = 45760/2640 ≈ 17.33   (UN-GUARDED)
+    """
+    days = pd.date_range(start="2024-01-01", periods=7, freq="D")
+    pnl = pd.Series([float(v) for v in _BLOWUP_PNL_BTC], index=days, name="native_pnl")
+    marks = pd.Series([_BLOWUP_MARK] * 7, index=days, name="native_pnl")
+    terminal = _BLOWUP_DEPOSIT_BTC + sum(_BLOWUP_PNL_BTC)  # 0.567 BTC (exact float)
+    return NativeLedger(
+        native_pnl={"BTC": pnl},
+        terminal_native_equity={"BTC": terminal},
+        marks={"BTC": marks},
+        # ONE inception deposit on day 1 in NATIVE BTC units. The core reads
+        # (utc_day_iso, currency, quantity) and re-values at its own mark; the
+        # usd_signed slot (0.025 × 88000) is ignored for a branch-2 coin but kept
+        # honest and finite (validate_flow_shape).
+        native_flows=[
+            ExternalFlow(
+                "2024-01-01", _BLOWUP_DEPOSIT_BTC * _BLOWUP_MARK, "BTC",
+                _BLOWUP_DEPOSIT_BTC,
+            )
+        ],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Phase 92 HARD-01 pre-fix: a P&L-dominated day on a small-but-above-"
+    "dust NAV emits an un-guarded ~17x/day return; Plan 92-02 adds the magnitude "
+    "guard and removes this marker",
+)
+def test_inverse_perpetual_pnl_dominated_day_is_guarded() -> None:
+    """DESIRED post-fix behavior: every emitted per-day return is bounded — a
+    P&L-dominated day must break the chain (NaN), never emit an un-interpretable
+    ~17x/day return. Pre-fix this FAILS on day 3 (r ≈ 17.3), so the strict xfail
+    pins the bug as RED evidence while keeping the suite green. Day 1 is NaN
+    (negative_nav_guard, prev0 ≈ 0 from the deposit-seeded inception) — a leading
+    terminus, not the bug. Run with --runxfail to capture the exploded r value."""
+    ledger = _pnl_dominated_blowup_ledger()
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    emitted = returns.dropna()
+    assert not emitted.empty  # the series reached the divide (not all-guarded)
+    # The bug: an un-guarded P&L-dominated day. Post-fix, every retained return
+    # is bounded; pre-fix, day 3's r ≈ 17.3 blows past this and reddens the assert.
+    exploded = emitted[emitted.abs() >= 5.0]
+    assert exploded.empty, (
+        "un-guarded P&L-dominated return(s) emitted (HARD-01 blow-up): "
+        f"{exploded.to_dict()}"
+    )
