@@ -168,6 +168,36 @@ function newPanel(): PanelState {
   };
 }
 
+/**
+ * Pure panel→keys[] mapping the wizard POSTs to
+ * `/api/strategies/composite/set-members`. Extracted from `handleContinue` so
+ * the FIRST member's entered `windowStart` VALUE can be pinned offline
+ * (`MultiKeyConnectStep.payload.test.ts`) — a silent field drop/rename here goes
+ * RED. Behaviour is byte-identical to the former inline map: `window_end` is
+ * null for an open-ended (`stillLive`) or blank-end member, `seq` is the 1-based
+ * panel index, and order is preserved.
+ */
+export function buildSetMembersKeys(
+  panels: ReadonlyArray<{
+    apiKeyId: string | null;
+    windowStart: string;
+    windowEnd: string;
+    stillLive: boolean;
+  }>,
+): Array<{
+  api_key_id: string | null;
+  window_start: string;
+  window_end: string | null;
+  seq: number;
+}> {
+  return panels.map((p, i) => ({
+    api_key_id: p.apiKeyId,
+    window_start: p.windowStart,
+    window_end: p.stillLive ? null : p.windowEnd || null,
+    seq: i + 1,
+  }));
+}
+
 interface FieldError {
   start?: string;
   end?: string;
@@ -499,12 +529,7 @@ export function MultiKeyConnectStep({
     setContinuing(true);
     setContinueError(null);
     try {
-      const keys = current.map((p, i) => ({
-        api_key_id: p.apiKeyId,
-        window_start: p.windowStart,
-        window_end: p.stillLive ? null : p.windowEnd || null,
-        seq: i + 1,
-      }));
+      const keys = buildSetMembersKeys(current);
       const res = await fetch("/api/strategies/composite/set-members", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

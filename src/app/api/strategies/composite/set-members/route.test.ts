@@ -180,6 +180,12 @@ describe("POST /api/strategies/composite/set-members — wholesale write (ONB-03
       expect(m).not.toHaveProperty("seq");
     });
     expect(members[0].api_key_id).toBe(AKID1);
+    // HARD-02: the FIRST member's entered window_start VALUE round-trips into
+    // p_members — not merely the property's existence (asserted above). A
+    // silent drop/blank of window_start[0] in the route map goes RED here.
+    expect(members[0].window_start).toBe("2025-08-01");
+    expect(members[1].window_start).toBe("2025-10-01");
+    expect(members[2].window_start).toBe("2025-12-01");
     expect(members[2].window_end).toBeNull();
   });
 });
