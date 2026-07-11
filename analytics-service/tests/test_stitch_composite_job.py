@@ -779,3 +779,109 @@ def test_no_verification_or_publish_status_write_source_scan() -> None:
     src = inspect.getsource(run_stitch_composite_job)
     assert "verification_status" not in src
     assert "published" not in src
+
+
+# ---------------------------------------------------------------------------
+# M-2 — _stamp_failed read-modify-write preserves a published composite's mask
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stamp_failed_preserves_published_composite_coverage_mask() -> None:
+    """M-2: keys/sync re-enqueues stitch_composite for an ALREADY-published
+    composite on owner resync. A re-derive FAILURE stamps computation_status=
+    'failed' but the live metrics_json_by_basis survives and keeps rendering the
+    public factsheet. The old _stamp_failed wrote {csv_source, composite}
+    WHOLESALE — dropping the live coverage-mask keys (per_key / gap_spans /
+    gap_day_count / overlap_days / mtm_gated_reason) → deriveSegmentMarkers
+    returns empty → real gap days render with NO FS-02 missing-segment
+    annotation (no-invented-data regression). Post-fix _stamp_failed is
+    read-modify-write: it MERGES the composite markers over the existing flags,
+    preserving the mask. Neuter (restore the wholesale replace) → the mask keys
+    vanish from the failed stamp → this reddens."""
+    from services.job_worker import DispatchResult
+
+    # A published composite's live coverage mask (what a prior successful derive
+    # persisted onto data_quality_flags).
+    live_mask = {
+        "csv_source": True,
+        "composite": True,
+        "per_key": {"key-1": {"present": 40, "gap": 3}},
+        "gap_spans": [["2024-01-10", "2024-01-12"]],
+        "gap_day_count": 3,
+        "overlap_days": 0,
+        "mtm_gated_reason": "option_activity",
+    }
+    fake = _FakeSupabase(
+        members=[_member(1, "2024-01-01", None)],
+        existing_flags=live_mask,
+    )
+    # A PERMANENT re-derive failure (missing / inactive member key) drives
+    # _stamp_failed on this published-composite row.
+    inactive = DispatchResult(
+        outcome=DispatchOutcome.FAILED,
+        error_message="run_stitch_composite_job: api_key key-1 is inactive",
+        error_kind="permanent",
+    )
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[],
+        has_option_activity=True,
+        preflight_side_effect=[inactive],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "re-derive failure must stamp a terminal 'failed' row"
+    dq = failed_stamps[-1]["data_quality_flags"]
+    # The coverage mask survives the failure stamp (the whole point of M-2).
+    assert dq.get("per_key") == {"key-1": {"present": 40, "gap": 3}}
+    assert dq.get("gap_spans") == [["2024-01-10", "2024-01-12"]]
+    assert dq.get("gap_day_count") == 3
+    assert dq.get("overlap_days") == 0
+    assert dq.get("mtm_gated_reason") == "option_activity"
+    # The composite markers are still present too.
+    assert dq.get("csv_source") is True
+    assert dq.get("composite") is True
+
+
+@pytest.mark.asyncio
+async def test_stamp_failed_first_derive_no_existing_row_falls_back() -> None:
+    """M-2 converse: a FIRST-derive failure (no existing strategy_analytics row /
+    no flags) stamps just {csv_source, composite} — the read-modify-write falls
+    back to the current behavior, byte-unchanged for the never-published case."""
+    from services.job_worker import DispatchResult
+
+    fake = _FakeSupabase(
+        members=[_member(1, "2024-01-01", None)],
+        existing_flags={},  # no prior derive
+    )
+    inactive = DispatchResult(
+        outcome=DispatchOutcome.FAILED,
+        error_message="run_stitch_composite_job: api_key key-1 is inactive",
+        error_kind="permanent",
+    )
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[],
+        has_option_activity=True,
+        preflight_side_effect=[inactive],
+    )):
+        await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps
+    dq = failed_stamps[-1]["data_quality_flags"]
+    assert dq == {"csv_source": True, "composite": True}

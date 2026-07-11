@@ -2921,8 +2921,37 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     async def _stamp_failed(message: str) -> None:
         """Terminal 'failed' stamp so the wizard poller reaches a gate instead of
         an infinite 'computing' spinner (mirrors the derive path). Scrubbed
-        (T-86-10). Never touches verification/publish columns (M-3)."""
+        (T-86-10). Never touches verification/publish columns (M-3).
+
+        M-2: read-modify-write on data_quality_flags. keys/sync re-enqueues
+        stitch_composite for an already-live composite on owner resync, so a
+        re-derive FAILURE lands on a live row whose metrics_json_by_basis survives
+        and keeps rendering the public factsheet. Writing {csv_source, composite}
+        WHOLESALE here would drop the live coverage-mask keys (per_key, gap_spans,
+        gap_day_count, overlap_days, mtm_gated_reason) → deriveSegmentMarkers
+        returns empty → real gap days render with NO FS-02 missing-segment
+        annotation (a no-invented-data regression) until a successful re-derive.
+        MERGE the two composite markers OVER the existing flags to PRESERVE the
+        mask (mirror the SUCCESS path's read-modify-write idiom below). On a
+        first-derive failure with no existing row this falls back to
+        {csv_source, composite} — current behavior, byte-unchanged."""
         scrubbed = str(scrub_freeform_string(message))
+
+        def _read_existing_failed_flags() -> dict[str, Any]:
+            res = (
+                supabase.table("strategy_analytics")
+                .select("data_quality_flags")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None) or {}
+            return dict(row.get("data_quality_flags") or {})
+
+        existing_flags = await db_execute(_read_existing_failed_flags)
+        merged_flags: dict[str, Any] = dict(existing_flags)
+        merged_flags["csv_source"] = True
+        merged_flags["composite"] = True
 
         def _upsert() -> None:
             supabase.table("strategy_analytics").upsert(
@@ -2931,7 +2960,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "computation_status": "failed",
                     "computation_warned": False,
                     "computation_error": scrubbed,
-                    "data_quality_flags": {"csv_source": True, "composite": True},
+                    "data_quality_flags": merged_flags,
                 },
                 on_conflict="strategy_id",
             ).execute()
