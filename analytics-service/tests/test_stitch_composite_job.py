@@ -1187,3 +1187,94 @@ async def test_blowup_member_persists_finite_series_and_plausible_contribution()
     final = analytics[-1]
     assert final["data_quality_flags"].get("pnl_dominated_guard") is True
     assert final["computation_status"] == "complete_with_warnings"
+
+
+# ---------------------------------------------------------------------------
+# HARD-03 (#69 / Phase-90 LOW-2) — persist the RAW cumulative_method into
+# data_quality_flags at stitch so the factsheet read-path can PREFER the frozen
+# method over a live re-derive (chart↔headline drift kill). The persisted value
+# is the WORKER vocabulary ("geometric"|"simple"), NEVER the resolved read-path
+# basis ("arithmetic"/"geometric") — the "simple"→"arithmetic" map lives in
+# exactly ONE place (the read side), so persisted and live-fallback share one
+# rule and cannot diverge (research Pitfall 1).
+# ---------------------------------------------------------------------------
+
+def _persisted_dqf(fake: "_FakeSupabase") -> dict[str, Any]:
+    """The data_quality_flags from the last strategy_analytics headline upsert."""
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and "data_quality_flags" in payload
+        ):
+            return dict(payload["data_quality_flags"])
+    raise AssertionError("no strategy_analytics headline upsert with DQ flags")
+
+
+@pytest.mark.asyncio
+async def test_persists_cumulative_method_geometric_for_null_config() -> None:
+    """HARD-03: a default stitch (returns_denominator_config None → method
+    "geometric") persists data_quality_flags["cumulative_method"] == "geometric".
+    RED without the merged_flags["cumulative_method"] line (key absent)."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={
+            "id": _STRATEGY_ID,
+            "asset_class": "crypto",
+            "returns_denominator_config": None,  # → cumulative_method "geometric"
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert _persisted_dqf(fake)["cumulative_method"] == "geometric"
+
+
+@pytest.mark.asyncio
+async def test_persists_cumulative_method_simple_for_allocated_config() -> None:
+    """HARD-03: a stitch whose strategies row carries returns_denominator_config
+    with cumulative_method "simple" (the allocated-capital / Zavara override)
+    persists data_quality_flags["cumulative_method"] == "simple" — the RAW worker
+    string, NOT the resolved "arithmetic" read-path basis."""
+    # Default _FakeSupabase strategy_row uses _TEST_CONFIG (cumulative_method
+    # "simple"), so no override is needed.
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert _persisted_dqf(fake)["cumulative_method"] == "simple"
+
+
+@pytest.mark.asyncio
+async def test_persisted_cumulative_method_is_raw_worker_vocabulary() -> None:
+    """HARD-03 Pitfall-1 vocabulary pin: whatever the config, the persisted value
+    is the RAW worker enum ∈ {"geometric","simple"} and is NEVER the resolved
+    read-path basis "arithmetic" — the translation belongs to the read side alone."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    persisted = _persisted_dqf(fake)["cumulative_method"]
+    assert persisted in {"geometric", "simple"}
+    assert persisted != "arithmetic"

@@ -3572,6 +3572,18 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["insufficient_window"] = True
     else:
         merged_flags.pop("insufficient_window", None)
+    # HARD-03 (#69 / Phase-90 LOW-2): freeze the RAW cumulation method the ONE
+    # canonical compute above actually used ("geometric"|"simple", decided at
+    # :3312-3317) into the DQ flags so the factsheet read-path can PREFER it over a
+    # live re-derive from strategies.returns_denominator_config — editing the config
+    # after publish without re-stitching can no longer flip the chart basis away
+    # from the frozen headline scalars. `cumulative_method` is always defined here,
+    # so a plain unconditional set is the correct drop-stale form (every re-stitch
+    # overwrites; no stale value survives). Persist the RAW worker string, NOT the
+    # resolved "arithmetic"/"geometric" read basis — the "simple"→"arithmetic" map
+    # lives in exactly ONE place (the read side), so persisted and live-fallback
+    # share one rule and cannot diverge (research Pitfall 1).
+    merged_flags["cumulative_method"] = cumulative_method
     # F-2: surface benchmark availability so the factsheet renders the "benchmark
     # unavailable" note instead of a silently-missing BTC family. DROP a stale flag
     # when the fetch succeeded this derive (the benchmark healed).
