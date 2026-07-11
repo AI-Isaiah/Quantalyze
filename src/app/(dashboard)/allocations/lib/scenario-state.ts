@@ -124,6 +124,16 @@ export interface ScenarioDraft {
    */
   userWeightOverrides?: Record<string, number>;
   /**
+   * LEV-02 (Phase 90.5, D3/D4): per-strategy leverage stamped at Save
+   * (setLeverageOverrides at the composer POST/PUT boundary), rehydrated to
+   * leverageByRef on load. Optional + additive — no schema_version bump
+   * (userWeightOverrides/window precedent). Saved-scenario persistence ONLY:
+   * NOT a commit-diff input, NOT localStorage-autosave-maintained. NO range
+   * refine (a refine failure = draft-deleting reset; sanitize-on-read via
+   * sanitizeLeverageMap instead).
+   */
+  leverageOverrides?: Record<string, number>;
+  /**
    * v1.5 PERSIST-01 — the saved coverage window (the honest co-live blend
    * window). Optional + additive: a v2 (pre-v1.5) draft omits it and defaults
    * to the intersection via `defaultWindowFor()` on open. Same `CoverageWindow`
@@ -689,6 +699,19 @@ export function setMemberKeyIds(
   return { ...draft, memberKeyIds: ids };
 }
 
+/**
+ * LEV-02 (Phase 90.5, D3/D4) — STAMP-at-save twin of setMemberKeyIds: folds the
+ * ephemeral `leverageByRef` map into the draft only at the composer's Save
+ * boundary (POST/PUT), so leverage never churns the live draft state machine
+ * (no autosave/diffCount involvement). Pure spread — no clone, no mutation.
+ */
+export function setLeverageOverrides(
+  draft: ScenarioDraft,
+  byRef: Record<string, number>,
+): ScenarioDraft {
+  return { ...draft, leverageOverrides: byRef };
+}
+
 // ---------------------------------------------------------------------------
 // B7 cross-tab storage codec — zod-validated parse + version trichotomy.
 // The cross-tab primitive (useCrossTabStorage) owns the localStorage
@@ -765,6 +788,16 @@ export const scenarioDraftSchema = z.object({
   addedStrategies: z.array(addedStrategySchema).max(200),
   weightOverrides: boundedRecord(z.number(), "weightOverrides"),
   userWeightOverrides: boundedRecord(z.number(), "userWeightOverrides").optional(),
+  // LEV-02 (Phase 90.5, D3) — per-strategy leverage overrides. Optional +
+  // additive so pre-existing drafts (field absent) validate; no schema_version
+  // bump. ⚠️ LOAD-BEARING: `z.object` STRIPS unknown keys and saved/route.ts:140
+  // persists `parsed.data.draft`, so WITHOUT this field a POSTed leverage map is
+  // silently dropped. DELIBERATELY NO `.min/.max` range refine (D3 correction
+  // 2026-07-11): a refine FAILURE on this shared schema routes the codec to the
+  // draft-deleting reset → data loss over one out-of-range persisted value. The
+  // clamp happens on READ (sanitizeLeverage, plan 90.5-04); `boundedRecord`
+  // already caps entry count (the DoS guard).
+  leverageOverrides: boundedRecord(z.number(), "leverageOverrides").optional(),
   // v1.5 PERSIST-01 — the saved coverage window. Optional so v2 (windowless)
   // drafts still validate. Each bound must be an exact `YYYY-MM-DD` ISO day
   // (pre-landing review I5): every first-party writer emits that shape, so a
