@@ -319,10 +319,31 @@ export function FactsheetBody({
 function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const payload = usePayload();
   const { basis } = useBasis();
+  // M-3 (round-2) — the single-key leverage recompute (LEV-01) levers ONLY the
+  // KpiStrip's headline scalars; the right-rail MetricsColumn duplicates
+  // Cum/CAGR/Vol/Sharpe/Sortino/MaxDD from the UN-levered payload. Reuse the ONE
+  // modeled predicate (no duplicate derivation) to surface a symmetric
+  // "BASE · 1× TRACK" eyebrow atop the rail while modeled, so a levered strip
+  // scalar is never read as un-bridged against the rail's base-track value.
+  const { modeled } = useLeveragedMetrics(payload);
   const composite = payload.dataQuality?.composite === true;
-  // Non-composite: bare column, byte-identical to before (GUARD-02).
+  // Non-composite at L=1: bare column, byte-identical to before (GUARD-02). Under
+  // a MODELED leverage (single-key only — the control is composite-hidden), the
+  // "BASE · 1× TRACK" eyebrow flags that the rail stayed on the base track
+  // (mirrors the composite MTM "BASIS · CASH SETTLEMENT" eyebrow below).
   if (!composite) {
-    return <MetricsColumn scenarioMode={scenarioMode} />;
+    if (!modeled) return <MetricsColumn scenarioMode={scenarioMode} />;
+    return (
+      <div className="flex flex-col gap-4 min-w-0">
+        <p
+          data-testid="metricscolumn-base-track-eyebrow"
+          className="text-micro uppercase tracking-wider text-text-muted"
+        >
+          BASE · 1× TRACK
+        </p>
+        <MetricsColumn scenarioMode={scenarioMode} />
+      </div>
+    );
   }
   // F4 (UI-SPEC §4 zero-shift): render the eyebrow PERSISTENTLY (reserved line
   // height) so toggling cash↔MTM no longer pops it in/out and reflows the right
@@ -685,7 +706,7 @@ function CapacityChip({
 // track, so the copy must NOT claim the charts scale (they don't) — an honest,
 // coherent statement of exactly which numbers are levered.
 const LEVERAGE_CAVEAT =
-  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage in the headline KPIs above; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). The equity and drawdown charts and the benchmark-relative stats (α, IR) below stay on the base 1× track. This is a modeled what-if — not the strategy's realized track record.";
+  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage in the headline KPIs above; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). Everything else on this page — the equity and drawdown charts, the rolling panels, the benchmark-relative stats (α, IR), and the right-rail metrics — stays on the base 1× track. This is a modeled what-if — not the strategy's realized track record.";
 
 function KpiStrip() {
   const payload = usePayload();
@@ -1073,7 +1094,14 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               value={leverage.toString()}
               title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
-              onChange={(e) => onLeverageChange(Number(e.target.value))}
+              onChange={(e) => {
+                // L-1 (round-2) — an emptied field (Number("") === 0) must NOT
+                // snap the strip to a flat 0× "MODELED · 0×" mid-edit while the
+                // user is retyping. Treat "" as keep-previous (like the
+                // non-finite branch in onLeverageChange), NOT an intentional 0.
+                if (e.target.value.trim() === "") return;
+                onLeverageChange(Number(e.target.value));
+              }}
               className="w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
             />
             <span aria-hidden="true" className="text-caption font-mono text-text-muted">

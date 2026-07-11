@@ -325,6 +325,53 @@ describe("FactsheetView — WR-01: α / IR are suppressed under a modeled levera
   });
 });
 
+describe("FactsheetView — M-3: right-rail MetricsColumn labeled BASE · 1× under a modeled leverage", () => {
+  const baseTrackEyebrow = (c: HTMLElement) =>
+    c.querySelector('[data-testid="metricscolumn-base-track-eyebrow"]');
+
+  it("no BASE·1× eyebrow at L=1 (byte-identical rail); the eyebrow appears at L≠1", () => {
+    const { container } = renderBody(v5SingleKey());
+    // L=1 — the right rail is bare, exactly as before (GUARD-02 shape).
+    expect(baseTrackEyebrow(container)).toBeNull();
+
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "3" } });
+    });
+    // Modeled — the rail is flagged as the base 1× track (the strip is levered).
+    expect(baseTrackEyebrow(container)).not.toBeNull();
+  });
+
+  it("the caveat discloses the rolling panels + right-rail metrics stay on the base track (no exhaustive-looking list)", () => {
+    const { container, getByText } = renderBody(v5SingleKey());
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "2" } });
+    });
+    const caveat = getByText(
+      new RegExp(CAVEAT_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+    expect(caveat.textContent).toContain("rolling panels");
+    expect(caveat.textContent).toContain("right-rail metrics");
+  });
+});
+
+describe("FactsheetView — L-1: clearing the leverage input keeps the previous value (no MODELED · 0×)", () => {
+  it("emptying the field mid-edit does NOT snap to a flat 0× — the previous multiplier is kept", () => {
+    const { container, queryByText } = renderBody(v5SingleKey());
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "3" } });
+    });
+    expect(levInput(container)!.value).toBe("3");
+
+    // Clear the field (Number("") === 0 pre-fix → MODELED · 0×).
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "" } });
+    });
+    expect(queryByText(/MODELED · 0×/)).toBeNull();
+    // The controlled input keeps the prior multiplier — nothing snapped to 0.
+    expect(levInput(container)!.value).toBe("3");
+  });
+});
+
 describe("FactsheetView — LEV-01 fail-loud clamp messaging (UI-SPEC error copy verbatim)", () => {
   it("input 11 → value clamped to 10 + over-max message", () => {
     const { container, getByText } = renderBody(v5SingleKey());
