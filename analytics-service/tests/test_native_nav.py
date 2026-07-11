@@ -1057,8 +1057,9 @@ def test_material_value_orphan_still_refuses_after_fold() -> None:
 # NAV (0.030 BTC × $88,000 ≈ $2,640) → an un-guarded per-day return r ≈ 17.3/day
 # (the ~1,700%/day live blow-up class). None of the three existing denominator
 # guards (negative / dust<$1000 / flow-dominated) fires (research §a A3), because
-# there is NO P&L-magnitude guard — the defect under test. Plan 92-02 adds the
-# guard and flips the strict-xfail below to enforced.
+# there was NO P&L-magnitude guard — the defect. Plan 92-02 added the
+# pnl_dominated_guard at the source and promoted the 92-01 strict-xfail below to
+# an ENFORCED regression (marker removed; now GREEN on the fixed commit).
 #
 # All quantities are SYNTHETIC (0.025 BTC deposit / $88k mark) — never a real
 # account balance (T-92-01). No network / no shared Supabase test DB (Pitfall 6).
@@ -1115,21 +1116,20 @@ def _pnl_dominated_blowup_ledger() -> NativeLedger:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 92 HARD-01 pre-fix: a P&L-dominated day on a small-but-above-"
-    "dust NAV emits an un-guarded ~17x/day return; Plan 92-02 adds the magnitude "
-    "guard and removes this marker",
-)
 def test_inverse_perpetual_pnl_dominated_day_is_guarded() -> None:
-    """DESIRED post-fix behavior: every emitted per-day return is bounded — a
-    P&L-dominated day must break the chain (NaN), never emit an un-interpretable
-    ~17x/day return. Pre-fix this FAILS on day 3 (r ≈ 17.3), so the strict xfail
-    pins the bug as RED evidence while keeping the suite green. Day 1 is NaN
+    """ENFORCED post-fix regression (Plan 92-02 removed the 92-01 strict-xfail):
+    every emitted per-day return is bounded — a P&L-dominated day breaks the
+    chain (NaN) + flags ``pnl_dominated_guard``, never emits an un-interpretable
+    ~17x/day return. This FAILED pre-fix on day 3 (r ≈ 17.3, the 92-01 RED
+    evidence) and PASSES on the fixed commit (the phase repro gate). Day 1 is NaN
     (negative_nav_guard, prev0 ≈ 0 from the deposit-seeded inception) — a leading
-    terminus, not the bug. Run with --runxfail to capture the exploded r value."""
+    terminus, not the bug.
+
+    Mutation-honest: reverting the ``pnl_dominated_guard`` at the source re-emits
+    day 3's r ≈ 17.3 and reddens the ``exploded.empty`` assert; dropping the
+    NAV_TWR_GUARD_KEYS registration reddens the meta/status asserts below."""
     ledger = _pnl_dominated_blowup_ledger()
-    returns, _meta = reconstruct_native_nav_and_twr(
+    returns, meta = reconstruct_native_nav_and_twr(
         ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
     )
     emitted = returns.dropna()
@@ -1141,6 +1141,10 @@ def test_inverse_perpetual_pnl_dominated_day_is_guarded() -> None:
         "un-guarded P&L-dominated return(s) emitted (HARD-01 blow-up): "
         f"{exploded.to_dict()}"
     )
+    # The guard FIRED (day 3): the meta carries the boolean flag (no raw
+    # magnitude leak) and the status is promoted via NAV_TWR_GUARD_KEYS.
+    assert meta.get("pnl_dominated_guard") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
 
 
 def test_blowup_fixture_nav_valuation_matches_hand_model() -> None:

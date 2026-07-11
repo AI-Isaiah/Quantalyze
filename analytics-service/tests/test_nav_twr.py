@@ -33,6 +33,7 @@ from services.nav_twr import (
     FLOW_TERMINUS_DAYS_BY_VENUE,
     NAV_TWR_GUARD_KEYS,
     OKX_DEPOSIT_TERMINUS_DAYS,
+    PNL_DOM_RATIO,
     FLOW_BOUNDARY_PROXIMITY_DAYS,
     NavReconstructionError,
     _flows_to_daily_usd,
@@ -477,6 +478,64 @@ def test_dq_guards_flag_not_substitute() -> None:
     assert wired_meta.get("negative_nav_guard") is True
     assert wired_meta["computation_status_hint"] == "complete_with_warnings"
     assert np.isnan(ret_neg.iloc[0])  # core and transforms now agree
+
+
+def test_pnl_dominated_guard_breaks_and_flags_interior_day() -> None:
+    """Phase 92 HARD-01: an interior day whose P&L numerator dwarfs a
+    small-but-ABOVE-dust prior NAV (``|pnl_t| >= PNL_DOM_RATIO * NAV_{t-1}``,
+    r ~ 20) breaks the chain (NaN) + flags ``pnl_dominated_guard`` — the missing
+    sibling of ``flow_dominated_guard`` — NEVER emits the ~20x/day return.
+    Reverting the call-site guard re-emits r = 20 and reddens the ``isnan``
+    assert (mutation-honest)."""
+    # nav backward roll = [2000, 42000, 42050]; day-1 prev NAV = 2000 (> dust),
+    # pnl_1 = 40000 => |pnl_1| = 20 * prev >= 10 * prev -> P&L-dominated -> guarded.
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([100.0, 40000.0, 50.0]), anchor_nav=42050.0
+    )
+    assert np.isnan(ret.iloc[1])                 # the P&L-dominated day broke
+    assert not bool(ret.isna().iloc[0])          # day 0 (prev 1900) is fine
+    assert not bool(ret.isna().iloc[2])          # day 2 (prev 42000) is fine
+    assert meta.get("pnl_dominated_guard") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+def test_pnl_dominated_guard_boundary_is_inclusive() -> None:
+    """The ``>=`` boundary (mirroring FLOW_DOM_RATIO): a day at EXACTLY
+    ``PNL_DOM_RATIO * prev`` is guarded. Flipping ``>=`` to ``>`` lets the
+    boundary day emit r = PNL_DOM_RATIO and reddens this (mutation-honest,
+    Rule 9)."""
+    # nav = [2000, 22000, 22050]; pnl_1 = 20000 = PNL_DOM_RATIO * 2000 -> exactly
+    # at the cap. prev(day1) = 2000 (> dust).
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([100.0, PNL_DOM_RATIO * 2000.0, 50.0]), anchor_nav=22050.0
+    )
+    assert np.isnan(ret.iloc[1])
+    assert meta.get("pnl_dominated_guard") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+def test_below_cap_pnl_day_passes_through_unguarded() -> None:
+    """Byte-identity partner: a day at 5x prior NAV (BELOW the 10x cap) passes
+    through with the EXACT unguarded return and NO flag — the no-op default that
+    keeps every normal account (and the SC-4 pins) byte-identical. Tightening the
+    cap below 5 would guard this day and redden the exact-r assert."""
+    # nav = [2000, 12000, 12050]; pnl_1 = 10000 = 5 * 2000 -> below the 10x cap.
+    ret, meta = reconstruct_nav_and_twr(
+        _pnl([100.0, 10000.0, 50.0]), anchor_nav=12050.0
+    )
+    assert ret.iloc[1] == pytest.approx(10000.0 / 2000.0)  # exact unguarded r = 5.0
+    assert "pnl_dominated_guard" not in meta
+    assert meta["computation_status_hint"] == "complete"
+
+
+def test_pnl_dominated_guard_rides_registry() -> None:
+    """By-construction propagation: ``pnl_dominated_guard`` is in
+    ``NAV_TWR_GUARD_KEYS`` and satisfies the subset pin, so it lifts/promotes
+    through every downstream registry (transforms._merge_status_meta, the
+    analytics_runner lift, the job_worker pre-stamp) with NO consumer-file edit.
+    Removing the registry append flips this RED."""
+    assert "pnl_dominated_guard" in NAV_TWR_GUARD_KEYS
+    assert set(NAV_TWR_GUARD_KEYS) <= set(nav_twr_mod.NavTWRMeta.__annotations__)
 
 
 def test_nonfinite_inputs_fail_loud() -> None:
@@ -1389,12 +1448,13 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
     # No duplicate keys in the single source.
     assert len(NAV_TWR_GUARD_KEYS) == len(set(NAV_TWR_GUARD_KEYS))
     # The v1.8 warn flags + the v1.9 DQ-03 chain-break key + the Phase 82
-    # pre-coverage option-dailies flag are all present (regression pin on the
-    # closed set).
+    # pre-coverage option-dailies flag + the Phase 92 HARD-01 P&L-dominated guard
+    # are all present (regression pin on the closed set).
     assert set(NAV_TWR_GUARD_KEYS) == {
         "dust_nav_guard",
         "negative_nav_guard",
         "flow_dominated_guard",
+        "pnl_dominated_guard",
         "flow_coverage_incomplete",
         "unrealized_pnl_in_anchor",
         "unrealized_pnl_unreadable",

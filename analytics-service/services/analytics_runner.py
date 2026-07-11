@@ -181,6 +181,15 @@ class DataQualityFlags(TypedDict, total=False):
     negative_nav_guard: bool
     dust_nav_guard: bool
     flow_dominated_guard: bool
+    # Phase 92 (HARD-01): a single-day P&L dwarfed a small-but-above-dust prior
+    # NAV (the inverse-perpetual near-zero-equity blow-up: |pnl_t| >=
+    # PNL_DOM_RATIO * NAV_{t-1}). The honest core NaNs that day rather than
+    # emitting an un-interpretable ~10-100x/day return that would compound into
+    # a millions-of-% per-key contribution. The missing sibling of
+    # flow_dominated_guard; a BOOL only (no raw NAV/P&L magnitude, the
+    # account-size leak T-73-02); promotes computation_status to
+    # complete_with_warnings on the same NAV_TWR_GUARD_KEYS channel.
+    pnl_dominated_guard: bool
     # --- Phase 76 (v1.8 DQ-02): flow-coverage terminus. Fires when a broker
     # account's return window extends BEFORE the venue's deposit-history
     # retention (OKX 90d / Bybit 365d) so the pre-terminus flows are unfetchable;
