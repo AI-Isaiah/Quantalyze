@@ -215,6 +215,70 @@ describe("FactsheetBody — PERMANENT no-cross-tab-bleed gate (GUARD-04, RT2 cla
     expect(window.location.search).not.toMatch(FACTSHEET_URL_PARAM_RE);
   });
 
+  // Phase 90.5 (LEV-01, GUARD-04 extension, T-90.5-15) — the ephemeral leverage
+  // control must write NOTHING (no storage / URL / cookie) and a fresh view must
+  // open at 1× (no persisted, shareable modeled state). This pins the
+  // Repudiation mitigation: a modeled what-if can never be persisted or shared as
+  // if it were the real track.
+  it("persist={false}: changing LEVERAGE on a single-key v5 payload writes NOTHING to storage/URL/cookies, and a fresh view opens at 1×", async () => {
+    const setItemSpy = vi.spyOn(window.localStorage, "setItem");
+    const replaceSpy = vi.spyOn(window.history, "replaceState");
+    const cookieBefore = document.cookie;
+
+    // Single-key v5 payload (periodsPerYear present) — the ONLY shape that
+    // renders the leverage control.
+    const v5 = { ...populatedPayload, periodsPerYear: 365 } as typeof populatedPayload;
+    let first!: ReturnType<typeof render>;
+    act(() => {
+      first = render(
+        <FactsheetProvider payload={v5} persist={false}>
+          <FactsheetBody payload={v5} hideHeader hideAllocatorSection hideFooter={false} />
+        </FactsheetProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50));
+    });
+
+    const urlBefore = window.location.search;
+    setItemSpy.mockClear();
+    replaceSpy.mockClear();
+
+    const input = first.container.querySelector(
+      "#leverage-factsheet",
+    ) as HTMLInputElement;
+    expect(input).not.toBeNull();
+    act(() => {
+      fireEvent.change(input, { target: { value: "2" } });
+    });
+    // Give any (absent) debounced write ample room to fire if the control leaked.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 400));
+    });
+
+    // The modeled state IS live locally (input reflects 2×) — but nothing bled.
+    expect(input.value).toBe("2");
+    expect(setItemSpy.mock.calls.filter(isFactsheetKeyWrite)).toEqual([]);
+    expect(lsStore.has(`factsheet-v2:${v5.strategyId}`)).toBe(false);
+    expect(replaceSpy.mock.calls.filter(isFactsheetUrlWrite)).toEqual([]);
+    expect(window.location.search).toBe(urlBefore);
+    expect(document.cookie).toBe(cookieBefore);
+
+    // Reload-equivalence: unmount (the reload) then a fresh render of the SAME
+    // payload opens at L=1 — no persisted leverage (ephemeral by construction).
+    first.unmount();
+    const fresh = render(
+      <FactsheetProvider payload={v5} persist={false}>
+        <FactsheetBody payload={v5} hideHeader hideAllocatorSection hideFooter={false} />
+      </FactsheetProvider>,
+    );
+    const freshInput = fresh.container.querySelector(
+      "#leverage-factsheet",
+    ) as HTMLInputElement;
+    expect(freshInput).not.toBeNull();
+    expect(freshInput.value).toBe("1");
+  });
+
   it("documents the scope: the keyspace predicate ALLOWS a composer-collapse write while forbidding factsheet keys", () => {
     // This is a pure predicate-scoping assertion (no render) — it pins the
     // Pitfall-5 boundary so a future reader knows the guard is keyspace-scoped,
