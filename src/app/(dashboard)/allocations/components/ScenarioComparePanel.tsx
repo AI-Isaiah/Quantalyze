@@ -14,6 +14,7 @@ import {
   setMemberKeyIds,
   type ScenarioDraft,
 } from "../lib/scenario-state";
+import { sanitizeLeverageMap } from "@/lib/leverage";
 import {
   ScenarioCompareTable,
   type ScenarioColumn,
@@ -104,6 +105,22 @@ interface ComparePayloadStrategy {
 function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
   if (typeof console === "undefined") return;
   console.warn(`[ScenarioComparePanel] ${tag}`, detail);
+}
+
+/**
+ * LEV-02 (round-2 H-2) — does this saved draft carry a per-strategy leverage
+ * multiplier ≠ 1 on a leg that is NOT toggled off? Drives the column's
+ * "Modeled · leverage" label. A conservative toggled-on proxy for the composer's
+ * `leverageApplied` (selected && weight>0 && L≠1): the panel has no resolved
+ * post-adapter weights, so it gates on the persisted toggle only — an over-label
+ * for the rare weight-0 leg is acceptable for a caption (it never fabricates a
+ * NUMBER; the metrics themselves are the engine's honest output).
+ */
+function draftHasEffectiveLeverage(draft: ScenarioDraft): boolean {
+  const lev = sanitizeLeverageMap(draft.leverageOverrides);
+  return Object.entries(lev).some(
+    ([id, L]) => L !== 1 && draft.toggleByScopeRef[id] !== false,
+  );
 }
 
 /** A NULL-metrics column — honest absence for a draft that can't be compared. */
@@ -267,7 +284,11 @@ export function ScenarioComparePanel({
               )
             : draft;
         try {
-          return { name: row.name, metrics: computeMetricsForDraft(normalized, liveInputs) };
+          return {
+            name: row.name,
+            metrics: computeMetricsForDraft(normalized, liveInputs),
+            leveraged: draftHasEffectiveLeverage(normalized),
+          };
         } catch (err) {
           warnAudit("scenario_compare_compute_failed", {
             id: row.id,
