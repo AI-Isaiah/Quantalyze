@@ -796,9 +796,13 @@ export async function seedCompositeStrategy(opts?: {
       );
     }
     ownerUserId = ownerData.user.id;
-    await admin
+    const { error: pErr } = await admin
       .from("profiles")
       .upsert({ id: ownerUserId, display_name: ownerEmail }, { onConflict: "id" });
+    if (pErr)
+      throw new Error(
+        `[seed] seedCompositeStrategy (profile) failed: ${pErr.message}`,
+      );
   }
 
   // 2. strategies row. A composite carries api_key_id = NULL (the single-key
