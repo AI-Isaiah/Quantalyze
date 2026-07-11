@@ -221,7 +221,7 @@ export default async function ScenarioSharePage({
     );
   }
 
-  const { name, metrics, portfolioDaily, strategyNames, isMixed, periodsPerYear } =
+  const { name, metrics, portfolioDaily, strategyNames, isMixed, periodsPerYear, leveraged } =
     resolved;
   const btcAvailable = btcDaily.length > 0;
 
@@ -273,6 +273,17 @@ export default async function ScenarioSharePage({
         {isMixed && (
           <p data-testid="scenario-mixed-caption" className="mt-1 text-xs text-text-muted">
             computed from this scenario&apos;s catalog strategies only
+          </p>
+        )}
+        {/* LEV-02 (round-2 H-1) — the owner saved per-strategy leverage WITH this
+            scenario, so the projection above is run at those multipliers. Label
+            the modeled state (mirrors the composer's leverage caveat): a
+            leveraged track is a what-if, not a realized record. Quiet muted-note
+            register, static prose, no warning color/role. */}
+        {leveraged && (
+          <p data-testid="scenario-leverage-caption" className="mt-1 text-xs text-text-muted">
+            modeled with per-strategy leverage — daily returns scaled by the saved
+            multipliers; excludes borrow / funding cost
           </p>
         )}
       </header>

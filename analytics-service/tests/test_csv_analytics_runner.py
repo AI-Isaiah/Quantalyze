@@ -1196,3 +1196,78 @@ async def test_csv_runner_bridges_mandate_window_excluded_days_warn() -> None:
     assert completed[0].args[0]["data_quality_flags"].get(
         "mandate_window_excluded_days"
     ) is True
+
+
+@pytest.mark.asyncio
+async def test_noncomposite_rederive_nulls_stale_by_basis() -> None:
+    """Finding 5 (non-composite direction): a strategy that STOPS being a composite
+    (members removed → single-key path) is re-derived HERE. Its prior row still
+    carries a composite metrics_json_by_basis object (incl. a stale mark_to_market
+    key) and composite DQ flags. The fresh single-key headline must NULL
+    metrics_json_by_basis so a stale composite object can't linger next to a
+    single-key headline (silent basis-toggle disagreement). The freshly-built
+    data_quality_flags already drops the composite-only flags (wholesale column
+    replace). Neuter (drop the null) → the stale object survives → this reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={
+            "csv_source": True, "composite": True, "per_key": {},
+            "gap_day_count": 3, "mtm_gated_reason": "unsmoothed_options_book",
+        },
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("was-composite-uuid")
+
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    payload = completed[0].args[0]
+    # (a) the stale composite by-basis object is nulled (SQL NULL).
+    assert "metrics_json_by_basis" in payload
+    assert payload["metrics_json_by_basis"] is None
+    # (b) the fresh flags drop the composite-only keys (wholesale replace).
+    dq = payload["data_quality_flags"]
+    assert "composite" not in dq
+    assert "per_key" not in dq
+    assert "mtm_gated_reason" not in dq
+
+
+@pytest.mark.asyncio
+async def test_pure_single_key_rederive_leaves_by_basis_untouched() -> None:
+    """Finding 5 converse: a strategy that was NEVER a composite (no prior
+    `composite` flag) must be byte-identical — the single-key recompute must NOT
+    add a metrics_json_by_basis=None column write (which would be a behavior change
+    on the untouched single-key path). Only a prior-composite row is nulled."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={"csv_source": True},  # never a composite
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.analytics_runner.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("pure-single-key-uuid")
+
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    assert "metrics_json_by_basis" not in completed[0].args[0], (
+        "a never-composite single-key recompute must not touch metrics_json_by_basis"
+    )

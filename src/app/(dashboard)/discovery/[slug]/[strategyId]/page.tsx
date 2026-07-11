@@ -8,9 +8,12 @@ import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 import { getStrategyDetail } from "@/lib/queries";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
+import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
+import { readCompositeFactsheet } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { TrustTierKind, IngestSource } from "@/lib/factsheet/types";
+import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
 
 export default async function StrategyDetailPage({
@@ -49,11 +52,16 @@ export default async function StrategyDetailPage({
   // real cumprod equity curve in returns_series. resolveDailyReturnSeries
   // handles both shapes + the three real-world daily_returns dict layouts.
   const analyticsRow = analytics as
-    | { daily_returns?: unknown; returns_series?: unknown }
+    | {
+        daily_returns?: unknown;
+        returns_series?: unknown;
+        data_quality_flags?: unknown;
+        metrics_json_by_basis?: unknown;
+      }
     | null
     | undefined;
   const dailyRaw = analyticsRow?.daily_returns;
-  const dailyReturns = resolveDailyReturnSeries(
+  let dailyReturns = resolveDailyReturnSeries(
     dailyRaw,
     analyticsRow?.returns_series,
   );
@@ -63,7 +71,39 @@ export default async function StrategyDetailPage({
   // buildFactsheetPayload defaults to "csv" and all gated panels (PeerPercentile,
   // AllocatorSection, Signatures) are permanently suppressed for API strategies
   // on the discovery surface. (RED-TEAM-H1)
-  const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
+  let ingestSource: IngestSource = deriveIngestSource(dailyRaw);
+
+  // H-2 (Round 2): a stitched composite has daily_returns=NULL + returns_series
+  // populated, so the plain path above would classify it "api" (invented
+  // PeerPercentile / AllocatorSection / EventSignatures) and draw a dense-0.0
+  // gap-filled series (flat-zero gap lines). Route it through the SAME shared
+  // composite read-path the factsheet route uses: force ingestSource "csv"
+  // (suppresses the invented panels), read the honest sparse csv_daily_returns
+  // series, and thread the marker/basis/method opts. A null result = data defect
+  // → the still-computing placeholder (never the api arm).
+  const dqf = analyticsRow?.data_quality_flags as
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown }
+    | null
+    | undefined;
+  let buildOpts: BuildFactsheetOpts | undefined;
+  if (dqf?.composite === true) {
+    ingestSource = "csv";
+    const admin = createAdminClient();
+    const composite = await readCompositeFactsheet(admin, {
+      strategyId: strategy.id,
+      dqf,
+      metricsJsonByBasis: analyticsRow?.metrics_json_by_basis,
+      returnsDenominatorConfig: (strategy as { returns_denominator_config?: unknown })
+        .returns_denominator_config,
+    });
+    if (composite) {
+      dailyReturns = composite.dailyReturns;
+      buildOpts = composite.buildOpts;
+    } else {
+      // Data defect (untrusted cash headline) → empty series → placeholder.
+      dailyReturns = [] as DailyReturn[];
+    }
+  }
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
   // would make FreshnessChip show a green "fresh" badge for a strategy with
@@ -98,6 +138,7 @@ export default async function StrategyDetailPage({
       assetClass: strategy.asset_class ?? null,
     },
     dailyReturns,
+    buildOpts,
   );
 
   return (

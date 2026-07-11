@@ -14,6 +14,7 @@ import {
   setMemberKeyIds,
   type ScenarioDraft,
 } from "../lib/scenario-state";
+import { sanitizeLeverageMap } from "@/lib/leverage";
 import {
   ScenarioCompareTable,
   type ScenarioColumn,
@@ -104,6 +105,34 @@ interface ComparePayloadStrategy {
 function warnAudit(tag: string, detail: Record<string, unknown> = {}): void {
   if (typeof console === "undefined") return;
   console.warn(`[ScenarioComparePanel] ${tag}`, detail);
+}
+
+/**
+ * LEV-02 (round-2 H-2) — does this saved draft carry a per-strategy leverage
+ * multiplier ≠ 1 on a leg that is actually IN the scenario? Drives the column's
+ * "Modeled · leverage" label.
+ *
+ * LOW-2 (round-3) — gate on the EFFECTIVE leg set: a ref counts only if it is an
+ * added strategy OR a persisted book member (the compare projection's leg set)
+ * AND not toggled off. That is exactly what the composer + share surfaces treat
+ * as effective, so a STRANDED entry in a pre-M-2 draft (a removed leg — its
+ * toggle was deleted, so a toggle-only gate read it as `!== false` → true) no
+ * longer labels the column "Modeled" while the other two surfaces stay silent.
+ * The panel has no post-adapter weights, so a rare toggled-on weight-0 leg may
+ * still over-label — acceptable for a caption (it never fabricates a NUMBER).
+ * LOW-1 — signal:false: the engine already sanitized this same map for this
+ * draft, so re-sanitizing here must not double-fire the coercion signal.
+ */
+function draftHasEffectiveLeverage(draft: ScenarioDraft): boolean {
+  const lev = sanitizeLeverageMap(draft.leverageOverrides, { signal: false });
+  const effectiveRefs = new Set<string>([
+    ...draft.addedStrategies.map((s) => s.id as string),
+    ...(draft.memberKeyIds ?? []),
+  ]);
+  return Object.entries(lev).some(
+    ([id, L]) =>
+      L !== 1 && effectiveRefs.has(id) && draft.toggleByScopeRef[id] !== false,
+  );
 }
 
 /** A NULL-metrics column — honest absence for a draft that can't be compared. */
@@ -267,7 +296,11 @@ export function ScenarioComparePanel({
               )
             : draft;
         try {
-          return { name: row.name, metrics: computeMetricsForDraft(normalized, liveInputs) };
+          return {
+            name: row.name,
+            metrics: computeMetricsForDraft(normalized, liveInputs),
+            leveraged: draftHasEffectiveLeverage(normalized),
+          };
         } catch (err) {
           warnAudit("scenario_compare_compute_failed", {
             id: row.id,

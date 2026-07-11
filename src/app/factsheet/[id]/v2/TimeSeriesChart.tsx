@@ -11,6 +11,36 @@ const VB_W = 880;
 const PAD = { top: 20, right: 30, bottom: 24, left: 50 };
 const MIN_VISIBLE = 5;
 
+/** Binary search: exact ordinal index of `target` in ascending ISO-date
+ *  `dates`, or -1 if absent. ISO YYYY-MM-DD strings sort lexicographically =
+ *  chronologically, so plain string compare is correct. (FS-01 boundary lookup) */
+function indexOfDate(dates: readonly string[], target: string): number {
+  let lo = 0;
+  let hi = dates.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const d = dates[mid];
+    if (d === target) return mid;
+    if (d < target) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** First index whose date sorts strictly AFTER `target` (insertion point past
+ *  it). Gap days are absent from `dates` (FS-02 / CONTEXT D4), so a gap collapses
+ *  to a zero-width seam at the first present index following the hole's end. */
+function firstIndexAfter(dates: readonly string[], target: string): number {
+  let lo = 0;
+  let hi = dates.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (dates[mid] <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /**
  * Generic comparator-reactive time series chart. Replaces the single-purpose
  * CumulativeChart from slice 1. Driven by a `ChartConfig` describing which
@@ -194,6 +224,125 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
       </g>
     );
   }, [config.warmup, config.key, n, xStart, plotW, plotH, X]);
+
+  // FS-01/FS-02 composite seam overlay — memoized so the <defs><pattern>
+  // subtrees don't rebuild every pan frame (warmupBand idiom). One
+  // <g pointerEvents="none"> holding the per-key boundary markers
+  // (payload.segmentBoundaries) + gap seams (payload.missingSegments), rendered
+  // only on the cumulative track (config.segmentMarkers) and only when the
+  // optional payload fields are present. Both fields absent → returns null, so
+  // single-key / non-composite emits a byte-identical SVG (GUARD-02).
+  const segmentMarkers = useMemo(() => {
+    if (!config.segmentMarkers) return null;
+    const boundaries = payload.segmentBoundaries ?? [];
+    const gaps = payload.missingSegments ?? [];
+    if (boundaries.length === 0 && gaps.length === 0) return null;
+
+    const dates = payload.dates;
+    const plotRight = PAD.left + plotW;
+    const plotBottom = PAD.top + plotH;
+
+    // Boundary (FS-01): dashed neutral vertical line + mono seq label at the
+    // boundary date's index. Skip if the date is absent or off the visible
+    // [xStart, xEnd] window; clamp x to the plot (ddHighlights idiom, pan/zoom safe).
+    const boundaryNodes = boundaries.flatMap((b, i) => {
+      // L-1: a member's `first_day` can be a guard/NaN day that is ABSENT from
+      // the present series → `indexOfDate` misses. Fall back to the first PRESENT
+      // day at or after the boundary date (`firstIndexAfter`, the gap-seam idiom)
+      // so the seam renders at the key's real first visible day instead of
+      // silently vanishing — otherwise the sr-only summary claims a handoff that
+      // has no marker.
+      const exact = indexOfDate(dates, b.date);
+      const idx = exact >= 0 ? exact : firstIndexAfter(dates, b.date);
+      if (idx >= dates.length || idx < xStart || idx > xEnd) return [];
+      const x = Math.max(PAD.left, Math.min(plotRight, X(idx)));
+      return [
+        <g key={`seg-bound-${i}`} data-idx={idx}>
+          <title>{`Key ${b.seq} track begins ${b.date}`}</title>
+          <line
+            x1={x}
+            x2={x}
+            y1={PAD.top}
+            y2={plotBottom}
+            stroke="var(--color-text-muted)"
+            strokeWidth={1}
+            strokeDasharray="4 3"
+          />
+          <text
+            x={x + 3}
+            y={PAD.top + 11}
+            textAnchor="start"
+            fontSize={10}
+            fontFamily="var(--font-mono)"
+            fill="var(--color-text-muted)"
+          >
+            {b.seq}
+          </text>
+        </g>,
+      ];
+    });
+
+    // Gap seam (FS-02): gap days are ABSENT from `dates`, so the gap collapses
+    // to a zero-width seam at the FIRST present index after the gap's end
+    // (firstIndexAfter insertion point) — never a proportional band, never a
+    // flat-zero line. Hatched sliver + neutral "{days}d — no data" label.
+    const gapNodes = gaps.flatMap((g, i) => {
+      const seamIdx = firstIndexAfter(dates, g.end);
+      if (seamIdx >= dates.length || seamIdx < xStart || seamIdx > xEnd) return [];
+      const x = Math.max(PAD.left, Math.min(plotRight, X(seamIdx)));
+      // Unique pattern id per config key + segment index avoids <defs> collisions.
+      const patternId = `gap-${config.key}-${i}`;
+      const sliver = 6;
+      const x0 = Math.max(PAD.left, x - sliver / 2);
+      const w = Math.min(plotRight, x + sliver / 2) - x0;
+      return [
+        <g key={`seg-gap-${i}`}>
+          <title>{`No data ${g.start} → ${g.end} (${g.days} days)`}</title>
+          <defs>
+            <pattern
+              id={patternId}
+              patternUnits="userSpaceOnUse"
+              width="6"
+              height="6"
+              patternTransform="rotate(45)"
+            >
+              <line x1="0" y1="0" x2="0" y2="6" stroke="var(--color-text-muted)" strokeOpacity="0.15" strokeWidth="3" />
+            </pattern>
+          </defs>
+          <rect x={x0} y={PAD.top} width={Math.max(0, w)} height={plotH} fill={`url(#${patternId})`} />
+          <text
+            x={x}
+            y={PAD.top + 11}
+            textAnchor="middle"
+            fontSize={10}
+            fontFamily="var(--font-mono)"
+            fill="var(--color-text-muted)"
+          >
+            {g.days}d — no data
+          </text>
+        </g>,
+      ];
+    });
+
+    if (boundaryNodes.length === 0 && gapNodes.length === 0) return null;
+    return (
+      <g pointerEvents="none">
+        {boundaryNodes}
+        {gapNodes}
+      </g>
+    );
+  }, [
+    config.segmentMarkers,
+    config.key,
+    payload.segmentBoundaries,
+    payload.missingSegments,
+    payload.dates,
+    xStart,
+    xEnd,
+    plotW,
+    plotH,
+    X,
+  ]);
 
   const yTicks = useMemo(
     () => makeYTicks(yDomain, config.scalable && scale === "log", config.valueFormat),
@@ -613,6 +762,11 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             />
           );
         })}
+
+        {/* Composite seam overlay (FS-01 per-key boundaries + FS-02 gap seams) —
+            inside the plot-clip and the ExportMenu-serialized <svg> so it stays
+            pan/zoom-synced and export-safe. Null on single-key / non-cumulative. */}
+        {segmentMarkers}
 
         {yTicks.map(t => {
           // The "natural zero" line (baseline = 0 for percent/ratio charts,

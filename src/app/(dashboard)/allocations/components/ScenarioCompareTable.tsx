@@ -45,6 +45,14 @@ export interface ScenarioColumn {
    * "older format" with "insufficient history" — the #509 heading/body class).
    */
   undecodable?: boolean;
+  /**
+   * LEV-02 (round-2 H-2) — TRUE when this saved scenario carries a per-strategy
+   * leverage multiplier ≠ 1 (on a toggled-on leg). The metrics ARE now computed
+   * at that leverage (parity with the composer), so the column must LABEL the
+   * modeled state — a levered Sharpe/vol sitting unlabeled beside an un-levered
+   * peer column would be the exact mislabel this milestone forbids.
+   */
+  leveraged?: boolean;
 }
 
 interface MetricRow {
@@ -199,6 +207,16 @@ export function ScenarioCompareTable({
                   className="text-right px-4 py-3 text-xs font-semibold text-text-primary"
                 >
                   {c.name}
+                  {/* LEV-02 (round-2 H-2) — label the modeled-leverage column so
+                      its levered metrics are never read as an un-levered peer. */}
+                  {c.leveraged && (
+                    <span
+                      data-testid={`scenario-col-modeled-${c.name}`}
+                      className="mt-0.5 block text-fixed-9 font-normal uppercase tracking-wider text-text-muted"
+                    >
+                      Modeled · leverage
+                    </span>
+                  )}
                 </th>
               ))}
             </tr>

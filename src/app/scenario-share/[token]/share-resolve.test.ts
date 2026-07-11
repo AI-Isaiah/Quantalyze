@@ -800,3 +800,79 @@ describe("resolveSharedScenario — blend-basis threading (BLEND-01)", () => {
     expect(result).not.toHaveProperty("periodsPerYear");
   });
 });
+
+// ===========================================================================
+// LEV-02 (round-2 H-1) — the SHARE page must APPLY the owner's persisted
+// per-strategy leverage. Pre-fix, resolveSharedScenario built the engine state
+// with NO leverage key ("no leverage is persisted... transient UI state"), so a
+// 3× share rendered the recipient a 1× track under the same scenario name — the
+// v1.5 PERSIST-02 cross-surface-divergence class. The persisted leverage is now
+// part of what the scenario MEANS: the recipient projects at the owner's saved
+// multipliers (sanitize-on-read) AND the page labels the modeled state.
+// ===========================================================================
+describe("resolveSharedScenario — persisted leverage applied + labeled (round-2 H-1)", () => {
+  const STRAT = "11111111-1111-4111-8111-111111111111";
+
+  function oneLegDraft(leverageOverrides: Record<string, number>): ScenarioDraft {
+    return {
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      init_holdings_fingerprint: "",
+      toggleByScopeRef: { [STRAT]: true },
+      addedStrategies: [
+        { id: STRAT as never, name: "Alpha", markets: ["BTC"], strategy_types: ["trend"] },
+      ],
+      weightOverrides: { [STRAT]: 1 },
+      leverageOverrides,
+      memberKeyIds: [],
+      lastEditedAt: "2026-06-22T00:00:00.000Z",
+    };
+  }
+
+  const rowFor = (draft: ScenarioDraft) => ({
+    name: "Levered",
+    draft,
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    series: [{ strategy_id: STRAT, daily_returns: makeSeries(0) }],
+  });
+
+  it("a shared draft with leverageOverrides {A:3} projects a LEVERED curve (≠ the un-levered curve) and flags leveraged", () => {
+    const levered = resolveSharedScenario(rowFor(oneLegDraft({ [STRAT]: 3 })));
+    const unlevered = resolveSharedScenario(rowFor(oneLegDraft({})));
+    expect(levered.kind).toBe("ok");
+    expect(unlevered.kind).toBe("ok");
+    if (levered.kind !== "ok" || unlevered.kind !== "ok") throw new Error("expected ok");
+
+    // The persisted 3× moved the projection — the recipient sees the SAME
+    // levered track the owner saved, never a silently un-levered one.
+    expect(levered.metrics.twr).not.toEqual(unlevered.metrics.twr);
+    // …and the page is told to LABEL the modeled state (composer caveat parity).
+    expect(levered.leveraged).toBe(true);
+    expect(unlevered.leveraged).toBe(false);
+  });
+
+  it("owner==recipient parity under leverage — the recipient curve equals the composer's computeMetricsForDraft output", () => {
+    const draft = oneLegDraft({ [STRAT]: 3 });
+    const recipient = resolveSharedScenario(rowFor(draft));
+    expect(recipient.kind).toBe("ok");
+    if (recipient.kind !== "ok") throw new Error("expected ok");
+
+    const owner = computeMetricsForDraft(draft, {
+      addedStrategyReturnsLookup: {
+        [STRAT]: makeSeries(0),
+      } as Record<StrategyForBuilderId, DailyPoint[]>,
+      addedStrategyMetadataLookup: {},
+    });
+    // The SAME saved scenario computes identically on the owner's compare engine
+    // and the recipient's share page — no cross-surface divergence.
+    expect(recipient.metrics).toEqual(owner);
+  });
+
+  it("a toggled-OFF leg carrying leverage does NOT raise the modeled caption (composer leverageApplied parity)", () => {
+    const draft = oneLegDraft({ [STRAT]: 3 });
+    draft.toggleByScopeRef = { [STRAT]: false };
+    const result = resolveSharedScenario(rowFor(draft));
+    // strategies.length is still 1 (an added leg exists) so it stays kind:"ok",
+    // but the leg is not selected → not effective → no modeled caption.
+    if (result.kind === "ok") expect(result.leveraged).toBe(false);
+  });
+});

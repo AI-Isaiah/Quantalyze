@@ -17,17 +17,30 @@ import type { GateFailureCode } from "./strategyGate";
 
 describe("wizardErrors", () => {
   describe("WIZARD_ERROR_COPY table shape", () => {
+    // MULTI_KEY_WINDOWS_INVALID is a summary-only code: its cause/fix/actions
+    // are intentionally left empty in the table because the MultiKeyConnectStep
+    // component REPLACES them at render with live per-issue field messages
+    // derived from keyWindowsSchema (see wizardErrors.ts). Only its title is
+    // table-owned, so the full-shape invariant below does not apply to it.
+    const SUMMARY_ONLY_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(
+      ["MULTI_KEY_WINDOWS_INVALID"],
+    );
+
     it("every code has a non-empty title, cause, fix list, docsHref, and actions", () => {
       const codes = Object.keys(WIZARD_ERROR_COPY) as WizardErrorCode[];
       expect(codes.length).toBeGreaterThanOrEqual(16);
 
       for (const code of codes) {
         const copy = WIZARD_ERROR_COPY[code];
+        // Title + docsHref are table-owned for EVERY code, including the
+        // summary-only ones.
         expect(copy.title).toBeTruthy();
         expect(copy.title.length).toBeGreaterThan(4);
+        expect(copy.docsHref).toMatch(/^\/security/);
+        if (SUMMARY_ONLY_CODES.has(code)) continue;
+        // Full-envelope codes must additionally carry cause, fix, and actions.
         expect(copy.cause).toBeTruthy();
         expect(copy.fix.length).toBeGreaterThan(0);
-        expect(copy.docsHref).toMatch(/^\/security/);
         expect(copy.actions.length).toBeGreaterThan(0);
       }
     });

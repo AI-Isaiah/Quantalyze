@@ -7,6 +7,8 @@ import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
+import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
+import { readCompositeFactsheet } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -38,7 +40,8 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
         `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
-       strategy_analytics ( daily_returns, returns_series, computed_at )`,
+       returns_denominator_config,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis )`,
       )
       .eq("id", id),
   )
@@ -64,13 +67,48 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   //       real series lives in `returns_series` as a cumprod equity curve.
   // Both gates have to fall before we render the "still computing"
   // placeholder.
-  const dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
+  let dailyReturns = resolveDailyReturnSeries(dailyRaw, analytics?.returns_series);
   // Ingest source classifies daily_returns (CSV path) vs returns_series-only
   // (live API path). The empty-array-is-csv invariant (FINDING-1) + the
   // no-invented-data rationale (NEW-C20-01) live in deriveIngestSource — the
   // single source of truth shared with the discovery page and pinned by
   // audit-c20's RED-TEAM-H1.
   const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
+
+  // Phase 90 (D6) — composite discriminator is SERVER TRUTH
+  // (`data_quality_flags.composite`), NEVER `apiKeyId === null` (Phase-89
+  // Pitfall 1). A stitched multi-key composite has `daily_returns=NULL` (so
+  // `deriveIngestSource` above classifies it "api" on the RAW column — LEFT
+  // UNTOUCHED, pinned by audit-c20 RED-TEAM-H1) but its honest cash series lives
+  // sparse in `csv_daily_returns`. We read that series, route the payload down
+  // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
+  // the arithmetic running-cumulative curve, and thread the marker/basis fields.
+  const dqf = analytics?.data_quality_flags as
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown }
+    | null
+    | undefined;
+  const isComposite = dqf?.composite === true;
+  let buildOpts: BuildFactsheetOpts | undefined;
+  if (isComposite) {
+    // H-2: the composite read-path is shared with the discovery detail page via
+    // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
+    // lesson). It REUSES the in-scope service-role admin `supabase` handle
+    // already created above under the SAME `withPublishedOnly` visibility
+    // boundary — NO new client, NO broader privilege; the outer request-scoped
+    // RLS signature probe + notFound() remains the unchanged auth gate. The
+    // helper carries C-1 (config-driven method), F1/H-1 (headline gate), F2/M-1
+    // (MTM gate) and the FS-01/02 markers. A null result = data defect → the
+    // "still computing" placeholder below.
+    const composite = await readCompositeFactsheet(supabase, {
+      strategyId: id,
+      dqf,
+      metricsJsonByBasis: analytics?.metrics_json_by_basis,
+      returnsDenominatorConfig: strategy.returns_denominator_config,
+    });
+    if (!composite) return null;
+    dailyReturns = composite.dailyReturns;
+    buildOpts = composite.buildOpts;
+  }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an
   // api-verified strategy as csv if the ingester later back-fills the column.
@@ -125,7 +163,10 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       markets: strategy.markets ?? [],
       computedAt,
       trustTier: null,
-      ingestSource,
+      // Composites route down the csv arm EXPLICITLY (suppresses the three
+      // synthesized panels via the existing discriminated union — no new
+      // logic). Single-key keeps the raw-column-derived classification.
+      ingestSource: isComposite ? "csv" : ingestSource,
       description: strategy.description ?? null,
       subtypes: strategy.subtypes ?? [],
       supportedExchanges: strategy.supported_exchanges ?? [],
@@ -138,6 +179,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
       assetClass: strategy.asset_class ?? null,
     },
     dailyReturns,
+    buildOpts,
   );
 }
 
@@ -160,7 +202,16 @@ function buildFactsheetPayloadCached(
     // which evaluates !== "api" and silently suppresses all gated panels
     // (PeerPercentile, AllocatorSection, Signatures) for legitimate API
     // strategies during the TTL drain window. (RED-TEAM-C1)
-    ["factsheet-v2-payload-v3", id],
+    // Bumped v3→v4 (Phase 90): composite payloads now carry five OPTIONAL
+    // fields (segmentBoundaries / missingSegments / metricsByBasis / mtmGate /
+    // dataQuality). Because they are optional-absent, a stale v3 entry
+    // deserialized as v4 degrades gracefully (missing marker/basis fields → no
+    // toggle / no markers during the TTL drain, never a crash) — the bump is
+    // belt-and-suspenders. `computedAt` in the key busts on any re-stitch.
+    // Bumped v4→v5 (Phase 90.5): payload carries optional periodsPerYear for the
+    // client leverage recompute; stale v4 entries lack it -> leverage control
+    // hidden (fail-closed) during the TTL drain, never a crash.
+    ["factsheet-v2-payload-v5", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

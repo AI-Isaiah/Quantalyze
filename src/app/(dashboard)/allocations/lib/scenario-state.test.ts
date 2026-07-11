@@ -29,10 +29,12 @@ import {
   setWindow,
   renormalizeWeights,
   scenarioDraftCodec,
+  scenarioDraftSchema,
   scenarioDraftSaveSchema,
   MAX_MEMBER_KEY_IDS,
   deriveMembershipFromGate,
   setMemberKeyIds,
+  setLeverageOverrides,
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
   type AddedStrategy,
@@ -857,6 +859,119 @@ describe("MEMBER-01 v4 codec + membership helpers", () => {
     expect(
       setWindow(base, { start: "2024-01-01", end: "2024-12-31" }).memberKeyIds,
     ).toEqual(["m1", "m2"]);
+  });
+});
+
+// ===========================================================================
+// LEV-02 (Phase 90.5, D3/D4) — optional per-strategy leverageOverrides draft
+// field + the setLeverageOverrides STAMP transform.
+//
+// WHY these tests exist (Rule 9 — intent, not behavior):
+//   - The field MUST survive the whole-draft zod parse. `z.object` STRIPS
+//     unknown keys, and saved/route.ts:140 persists `parsed.data.draft` — so a
+//     schema WITHOUT the field silently DROPS POSTed leverage (Test 1 pins the
+//     seam is live).
+//   - It is OPTIONAL and ADDITIVE: a pre-existing draft without it must parse
+//     and read undefined (→ `?? {}`), with NO SCENARIO_SCHEMA_VERSION bump and
+//     NO codec branch (Test 2 backward-compat, Test 5 version discipline).
+//   - It carries NO `.min/.max` range refine (D3 correction 2026-07-11): a
+//     refine FAILURE on the shared schema routes the codec to the draft-DELETING
+//     reset path → data loss. An out-of-range persisted value must PARSE; the
+//     clamp happens on READ (sanitizeLeverage, plan 90.5-04). Test 3 pins this.
+//   - setLeverageOverrides is a pure spread twin of setMemberKeyIds (Test 4).
+// ===========================================================================
+describe("LEV-02 leverageOverrides", () => {
+  const validCurrentDraft = (): ScenarioDraft => ({
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true },
+    addedStrategies: [],
+    weightOverrides: { "holding:binance:BTC:spot": 1 },
+    memberKeyIds: [],
+    lastEditedAt: "2026-04-25T00:00:00.000Z",
+  });
+  const codec = scenarioDraftCodec(defaultDraftFromHoldings(HOLDINGS_2));
+
+  it("Test 1 — leverageOverrides is RETAINED, not stripped, by the whole-draft parse (and the codec round-trip)", () => {
+    const withLev: ScenarioDraft = {
+      ...validCurrentDraft(),
+      leverageOverrides: { "ref-a": 2, "ref-b": 0.5 },
+    };
+    // Direct schema parse — the load-bearing seam. If the field were absent from
+    // scenarioDraftSchema, z.object would strip it and this assertion would fail.
+    const parsed = scenarioDraftSchema.safeParse(withLev);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.leverageOverrides).toEqual({ "ref-a": 2, "ref-b": 0.5 });
+
+    // And through the codec decode path the round-trip tests use.
+    const r = codec.decode(codec.encode(withLev));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.leverageOverrides).toEqual({ "ref-a": 2, "ref-b": 0.5 });
+  });
+
+  it("Test 2 — backward-compat: a draft WITHOUT the field parses; reads undefined; `?? {}` deep-equals {}", () => {
+    const withoutLev = validCurrentDraft();
+    const parsed = scenarioDraftSchema.safeParse(withoutLev);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.leverageOverrides).toBeUndefined();
+    expect(parsed.data.leverageOverrides ?? {}).toEqual({});
+  });
+
+  it("Test 3 — NO-refine pin (D3 2026-07-11): an OUT-OF-RANGE value {999, -5} still PASSES the whole-draft parse", () => {
+    // A .min/.max range refine here would FAIL safeParse → route the codec to the
+    // draft-deleting reset → DATA LOSS. Out-of-range values are ACCEPTED by the
+    // schema; read-side sanitize (sanitizeLeverage) is plan 90.5-04's job.
+    const withGarbage: ScenarioDraft = {
+      ...validCurrentDraft(),
+      leverageOverrides: { "ref-a": 999, "ref-b": -5 },
+    };
+    const parsed = scenarioDraftSchema.safeParse(withGarbage);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.leverageOverrides).toEqual({ "ref-a": 999, "ref-b": -5 });
+  });
+
+  it("Test 4 — setLeverageOverrides is a pure spread twin of setMemberKeyIds (new object, input unmutated, other fields ref-equal)", () => {
+    const draft = defaultDraftFromHoldings(HOLDINGS_2);
+    const before = JSON.stringify(draft);
+    const stamped = setLeverageOverrides(draft, { a: 2 });
+    expect(stamped.leverageOverrides).toEqual({ a: 2 });
+    expect(stamped).not.toBe(draft);
+    expect(JSON.stringify(draft)).toBe(before); // input unmutated
+    // every other field is reference-equal (pure spread — no clone)
+    expect(stamped.toggleByScopeRef).toBe(draft.toggleByScopeRef);
+    expect(stamped.weightOverrides).toBe(draft.weightOverrides);
+    expect(stamped.addedStrategies).toBe(draft.addedStrategies);
+    expect(stamped.memberKeyIds).toBe(draft.memberKeyIds);
+  });
+
+  it("Test 5 — version discipline: SCENARIO_SCHEMA_VERSION is still 4 (no bump for this additive field)", () => {
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4);
+  });
+
+  it("Test 6 (round-2 M-2) — removeAddedStrategy PRUNES the removed leg's leverageOverrides entry (keeps the rest)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const withStrategy = addStrategyBrowse(initial, STRAT_A);
+    const withLev: ScenarioDraft = {
+      ...withStrategy,
+      leverageOverrides: { [STRAT_A.id]: 3, "holding:binance:BTC:spot": 2 },
+    };
+    const removed = removeAddedStrategy(withLev, STRAT_A.id);
+    // The removed leg's leverage is gone; a surviving book leg's leverage stays.
+    expect(removed.leverageOverrides).toEqual({ "holding:binance:BTC:spot": 2 });
+    expect(removed.addedStrategies).toEqual([]);
+  });
+
+  it("Test 7 (round-2 M-2) — removeAddedStrategy on a draft WITHOUT leverageOverrides leaves the field ABSENT (byte-compat)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const withStrategy = addStrategyBrowse(initial, STRAT_A);
+    expect(withStrategy.leverageOverrides).toBeUndefined();
+    const removed = removeAddedStrategy(withStrategy, STRAT_A.id);
+    // No field in → no field out (never fabricates an empty leverage map).
+    expect(removed.leverageOverrides).toBeUndefined();
+    expect("leverageOverrides" in removed).toBe(false);
   });
 });
 

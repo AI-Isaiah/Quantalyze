@@ -347,6 +347,58 @@ describe("POST /api/allocator/scenario/saved", () => {
     expect(insertedDraft.window).toBeUndefined();
     expect(lastInsertPayload!.schema_version).toBe(3);
   });
+
+  // LEV-02 (Phase 90.5, D3/D4) — per-strategy leverage overrides persist as part
+  // of the saved draft. The route persists `parsed.data.draft` WHOLE, so the
+  // observable at this boundary is: (1) once scenarioDraftSchema declares the
+  // additive-optional `leverageOverrides` field, a POSTed leverage map survives
+  // the `z.object` unknown-key STRIP and reaches the insert intact — the D3
+  // load-bearing seam; (2) an out-of-range value does NOT 400 (deliberately NO
+  // range refine — a refine failure routes the codec to the draft-DELETING reset;
+  // the clamp is sanitize-on-read in the composer, NOT a server reject; this
+  // supersedes the 90.5-VALIDATION.md "server clamp" row, D3 correction
+  // 2026-07-11); (3) an absent field stays absent (backward draft shape). These
+  // are regression armor over the plan-90.5-02 schema seam — no route code change.
+  it("T_S21 — a draft carrying leverageOverrides round-trips WHOLE through the insert (field not stripped)", async () => {
+    const leverageOverrides = { "strat-a": 2, "holding:binance:BTC:spot": 1.5 };
+    const WITH_LEV = { ...VALID_DRAFT, schema_version: 3, leverageOverrides };
+    const res = await POST(mkPost({ name: "Levered", draft: WITH_LEV }));
+    expect(res.status).toBe(200);
+    expect(lastInsertPayload).not.toBeNull();
+    const insertedDraft = lastInsertPayload!.draft as {
+      leverageOverrides?: unknown;
+    };
+    // The schema field stops the z.object unknown-key strip — WITHOUT it the map
+    // would be silently dropped before the insert.
+    expect(insertedDraft.leverageOverrides).toEqual(leverageOverrides);
+  });
+
+  it("T_S22 — an OUT-OF-RANGE leverageOverrides value does NOT 400 (no range refine; clamp is sanitize-on-read, D3)", async () => {
+    const OUT_OF_RANGE = {
+      ...VALID_DRAFT,
+      schema_version: 3,
+      leverageOverrides: { "strat-a": 999 },
+    };
+    const res = await POST(mkPost({ name: "Out of range", draft: OUT_OF_RANGE }));
+    // Parse SUCCEEDS — the range is sanitize-on-read territory, never a save
+    // reject (a schema refine failure would route the codec to a draft-deleting
+    // reset over one bad persisted value).
+    expect(res.status).toBe(200);
+    const insertedDraft = lastInsertPayload!.draft as {
+      leverageOverrides?: Record<string, number>;
+    };
+    // Persisted verbatim (clamped later on READ, not here).
+    expect(insertedDraft.leverageOverrides).toEqual({ "strat-a": 999 });
+  });
+
+  it("T_S23 — a draft WITHOUT leverageOverrides inserts cleanly with no such key (optional-absent, backward shape)", async () => {
+    const res = await POST(mkPost({ name: "No leverage", draft: VALID_DRAFT }));
+    expect(res.status).toBe(200);
+    const insertedDraft = lastInsertPayload!.draft as {
+      leverageOverrides?: unknown;
+    };
+    expect(insertedDraft.leverageOverrides).toBeUndefined();
+  });
 });
 
 // ===========================================================================

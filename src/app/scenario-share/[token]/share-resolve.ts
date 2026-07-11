@@ -42,6 +42,7 @@ import {
 import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { sanitizeLeverageMap } from "@/lib/leverage";
 
 /** One `get_shared_scenario` series row (RPC `series` jsonb element). */
 export interface SharedSeriesRow {
@@ -89,6 +90,17 @@ export interface ResolvedOk {
    * pre-84 default (the whole no-lookup suite is that regression pin).
    */
   periodsPerYear: number;
+  /**
+   * LEV-02 (Phase 90.5 round-2 H-1) — TRUE when the saved draft applies a
+   * per-strategy leverage multiplier ≠ 1 to a SELECTED, WEIGHTED added leg (the
+   * composer's `leverageApplied` rule). The persisted leverage is now part of
+   * what the scenario MEANS, so the shared projection runs it (state.leverage
+   * below) AND the page must LABEL the modeled state — a leveraged share is a
+   * what-if, not the strategy's realized track. Drives the page's one-line
+   * modeled caption. Holdings-ref leverage never counts here (holdings refs are
+   * the owner's private book and never resolve to a public series).
+   */
+  leveraged: boolean;
 }
 
 /** Undecodable / version-ahead / unparseable draft — render the honest-absence
@@ -246,9 +258,16 @@ export function resolveSharedScenario(
     return { kind: "honest-absence", reason: "book-only" };
   }
 
-  // No leverage is persisted in the draft schema (it is transient UI state), so
-  // the shared projection runs at the persisted weights with default 1.0
-  // leverage — the honest reflection of what was saved.
+  // LEV-02 (round-2 H-1) — the persisted per-strategy leverage IS now part of
+  // the saved scenario (the German user's "leverage saved WITH the scenario"
+  // request). The recipient MUST project at the OWNER's saved multipliers, or
+  // the same scenario name renders a different track on the public page than in
+  // the owner's composer (the v1.5 PERSIST-02 cross-surface-divergence class).
+  // Thread the sanitized map onto the engine `state.leverage` (clamp-on-read via
+  // sanitizeLeverageMap, D3 — a tampered persisted value is clamped, never
+  // poisons the curve). computeScenario's `lev()` only reads leverage for the
+  // iterated added legs, so a holdings-ref leverage entry (owner book, never in
+  // the public series) is inert.
   //
   // v1.5 PERSIST-02 — thread the OWNER's saved coverage window VERBATIM. The
   // window rides in the returned `draft` JSONB (get_shared_scenario returns the
@@ -284,12 +303,32 @@ export function resolveSharedScenario(
         return span ? [span] : [];
       }),
     );
+  // LOW-1 (round-3) — signal:false: this is the PUBLIC anonymous share render.
+  // A corrupt persisted value would otherwise fire a Sentry warning on EVERY
+  // anonymous view (a quota-burn vector on a public URL). The coercion still
+  // clamps identically; the actionable owner-facing signal lives on the
+  // composer rehydrate path.
+  const leverage = sanitizeLeverageMap(draft.leverageOverrides, {
+    signal: false,
+  });
   const state: ScenarioState = {
     selected,
     weights,
     startDates,
+    leverage,
     ...(window ? { window } : {}),
   };
+  // The composer's `leverageApplied` rule: a multiplier only "modeled" the
+  // projection when it is ≠ 1 on a SELECTED, positively-weighted leg — a stale
+  // multiplier on a toggled-off / zero-weight leg contributes nothing, so it
+  // must not raise the modeled caption.
+  const leveraged = Object.entries(leverage).some(
+    ([id, L]) =>
+      Number.isFinite(L) &&
+      L !== 1 &&
+      selected[id] === true &&
+      (weights[id] ?? 0) > 0,
+  );
   const dateMapCache = buildDateMapCache(strategies);
   // Phase 84 (BLEND-01) — the blend annualizes √365 if ANY SELECTED leg is
   // crypto, else √252 (blendPeriodsPerYear). SELECTED-only (the engine's
@@ -319,5 +358,8 @@ export function resolveSharedScenario(
     // Phase 84 (BLEND-01) — the basis the projection actually used, so the page
     // threads the IDENTICAL clock into ScenarioBenchmarkSection.
     periodsPerYear: basis,
+    // LEV-02 (round-2 H-1) — surface the modeled-leverage caption when a
+    // selected, weighted leg carries a multiplier ≠ 1.
+    leveraged,
   };
 }

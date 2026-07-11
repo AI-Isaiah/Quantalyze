@@ -126,6 +126,10 @@ export function SubmitStep({
             "KEY_NETWORK_TIMEOUT",
             "GATE_DRAFT_GONE",
             "GUARD_BLOCKED",
+            // Phase 88 / W-4 — composite membership probe fail-closed (503).
+            // Recoverable copy renders the Retry affordance rather than
+            // degrading to the generic UNKNOWN envelope.
+            "COMPOSITE_MEMBERSHIP_UNKNOWN",
           ],
         );
         const surfaced: WizardErrorCode =

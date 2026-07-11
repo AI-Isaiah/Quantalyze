@@ -63,3 +63,46 @@ describe("compute", () => {
     expect(() => compute([0.01], ["2024-01-01", "2024-01-02"])).toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// FS-02 (Phase 90) — sparse invariance: gap exclusion from compounding is true
+// BY CONSTRUCTION. `compute()`/`cumEq()` only ever see the observations they are
+// handed; they never zero-fill an interior gap. So a sparse series (gap days
+// simply absent) is NOT the same as a dense series with explicit 0.0 gap rows —
+// the observation count that drives every statistic equals the INPUT length.
+// This pins that compute is a pure function of its inputs (no internal reindex).
+// ---------------------------------------------------------------------------
+describe("FS-02 sparse invariance (gap exclusion by construction)", () => {
+  // 8-point sparse series with a real 2-day gap between 2025-08-04 and
+  // 2025-08-07 (the 5th and 6th are ABSENT — never zero-filled).
+  const SPARSE_RETS = [0.01, 0.02, -0.03, 0.04, -0.05, 0.06, -0.01, 0.02];
+  const SPARSE_DATES = [
+    "2025-08-01", "2025-08-02", "2025-08-03", "2025-08-04",
+    "2025-08-07", "2025-08-08", "2025-08-09", "2025-08-10",
+  ];
+  // Dense twin — identical values with explicit 0.0 rows on the two gap dates.
+  const DENSE_RETS = [0.01, 0.02, -0.03, 0.04, 0.0, 0.0, -0.05, 0.06, -0.01, 0.02];
+  const DENSE_DATES = [
+    "2025-08-01", "2025-08-02", "2025-08-03", "2025-08-04", "2025-08-05",
+    "2025-08-06", "2025-08-07", "2025-08-08", "2025-08-09", "2025-08-10",
+  ];
+
+  it("the equity array length equals the INPUT length — compute never reindexes", () => {
+    expect(cumEq(SPARSE_RETS).length).toBe(SPARSE_RETS.length);
+    const r = compute(SPARSE_RETS, SPARSE_DATES);
+    expect(r.n).toBe(SPARSE_RETS.length);
+    expect(r.eq.length).toBe(SPARSE_RETS.length);
+  });
+
+  it("sparse vol (no gap days) differs from dense-with-0.0 vol — no internal zero-fill", () => {
+    // If compute() secretly zero-filled the interior gap, the sparse vol would
+    // equal the dense-with-0.0 vol. It does NOT: the two 0.0 rows change the
+    // observation count and the mean, so the annualized vols must differ. This
+    // is the by-construction proof that gap days never enter compounding.
+    const sparseVol = compute(SPARSE_RETS, SPARSE_DATES).ann_vol;
+    const denseVol = compute(DENSE_RETS, DENSE_DATES).ann_vol;
+    expect(sparseVol).not.toBe(denseVol);
+    expect(sparseVol).toBeGreaterThan(0);
+    expect(denseVol).toBeGreaterThan(0);
+  });
+});

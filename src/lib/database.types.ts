@@ -3079,6 +3079,25 @@ export type Database = {
         }
         Returns: string
       }
+      add_wizard_composite_key: {
+        Args: {
+          p_api_key_encrypted: string
+          p_api_secret_encrypted: string
+          p_dek_encrypted: string
+          p_exchange: string
+          p_kek_version: number
+          p_label: string
+          p_nonce: string
+          p_passphrase_encrypted: string
+          p_placeholder_name: string
+          p_user_id: string
+          p_wizard_session_id: string
+        }
+        Returns: {
+          api_key_id: string
+          strategy_id: string
+        }[]
+      }
       check_fan_in_ready: { Args: { p_child_job_id: string }; Returns: boolean }
       claim_compute_jobs: {
         Args: { p_batch_size: number; p_worker_id: string }
@@ -3520,6 +3539,10 @@ export type Database = {
           match_decision_id: string
           was_already_sent: boolean
         }[]
+      }
+      set_wizard_composite_members: {
+        Args: { p_members: Json; p_strategy_id: string; p_user_id: string }
+        Returns: number
       }
       stamp_first_sync_success: {
         Args: { p_user_id: string }

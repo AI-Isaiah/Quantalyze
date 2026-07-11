@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -119,9 +119,17 @@ export interface ConnectKeySuccess {
 export interface ConnectKeyStepProps {
   wizardSessionId: string;
   onSuccess: (result: ConnectKeySuccess) => void;
+  /**
+   * Phase 88 / ONB-01 (A1). Optional slot rendered between the primary CTA and
+   * the CSV escape-hatch. DEFAULT-ABSENT keeps this component byte-identical to
+   * the single-key experience — the multi-key step (MultiKeyConnectStep) uses
+   * it to inject the ghost "+ Add another key window" affordance. When
+   * undefined, `{footerSlot}` renders nothing, so the DOM is unchanged.
+   */
+  footerSlot?: ReactNode;
 }
 
-export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepProps) {
+export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot }: ConnectKeyStepProps) {
   const [exchange, setExchange] = useState<ExchangeId>("binance");
   const [nickname, setNickname] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -367,6 +375,8 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess }: ConnectKeyStepPro
             {submitting ? "Validating..." : "Validate key and continue"}
           </Button>
         </div>
+
+        {footerSlot}
 
         {/* Phase 15 follow-up (2026-05-07): the CSV branch shipped without a
             GUI entry point — only reachable via direct URL — so founders

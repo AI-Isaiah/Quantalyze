@@ -12,12 +12,16 @@
  *
  * Honesty invariants this helper preserves (test-pinned in scenario-compare.test.ts):
  *
- *   - NO leverage. Leverage is ephemeral `useState` in the composer
- *     (the composer's `leverageByRef` state), NEVER persisted — a saved `ScenarioDraft`
- *     carries no leverage field. The projection state built here OMITS the
- *     optional `leverage` map entirely, so `computeScenario`'s `lev()` defaults
- *     every leg to 1 and the byte-identical pre-R4 path runs. We never read a
- *     `leverage` field off the draft even if one is smuggled on.
+ *   - Leverage APPLIED sanitize-on-read (LEV-02, round-2 H-2). Post-LEV-02 the
+ *     composer FOLDS `leverageByRef` into the saved `draft.leverageOverrides` at
+ *     Save, so the persisted multipliers are part of what the scenario means.
+ *     This compare engine builds `state.leverage` from
+ *     `sanitizeLeverageMap(draft.leverageOverrides)` — EXACTLY mirroring the
+ *     composer's `projectionState.leverage` — so a saved scenario's compare row
+ *     shows the SAME levered metrics the composer does (never a silently 1×
+ *     row: the v1.5 PERSIST-02 cross-surface-divergence class). A draft with NO
+ *     leverageOverrides yields an all-1 map, byte-identical to the pre-R4 path
+ *     (`computeScenario`'s `lev()` default), so every pre-LEV-02 pin holds.
  *
  *   - Degenerate → null. `computeScenario` returns null-metric `ComputedMetrics`
  *     for degenerate sets (empty active set, n < 10, NaN-poisoned curve). We let
@@ -57,6 +61,7 @@ import {
 } from "@/lib/scenario";
 import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
+import { sanitizeLeverageMap } from "@/lib/leverage";
 import {
   buildAddedOnlySet,
   buildPerKeyStrategyForBuilderSet,
@@ -218,12 +223,25 @@ export function computeMetricsForDraft(
   // the collapse, so computeScenario reflects exactly what the saved draft
   // encodes — the same wiring the composer does in its `projectionState` memo.
   //
-  // Deliberately NO `leverage` key: leverage is never persisted (a saved draft
-  // has no leverage field), so omitting it makes computeScenario's `lev()`
-  // default every leg to 1 and runs the byte-identical pre-R4 path. We read
-  // ONLY draft.toggleByScopeRef / draft.weightOverrides — never any leverage.
+  // LEV-02 (round-2 H-2) — the saved draft's persisted `leverageOverrides` ARE
+  // now part of what the scenario MEANS (the composer folds them into the draft
+  // at Save). If this compare engine omitted them, a saved scenario's compare
+  // row would show 1× Sharpe/vol/DD while the composer shows the levered numbers
+  // for the SAME scenario — the v1.5 PERSIST-02 cross-surface-divergence class.
+  // Build `leverage` sanitize-on-read (D3 — a tampered persisted value is
+  // clamped at use, never fails the whole-draft parse), EXACTLY mirroring the
+  // composer's `projectionState.leverage`. We read draft.toggleByScopeRef /
+  // draft.weightOverrides / draft.leverageOverrides — the full saved projection.
+  // LOW-1 (round-3) — signal:false: the compare surface reads leverage TWICE per
+  // corrupt entry per compute (here + the panel's draftHasEffectiveLeverage), and
+  // re-computes on every payload change — a noisy, non-actionable duplicate of
+  // the owner's rehydrate signal. Suppress here; clamp behavior is unchanged.
+  const sanitizedLeverage = sanitizeLeverageMap(draft.leverageOverrides, {
+    signal: false,
+  });
   const selected: Record<string, boolean> = {};
   const weights: Record<string, number> = {};
+  const leverage: Record<string, number> = {};
   for (const s of adapterOutput.strategies) {
     const toggle = draft.toggleByScopeRef[s.id];
     selected[s.id] =
@@ -235,11 +253,18 @@ export function computeMetricsForDraft(
       typeof ov === "number" && Number.isFinite(ov)
         ? ov
         : (adapterOutput.state.weights[s.id] ?? 0);
+    // Mirror the composer's projectionState.leverage: an absent/non-finite
+    // multiplier defaults to 1 (the engine `lev()` default). A draft with NO
+    // leverageOverrides yields an all-1 map → byte-identical to the pre-LEV-02
+    // path (computeScenario's lev() default), so every existing pin holds.
+    const L = sanitizedLeverage[s.id];
+    leverage[s.id] = typeof L === "number" && Number.isFinite(L) ? L : 1;
   }
   const projectionState: ScenarioState = {
     selected,
     weights,
     startDates: adapterOutput.state.startDates,
+    leverage,
   };
 
   // Phase 63 ENGINE-02 — the alias collapse is retired with the holdings path.

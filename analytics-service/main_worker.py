@@ -161,6 +161,11 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # minutes (full-history realized PnL + funding fetch); watchdog must be
     # strictly greater. Mirrors the sync_trades 15→30 pairing.
     "derive_broker_dailies": "30 minutes",  # handler timeout = 15 minutes
+    # Phase 86 (COMP-02) — the composite fans out over N member keys and, when
+    # MTM is admissible, crawls each Deribit member TWICE (cash + mark_to_market),
+    # so its handler timeout is 20 minutes. Watchdog must be strictly greater;
+    # 30 minutes mirrors the derive/sync_trades 15→30 headroom pairing.
+    "stitch_composite": "30 minutes",  # handler timeout = 20 minutes
 }
 
 

@@ -200,6 +200,42 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(findWizardError()!.code).toBe("UNKNOWN");
   });
 
+  // Phase 88 / W-4 (T-88-10): the finalize route fails CLOSED with a 503
+  // { code: "COMPOSITE_MEMBERSHIP_UNKNOWN" } when it cannot determine composite
+  // membership. That code must be a known finalize code so SubmitStep surfaces
+  // its composite-specific, RECOVERABLE copy (with the Retry affordance) rather
+  // than degrading to the generic UNKNOWN envelope. This test fails if the code
+  // is dropped from the union / KNOWN_FINALIZE_CODES (it would map to UNKNOWN).
+  it("maps the route's COMPOSITE_MEMBERSHIP_UNKNOWN code (503) to its composite-specific retry copy, not generic UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          error: "Could not determine composite membership; please retry.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // Telemetry funnel-truth: the code passes through (pre-fix: UNKNOWN).
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    // The envelope renders the composite-specific title (from wizardErrors.ts),
+    // NOT the generic UNKNOWN copy ("Something went wrong.").
+    expect(
+      screen.getByText("We couldn't confirm this strategy's key membership."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+
+    // Recoverable copy → the Retry affordance renders (clear_and_retry action).
+    expect(
+      await screen.findByRole("button", { name: "Retry" }),
+    ).toBeInTheDocument();
+  });
+
   // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
   // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
   // keeps its Retry button (RED-TEAM R1 regression guard).

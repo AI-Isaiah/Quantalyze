@@ -6,6 +6,13 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
+import { BasisProvider, useBasis, mtmDisabledReasonCopy, type Basis } from "./basis-context";
+// Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
+// wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
+// L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
+import { LeverageProvider, useLeverage, useLeveragedMetrics, useModeledLeverage } from "./leverage-context";
+import { MAX_LEVERAGE } from "@/lib/leverage";
+import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
@@ -182,7 +189,11 @@ export function FactsheetBody({
   const { key: cmpKey } = useActiveComparator();
   const hasComparator = cmpKey !== "none";
   return (
-    <>
+    // Phase 90 (FS-03): BasisProvider wraps the tree so useBasis() resolves in
+    // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
+    // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
+    <LeverageProvider>
+    <BasisProvider>
       <article
         id="factsheet-main"
         tabIndex={-1}
@@ -275,7 +286,7 @@ export function FactsheetBody({
             </CollapsibleSection>
           </section>
           <div id="factsheet-metrics" className="contents" />
-          <MetricsColumn scenarioMode={scenarioMode} />
+          <MetricsColumnWithBasis scenarioMode={scenarioMode} />
         </div>
 
         {/* AllocatorSection uses demo blended portfolios — derivable data only
@@ -291,7 +302,71 @@ export function FactsheetBody({
 
         {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
-    </>
+    </BasisProvider>
+    </LeverageProvider>
+  );
+}
+
+/**
+ * Phase 90 (FS-03, D5) — MetricsColumn stays pinned to CASH always (its
+ * distributional stats have no persisted MTM counterpart, so it is never passed
+ * the basis hook). When the KpiStrip has diverged to MTM we surface a static
+ * "BASIS · CASH SETTLEMENT" eyebrow atop the column so the reader knows the
+ * right-rail metrics did NOT follow the toggle. Composite-only; when the eyebrow
+ * is not shown (single-key OR composite-cash) this renders EXACTLY the bare
+ * <MetricsColumn> — byte-identical to before (GUARD-02).
+ */
+function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
+  const payload = usePayload();
+  const { basis } = useBasis();
+  // M-3 (round-2) — the single-key leverage recompute (LEV-01) levers ONLY the
+  // KpiStrip's headline scalars; the right-rail MetricsColumn duplicates
+  // Cum/CAGR/Vol/Sharpe/Sortino/MaxDD from the UN-levered payload. Surface a
+  // symmetric "BASE · 1× TRACK" eyebrow atop the rail while modeled, so a levered
+  // strip scalar is never read as un-bridged against the rail's base-track value.
+  // Round-3 perf — read the CHEAP `useModeledLeverage` predicate (no compute()),
+  // NOT `useLeveragedMetrics`, so the eyebrow never re-runs the O(n) recompute
+  // the KpiStrip already ran at L≠1.
+  const { modeled } = useModeledLeverage(payload);
+  const composite = payload.dataQuality?.composite === true;
+  // Non-composite at L=1: bare column, byte-identical to before (GUARD-02). Under
+  // a MODELED leverage (single-key only — the control is composite-hidden), the
+  // "BASE · 1× TRACK" eyebrow flags that the rail stayed on the base track
+  // (mirrors the composite MTM "BASIS · CASH SETTLEMENT" eyebrow below).
+  if (!composite) {
+    if (!modeled) return <MetricsColumn scenarioMode={scenarioMode} />;
+    return (
+      <div className="flex flex-col gap-4 min-w-0">
+        <p
+          data-testid="metricscolumn-base-track-eyebrow"
+          className="text-micro uppercase tracking-wider text-text-muted"
+        >
+          BASE · 1× TRACK
+        </p>
+        <MetricsColumn scenarioMode={scenarioMode} />
+      </div>
+    );
+  }
+  // F4 (UI-SPEC §4 zero-shift): render the eyebrow PERSISTENTLY (reserved line
+  // height) so toggling cash↔MTM no longer pops it in/out and reflows the right
+  // rail. NOTE (deviation from the finding's literal "swap CASH↔MTM text"): the
+  // MetricsColumn distributional stats are cash-ONLY (D5 — skew/VaR/win-rate have
+  // NO persisted MTM counterpart), so labeling the column "MARK-TO-MARKET" would
+  // be the exact no-invented-data violation this milestone forbids. Instead the
+  // eyebrow flags "these stayed CASH" under MTM, and holds a blank line (nbsp)
+  // under cash — reserving height without emitting a "BASIS ·" string that would
+  // duplicate the KpiStrip eyebrow or mislabel the column.
+  const onMtm = basis === "mark_to_market";
+  return (
+    <div className="flex flex-col gap-4 min-w-0">
+      <p
+        aria-hidden={!onMtm}
+        className="text-micro uppercase tracking-wider text-text-muted"
+      >
+        {onMtm ? "BASIS · CASH SETTLEMENT" : " "}
+      </p>
+      <MetricsColumn scenarioMode={scenarioMode} />
+    </div>
   );
 }
 
@@ -312,6 +387,10 @@ const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSorti
 function PerformanceCharts() {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
+  // Phase 90 (FS-03): charts stay cash always; under MTM we caption that. Plus
+  // the FS-01/02 visually-hidden AT summary for the stitched track. Composite-only.
+  const { basis } = useBasis();
+  const composite = payload.dataQuality?.composite === true;
   // Defensive fallbacks: a cache entry created before the rollingWindow
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
@@ -362,6 +441,40 @@ function PerformanceCharts() {
       {configs.map(cfg => (
         <TimeSeriesChart key={cfg.key} config={cfg} />
       ))}
+      {/* FS-01/02 (composite-only): visually-hidden AT summary for the sparse
+          stitched cumulative track. The seam/gap markers are pointerEvents-none,
+          so this is the authoritative AT surface. */}
+      {composite && (() => {
+        // F6 (IN-05): N boundaries ⇒ N+1 keys, but a 1-member composite has 0
+        // boundaries and therefore NO handoffs — don't claim "1 keys" or "seam
+        // markers at each key handoff". Pluralize and guard the handoff clause.
+        const nBoundaries = payload.segmentBoundaries?.length ?? 0;
+        const nKeys = nBoundaries + 1;
+        const nGaps = payload.missingSegments?.length ?? 0;
+        return (
+          <span className="sr-only">
+            Stitched from {nKeys} key{nKeys === 1 ? "" : "s"}.
+            {nBoundaries > 0 ? " Seam markers at each key handoff;" : ""} {nGaps}{" "}
+            gap{nGaps === 1 ? "" : "s"} shown as breaks, never as zero returns.
+          </span>
+        );
+      })()}
+      {/* FS-03 (composite-only): charts never swap basis. F5 (IN-03): PRE-MOUNT
+          this role=status region (rendered for every composite, empty under cash)
+          so the caption text is a CONTENT change on an existing live region
+          rather than a mount-on-toggle region — several SRs do not reliably
+          announce a live region that appears at the same instant as its content.
+          role="status" carries an implicit aria-live="polite"; this is now the
+          SINGLE authoritative announcer for the basis switch (the KpiStrip
+          eyebrow's redundant aria-live was dropped to avoid a double
+          announcement). */}
+      {composite && (
+        <p role="status" className="text-caption text-text-secondary">
+          {basis === "mark_to_market"
+            ? "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."
+            : ""}
+        </p>
+      )}
       {!roll.enough && (
         <NotEnoughDataPanel
           title="Rolling Metrics — Not enough data"
@@ -585,10 +698,30 @@ function CapacityChip({
   );
 }
 
+// Phase 90.5 (LEV-01, UI-SPEC copy contract) — the cost-free caveat, rendered
+// verbatim beneath the MODELED eyebrow at every L!=1 (persistent visible line,
+// NOT tooltip-only; AT-robust). Kept as a const so the apostrophe/arrow glyphs
+// don't trip JSX entity-escaping lint.
+// WR-01 — the caveat is scoped to what the LEV-01 lighter recompute actually
+// re-derives (the headline KPIs). The equity/drawdown chart, the rolling panels,
+// and the benchmark-relative stats (α, IR) below the strip stay on the base 1×
+// track, so the copy must NOT claim the charts scale (they don't) — an honest,
+// coherent statement of exactly which numbers are levered.
+const LEVERAGE_CAVEAT =
+  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage in the headline KPIs above; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). Everything else on this page — the equity and drawdown charts, the rolling panels, the benchmark-relative stats (α, IR), and the right-rail metrics — stays on the base 1× track. This is a modeled what-if — not the strategy's realized track record.";
+
 function KpiStrip() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
-  const m = payload.strategyMetrics;
+  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE and only
+  // here. Cash returns strategyMetrics untouched → single-key is bit-identical
+  // (the existing kpistrip pins prove it). α/IR + MetricsColumn stay cash.
+  // Phase 90.5 (LEV-01): the ONE consumer swap. useLeveragedMetrics returns the
+  // basis metrics UNTOUCHED at L=1 (byte-identity; the frozen kpistrip pins prove
+  // it) and a client recompute of the SAME scalars at L!=1. items[] read m.*
+  // unchanged.
+  const { basis, m, modeled, appliedLeverage } = useLeveragedMetrics(payload);
+  const composite = payload.dataQuality?.composite === true;
   const j = cmp.joint;
   const cn = cmp.shortName;
 
@@ -614,15 +747,27 @@ function KpiStrip() {
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
+    // F2 (no-invented-data): α / IR are series-derived and exist for the CASH
+    // basis only (D5 — they are never recomputed per-basis). Under the
+    // "BASIS · MARK-TO-MARKET" eyebrow a cash α/IR number would be mislabeled, so
+    // render "—" instead of inheriting the cash value.
+    // WR-01 — the SAME suppression applies under a MODELED leverage: the LEV-01
+    // lighter recompute levers only the seven headline scalars, NOT the
+    // benchmark-relative stats. α (r_strat = α + β·r_bench) transforms as α → L·α
+    // and β → L·β under r→L·r, but the strip pulls the UN-levered `j.alpha` /
+    // `j.info_ratio` from the payload — so beside a levered Sharpe/Vol they would
+    // be an internally-inconsistent mislabel. Render "—" instead (matching the
+    // MTM branch shape) rather than an unrescaled benchmark-relative number.
+    const suppressRelative = basis === "mark_to_market" || modeled;
     items.push({
       label: `α vs ${cn}`,
-      value: pctSigned(j.alpha, 1),
-      tone: signTone(j.alpha),
+      value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
+      tone: suppressRelative ? undefined : signTone(j.alpha),
     });
     items.push({
       label: `IR vs ${cn}`,
-      value: num(j.info_ratio),
-      tone: signTone(j.info_ratio),
+      value: suppressRelative ? "—" : num(j.info_ratio),
+      tone: suppressRelative ? undefined : signTone(j.info_ratio),
     });
   }
   // Phase 52-06 / TYPE-04 — the strip reflows on ITS OWN width via `@container`
@@ -641,13 +786,44 @@ function KpiStrip() {
   const containerCols =
     items.length === 9 ? "@5xl:grid-cols-9" : "@5xl:grid-cols-7";
   return (
-    <section
-      className="mt-6 overflow-hidden @container"
-      style={{
-        backgroundColor: "var(--color-surface)",
-        border: "1px solid var(--color-border)",
-      }}
-    >
+    <>
+      {/* Phase 90 (FS-03): persistent composite-only basis eyebrow. Reserved
+          height, only the TEXT swaps on toggle → zero reflow. F5 (IN-03): the
+          aria-live was REMOVED here — the PerformanceCharts role=status caption
+          is the single authoritative live region for the basis switch, so the
+          eyebrow no longer double-announces. */}
+      {composite && (
+        <p className="mt-6 text-micro uppercase tracking-wider text-text-muted">
+          BASIS ·{" "}
+          {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
+        </p>
+      )}
+      {/* Phase 90.5 (LEV-01, UI-SPEC): the MODELED amber eyebrow + cost-free
+          caveat are INSERTED only at L!=1 (never a reserved row) so L=1 stays
+          byte-identical (GUARD-02). Amber = "modeled/what-if, recoverable" — a
+          leveraged KPI is a projection, not the realized track, so it must be
+          unmistakable (not the BASIS eyebrow's neutral grey). The eyebrow is the
+          authoritative modeled-state live region. */}
+      {modeled && (
+        <>
+          <p
+            className="mt-6 text-micro font-mono uppercase tracking-wider"
+            style={{ color: "var(--color-warning, #B45309)" }}
+            role="status"
+            aria-live="polite"
+          >
+            MODELED · {appliedLeverage}×
+          </p>
+          <p className="mt-2 text-caption text-text-muted">{LEVERAGE_CAVEAT}</p>
+        </>
+      )}
+      <section
+        className="mt-6 overflow-hidden @container"
+        style={{
+          backgroundColor: "var(--color-surface)",
+          border: "1px solid var(--color-border)",
+        }}
+      >
       <div className={`grid grid-cols-3 ${containerCols} @5xl:divide-y-0`} style={{ }}>
         {items.map(it => (
           <div
@@ -692,7 +868,8 @@ function KpiStrip() {
           ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -847,6 +1024,47 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
   const shareMode = useShareMode();
+  // Phase 90 (FS-03, D2/D5): composite-only cash↔MTM toggle. NEVER apiKeyId —
+  // the server-truth `dataQuality.composite` marker. MTM enabled iff the
+  // persisted `mark_to_market` basis exists (`mtmGate.available`); otherwise
+  // disabled with the mapped closed-set reason (D1). Default cash.
+  const { basis, setBasis } = useBasis();
+  const composite = payload.dataQuality?.composite === true;
+  const mtmAvailable = payload.mtmGate?.available === true;
+  const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
+  // Phase 90.5 (LEV-01, D1/D2/D5): fail-closed eligibility — the leverage cluster
+  // renders IFF single-key (composite !== true) AND periodsPerYear present. It
+  // occupies the SAME mr-auto slot as the composite BASIS control; the two never
+  // coexist (D1), so they never compete for the slot.
+  const leverageEligible = !composite && payload.periodsPerYear != null;
+  const { leverage, setLeverage } = useLeverage();
+  // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
+  // channel does not exist on the factsheet). Interactive fail-loud contract
+  // mirrors the composer's handleLeverageChange: non-finite -> keep previous +
+  // message; <0 -> 0 + message; >MAX -> MAX + message; valid -> clear.
+  const [leverageMsg, setLeverageMsg] = React.useState<string | null>(null);
+  const onLeverageChange = (raw: number) => {
+    if (!Number.isFinite(raw)) {
+      setLeverageMsg(
+        `Invalid leverage — enter a number between 0 and ${MAX_LEVERAGE}. The previous value was kept.`,
+      );
+      return;
+    }
+    if (raw < 0) {
+      setLeverageMsg(
+        "Leverage can't be negative — shorting isn't modeled in this projection. Clamped to 0.",
+      );
+    } else if (raw > MAX_LEVERAGE) {
+      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum modeled leverage.`);
+    } else {
+      setLeverageMsg(null);
+    }
+    setLeverage(Math.min(MAX_LEVERAGE, Math.max(0, raw)));
+  };
+  const resetLeverage = () => {
+    setLeverage(1);
+    setLeverageMsg(null);
+  };
   const resetView = () => {
     resetXRange();
     setComparator(payload.activeComparator);
@@ -860,6 +1078,86 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   };
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
+      {leverageEligible && (
+        <div className="mr-auto flex flex-col items-start gap-1">
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor="leverage-factsheet"
+              className="text-micro font-mono uppercase tracking-wider text-text-muted"
+            >
+              LEVERAGE
+            </label>
+            <input
+              id="leverage-factsheet"
+              type="number"
+              step="0.1"
+              min="0"
+              max={MAX_LEVERAGE}
+              value={leverage.toString()}
+              title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
+              aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
+              onChange={(e) => {
+                // L-1 (round-2) — an emptied field (Number("") === 0) must NOT
+                // snap the strip to a flat 0× "MODELED · 0×" mid-edit while the
+                // user is retyping. Treat "" as keep-previous (like the
+                // non-finite branch in onLeverageChange), NOT an intentional 0.
+                if (e.target.value.trim() === "") return;
+                onLeverageChange(Number(e.target.value));
+              }}
+              className="w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+            />
+            <span aria-hidden="true" className="text-caption font-mono text-text-muted">
+              ×
+            </span>
+            {leverage !== 1 && (
+              <button
+                type="button"
+                onClick={resetLeverage}
+                aria-label="Reset leverage to 1×"
+                className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+              >
+                Reset 1×
+              </button>
+            )}
+          </div>
+          {leverageMsg && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="text-caption"
+              style={{ color: "var(--color-warning, #B45309)" }}
+            >
+              {leverageMsg}
+            </p>
+          )}
+        </div>
+      )}
+      {composite && (
+        <div className="mr-auto flex flex-col items-start gap-1">
+          <SegmentedControl
+            ariaLabel="Metrics basis"
+            activeId={basis}
+            onChange={(id) => setBasis(id as Basis)}
+            options={[
+              { id: "cash_settlement", label: "Cash settlement" },
+              {
+                id: "mark_to_market",
+                label: "Mark-to-market",
+                disabled: !mtmAvailable,
+                disabledReason: mtmReason,
+              },
+            ]}
+          />
+          {!mtmAvailable && (
+            <p
+              className="text-caption"
+              style={{ color: "var(--color-warning, #B45309)" }}
+            >
+              {mtmReason}
+            </p>
+          )}
+        </div>
+      )}
       <DisplayMenu />
       <button
         type="button"

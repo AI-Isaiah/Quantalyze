@@ -11,6 +11,7 @@ import { isUuid } from "@/lib/utils";
 import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { logAuditEventAsUser } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -462,16 +463,38 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // vs the pre-#597 `api_key_id → √365` proxy. Mirrors the migration backfill
   // rule (api_key_id IS NOT NULL → crypto).
   //
+  // Phase 86 / F-1: a MULTI-KEY composite has api_key_id=NULL (members live in
+  // strategy_keys), so the `apiKeyId ? crypto` rule alone would leave it on the
+  // picker/default 'traditional'. But every composite member venue is a crypto
+  // exchange this phase, and run_stitch_composite_job annualizes the headline on
+  // the venue blend (Deribit → √365). If asset_class stayed 'traditional', every
+  // #597 surface (scenario blends, leg annualization, OG card, peer-rank) would
+  // recompute √252 from the SAME returns and disagree with the composite headline
+  // by ~√(365/252) ≈ 1.20×. Force 'crypto' when the strategy has ≥1 member. The
+  // count is best-effort (membership isn't sensitive → admin client); a count
+  // blip falling open here CANNOT silently ship a mislabeled composite because
+  // the worker fails LOUD on a √365-vs-asset_class mismatch (F-1b) and the
+  // dispatch guard fails closed on unknowable membership.
+  const assetClassAdmin = createAdminClient();
+  const { count: assetClassMemberCount } = await assetClassAdmin
+    .from("strategy_keys")
+    .select("*", { count: "exact", head: true })
+    .eq("strategy_id", fields.strategy_id);
+  const isCompositeForAssetClass = (assetClassMemberCount ?? 0) > 0;
+  //
   // Non-blocking on failure: the column default means a failed write leaves a
   // CSV strategy on √252 (harmless for traditional; WRONG for crypto-CSV, so
-  // the failure is surfaced to Sentry below) and a broker strategy is
+  // the failure is surfaced to Sentry below) and a broker/composite strategy is
   // re-derived to crypto on the next finalize attempt.
   // @audit-skip: non-security annualization metadata (√365 crypto / √252
   // traditional) written as part of the already-audited strategy finalization;
   // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
   const { error: assetClassErr } = await supabase
     .from("strategies")
-    .update({ asset_class: apiKeyId ? "crypto" : fields.asset_class })
+    .update({
+      asset_class:
+        apiKeyId || isCompositeForAssetClass ? "crypto" : fields.asset_class,
+    })
     .eq("id", fields.strategy_id)
     .eq("user_id", user.id);
   if (assetClassErr) {
@@ -490,6 +513,112 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (apiKeyId) {
     const probe = await runScopeBroadeningProbe(apiKeyId);
     if (!probe.ok) return probe.response;
+  }
+
+  // ── Composite-first finalize routing ──────────────────────────────
+  // Phase 88 / ONB-01, D-LOCKED (CONTEXT 2026-07-10, Option A). Prod runs
+  // `process_key_unified_backbone = on` (since 2026-05-25), so
+  // isUnifiedBackboneActive() below is TRUE in prod and the unified arm
+  // REJECTS composites (COMPOSITE_UNSUPPORTED_UNIFIED, ~:1004). Without this
+  // hoist every wizard composite dies at submit with a 409. Branch
+  // composite-vs-single-key HERE, ahead of the flag: a strategy with >=1
+  // strategy_keys member ALWAYS enqueues stitch_composite (via
+  // runLegacyFinalize's after() arm, :776-811) regardless of the backbone
+  // flag. Single-key strategies fall through to the EXISTING unified-vs-legacy
+  // split byte-unchanged.
+  //
+  // The hoist engages only for apiKeyId === null. A composite has
+  // strategies.api_key_id = NULL (members live in strategy_keys); a strategy
+  // with api_key_id SET is definitively single-key (the two are mutually
+  // exclusive by construction). Scoping the branch to apiKeyId === null keeps
+  // the fail-closed W-4 posture aimed at a POSSIBLE composite (never a known
+  // single-key) and leaves every api_key_id-bearing path untouched.
+  if (apiKeyId === null) {
+    const compositeAdmin = createAdminClient();
+    let compositeMemberCountN: number;
+    try {
+      // compositeMemberCount fails CLOSED (stamps a terminal 'failed' row,
+      // then throws) on an unknowable count — never falls open to a single-key
+      // dispatch of a possible composite (W-4 / T-88-10).
+      compositeMemberCountN = await compositeMemberCount(
+        compositeAdmin,
+        fields.strategy_id,
+      );
+    } catch (err) {
+      // Fail CLOSED: the terminal 'failed' row is already stamped inside
+      // compositeMemberCount. Surface to Sentry and return 503 rather than
+      // fall through to the single-key unified/legacy split. Reuses the
+      // unified path's COMPOSITE_MEMBERSHIP_UNKNOWN code so the wizard client
+      // maps the same retry copy off `code`.
+      console.error(
+        `[strategies/finalize-wizard] composite membership probe failed: ${safeErrorString(err)}`,
+      );
+      captureToSentry(err, {
+        tags: {
+          surface: "finalize-wizard",
+          step: "composite-membership-probe",
+        },
+        extra: { strategy_id: fields.strategy_id },
+      });
+      return NextResponse.json(
+        {
+          error: "Could not determine composite membership; please retry.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    if (compositeMemberCountN > 0) {
+      // O-1 (T-88-09) — per-member scope-broadening re-probe. The single-key
+      // defense above (the apiKeyId probe) only covers strategies.api_key_id,
+      // which is NULL for composites, so composite members would otherwise
+      // skip the connect→submit broadening defense entirely. Re-probe EACH
+      // member key (ordered by seq) BEFORE any enqueue; the first !ok returns
+      // the same 403 KEY_SCOPE_BROADENED / 502 KEY_NETWORK_TIMEOUT the
+      // single-key path returns. Ownership is already established by the
+      // owner-scoped strategy lookup above (:427-432); membership ids are not
+      // sensitive, so the admin client is used only to enumerate them.
+      const { data: members, error: membersErr } = await compositeAdmin
+        .from("strategy_keys")
+        .select("api_key_id")
+        .eq("strategy_id", fields.strategy_id)
+        .order("seq", { ascending: true });
+      if (membersErr) {
+        // A member-list read error also fails CLOSED — never enqueue a
+        // composite whose members we could not enumerate to re-probe.
+        console.error(
+          `[strategies/finalize-wizard] composite member list read failed: ${scrubInternalToken(membersErr.message)}`,
+        );
+        captureToSentry(membersErr, {
+          tags: {
+            surface: "finalize-wizard",
+            step: "composite-member-list",
+          },
+          extra: { strategy_id: fields.strategy_id },
+        });
+        return NextResponse.json(
+          {
+            error: "Could not load composite members; please retry.",
+            code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+      for (const member of members ?? []) {
+        const memberKeyId =
+          typeof member.api_key_id === "string" ? member.api_key_id : null;
+        if (!memberKeyId) continue;
+        const probe = await runScopeBroadeningProbe(memberKeyId);
+        if (!probe.ok) return probe.response;
+      }
+      // Route to the legacy finalize whose after() block enqueues
+      // stitch_composite (memberCount re-count + USE_COMPUTE_JOBS_QUEUE
+      // fail-loud + enqueue, :776-811) — independent of the backbone flag.
+      return await runLegacyFinalize({ supabase, user, fields });
+    }
+    // compositeMemberCountN === 0 (CSV / no-member draft with api_key_id NULL)
+    // → fall through to the existing unified-vs-legacy split byte-unchanged.
   }
 
   // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag. The
@@ -737,6 +866,71 @@ async function runLegacyFinalize(args: {
       {
         label: "enqueue_sync_trades_job",
         run: async () => {
+          // Phase 86 (COMP-02) / Finding 6 — composite dispatch. A strategy with
+          // one or more strategy_keys members is a MULTI-KEY composite: enqueue
+          // `stitch_composite` (the worker fans out over the members, decrypts
+          // each key worker-side, clips + stitches). A strategy with zero members
+          // is the legacy single-key path → `sync_trades`, byte-identical.
+          //
+          // Finding 6: composite detection runs REGARDLESS of
+          // USE_COMPUTE_JOBS_QUEUE. Pre-fix the count probe sat BELOW the
+          // `USE_COMPUTE_JOBS_QUEUE !== "true"` early-return, so a composite
+          // created while the queue was off was silently orphaned (no job, no
+          // failure stamp). The route reads ONLY a count — it NEVER decrypts
+          // (worker-only decryption, LOCKED). resolvedId scoping is unchanged
+          // (T-86-14). compositeMemberCount fails CLOSED (stamp + throw) on an
+          // unknowable count (W-4 / F3 / F5(b)).
+          const memberCount = await compositeMemberCount(admin, resolvedId);
+          if (memberCount > 0) {
+            // stitch_composite is a compute_jobs kind — without the queue there
+            // is NO worker to derive it (the reconcile cron excludes deribit and
+            // never enqueues stitch_composite). Fail LOUD (stamp a terminal
+            // 'failed' + throw → Sentry) rather than orphan a composite that
+            // never derives.
+            if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
+              await admin.from("strategy_analytics").upsert(
+                {
+                  strategy_id: resolvedId,
+                  computation_status: "failed",
+                  computation_warned: false,
+                  computation_error:
+                    "Composite strategy requires the compute-jobs queue " +
+                    "(USE_COMPUTE_JOBS_QUEUE) to derive; enable it and re-submit.",
+                  data_quality_flags: { csv_source: true, composite: true },
+                },
+                { onConflict: "strategy_id" },
+              );
+              throw new Error(
+                "composite finalize requires USE_COMPUTE_JOBS_QUEUE=true " +
+                  "(no worker to derive stitch_composite otherwise)",
+              );
+            }
+            const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+              p_strategy_id: resolvedId,
+              p_kind: "stitch_composite",
+              p_metadata: { source: "finalize-wizard" },
+            });
+            if (enqueueErr) {
+              throw new Error(
+                `enqueue_compute_job failed: ${enqueueErr.message}`,
+              );
+            }
+            // Phase 89 — audit the composite dispatch, mirroring the
+            // keys/sync stitch_composite kickoff (keys/sync/route.ts:220-225):
+            // a stitch_composite enqueue is a user-initiated sync.start on the
+            // strategy, same class + shape as its keys/sync sibling. Idempotent
+            // double-submit is absorbed by the compute_jobs partial unique index.
+            logAuditEventAsUser(admin, user.id, {
+              action: "sync.start",
+              entity_type: "sync",
+              entity_id: resolvedId,
+              metadata: { path: "queue", kind: "stitch_composite" },
+            });
+            return;
+          }
+          // Legacy single-key path (zero strategy_keys members) — unchanged,
+          // gated by USE_COMPUTE_JOBS_QUEUE so the button-driven legacy sync keeps
+          // working while the flag is off.
           if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
           if (!keyLink?.api_key_id) return;
           const { error: enqueueErr } = await admin.rpc(
@@ -827,6 +1021,54 @@ async function runLegacyFinalize(args: {
  * on the very first unified-path request after cutover instead of
  * silently breaking the founder-notification SLA.
  */
+/**
+ * Phase 86 (COMP-02) / Finding 6 — composite membership probe shared by the
+ * legacy and unified finalize paths. Returns the strategy_keys member count.
+ *
+ * Fails CLOSED (stamps a terminal 'failed' analytics row so the wizard poller
+ * reaches a gate, then throws) when the count is unknowable — a query error, or
+ * a null count with NO error (PostgREST can return count===null without
+ * erroring; `(count ?? 0) > 0` would fall OPEN to a single-key path). Routing a
+ * possible member-bearing composite through a single-key path would silently
+ * produce a wrong/partial derivation, and the reconcile cron never re-drives a
+ * composite (it filters RECONCILABLE_EXCHANGES / excludes deribit and enqueues
+ * reconcile_strategy, not stitch_composite).
+ *
+ * The route reads ONLY a count — it NEVER decrypts (worker-only decryption LOCKED).
+ */
+async function compositeMemberCount(
+  admin: ReturnType<typeof createAdminClient>,
+  strategyId: string,
+): Promise<number> {
+  const { count, error: countErr } = await admin
+    .from("strategy_keys")
+    .select("*", { count: "exact", head: true })
+    .eq("strategy_id", strategyId);
+  if (countErr || count === null) {
+    const reason = countErr
+      ? `strategy_keys count failed: ${countErr.message}`
+      : "strategy_keys count returned null without an error";
+    await admin.from("strategy_analytics").upsert(
+      {
+        strategy_id: strategyId,
+        computation_status: "failed",
+        computation_warned: false,
+        computation_error:
+          "Could not determine composite membership " +
+          "(strategy_keys count unavailable). Please retry submission.",
+        // Finding 10: membership is UNKNOWN here (the count query failed) — do NOT
+        // assert `composite: true`, which claims a fact we could not establish.
+        // An honest `membership_unknown` reason avoids mislabeling a single-key
+        // strategy as a composite in the DQ flags.
+        data_quality_flags: { csv_source: true, membership_unknown: true },
+      },
+      { onConflict: "strategy_id" },
+    );
+    throw new Error(reason);
+  }
+  return count;
+}
+
 async function unifiedFinalizeWizardHandler(args: {
   strategy_id: string;
   userId: string;
@@ -834,6 +1076,55 @@ async function unifiedFinalizeWizardHandler(args: {
   apiKeyId: string | null;
   source: string;
 }): Promise<NextResponse> {
+  // Finding 6: the unified backbone delegates to process_key_long — a SINGLE-KEY
+  // derive that cannot honestly reconstruct a multi-key composite. Composite
+  // dispatch (stitch_composite) is wired only through the legacy finalize path
+  // this phase, so a member-bearing composite reaching the unified path would be
+  // silently orphaned (process_key_long enqueued, stitch_composite never). Fail
+  // LOUD at finalize (never silently create a composite that never derives):
+  // stamp a terminal 'failed' and reject rather than route through process_key_long.
+  // (Full composite support under the unified backbone is Phase 88's wizard work.)
+  const compositeAdmin = createAdminClient();
+  let compositeMembers: number;
+  try {
+    compositeMembers = await compositeMemberCount(compositeAdmin, args.strategy_id);
+  } catch (err) {
+    // fail-closed (unknowable membership): the failed row is already stamped.
+    captureToSentry(err, {
+      tags: { surface: "finalize-wizard", step: "unified-composite-probe" },
+      extra: { strategy_id: args.strategy_id },
+    });
+    return NextResponse.json(
+      {
+        error: "Could not determine composite membership; please retry.",
+        code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+      },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
+  }
+  if (compositeMembers > 0) {
+    await compositeAdmin.from("strategy_analytics").upsert(
+      {
+        strategy_id: args.strategy_id,
+        computation_status: "failed",
+        computation_warned: false,
+        computation_error:
+          "Composite (multi-key) strategies are not yet supported on the " +
+          "unified-backbone finalize path. Contact support.",
+        data_quality_flags: { csv_source: true, composite: true },
+      },
+      { onConflict: "strategy_id" },
+    );
+    return NextResponse.json(
+      {
+        error:
+          "Composite (multi-key) strategies are not yet supported on this path.",
+        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
+      },
+      { status: 409, headers: NO_STORE_HEADERS },
+    );
+  }
+
   const result = await postProcessKey({
     flow_type: "onboard",
     // API-8: actual exchange resolved from api_keys.exchange (or 'okx' for

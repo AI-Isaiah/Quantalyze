@@ -4,6 +4,10 @@ interface SegmentedOption {
   id: string;
   label: string;
   disabled?: boolean;
+  /** Optional per-option disabled tooltip. Defaults to "Coming soon" so every
+   *  existing call site stays byte-identical (Phase 90 FS-03 passes the mapped
+   *  MTM-gated reason copy here). */
+  disabledReason?: string;
 }
 
 interface SegmentedControlProps {
@@ -43,7 +47,7 @@ export function SegmentedControl({
               key={opt.id}
               type="button"
               aria-disabled="true"
-              title="Coming soon"
+              title={opt.disabledReason ?? "Coming soon"}
               onClick={(e) => e.preventDefault()}
               className="cursor-not-allowed rounded-md border border-border bg-surface px-3 py-1.5 text-xs font-normal text-text-muted opacity-60"
             >

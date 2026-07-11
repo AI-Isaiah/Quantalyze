@@ -21,6 +21,18 @@ import { buildEnvelope } from "@/lib/envelope";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
+import { cn } from "@/lib/utils";
+import {
+  CoverageTimeline,
+  type CoverageTimelineRow,
+} from "@/app/(dashboard)/allocations/components/CoverageTimeline";
+import { unionOf, type CoverageSpan } from "@/lib/scenario-window";
+import {
+  partitionAttribution,
+  attributionBasisFromConfig,
+} from "@/lib/composite/compositeAttribution";
+import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 
 /**
  * SyncPreviewStep kicks off /api/keys/sync, polls strategy_analytics
@@ -113,6 +125,52 @@ const POLL_BACKOFF_MS = [3000, 3000, 5000, 5000, 10_000] as const;
  */
 const MAX_CONSECUTIVE_POLL_ERRORS = 3;
 
+/**
+ * A single composite member key, ordered by `seq`. Sourced from
+ * `strategy_keys` (owner-RLS) with the `api_keys(exchange, label)` embed
+ * (null-safe — the embed can be absent if the join is unavailable).
+ */
+export interface CompositeMemberKeyRow {
+  apiKeyId: string;
+  windowStart: string;
+  windowEnd: string | null;
+  seq: number;
+  exchange: string | null;
+  label: string | null;
+}
+
+/**
+ * Additive composite preview payload. Populated ONLY on the composite branch
+ * (membership probe count > 0). The stitched result already lives in one
+ * `strategy_analytics` row + `csv_daily_returns` — this is a READ, never a
+ * re-stitch. Plan 89-04 layers the attribution table / gantt / warnings on top
+ * of these fields; `rawDenominatorConfig` is mapped to the attribution basis
+ * there (via `attributionBasisFromConfig`).
+ */
+export interface CompositePreviewData {
+  members: CompositeMemberKeyRow[];
+  perKey: {
+    seq: number;
+    first_day: string | null;
+    last_day: string | null;
+    n_days: number;
+  }[];
+  gapSpans: { start: string; end: string }[]; // inclusive both ends — render verbatim
+  gapDayCount: number;
+  mtmGatedReason: string | null;
+  benchmarkUnavailable: boolean;
+  benchmarkNote: string | null;
+  series: { date: string; daily_return: number }[]; // full stitched series
+  rawDenominatorConfig: unknown;
+  /**
+   * Server-computed composite cumulative return (raw, from
+   * `strategy_analytics.cumulative_return`). Used by the reconciliation caption
+   * to epsilon-verify that the per-key attribution reconstitutes it — a count
+   * match (`Σ member days == series.length`) is not a value identity (R2-4).
+   */
+  cumulativeReturn: number | null;
+}
+
 export interface SyncPreviewSnapshot {
   tradeCount: number;
   /**
@@ -127,6 +185,12 @@ export interface SyncPreviewSnapshot {
   metrics: FactsheetPreviewMetric[];
   sparkline: number[] | null;
   computedAt: string | null;
+  /**
+   * Additive composite payload — present only on the composite branch. The
+   * single-key snapshot shape and the MetadataStep/SubmitStep consumers of
+   * detectedMarkets/exchange/tradeCount/sparkline are unaffected (SC-4).
+   */
+  composite?: CompositePreviewData;
 }
 
 export interface SyncPreviewStepProps {
@@ -156,6 +220,66 @@ function formatCagr(value: number | null): string {
   return `${sign}${pct.toFixed(1)}%`;
 }
 
+/**
+ * Human name for a composite member row: the nickname when present, else the
+ * `Key {seq} · {exchange}` fallback (mirrors the multi-key summary chip). Pure
+ * — shared by the coverage gantt and the attribution table so both label a
+ * member identically.
+ */
+function memberDisplayName(
+  seq: number,
+  label: string | null,
+  exchange: string | null,
+): string {
+  return label ?? `Key ${seq} · ${exchange ?? "unknown"}`;
+}
+
+/**
+ * Signed percentage contribution string (`+X.X%` / `−X.X%`), or an em dash for
+ * a no-data member (`null` contribution — never a fabricated 0%). Uses the
+ * U+2212 MINUS SIGN for negatives, matching the tabular financial convention.
+ */
+function formatContribution(value: number | null): string {
+  if (value === null) return "—";
+  const pct = value * 100;
+  const sign = pct >= 0 ? "+" : "−";
+  return `${sign}${Math.abs(pct).toFixed(1)}%`;
+}
+
+/**
+ * Inclusive-both-ends day count of a server `gap_span` — the count the warnings
+ * list shows next to the range. Derived via parseIsoDay/utcEpoch (NOT
+ * `new Date(iso)`, which reintroduces the UTC/local off-by-one dateday.ts
+ * exists to kill). Returns 0 for a malformed bound so a bad span degrades
+ * quietly rather than rendering NaN.
+ */
+function inclusiveGapDays(start: string, end: string): number {
+  const s = parseIsoDay(start);
+  const e = parseIsoDay(end);
+  if (!s || !e) return 0;
+  return Math.round((utcEpoch(e) - utcEpoch(s)) / 86_400_000) + 1;
+}
+
+/**
+ * Convert a declared HALF-OPEN `[start, end)` window's EXCLUSIVE `end` into the
+ * INCLUSIVE last calendar day WITH data (`end − 1 day`) for the coverage gantt,
+ * whose `CoverageSpan.last` is documented as "last calendar day with data"
+ * (R2-3). Passing the half-open `window_end` straight through draws member N's
+ * bar THROUGH member N+1's first owned day, so adjacent disjoint windows appear
+ * to overlap. UTC-epoch math + UTC accessors keep this timezone-stable and
+ * lexicographically ordered (dateday.ts discipline — no local-Date drift). A
+ * malformed bound degrades to pass-through rather than rendering garbage.
+ */
+function halfOpenEndToInclusiveLast(halfOpenEnd: string): string {
+  const parsed = parseIsoDay(halfOpenEnd);
+  if (!parsed) return halfOpenEnd;
+  const prev = new Date(utcEpoch(parsed) - 86_400_000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${prev.getUTCFullYear()}-${pad(prev.getUTCMonth() + 1)}-${pad(
+    prev.getUTCDate(),
+  )}`;
+}
+
 export function SyncPreviewStep({
   strategyId,
   apiKeyId,
@@ -171,6 +295,17 @@ export function SyncPreviewStep({
   const [expandLog, setExpandLog] = useState(false);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
   const [computationError, setComputationError] = useState<string | null>(null);
+  // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
+  // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
+  // the route took the `stitch_composite` branch). NEVER from a client
+  // `strategy_keys` count re-read: that probe falls OPEN on a transient error
+  // or a null-without-error count, silently routing an already-stitched
+  // composite through the single-key arm (false INSUFFICIENT_TRADES / a
+  // degraded first-member factsheet). The route fails CLOSED (503) on an
+  // unknowable membership, so `!res.ok` → SYNC_FAILED covers that end to end.
+  // Init false so a single-key run never re-renders and the poll effect never
+  // restarts on the single-key path (SC-4 neutrality).
+  const [isComposite, setIsComposite] = useState(false);
   // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
   const [correlationId] = useState<string>(() => readCorrelationId());
   // useRef initializer must be a non-impure value for React Compiler's
@@ -194,6 +329,12 @@ export function SyncPreviewStep({
         // on the first poll. Stale rows still kick off as before so
         // a long-paused session doesn't show outdated metrics.
         const supabase = createClient();
+        // NOTE: composite-ness is NOT probed client-side here (the removed
+        // fail-open `strategy_keys` count read). It is threaded from the
+        // kickoff response below. On the freshness-skip resume path the row is
+        // already complete+fresh; that path stays byte-neutral for single-key,
+        // and a broken composite is still caught by the shared failed-gate
+        // fail-safe in the poll effect.
         const { data: existing } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computed_at")
@@ -208,7 +349,32 @@ export function SyncPreviewStep({
           Number.isFinite(computedAtMs) &&
           Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
         if (isFresh) {
-          if (mountedRef.current) setPhase("waiting_for_complete");
+          // R2-2 (freshness-skip resume): the kickoff POST is SKIPPED here, so
+          // there is no server `composite` field to thread. Determine
+          // composite-ness DETERMINISTICALLY from the marker the stitch worker
+          // persists (`data_quality_flags.composite`) via a SEPARATE lightweight
+          // read — we do NOT re-derive/re-enqueue a fresh composite, and we do
+          // NOT touch the frozen `computation_status, computed_at` read above.
+          // Fail CLOSED to SYNC_FAILED when the marker row can't be read (error
+          // or missing row) rather than silently routing a possible composite
+          // through the single-key arm. A present row WITHOUT the marker is
+          // definitively single-key/CSV → byte-neutral resume.
+          const { data: dqRow, error: dqErr } = await supabase
+            .from("strategy_analytics")
+            .select("data_quality_flags")
+            .eq("strategy_id", strategyId)
+            .maybeSingle();
+          if (!mountedRef.current) return;
+          if (dqErr || !dqRow) {
+            setErrorCode("SYNC_FAILED");
+            setPhase("gate_failed");
+            return;
+          }
+          const dqFlags = (dqRow.data_quality_flags ?? {}) as {
+            composite?: unknown;
+          };
+          if (dqFlags.composite === true) setIsComposite(true);
+          setPhase("waiting_for_complete");
           return;
         }
         const res = await fetch("/api/keys/sync", {
@@ -216,12 +382,29 @@ export function SyncPreviewStep({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
         });
-        if (!res.ok && mountedRef.current) {
-          setErrorCode("SYNC_FAILED");
-          setPhase("gate_failed");
+        if (!res.ok) {
+          // A non-2xx kickoff — INCLUDING the 503 the route returns when
+          // composite membership is UNKNOWABLE — fails CLOSED: surface the
+          // recoverable SYNC_FAILED envelope, never silently assume single-key.
+          if (mountedRef.current) {
+            setErrorCode("SYNC_FAILED");
+            setPhase("gate_failed");
+          }
           return;
         }
-        if (mountedRef.current) setPhase("waiting_for_complete");
+        // AUTHORITATIVE composite discriminator from server truth. The route
+        // returns `composite: true` ONLY on the stitch_composite branch and
+        // fails CLOSED (503, handled above) on an unknowable membership, so a
+        // 2xx always carries a definite boolean. A parse failure can only be a
+        // legacy/empty body (never a real composite, which always emits
+        // `composite: true`), so it safely defaults to the single-key arm.
+        const kickoff = (await res.json().catch(() => null)) as {
+          composite?: boolean;
+        } | null;
+        if (mountedRef.current) {
+          if (kickoff?.composite === true) setIsComposite(true);
+          setPhase("waiting_for_complete");
+        }
       } catch (err) {
         console.error("[wizard:SyncPreviewStep] kickoff threw:", err);
         if (mountedRef.current) {
@@ -388,6 +571,220 @@ export function SyncPreviewStep({
         // `consecutiveErrors = 0` reset. One transient heavy fault is still
         // tolerated; the threshold matches the status-read path.
         try {
+          // COMPOSITE ARM (Pitfall 1/4/5): the composite reads the stitched
+          // result directly (analytics mask + members + full series +
+          // denominator config) and NEVER routes through checkStrategyGate or
+          // queries `trades` (a composite has 0 trades — the single-key gate
+          // would false-fail INSUFFICIENT_TRADES). Its only gate is the shared
+          // `nextStatus === "failed"` branch above, which fires before this
+          // read. Supabase error-as-value on any read throws so the existing
+          // heavyFetchErrors escalation (H-0197) applies unchanged.
+          if (isComposite) {
+            const [analyticsRes, membersRes, seriesRes, stratRes] =
+              await Promise.all([
+                supabase
+                  .from("strategy_analytics")
+                  .select(
+                    "cagr, sharpe, sortino, max_drawdown, volatility, cumulative_return, sparkline_returns, metrics_json_by_basis, data_quality_flags, computed_at",
+                  )
+                  .eq("strategy_id", strategyId)
+                  .maybeSingle(),
+                supabase
+                  .from("strategy_keys")
+                  .select(
+                    "api_key_id, window_start, window_end, seq, api_keys(exchange, label)",
+                  )
+                  .eq("strategy_id", strategyId)
+                  .order("seq", { ascending: true }),
+                supabase
+                  .from("csv_daily_returns")
+                  .select("date, daily_return")
+                  .eq("strategy_id", strategyId)
+                  .order("date", { ascending: true })
+                  // Flat safety ceiling, T-36-03-03 precedent (queries.ts).
+                  .limit(20000),
+                supabase
+                  .from("strategies")
+                  .select("returns_denominator_config")
+                  .eq("id", strategyId)
+                  .maybeSingle(),
+              ]);
+
+            if (analyticsRes.error) {
+              throw new Error(
+                `composite analytics read failed: ${analyticsRes.error.message}`,
+              );
+            }
+            if (membersRes.error) {
+              throw new Error(
+                `composite members read failed: ${membersRes.error.message}`,
+              );
+            }
+            if (seriesRes.error) {
+              throw new Error(
+                `composite series read failed: ${seriesRes.error.message}`,
+              );
+            }
+            if (stratRes.error) {
+              throw new Error(
+                `composite denominator-config read failed: ${stratRes.error.message}`,
+              );
+            }
+
+            if (!mountedRef.current) return;
+
+            const analyticsRow =
+              (analyticsRes.data as Record<string, unknown> | null) ?? null;
+            const dq = (analyticsRow?.data_quality_flags ?? {}) as {
+              per_key?: {
+                seq: number;
+                first_day: string | null;
+                last_day: string | null;
+                n_days: number;
+              }[];
+              gap_spans?: { start: string; end: string }[];
+              gap_day_count?: number;
+              mtm_gated_reason?: string | null;
+              benchmark_unavailable?: boolean;
+              benchmark_note?: string | null;
+            };
+
+            const members: CompositeMemberKeyRow[] = (
+              (membersRes.data as
+                | {
+                    api_key_id: string;
+                    window_start: string;
+                    window_end: string | null;
+                    seq: number;
+                    api_keys?:
+                      | { exchange: string | null; label: string | null }
+                      | { exchange: string | null; label: string | null }[]
+                      | null;
+                  }[]
+                | null) ?? []
+            )
+              .map((r) => {
+                // The api_keys embed is many-to-one; supabase-js may return it
+                // as an object OR a single-element array. Normalize null-safely.
+                const embed = Array.isArray(r.api_keys)
+                  ? r.api_keys[0]
+                  : r.api_keys;
+                return {
+                  apiKeyId: r.api_key_id,
+                  windowStart: r.window_start,
+                  windowEnd: r.window_end ?? null,
+                  seq: r.seq,
+                  exchange: embed?.exchange ?? null,
+                  label: embed?.label ?? null,
+                };
+              })
+              .sort((a, b) => a.seq - b.seq);
+
+            const perKey = Array.isArray(dq.per_key)
+              ? [...dq.per_key].sort((a, b) => a.seq - b.seq)
+              : [];
+            const series =
+              (seriesRes.data as
+                | { date: string; daily_return: number }[]
+                | null) ?? [];
+
+            // R2-5 (stale-complete race): the stitch_composite worker does a
+            // wholesale delete→re-upsert of csv_daily_returns. A poll landing
+            // inside that window can read a 'complete' status with 0 series
+            // rows — rendering an empty attribution table + gantt beside stale
+            // metrics. Treat an empty series as NOT-yet-terminal: stay in the
+            // waiting/computing state and re-poll until the re-upsert lands
+            // (bounded by the same elapsed WARN/RETRY affordances). A genuine
+            // stitched composite always persists ≥1 day, so this never hides a
+            // real result.
+            if (series.length === 0) {
+              scheduleNext();
+              return;
+            }
+
+            const compositeMetrics: FactsheetPreviewMetric[] = [
+              {
+                label: "CAGR",
+                value: formatCagr((analyticsRow?.cagr as number) ?? null),
+              },
+              {
+                label: "Sharpe",
+                value: formatMetric((analyticsRow?.sharpe as number) ?? null),
+              },
+              {
+                label: "Sortino",
+                value: formatMetric((analyticsRow?.sortino as number) ?? null),
+              },
+              {
+                label: "Max DD",
+                value:
+                  analyticsRow?.max_drawdown != null
+                    ? formatCagr(analyticsRow.max_drawdown as number)
+                    : "—",
+              },
+              {
+                label: "Volatility",
+                value:
+                  analyticsRow?.volatility != null
+                    ? formatMetric(analyticsRow.volatility as number, "%")
+                    : "—",
+              },
+              {
+                label: "Cumulative",
+                value:
+                  analyticsRow?.cumulative_return != null
+                    ? formatCagr(analyticsRow.cumulative_return as number)
+                    : "—",
+              },
+            ];
+
+            // A1 fallback: use the served sparkline_returns if present, else
+            // the daily_return values from the stitched series — served data
+            // only, NEVER recomputed.
+            const compositeSparkline: number[] | null = Array.isArray(
+              analyticsRow?.sparkline_returns,
+            )
+              ? (analyticsRow!.sparkline_returns as number[])
+              : series.map((d) => d.daily_return);
+
+            const compositeSnapshot: SyncPreviewSnapshot = {
+              tradeCount: 0,
+              csvRowCount: series.length,
+              earliestTradeAt: null,
+              latestTradeAt: null,
+              detectedMarkets: [],
+              exchange: null,
+              metrics: compositeMetrics,
+              sparkline: compositeSparkline,
+              computedAt: (analyticsRow?.computed_at as string) ?? null,
+              composite: {
+                members,
+                perKey,
+                gapSpans: Array.isArray(dq.gap_spans) ? dq.gap_spans : [],
+                gapDayCount:
+                  typeof dq.gap_day_count === "number" ? dq.gap_day_count : 0,
+                mtmGatedReason: dq.mtm_gated_reason ?? null,
+                benchmarkUnavailable: dq.benchmark_unavailable === true,
+                benchmarkNote: dq.benchmark_note ?? null,
+                series,
+                rawDenominatorConfig:
+                  (stratRes.data as { returns_denominator_config?: unknown } | null)
+                    ?.returns_denominator_config ?? null,
+                // R2-4: the SERVER-computed composite cumulative return, kept raw
+                // so the reconciliation caption can epsilon-check that the
+                // per-key attribution actually reconstitutes it (a count match
+                // alone is not a value identity).
+                cumulativeReturn:
+                  (analyticsRow?.cumulative_return as number | null) ?? null,
+              },
+            };
+
+            stopped = true;
+            setSnapshot(compositeSnapshot);
+            setPhase("passed");
+            return;
+          }
+
           const [
             { data: analytics },
             { count: tradeCount },
@@ -574,7 +971,7 @@ export function SyncPreviewStep({
       stopped = true;
       if (timerId !== undefined) window.clearTimeout(timerId);
     };
-  }, [phase, strategyId, apiKeyId, wizardSessionId]);
+  }, [phase, strategyId, apiKeyId, wizardSessionId, isComposite]);
 
   const handleUseThisKey = useCallback(() => {
     if (snapshot) onComplete(snapshot);
@@ -597,9 +994,15 @@ export function SyncPreviewStep({
           id="wizard-sync-heading"
           className="font-sans text-h3 font-semibold text-text-primary"
         >
-          We could not verify this strategy
+          {isComposite
+            ? "We could not verify this composite"
+            : "We could not verify this strategy"}
         </h2>
         <div className="mt-4">
+          {/* The envelope names the offending member: computation_error is
+              server-scrubbed and already threaded via buildEnvelope → the
+              GATE_ANALYTICS_FAILED cause gains "Details: {computation_error}."
+              (zero new plumbing). */}
           <WizardErrorEnvelope envelope={errorEnvelope} />
         </div>
         <div className="mt-6 flex gap-3">
@@ -608,7 +1011,329 @@ export function SyncPreviewStep({
             onClick={onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
-            Try another key
+            {isComposite ? "Review your keys" : "Try another key"}
+          </Button>
+        </div>
+      </section>
+    );
+  }
+
+  if (phase === "passed" && snapshot && isComposite && snapshot.composite) {
+    const composite = snapshot.composite;
+    const memberCount = composite.members.length;
+    // firstDay/lastDay = union of the per_key ACTUAL data days (min non-null
+    // first_day / max non-null last_day). Omit the range clause when either is
+    // absent (no-invented-data).
+    const firstDays = composite.perKey
+      .map((k) => k.first_day)
+      .filter((d): d is string => d != null);
+    const lastDays = composite.perKey
+      .map((k) => k.last_day)
+      .filter((d): d is string => d != null);
+    const firstDay = firstDays.length > 0 ? firstDays.reduce((a, b) => (a < b ? a : b)) : null;
+    const lastDay = lastDays.length > 0 ? lastDays.reduce((a, b) => (a > b ? a : b)) : null;
+    const rangeClause =
+      firstDay && lastDay ? `, ${firstDay} – ${lastDay}` : "";
+
+    // activeWindow (the accent band) = the stitched ACTUAL data span, drawn over
+    // the DECLARED bars. Null when either bound is absent — the gantt degrades.
+    const activeWindow =
+      firstDay && lastDay ? { start: firstDay, end: lastDay } : null;
+
+    // Coverage gantt rows — DECLARED windows as bars, ordered by seq (defensive
+    // re-sort so the render layer never depends on read order). TODAY closes an
+    // open-ended window; inBlend=true for EVERY member (no auto-excluded state).
+    // Two window conventions stay separate: these declared bars are half-open
+    // `[start,end)`; the per_key attribution windows below are inclusive.
+    const ganttToday = new Date().toISOString().slice(0, 10);
+    const sortedMembers = [...composite.members].sort((a, b) => a.seq - b.seq);
+    // R2-3: the declared `window_end` is HALF-OPEN (exclusive). The gantt's
+    // `last` is the INCLUSIVE last day WITH data, so convert `end → end − 1 day`;
+    // a still-live member (null `window_end`) keeps its open-ended treatment
+    // (drawn through TODAY). Without this, adjacent disjoint windows overlap by
+    // one day and contradict the correct inclusive attribution windows beside.
+    const ganttLast = (m: (typeof sortedMembers)[number]): string =>
+      m.windowEnd != null
+        ? halfOpenEndToInclusiveLast(m.windowEnd)
+        : ganttToday;
+    const ganttSpans: CoverageSpan[] = sortedMembers.map((m) => ({
+      first: m.windowStart,
+      last: ganttLast(m),
+    }));
+    const ganttRows: CoverageTimelineRow[] = sortedMembers.map((m) => ({
+      id: m.apiKeyId,
+      name: memberDisplayName(m.seq, m.label, m.exchange),
+      span: { first: m.windowStart, last: ganttLast(m) },
+      inBlend: true,
+    }));
+    const ganttUnion = unionOf(ganttSpans);
+
+    // Per-key attribution — signed contribution from the 89-01 pure helper on
+    // the SERVED series (never a client re-stitch). Basis mirrors the server
+    // branch VERBATIM via attributionBasisFromConfig. Exactly one call site
+    // each (no duplicate derivation — one-spec discipline).
+    const attributionBasis = attributionBasisFromConfig(
+      composite.rawDenominatorConfig,
+    );
+    const attributionRows = partitionAttribution(
+      composite.series,
+      composite.perKey,
+      attributionBasis,
+    );
+    const perKeyBySeq = new Map(composite.perKey.map((k) => [k.seq, k]));
+    const memberBySeq = new Map(composite.members.map((m) => [m.seq, m]));
+    // Reconciliation caption renders ONLY when the members' present days cover
+    // the whole series — otherwise the "sums/compounds to the cumulative" claim
+    // would not hold (fail-safe honesty; no-invented-data).
+    const attributedDays = attributionRows.reduce((sum, r) => sum + r.days, 0);
+    // R2-4: the count gate (`Σ member days == series.length`) is necessary but
+    // NOT sufficient — corrupted `per_key` windows or a `.limit(20000)` series
+    // truncation could satisfy it while the VALUE identity is false. Cheap
+    // insurance: also reconstitute the composite return from the per-key
+    // contributions (arithmetic Σ, or geometric Π(1+c)−1; a null no-data member
+    // contributes 0 / factor 1) and epsilon-compare it to the SERVER's
+    // cumulative_return. Suppress the "sums/compounds to the cumulative" claim
+    // when they diverge (fail-safe honesty — never assert a false identity).
+    const RECONCILE_EPSILON = 1e-4;
+    const reconstitutedReturn =
+      attributionBasis === "arithmetic"
+        ? attributionRows.reduce((sum, r) => sum + (r.contribution ?? 0), 0)
+        : attributionRows.reduce(
+            (prod, r) => prod * (1 + (r.contribution ?? 0)),
+            1,
+          ) - 1;
+    const cumulativeReturn = composite.cumulativeReturn;
+    const valueReconciles =
+      cumulativeReturn != null &&
+      Number.isFinite(cumulativeReturn) &&
+      Math.abs(reconstitutedReturn - cumulativeReturn) <= RECONCILE_EPSILON;
+    const showReconciliationCaption =
+      attributedDays === composite.series.length && valueReconciles;
+
+    // Pre-submit warnings — gaps rendered VERBATIM from the server mask (the
+    // client never recomputes gaps from windows) + amber DQ caveats. Both are
+    // non-blocking; submit stays enabled on the passed path.
+    const gapSpans = composite.gapSpans;
+    const hasGaps = gapSpans.length > 0;
+    const hasMtmCaveat = composite.mtmGatedReason != null;
+    const hasBenchmarkCaveat = composite.benchmarkUnavailable;
+    const hasDqCaveat = hasMtmCaveat || hasBenchmarkCaveat;
+    const hasWarnings = hasGaps || hasDqCaveat;
+
+    return (
+      <section aria-labelledby="wizard-sync-heading">
+        <h2
+          id="wizard-sync-heading"
+          className="font-sans text-h3 font-semibold text-text-primary"
+        >
+          Your verified composite factsheet is ready
+        </h2>
+        <p className="mt-2 text-body text-text-secondary">
+          {memberCount} key{memberCount === 1 ? "" : "s"} stitched into one
+          continuous track record{rangeClause}. Review the composite below and
+          continue to add metadata.
+        </p>
+
+        {/* KeyPermissionBadge OMITTED on the composite branch (FLAG-3) — a
+            single badge would show only the first member's scopes and mislead. */}
+
+        <div className="mt-6">
+          <FactsheetPreview
+            strategyName={"Your draft composite"}
+            metrics={snapshot.metrics}
+            sparklineReturns={snapshot.sparkline}
+            computedAt={snapshot.computedAt}
+            verificationState="draft"
+          />
+        </div>
+
+        {/* Per-key attribution — signed contribution (89-01 partition), basis-
+            honest, reconstitutes the composite cumulative. A real <table> per
+            DESIGN.md data-density: no outer border, hairline row borders. */}
+        <div className="mt-6">
+          <p className="text-micro font-medium uppercase tracking-wider text-text-secondary">
+            PER-KEY ATTRIBUTION
+          </p>
+          <table className="mt-2 w-full border-collapse text-left">
+            <caption className="sr-only">
+              Per-key attribution: each member key&rsquo;s data window, day
+              count, and signed contribution to the composite cumulative return.
+            </caption>
+            <thead>
+              <tr className="border-b border-border">
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  #
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  Key
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  Data window
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 pr-4 text-caption font-medium text-text-secondary"
+                >
+                  Days
+                </th>
+                <th
+                  scope="col"
+                  className="py-2 text-caption font-medium text-text-secondary"
+                >
+                  Contribution
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {attributionRows.map((row) => {
+                const pk = perKeyBySeq.get(row.seq);
+                const member = memberBySeq.get(row.seq);
+                const windowText =
+                  pk?.first_day && pk?.last_day
+                    ? `${pk.first_day} – ${pk.last_day}`
+                    : "—";
+                const contributionClass =
+                  row.contribution === null
+                    ? "text-text-muted"
+                    : row.contribution < 0
+                      ? "text-negative"
+                      : "text-positive";
+                return (
+                  <tr key={row.seq} className="border-b border-border">
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-muted">
+                      {row.seq}
+                    </td>
+                    <td className="py-2 pr-4 text-caption text-text-primary">
+                      <span className="inline-flex items-center gap-2">
+                        {memberDisplayName(
+                          row.seq,
+                          member?.label ?? null,
+                          member?.exchange ?? null,
+                        )}
+                        <TrustTierLabel trustTier="api_verified" />
+                      </span>
+                    </td>
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary">
+                      {windowText}
+                    </td>
+                    <td className="py-2 pr-4 font-metric text-caption tabular-nums text-text-secondary">
+                      {pk?.n_days ?? "—"}
+                    </td>
+                    <td
+                      className={cn(
+                        "py-2 font-metric text-caption tabular-nums",
+                        contributionClass,
+                      )}
+                    >
+                      {formatContribution(row.contribution)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            {showReconciliationCaption && (
+              <tfoot>
+                <tr>
+                  <td
+                    colSpan={5}
+                    className="pt-2 text-caption text-text-muted"
+                  >
+                    {attributionBasis === "arithmetic"
+                      ? "Contributions sum to the composite cumulative return."
+                      : "Contributions compound to the composite cumulative return."}
+                  </td>
+                </tr>
+              </tfoot>
+            )}
+          </table>
+        </div>
+
+        {/* Coverage mini-gantt — the REUSED CoverageTimeline (never rebuilt),
+            one row per member by seq, declared windows as bars + the stitched
+            actual span as the accent band. Gaps are NOT drawn here (FLAG-5);
+            the warnings list below owns gap display. */}
+        <div className="mt-6">
+          <CoverageTimeline
+            rows={ganttRows}
+            unionWindow={ganttUnion}
+            activeWindow={activeWindow}
+          />
+        </div>
+
+        {/* Pre-submit warnings — neutral gaps (server-authoritative) + amber DQ
+            caveats. Non-blocking; both role="status" aria-live="polite". */}
+        {hasWarnings && (
+          <div className="mt-6">
+            <p className="text-micro font-medium uppercase tracking-wider text-text-secondary">
+              BEFORE YOU SUBMIT
+            </p>
+            {hasGaps && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mt-2 rounded-md border border-border bg-page px-4 py-3"
+              >
+                <p className="text-caption font-medium text-text-primary">
+                  Coverage gaps ({composite.gapDayCount} days total)
+                </p>
+                <ul className="mt-2 space-y-1">
+                  {gapSpans.map((gap) => (
+                    <li
+                      key={`${gap.start}-${gap.end}`}
+                      className="font-metric text-caption tabular-nums text-text-muted"
+                    >
+                      {gap.start} → {gap.end} (
+                      {inclusiveGapDays(gap.start, gap.end)} days). Your
+                      composite shows this as a break, not zero returns.
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {hasDqCaveat && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mt-2 rounded-md border border-warning/30 bg-warning/5 px-4 py-3"
+              >
+                <p className="text-caption font-medium text-warning">
+                  Data quality
+                </p>
+                <div className="mt-1 space-y-1 text-caption text-text-secondary">
+                  {hasMtmCaveat && (
+                    <p>
+                      Mark-to-market view unavailable — {composite.mtmGatedReason}
+                      . Cash-settlement basis shown.
+                    </p>
+                  )}
+                  {hasBenchmarkCaveat && (
+                    <p>Benchmark overlay unavailable for this period.</p>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="mt-6 flex gap-3">
+          <Button onClick={handleUseThisKey} data-testid="wizard-use-this-key">
+            Use this composite and continue
+          </Button>
+          <Button
+            variant="ghost"
+            onClick={onTryAnotherKey}
+            data-testid="wizard-try-another-key"
+          >
+            Review your keys
           </Button>
         </div>
       </section>
@@ -701,11 +1426,14 @@ export function SyncPreviewStep({
         id="wizard-sync-heading"
         className="font-sans text-h3 font-semibold text-text-primary"
       >
-        Computing your verified factsheet
+        {isComposite
+          ? "Stitching your composite track record"
+          : "Computing your verified factsheet"}
       </h2>
       <p className="mt-2 text-body text-text-secondary">
-        We are fetching your trade history from the exchange and computing risk
-        metrics. Usually takes 15–30 seconds.
+        {isComposite
+          ? "We are reconstructing each key's history and stitching them into one continuous track. Usually takes 20–40 seconds."
+          : "We are fetching your trade history from the exchange and computing risk metrics. Usually takes 15–30 seconds."}
       </p>
 
       <div className="mt-6 rounded-md border border-border bg-page px-4 py-3">
@@ -716,9 +1444,11 @@ export function SyncPreviewStep({
               ? "Sync reported a failure"
               : phase === "kicking_off"
                 ? "Contacting exchange..."
-                : computationStatus === "computing"
-                  ? "Computing analytics..."
-                  : "Fetching trades..."}
+                : isComposite
+                  ? "Stitching composite…"
+                  : computationStatus === "computing"
+                    ? "Computing analytics..."
+                    : "Fetching trades..."}
           </p>
           <span className="ml-auto font-metric text-caption tabular-nums text-text-muted">
             {elapsedSeconds}s

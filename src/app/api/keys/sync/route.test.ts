@@ -38,6 +38,19 @@ const {
   // F6 (M-0327/H-0279): capture the limiter bucket key so a regression that
   // drops the per-strategy namespacing fails loudly.
   checkLimitMock,
+  // 89-02: composite-first kickoff. The strategy_keys membership head-count
+  // probe (hoisted so each test drives count/error) plus a spy on the select
+  // call so the neutrality pins can assert the probe is (not) issued.
+  strategyKeysProbe,
+  // R2-1: existing strategy_analytics row the fail-closed stamp guard reads.
+  analyticsExisting,
+  mockStrategyKeysSelect,
+  // 89-02: the unified-backbone flag (default OFF) + a spy on the unified
+  // delegate so the hoist-ordering pin can prove the composite branch wins
+  // even when the flag is TRUE (the prod process_key_unified_backbone='on'
+  // routing lesson).
+  unifiedActive,
+  mockPostProcessKey,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -49,8 +62,26 @@ const {
   mockLogAuditEvent: vi.fn(),
   rateLimitResult: { success: true as boolean, retryAfter: 0 },
   ownershipResult: {
-    data: null as Record<string, string> | null,
+    // 89-02: api_key_id joins the ownership row — null identifies a POSSIBLE
+    // composite (members live in strategy_keys); a UUID is definitively
+    // single-key. Undefined (the default fixtures) leaves the branch dormant.
+    data: null as Record<string, string | null> | null,
   },
+  strategyKeysProbe: {
+    count: 0 as number | null,
+    error: null as { message: string } | null,
+  },
+  // R2-1: the existing strategy_analytics row the guard reads before stamping a
+  // terminal 'failed'. Default (no prior derive) → the stamp proceeds; set
+  // `data.computation_status = 'complete'` to simulate a PUBLISHED composite the
+  // fail-closed stamp must NOT clobber.
+  analyticsExisting: {
+    data: null as { computation_status?: string } | null,
+    error: null as { message: string } | null,
+  },
+  mockStrategyKeysSelect: vi.fn(),
+  unifiedActive: { value: false as boolean },
+  mockPostProcessKey: vi.fn(),
   ownershipQuery: {
     table: null as string | null,
     selectCols: null as string | null,
@@ -101,10 +132,57 @@ vi.mock("@/lib/supabase/server", () => ({
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     rpc: mockRpc,
-    from: () => ({
-      upsert: mockUpsert,
-    }),
+    // 89-02: the admin `from` now branches by table. `strategy_keys` serves
+    // the composite membership head-count probe (a thenable resolving to the
+    // hoisted `{ count, error }`); everything else keeps the upsert seam the
+    // legacy + composite-failed-stamp paths use.
+    from: (table: string) => {
+      if (table === "strategy_keys") {
+        return {
+          select: (cols: string, opts?: unknown) => {
+            mockStrategyKeysSelect(cols, opts);
+            return {
+              eq: (_col: string, _val: unknown) =>
+                Promise.resolve({
+                  count: strategyKeysProbe.count,
+                  error: strategyKeysProbe.error,
+                }),
+            };
+          },
+        };
+      }
+      if (table === "strategy_analytics") {
+        // R2-1: the guard reads the existing row (select→eq→maybeSingle) before
+        // the fail-closed stamp; the stamp itself is the upsert seam.
+        return {
+          upsert: mockUpsert,
+          select: (_cols: string) => ({
+            eq: (_col: string, _val: unknown) => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: analyticsExisting.data,
+                  error: analyticsExisting.error,
+                }),
+            }),
+          }),
+        };
+      }
+      return { upsert: mockUpsert };
+    },
   }),
+}));
+
+// 89-02: unified-backbone flag seam. Default OFF (existing tests exercise the
+// legacy handler); the hoist-ordering pin flips it TRUE to prove the composite
+// branch still wins ahead of it.
+vi.mock("@/lib/feature-flags", () => ({
+  isUnifiedBackboneActive: async () => unifiedActive.value,
+}));
+
+// 89-02: the unified single-key delegate. Spied so the hoist-ordering pin can
+// assert a composite is NEVER routed through it, even with the flag TRUE.
+vi.mock("@/lib/process-key-client", () => ({
+  postProcessKey: mockPostProcessKey,
 }));
 
 vi.mock("@/lib/ratelimit", () => ({
@@ -181,6 +259,16 @@ describe("POST /api/keys/sync", () => {
     ownershipQuery.selectCols = null;
     ownershipQuery.filters = [];
     authState.user = { id: TEST_USER.id };
+    // 89-02: reset composite probe + unified flag to their neutral defaults so
+    // the existing single-key/legacy pins run byte-identically (no probe fires
+    // unless a fixture explicitly sets api_key_id: null).
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    // R2-1: default to NO prior derive so the existing stamp pins still stamp.
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    unifiedActive.value = false;
+    mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
     delete process.env.USE_COMPUTE_JOBS_QUEUE;
 
     // Default mock implementations
@@ -212,6 +300,9 @@ describe("POST /api/keys/sync", () => {
       accepted: true,
       strategy_id: TEST_STRATEGY_ID,
       status: "syncing",
+      // 89-02 / Finding-H: single-key queue path threads composite:false so the
+      // preview step's discriminator stays byte-neutral for non-composites.
+      composite: false,
     });
 
     // RPC was called with correct args, including the correlation_id
@@ -242,6 +333,8 @@ describe("POST /api/keys/sync", () => {
       accepted: true,
       strategy_id: TEST_STRATEGY_ID,
       status: "syncing",
+      // 89-02 / Finding-H: single-key legacy path is composite:false too.
+      composite: false,
     });
 
     // after() was called with a function
@@ -515,8 +608,10 @@ describe("POST /api/keys/sync", () => {
 
     // The check must hit the strategies table — NOT api_keys or any other.
     expect(ownershipQuery.table).toBe("strategies");
-    // It must select the ownership columns the route relies on.
-    expect(ownershipQuery.selectCols).toBe("id, user_id");
+    // It must select the ownership columns the route relies on. 89-02 extends
+    // the select with api_key_id so the composite-first branch can gate on
+    // api_key_id === null with ZERO extra queries for single-key strategies.
+    expect(ownershipQuery.selectCols).toBe("id, user_id, api_key_id");
     // Both filters must be present: id scopes the row, user_id is the
     // ownership fence. Dropping user_id would let any authenticated user
     // sync any strategy.
@@ -594,5 +689,410 @@ describe("POST /api/keys/sync", () => {
     const onlyPayload = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
     expect(onlyPayload.computation_status).toBe("computing");
     consoleSpy.mockRestore();
+  });
+
+  // ── 89-02: composite-first kickoff branch ──────────────────────────────
+  // The preview step (wizard index 2) POSTs /api/keys/sync BEFORE finalize.
+  // For a member-bearing composite (strategies.api_key_id === null AND a
+  // strategy_keys count > 0) the route must enqueue the SAME production
+  // `stitch_composite` job finalize enqueues — never sync_trades, never the
+  // unified single-key resync — and it must do so BEFORE isUnifiedBackboneActive()
+  // (prod runs unified='on', whose single-key arm cannot honestly derive a
+  // NULL-api_key composite). This mirrors the Phase-88 finalize-wizard hoist.
+  describe("composite-first kickoff (stitch_composite)", () => {
+    // Pin 1 — happy path: api_key_id null + count 2 + queue ON → stitch_composite.
+    it("enqueues stitch_composite (not sync_trades) for a member-bearing composite", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(202);
+      const body = await res.json();
+      expect(body).toEqual({
+        ok: true,
+        accepted: true,
+        strategy_id: TEST_STRATEGY_ID,
+        status: "syncing",
+        // 89-02 / Finding-H: the AUTHORITATIVE discriminator the preview step
+        // threads into isComposite — server truth, not a fragile client probe.
+        composite: true,
+      });
+
+      // The SAME stitch_composite job finalize dispatches, with the source tag
+      // + the correlation_id forensic thread (mirroring the sync_trades arm).
+      expect(mockRpc).toHaveBeenCalledWith("enqueue_compute_job", {
+        p_strategy_id: TEST_STRATEGY_ID,
+        p_kind: "stitch_composite",
+        p_metadata: {
+          source: "keys/sync",
+          correlation_id: TEST_CORRELATION_ID,
+        },
+      });
+      // NEVER the single-key legacy kind for a composite.
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "sync_trades" }),
+      );
+
+      // T-89-06: the sync.start audit rides the composite queue branch with a
+      // kind discriminator so operators can attribute composite kickoffs.
+      expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+      const [, actingUserId, event] = mockLogAuditEvent.mock.calls[0] as [
+        unknown,
+        string,
+        { action: string; entity_type: string; entity_id: string; metadata: Record<string, unknown> },
+      ];
+      expect(actingUserId).toBe(TEST_USER.id);
+      expect(event.action).toBe("sync.start");
+      expect(event.entity_type).toBe("sync");
+      expect(event.entity_id).toBe(TEST_STRATEGY_ID);
+      expect(event.metadata).toEqual({ path: "queue", kind: "stitch_composite" });
+    });
+
+    // Pin 2 — HOIST ORDERING (T-89-05): even with the unified flag TRUE (prod
+    // reality), a composite STILL enqueues stitch_composite and the unified
+    // delegate is never invoked. Falsifiable: moving the branch below the flag
+    // check reddens this — the composite would route through postProcessKey.
+    it("wins BEFORE isUnifiedBackboneActive() — enqueues stitch_composite with the unified flag ON", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      unifiedActive.value = true; // prod process_key_unified_backbone='on'
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 3;
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(202);
+      expect(mockRpc).toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "stitch_composite" }),
+      );
+      // The unified single-key resync must NEVER see a composite.
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+    });
+
+    // Pin 3 — queue flag OFF + composite → fail LOUD (there is no worker to
+    // derive stitch_composite without the queue): terminal 'failed' stamp +
+    // 503, zero enqueue.
+    it("fails loud (terminal 'failed' + 503) when a composite hits a queue-flag-OFF route", async () => {
+      // USE_COMPUTE_JOBS_QUEUE unset (default OFF).
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.error).toBeTruthy();
+
+      // A terminal 'failed' row is stamped — never orphan a composite that
+      // never derives — with the composite DQ flag (membership WAS established
+      // here, count 2, so `composite: true` is honest).
+      expect(mockUpsert).toHaveBeenCalledTimes(1);
+      const stamp = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
+      expect(stamp).toMatchObject({
+        strategy_id: TEST_STRATEGY_ID,
+        computation_status: "failed",
+        computation_warned: false,
+        data_quality_flags: { csv_source: true, composite: true },
+      });
+      expect(String(stamp.computation_error)).toContain("USE_COMPUTE_JOBS_QUEUE");
+
+      // No enqueue, no unified delegate.
+      expect(mockRpc).not.toHaveBeenCalled();
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    // Pin 4 — FAIL CLOSED on unknowable membership (W-4 / T-88-10 posture):
+    // a count error OR a null count MUST stamp a terminal 'failed' with
+    // membership_unknown:true (NOT composite:true — membership unproven) and
+    // 503, never fall open to a single-key sync_trades dispatch of a possible
+    // composite.
+    it("fails CLOSED (membership_unknown + 503) when the strategy_keys count errors", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = { message: "connection reset" };
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(mockUpsert).toHaveBeenCalledTimes(1);
+      const stamp = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
+      expect(stamp).toMatchObject({
+        strategy_id: TEST_STRATEGY_ID,
+        computation_status: "failed",
+        computation_warned: false,
+        data_quality_flags: { csv_source: true, membership_unknown: true },
+      });
+      // Membership was NOT established — must NOT claim composite.
+      expect(
+        (stamp.data_quality_flags as Record<string, unknown>).composite,
+      ).toBeUndefined();
+
+      // Never fall open: no sync_trades enqueue, no unified delegate.
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "sync_trades" }),
+      );
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    // Pin 4 (sibling) — a null count with NO error is ALSO unknowable (PostgREST
+    // can return count===null without erroring); `(count ?? 0) > 0` would fall
+    // OPEN. Pin the fail-closed stamp on this branch too.
+    it("fails CLOSED when the strategy_keys count is null without an error", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = null;
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      const stamp = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
+      expect(stamp).toMatchObject({
+        computation_status: "failed",
+        data_quality_flags: { csv_source: true, membership_unknown: true },
+      });
+      expect(mockRpc).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    // Pin 5a — NEUTRALITY: a single-key strategy (api_key_id SET) issues NO
+    // strategy_keys probe and keeps the existing sync_trades queue behavior.
+    it("neutrality — single-key (api_key_id set) issues NO strategy_keys probe and enqueues sync_trades", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: "33333333-3333-3333-3333-333333333333",
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(202);
+      // The composite probe is gated on api_key_id === null — a UUID must skip it.
+      expect(mockStrategyKeysSelect).not.toHaveBeenCalled();
+      // Existing single-key queue behavior unchanged.
+      expect(mockRpc).toHaveBeenCalledWith("enqueue_compute_job", {
+        p_strategy_id: TEST_STRATEGY_ID,
+        p_kind: "sync_trades",
+        p_metadata: { correlation_id: TEST_CORRELATION_ID },
+      });
+    });
+
+    // Pin 5b — NEUTRALITY: a zero-member CSV strategy (api_key_id null, count 0)
+    // falls THROUGH to the existing paths unchanged — the sole added cost is one
+    // head-count read.
+    it("neutrality — zero-member CSV (api_key_id null, count 0) falls through to sync_trades after one probe", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 0;
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(202);
+      // Exactly one head-count read, then fall through.
+      expect(mockStrategyKeysSelect).toHaveBeenCalledTimes(1);
+      // Falls through to the existing legacy queue path (sync_trades), NOT
+      // stitch_composite.
+      expect(mockRpc).toHaveBeenCalledWith("enqueue_compute_job", {
+        p_strategy_id: TEST_STRATEGY_ID,
+        p_kind: "sync_trades",
+        p_metadata: { correlation_id: TEST_CORRELATION_ID },
+      });
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "stitch_composite" }),
+      );
+    });
+
+    // ── Finding-M (MEDIUM): terminal-stamp write errors must be LOGGED ──────
+    // Both fail-loud stamps (queue-off composite + membership-unknown) upsert a
+    // terminal 'failed' row. The upsert result was previously discarded, so a
+    // failed "fail-loud" stamp was silently swallowed. Capturing { error } and
+    // logging it is the fix; these pins neuter by asserting the log fires.
+
+    // Finding-M (a) — queue-off composite stamp failure is logged, not swallowed.
+    it("[Finding-M] logs a failed terminal 'failed' stamp on the queue-off composite path", async () => {
+      // USE_COMPUTE_JOBS_QUEUE unset (default OFF) → composite fails loud.
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      mockUpsert.mockReturnValue({ error: { message: "stamp write denied" } });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      // The swallowed-error bug: without capturing the upsert result the failure
+      // is silently discarded. Assert it is logged with the stamp-failure marker.
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "failed to stamp terminal 'failed' (queue-off composite)",
+        ),
+        expect.objectContaining({ message: "stamp write denied" }),
+      );
+      consoleSpy.mockRestore();
+    });
+
+    // Finding-M (b) — membership-unknown stamp failure is logged, not swallowed.
+    it("[Finding-M] logs a failed membership_unknown stamp on the fail-closed path", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = { message: "connection reset" };
+      mockUpsert.mockReturnValue({ error: { message: "stamp write denied" } });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "failed to stamp terminal 'failed' (membership_unknown)",
+        ),
+        expect.objectContaining({ message: "stamp write denied" }),
+      );
+      consoleSpy.mockRestore();
+    });
+
+    // ── R2-1 (MEDIUM): fail-closed stamp must NOT clobber a mature/published row ─
+    // keys/sync runs REPEATEDLY on mature rows (ApiKeyManager resync, wizard
+    // revisit). A raw upsert of computation_status:'failed' replaces
+    // data_quality_flags WHOLESALE, so ONE transient strategy_keys 5xx would
+    // flip a PUBLISHED complete composite to 'failed' and drop
+    // per_key/gap_spans/... The stamp is now guarded on an existing complete row.
+
+    // R2-1 (a) — membership-unknown path: existing 'complete' + count error →
+    // row preserved (no clobber), 503 returned.
+    it("[R2-1] preserves an existing 'complete' row when the membership probe errors (no clobber)", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = { message: "connection reset" };
+      // A PUBLISHED, COMPLETE composite already exists.
+      analyticsExisting.data = { computation_status: "complete" };
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      // Still fails the request closed (503) — but the destructive stamp is
+      // SKIPPED, so the live completed derive (and its data_quality_flags) survive.
+      expect(res.status).toBe(503);
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("preserving existing completed derive"),
+      );
+      // Never falls open to a single-key dispatch either.
+      expect(mockRpc).not.toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "sync_trades" }),
+      );
+      warnSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+
+    // R2-1 (b) — queue-off composite path: existing 'complete' → row preserved.
+    it("[R2-1] preserves an existing 'complete' row on the queue-off composite path (no clobber)", async () => {
+      // USE_COMPUTE_JOBS_QUEUE unset (default OFF) → composite fails loud.
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      analyticsExisting.data = { computation_status: "complete" };
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(mockUpsert).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("preserving existing completed derive"),
+      );
+      warnSpy.mockRestore();
+    });
+
+    // R2-1 (c) — a genuine first-derive (NO existing row) still stamps 'failed'
+    // loud, so the guard doesn't swallow the fail-loud signal for real failures.
+    it("[R2-1] still stamps 'failed' loud on a genuine first-derive (no existing complete row)", async () => {
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      analyticsExisting.data = null; // no prior derive
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      expect(mockUpsert).toHaveBeenCalledTimes(1);
+      const stamp = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
+      expect(stamp).toMatchObject({
+        strategy_id: TEST_STRATEGY_ID,
+        computation_status: "failed",
+        data_quality_flags: { csv_source: true, composite: true },
+      });
+      consoleSpy.mockRestore();
+    });
   });
 });

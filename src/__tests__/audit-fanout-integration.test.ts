@@ -808,6 +808,19 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
               }),
             };
           }
+          if (table === "strategy_keys") {
+            // PUB-01 (Phase 87) composite publish-gate head-count. This test
+            // strategy is single-key/CSV (100 trades, no strategy_keys members),
+            // so the `head:true` count resolves to 0 — (memberCount ?? 0) >= 1 is
+            // false, short-circuiting the composite gate (compute_jobs is never
+            // read, so no compute_jobs branch is needed). Mirrors the
+            // csv_daily_returns head-count shape above.
+            return {
+              select: () => ({
+                eq: async () => ({ count: 0, data: null, error: null }),
+              }),
+            };
+          }
           throw new Error(`unexpected from(${table})`);
         },
         // NEW-C10-01: strategy-review route switched to logAuditEventAsUser

@@ -224,6 +224,61 @@ describe("ScenarioComparePanel (Plan 23-05 Task 2)", () => {
   });
 
   // -------------------------------------------------------------------------
+  // LOW-2 (round-3) — the "Modeled · leverage" caption gates on the EFFECTIVE
+  // leg set (addedStrategies ∪ memberKeyIds), not toggle-only, so a stranded
+  // pre-M-2 leverage entry never labels a column the composer + share leave
+  // silent.
+  // -------------------------------------------------------------------------
+  it("LOW-2 labels a column 'Modeled · leverage' ONLY when the leverage ref is in the effective leg set", () => {
+    mockComputeMetricsForDraft.mockReturnValue(metrics({}));
+
+    // Stranded: leverage keyed to a ref that is NEITHER an added strategy NOR a
+    // book member (a removed leg from a pre-M-2 draft — its toggle was deleted).
+    const strandedDraft = {
+      schema_version: 2,
+      init_holdings_fingerprint: "fp-a",
+      toggleByScopeRef: {},
+      addedStrategies: [],
+      weightOverrides: {},
+      memberKeyIds: [],
+      leverageOverrides: { "removed-leg-ref": 3 },
+      lastEditedAt: "2026-06-01T00:00:00.000Z",
+    };
+    // Effective: leverage keyed to a genuine added strategy → labeled.
+    const effectiveDraft = {
+      schema_version: 2,
+      init_holdings_fingerprint: "fp-b",
+      toggleByScopeRef: {},
+      addedStrategies: [
+        { id: "added-1", name: "Added", markets: ["BTC"], strategy_types: ["trend"] },
+      ],
+      weightOverrides: {},
+      memberKeyIds: [],
+      leverageOverrides: { "added-1": 2 },
+      lastEditedAt: "2026-06-01T00:00:00.000Z",
+    };
+
+    render(
+      <ScenarioComparePanel
+        selectedRows={[
+          row("a", "Stranded", strandedDraft),
+          row("b", "Effective", effectiveDraft),
+        ]}
+        includeLiveBook={false}
+        payload={PAYLOAD}
+      />,
+    );
+
+    // Stranded → NO modeled label (matches composer + share, which exclude
+    // non-member refs). Toggle-only gating would have (wrongly) labeled it.
+    expect(screen.queryByTestId("scenario-col-modeled-Stranded")).toBeNull();
+    // Effective (added-strategy leverage) → labeled.
+    expect(
+      screen.getByTestId("scenario-col-modeled-Effective"),
+    ).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
   // T_CP4 — A degenerate column reaches the table as NULL metrics (em-dash),
   //         never 0. The panel does not coerce.
   // -------------------------------------------------------------------------

@@ -36,6 +36,7 @@ import {
   SCENARIO_SCHEMA_VERSION,
   type ScenarioDraft,
 } from "../lib/scenario-state";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 
 // --- next/navigation mock -------------------------------------------------
 
@@ -85,6 +86,11 @@ vi.mock("./ScenarioCommitDrawer", () => ({
 vi.mock("../ScenarioFlaggedHoldingsList", () => ({
   ScenarioFlaggedHoldingsList: vi.fn(() => <div data-testid="flagged-list-mock" />),
 }));
+// SFH-2 — a corrupt persisted leverage (T_LEV_LOAD3's 999) now emits a Sentry
+// warning on rehydrate-sanitize. Stub the helper so the suite stays hermetic
+// (no real @sentry import) — the coercion signal itself is asserted in
+// src/lib/leverage.test.ts.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 // ENGINE-01 (Phase 63): the composer builds its series-space engine set from the
 // REAL per-key + added constructions, so this suite keeps them genuine via
 // importOriginal. The windowed-save (review-CR-01) tests drive their two-strategy
@@ -1064,5 +1070,320 @@ describe("ScenarioComposer — review CR-01: the applied coverage window is pers
         screen.getByTestId("scenario-coverage-window-value").textContent,
       ).toContain("2026-01-01 → 2026-01-06");
     });
+  });
+});
+
+// ===========================================================================
+// LEV-02 (Phase 90.5 Plan 04, D3/D4/D5) — per-strategy leverage survives a
+// Save/load round-trip on a saved scenario. Leverage is a what-if OVERLAY:
+// stamped into the saved draft at POST/PUT (the setMemberKeyIds fold twin),
+// rehydrated-REPLACE on every open (closing the latent session-bleed bug),
+// sanitize-on-read clamped (D3, no schema refine), and NEVER a commit-diff
+// input. These mirror the T_SAVE / T_WIN_SAVE round-trip harness.
+//
+// Read-only-tokens model (Phase 63): weight + leverage inputs live ONLY on
+// ADDED-STRATEGY rows, and a row's leverage input is enabled purely by its
+// toggle state (`toggleByScopeRef[a.id] !== false`), NOT by loaded returns —
+// so a draft-hydrated added strategy yields an editable leverage input with no
+// lazy-fetch dance. Every case opens a saved row carrying one added strategy.
+// ===========================================================================
+describe("ScenarioComposer — LEV-02: per-strategy leverage round-trips through Save/load", () => {
+  const STRAT_LEV = "strat-lev-a";
+
+  /** One added strategy so its leverage input (`leverage-${id}`) renders. */
+  function stratLevRow() {
+    return {
+      id: STRAT_LEV,
+      name: "Lev Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    };
+  }
+
+  /** okDraft + one added strategy; `over` seeds leverageOverrides etc. The
+   *  added-strategy `id` is a branded StrategyForBuilderId at compile time but a
+   *  plain string at runtime (the codec re-parses row.draft), so the cast is the
+   *  same `as unknown as` convention scenario-state's codec + T_SAVE6 use. */
+  function okDraftWithStrat(over: Partial<ScenarioDraft> = {}): ScenarioDraft {
+    return {
+      ...okDraft(),
+      addedStrategies: [stratLevRow()] as unknown as ScenarioDraft["addedStrategies"],
+      ...over,
+    };
+  }
+
+  function leverageInput(): HTMLInputElement {
+    const el = document.getElementById(`leverage-${STRAT_LEV}`);
+    expect(el).not.toBeNull();
+    return el as HTMLInputElement;
+  }
+
+  /** The footer's diff-count chip (the FIRST span in the summary region) —
+   *  the mandate diff count, distinct from the projection delta summary. */
+  function diffCountLabel(): string {
+    const region = screen.getByRole("region", {
+      name: /Scenario draft summary and actions/i,
+    });
+    return region.querySelector("span")?.textContent ?? "";
+  }
+
+  it("T_LEV_SAVE1 (POST round-trip) a leverage edit stamps draft.leverageOverrides into the POSTed body (Save as new)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Levered copy" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    openRow({ id: SAVED_ID, name: "Base", draft: okDraftWithStrat() });
+
+    // The added-strategy leverage input is enabled (toggle-derived) → set 2×.
+    act(() => {
+      fireEvent.change(leverageInput(), { target: { value: "2" } });
+    });
+    expect(leverageInput().value).toBe("2");
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Save as new portfolio/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Levered copy" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // The POST fold (setLeverageOverrides(setMemberKeyIds(...))) stamped it.
+    expect(body.draft.leverageOverrides).toEqual({ [STRAT_LEV]: 2 });
+  });
+
+  it("T_LEV_SAVE2 (PUT round-trip) a leverage edit stamps draft.leverageOverrides into the Update (PUT) body", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Base" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    openRow({ id: SAVED_ID, name: "Base", draft: okDraftWithStrat() });
+
+    act(() => {
+      fireEvent.change(leverageInput(), { target: { value: "2" } });
+    });
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Update portfolio/i }),
+    );
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
+    expect((init as RequestInit).method).toBe("PUT");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.draft.leverageOverrides).toEqual({ [STRAT_LEV]: 2 });
+  });
+
+  it("T_LEV_LOAD1 (rehydrate) opening a saved draft carrying leverageOverrides seeds the leverage input", () => {
+    renderComposer();
+    openRow({
+      id: SAVED_ID,
+      name: "Saved levered",
+      draft: okDraftWithStrat({ leverageOverrides: { [STRAT_LEV]: 2.5 } }),
+    });
+    // Rehydrate-REPLACE seeded leverageByRef from the saved draft.
+    expect(leverageInput().value).toBe("2.5");
+  });
+
+  it("T_LEV_LOAD2 (session-bleed fix) opening a saved draft with NO leverageOverrides RESETS a prior session's leverage — replace, not merge", () => {
+    renderComposer();
+
+    // First open + a live leverage edit sets session state {STRAT_LEV: 3}.
+    openRow({ id: SAVED_ID, name: "First", draft: okDraftWithStrat() });
+    act(() => {
+      fireEvent.change(leverageInput(), { target: { value: "3" } });
+    });
+    expect(leverageInput().value).toBe("3");
+
+    // Open a DIFFERENT saved scenario whose draft carries NO leverageOverrides.
+    openRow({ id: NEW_ID, name: "Second", draft: okDraftWithStrat() });
+
+    // The pre-existing bleed: leverageByRef was never reset on open, so it
+    // retained {STRAT_LEV: 3}. Rehydrate-REPLACE clears it → default 1×.
+    expect(leverageInput().value).toBe("1");
+  });
+
+  it("T_LEV_DRIFT1 (M-1) a DRIFTED open of a leverage-carrying scenario does NOT seed the refused draft's leverage — a later Update POSTs leverageOverrides {}", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Drifted levered" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    // A drifted fingerprint means the saved draft is NOT applied (the working
+    // draft falls back to the default live book); its leverage must NOT seed
+    // leverageByRef. Key the leverage to a LIVE HOLDINGS leg (BTC) so, without
+    // the fix, it would both project 3× onto the fresh default's BTC leg AND
+    // persist on the next Update — the M-1 bug in full.
+    openRow({
+      id: SAVED_ID,
+      name: "Drifted levered",
+      draft: { ...driftedDraft(), leverageOverrides: { [REF_BTC]: 3 } },
+    });
+
+    // Update the (loaded, editable) scenario and inspect the POST body.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Update portfolio/i }),
+    );
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // With the drift-branch fix leverageByRef seeded {} → Update persists {}.
+    // Without it, the refused draft's {REF_BTC:3} seeded and would persist here.
+    expect(body.draft.leverageOverrides).toEqual({});
+  });
+
+  it("T_LEV_LOAD3 (clamp-on-read) an out-of-range persisted leverage rehydrates CLAMPED to MAX (999 → 10) — sanitizeLeverageMap, D3 sanitize-on-read", () => {
+    renderComposer();
+    openRow({
+      id: SAVED_ID,
+      name: "Tampered",
+      draft: okDraftWithStrat({ leverageOverrides: { [STRAT_LEV]: 999 } }),
+    });
+    // Garbage jsonb clamps to the ceiling on read — never reaches the input raw.
+    expect(leverageInput().value).toBe(String(MAX_LEVERAGE));
+  });
+
+  it("T_LEV_REMOVE1 (M-2) removing a leg drops its leverage — the next Save POSTs leverageOverrides without that ref (no strand/re-apply)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "After remove" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    openRow({
+      id: SAVED_ID,
+      name: "Levered",
+      draft: okDraftWithStrat({ leverageOverrides: { [STRAT_LEV]: 3 } }),
+    });
+    expect(leverageInput().value).toBe("3");
+
+    // Remove the added leg (the single remove seam, handleRemoveAdded).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    // Its leverage input is gone (the leg is out of the draft).
+    expect(document.getElementById(`leverage-${STRAT_LEV}`)).toBeNull();
+
+    // Save-as-new → the removed leg's 3× must NOT fold into the persisted draft.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Save as new portfolio/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "After remove" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // Without the fix (handleRemoveAdded purge + Save-fold prune) this POSTs
+    // {STRAT_LEV:3} into a scenario that no longer contains the leg.
+    expect(body.draft.leverageOverrides).not.toHaveProperty(STRAT_LEV);
+    expect(body.draft.leverageOverrides).toEqual({});
+  });
+
+  it("T_LEV_COMMIT1 (mandate untouched) changing leverage does NOT change the commit diff count — leverage is a what-if overlay, never a mandate input", () => {
+    renderComposer();
+    openRow({ id: SAVED_ID, name: "Base", draft: okDraftWithStrat() });
+
+    // Non-vacuous baseline: the one added strategy is a real diff ("1 change").
+    const before = diffCountLabel();
+    expect(before).toMatch(/change/i);
+
+    act(() => {
+      fireEvent.change(leverageInput(), { target: { value: "4" } });
+    });
+
+    // Leverage never enters diffCount/handleCommit — the chip is unchanged.
+    expect(diffCountLabel()).toBe(before);
+  });
+
+  // HIGH-1 (Phase 90.5 review) — handleReset MUST drop the leverage overlay.
+  // leverageByRef was reset at the two scenario-OPEN seams but NOT in handleReset
+  // (banner Reset / reset-modal confirm / commit-success). A stale multiplier
+  // surviving a reset both (a) re-levers any matching leg in the fresh draft's
+  // projection — projectionState.leverage[id] = leverageByRef[id] ?? 1, so an
+  // empty map ⇒ every leg at 1× — AND (b) folds into a BRAND-NEW scenario at the
+  // next Save, a leverage the user never set on it. The POST body is the
+  // load-bearing observable: it reads the SAME leverageByRef map the projection
+  // consumes, and it distinguishes the fix (the projection needs loaded series
+  // the fixture omits, and the reset removes the added row regardless of the fix).
+  it("T_LEV_RESET1 (HIGH-1) reset drops the leverage overlay → the fresh draft's next Save POSTs leverageOverrides {} (no bleed)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Fresh book" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    // Open a saved scenario carrying a live 3× overlay on its added strategy.
+    openRow({
+      id: SAVED_ID,
+      name: "Levered book",
+      draft: okDraftWithStrat({ leverageOverrides: { [STRAT_LEV]: 3 } }),
+    });
+    // Precondition (non-vacuous): the overlay is genuinely live — the input reads 3×.
+    expect(leverageInput().value).toBe("3");
+
+    // Invoke the reset path: footer "Reset scenario draft" → confirm "Discard
+    // draft" (both route through handleReset).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reset scenario draft/i }),
+      );
+    });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
+    });
+
+    // A subsequent Save (no scenario open → "Save portfolio") POSTs an EMPTY
+    // leverage map — the projection input is back to 1× on every leg AND the 3×
+    // never bleeds into the brand-new scenario's persisted draft. Without the fix
+    // leverageByRef retains {STRAT_LEV:3} and this POSTs {STRAT_LEV:3}.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Save portfolio/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Fresh book" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.draft.leverageOverrides).toEqual({});
   });
 });

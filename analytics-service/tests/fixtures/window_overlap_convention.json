@@ -1,0 +1,20 @@
+{
+  "convention": "half-open [start,end); end null = unbounded; overlap iff a.start < (b.end ?? inf) and b.start < (a.end ?? inf)",
+  "notes": "The SINGLE shared overlap-convention spec. Member windows are half-open date intervals [window_start, window_end) matching services.allocated_capital.capital_on_date (a day == window_end is EXCLUDED). window_end null = unbounded (open-ended). Two windows OVERLAP iff a.start < (b.end ?? +inf) AND b.start < (a.end ?? +inf). Adjacent windows that share only the handoff boundary (a.end == b.start) DO NOT overlap. Dates are 'YYYY-MM-DD' UTC calendar days.",
+  "consumers": [
+    "analytics-service/services/stitch_composite.py",
+    "Phase 88 wizard zod superRefine validator — MUST load this same file (vitest fs.readFileSync across packages); parallel impls, ONE spec (v1.5 lesson)"
+  ],
+  "cases": [
+    {"name": "adjacent_handoff_not_overlapping", "a_start": "2025-01-01", "a_end": "2025-01-04", "b_start": "2025-01-04", "b_end": "2025-01-07", "overlaps": false},
+    {"name": "containment_overlaps", "a_start": "2025-01-01", "a_end": "2025-02-01", "b_start": "2025-01-10", "b_end": "2025-01-20", "overlaps": true},
+    {"name": "identical_windows_overlap", "a_start": "2025-01-01", "a_end": "2025-02-01", "b_start": "2025-01-01", "b_end": "2025-02-01", "overlaps": true},
+    {"name": "partial_overlap", "a_start": "2025-01-01", "a_end": "2025-01-15", "b_start": "2025-01-10", "b_end": "2025-01-20", "overlaps": true},
+    {"name": "open_ended_vs_later_start_overlaps", "a_start": "2025-01-01", "a_end": null, "b_start": "2025-06-01", "b_end": "2025-07-01", "overlaps": true},
+    {"name": "open_ended_vs_earlier_closed_ending_before_its_start_not_overlapping", "a_start": "2025-06-01", "a_end": null, "b_start": "2025-01-01", "b_end": "2025-03-01", "overlaps": false},
+    {"name": "single_day_adjacent_not_overlapping", "a_start": "2025-01-01", "a_end": "2025-01-02", "b_start": "2025-01-02", "b_end": "2025-01-03", "overlaps": false},
+    {"name": "single_day_identical_overlaps", "a_start": "2025-01-01", "a_end": "2025-01-02", "b_start": "2025-01-01", "b_end": "2025-01-02", "overlaps": true},
+    {"name": "disjoint_with_gap_not_overlapping", "a_start": "2025-01-01", "a_end": "2025-01-04", "b_start": "2025-01-10", "b_end": "2025-01-12", "overlaps": false},
+    {"name": "both_open_ended_overlap", "a_start": "2025-01-01", "a_end": null, "b_start": "2025-06-01", "b_end": null, "overlaps": true}
+  ]
+}

@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260708120000_sync_status_failed_final_bounce.sql
+-- source migration: 20260710150000_sync_status_supersede_failed_per_kind.sql
 CREATE OR REPLACE FUNCTION sync_strategy_analytics_status(p_strategy_id UUID)
 RETURNS VOID
 LANGUAGE plpgsql
@@ -61,23 +61,49 @@ BEGIN
     RETURN;
   END IF;
 
-  -- (b) all terminal, any failed_final → 'failed' with latest error (unchanged).
-  -- NOTE: this write does NOT touch computation_warned — the runner-owned marker
-  -- survives the 'failed' bounce in its own column, so branch (c) can recover the
-  -- warning after a sibling failed_final→done recovery WITHOUT an analytics re-run
-  -- (this is the SI-02 failed_final-bounce launder closed by mig 20260708120000).
+  -- (b) all terminal, any NON-SUPERSEDED failed_final → 'failed' with latest error.
+  -- PER-(strategy,kind) created_at SUPERSESSION (F-3 / PUB-02 close, this migration):
+  -- a failed_final poisons the strategy ONLY when it is NOT superseded by a
+  -- strictly-later 'done' job of the SAME (strategy_id, kind). A fresh ledger
+  -- generation (a re-enqueued job — enqueue dedup is in-flight-only, so a resubmit
+  -- inserts a fresh generation while the stale failed_final is RETAINED for audit)
+  -- clears the poison the moment it completes, WITHOUT deleting queue history.
+  -- PER-KIND (d.kind = f.kind): a later done of a DIFFERENT kind can NEVER mask a
+  -- real permanent failure (the cross-kind-blind defect that killed held PR
+  -- 229d80fa). Keyed on the IMMUTABLE created_at (updated_at is trigger-stamped
+  -- now() on every touch — non-deterministic generation ordering).
+  -- This write does NOT touch computation_warned — the runner-owned marker survives
+  -- the 'failed' bounce in its own column, so branch (c) can recover the warning
+  -- after a sibling failed_final→done recovery WITHOUT an analytics re-run (SI-02,
+  -- closed by mig 20260708120000).
   SELECT count(*) INTO v_failed_count
-    FROM compute_jobs
-   WHERE strategy_id = p_strategy_id
-     AND status = 'failed_final';
+    FROM compute_jobs f
+   WHERE f.strategy_id = p_strategy_id
+     AND f.status = 'failed_final'
+     AND NOT EXISTS (
+       SELECT 1
+         FROM compute_jobs d
+        WHERE d.strategy_id = f.strategy_id
+          AND d.kind = f.kind
+          AND d.status = 'done'
+          AND d.created_at > f.created_at
+     );
 
   IF v_failed_count > 0 THEN
-    SELECT last_error
+    SELECT f.last_error
       INTO v_latest_error
-      FROM compute_jobs
-     WHERE strategy_id = p_strategy_id
-       AND status = 'failed_final'
-     ORDER BY updated_at DESC
+      FROM compute_jobs f
+     WHERE f.strategy_id = p_strategy_id
+       AND f.status = 'failed_final'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM compute_jobs d
+          WHERE d.strategy_id = f.strategy_id
+            AND d.kind = f.kind
+            AND d.status = 'done'
+            AND d.created_at > f.created_at
+       )
+     ORDER BY f.created_at DESC
      LIMIT 1;
 
     INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error)

@@ -44,6 +44,54 @@ async function loginViaForm(
   });
 }
 
+// Phase 88 multi-key mode (CONTEXT D4) — the wizard surface added after Phase
+// 17 and never axe-scanned. These two helpers mirror
+// e2e/composite-onboarding.spec.ts (91-03) VERBATIM so the two specs stay on
+// ONE driving idiom (91-05 acceptance: selector consistency with 91-03). Only
+// the per-key add-key route is stubbed: these axe cases stop at the multi-key
+// step (never Continue), so set-members / keys/sync are never reached.
+async function stubAddKeyRoute(page: import("@playwright/test").Page) {
+  await page.route("**/api/strategies/composite/add-key", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      // Exact keys at MultiKeyConnectStep.tsx:385-397 (fresh uuids per call);
+      // a random strategy_id is fine — these cases never reach the preview step.
+      body: JSON.stringify({
+        ok: true,
+        strategy_id: crypto.randomUUID(),
+        api_key_id: crypto.randomUUID(),
+      }),
+    });
+  });
+}
+
+// Drive one editable key panel (index `i`) to `validated` — Deribit exchange,
+// placeholder credentials, a start window and either an end window or the
+// still-live (open-ended) toggle. Copied verbatim from
+// composite-onboarding.spec.ts:124-142 so both specs share the selector idiom.
+async function fillAndValidatePanel(
+  page: import("@playwright/test").Page,
+  i: number,
+  opts: { start: string; end?: string; stillLive?: boolean },
+) {
+  await page.getByTestId(`key-${i}-exchange-deribit`).click();
+  await page.getByTestId(`key-${i}-api-key`).fill("e2e-deribit-client-id");
+  await page
+    .getByTestId(`key-${i}-api-secret`)
+    .fill("e2e-deribit-client-secret");
+  await page.getByTestId(`key-${i}-window-start`).fill(opts.start);
+  if (opts.stillLive) {
+    await page.getByTestId(`key-${i}-still-live`).check();
+  } else if (opts.end) {
+    await page.getByTestId(`key-${i}-window-end`).fill(opts.end);
+  }
+  await page.getByTestId(`key-${i}-validate`).click();
+  await expect(page.getByTestId(`key-${i}-summary`)).toBeVisible({
+    timeout: 10_000,
+  });
+}
+
 test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
   test.skip(
     !HAS_SEED_ENV,
@@ -199,6 +247,88 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     await expect(
       page.getByRole("heading", { name: /review & confirm/i }),
     ).toBeVisible({ timeout: 15_000 });
+
+    const results = await buildAxe(page).analyze();
+    expect(results.violations).toEqual([]);
+  });
+
+  // Phase 88 / CONTEXT D4 — the multi-key composite mode is the wizard surface
+  // added after Phase 17 and never axe-scanned. Enter multi mode via the
+  // State-A ghost affordance (MultiKeyConnectStep.tsx:522) → the key list
+  // renders with two editable panels → scan the multi-key step at the full
+  // buildAxe zero-violation set (same idiom as the api/csv branches above).
+  test("zero axe violations on the multi-key mode", async ({ page }) => {
+    if (HAS_SEED_ENV) {
+      const allocator = await seedTestAllocator();
+      await loginViaForm(page, allocator.email, allocator.password);
+    }
+
+    await page.goto("/strategies/new/wizard");
+
+    // ME-02 false-green guard (mirrors the api-branch scan above).
+    await expect(page).toHaveURL(/\/strategies\/new\/wizard(?!\/csv)/, {
+      timeout: 10_000,
+    });
+
+    // Enter multi-key mode; the key list renders with two editable panels.
+    await page.getByTestId("multi-add-key").click();
+    await expect(page.getByTestId("multi-key-list")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("key-panel-0")).toBeVisible();
+
+    const results = await buildAxe(page).analyze();
+    expect(results.violations).toEqual([]);
+  });
+
+  // Phase 88 / CONTEXT D4 — the fail-loud overlap-error state. Drive two panels
+  // into overlapping windows EXACTLY as e2e/composite-onboarding.spec.ts (91-03)
+  // does (one driving idiom, shared selectors), then scan the visible overlap
+  // envelope. This is the a11y proof for the fail-loud error surface: the
+  // summary text must be programmatically associated. If axe flags a REAL
+  // association gap on the Phase-88 markup, that is reported as a FINDING in the
+  // plan SUMMARY — this plan does NOT patch production markup.
+  test("zero axe violations on the overlap-error state", async ({ page }) => {
+    if (HAS_SEED_ENV) {
+      const allocator = await seedTestAllocator();
+      await loginViaForm(page, allocator.email, allocator.password);
+    }
+    // Registered BEFORE navigation so the first per-key validate POST is caught.
+    await stubAddKeyRoute(page);
+
+    await page.goto("/strategies/new/wizard");
+    await expect(page).toHaveURL(/\/strategies\/new\/wizard(?!\/csv)/, {
+      timeout: 10_000,
+    });
+
+    // Enter multi mode → two editable panels (indexes 0 and 1).
+    await page.getByTestId("multi-add-key").click();
+    await expect(page.getByTestId("key-panel-0")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("key-panel-1")).toBeVisible();
+
+    // Panel 0 → validated with a fixed [2025-01-01, 2025-01-20) window (frozen).
+    await fillAndValidatePanel(page, 0, {
+      start: "2025-01-01",
+      end: "2025-01-20",
+    });
+
+    // Panel 1 → OVERLAPPING open-ended window [2025-01-10, live), left editable.
+    // Step-level validation spans validated + editing panels, so the overlap
+    // fires now (mirrors composite-onboarding.spec.ts:196-208).
+    await page.getByTestId("key-1-exchange-deribit").click();
+    await page.getByTestId("key-1-api-key").fill("e2e-deribit-client-id-2");
+    await page
+      .getByTestId("key-1-api-secret")
+      .fill("e2e-deribit-client-secret-2");
+    await page.getByTestId("key-1-window-start").fill("2025-01-10");
+    await page.getByTestId("key-1-still-live").check();
+
+    // The overlap envelope is visible — scan this fail-loud a11y surface.
+    await expect(
+      page.getByTestId("multi-key-validation-summary"),
+    ).toBeVisible({ timeout: 10_000 });
 
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);

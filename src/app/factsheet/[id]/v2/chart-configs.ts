@@ -61,6 +61,11 @@ export type ChartConfig = {
   fill?: boolean;
   /** Shade payload.strategyWorst10 periods behind the line (Worst-DDs chart). */
   ddHighlights?: boolean;
+  /** Render the FS-01/FS-02 composite seam overlay: per-key boundary markers
+   *  (payload.segmentBoundaries) + gap seams (payload.missingSegments). Set true
+   *  only on key:"cumulative". Absent (single-key) or with both payload fields
+   *  absent → renders nothing (byte-identical). Mirrors ddHighlights gating. */
+  segmentMarkers?: boolean;
   /** Per-config stroke widths. Daily Returns wants a thin line so the noise reads as noise. */
   stratWidth?: number;
   comparatorWidth?: number;
@@ -92,6 +97,8 @@ export const CHART_CONFIGS: ChartConfig[] = [
     stratField: "strategyEquity",
     comparatorField: "cumulative",
     rebaseOnZoom: true,
+    // FS-01/FS-02 composite seam overlay lives on the cumulative track only.
+    segmentMarkers: true,
   },
   {
     key: "cumVsBench",

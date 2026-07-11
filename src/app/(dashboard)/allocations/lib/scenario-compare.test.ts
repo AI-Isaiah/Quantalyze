@@ -1,7 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { DailyPoint } from "@/lib/scenario";
 import { computeScenario, buildDateMapCache } from "@/lib/scenario";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
+// LOW-1 (round-3) — the compare engine reads leverage with signal:false, so a
+// corrupt persisted value must NOT emit a Sentry warning here. Mock the helper
+// to assert the suppression.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
 import {
   buildAddedOnlySet,
@@ -415,11 +420,54 @@ describe("computeMetricsForDraft", () => {
     expect(m.effective_end).not.toBeNull();
   });
 
-  it("ignores any leverage — every leg runs at leverage 1", () => {
-    // A saved draft carries no leverage field. Even if a caller smuggles one
-    // onto the draft object, the helper must never consult it: a 2x leg would
-    // double the curve, so TWR with vs without the smuggled field must match.
-    // Non-vacuous: a per-key member yields REAL (non-null) metrics.
+  it("APPLIES persisted leverageOverrides — a 2× leg scales the curve (LEV-02 round-2 H-2, composer parity)", () => {
+    // Post-LEV-02 the composer FOLDS leverageByRef into draft.leverageOverrides
+    // at Save, so a saved scenario's compare row MUST run at those multipliers —
+    // else the compare surface shows 1× metrics while the composer shows the
+    // levered numbers for the SAME scenario (the v1.5 PERSIST-02 divergence
+    // class). Non-vacuous: a per-key member yields REAL (non-null) metrics.
+    const dates = buildDates("2024-01-02", 80);
+    const inputs = perKeyLiveInputs(
+      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": 5000 },
+    );
+
+    const base = computeMetricsForDraft(draft({ memberKeyIds: ["key-A"] }), inputs);
+    const levered = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"], leverageOverrides: { "key-A": 2 } }),
+      inputs,
+    );
+
+    expect(base.twr).not.toBeNull();
+    expect(base.volatility).not.toBeNull();
+    // The 2× multiplier moved the projection — it is NOT ignored. A single 2×
+    // leg scales the daily return series ×2, so vol scales up and the compounded
+    // TWR diverges from the un-levered curve.
+    expect(levered.twr).not.toBe(base.twr);
+    expect(levered.volatility! > base.volatility!).toBe(true);
+  });
+
+  it("LOW-1 — a corrupt persisted leverage (999) is clamped but emits NO Sentry warning on the compare path (quota-safe)", () => {
+    vi.mocked(captureToSentry).mockClear();
+    const dates = buildDates("2024-01-02", 80);
+    const inputs = perKeyLiveInputs(
+      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": 5000 },
+    );
+    // 999 → clamped to 10 at read; the metrics still compute honestly.
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A"], leverageOverrides: { "key-A": 999 } }),
+      inputs,
+    );
+    expect(m.twr).not.toBeNull();
+    // …but the coercion signal is suppressed on this read-twice compare path.
+    expect(captureToSentry).not.toHaveBeenCalled();
+  });
+
+  it("a legacy top-level `leverage` field (NOT the schema's leverageOverrides) stays ignored — only the persisted schema field is read", () => {
+    // Defense-in-depth: the engine reads draft.leverageOverrides (the schema
+    // field the codec persists), never a stray top-level `.leverage` key, so a
+    // smuggled non-schema field can't move the curve.
     const dates = buildDates("2024-01-02", 80);
     const inputs = perKeyLiveInputs(
       { "key-A": altReturns(dates, 0.01, -0.008) },
@@ -433,7 +481,6 @@ describe("computeMetricsForDraft", () => {
       inputs,
     );
 
-    expect(base.twr).not.toBeNull();
     expect(smuggled.twr).toBe(base.twr);
     expect(smuggled.volatility).toBe(base.volatility);
   });

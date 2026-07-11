@@ -264,6 +264,63 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // PUB-01 (Phase 87) defense-in-depth — a pure READ of terminal queue state,
+    // AFTER the isComputedAnalytics primary gate (its error precedence is
+    // unchanged). For a composite (>=1 strategy_keys member) the primary gate
+    // reads strategy_analytics.computation_status; this additionally requires
+    // the LATEST stitch_composite compute_jobs row to be status='done'. It
+    // catches the pathological class where computation_status is laundered to
+    // complete while the member fan-out stitch never finished. LOCKED-compliant:
+    // it READS the worker's terminal state and never re-derives member
+    // completeness (Pitfall 4) — no write, no worker/enqueue change here.
+    //
+    // Scoped to >=1 member so the single-key / CSV approve path is byte-
+    // unchanged (SC-4): a zero-member strategy never issues the compute_jobs
+    // read at all — the head-count short-circuits it.
+    const { count: memberCount, error: memberCountError } = await admin
+      .from("strategy_keys")
+      .select("api_key_id", { count: "exact", head: true })
+      .eq("strategy_id", id);
+    // Fail LOUD (WR-01): a coerced memberCount=0 on a transient read error would
+    // silently skip the composite check and could publish a holed composite.
+    // Mirror the csvCountError 503 guard above — never divert the branch quietly.
+    if (memberCountError) {
+      console.error("[admin/strategy-review] strategy_keys count failed:", memberCountError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+    if ((memberCount ?? 0) >= 1) {
+      // Latest generation wins by immutable created_at (updated_at is trigger-
+      // clobbered to now() on every touch, so it is NOT a stable ordering key —
+      // matches Plan 01's supersession key).
+      const { data: latestStitchJob, error: stitchJobError } = await admin
+        .from("compute_jobs")
+        .select("status")
+        .eq("strategy_id", id)
+        .eq("kind", "stitch_composite")
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (stitchJobError) {
+        console.error("[admin/strategy-review] compute_jobs stitch lookup failed:", stitchJobError);
+        return NextResponse.json(
+          { error: "Cannot verify strategy data source. Please try again." },
+          { status: 503 },
+        );
+      }
+      // Missing row OR any non-done terminal/in-flight state blocks publish.
+      // Least-disclosure message (no job ids / internals), matching the sibling
+      // 409s above.
+      if (latestStitchJob?.status !== "done") {
+        return NextResponse.json(
+          { error: "Cannot approve: composite computation is not complete." },
+          { status: 409 },
+        );
+      }
+    }
+
     // @audit-skip: audit-event is emitted by the strategy.approve / strategy.reject
     // logAuditEvent call further down in this same function (after the
     // revalidateTag block) — covers BOTH the approve UPDATE here and the reject
