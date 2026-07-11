@@ -114,10 +114,14 @@ describe("basis-context", () => {
     expect(result.current.bm.m).not.toBe(payload.strategyMetrics);
 
     // Mapped scalars swap to the persisted MTM values (serverKey → tsKey).
+    // ALL SEVEN BASIS_KPI_MAP keys asserted so a regression on any mapped key
+    // (incl. cagr/sortino) can't slip through the overlay-coverage test.
     expect(m.cum_ret).toBe(0.9); // cumulative_return
     expect(m.ann_vol).toBe(0.25); // volatility
     expect(m.max_dd).toBe(-0.18); // max_drawdown
+    expect(m.cagr).toBe(0.7);
     expect(m.sharpe).toBe(2.2);
+    expect(m.sortino).toBe(2.9);
     expect(m.calmar).toBe(0.9);
 
     // UNMAPPED keys keep their cash value — never displayed under an MTM label.
