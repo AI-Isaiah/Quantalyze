@@ -29,6 +29,7 @@ import { buildFactsheetPayload } from "./build-payload";
 import { arithmeticEquity } from "./compute";
 import { arithmeticUnderwater } from "./compute";
 import { deriveSegmentMarkers } from "./build-payload";
+import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
 
 // ---------------------------------------------------------------------------
 // Local typed alias for the not-yet-existing third `opts` arg (90-03). The
@@ -344,6 +345,76 @@ describe("D3 deriveSegmentMarkers: seq>1 boundaries + inclusive gap days", () =>
     expect(missingSegments).toEqual([
       { start: "2025-09-20", end: "2025-09-30", kind: "gap", days: 11 },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// C-1 (CRITICAL, Round 2) — the composite cumulative method follows
+// `returns_denominator_config` (attributionBasisFromConfig), NOT a hardcoded
+// arithmetic. A mainline composite (NULL config) persists a GEOMETRIC headline;
+// forcing arithmetic curves made the chart endpoint disagree with the headline.
+// ---------------------------------------------------------------------------
+describe("C-1 composite cumulative method follows returns_denominator_config", () => {
+  it("NULL config → geometric → strategyEquity is the geometric curve (cumEq), NOT arithmeticEquity", () => {
+    expect(attributionBasisFromConfig(null)).toBe("geometric");
+    const p = buildWithOpts(makeStrategy(), SPARSE, {
+      cumulativeMethod: attributionBasisFromConfig(null),
+    })!;
+    expect(p.strategyEquity).toEqual(cumEq(SPARSE_RETS));
+    // The pre-fix page hardcoded arithmetic; over non-trivial returns the two
+    // curves diverge, so this proves the geometric selection took effect.
+    expect(p.strategyEquity).not.toEqual(arithmeticEquity(SPARSE_RETS));
+  });
+
+  it("geometric chart endpoint ≈ persisted geometric cumulative_return (Π(1+r)−1)", () => {
+    const geomCumRet = SPARSE_RETS.reduce((a, r) => a * (1 + r), 1) - 1;
+    const p = buildWithOpts(makeStrategy(), SPARSE, {
+      cumulativeMethod: attributionBasisFromConfig(null),
+    })!;
+    const endpoint = p.strategyEquity[p.strategyEquity.length - 1] - 1;
+    expect(Math.abs(endpoint - geomCumRet)).toBeLessThan(1e-12);
+    // And it is NOT the arithmetic endpoint (1+Σr)−1 = Σr — the mismatch C-1 fixes.
+    const arithCumRet = SPARSE_RETS.reduce((a, r) => a + r, 0);
+    expect(Math.abs(geomCumRet - arithCumRet)).toBeGreaterThan(1e-6);
+  });
+
+  it("{cumulative_method:'simple'} → arithmetic (Zavara / allocated-capital override preserved)", () => {
+    expect(attributionBasisFromConfig({ cumulative_method: "simple" })).toBe("arithmetic");
+    const p = buildWithOpts(makeStrategy(), SPARSE, {
+      cumulativeMethod: attributionBasisFromConfig({ cumulative_method: "simple" }),
+    })!;
+    expect(p.strategyEquity).toEqual(arithmeticEquity(SPARSE_RETS));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// H-1 (HIGH, Round 2) — a degenerate-but-valid composite (finite headline, a
+// per-scalar null) RENDERS with an honest "—" for the null scalar, NOT the
+// still-computing placeholder and NOT the client-computed geometric value.
+// ---------------------------------------------------------------------------
+describe("H-1 degenerate composite renders with '—' (strict cash overlay)", () => {
+  // Young all-positive book: max_dd==0 → calmar null; no losing day → sortino null.
+  const DEGEN_CASH = {
+    cumulative_return: 0.0568,
+    volatility: 0.12,
+    max_drawdown: 0,
+    cagr: 0.05,
+    sharpe: 0.9,
+    sortino: null,
+    calmar: null,
+  } as unknown as Record<string, number>;
+
+  it("build returns a NON-null payload; calmar/sortino are NaN (→ '—'), never a client number", () => {
+    const p = buildWithOpts(makeStrategy(), SPARSE, {
+      cumulativeMethod: "geometric",
+      metricsByBasis: { cash_settlement: DEGEN_CASH },
+    });
+    expect(p).not.toBeNull();
+    // Finite headline scalar overlaid from the persisted basis.
+    expect(p!.strategyMetrics.cum_ret).toBe(0.0568);
+    // Degenerate nulls render "—" (NaN), NOT the client-computed calmar/sortino.
+    expect(Number.isNaN(p!.strategyMetrics.calmar)).toBe(true);
+    expect(Number.isNaN(p!.strategyMetrics.sortino)).toBe(true);
   });
 });
 

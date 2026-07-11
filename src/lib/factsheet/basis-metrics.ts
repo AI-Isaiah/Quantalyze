@@ -26,80 +26,69 @@ export const BASIS_KPI_MAP: { tsKey: string; serverKey: string }[] = [
 ];
 
 /**
- * Return a shallow copy of `base` with ONLY the seven {@link BASIS_KPI_MAP}
- * keys overlaid from `serverScalars`, and only where the server value is a
- * FINITE number. An absent / null / non-finite server scalar leaves the base
- * (client-computed) value untouched — never overlay a hole (no-invented-data).
+ * STRICT per-basis overlay for the seven {@link BASIS_KPI_MAP} headline scalars.
  *
- * Used two ways:
- *   - D3 cash overlay (server, build-payload.ts): base = client `strategyMetrics`,
- *     serverScalars = persisted `metrics_json_by_basis.cash_settlement`, so the
- *     headline reads the persisted arithmetic scalars the discovery/ranking
- *     surfaces already show (KpiStrip AND MetricsColumn agree).
- *   - MTM relabel (client, 90-05): serverScalars = `mark_to_market`.
+ * Behaviour (Round-2 H-1 — every displayed by-basis scalar comes from the
+ * persisted basis, never the client-computed value):
+ *   - `serverScalars` ABSENT (`undefined`/`null`) → returns `base` UNCHANGED.
+ *     This is the single-key / non-composite path: no persisted by-basis object,
+ *     so the client-computed `base` is the coherent value (byte-identical).
+ *   - `serverScalars` PRESENT → each of the seven mapped keys is rewritten to the
+ *     persisted value when FINITE, else `NaN` (→ "—" via the formatters). A
+ *     degenerate `calmar:null` / `sortino:null` (Python `_safe_float` persists
+ *     JSON null for max_dd==0 / no-loss / zero-variance) therefore renders an
+ *     honest "—", NOT the client-geometric value it would silently inherit under
+ *     a lenient overlay (no-invented-data).
+ *
+ * Used three ways, all now strict:
+ *   - CASH overlay (server, build-payload.ts): `serverScalars =
+ *     cash_settlement` — only passed when present (composite), so the absent
+ *     branch keeps single-key byte-identical.
+ *   - MTM overlay (client, basis-context.tsx): `serverScalars = mark_to_market
+ *     ?? {}` — an absent MTM object becomes `{}` → all seven "—", never cash.
+ *
+ * Only the seven mapped keys are rewritten; every other key on `base` (the
+ * observation count `n`, cash-only distributional stats) is preserved.
  */
 export function overlayBasisScalars<T extends Record<string, unknown>>(
   base: T,
-  serverScalars: Record<string, number> | undefined | null,
+  serverScalars: Record<string, unknown> | undefined | null,
 ): T {
   if (!serverScalars) return base;
   const out: Record<string, unknown> = { ...base };
   for (const { tsKey, serverKey } of BASIS_KPI_MAP) {
     const v = serverScalars[serverKey];
-    if (typeof v === "number" && Number.isFinite(v)) out[tsKey] = v;
-  }
-  return out as T;
-}
-
-/**
- * Phase 90 (F1/F2) — the ONE availability criterion for a by-basis scalar set.
- *
- * True iff `obj` is a non-null object carrying a FINITE number for ALL seven
- * mapped {@link BASIS_KPI_MAP} scalars. This is the single predicate trusted by
- * BOTH server gates:
- *   - F1 (page.tsx): a composite whose persisted `cash_settlement` fails this
- *     is a DATA DEFECT — the page refuses to render the client-geometric
- *     headline (which would silently disagree with the arithmetic acceptance
- *     number) and shows the "still computing" placeholder instead.
- *   - F2 (page.tsx MTM gate): `mark_to_market` must pass this for the toggle to
- *     ENABLE. A null / empty / partial object ⇒ toggle DISABLED — never a
- *     cash-value-under-an-MTM-label leak.
- *
- * Using ONE criterion for the gate and the display overlay ({@link overlayMtmScalars})
- * closes the "gate trusts key-presence, display trusts value-finiteness" skew
- * that let a partial persist show cash as MTM (no-invented-data, D5).
- */
-export function hasAllBasisScalars(obj: unknown): boolean {
-  if (!obj || typeof obj !== "object") return false;
-  const rec = obj as Record<string, unknown>;
-  return BASIS_KPI_MAP.every(({ serverKey }) => {
-    const v = rec[serverKey];
-    return typeof v === "number" && Number.isFinite(v);
-  });
-}
-
-/**
- * Phase 90 (F2) — STRICT MTM display overlay for the KpiStrip.
- *
- * UNLIKE {@link overlayBasisScalars} (which leaves the base value untouched for
- * an absent/non-finite server scalar — correct for the CASH overlay, whose base
- * is already the coherent cash value), this overlay is used when the reader has
- * switched to the MARK-TO-MARKET label: any mapped scalar absent / non-finite in
- * the persisted MTM object renders `NaN` (→ "—" via the formatters), NEVER the
- * cash fallback. Displaying a cash number under an MTM eyebrow is the exact
- * no-invented-data violation D5 forbids.
- *
- * Only the seven mapped keys are rewritten; every other key on `base` (e.g. the
- * observation count `n`, and the cash-only distributional stats) is preserved.
- */
-export function overlayMtmScalars<T extends Record<string, unknown>>(
-  base: T,
-  mtmScalars: Record<string, unknown> | undefined | null,
-): T {
-  const out: Record<string, unknown> = { ...base };
-  for (const { tsKey, serverKey } of BASIS_KPI_MAP) {
-    const v = mtmScalars?.[serverKey];
     out[tsKey] = typeof v === "number" && Number.isFinite(v) ? v : NaN;
   }
   return out as T;
+}
+
+/**
+ * Round-2 H-1/M-1 — the ONE availability criterion for a by-basis scalar object.
+ *
+ * True iff `obj` is a non-null object with ALL seven mapped {@link BASIS_KPI_MAP}
+ * KEYS structurally present AND a FINITE `cumulative_return`. It deliberately
+ * distinguishes two failure modes:
+ *   - STRUCTURAL absence (object missing entirely, a mapped key missing, or a
+ *     non-finite `cumulative_return`) → false. `cumulative_return` is the
+ *     invariance-critical headline scalar that must equal the chart endpoint /
+ *     drive Cum. Return; if it can't be trusted the whole basis can't.
+ *   - DEGENERATE per-scalar null (`calmar:null` on a zero-drawdown book,
+ *     `sortino:null` with no losing day) → still true. Those keys are PRESENT
+ *     (JSON null), and the strict {@link overlayBasisScalars} renders them "—".
+ *
+ * Trusted by BOTH server gates:
+ *   - F1/H-1 (page.tsx cash gate): a composite whose `cash_settlement` fails
+ *     this is a real data defect → still-computing placeholder. A degenerate-but-
+ *     valid composite (finite `cumulative_return`, some other scalar null) RENDERS.
+ *   - F2/M-1 (page.tsx MTM gate): restores locked D1 intent (key-presence, not
+ *     all-seven-finite) while guarding a non-finite headline — a degenerate
+ *     `sortino:null` no longer wrongly disables a displayable MTM basis.
+ */
+export function hasBasisHeadline(obj: unknown): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  const rec = obj as Record<string, unknown>;
+  if (!BASIS_KPI_MAP.every(({ serverKey }) => serverKey in rec)) return false;
+  const cr = rec["cumulative_return"];
+  return typeof cr === "number" && Number.isFinite(cr);
 }

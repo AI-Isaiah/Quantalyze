@@ -8,7 +8,8 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource, deriveSegmentMarkers } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { hasAllBasisScalars } from "@/lib/factsheet/basis-metrics";
+import { hasBasisHeadline } from "@/lib/factsheet/basis-metrics";
+import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -40,6 +41,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
         `id, name, codename, disclosure_tier, status, markets, strategy_types,
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
+       returns_denominator_config,
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis )`,
       )
       .eq("id", id),
@@ -121,33 +123,49 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     const metricsByBasis = (analytics?.metrics_json_by_basis ?? undefined) as
       | BuildFactsheetOpts["metricsByBasis"]
       | undefined;
-    // F1 (no-invented-data): a composite renders the ARITHMETIC headline curve
-    // (cumulativeMethod:"arithmetic" below) and overlays the persisted
-    // `cash_settlement` scalars onto the KpiStrip. If those scalars are absent /
-    // partial / non-finite (metrics_json_by_basis NULL or a defective persist),
-    // the overlay silently no-ops and the KpiStrip would fall back to the
-    // client-GEOMETRIC compute() values — disagreeing with the arithmetic chart,
-    // the acceptance number, and the cash-by-construction discovery/ranking
-    // headline. A composite lacking its persisted cash scalars is a DATA DEFECT,
-    // NOT a renderable state: fail loud (→ Sentry) and return null so the page
-    // renders the existing "still computing" placeholder instead.
-    if (!hasAllBasisScalars(metricsByBasis?.cash_settlement)) {
+    // C-1 (CRITICAL): the composite's cumulative method is NOT unconditionally
+    // arithmetic. The worker persists ARITHMETIC scalars only when
+    // `returns_denominator_config.cumulative_method === "simple"` (the Zavara /
+    // allocated-capital override, job_worker.py:3250-3255); the mainline finalize
+    // wizard NEVER writes `returns_denominator_config`, so a mainline composite
+    // persists the GEOMETRIC headline (`Π(1+r)−1`). Forcing an arithmetic chart
+    // over a geometric headline made the KpiStrip Cum. Return disagree with the
+    // chart endpoint on the same page. `attributionBasisFromConfig` mirrors the
+    // server branch VERBATIM. Geometric is coherent over the sparse series:
+    // `Π(1+r)` is invariant to absent 0-days, so the geometric chart endpoint
+    // equals the persisted geometric headline by construction (same as the
+    // single-key geometric path). NOTE: the 90-CONTEXT D3 claim "persisted
+    // composite headline is arithmetic" holds ONLY for the "simple" override.
+    const cumulativeMethod = attributionBasisFromConfig(
+      strategy.returns_denominator_config,
+    );
+    // F1/H-1 (no-invented-data): the composite overlays the persisted
+    // `cash_settlement` scalars onto the KpiStrip. If that object is structurally
+    // absent — metrics_json_by_basis NULL, a mapped key missing, or a NON-FINITE
+    // `cumulative_return` (the invariance-critical headline) — the overlay can't
+    // be trusted and the KpiStrip would fall back to client-computed values that
+    // disagree with the persisted headline. That is a DATA DEFECT: fail loud
+    // (→ Sentry) and return null (still-computing placeholder). H-1: a DEGENERATE
+    // composite (finite `cumulative_return` but e.g. `calmar:null` on a young
+    // all-positive book) is VALID — it renders with an honest "—" for the null
+    // scalar (strict overlay), NOT a permanent blank page.
+    if (!hasBasisHeadline(metricsByBasis?.cash_settlement)) {
       console.error(
-        "[factsheet] composite missing persisted cash_settlement scalars — refusing to render client-geometric headline",
+        "[factsheet] composite missing persisted cash_settlement headline — refusing to render an untrusted headline",
         { strategyId: id },
       );
       return null;
     }
-    // F2 MTM gate: compute availability from the SAME criterion the display
-    // overlay trusts (a non-null object with FINITE values for all seven mapped
-    // scalars), NOT bare key-presence. A `mark_to_market:null` or partial object
-    // ⇒ toggle DISABLED — never enable a toggle that would show cash values under
-    // an MTM label (the `mtm_gated_reason` / generic-fallback copy still applies).
-    const mtmAvailable = hasAllBasisScalars(
+    // F2/M-1 MTM gate: restore locked D1 intent (enabled iff the `mark_to_market`
+    // basis is present with a finite headline), NOT all-seven-finite. A degenerate
+    // `sortino:null` no longer disables a displayable MTM basis with false copy;
+    // the strict overlay renders that one scalar "—". A null / structurally-absent
+    // mark_to_market still ⇒ toggle DISABLED (never cash-under-an-MTM-label).
+    const mtmAvailable = hasBasisHeadline(
       (metricsByBasis as { mark_to_market?: unknown } | undefined)?.mark_to_market,
     );
     buildOpts = {
-      cumulativeMethod: "arithmetic",
+      cumulativeMethod,
       segmentBoundaries: markers.segmentBoundaries,
       missingSegments: markers.missingSegments,
       metricsByBasis,

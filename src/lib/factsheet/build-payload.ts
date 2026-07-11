@@ -232,13 +232,14 @@ export function buildFactsheetPayload(
   const stratEquity = isArithmetic ? arithmeticEquity(stratRet) : cumEq(stratRet);
   const stratDd = isArithmetic ? arithmeticUnderwater(stratRet) : geoDd;
 
-  // Phase 90 (D3) — cash-scalar overlay. The persisted composite headline is
-  // ARITHMETIC (Zavara 62.66% acceptance); the client `compute()` is GEOMETRIC.
-  // KpiStrip AND MetricsColumn both read `strategyMetrics`, so both must carry
-  // the persisted cash scalars to agree with discovery / ranking / acceptance
-  // (D3, Rule-7 resolution — supersedes the RESEARCH "inert" remark). Only the
-  // seven mapped headline scalars are overlaid; every other key stays the
-  // client-computed cash value. No-op (byte-identical) when metricsByBasis absent.
+  // Phase 90 (D3) — cash-scalar overlay. The KpiStrip's seven headline scalars
+  // read the PERSISTED `cash_settlement` basis so they agree with discovery /
+  // ranking / acceptance, whatever cumulative method the composite persisted
+  // (geometric mainline OR the Zavara "simple"/arithmetic override — Round-2
+  // C-1). Round-2 H-1: the overlay is now STRICT — a degenerate persisted scalar
+  // (`calmar:null` on a zero-drawdown book) renders "—", not the client-geometric
+  // value it would silently inherit. No-op (single-key byte-identical) when
+  // `cash_settlement` is absent (overlayBasisScalars returns base unchanged).
   const strategyMetrics = overlayBasisScalars(computedMetrics, opts?.metricsByBasis?.cash_settlement);
 
   const btcRet = alignReturns(BTC_DAILY, dates);

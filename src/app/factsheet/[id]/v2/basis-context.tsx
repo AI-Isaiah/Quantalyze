@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
-import { overlayMtmScalars } from "@/lib/factsheet/basis-metrics";
+import { overlayBasisScalars } from "@/lib/factsheet/basis-metrics";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -78,11 +78,12 @@ export function useBasisMetrics(payload: FactsheetPayload): {
     if (basis === "mark_to_market") {
       // F2 (no-invented-data): STRICT overlay — any of the seven mapped scalars
       // absent / non-finite in the persisted MTM object renders "—" (NaN), NEVER
-      // the cash fallback. The old `?? {}` + finite-skip left cash values in
-      // place, which then displayed under the "BASIS · MARK-TO-MARKET" eyebrow.
-      return overlayMtmScalars(
+      // the cash fallback. The `?? {}` makes an entirely-absent MTM object render
+      // all-seven "—" (the strict overlay's absent-branch keeps `base` for the
+      // single-key/cash path, so MTM must force a present-empty object here).
+      return overlayBasisScalars(
         payload.strategyMetrics,
-        payload.metricsByBasis?.mark_to_market,
+        payload.metricsByBasis?.mark_to_market ?? {},
       );
     }
     return payload.strategyMetrics;
