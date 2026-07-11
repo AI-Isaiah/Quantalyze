@@ -53,6 +53,7 @@ import {
   seedCompositeStrategy,
   seedTestAllocator,
   cleanupStrategiesByNamePrefix,
+  countStrategyKeys,
 } from "./helpers/seed-test-project";
 
 const HAS_SEED_ENV =
@@ -361,5 +362,159 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
       page.getByText(failedName),
       "the draft composite's content must NOT leak on its public detail route",
     ).toHaveCount(0);
+  });
+});
+
+/**
+ * Phase 94 / Plan 94-05 (WIZ-03 + WIZ-05) — the owner-seeded TRUE-e2e that
+ * plans 02/03 corroborate at the component level. The two behaviors proved here
+ * NEED a real unmount/remount navigation + real RLS browser reads, which a
+ * component test cannot exercise:
+ *
+ *   WIZ-05 (a completed crawl never re-kicks): the SEEDED `strategy_analytics`
+ *     row is COMPLETE with `data_quality_flags.composite === true` and a
+ *     deliberately STALE `computed_at` (2026-07-01). On resume, SyncPreviewStep's
+ *     mount effect reads the marker and SHORT-CIRCUITS the /api/keys/sync kickoff
+ *     regardless of the 5-minute freshness window (WIZ-05 durability skip,
+ *     SyncPreviewStep.tsx:406-428). The proof is a call count of ZERO across the
+ *     entire walk — a freshness-only skip would re-kick on the second visit.
+ *
+ *   WIZ-03 (review is non-destructive): "Review your keys" is a pure step
+ *     transition back to connect_key (WizardClient.tsx:724-735) — it does NOT
+ *     DELETE the draft (which would cascade away every strategy_keys member) and
+ *     does NOT regenerate the session. Proof: ZERO DELETE /api/strategies/draft/*
+ *     calls AND the 3 strategy_keys rows still exist (direct admin read).
+ *
+ * ── Ph91 owner-match (the whole reason this is REAL, not stub-theater) ────────
+ * The 91-03 walk above STUBS add-key / set-members / members because its seed is
+ * owned by a DIFFERENT user than the logged-in allocator, so the real routes
+ * 403 / return empty. Here `ownerUserId = allocator.userId`, so the wizard's
+ * RLS-bound browser reads (strategy_analytics, strategy_keys, csv_daily_returns)
+ * resolve, the WIZ-01 members GET returns the seeded members, and the set-members
+ * POST persists — ALL unstubbed. A non-owner seed would false-RED: the RLS reads
+ * would come back empty, the poller would loop forever, and the panels would
+ * rehydrate blank (the exact failure mode this plan exists to avoid).
+ *
+ * ── Seed-gate (two-place rule) ───────────────────────────────────────────────
+ * Place 1: the HAS_SEED_ENV self-skip below. Place 2: `composite-onboarding.spec.ts`
+ * is ALREADY listed in the ci.yml e2e-seeded batch (ci.yml:1452), so EXTENDING
+ * this existing spec inherits place 2 with NO ci.yml edit (a NEW spec file would
+ * have needed a new entry). When the seed env vars are absent the block skips
+ * entirely — the standard gate, never a silent per-assertion skip.
+ */
+test.describe("Phase 94 — wizard resumability (WIZ-03 / WIZ-05)", () => {
+  test.skip(
+    !HAS_SEED_ENV,
+    "wizard resumability: seed-helper env vars not wired " +
+      "(set TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY).",
+  );
+
+  test.afterAll(async () => {
+    // Same e2e-composite- prefix GC as the Phase 91 block (strategy_keys /
+    // strategy_analytics cascade on the strategies delete).
+    if (HAS_SEED_ENV) {
+      await cleanupStrategiesByNamePrefix("e2e-composite-");
+    }
+  });
+
+  test("owner-seeded resume: WIZ-05 no re-kick + WIZ-03 non-destructive review", async ({
+    page,
+  }) => {
+    test.skip(!HAS_SEED_ENV, "requires seed env");
+
+    // 1. OWNER-MATCHED resumable composite. Allocator created FIRST so the
+    //    composite can be owned by it — the RLS-bound wizard reads only resolve
+    //    for the logged-in owner (Ph91). variant "resumable" = draft + wizard, so
+    //    the wizard's draft-resume query hydrates initialDraft and WizardClient
+    //    inits step "sync_preview".
+    const allocator = await seedTestAllocator();
+    const composite = await seedCompositeStrategy({
+      variant: "resumable",
+      ownerUserId: allocator.userId,
+    });
+
+    // 2. Route SPIES, not stubs (the point is REAL routes now the owner matches).
+    //    Passthrough counters registered BEFORE navigation so the very first
+    //    request is observed. A COUNT of 0 for keys/sync is the WIZ-05 proof; a
+    //    count of 0 for DELETE draft is the WIZ-03 non-destructive proof.
+    let syncKickoffCalls = 0;
+    let draftDeleteCalls = 0;
+    await page.route("**/api/keys/sync", async (route) => {
+      syncKickoffCalls += 1;
+      await route.continue();
+    });
+    await page.route("**/api/strategies/draft/**", async (route) => {
+      if (route.request().method() === "DELETE") draftDeleteCalls += 1;
+      await route.continue();
+    });
+
+    await loginViaForm(page, allocator.email, allocator.password);
+
+    // 3. Resume: the draft-resume query hydrates initialDraft → WizardClient
+    //    inits step "sync_preview" (no Resume-banner click needed; the step
+    //    useState initializer keys off initialDraft, WizardClient.tsx:143-144).
+    await page.goto("/strategies/new/wizard");
+    await expect(page).toHaveURL(/\/strategies\/new\/wizard(?!\/csv)/, {
+      timeout: 10_000,
+    });
+
+    // The completed snapshot materializes from the SEEDED rows — the composite
+    // "Use this composite and continue" CTA (SyncPreviewStep.tsx:1450-1451)
+    // becomes visible with ZERO /api/keys/sync calls (WIZ-05 durability: the
+    // seeded computed_at is stale, so ONLY the COMPLETE-composite skip explains
+    // a zero count — a freshness skip would not apply to a stale row).
+    await expect(page.getByTestId("wizard-use-this-key")).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(
+      syncKickoffCalls,
+      "WIZ-05: a COMPLETE composite must NOT re-kick /api/keys/sync on resume " +
+        `(saw ${syncKickoffCalls} calls; the seeded computed_at is stale, so a ` +
+        "non-zero count means the durability skip regressed)",
+    ).toBe(0);
+
+    // 4. WIZ-03 review round-trip. "Review your keys" (composite label on the
+    //    wizard-try-another-key CTA) → onReviewKeys → connect_key. The step
+    //    re-mounts MultiKeyConnectStep, which rehydrates via the REAL WIZ-01
+    //    members GET (owner-matched, unstubbed) → 3 validated panels carrying the
+    //    seeded member labels (members route returns api_keys.label as nickname).
+    await page.getByTestId("wizard-try-another-key").click();
+    await expect(page.getByTestId("key-0-summary")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("key-1-summary")).toBeVisible();
+    await expect(page.getByTestId("key-2-summary")).toBeVisible();
+    // The rehydrated summary chips show the seeded member labels (proves the GET
+    // read the real strategy_keys ↔ api_keys rows through browser RLS).
+    await expect(page.getByText(/e2e-composite-key-/)).toHaveCount(3);
+
+    // 5. Non-destructive: no DELETE fired, and the members SURVIVE (direct admin
+    //    read — independent of the GUI rehydration above).
+    expect(
+      draftDeleteCalls,
+      "WIZ-03: review must be non-destructive — DELETE /api/strategies/draft/* " +
+        `must not fire on "Review your keys" (saw ${draftDeleteCalls})`,
+    ).toBe(0);
+    expect(
+      await countStrategyKeys(composite.strategyId),
+      "WIZ-03: the 3 composite members must survive a review round-trip",
+    ).toBe(3);
+
+    // 6. Secretless resubmit: Continue → REAL set-members (owner-matched →
+    //    succeeds; the rehydrated panels carry empty secret fields, so this is
+    //    the true-e2e secretless-resubmit proof) → back at sync_preview showing
+    //    the snapshot. Final invariant: /api/keys/sync STILL never called across
+    //    the ENTIRE walk (WizardClient threads the captured snapshot as
+    //    cachedSnapshot, so the remount early-returns without a kickoff).
+    await expect(page.getByTestId("multi-continue")).toBeEnabled();
+    await page.getByTestId("multi-continue").click();
+    await expect(page.getByTestId("wizard-use-this-key")).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(
+      syncKickoffCalls,
+      "WIZ-05: /api/keys/sync must remain uncalled across the whole resume + " +
+        `review + resubmit walk (saw ${syncKickoffCalls})`,
+    ).toBe(0);
   });
 });

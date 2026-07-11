@@ -333,6 +333,26 @@ export async function cleanupStrategiesByNamePrefix(
   }
 }
 
+/**
+ * Admin (service-role) count of the `strategy_keys` member rows for a strategy.
+ * Used by the Plan 94-05 WIZ-03 non-destructive round-trip spec to assert the
+ * composite's members SURVIVE a "Review your keys" leave→return (a direct DB
+ * read, independent of the GUI rehydration path). Reads only — the getAdmin()
+ * prod-URL + service-role assertions guarantee it can only touch the TEST
+ * project.
+ */
+export async function countStrategyKeys(strategyId: string): Promise<number> {
+  const admin = getAdmin();
+  const { count, error } = await admin
+    .from("strategy_keys")
+    .select("*", { count: "exact", head: true })
+    .eq("strategy_id", strategyId);
+  if (error) {
+    throw new Error(`[seed] countStrategyKeys failed: ${error.message}`);
+  }
+  return count ?? 0;
+}
+
 export async function seedStrategyWithHistory(opts: {
   days: number;
   name?: string;
