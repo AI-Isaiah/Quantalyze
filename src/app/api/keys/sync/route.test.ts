@@ -51,6 +51,10 @@ const {
   // routing lesson).
   unifiedActive,
   mockPostProcessKey,
+  // UAT/F-1: spy on the composite kickoff's asset_class='crypto' force-derive
+  // (strategies update BEFORE the stitch enqueue) so a regression that drops it
+  // — re-opening the √252-vs-√365 preview fail-loud — reddens.
+  mockStrategiesUpdate,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -82,6 +86,7 @@ const {
   mockStrategyKeysSelect: vi.fn(),
   unifiedActive: { value: false as boolean },
   mockPostProcessKey: vi.fn(),
+  mockStrategiesUpdate: vi.fn(),
   ownershipQuery: {
     table: null as string | null,
     selectCols: null as string | null,
@@ -165,6 +170,21 @@ vi.mock("@/lib/supabase/admin", () => ({
                 }),
             }),
           }),
+        };
+      }
+      if (table === "strategies") {
+        // UAT/F-1: the composite kickoff force-derives asset_class='crypto' before
+        // enqueuing stitch_composite (update→eq). Spy the patch so a regression
+        // that drops the derive — re-opening the preview √252-vs-√365 fail-loud —
+        // is observable.
+        return {
+          update: (patch: Record<string, unknown>) => {
+            mockStrategiesUpdate(patch);
+            return {
+              eq: (_col: string, _val: unknown) =>
+                Promise.resolve({ error: null }),
+            };
+          },
         };
       }
       return { upsert: mockUpsert };
@@ -741,6 +761,13 @@ describe("POST /api/keys/sync", () => {
         expect.objectContaining({ p_kind: "sync_trades" }),
       );
 
+      // UAT/F-1: force-derive asset_class='crypto' BEFORE the stitch dispatch.
+      // A composite annualizes on the venue blend (√365); asset_class carries the
+      // NOT NULL DEFAULT 'traditional' (√252) until finalize, and the stitch runs
+      // HERE at preview — so without this the worker's guard trips
+      // (`asset_class 252 != venue-blend 365`) and the preview fails-loud.
+      expect(mockStrategiesUpdate).toHaveBeenCalledWith({ asset_class: "crypto" });
+
       // T-89-06: the sync.start audit rides the composite queue branch with a
       // kind discriminator so operators can attribute composite kickoffs.
       expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
@@ -943,6 +970,38 @@ describe("POST /api/keys/sync", () => {
         "enqueue_compute_job",
         expect.objectContaining({ p_kind: "stitch_composite" }),
       );
+      // UAT/F-1 neutrality: the asset_class='crypto' derive is scoped to the
+      // composite dispatch branch — a zero-member CSV must NOT have its
+      // asset_class rewritten (its picker choice / traditional default stands).
+      expect(mockStrategiesUpdate).not.toHaveBeenCalled();
+    });
+
+    // UAT/F-1 — ORDERING: the asset_class='crypto' derive must land BEFORE the
+    // stitch_composite enqueue. Falsifiable: if the enqueue moved above the
+    // derive, the worker could claim the job and read the stale 'traditional'
+    // asset_class before the update committed → the √252-vs-√365 fail-loud races
+    // back. invocationCallOrder pins the sequence.
+    it("derives asset_class='crypto' BEFORE enqueuing stitch_composite", async () => {
+      process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(202);
+      expect(mockStrategiesUpdate).toHaveBeenCalledWith({ asset_class: "crypto" });
+      expect(mockRpc).toHaveBeenCalledWith(
+        "enqueue_compute_job",
+        expect.objectContaining({ p_kind: "stitch_composite" }),
+      );
+      const deriveOrder = mockStrategiesUpdate.mock.invocationCallOrder[0];
+      const enqueueOrder = mockRpc.mock.invocationCallOrder[0];
+      expect(deriveOrder).toBeLessThan(enqueueOrder);
     });
 
     // ── Finding-M (MEDIUM): terminal-stamp write errors must be LOGGED ──────

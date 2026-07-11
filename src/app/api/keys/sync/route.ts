@@ -192,6 +192,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         );
       }
 
+      // #597 / F-1 (UAT): a composite annualizes its headline on the venue blend
+      // — every supported member venue is crypto, so √365 — but strategies.asset_class
+      // carries the NOT NULL DEFAULT 'traditional' (√252) until finalize force-derives
+      // it (finalize-wizard :492-499). The stitch runs HERE, at the PREVIEW kickoff,
+      // BEFORE finalize — so without this the worker reads 'traditional', the
+      // run_stitch_composite_job guard trips (`asset_class 252 != venue-blend 365`),
+      // and every composite preview fails-loud. Force 'crypto' before the dispatch so
+      // preview and finalize agree. Best-effort + logged (ownership was verified by the
+      // select above; the worker guard remains the hard backstop) — mirrors finalize.
+      const { error: assetClassErr } = await admin
+        .from("strategies")
+        .update({ asset_class: "crypto" })
+        .eq("id", strategy_id);
+      if (assetClassErr) {
+        console.warn(
+          `[keys/sync] composite asset_class derive failed (non-blocking) for ${strategy_id}:`,
+          assetClassErr,
+        );
+      }
+
       // Thread the inbound correlation_id like the sync_trades arm (:253-259)
       // so the forensic chain stays queryable end-to-end.
       const correlation_id = await getCorrelationId();
