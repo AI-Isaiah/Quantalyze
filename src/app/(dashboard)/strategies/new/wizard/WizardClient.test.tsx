@@ -85,14 +85,39 @@ vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
 // onTryAnotherKey) can be exercised in isolation. MultiKeyConnectStep renders a
 // marker so "step is now connect_key" is observable. None of the pre-existing
 // tests assert either child's content, so these stubs are inert for them.
+// WIZ-04: a minimal snapshot the sync-complete trigger fires so the stepper
+// tests can drive syncSnapshot != null (⇒ metadata/review become navigable).
+const SYNC_SNAPSHOT = {
+  tradeCount: 42,
+  csvRowCount: 0,
+  earliestTradeAt: null,
+  latestTradeAt: null,
+  detectedMarkets: ["BTC"],
+  exchange: "binance",
+  metrics: [],
+  sparkline: null,
+  computedAt: null,
+};
+
 vi.mock("./steps/SyncPreviewStep", () => ({
   SyncPreviewStep: (props: {
     wizardSessionId: string;
+    onComplete: (snapshot: typeof SYNC_SNAPSHOT) => void;
     onReviewKeys?: () => void;
     onTryAnotherKey: () => void;
   }) => (
     <div data-testid="mock-sync-preview">
       <span data-testid="sync-session">{props.wizardSessionId}</span>
+      {/* WIZ-04: drive handleSyncComplete so syncSnapshot is set and the
+          stepper's forward review cell becomes navigable. Inert for the
+          pre-existing tests, which never click it. */}
+      <button
+        type="button"
+        data-testid="sync-complete"
+        onClick={() => props.onComplete(SYNC_SNAPSHOT)}
+      >
+        Complete sync
+      </button>
       <button
         type="button"
         data-testid="sync-review-keys"
@@ -117,6 +142,17 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
       <span data-testid="connect-session">{props.wizardSessionId}</span>
     </div>
   ),
+}));
+
+// WIZ-04: stub the metadata + review steps so the stepper-navigation tests
+// observe the active step without depending on either step's internals. The
+// pre-existing tests never reach these steps, so the stubs are inert for them.
+vi.mock("./steps/MetadataStep", () => ({
+  MetadataStep: () => <div data-testid="mock-metadata-step" />,
+}));
+
+vi.mock("./steps/ReviewStep", () => ({
+  ReviewStep: () => <div data-testid="mock-review-step" />,
 }));
 
 const DRAFT = {
@@ -408,5 +444,66 @@ describe("[94-03] WizardClient — non-destructive composite review (WIZ-03)", (
     });
     // And the destructive path re-arms the F6 fence by minting a fresh session.
     expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("[94-04] WizardClient — clickable stepper (WIZ-04)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Forward-skip block (T-94-15 / research Pitfall 4). At connect_key with no
+  // strategyId, NO forward step is complete, so none is navigable — the render
+  // guards at :699/:724 (strategyId && syncSnapshot && metadataDraft) can never
+  // be reached with missing deps. This is the RED-under-mutation pin: neuter
+  // stepNavigable to always-true and the forward cells appear ⇒ these fail.
+  it("blocks forward navigation to steps whose prerequisites are missing", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    // Active step (connect_key) is inert (no button); every forward step is
+    // non-navigable because its data prerequisites are absent.
+    expect(screen.queryByTestId("wizard-step-connect_key")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-sync_preview")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-metadata")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-review")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-submit")).toBeNull();
+  });
+
+  // "Change nothing, go forward" (T-94-16). After reaching review-eligible
+  // state, a backward click then a forward click redoes NO work: handleStepSelect
+  // is setStep + persistPointer only, and syncSnapshot/metadataDraft persist in
+  // WizardClient state — so the round-trip issues zero network calls (no
+  // /api/keys/sync POST, no add-key/set-members POST).
+  it("returns forward to a completed step after a backward click with no refetch", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    // initialDraft seeds strategyId + metadataDraft; syncSnapshot starts null.
+    render(<WizardClient initialDraft={DRAFT} />);
+    await screen.findByTestId("mock-sync-preview");
+
+    // review is not navigable yet — syncSnapshot is missing (forward-skip block).
+    expect(screen.queryByTestId("wizard-step-review")).toBeNull();
+
+    // Complete sync → syncSnapshot set, step advances to metadata.
+    fireEvent.click(screen.getByTestId("sync-complete"));
+    await screen.findByTestId("mock-metadata-step");
+
+    // Now every lower-ordinal step is complete ⇒ review is navigable.
+    await screen.findByTestId("wizard-step-review");
+
+    // Inventory network calls, then run the back → forward round-trip.
+    const callsBeforeRoundTrip = fetchSpy.mock.calls.length;
+
+    fireEvent.click(screen.getByTestId("wizard-step-sync_preview"));
+    await screen.findByTestId("mock-sync-preview");
+
+    fireEvent.click(await screen.findByTestId("wizard-step-review"));
+    await screen.findByTestId("mock-review-step");
+
+    // No work redone: the stepper round-trip issued no new fetch calls.
+    expect(fetchSpy.mock.calls.length).toBe(callsBeforeRoundTrip);
   });
 });
