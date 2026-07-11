@@ -1400,6 +1400,48 @@ async def test_ccxt_byte_consistent_with_real_flows_and_terminus_segmentation() 
 
 
 @pytest.mark.asyncio
+async def test_ccxt_non_typed_reconstruction_bug_reraises_not_laundered_to_degrade() -> None:
+    """Phase 93.1 FIX 4 (Rule 9 — the load-bearing anti-laundering guarantee): a
+    GENUINE non-typed bug from `_reconstruct_ccxt_member` (a KeyError / AttributeError /
+    generic ValueError — NOT a `_PERMANENT_LEDGER_ERRORS` member and NOT a 429/geo
+    transient) must RE-RAISE (surface for classification), NEVER be laundered into a
+    silent `reconstruction_failed` degrade that ships a wrong-but-quiet composite.
+
+    `_reconstruct_ccxt_member` is a closure, so the non-typed bug is injected at a
+    fetch primitive (the equity read raises `KeyError`); it propagates through the
+    helper into the degrade routing, which catches ONLY the typed structural set and
+    the 429/geo transients — a KeyError falls through `is_geo_blocked` (False) to the
+    bare `raise`. RED-if-neutered: broadening the degrade `except` to `Exception`
+    would launder this into a degrade → the job would return DONE and this
+    `pytest.raises(KeyError)` would fail."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit
+        _member(2, "2026-06-01", None),           # bybit — equity read raises KeyError
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        fetch_raise=KeyError("genuine non-typed reconstruction bug"),
+    )):
+        with pytest.raises(KeyError):
+            await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    # NOT laundered: no reconstruction_failed degrade, no terminal failed stamp.
+    assert not any(
+        isinstance(payload, dict)
+        and (
+            payload.get("data_quality_flags", {}).get("degraded_members")
+            or payload.get("computation_status") == "failed"
+        )
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+    )
+
+
+@pytest.mark.asyncio
 async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
     """Finding 4: a PERMANENT member-key preflight failure (missing / inactive key)
     used to `return ctx` WITHOUT stamping strategy_analytics — the wizard poller
