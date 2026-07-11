@@ -645,6 +645,18 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 apiKeyId={apiKeyId}
                 wizardSessionId={wizardSessionId}
                 onComplete={handleSyncComplete}
+                onReviewKeys={() => {
+                  // WIZ-03: composite "Review your keys" is NON-destructive —
+                  // it is a pure step transition back to connect_key. Unlike
+                  // onTryAnotherKey it does NOT handleDeleteDraft (which would
+                  // cascade away every strategy_keys member) and does NOT
+                  // regenerate wizardSessionId (the F6 duplicate-submit fence is
+                  // only re-armed on the destructive discard-the-key path). The
+                  // draft + its members + the session all survive; the
+                  // MultiKeyConnectStep rehydrates the stored keys via WIZ-02.
+                  setStep("connect_key");
+                  persistPointer("connect_key", strategyId);
+                }}
                 onTryAnotherKey={() => {
                   setStep("connect_key");
                   // Regenerate the idempotency token OPTIMISTICALLY (before the

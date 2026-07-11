@@ -213,6 +213,14 @@ export interface SyncPreviewStepProps {
   wizardSessionId: string;
   onComplete: (snapshot: SyncPreviewSnapshot) => void;
   onTryAnotherKey: () => void;
+  /**
+   * WIZ-03 (non-destructive composite review). Composite "Review your keys"
+   * navigates back to `connect_key` WITHOUT deleting the draft or minting a
+   * fresh session (the destructive `onTryAnotherKey` path is single-key only).
+   * When absent, the composite buttons fall back to `onTryAnotherKey` so a
+   * missing wiring degrades to the prior behaviour rather than a dead click.
+   */
+  onReviewKeys?: () => void;
 }
 
 type Phase =
@@ -300,6 +308,7 @@ export function SyncPreviewStep({
   wizardSessionId,
   onComplete,
   onTryAnotherKey,
+  onReviewKeys,
 }: SyncPreviewStepProps) {
   const [phase, setPhase] = useState<Phase>("kicking_off");
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -1040,7 +1049,7 @@ export function SyncPreviewStep({
         <div className="mt-6 flex gap-3">
           <Button
             type="button"
-            onClick={onTryAnotherKey}
+            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
             {isComposite ? "Review your keys" : "Try another key"}
@@ -1393,7 +1402,7 @@ export function SyncPreviewStep({
           </Button>
           <Button
             variant="ghost"
-            onClick={onTryAnotherKey}
+            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
             Review your keys
@@ -1467,7 +1476,7 @@ export function SyncPreviewStep({
           </Button>
           <Button
             variant="ghost"
-            onClick={onTryAnotherKey}
+            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
             Try another key
