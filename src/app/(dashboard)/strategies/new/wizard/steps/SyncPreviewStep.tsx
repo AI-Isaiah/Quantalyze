@@ -221,6 +221,13 @@ export interface SyncPreviewStepProps {
    * missing wiring degrades to the prior behaviour rather than a dead click.
    */
   onReviewKeys?: () => void;
+  /**
+   * WIZ-05 (cached crawl snapshot). The completed snapshot WizardClient already
+   * holds (`syncSnapshot`). When present, the mount effect renders it directly
+   * and short-circuits BEFORE any strategy_analytics read or /api/keys/sync
+   * kickoff — returning to this step after a back-nav never re-crawls/re-stitches.
+   */
+  cachedSnapshot?: SyncPreviewSnapshot | null;
 }
 
 type Phase =
@@ -309,6 +316,7 @@ export function SyncPreviewStep({
   onComplete,
   onTryAnotherKey,
   onReviewKeys,
+  cachedSnapshot,
 }: SyncPreviewStepProps) {
   const [phase, setPhase] = useState<Phase>("kicking_off");
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -341,6 +349,21 @@ export function SyncPreviewStep({
     startedAtRef.current = Date.now();
     (async () => {
       try {
+        // WIZ-05 (cached crawl snapshot) — FIRST, before any DB probe or
+        // kickoff POST. WizardClient renders SyncPreviewStep only while
+        // step === "sync_preview", so a back-nav unmounts then remounts this
+        // effect. When WizardClient still holds the completed snapshot
+        // (`syncSnapshot`, threaded as cachedSnapshot), render it directly and
+        // return: no strategy_analytics read, no /api/keys/sync POST, no poll
+        // (phase "passed" never enters the poll effect) — regardless of the
+        // freshness window. Mirrors the freshness-skip idiom below but keys off
+        // the client-held snapshot instead of a DB freshness probe.
+        if (cachedSnapshot) {
+          setSnapshot(cachedSnapshot);
+          if (cachedSnapshot.composite) setIsComposite(true);
+          setPhase("passed");
+          return;
+        }
         // QA report 2026-05-21 ISSUE-005 — skip the /api/keys/sync
         // round-trip on resume when the analytics row is both COMPLETE
         // and fresh (within SYNC_FRESHNESS_WINDOW_MS). The worker is
@@ -366,39 +389,64 @@ export function SyncPreviewStep({
         const computedAtMs = existing?.computed_at
           ? Date.parse(existing.computed_at)
           : null;
+        const isComplete = isComputedAnalytics(existing?.computation_status);
         const isFresh =
-          isComputedAnalytics(existing?.computation_status) &&
+          isComplete &&
           computedAtMs !== null &&
           Number.isFinite(computedAtMs) &&
           Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
-        if (isFresh) {
-          // R2-2 (freshness-skip resume): the kickoff POST is SKIPPED here, so
-          // there is no server `composite` field to thread. Determine
-          // composite-ness DETERMINISTICALLY from the marker the stitch worker
-          // persists (`data_quality_flags.composite`) via a SEPARATE lightweight
-          // read — we do NOT re-derive/re-enqueue a fresh composite, and we do
-          // NOT touch the frozen `computation_status, computed_at` read above.
-          // Fail CLOSED to SYNC_FAILED when the marker row can't be read (error
-          // or missing row) rather than silently routing a possible composite
-          // through the single-key arm. A present row WITHOUT the marker is
-          // definitively single-key/CSV → byte-neutral resume.
+        if (isComplete) {
+          // The kickoff POST is (potentially) SKIPPED on a resume, so there is
+          // no server `composite` field to thread. Determine composite-ness
+          // DETERMINISTICALLY from the marker the stitch worker persists
+          // (`data_quality_flags.composite`) via a SEPARATE lightweight read —
+          // we do NOT re-derive/re-enqueue a fresh composite, and we do NOT
+          // touch the frozen `computation_status, computed_at` read above.
+          //
+          // WIZ-05 durability (resolved decision 1): this read now runs for ANY
+          // complete row (fresh OR stale), not only fresh ones, so a COMPLETE
+          // composite short-circuits the kickoff regardless of the 5-minute
+          // window — a finished stitch never needs re-running merely to display
+          // (the hard-reload case). Cost on the complete-and-stale SINGLE-KEY
+          // resume is one extra lightweight marker read before the unchanged
+          // re-sync POST.
           const { data: dqRow, error: dqErr } = await supabase
             .from("strategy_analytics")
             .select("data_quality_flags")
             .eq("strategy_id", strategyId)
             .maybeSingle();
           if (!mountedRef.current) return;
-          if (dqErr || !dqRow) {
-            setErrorCode("SYNC_FAILED");
-            setPhase("gate_failed");
-            return;
-          }
-          const dqFlags = (dqRow.data_quality_flags ?? {}) as {
+          const dqFlags = (dqRow?.data_quality_flags ?? {}) as {
             composite?: unknown;
           };
-          if (dqFlags.composite === true) setIsComposite(true);
-          setPhase("waiting_for_complete");
-          return;
+          if (dqFlags.composite === true) {
+            // COMPLETE composite (fresh OR stale) → skip the kickoff; the
+            // existing poll materializes the snapshot from the persisted rows.
+            setIsComposite(true);
+            setPhase("waiting_for_complete");
+            return;
+          }
+          if (isFresh) {
+            // FRESH resume, non-composite (or unreadable marker). The fresh-skip
+            // path has NO kickoff-POST fallback, so it fails CLOSED to
+            // SYNC_FAILED when the marker row can't be read (error or missing
+            // row) rather than silently routing a possible composite through the
+            // single-key arm — byte-identical to the prior freshness-skip guard.
+            // A present row WITHOUT the marker is definitively single-key/CSV →
+            // byte-neutral resume.
+            if (dqErr || !dqRow) {
+              setErrorCode("SYNC_FAILED");
+              setPhase("gate_failed");
+              return;
+            }
+            setPhase("waiting_for_complete");
+            return;
+          }
+          // STALE, non-composite (or unreadable marker) → fall through to the
+          // kickoff POST exactly as today. The route fails CLOSED (503) on an
+          // unknowable membership, so the end-to-end fail-closed guarantee is
+          // preserved without blocking a legitimate stale single-key re-sync on
+          // a transient marker-read blip.
         }
         const res = await fetch("/api/keys/sync", {
           method: "POST",
@@ -439,7 +487,9 @@ export function SyncPreviewStep({
     return () => {
       mountedRef.current = false;
     };
-  }, [strategyId]);
+    // cachedSnapshot is stable WizardClient state; the early return keeps any
+    // re-run inert (it never re-crawls when a snapshot is already held).
+  }, [strategyId, cachedSnapshot]);
 
   useEffect(() => {
     if (phase !== "waiting_for_complete" && phase !== "kicking_off") return;

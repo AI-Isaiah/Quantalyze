@@ -644,6 +644,10 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 strategyId={strategyId}
                 apiKeyId={apiKeyId}
                 wizardSessionId={wizardSessionId}
+                // WIZ-05: thread the completed snapshot WizardClient already
+                // captured (handleSyncComplete) so a back-nav to sync_preview
+                // renders the cached crawl/stitch result instead of re-kicking.
+                cachedSnapshot={syncSnapshot}
                 onComplete={handleSyncComplete}
                 onReviewKeys={() => {
                   // WIZ-03: composite "Review your keys" is NON-destructive —

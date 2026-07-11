@@ -221,6 +221,24 @@ function installSupabaseMock(
             };
           }
 
+          // WIZ-05: the mount effect now reads data_quality_flags for ANY
+          // complete row (fresh or stale) to decide composite-ness. The
+          // freshness probe here reports a STALE complete row, so model the
+          // marker as present-but-non-composite → the stale single-key path
+          // falls through to the kickoff POST exactly as before (and never hits
+          // the throwing heavy branch below, which would abort the mount effect).
+          if (cols === "data_quality_flags") {
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({
+                    data: { data_quality_flags: null },
+                    error: null,
+                  }),
+              }),
+            };
+          }
+
           // Heavy terminal fetch (analytics columns / trades / api_keys).
           if (heavyOutcome === "throw") {
             // Reject the analytics-column maybeSingle() so the leading
@@ -517,6 +535,21 @@ describe("[H-0195] SyncPreviewStep — poll effect cleanup on unmount", () => {
                       computation_status: "complete",
                       computed_at: "2000-01-01T00:00:00.000Z",
                     },
+                    error: null,
+                  }),
+              }),
+            };
+          }
+          // WIZ-05: model the composite-marker read as present-but-non-composite
+          // so the stale-complete path falls through to the kickoff POST and the
+          // in-flight assertion below still exercises the STATUS poll (not the
+          // marker read).
+          if (cols === "data_quality_flags") {
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({
+                    data: { data_quality_flags: null },
                     error: null,
                   }),
               }),
