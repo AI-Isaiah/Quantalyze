@@ -285,11 +285,50 @@ function computeValidation(panels: PanelState[]): {
 export interface MultiKeyConnectStepProps {
   wizardSessionId: string;
   onSuccess: (result: ConnectKeySuccess) => void;
+  /**
+   * WIZ-02: the composite draft's strategy id, threaded from WizardClient so a
+   * re-mounted step can rehydrate State B from the WIZ-01 GET. Named
+   * `draftStrategyId` (NOT strategyId) to avoid shadowing the local
+   * `const [strategyId, setStrategyId]` state below.
+   */
+  draftStrategyId?: string | null;
+}
+
+/**
+ * WIZ-02: a WIZ-01 GET member → rehydrated PanelState. Mirrors a post-validate
+ * panel (validatePanel success, above): status "validated", apiKeyId set,
+ * plaintext EMPTY. The three credential fields are hardcoded to "" (T-94-06) —
+ * no secret ever enters browser state on rehydrate.
+ */
+function toRehydratedPanel(member: {
+  exchange: string;
+  nickname: string | null;
+  window_start: string;
+  window_end: string | null;
+  api_key_id: string;
+}): PanelState {
+  return {
+    id: genId(),
+    exchange: member.exchange as ExchangeId,
+    nickname: member.nickname ?? "",
+    apiKey: "",
+    apiSecret: "",
+    passphrase: "",
+    showSecret: false,
+    windowStart: member.window_start,
+    windowEnd: member.window_end ?? "",
+    stillLive: member.window_end == null,
+    status: "validated",
+    apiKeyId: member.api_key_id,
+    errorCode: null,
+    confirmingRemove: false,
+  };
 }
 
 export function MultiKeyConnectStep({
   wizardSessionId,
   onSuccess,
+  draftStrategyId,
 }: MultiKeyConnectStepProps) {
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [panels, setPanels] = useState<PanelState[]>([]);
@@ -308,6 +347,67 @@ export function MultiKeyConnectStep({
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  // WIZ-02: mount rehydration. When the step re-mounts for an existing composite
+  // draft (back-nav — WizardClient threads its strategyId as draftStrategyId),
+  // fetch the WIZ-01 GET and rebuild State B so stored keys appear pre-filled and
+  // verified rather than a blank single-key form. The panels carry EMPTY
+  // plaintext (toRehydratedPanel) and status "validated", so the gating
+  // predicates (allValidated) accept them with no re-validation, and the
+  // secretless set-members resubmit works by construction.
+  //
+  // Guards: no draftStrategyId → no fetch (byte-neutral State A). Empty
+  // membership → stays single-key State A (single-key drafts have no
+  // strategy_keys rows). Never clobbers in-progress work: applies only when
+  // still on the pristine single-key path (mode single, no panels), checked via
+  // panelsRef at resolve time. A non-ok/failed GET degrades honestly to State A
+  // (the pre-phase behavior) with the error logged — no secret-touching path.
+  useEffect(() => {
+    if (!draftStrategyId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/strategies/composite/members?strategy_id=${draftStrategyId}`,
+        );
+        if (!res.ok) {
+          console.error(
+            "[wizard:MultiKeyConnectStep] members GET non-ok:",
+            res.status,
+          );
+          return;
+        }
+        const data = (await res.json().catch(() => ({}))) as {
+          members?: Array<{
+            exchange: string;
+            nickname: string | null;
+            window_start: string;
+            window_end: string | null;
+            api_key_id: string;
+          }>;
+        };
+        const members = data.members;
+        if (
+          cancelled ||
+          !Array.isArray(members) ||
+          members.length === 0 ||
+          panelsRef.current.length > 0
+        ) {
+          return;
+        }
+        setStrategyId(draftStrategyId);
+        setMode("multi");
+        setPanels(members.map(toRehydratedPanel));
+      } catch (err) {
+        // Logs only `err`, never member/panel fields (T-94-07).
+        console.error("[wizard:MultiKeyConnectStep] members GET threw:", err);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [draftStrategyId]);
+
   const focusRef = useRef<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
   // UAT/F-4: the latest unvalidated draft the user typed into the single-key

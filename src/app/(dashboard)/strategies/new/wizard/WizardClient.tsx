@@ -635,6 +635,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
               <MultiKeyConnectStep
                 wizardSessionId={wizardSessionId}
                 onSuccess={handleConnectSuccess}
+                draftStrategyId={strategyId}
               />
             )}
 
