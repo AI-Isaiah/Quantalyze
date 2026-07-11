@@ -269,14 +269,12 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // A published composite as the false-green POSITIVE CONTROL for the
     // discoverability assertion below (proves the id-based lookup surface
     // actually renders a published composite before we assert the failed one
-    // is absent). Seeded under its OWN owner (NOT the allocator): the control is
-    // only ever hit via the PUBLIC, owner-agnostic /strategy/[id] lookup
-    // (withPublishedOnly), so ownership is irrelevant to it — and keeping it off
-    // the allocator leaves the allocator owning exactly ONE composite (the
-    // failed one), matching the passing multi-key test's State-A. A second
-    // allocator-owned composite perturbs the wizard's initial connect step so
-    // the `multi-add-key` ghost affordance never renders (the walk below times
-    // out on it).
+    // is absent). Seeded under its OWN owner: it is only ever hit via the PUBLIC,
+    // owner-agnostic /strategy/[id] lookup (withPublishedOnly), so ownership is
+    // irrelevant. (The wizard-walk hang was NOT caused by this control — see the
+    // `source: 'legacy'` note in seedCompositeStrategy's `failed` variant: the
+    // FAILED composite was a `source='wizard' status='draft'` row that the wizard
+    // resumed.)
     const publishedControl = await seedCompositeStrategy();
     await stubWizardLiveCalls(page, failed.strategyId);
     await loginViaForm(page, allocator.email, allocator.password);

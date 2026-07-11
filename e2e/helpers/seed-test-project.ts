@@ -825,7 +825,16 @@ export async function seedCompositeStrategy(opts?: {
       strategy_types: ["spot"],
       subtypes: [],
       markets: ["BTC"],
-      source: "wizard",
+      // The `failed` variant seeds `status='draft'` data that the #338 walk polls
+      // (via the stub) as its failed-gate target — it is NOT an in-progress
+      // onboarding the walking user should resume. Give it `source='legacy'` (a
+      // valid CHECK value: legacy/wizard/admin_import) so it stays OUT of the
+      // wizard's draft-resume query — `.eq("source","wizard").eq("status","draft")`
+      // in strategies/new/wizard/page.tsx:85-86 — which would otherwise hydrate
+      // WizardClient's initialDraft and suppress the fresh connect step (the
+      // `multi-add-key` ghost affordance), timing out the walk. The published
+      // default never matches the `status='draft'` filter, so it keeps 'wizard'.
+      source: variant === "failed" ? "legacy" : "wizard",
     })
     .select("id")
     .single();
