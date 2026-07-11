@@ -86,6 +86,11 @@ vi.mock("./ScenarioCommitDrawer", () => ({
 vi.mock("../ScenarioFlaggedHoldingsList", () => ({
   ScenarioFlaggedHoldingsList: vi.fn(() => <div data-testid="flagged-list-mock" />),
 }));
+// SFH-2 — a corrupt persisted leverage (T_LEV_LOAD3's 999) now emits a Sentry
+// warning on rehydrate-sanitize. Stub the helper so the suite stays hermetic
+// (no real @sentry import) — the coercion signal itself is asserted in
+// src/lib/leverage.test.ts.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 // ENGINE-01 (Phase 63): the composer builds its series-space engine set from the
 // REAL per-key + added constructions, so this suite keeps them genuine via
 // importOriginal. The windowed-save (review-CR-01) tests drive their two-strategy
@@ -1240,5 +1245,66 @@ describe("ScenarioComposer — LEV-02: per-strategy leverage round-trips through
 
     // Leverage never enters diffCount/handleCommit — the chip is unchanged.
     expect(diffCountLabel()).toBe(before);
+  });
+
+  // HIGH-1 (Phase 90.5 review) — handleReset MUST drop the leverage overlay.
+  // leverageByRef was reset at the two scenario-OPEN seams but NOT in handleReset
+  // (banner Reset / reset-modal confirm / commit-success). A stale multiplier
+  // surviving a reset both (a) re-levers any matching leg in the fresh draft's
+  // projection — projectionState.leverage[id] = leverageByRef[id] ?? 1, so an
+  // empty map ⇒ every leg at 1× — AND (b) folds into a BRAND-NEW scenario at the
+  // next Save, a leverage the user never set on it. The POST body is the
+  // load-bearing observable: it reads the SAME leverageByRef map the projection
+  // consumes, and it distinguishes the fix (the projection needs loaded series
+  // the fixture omits, and the reset removes the added row regardless of the fix).
+  it("T_LEV_RESET1 (HIGH-1) reset drops the leverage overlay → the fresh draft's next Save POSTs leverageOverrides {} (no bleed)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Fresh book" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderComposer();
+    // Open a saved scenario carrying a live 3× overlay on its added strategy.
+    openRow({
+      id: SAVED_ID,
+      name: "Levered book",
+      draft: okDraftWithStrat({ leverageOverrides: { [STRAT_LEV]: 3 } }),
+    });
+    // Precondition (non-vacuous): the overlay is genuinely live — the input reads 3×.
+    expect(leverageInput().value).toBe("3");
+
+    // Invoke the reset path: footer "Reset scenario draft" → confirm "Discard
+    // draft" (both route through handleReset).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Reset scenario draft/i }),
+      );
+    });
+    act(() => {
+      fireEvent.click(screen.getByRole("button", { name: /Discard draft/i }));
+    });
+
+    // A subsequent Save (no scenario open → "Save portfolio") POSTs an EMPTY
+    // leverage map — the projection input is back to 1× on every leg AND the 3×
+    // never bleeds into the brand-new scenario's persisted draft. Without the fix
+    // leverageByRef retains {STRAT_LEV:3} and this POSTs {STRAT_LEV:3}.
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Save portfolio/i }),
+    );
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Fresh book" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.draft.leverageOverrides).toEqual({});
   });
 });

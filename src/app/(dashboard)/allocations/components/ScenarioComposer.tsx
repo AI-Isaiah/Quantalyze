@@ -852,8 +852,10 @@ export function ScenarioComposer({
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
   // DSRC-02/03 — per-data-source include/exclude map (api_key_id → included?).
-  // Ephemeral exploration state, modeled EXACTLY on R4 `leverageByRef` above:
-  // NOT persisted to scenario.draft, NOT routed through
+  // Ephemeral exploration state, structurally modeled on R4 `leverageByRef`
+  // above — but DIVERGING on persistence: `leverageByRef` is now folded into the
+  // saved draft at Save (LEV-02), whereas this include-map is genuinely
+  // ephemeral. This map is NOT persisted to scenario.draft, NOT routed through
   // `scenario.draft.toggleByScopeRef`, NOT part of the commit diff, and resets on
   // reload (Pitfall 5). `{}` = all included (default). A key resolves to included
   // via `includeByApiKeyId[id] ?? true` wherever it is read. Threaded into the
@@ -1212,6 +1214,16 @@ export function ScenarioComposer({
     // prior exclusion would silently carry over and the loaded scenario's
     // projection would omit a source the user never excluded for it.
     setIncludeByApiKeyId({});
+    // LEV-02 (HIGH-1) — clear the per-strategy leverage overlay on EVERY reset /
+    // commit-success. Unlike include-map (never persisted), leverageByRef is
+    // FOLDED INTO the draft at the next Save (setLeverageOverrides at POST/PUT),
+    // so a stale multiplier that survives a reset both (a) silently re-levers any
+    // matching leg in the fresh draft's projection AND (b) persists into a
+    // brand-new scenario the user never leveraged. The two scenario-OPEN seams
+    // already rehydrate-REPLACE it; reset/commit is the third seam that must drop
+    // it (the exact class the WR-02 include-map clear above fixes). Every ref
+    // back to the 1× default on a fresh live book.
+    setLeverageByRef({});
     // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
     // it now (on the SAME confirm that discards the draft). `reset()` re-inits
     // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
