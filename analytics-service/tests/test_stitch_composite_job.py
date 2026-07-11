@@ -1442,6 +1442,92 @@ async def test_ccxt_non_typed_reconstruction_bug_reraises_not_laundered_to_degra
 
 
 @pytest.mark.asyncio
+async def test_ccxt_empty_reconstruction_degrades_insufficient_history_no_crash() -> None:
+    """Phase 93.1 red-team HIGH FIX A: a ccxt member whose honest reconstruction
+    yields an EMPTY series (brand-new / inactive account: no realized, no funding, no
+    flows) must DEGRADE with reason `insufficient_history` — NOT crash the whole
+    (healthy Deribit) composite, and NOT join the stitch as a silent 0-day 'complete'
+    member. Mirrors the single-key derive short-circuit (run_derive_broker_dailies_job
+    :2558) the composite ccxt arm previously omitted.
+
+    RED before the fix: the empty series (a RangeIndex, not a DatetimeIndex) reaches
+    `clip_to_window` at the append site (OUTSIDE the try), whose `>=` against a
+    Timestamp raises `TypeError` → the whole composite fails ('unknown' → retried to
+    failed_final). GREEN after: the guard raises `_CcxtMemberDegrade` inside the
+    helper so the empty series never reaches clip_to_window."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit, healthy
+        _member(2, "2026-06-01", None),           # bybit — empty reconstruction
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,          # gate CLOSED → single cash pass
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=[],   # brand-new account: no trades, no funding, no flows
+        funding=[],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    # Did NOT crash / fail the whole composite — it completed with a warning.
+    assert result.outcome == DispatchOutcome.DONE
+    assert _degraded_members(fake) == [
+        {"seq": 2, "venue": "bybit", "reason": "insufficient_history"},
+    ]
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["computation_status"] == "complete_with_warnings"
+    # The degraded member shows honest zero coverage (not a silent 0-day 'complete').
+    seq2 = next(e for e in headline["data_quality_flags"]["per_key"] if e["seq"] == 2)
+    assert seq2["n_days"] == 0
+    # Only the Deribit member contributed persisted rows.
+    written_dates = {
+        r["date"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+    }
+    assert written_dates == {"2026-05-01", "2026-05-02"}
+
+
+@pytest.mark.asyncio
+async def test_ccxt_insufficient_history_degrade_consistent_across_mtm_passes() -> None:
+    """Phase 93.1 FIX A/B x FIX 1 interaction: a FIX-A `insufficient_history` degrade
+    must be CONSISTENT across the cash AND MTM passes so it does NOT trip the FIX-1
+    MTM/cash degraded-set divergence fail-loud. The ccxt reconstruction is
+    basis-independent (both passes run the SAME fetches + combine + terminus), so a
+    member that degrades in cash degrades identically in MTM → the seq-sets match →
+    the divergence check passes and the composite completes complete_with_warnings.
+
+    Perp-only Deribit remainder keeps the MTM gate OPEN (mark_to_market_available true
+    on the Deribit-only member_signals), so the MTM second pass actually runs."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit, perp-only → MTM gate OPEN
+        _member(2, "2024-02-01", None),           # bybit — empty reconstruction (FIX A)
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m1, {})],   # cash seq1 + MTM seq1
+        has_option_activity=False,              # perp-only → gate OPEN
+        preflight_side_effect=[
+            _ctx("deribit"), _ctx("bybit"),     # cash pass
+            _ctx("deribit"), _ctx("bybit"),     # MTM pass
+        ],
+    ) + _ccxt_fetch_patches(realized=[], funding=[])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    # Consistent degrade across both passes → NO divergence fail-loud (would be
+    # error_kind='transient' with 'diverge' in the message).
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None and set(by_basis) == {"cash_settlement", "mark_to_market"}
+    assert _degraded_members(fake) == [
+        {"seq": 2, "venue": "bybit", "reason": "insufficient_history"},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
     """Finding 4: a PERMANENT member-key preflight failure (missing / inactive key)
     used to `return ctx` WITHOUT stamping strategy_analytics — the wizard poller

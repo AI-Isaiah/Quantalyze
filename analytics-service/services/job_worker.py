@@ -2804,6 +2804,35 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
 # _COMPOSITE_CRYPTO_VENUES so the two sets can never drift.
 _COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {"deribit"}
 
+
+class _CcxtMemberDegrade(Exception):
+    """HARD-05 (Phase 93.1 hardening): a ccxt composite member that reconstructed
+    WITHOUT raising a structural ledger error but is nonetheless NOT honestly
+    representable in the stitch — it must DEGRADE (visible DQ reason) rather than
+    join. Carries a fixed machine-readable ``reason`` enum literal (leak-safe: no
+    exception text / USD / NAV interpolated), routed to the SAME degrade channel as
+    the structural `reconstruction_failed` path. Two cases (mirroring the single-key
+    derive path's guards, which the composite ccxt arm previously OMITTED):
+
+      * ``insufficient_history`` — the reconstructed series has < 2 interpretable
+        (non-NaN) days (a brand-new / inactive account, or a series entirely NaN'd
+        by the DQ-02 terminus). ``run_derive_broker_dailies_job`` short-circuits this
+        at :2558; the composite arm let an EMPTY series reach ``clip_to_window`` →
+        ``TypeError`` → 'unknown' retry-to-failed_final on the whole (healthy)
+        composite, OR a 0-day member joining 'complete' with no caveat.
+      * ``realized_stream_unavailable`` — the realized/closed-PnL trade stream is
+        EMPTY while funding rows are PRESENT. A real perp trader has trades; an
+        empty-realized + funding-present member is the Bybit-INVERSE gap (closed-PnL
+        is fetched category='linear' only, so inverse realized is invisible) — it
+        would reconstruct a fabricated funding-only track (100% of trading PnL
+        absent). Degrade honestly instead of shipping fabrication (HARD-05
+        OR-criterion). Full inverse SUPPORT is deferred (D-2).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 # Phase 86 / Finding 8 — a composite fans out over its members with (worst case,
 # when MTM is admissible) TWO sequential exchange crawls per member. The
 # stitch_composite handler runs under a FIXED TIMEOUT_PER_KIND["stitch_composite"]
@@ -3255,6 +3284,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             if _coverage_flags.get("flow_coverage_incomplete"):
                 meta["flow_coverage_incomplete"] = True
 
+        # FIX A (Phase 93.1 red-team HIGH): mirror the single-key derive path's
+        # terminal insufficient-history short-circuit (run_derive_broker_dailies_job
+        # :2558) the composite ccxt arm previously OMITTED. Gate on INTERPRETABLE
+        # (non-NaN) days — after the DQ-02 terminus a thin series may be all-NaN or
+        # < 2 real days. Raising HERE guarantees an empty/thin series NEVER reaches
+        # `clip_to_window` at the append site (whose `>=` on an empty RangeIndex
+        # raises TypeError → 'unknown' retry-to-failed_final on the whole composite),
+        # and never joins the stitch as a silent 0-day 'complete' member. DEGRADE it.
+        if returns.empty or int(returns.notna().sum()) < 2:
+            raise _CcxtMemberDegrade("insufficient_history")
+
         # Cash basis only — has_option_activity is False for ccxt (no options book
         # signal; mark_to_market_available gates OFF non-native venues).
         return returns, False, dict(meta)
@@ -3329,6 +3369,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     returns, has_opt, member_meta = await _reconstruct_ccxt_member(
                         ctx, venue
                     )
+                except _CcxtMemberDegrade as deg:
+                    # FIX A / FIX B (Phase 93.1): the member reconstructed without a
+                    # structural ledger error but is not honestly representable
+                    # (insufficient_history / realized_stream_unavailable) → route to
+                    # the SAME degrade channel with the distinct fixed reason. Same
+                    # leak discipline as the structural arm (closed {seq, venue, reason}
+                    # set, fixed literal). MUST precede the bare `except Exception`
+                    # below so this typed signal is never swallowed by the geo/raise
+                    # arm. The `finally` still closes the exchange.
+                    degraded.append(
+                        {"seq": seq, "venue": venue, "reason": deg.reason}
+                    )
+                    venues.append(venue)
+                    continue
                 except (NavReconstructionError, *_PERMANENT_LEDGER_ERRORS):
                     # Structural: this MEMBER cannot be honestly reconstructed →
                     # DEGRADE visibly (the composite still completes). Leak discipline
