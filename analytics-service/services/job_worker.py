@@ -3204,6 +3204,19 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 f"unsupported ccxt composite venue {venue!r}"
             )
 
+        # FIX B (Phase 93.1 red-team HIGH): realized-empty + funding-present is the
+        # honest-reconstruction-impossible signal. `fetch_all_trades` fetches closed
+        # PnL as category='linear' only (exchange.py:1576), so a Bybit-INVERSE perp
+        # member's realized stream comes back EMPTY while its funding settlements do
+        # NOT — combine would then fabricate a ~1e-8/day funding-only track (BTC
+        # funding summed as USD over heuristic capital) with 100% of trading PnL
+        # missing, flagged only by `used_heuristic_capital`. A real perp trader has
+        # trades: an empty realized stream alongside present funding means realized
+        # could not be fetched, not that the account never traded. DEGRADE visibly
+        # rather than ship the fabrication (full inverse support is deferred — D-2).
+        if not realized and funding:
+            raise _CcxtMemberDegrade("realized_stream_unavailable")
+
         # Bound the flow lookback to the venue's deposit-history retention via the
         # SHARED normalized floor (LOW-2 — the SAME source the DQ-02 terminus gate
         # uses, so the two "retention" definitions can never drift).

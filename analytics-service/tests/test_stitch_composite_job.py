@@ -1492,6 +1492,59 @@ async def test_ccxt_empty_reconstruction_degrades_insufficient_history_no_crash(
 
 
 @pytest.mark.asyncio
+async def test_ccxt_realized_empty_funding_present_degrades_not_fabricated() -> None:
+    """Phase 93.1 red-team HIGH FIX B: a ccxt member with an EMPTY realized/closed-PnL
+    trade stream but PRESENT funding rows (the Bybit-INVERSE gap — closed PnL is fetched
+    category='linear' only, so inverse realized is invisible) must DEGRADE with reason
+    `realized_stream_unavailable` — NOT reconstruct a fabricated funding-only track that
+    joins the stitch as a 'covered' member while 100% of its trading PnL is absent.
+
+    The funding spans 3 days so the fabricated series would PASS the FIX-A `< 2 days`
+    guard (isolating FIX B). RED before the fix: realized-empty + funding-present
+    reconstructed a funding-only series that JOINED (seq-2 n_days > 0, no degrade,
+    status complete_with_warnings via `used_heuristic_capital` — which misdescribes a
+    100%-missing-PnL member). GREEN after: it degrades visibly instead."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2026-05-01", "2026-05-10"),   # deribit, healthy
+        _member(2, "2026-06-01", None),           # bybit inverse — realized invisible
+    ])
+    m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+    funding_only = [
+        _ccxt_funding("2026-06-01", 20.0),
+        _ccxt_funding("2026-06-02", -8.0),
+        _ccxt_funding("2026-06-03", 12.0),
+    ]
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=[],              # inverse closed-PnL invisible (category='linear' gap)
+        funding=funding_only,     # 3 funding days → would clear the FIX-A <2 guard
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert _degraded_members(fake) == [
+        {"seq": 2, "venue": "bybit", "reason": "realized_stream_unavailable"},
+    ]
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["computation_status"] == "complete_with_warnings"
+    # The fabricated funding-only member did NOT join the stitch: zero coverage, and
+    # NO 2026-06 rows fabricated into csv_daily_returns.
+    seq2 = next(e for e in headline["data_quality_flags"]["per_key"] if e["seq"] == 2)
+    assert seq2["n_days"] == 0
+    written_dates = {
+        r["date"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+    }
+    assert not any(d.startswith("2026-06") for d in written_dates)
+
+
+@pytest.mark.asyncio
 async def test_ccxt_insufficient_history_degrade_consistent_across_mtm_passes() -> None:
     """Phase 93.1 FIX A/B x FIX 1 interaction: a FIX-A `insufficient_history` degrade
     must be CONSISTENT across the cash AND MTM passes so it does NOT trip the FIX-1
