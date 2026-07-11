@@ -113,6 +113,25 @@ export async function readCompositeFactsheet(
   // honored; anything else falls back) mirrors the `=== true` server-truth
   // discipline in this file (T-92-05).
   const persisted = dqf?.cumulative_method;
+  // HARD-03 hardening (Phase 93.1): an UNEXPECTED persisted value — PRESENT but
+  // neither "simple" nor "geometric" — silently re-derives below, re-opening the
+  // exact chart↔headline drift HARD-03 closes, with ZERO signal. It is unreachable
+  // for correctly-written current data (the worker persists only the two RAW
+  // literals at :3868), so surface it LOUD before the (preserved) live fallback.
+  // Absent/null stays SILENT — that is the legitimate older-composite fallback
+  // (no persisted key), not a defect. Warn-level per the sibling malformed-input
+  // convention in build-payload.ts (deriveSegmentMarkers): recoverable, not Sentry.
+  if (
+    persisted !== null &&
+    persisted !== undefined &&
+    persisted !== "simple" &&
+    persisted !== "geometric"
+  ) {
+    console.warn(
+      "[factsheet] readCompositeFactsheet — unexpected persisted cumulative_method; falling back to live re-derive",
+      { strategyId, persisted },
+    );
+  }
   const cumulativeMethod =
     persisted === "simple"
       ? "arithmetic"

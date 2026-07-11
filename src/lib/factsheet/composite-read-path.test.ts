@@ -290,6 +290,49 @@ describe("HARD-03 readCompositeFactsheet — prefer persisted cumulative_method 
       expect(out!.buildOpts.cumulativeMethod).toBe("geometric");
     }
   });
+
+  it("Phase 93.1 hardening: an UNEXPECTED persisted method WARNS then falls back; absent/null stays silent", async () => {
+    // A value PRESENT but outside {simple,geometric} used to silently re-derive
+    // (re-opening the HARD-03 drift with no signal). It must now warn LOUD before
+    // the preserved live fallback — while the legitimate older-composite path
+    // (absent / null persisted key) must NOT warn.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // 1. bogus value present → WARN once + live fallback (null config → geometric).
+      const bogus = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+        strategyId: "s1",
+        dqf: { ...DQF, cumulative_method: "bogus" },
+        metricsJsonByBasis: { cash_settlement: FULL_CASH },
+        returnsDenominatorConfig: null,
+      });
+      expect(bogus!.buildOpts.cumulativeMethod).toBe("geometric"); // fallback preserved
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("unexpected persisted cumulative_method");
+
+      // 2. absent key (every pre-HARD-03 composite) → NO warn, silent live fallback.
+      warn.mockClear();
+      const absent = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+        strategyId: "s1",
+        dqf: { ...DQF }, // no cumulative_method key
+        metricsJsonByBasis: { cash_settlement: FULL_CASH },
+        returnsDenominatorConfig: { cumulative_method: "simple" },
+      });
+      expect(absent!.buildOpts.cumulativeMethod).toBe("arithmetic"); // live derive
+      expect(warn).not.toHaveBeenCalled();
+
+      // 3. explicit null → NO warn (legitimate fallback, not a defect).
+      warn.mockClear();
+      await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+        strategyId: "s1",
+        dqf: { ...DQF, cumulative_method: null },
+        metricsJsonByBasis: { cash_settlement: FULL_CASH },
+        returnsDenominatorConfig: null,
+      });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 /**
