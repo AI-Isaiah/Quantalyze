@@ -326,8 +326,32 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 8): a window-end edit at the same member count did NOT invalidate analytics (status=%, expected pending)', v_status;
   END IF;
 
+  -- ======================================================================
+  -- Part 9 — RT-1 nit: a NON-CANONICAL (uppercase) api_key_id is still a NO-OP.
+  -- ======================================================================
+  -- The incoming signature must normalize api_key_id via ::uuid::text so that a
+  -- client sending an UPPERCASE UUID string for the SAME member set does not read
+  -- as "changed" — which would trigger an unnecessary re-stitch and defeat the
+  -- WIZ-05 no-op latency win. Re-stamp 'complete', re-submit the Part-8 set
+  -- verbatim but with UPPERCASED api_key_id strings, and assert it stays complete.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'complete', computation_error = NULL
+   WHERE strategy_id = strat_comp;
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', upper(key1::text), 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', upper(key2::text), 'window_start', '2025-06-01', 'window_end', '2025-09-01'),
+      jsonb_build_object('api_key_id', upper(key3::text), 'window_start', '2025-09-01', 'window_end', '2025-12-01')
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 9): an identical set re-submitted with UPPERCASE api_key_id was treated as CHANGED (status=%, expected complete) — the incoming signature is not canonicalized via ::uuid::text (WIZ-05 no-op broken on non-canonical UUIDs)', v_status;
+  END IF;
+
   PERFORM set_config('request.jwt.claims', NULL, true);
-  RAISE NOTICE 'test_wizard_composite_members: ALL PASS (wholesale seq-by-window, idempotent re-submit, reorder without L-4, owner-coherence, composite-only guard, RT-1 stale-analytics invalidation on change + no-op preservation).';
+  RAISE NOTICE 'test_wizard_composite_members: ALL PASS (wholesale seq-by-window, idempotent re-submit, reorder without L-4, owner-coherence, composite-only guard, RT-1 stale-analytics invalidation on change + no-op preservation incl. non-canonical UUID).';
 END
 $$;
 

@@ -123,7 +123,12 @@ BEGIN
   SELECT array_agg(sig ORDER BY sig)
     INTO v_incoming_sig
     FROM (
-      SELECT (elem->>'api_key_id') || '|'
+      -- Normalize the incoming api_key_id via ::uuid::text so it is CANONICAL
+      -- (lowercase, brace-free) and symmetric with the existing side's
+      -- sk.api_key_id::text. A non-canonical client UUID (uppercase/braces)
+      -- would otherwise produce a mismatched signature → a false "changed" →
+      -- an unnecessary re-stitch, defeating the WIZ-05 no-op latency win.
+      SELECT (elem->>'api_key_id')::uuid::text || '|'
              || (elem->>'window_start')::date::text || '|'
              || COALESCE((elem->>'window_end')::date::text, '')
         FROM jsonb_array_elements(p_members) AS elem
