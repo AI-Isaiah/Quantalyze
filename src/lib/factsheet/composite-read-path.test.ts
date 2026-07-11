@@ -1,4 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
+
+// The helper imports `server-only` (a Next.js build guard that throws outside an
+// RSC bundle). Stub it so this unit test can import the module — the existing
+// pattern in src/lib/audit.test.ts / auth.test.ts / email.test.ts.
+vi.mock("server-only", () => ({}));
+
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { readCompositeFactsheet } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";

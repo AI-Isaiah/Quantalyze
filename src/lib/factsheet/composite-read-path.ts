@@ -1,3 +1,4 @@
+import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DailyReturn } from "./types";
 import { deriveSegmentMarkers } from "./build-payload";

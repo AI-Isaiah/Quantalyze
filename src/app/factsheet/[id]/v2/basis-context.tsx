@@ -61,8 +61,10 @@ export function useBasis(): BasisContextValue {
  * FactsheetProvider).
  *
  *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. For composites,
- *     90-03 already overlaid the persisted arithmetic cash scalars onto it, so
- *     this is coherent with D3 and byte-identical to today for single-key.
+ *     build-payload already overlaid the persisted cash scalars onto it (geometric
+ *     or arithmetic per `returns_denominator_config` — Round-2 C-1; arithmetic
+ *     only for the "simple"/allocated-capital override), so this is coherent with
+ *     the persisted headline and byte-identical to today for single-key.
  *   - `mark_to_market` → a shallow copy overlaying ONLY the seven mapped
  *     {@link overlayBasisScalars} scalars from the PERSISTED
  *     `metrics_json_by_basis.mark_to_market`. α/IR and every unmapped key keep
