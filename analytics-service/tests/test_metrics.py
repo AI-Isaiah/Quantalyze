@@ -2478,3 +2478,83 @@ class TestPeriodsPerYearForAssetClass:
         from services.metrics import periods_per_year_for_asset_class
         assert periods_per_year_for_asset_class(None) == 252
         assert periods_per_year_for_asset_class("equities") == 252
+
+
+class TestInsufficientWindowFlag:
+    """HARD-04 (#67): a short annualization window is FLAGGED
+    (result.insufficient_window True) instead of silently over-annualizing CAGR.
+    The flag is a DQ ANNOTATION ONLY — the CAGR value is byte-identical with or
+    without the flag logic (value-invariant hard rule), and it NEVER leaks into
+    metrics_json (which is spread into the strategy_analytics upsert as columns).
+    """
+
+    def test_insufficient_window_geometric_short_flagged_value_unchanged(self) -> None:
+        """(i) A 30-day geometric window flags insufficient_window AND the cagr
+        value equals the exact hand formula — a fix that clamps/zeroes/NaNs cagr
+        on a flagged window reddens the value-unchanged assertion."""
+        idx = pd.date_range("2026-01-01", periods=30, freq="D")  # 29-day span
+        vals = [0.001 * ((-1) ** i) + 0.002 for i in range(30)]
+        returns = pd.Series(vals, index=idx, dtype=float)
+        result = compute_all_metrics(returns)
+        assert result.insufficient_window is True
+        # Value-unchanged pin: cagr == the exact hand formula on the flagged window.
+        total = float((1 + returns).prod() - 1)
+        elapsed = (idx[-1] - idx[0]).days  # 29
+        expected_cagr = (1.0 + total) ** (365.0 / elapsed) - 1.0
+        assert result["cagr"] == pytest.approx(expected_cagr, rel=1e-12)
+
+    def test_insufficient_window_geometric_long_not_flagged(self) -> None:
+        """(ii) A 120-day window is NOT flagged."""
+        idx = pd.date_range("2026-01-01", periods=120, freq="D")
+        vals = [0.001 * ((-1) ** i) + 0.0005 for i in range(120)]
+        returns = pd.Series(vals, index=idx, dtype=float)
+        result = compute_all_metrics(returns)
+        assert result.insufficient_window is False
+
+    def test_insufficient_window_geometric_boundary_90_false_89_true(self) -> None:
+        """(iii) Boundary pair — strict `<`: an exactly-90-calendar-day span is
+        NOT flagged; an 89-day span IS flagged."""
+        # span == 90 → periods=91 (day 0 .. day 90) → NOT flagged
+        idx90 = pd.date_range("2026-01-01", periods=91, freq="D")
+        r90 = pd.Series([0.0005] * 91, index=idx90, dtype=float)
+        assert (idx90[-1] - idx90[0]).days == 90
+        assert compute_all_metrics(r90).insufficient_window is False
+        # span == 89 → periods=90 → flagged
+        idx89 = pd.date_range("2026-01-01", periods=90, freq="D")
+        r89 = pd.Series([0.0005] * 90, index=idx89, dtype=float)
+        assert (idx89[-1] - idx89[0]).days == 89
+        assert compute_all_metrics(r89).insufficient_window is True
+
+    def test_insufficient_window_simple_branch_mirror(self) -> None:
+        """(iv) The simple (allocated-capital) branch mirrors: a short window
+        flags True, a long window False, and the cagr value equals the exact
+        mean×periods_per_year hand value on the flagged window."""
+        idx_short = pd.date_range("2026-01-01", periods=20, freq="D")  # 19-day span
+        r_short = pd.Series([0.001] * 20, index=idx_short, dtype=float)
+        res_short = compute_all_metrics(r_short, cumulative_method="simple")
+        assert res_short.insufficient_window is True
+        # Value-unchanged pin on the simple branch: cagr == mean × periods_per_year.
+        expected = float(r_short.mean()) * 252
+        assert res_short["cagr"] == pytest.approx(expected, rel=1e-12)
+
+        idx_long = pd.date_range("2026-01-01", periods=200, freq="D")
+        r_long = pd.Series([0.0005] * 200, index=idx_long, dtype=float)
+        res_long = compute_all_metrics(r_long, cumulative_method="simple")
+        assert res_long.insufficient_window is False
+
+    def test_insufficient_window_never_leaks_into_metrics_json(self) -> None:
+        """(v) Spread-hazard pin: insufficient_window rides the MetricsResult
+        field, NEVER a metrics_json key (a new key would become an unknown
+        column in the strategy_analytics upsert). True for both flagged and
+        unflagged runs."""
+        idx_short = pd.date_range("2026-01-01", periods=20, freq="D")
+        r_short = pd.Series([0.001] * 20, index=idx_short, dtype=float)
+        res_short = compute_all_metrics(r_short)
+        assert res_short.insufficient_window is True
+        assert "insufficient_window" not in res_short.metrics_json
+
+        idx_long = pd.date_range("2026-01-01", periods=200, freq="D")
+        r_long = pd.Series([0.0005] * 200, index=idx_long, dtype=float)
+        res_long = compute_all_metrics(r_long)
+        assert res_long.insufficient_window is False
+        assert "insufficient_window" not in res_long.metrics_json
