@@ -719,6 +719,146 @@ describe("[WIZ-02] MultiKeyConnectStep — State B rehydration (back-nav)", () =
   });
 });
 
+describe("[94.1 F3/F4] MultiKeyConnectStep — rehydration status + draft protection", () => {
+  const AK1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const MEMBERS = [
+    {
+      seq: 1,
+      api_key_id: AK1,
+      exchange: "binance",
+      nickname: "First key",
+      window_start: "2025-01-01",
+      window_end: "2025-06-01",
+    },
+  ];
+
+  /** A hand-controlled promise so a test can hold the members GET pending
+   *  (loading window) and resolve/reject it on demand. */
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  // F3 — Root cause: the rehydration mount effect only console.error'd on a
+  // failed/pending GET, leaving the blank single-key State-A form. A user with
+  // stored composite keys returning to a blank form (no spinner, no error) could
+  // not tell a rehydration was even attempted — "keys lost". The fix tracks a
+  // rehydration status and renders a loading indicator + a retryable error.
+  it("F3: shows a loading indicator while the members GET is in flight (not a bare blank form)", async () => {
+    const d = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return d.promise;
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // A loading indication is present while the GET is pending (RED pre-fix: no
+    // such element existed — only the blank form).
+    expect(await screen.findByTestId("rehydrate-loading")).toBeInTheDocument();
+
+    // Resolve empty to settle the effect (avoids act warnings on teardown).
+    d.resolve(jsonResponse({ ok: true, members: [] }, 200));
+    await waitFor(() =>
+      expect(screen.queryByTestId("rehydrate-loading")).toBeNull(),
+    );
+  });
+
+  it("F3: surfaces a retryable error envelope (not the blank single-key form) when the members GET fails, and Retry refetches", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/members")) {
+          return jsonResponse({}, 500);
+        }
+        return jsonResponse({}, 200);
+      });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    // Distinguishable, actionable error — not a silent blank fallback.
+    expect(within(err).getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "COMPOSITE_MEMBERSHIP_UNKNOWN",
+    );
+    expect(screen.queryByTestId("wizard-connect-submit")).toBeNull();
+
+    // Retry re-issues the members GET (recoverable envelope → Retry control).
+    const membersCallsBefore = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("composite/members"),
+    ).length;
+    fireEvent.click(within(err).getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      const membersCallsAfter = fetchSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("composite/members"),
+      ).length;
+      expect(membersCallsAfter).toBeGreaterThan(membersCallsBefore);
+    });
+  });
+
+  // F4 — Root cause: the clobber guard only checked `panelsRef.current.length`,
+  // but single-key typing lands in `singleDraftRef.current`, never in `panels`.
+  // A slow GET resolving mid-typing then flipped mode→multi + replaced panels,
+  // blowing the in-progress single-key entry away. The fix extends the guard to
+  // also bail when the single-key draft is dirty.
+  it("F4: does NOT clobber an in-progress single-key draft when a slow rehydrate resolves with stored members", async () => {
+    const d = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return d.promise;
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // The single-key form stays usable during the loading window (the F3 banner
+    // is additive, not a form-replacing skeleton) — the user types a key.
+    fireEvent.change(await screen.findByLabelText("API Key"), {
+      target: { value: "IN_PROGRESS_KEY" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "IN_PROGRESS_SECRET" },
+    });
+
+    // Only NOW does the slow GET resolve with stored composite members.
+    d.resolve(jsonResponse({ ok: true, members: MEMBERS }, 200));
+
+    // The guard bails: mode stays single (no State-B list) and the typed draft
+    // survives verbatim (RED pre-fix: mode flips to multi, the draft is gone).
+    await waitFor(() =>
+      expect(screen.queryByTestId("rehydrate-loading")).toBeNull(),
+    );
+    expect(screen.queryByTestId("multi-key-list")).toBeNull();
+    expect(screen.getByLabelText("API Key")).toHaveValue("IN_PROGRESS_KEY");
+    expect(screen.getByLabelText("API Secret")).toHaveValue(
+      "IN_PROGRESS_SECRET",
+    );
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — tap targets (v1.4 flex-compression)", () => {
   it("Move and Remove controls carry explicit >=44px width AND height classes", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
