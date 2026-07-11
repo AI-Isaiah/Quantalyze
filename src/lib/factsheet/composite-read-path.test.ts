@@ -6,8 +6,9 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { readCompositeFactsheet } from "./composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
+import type { DailyReturn } from "./types";
 
 /**
  * Round-2 H-2 — the discovery detail page routed composites down the invented-
@@ -155,5 +156,68 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
     expect("peerPercentile" in payload).toBe(false);
     expect("allocatorPortfolios" in payload).toBe(false);
     expect("eventSignatures" in payload).toBe(false);
+  });
+});
+
+/**
+ * Finding B (Phase 92 hardening) — the SINGLE-KEY `insufficient_window` DQ flag is
+ * persisted server-side (analytics_runner.py :1839/:2367, with a passing lift
+ * test) but was NEVER rendered on the factsheet: both FactsheetView-consumer
+ * surfaces (the `/factsheet/[id]/v2` route + the discovery detail page) assigned
+ * `buildOpts` ONLY on their composite arm, so a single-key strategy built
+ * `buildOpts=undefined` → `payload.dataQuality` undefined → the FactsheetView
+ * caveat gate (`payload.dataQuality?.insufficientWindow === true`) was dead for
+ * single-key. `singleKeyDataQuality` is the ONE shared owner both arms now
+ * delegate to (mirroring the composite `readCompositeFactsheet` "one path").
+ */
+describe("Finding B — singleKeyDataQuality single-key DQ opt (one owner)", () => {
+  it("strict `=== true` server-truth coercion: only literal true flags the window", () => {
+    // The persisted truth flags it.
+    expect(singleKeyDataQuality({ insufficient_window: true })).toEqual({
+      composite: false,
+      insufficientWindow: true,
+    });
+    // Absent / null / undefined dqf → not flagged (single-key default absent-as-false).
+    expect(singleKeyDataQuality({}).insufficientWindow).toBe(false);
+    expect(singleKeyDataQuality(null).insufficientWindow).toBe(false);
+    expect(singleKeyDataQuality(undefined).insufficientWindow).toBe(false);
+    // T-92-05 tampering guard: a non-boolean value must NEVER flag the caveat.
+    expect(singleKeyDataQuality({ insufficient_window: "true" }).insufficientWindow).toBe(false);
+    expect(singleKeyDataQuality({ insufficient_window: 1 }).insufficientWindow).toBe(false);
+    // Always single-key (`composite:false`) — behaviorally identical to absent for
+    // every `=== true` composite reader, so it never trips the composite branch.
+    expect(singleKeyDataQuality({ insufficient_window: true }).composite).toBe(false);
+  });
+
+  it("regression: threaded single-key opts surface insufficientWindow on the payload; the pre-fix undefined opts (buildOpts unassigned) drop it", () => {
+    const series: DailyReturn[] = [
+      { date: "2025-08-01", value: 0.01 },
+      { date: "2025-08-02", value: 0.02 },
+      { date: "2025-08-03", value: -0.01 },
+      { date: "2025-08-04", value: 0.015 },
+    ];
+    const base = {
+      id: "sk1",
+      name: "Single-key",
+      types: ["quant"],
+      markets: ["crypto"],
+      computedAt: "2025-08-04T00:00:00Z",
+      trustTier: null,
+      ingestSource: "csv" as const,
+    };
+
+    // PRE-FIX single-key arm: buildOpts stayed undefined → the persisted flag was
+    // dropped, so the factsheet caveat could never render (Finding B).
+    const preFix = buildFactsheetPayload(base, series, undefined)!;
+    expect(preFix.dataQuality?.insufficientWindow).toBeUndefined();
+
+    // FIXED single-key arm: both pages now thread singleKeyDataQuality(dqf) →
+    // payload carries the server truth so the FactsheetView :876 caveat fires.
+    const fixed = buildFactsheetPayload(
+      base,
+      series,
+      { dataQuality: singleKeyDataQuality({ insufficient_window: true }) },
+    )!;
+    expect(fixed.dataQuality).toEqual({ composite: false, insufficientWindow: true });
   });
 });

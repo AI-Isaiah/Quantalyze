@@ -413,4 +413,35 @@ describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth 
       queryByText(/annualized metrics are flagged as computed on an insufficient window/),
     ).not.toBeInTheDocument();
   });
+
+  // Finding B (Phase 92 hardening): the caveat surface must NOT be gated on
+  // `composite` — a SINGLE-KEY strategy (`dataQuality.composite === false`, the
+  // shape `singleKeyDataQuality` now threads on both pages' non-composite arm)
+  // with the server-truth flag must render the identical caveat. Pre-Finding-B the
+  // single-key arm never set `dataQuality`, so this surface was dead single-key;
+  // this pins that FactsheetView renders on the flag alone, composite or not.
+  function singleKeyInsufficientWindowPayload(insufficientWindow: boolean): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: { composite: false, insufficientWindow },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("SINGLE-KEY (composite:false): renders the server-truth caveat when insufficientWindow is true", () => {
+    const { getByText } = renderComposite(singleKeyInsufficientWindowPayload(true));
+    expect(
+      getByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).toBeInTheDocument();
+  });
+
+  it("SINGLE-KEY (composite:false): does NOT render the caveat when insufficientWindow is false", () => {
+    const { queryByText } = renderComposite(singleKeyInsufficientWindowPayload(false));
+    expect(
+      queryByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).not.toBeInTheDocument();
+  });
 });

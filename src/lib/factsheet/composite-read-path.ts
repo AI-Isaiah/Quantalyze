@@ -126,3 +126,29 @@ export async function readCompositeFactsheet(
     },
   };
 }
+
+/**
+ * HARD-04 (#67) — the SINGLE-KEY counterpart of the composite `dataQuality` opt
+ * built in `readCompositeFactsheet` above. A single-key strategy persists
+ * `insufficient_window` at the analytics_runner CAGR site
+ * (analytics_runner.py :1839 stored-trades / :2367 CSV-broker) exactly like a
+ * composite, but has NO composite read-path to thread it. Finding B: because the
+ * factsheet route (`/factsheet/[id]/v2`) and the discovery detail page
+ * (`/discovery/[slug]/[strategyId]`) each assigned `buildOpts` ONLY on their
+ * composite arm, a single-key sub-90-day track record built `buildOpts=undefined`
+ * → `payload.dataQuality` undefined → the FactsheetView :876 caveat NEVER rendered
+ * single-key, despite the server truth being persisted (with a passing lift test).
+ *
+ * Both surfaces now derive the single-key opt from THIS ONE owner — mirroring the
+ * composite "one path" lesson (this file's header) so the two FactsheetView
+ * consumers can't diverge on a future DQ flag. `composite: false` is behaviorally
+ * identical to an absent `dataQuality` for every `=== true` composite reader
+ * (FactsheetView :331/:393/:724/:1048), so this adds the caveat WITHOUT touching
+ * the composite branch. Strict `=== true` server-truth coercion mirrors the
+ * composite path so a malformed dqf value can never render the caveat (T-92-05).
+ */
+export function singleKeyDataQuality(
+  dqf: { insufficient_window?: unknown } | null | undefined,
+): NonNullable<BuildFactsheetOpts["dataQuality"]> {
+  return { composite: false, insufficientWindow: dqf?.insufficient_window === true };
+}

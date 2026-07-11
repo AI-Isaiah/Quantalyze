@@ -11,7 +11,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -82,7 +82,7 @@ export default async function StrategyDetailPage({
   // series, and thread the marker/basis/method opts. A null result = data defect
   // → the still-computing placeholder (never the api arm).
   const dqf = analyticsRow?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown }
     | null
     | undefined;
   let buildOpts: BuildFactsheetOpts | undefined;
@@ -103,6 +103,15 @@ export default async function StrategyDetailPage({
       // Data defect (untrusted cash headline) → empty series → placeholder.
       dailyReturns = [] as DailyReturn[];
     }
+  } else {
+    // HARD-04 (#67) / Finding B: single-key strategies persist
+    // `insufficient_window` at the analytics_runner CAGR site too, but buildOpts
+    // was assigned ONLY on the composite arm, so `payload.dataQuality` stayed
+    // undefined and the FactsheetView :876 caveat never rendered single-key
+    // despite the server truth. Thread it through the ONE shared owner
+    // (`singleKeyDataQuality`) so this discovery surface and the factsheet route
+    // can't diverge on the DQ opt (the composite "one path" lesson).
+    buildOpts = { ...(buildOpts ?? {}), dataQuality: singleKeyDataQuality(dqf) };
   }
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that
