@@ -67,6 +67,7 @@ DECLARE
   row_cnt      INTEGER;
   raised       BOOLEAN;
   err_msg      TEXT;
+  v_status     TEXT;   -- RT-FINDING-1: strategy_analytics.computation_status probe
 BEGIN
   -- ----- SEED (service-role context — bypasses RLS, fires triggers) ----------
   -- Tenant A: 4 api_keys + one composite DRAFT (api_key_id defaults NULL) + one
@@ -254,8 +255,79 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 5): the single-key strategy gained % strategy_keys rows despite the guard', row_cnt;
   END IF;
 
+  -- ======================================================================
+  -- Part 6/7/8 — RT-FINDING-1: stale composite analytics invalidation.
+  -- ======================================================================
+  -- A member-set CHANGE must invalidate a COMPLETED strategy_analytics row
+  -- (complete/complete_with_warnings -> pending) so the wizard verify step
+  -- re-stitches instead of short-circuiting to the OLD set's metrics; a NO-OP
+  -- re-Continue (identical set) must leave the row 'complete' (WIZ-05 latency
+  -- invariant). Establish a known 2-member baseline, then stamp a 'complete'
+  -- composite analytics row and exercise the three cases.
+  SELECT public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01')
+    )
+  ) INTO v_count;
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6 setup): baseline write returned %, expected 2', v_count;
+  END IF;
+
+  -- Stamp a COMPLETED composite analytics row (mirrors a finished stitch).
+  INSERT INTO strategy_analytics (strategy_id, computation_status, data_quality_flags)
+  VALUES (strat_comp, 'complete', jsonb_build_object('composite', true))
+  ON CONFLICT (strategy_id) DO UPDATE
+    SET computation_status = 'complete', computation_error = NULL;
+
+  -- Part 6 — NO-OP re-Continue (identical set): analytics stays 'complete'.
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01')
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6): an IDENTICAL re-Continue invalidated analytics (status=%, expected complete) — WIZ-05 no-op latency invariant broken', v_status;
+  END IF;
+
+  -- Part 7 — CHANGED set (add key3): analytics invalidated to 'pending'.
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01'),
+      jsonb_build_object('api_key_id', key3::text, 'window_start', '2025-09-01', 'window_end', NULL)
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7): adding a key did NOT invalidate the stale composite analytics (status=%, expected pending) — the verify step would show 3 keys beside 2-key metrics', v_status;
+  END IF;
+
+  -- Part 8 — CHANGED window at the SAME count (edit key3 window_end): still
+  -- invalidated. Proves the signature catches window edits, not just add/remove.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'complete', computation_error = NULL
+   WHERE strategy_id = strat_comp;
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01'),
+      jsonb_build_object('api_key_id', key3::text, 'window_start', '2025-09-01', 'window_end', '2025-12-01')
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 8): a window-end edit at the same member count did NOT invalidate analytics (status=%, expected pending)', v_status;
+  END IF;
+
   PERFORM set_config('request.jwt.claims', NULL, true);
-  RAISE NOTICE 'test_wizard_composite_members: ALL PASS (wholesale seq-by-window, idempotent re-submit, reorder without L-4, owner-coherence, composite-only guard).';
+  RAISE NOTICE 'test_wizard_composite_members: ALL PASS (wholesale seq-by-window, idempotent re-submit, reorder without L-4, owner-coherence, composite-only guard, RT-1 stale-analytics invalidation on change + no-op preservation).';
 END
 $$;
 
