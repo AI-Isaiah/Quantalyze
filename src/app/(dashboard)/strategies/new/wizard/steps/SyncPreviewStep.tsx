@@ -1213,10 +1213,19 @@ export function SyncPreviewStep({
               {attributionRows.map((row) => {
                 const pk = perKeyBySeq.get(row.seq);
                 const member = memberBySeq.get(row.seq);
+                // Tier 1: actual reconstructed coverage when present. Tier 2:
+                // the member's DECLARED entered window from strategy_keys (user-
+                // entered metadata read from the DB, never invented) — so an
+                // entered window never renders "—" behind a reconstructed
+                // n_days=0. The Days column stays coverage-honest below. "live"
+                // matches the wizard's open-ended (stillLive) vocabulary. Tier 3:
+                // "—" only when no window was ever entered.
                 const windowText =
                   pk?.first_day && pk?.last_day
                     ? `${pk.first_day} – ${pk.last_day}`
-                    : "—";
+                    : member?.windowStart
+                      ? `${member.windowStart} – ${member.windowEnd ?? "live"}`
+                      : "—";
                 const contributionClass =
                   row.contribution === null
                     ? "text-text-muted"
