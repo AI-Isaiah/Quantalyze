@@ -627,6 +627,234 @@ async def test_member_guard_meta_promotes_complete_with_warnings() -> None:
     assert dq.get("used_heuristic_capital") is True
 
 
+# ---------------------------------------------------------------------------
+# HARD-05 (Phase 93) — remove the PERMANENT ccxt rejection; ccxt members DEGRADE
+# ---------------------------------------------------------------------------
+
+
+def _degraded_members(fake: _FakeSupabase) -> Any:
+    """The degraded_members list from the persisted headline data_quality_flags
+    (None if the key is absent)."""
+    headline = _headline_row(fake)
+    assert headline is not None
+    return headline["data_quality_flags"].get("degraded_members")
+
+
+@pytest.mark.asyncio
+async def test_ccxt_member_degrades_not_permanent_fail() -> None:
+    """HARD-05: a 2-member composite (seq 1 Deribit + seq 2 Bybit) NO LONGER fails
+    PERMANENT on the venue check. The Deribit member stitches; the Bybit member
+    DEGRADES out of the stitch with a machine-readable DQ reason, computation_status
+    promotes to complete_with_warnings, and the ccxt member appears in per_key with
+    n_days 0 (honest zero coverage). The stitched csv equals the Deribit-only stitch.
+
+    RED on pre-change code: the `venue != "deribit"` rejection returned a permanent
+    FAILED, so result.outcome would be FAILED and no degraded_members flag exists."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit
+        _member(2, "2024-02-01", None),           # bybit — degrades
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],   # ONLY the Deribit member reconstructs
+        has_option_activity=True,     # gate CLOSED → single cash pass
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["computation_status"] == "complete_with_warnings"
+    assert headline["computation_warned"] is True
+    # The degrade record: fixed enum reason, closed keys.
+    assert _degraded_members(fake) == [
+        {"seq": 2, "venue": "bybit", "reason": "venue_reconstruction_unavailable"},
+    ]
+    # per_key visibility: the degraded member is present with honest zero coverage.
+    per_key = headline["data_quality_flags"]["per_key"]
+    seq2 = next(e for e in per_key if e["seq"] == 2)
+    assert seq2["n_days"] == 0
+    assert seq2["first_day"] is None and seq2["last_day"] is None
+    # The stitched csv is the Deribit-only stitch — the Bybit member contributes
+    # zero rows.
+    written_dates = {
+        r["date"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+    }
+    assert written_dates == {"2024-01-01", "2024-01-02"}
+
+
+@pytest.mark.asyncio
+async def test_all_ccxt_composite_permanent_no_member_reconstructed() -> None:
+    """HARD-05 honest floor: a 1-member all-ccxt composite (single OKX member) has
+    ZERO reconstructable members → PERMANENT FAILED with a scrubbed 'no member could
+    be reconstructed' stamp (never an empty invented 'complete' track record). The
+    zero-member floor stays fail-loud."""
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])  # okx
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[],           # nothing reconstructs
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("okx")],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # Terminal 'failed' analytics stamp (poller reaches a gate); the compute path
+    # (csv_daily_returns) is never reached.
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "all-ccxt composite must stamp a terminal failed row"
+    assert not any(t == "csv_daily_returns" for t, _, _ in fake.upserts)
+
+
+@pytest.mark.asyncio
+async def test_degraded_members_drop_stale_on_all_deribit_restitch() -> None:
+    """HARD-05 drop-stale heal (insufficient_window / mtm_gated_reason mirror): a
+    stale degraded_members list seeded from a prior derive is POPPED when an
+    all-Deribit re-stitch produces zero degraded members, while an unrelated seeded
+    flag survives the merge. Neuter the else-branch pop → the stale list lingers."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        existing_flags={
+            "csv_source": True,
+            "degraded_members": [   # stale from a prior mixed derive
+                {"seq": 2, "venue": "bybit", "reason": "venue_reconstruction_unavailable"},
+            ],
+            "benchmark_unavailable": True,  # unrelated — must survive
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "degraded_members" not in dq  # healed (drop-stale)
+    assert dq.get("benchmark_unavailable") is True  # unrelated key preserved
+
+
+@pytest.mark.asyncio
+async def test_degraded_member_leak_discipline_closed_keys_no_magnitude() -> None:
+    """HARD-05 leak discipline (T-93-03-01): the persisted degrade entry contains
+    EXACTLY {seq, venue, reason} with reason the fixed literal code — no '$', no
+    USD-looking magnitude, no exception text. Pins the closed-key contract so a
+    future edit can't smuggle account-size or raw error text into the flag."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit
+        _member(2, "2024-02-01", None),           # binance — degrades
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("binance")],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    entries = _degraded_members(fake)
+    assert entries == [
+        {"seq": 2, "venue": "binance", "reason": "venue_reconstruction_unavailable"},
+    ]
+    for entry in entries:
+        assert set(entry) == {"seq", "venue", "reason"}  # EXACTLY these keys
+        assert entry["reason"] == "venue_reconstruction_unavailable"  # fixed literal
+        # No account-size / exception text anywhere in the entry values.
+        blob = repr(entry)
+        assert "$" not in blob
+        # No stray digits beyond the seq int (venue/reason are alpha-only).
+        assert not any(ch.isdigit() for ch in str(entry["venue"]))
+        assert not any(ch.isdigit() for ch in str(entry["reason"]))
+
+
+@pytest.mark.asyncio
+async def test_mtm_runs_on_deribit_remainder_with_degraded_ccxt_member() -> None:
+    """Plan-checker Note 1: the MTM pass DOES run when a composite mixes a perp-only
+    Deribit member with a degraded ccxt member. The ccxt member is `continue`d before
+    its signal is appended, so member_signals is Deribit-only → mark_to_market_available
+    can return True → the MTM second pass reconstructs the Deribit-only remainder and
+    both bases are written. (This falsifies the naive rationale that MTM never runs for
+    a composite containing a ccxt member.)"""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit, perp-only
+        _member(2, "2024-02-01", None),           # bybit — degrades
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    # cash pass reconstructs seq1 (1 combine) then MTM pass reconstructs seq1 (1
+    # combine) = 2 combine calls; seq2 degrades both passes (no combine).
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=False,
+    )))
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m1, {})],
+        has_option_activity=False,   # gate OPEN on the Deribit remainder
+        preflight_side_effect=[
+            _ctx("deribit"), _ctx("bybit"),   # cash pass
+            _ctx("deribit"), _ctx("bybit"),   # MTM pass
+        ],
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert set(by_basis) == {"cash_settlement", "mark_to_market"}
+    # The degrade record still rides through (from the authoritative cash pass).
+    assert _degraded_members(fake) == [
+        {"seq": 2, "venue": "bybit", "reason": "venue_reconstruction_unavailable"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unknown_venue_member_still_permanent_fail() -> None:
+    """A member on a venue OUTSIDE _COMPOSITE_CRYPTO_VENUES (a truly unknown
+    exchange) is a STRUCTURAL error, not a degradable one — it stays PERMANENT
+    FAILED with a terminal stamp (the degrade channel is scoped to the known ccxt
+    crypto venues)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit
+        _member(2, "2024-02-01", None),           # kraken — unknown, structural fail
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("kraken")],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    failed_stamps = [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "unknown-venue member must stamp a terminal failed row"
+
+
 @pytest.mark.asyncio
 async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
     """Finding 4: a PERMANENT member-key preflight failure (missing / inactive key)

@@ -2795,6 +2795,15 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
     {"deribit", "binance", "okx", "bybit"}
 )
 
+# HARD-05 (Phase 93): the ccxt crypto venues a composite member can declare that
+# this phase does NOT yet reconstruct natively (Plan 93-04 attaches the honest
+# reconstruction attempt). A member on one of these venues is NOT a hard failure:
+# it DEGRADES out of the stitch with a machine-readable data-quality reason
+# (`venue_reconstruction_unavailable`) the user sees, rather than killing the whole
+# composite (the Phase-86 Deribit-only fence is lifted). Derived from
+# _COMPOSITE_CRYPTO_VENUES so the two sets can never drift.
+_COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {"deribit"}
+
 # Phase 86 / Finding 8 — a composite fans out over its members with (worst case,
 # when MTM is admissible) TWO sequential exchange crawls per member. The
 # stitch_composite handler runs under a FIXED TIMEOUT_PER_KIND["stitch_composite"]
@@ -3103,17 +3112,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     async def _reconstruct_all(basis: str) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
-        list[dict[str, Any]],
+        list[dict[str, Any]], list[dict[str, Any]],
     ] | DispatchResult:
         """Fan out over every member for ``basis``: preflight (worker-only
         decrypt) → reconstruct → clip. Returns the clipped (seq, series) list +
         per-member MTM signals + venues + per-member NavTWRMeta guard dicts
-        (Finding 3), or a DispatchResult on a preflight FAILED/DEFERRED or a
-        typed permanent / transient reconstruction error."""
+        (Finding 3) + the DEGRADED members (HARD-05: ccxt members skipped from the
+        stitch with a machine-readable DQ reason), or a DispatchResult on a
+        preflight FAILED/DEFERRED or a typed permanent / transient reconstruction
+        error."""
         clipped: list[tuple[int, pd.Series]] = []
         signals: list[MemberBasisSignal] = []
         venues: list[str] = []
         metas: list[dict[str, Any]] = []
+        degraded: list[dict[str, Any]] = []
         for m in members:
             seq = int(m["seq"])
             # M-1: thread the PARENT stitch job's id + claim_token into the member
@@ -3151,25 +3163,43 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     )
                 return ctx
             venue = str(ctx.key_row["exchange"])
+            if venue in _COMPOSITE_DEGRADE_VENUES:
+                # HARD-05 (Phase 93): a ccxt (binance/okx/bybit) member DEGRADES
+                # rather than killing the whole composite. This plan does NOT attempt
+                # its reconstruction (Plan 93-04 adds the honest flow-valuation +
+                # DQ-02 retention-terminus attempt on this same channel) — the member
+                # is EXCLUDED from the stitch and stamped with a fixed, machine-
+                # readable DQ reason the user sees. Leak discipline (T-93-03-01): the
+                # record is a CLOSED key-set {seq, venue, reason} with `reason` a
+                # FIXED enum literal — NEVER exception text, USD, or account size.
+                # Still append `venue` to `venues` so the #597 blend annualization
+                # decision (:3279) keeps seeing the crypto venue (a deribit+ccxt mix
+                # is 365 either way, but keep the signal honest and explicit).
+                await aclose_exchange(ctx.exchange)
+                degraded.append(
+                    {
+                        "seq": seq,
+                        "venue": venue,
+                        "reason": "venue_reconstruction_unavailable",
+                    }
+                )
+                venues.append(venue)
+                continue
             if venue != "deribit":
-                # SCOPE (Phase 86): the composite ships the Deribit (Zavara-class)
-                # path first. A ccxt (binance/okx/bybit) member requires the derive
-                # path's full flow-valuation + DQ-02 retention-terminus machinery
-                # (job_worker.py:2363-2413) to reconstruct honestly; composing that
-                # here without it would ship a subtly-wrong series (silent
-                # divergence — no-invented-data). Fail LOUD PERMANENT with a clear
-                # message rather than a guessed number; ccxt composite support is a
-                # deliberate follow-up (tracked in the SUMMARY).
+                # A venue OUTSIDE _COMPOSITE_CRYPTO_VENUES is a truly UNKNOWN
+                # exchange — a structural configuration error, not a degradable
+                # member. Keep the fail-loud PERMANENT semantics (the degrade channel
+                # is deliberately scoped to the known ccxt crypto venues).
                 await aclose_exchange(ctx.exchange)
                 await _stamp_failed(
-                    f"Composite member on venue {venue!r} is not yet supported "
-                    "(Deribit-only this phase)."
+                    f"Composite member on venue {venue!r} is not a supported "
+                    "exchange."
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
-                        "run_stitch_composite_job: non-Deribit composite member "
-                        f"venue {venue!r} not yet supported"
+                        "run_stitch_composite_job: unsupported composite member "
+                        f"venue {venue!r}"
                     ),
                     error_kind="permanent",
                 )
@@ -3227,13 +3257,25 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             signals.append(MemberBasisSignal(seq=seq, venue=venue, has_option_activity=has_opt))
             venues.append(venue)
             metas.append(member_meta)
-        return clipped, signals, venues, metas
+        return clipped, signals, venues, metas, degraded
 
     # 3. CASH_SETTLEMENT fan-out (always).
     cash_result = await _reconstruct_all(cash_pnl_basis)
     if isinstance(cash_result, DispatchResult):
         return cash_result
-    clipped_cash, member_signals, venues, member_metas = cash_result
+    clipped_cash, member_signals, venues, member_metas, degraded_members = cash_result
+
+    # HARD-05 honest floor: if NO member reconstructed (all members degraded or an
+    # all-ccxt composite), fail PERMANENT with a scrubbed terminal stamp rather than
+    # shipping an empty invented 'complete' track record. This preserves what the
+    # removed Deribit-only rejection guaranteed implicitly (zero-member floor).
+    if not clipped_cash:
+        await _stamp_failed("No composite member could be reconstructed.")
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_stitch_composite_job: no reconstructable member",
+            error_kind="permanent",
+        )
 
     # 4. Fail-loud post-clip overlap + arithmetic stitch (T-86-11 second layer).
     try:
@@ -3269,7 +3311,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             error_kind="permanent",
         )
 
-    mask = coverage_mask(clipped_cash)
+    # HARD-05 per_key visibility: a degraded ccxt member is EXCLUDED from the stitch
+    # (never in clipped_cash), but it must still appear in the coverage mask's per_key
+    # with honest zero coverage (n_days 0) so the wizard table renders its ENTERED
+    # window via Plan 93-02's fallback. coverage_mask handles an empty per-member
+    # series cleanly (empty index → {seq, first_day: None, last_day: None, n_days: 0}),
+    # so feed each degraded member an empty series. The pure core (stitch_composite.py)
+    # is untouched; coverage_mask sorts per_key by seq internally.
+    _coverage_input = list(clipped_cash) + [
+        (int(d["seq"]), pd.Series(dtype="float64")) for d in degraded_members
+    ]
+    mask = coverage_mask(_coverage_input)
 
     # 5. #597 blend annualization: 365 if ANY member venue crypto else 252. For an
     # all-crypto composite this equals periods_per_year_for_asset_class('crypto')
@@ -3407,7 +3459,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # passes is caught on the NEXT derive (re-derives are authoritative). The
         # sub-derive-interval TOCTOU is accepted; re-checking `_mtm_signals` here
         # would only defer, not eliminate, the same infinitesimal race.
-        clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas = mtm_result
+        # HARD-05: the MTM pass re-runs the SAME member fan-out and produces its OWN
+        # degraded list (`_mtm_degraded`), which is identical to the cash pass's by
+        # construction — the venue routing is basis-independent. We DISCARD it and
+        # take the authoritative degraded list from the cash pass (`degraded_members`
+        # above), mirroring how the MTM option-activity signals are discarded. NOTE:
+        # the MTM pass DOES run for a composite that contains a degraded ccxt member —
+        # that member is `continue`d before its signal is appended, so
+        # `member_signals` is Deribit-only and `mark_to_market_available` can return
+        # True on the perp-only Deribit remainder.
+        clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas, _mtm_degraded = mtm_result
         try:
             mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)
         except CompositeOverlapError as exc:
@@ -3532,6 +3593,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             member_warn_flags["used_heuristic_capital"] = True
             member_warned = True
 
+    # HARD-05: a composite MISSING a member (a degraded ccxt member) IS warn-worthy —
+    # it rides the existing complete_with_warnings promotion. This is deliberate per
+    # research Pitfall 5 (unlike the pure-annotation insufficient_window, an excluded
+    # member changes the composite's coverage, so the status must reflect it). The
+    # degraded_members flag stays OUT of NAV_TWR_GUARD_KEYS (single-key blast radius
+    # stays zero); this is a direct promotion, not a guard-key registration.
+    if degraded_members:
+        member_warned = True
+
     def _read_existing_flags() -> dict[str, Any]:
         res = (
             supabase.table("strategy_analytics")
@@ -3572,6 +3642,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["insufficient_window"] = True
     else:
         merged_flags.pop("insufficient_window", None)
+    # HARD-05 (#): lift the degraded-member records (ccxt members excluded from the
+    # stitch this phase) so the user SEES the exclusion on both DQ surfaces. Drop-stale
+    # heals on re-stitch (mtm_gated_reason / insufficient_window mirror): an all-Deribit
+    # re-stitch, or one where a formerly-degraded member is later reconstructed (Plan
+    # 93-04), pops the key. The list carries a CLOSED key-set {seq, venue, reason} with
+    # `reason` a fixed enum literal — leak discipline (T-93-03-01), pinned by a test.
+    if degraded_members:
+        merged_flags["degraded_members"] = degraded_members
+    else:
+        merged_flags.pop("degraded_members", None)
     # HARD-03 (#69 / Phase-90 LOW-2): freeze the RAW cumulation method the ONE
     # canonical compute above actually used ("geometric"|"simple", decided at
     # :3312-3317) into the DQ flags so the factsheet read-path can PREFER it over a
