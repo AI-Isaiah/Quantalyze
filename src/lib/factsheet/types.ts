@@ -498,6 +498,8 @@ export type FactsheetCommon = {
   };
   /** Server-truth composite discriminator (`data_quality_flags.composite`). */
   dataQuality?: { composite: boolean };
+  /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
+  periodsPerYear?: number;
 };
 
 /**

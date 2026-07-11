@@ -208,7 +208,10 @@ function buildFactsheetPayloadCached(
     // deserialized as v4 degrades gracefully (missing marker/basis fields → no
     // toggle / no markers during the TTL drain, never a crash) — the bump is
     // belt-and-suspenders. `computedAt` in the key busts on any re-stitch.
-    ["factsheet-v2-payload-v4", id],
+    // Bumped v4→v5 (Phase 90.5): payload carries optional periodsPerYear for the
+    // client leverage recompute; stale v4 entries lack it -> leverage control
+    // hidden (fail-closed) during the TTL drain, never a crash.
+    ["factsheet-v2-payload-v5", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],

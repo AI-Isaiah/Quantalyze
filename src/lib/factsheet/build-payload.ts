@@ -346,6 +346,11 @@ export function buildFactsheetPayload(
     metricsByBasis: opts?.metricsByBasis,
     mtmGate: opts?.mtmGate,
     dataQuality: opts?.dataQuality,
+    // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis derived at
+    // :220 so the client leverage recompute annualizes on the SAME basis the
+    // server did. Additive-optional: single-key payloads carry a number here,
+    // stale v4 cache entries lack it (leverage control hidden, fail-closed).
+    periodsPerYear,
   };
 
   // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized
