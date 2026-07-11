@@ -6,12 +6,11 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
-import { buildFactsheetPayload, deriveIngestSource, deriveSegmentMarkers } from "@/lib/factsheet/build-payload";
+import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { hasBasisHeadline } from "@/lib/factsheet/basis-metrics";
-import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
+import { readCompositeFactsheet } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
-import type { DailyReturn, FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
+import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
 
 /**
@@ -91,90 +90,24 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   const isComposite = dqf?.composite === true;
   let buildOpts: BuildFactsheetOpts | undefined;
   if (isComposite) {
-    // rls-policy-auditor: this read REUSES the in-scope service-role admin
-    // `supabase` handle already created at the top of this function under the
-    // SAME `withPublishedOnly` visibility boundary — NO new client, NO broader
-    // privilege. `csv_daily_returns` has service_role/owner/admin RLS only
-    // (migration 20260522111839), so the admin handle is the ONLY correct
-    // client; the outer request-scoped RLS signature probe + notFound() remains
-    // the unchanged auth gate. Parameterized `.eq` + `.limit(20000)` ceiling.
-    const { data: sparseRows, error: sparseErr } = await supabase
-      .from("csv_daily_returns")
-      .select("date, daily_return")
-      .eq("strategy_id", id)
-      .order("date", { ascending: true })
-      .limit(20000); // Flat safety ceiling, T-36-03-03 precedent
-    if (sparseErr) {
-      // F3: a composite depends ENTIRELY on this sparse read — a real DB failure
-      // hides the whole published factsheet behind the "still computing"
-      // placeholder. Log at ERROR (→ Sentry) so a persistent read failure is
-      // observable rather than looking like an un-computed strategy. Control flow
-      // is unchanged (fail-SAFE: still returns the placeholder below, never the
-      // api arm / flat-zero line).
-      console.error("[factsheet] fetchAndBuildPayload — composite csv_daily_returns read failed", {
-        id,
-        errorMessage: sparseErr.message,
-      });
-    }
-    dailyReturns = (sparseRows ?? []).map(
-      (r): DailyReturn => ({ date: r.date as string, value: r.daily_return as number }),
-    );
-    const markers = deriveSegmentMarkers(dqf);
-    const metricsByBasis = (analytics?.metrics_json_by_basis ?? undefined) as
-      | BuildFactsheetOpts["metricsByBasis"]
-      | undefined;
-    // C-1 (CRITICAL): the composite's cumulative method is NOT unconditionally
-    // arithmetic. The worker persists ARITHMETIC scalars only when
-    // `returns_denominator_config.cumulative_method === "simple"` (the Zavara /
-    // allocated-capital override, job_worker.py:3250-3255); the mainline finalize
-    // wizard NEVER writes `returns_denominator_config`, so a mainline composite
-    // persists the GEOMETRIC headline (`Π(1+r)−1`). Forcing an arithmetic chart
-    // over a geometric headline made the KpiStrip Cum. Return disagree with the
-    // chart endpoint on the same page. `attributionBasisFromConfig` mirrors the
-    // server branch VERBATIM. Geometric is coherent over the sparse series:
-    // `Π(1+r)` is invariant to absent 0-days, so the geometric chart endpoint
-    // equals the persisted geometric headline by construction (same as the
-    // single-key geometric path). NOTE: the 90-CONTEXT D3 claim "persisted
-    // composite headline is arithmetic" holds ONLY for the "simple" override.
-    const cumulativeMethod = attributionBasisFromConfig(
-      strategy.returns_denominator_config,
-    );
-    // F1/H-1 (no-invented-data): the composite overlays the persisted
-    // `cash_settlement` scalars onto the KpiStrip. If that object is structurally
-    // absent — metrics_json_by_basis NULL, a mapped key missing, or a NON-FINITE
-    // `cumulative_return` (the invariance-critical headline) — the overlay can't
-    // be trusted and the KpiStrip would fall back to client-computed values that
-    // disagree with the persisted headline. That is a DATA DEFECT: fail loud
-    // (→ Sentry) and return null (still-computing placeholder). H-1: a DEGENERATE
-    // composite (finite `cumulative_return` but e.g. `calmar:null` on a young
-    // all-positive book) is VALID — it renders with an honest "—" for the null
-    // scalar (strict overlay), NOT a permanent blank page.
-    if (!hasBasisHeadline(metricsByBasis?.cash_settlement)) {
-      console.error(
-        "[factsheet] composite missing persisted cash_settlement headline — refusing to render an untrusted headline",
-        { strategyId: id },
-      );
-      return null;
-    }
-    // F2/M-1 MTM gate: restore locked D1 intent (enabled iff the `mark_to_market`
-    // basis is present with a finite headline), NOT all-seven-finite. A degenerate
-    // `sortino:null` no longer disables a displayable MTM basis with false copy;
-    // the strict overlay renders that one scalar "—". A null / structurally-absent
-    // mark_to_market still ⇒ toggle DISABLED (never cash-under-an-MTM-label).
-    const mtmAvailable = hasBasisHeadline(
-      (metricsByBasis as { mark_to_market?: unknown } | undefined)?.mark_to_market,
-    );
-    buildOpts = {
-      cumulativeMethod,
-      segmentBoundaries: markers.segmentBoundaries,
-      missingSegments: markers.missingSegments,
-      metricsByBasis,
-      dataQuality: { composite: true },
-      mtmGate: {
-        available: mtmAvailable,
-        reason: typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined,
-      },
-    };
+    // H-2: the composite read-path is shared with the discovery detail page via
+    // `readCompositeFactsheet` so the two surfaces can't diverge (the "one path"
+    // lesson). It REUSES the in-scope service-role admin `supabase` handle
+    // already created above under the SAME `withPublishedOnly` visibility
+    // boundary — NO new client, NO broader privilege; the outer request-scoped
+    // RLS signature probe + notFound() remains the unchanged auth gate. The
+    // helper carries C-1 (config-driven method), F1/H-1 (headline gate), F2/M-1
+    // (MTM gate) and the FS-01/02 markers. A null result = data defect → the
+    // "still computing" placeholder below.
+    const composite = await readCompositeFactsheet(supabase, {
+      strategyId: id,
+      dqf,
+      metricsJsonByBasis: analytics?.metrics_json_by_basis,
+      returnsDenominatorConfig: strategy.returns_denominator_config,
+    });
+    if (!composite) return null;
+    dailyReturns = composite.dailyReturns;
+    buildOpts = composite.buildOpts;
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an
