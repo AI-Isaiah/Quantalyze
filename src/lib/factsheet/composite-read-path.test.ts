@@ -160,6 +160,65 @@ describe("H-2 readCompositeFactsheet — shared composite read-path", () => {
 });
 
 /**
+ * HARD-03 (#69 / Phase-90 LOW-2) — chart↔headline method drift kill. The headline
+ * scalars are frozen at stitch under the worker's cumulative_method (persisted RAW
+ * into `data_quality_flags.cumulative_method` — Task 1). The read-path used to
+ * re-derive the chart basis LIVE from `returns_denominator_config`, so editing the
+ * config after publish (without re-stitching) flipped the chart away from the
+ * frozen headline. `readCompositeFactsheet` now PREFERS the persisted method, with
+ * a live-derive FALLBACK so older composites (no persisted key) stay byte-identical.
+ */
+describe("HARD-03 readCompositeFactsheet — prefer persisted cumulative_method over live re-derive", () => {
+  it("drift-kill: persisted 'simple' beats a live config that would derive geometric → arithmetic", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: { ...DQF, cumulative_method: "simple" },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: null, // live derive would be "geometric"
+    });
+    // The persisted frozen method wins: "simple" → "arithmetic".
+    expect(out!.buildOpts.cumulativeMethod).toBe("arithmetic");
+  });
+
+  it("reverse drift-kill: persisted 'geometric' beats a live config that would derive arithmetic → geometric", async () => {
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: { ...DQF, cumulative_method: "geometric" },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: { cumulative_method: "simple" }, // live derive would be "arithmetic"
+    });
+    expect(out!.buildOpts.cumulativeMethod).toBe("geometric");
+  });
+
+  it("older-composite fallback: absent persisted method → live re-derive (byte-identical)", async () => {
+    // DQF carries NO cumulative_method — the pre-HARD-03 state of every already-
+    // published composite. It must fall back to the live config derive verbatim.
+    const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH },
+      returnsDenominatorConfig: { cumulative_method: "simple" },
+    });
+    expect(out!.buildOpts.cumulativeMethod).toBe("arithmetic"); // live derive, unchanged
+  });
+
+  it("strict-literal coercion: only exact 'simple'/'geometric' honored; malformed values fall back to live (T-92-05)", async () => {
+    // A tampered/garbage persisted value must NEVER independently pick a basis —
+    // it defers to the live derive. Here the live config is null → "geometric", so
+    // an honored-malformed bug would surface as anything other than "geometric".
+    for (const bad of [true, 42, "arithmetic", {}] as unknown[]) {
+      const out = await readCompositeFactsheet(mockAdmin(SPARSE_ROWS), {
+        strategyId: "s1",
+        dqf: { ...DQF, cumulative_method: bad },
+        metricsJsonByBasis: { cash_settlement: FULL_CASH },
+        returnsDenominatorConfig: null, // fallback derive → "geometric"
+      });
+      expect(out!.buildOpts.cumulativeMethod).toBe("geometric");
+    }
+  });
+});
+
+/**
  * Finding B (Phase 92 hardening) — the SINGLE-KEY `insufficient_window` DQ flag is
  * persisted server-side (analytics_runner.py :1839/:2367, with a passing lift
  * test) but was NEVER rendered on the factsheet: both FactsheetView-consumer

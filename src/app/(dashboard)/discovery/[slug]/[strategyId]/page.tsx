@@ -82,7 +82,7 @@ export default async function StrategyDetailPage({
   // series, and thread the marker/basis/method opts. A null result = data defect
   // → the still-computing placeholder (never the api arm).
   const dqf = analyticsRow?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
     | null
     | undefined;
   let buildOpts: BuildFactsheetOpts | undefined;

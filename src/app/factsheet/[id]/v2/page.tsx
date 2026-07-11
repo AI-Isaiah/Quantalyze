@@ -84,7 +84,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
   // the arithmetic running-cumulative curve, and thread the marker/basis fields.
   const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
     | null
     | undefined;
   const isComposite = dqf?.composite === true;

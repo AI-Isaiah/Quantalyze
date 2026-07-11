@@ -54,6 +54,7 @@ export async function readCompositeFactsheet(
           per_key?: unknown;
           gap_spans?: unknown;
           insufficient_window?: unknown;
+          cumulative_method?: unknown;
         }
       | null
       | undefined;
@@ -98,9 +99,25 @@ export async function readCompositeFactsheet(
     return null;
   }
 
-  // C-1: cumulative method follows the persisted config (arithmetic only for the
-  // "simple"/allocated-capital override), NOT a hardcoded arithmetic.
-  const cumulativeMethod = attributionBasisFromConfig(returnsDenominatorConfig);
+  // C-1 / HARD-03 (#69, Phase-90 LOW-2): cumulation basis precedence —
+  //   1. the PERSISTED method frozen into `data_quality_flags.cumulative_method`
+  //      at stitch (Task 1), which matches the headline compute BY CONSTRUCTION;
+  //   2. else the LIVE re-derive from returns_denominator_config (older composites
+  //      with no persisted key — self-heals on next re-stitch, HARD-04 precedent).
+  // Preferring the persisted value kills the chart↔headline drift an owner could
+  // trigger by editing the config after publish without re-stitching. The
+  // "simple"→"arithmetic" map is the SAME single rule `attributionBasisFromConfig`
+  // encodes, applied to the RAW worker vocabulary — persisted and fallback can't
+  // diverge. Strict-literal coercion (only the exact strings "simple"/"geometric"
+  // honored; anything else falls back) mirrors the `=== true` server-truth
+  // discipline in this file (T-92-05).
+  const persisted = dqf?.cumulative_method;
+  const cumulativeMethod =
+    persisted === "simple"
+      ? "arithmetic"
+      : persisted === "geometric"
+        ? "geometric"
+        : attributionBasisFromConfig(returnsDenominatorConfig);
   // F2/M-1: MTM enabled iff the mark_to_market basis is present with a finite
   // headline (locked D1 intent); the strict overlay renders degenerate scalars "—".
   const mtmAvailable = hasBasisHeadline(
