@@ -6,7 +6,12 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, useBasisMetrics, mtmDisabledReasonCopy, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, mtmDisabledReasonCopy, type Basis } from "./basis-context";
+// Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
+// wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
+// L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
+import { LeverageProvider, useLeverage, useLeveragedMetrics } from "./leverage-context";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
@@ -187,6 +192,7 @@ export function FactsheetBody({
     // Phase 90 (FS-03): BasisProvider wraps the tree so useBasis() resolves in
     // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
     // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
+    <LeverageProvider>
     <BasisProvider>
       <article
         id="factsheet-main"
@@ -297,6 +303,7 @@ export function FactsheetBody({
         {!hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
     </BasisProvider>
+    </LeverageProvider>
   );
 }
 
@@ -668,13 +675,24 @@ function CapacityChip({
   );
 }
 
+// Phase 90.5 (LEV-01, UI-SPEC copy contract) — the cost-free caveat, rendered
+// verbatim beneath the MODELED eyebrow at every L!=1 (persistent visible line,
+// NOT tooltip-only; AT-robust). Kept as a const so the apostrophe/arrow glyphs
+// don't trip JSX entity-escaping lint.
+const LEVERAGE_CAVEAT =
+  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). This is a modeled what-if — not the strategy's realized track record.";
+
 function KpiStrip() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
   // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE and only
   // here. Cash returns strategyMetrics untouched → single-key is bit-identical
   // (the existing kpistrip pins prove it). α/IR + MetricsColumn stay cash.
-  const { basis, m } = useBasisMetrics(payload);
+  // Phase 90.5 (LEV-01): the ONE consumer swap. useLeveragedMetrics returns the
+  // basis metrics UNTOUCHED at L=1 (byte-identity; the frozen kpistrip pins prove
+  // it) and a client recompute of the SAME scalars at L!=1. items[] read m.*
+  // unchanged.
+  const { basis, m, leverage } = useLeveragedMetrics(payload);
   const composite = payload.dataQuality?.composite === true;
   const j = cmp.joint;
   const cn = cmp.shortName;
@@ -744,6 +762,25 @@ function KpiStrip() {
           BASIS ·{" "}
           {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
         </p>
+      )}
+      {/* Phase 90.5 (LEV-01, UI-SPEC): the MODELED amber eyebrow + cost-free
+          caveat are INSERTED only at L!=1 (never a reserved row) so L=1 stays
+          byte-identical (GUARD-02). Amber = "modeled/what-if, recoverable" — a
+          leveraged KPI is a projection, not the realized track, so it must be
+          unmistakable (not the BASIS eyebrow's neutral grey). The eyebrow is the
+          authoritative modeled-state live region. */}
+      {leverage !== 1 && (
+        <>
+          <p
+            className="mt-6 text-micro font-mono uppercase tracking-wider"
+            style={{ color: "var(--color-warning, #B45309)" }}
+            role="status"
+            aria-live="polite"
+          >
+            MODELED · {leverage}×
+          </p>
+          <p className="mt-2 text-caption text-text-muted">{LEVERAGE_CAVEAT}</p>
+        </>
       )}
       <section
         className="mt-6 overflow-hidden @container"
@@ -960,6 +997,39 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
+  // Phase 90.5 (LEV-01, D1/D2/D5): fail-closed eligibility — the leverage cluster
+  // renders IFF single-key (composite !== true) AND periodsPerYear present. It
+  // occupies the SAME mr-auto slot as the composite BASIS control; the two never
+  // coexist (D1), so they never compete for the slot.
+  const leverageEligible = !composite && payload.periodsPerYear != null;
+  const { leverage, setLeverage } = useLeverage();
+  // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
+  // channel does not exist on the factsheet). Interactive fail-loud contract
+  // mirrors the composer's handleLeverageChange: non-finite -> keep previous +
+  // message; <0 -> 0 + message; >MAX -> MAX + message; valid -> clear.
+  const [leverageMsg, setLeverageMsg] = React.useState<string | null>(null);
+  const onLeverageChange = (raw: number) => {
+    if (!Number.isFinite(raw)) {
+      setLeverageMsg(
+        `Invalid leverage — enter a number between 0 and ${MAX_LEVERAGE}. The previous value was kept.`,
+      );
+      return;
+    }
+    if (raw < 0) {
+      setLeverageMsg(
+        "Leverage can't be negative — shorting isn't modeled in this projection. Clamped to 0.",
+      );
+    } else if (raw > MAX_LEVERAGE) {
+      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum modeled leverage.`);
+    } else {
+      setLeverageMsg(null);
+    }
+    setLeverage(Math.min(MAX_LEVERAGE, Math.max(0, raw)));
+  };
+  const resetLeverage = () => {
+    setLeverage(1);
+    setLeverageMsg(null);
+  };
   const resetView = () => {
     resetXRange();
     setComparator(payload.activeComparator);
@@ -973,6 +1043,53 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   };
   return (
     <section className="factsheet-v2-no-print mt-6 flex flex-wrap items-center justify-start lg:justify-end gap-x-3 sm:gap-x-6 gap-y-3 border-b border-border pb-3">
+      {leverageEligible && (
+        <div className="mr-auto flex flex-col items-start gap-1">
+          <div className="flex items-center gap-2">
+            <label
+              htmlFor="leverage-factsheet"
+              className="text-micro font-mono uppercase tracking-wider text-text-muted"
+            >
+              LEVERAGE
+            </label>
+            <input
+              id="leverage-factsheet"
+              type="number"
+              step="0.1"
+              min="0"
+              max={MAX_LEVERAGE}
+              value={leverage.toString()}
+              title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
+              aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
+              onChange={(e) => onLeverageChange(Number(e.target.value))}
+              className="w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+            />
+            <span aria-hidden="true" className="text-caption font-mono text-text-muted">
+              ×
+            </span>
+            {leverage !== 1 && (
+              <button
+                type="button"
+                onClick={resetLeverage}
+                aria-label="Reset leverage to 1×"
+                className="px-2.5 py-1 text-micro font-mono uppercase tracking-wider rounded-sm border bg-surface-subtle text-text-2 border-border hover:bg-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]"
+              >
+                Reset 1×
+              </button>
+            )}
+          </div>
+          {leverageMsg && (
+            <p
+              role="status"
+              aria-live="polite"
+              className="text-caption"
+              style={{ color: "var(--color-warning, #B45309)" }}
+            >
+              {leverageMsg}
+            </p>
+          )}
+        </div>
+      )}
       {composite && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <SegmentedControl
