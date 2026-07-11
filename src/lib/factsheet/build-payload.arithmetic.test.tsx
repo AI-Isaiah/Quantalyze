@@ -16,7 +16,7 @@
  * (TS2578) so 90-03's own tsc gate forces its removal and the real imports wire
  * up. Do NOT stub the exports early to silence RED — that defeats the Wave-0 gate.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { DailyReturn, FactsheetPayload } from "./types";
 import { cumEq, drawdowns, worstDrawdowns } from "./compute";
 import { buildFactsheetPayload } from "./build-payload";
@@ -344,5 +344,50 @@ describe("D3 deriveSegmentMarkers: seq>1 boundaries + inclusive gap days", () =>
     expect(missingSegments).toEqual([
       { start: "2025-09-20", end: "2025-09-30", kind: "gap", days: 11 },
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F6 (IN-06) — a present-but-non-array per_key / gap_spans is a malformed
+// persist: deriveSegmentMarkers warns (observable) AND degrades to empty arrays
+// rather than silently reporting 0 markers.
+// ---------------------------------------------------------------------------
+describe("F6 deriveSegmentMarkers: malformed (non-array) shapes warn + degrade", () => {
+  it("warns and returns empty when gap_spans is present but not an array", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { missingSegments, segmentBoundaries } = deriveSegmentMarkers({
+      composite: true,
+      per_key: [{ seq: 1, first_day: "2025-08-01" }],
+      gap_spans: { start: "2025-09-20", end: "2025-09-30" }, // object, not array
+    } as unknown as Parameters<typeof deriveSegmentMarkers>[0]);
+    expect(missingSegments).toEqual([]);
+    expect(segmentBoundaries).toEqual([]); // seq 1 excluded anyway
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("gap_spans present but not an array"),
+      expect.anything(),
+    );
+    warn.mockRestore();
+  });
+
+  it("warns when per_key is present but not an array", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    deriveSegmentMarkers({
+      per_key: "oops",
+      gap_spans: [],
+    } as unknown as Parameters<typeof deriveSegmentMarkers>[0]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("per_key present but not an array"),
+      expect.anything(),
+    );
+    warn.mockRestore();
+  });
+
+  it("does NOT warn for the normal (array) or absent shapes", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    deriveSegmentMarkers({ per_key: [], gap_spans: [] });
+    deriveSegmentMarkers(null);
+    deriveSegmentMarkers(undefined);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

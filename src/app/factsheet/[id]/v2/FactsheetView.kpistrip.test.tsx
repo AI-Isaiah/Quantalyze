@@ -354,3 +354,34 @@ describe("FactsheetView KPI strip — Phase 90 F2: MTM never fails open", () => 
     expect(readKpiCell(container, "Cum. Return")).toBe("+62.7%");
   });
 });
+
+/**
+ * Phase 90 review-fix (F6, IN-05) — the sr-only stitched-track summary must not
+ * read "1 keys" / claim "handoffs" for a single-member composite (0 boundaries).
+ */
+describe("FactsheetView — Phase 90 F6: sr-only stitched summary grammar", () => {
+  function singleMemberComposite(): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    // Composite with NO segmentBoundaries (seq 1 only) ⇒ 1 key, 0 handoffs.
+    return {
+      ...p,
+      dataQuality: { composite: true },
+      metricsByBasis: { cash_settlement: KP_CASH },
+      mtmGate: { available: false },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("reads 'Stitched from 1 key.' (singular) and omits the handoff clause", () => {
+    const { container } = renderComposite(singleMemberComposite());
+    const summary = Array.from(container.querySelectorAll(".sr-only")).find((el) =>
+      el.textContent?.includes("Stitched from"),
+    );
+    const text = (summary?.textContent ?? "").replace(/\s+/g, " ").trim();
+    expect(text).toContain("Stitched from 1 key.");
+    expect(text).not.toMatch(/\b1 keys\b/);
+    expect(text).not.toContain("handoff");
+  });
+});

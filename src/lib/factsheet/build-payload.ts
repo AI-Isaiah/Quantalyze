@@ -83,6 +83,20 @@ export function deriveSegmentMarkers(dqf: {
   segmentBoundaries: NonNullable<FactsheetCommon["segmentBoundaries"]>;
   missingSegments: NonNullable<FactsheetCommon["missingSegments"]>;
 } {
+  // F6 (IN-06): a present-but-non-array `per_key`/`gap_spans` is a malformed
+  // persist (Phase-86 always writes arrays). Silently coercing it to [] would
+  // under-report the segment/gap count with no signal — warn so the bad shape is
+  // observable rather than degrading to 0 markers invisibly.
+  if (dqf?.per_key != null && !Array.isArray(dqf.per_key)) {
+    console.warn("[factsheet] deriveSegmentMarkers — per_key present but not an array; treating as empty", {
+      type: typeof dqf.per_key,
+    });
+  }
+  if (dqf?.gap_spans != null && !Array.isArray(dqf.gap_spans)) {
+    console.warn("[factsheet] deriveSegmentMarkers — gap_spans present but not an array; treating as empty", {
+      type: typeof dqf.gap_spans,
+    });
+  }
   const perKey = Array.isArray(dqf?.per_key) ? (dqf!.per_key as Array<{ seq?: unknown; first_day?: unknown }>) : [];
   const gapSpans = Array.isArray(dqf?.gap_spans) ? (dqf!.gap_spans as Array<{ start?: unknown; end?: unknown }>) : [];
 

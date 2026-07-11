@@ -312,15 +312,28 @@ export function FactsheetBody({
 function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const payload = usePayload();
   const { basis } = useBasis();
-  const showEyebrow =
-    payload.dataQuality?.composite === true && basis === "mark_to_market";
-  if (!showEyebrow) {
+  const composite = payload.dataQuality?.composite === true;
+  // Non-composite: bare column, byte-identical to before (GUARD-02).
+  if (!composite) {
     return <MetricsColumn scenarioMode={scenarioMode} />;
   }
+  // F4 (UI-SPEC §4 zero-shift): render the eyebrow PERSISTENTLY (reserved line
+  // height) so toggling cash↔MTM no longer pops it in/out and reflows the right
+  // rail. NOTE (deviation from the finding's literal "swap CASH↔MTM text"): the
+  // MetricsColumn distributional stats are cash-ONLY (D5 — skew/VaR/win-rate have
+  // NO persisted MTM counterpart), so labeling the column "MARK-TO-MARKET" would
+  // be the exact no-invented-data violation this milestone forbids. Instead the
+  // eyebrow flags "these stayed CASH" under MTM, and holds a blank line (nbsp)
+  // under cash — reserving height without emitting a "BASIS ·" string that would
+  // duplicate the KpiStrip eyebrow or mislabel the column.
+  const onMtm = basis === "mark_to_market";
   return (
     <div className="flex flex-col gap-4 min-w-0">
-      <p className="text-micro uppercase tracking-wider text-text-muted">
-        BASIS · CASH SETTLEMENT
+      <p
+        aria-hidden={!onMtm}
+        className="text-micro uppercase tracking-wider text-text-muted"
+      >
+        {onMtm ? "BASIS · CASH SETTLEMENT" : " "}
       </p>
       <MetricsColumn scenarioMode={scenarioMode} />
     </div>
@@ -401,23 +414,35 @@ function PerformanceCharts() {
       {/* FS-01/02 (composite-only): visually-hidden AT summary for the sparse
           stitched cumulative track. The seam/gap markers are pointerEvents-none,
           so this is the authoritative AT surface. */}
+      {composite && (() => {
+        // F6 (IN-05): N boundaries ⇒ N+1 keys, but a 1-member composite has 0
+        // boundaries and therefore NO handoffs — don't claim "1 keys" or "seam
+        // markers at each key handoff". Pluralize and guard the handoff clause.
+        const nBoundaries = payload.segmentBoundaries?.length ?? 0;
+        const nKeys = nBoundaries + 1;
+        const nGaps = payload.missingSegments?.length ?? 0;
+        return (
+          <span className="sr-only">
+            Stitched from {nKeys} key{nKeys === 1 ? "" : "s"}.
+            {nBoundaries > 0 ? " Seam markers at each key handoff;" : ""} {nGaps}{" "}
+            gap{nGaps === 1 ? "" : "s"} shown as breaks, never as zero returns.
+          </span>
+        );
+      })()}
+      {/* FS-03 (composite-only): charts never swap basis. F5 (IN-03): PRE-MOUNT
+          this role=status region (rendered for every composite, empty under cash)
+          so the caption text is a CONTENT change on an existing live region
+          rather than a mount-on-toggle region — several SRs do not reliably
+          announce a live region that appears at the same instant as its content.
+          role="status" carries an implicit aria-live="polite"; this is now the
+          SINGLE authoritative announcer for the basis switch (the KpiStrip
+          eyebrow's redundant aria-live was dropped to avoid a double
+          announcement). */}
       {composite && (
-        <span className="sr-only">
-          Stitched from {(payload.segmentBoundaries?.length ?? 0) + 1} keys. Seam
-          markers at each key handoff; {payload.missingSegments?.length ?? 0} gap(s)
-          shown as breaks, never as zero returns.
-        </span>
-      )}
-      {/* FS-03 (composite-only): charts never swap basis. Under MTM, announce
-          that the series stays cash-settlement (role=status → AT announces). */}
-      {composite && basis === "mark_to_market" && (
-        <p
-          role="status"
-          aria-live="polite"
-          className="text-caption text-text-secondary"
-        >
-          Charts show the cash-settlement series. Mark-to-market applies to
-          summary metrics only.
+        <p role="status" className="text-caption text-text-secondary">
+          {basis === "mark_to_market"
+            ? "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."
+            : ""}
         </p>
       )}
       {!roll.enough && (
@@ -710,13 +735,12 @@ function KpiStrip() {
   return (
     <>
       {/* Phase 90 (FS-03): persistent composite-only basis eyebrow. Reserved
-          height, only the TEXT swaps on toggle → zero reflow. aria-live announces
-          the basis switch (the MTM chart caption below carries role="status"). */}
+          height, only the TEXT swaps on toggle → zero reflow. F5 (IN-03): the
+          aria-live was REMOVED here — the PerformanceCharts role=status caption
+          is the single authoritative live region for the basis switch, so the
+          eyebrow no longer double-announces. */}
       {composite && (
-        <p
-          aria-live="polite"
-          className="mt-6 text-micro uppercase tracking-wider text-text-muted"
-        >
+        <p className="mt-6 text-micro uppercase tracking-wider text-text-muted">
           BASIS ·{" "}
           {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
         </p>
