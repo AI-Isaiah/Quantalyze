@@ -1267,6 +1267,139 @@ async def test_mtm_cash_degraded_member_divergence_fails_transient() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ccxt_byte_consistent_with_real_flows_and_terminus_segmentation() -> None:
+    """Phase 93.1 FIX 3 (byte-consistency at the two bug-prone seams): the existing
+    byte-consistency pin used ZERO external flows and a within-retention window
+    (terminus no-op), so the `ccxt_rows_to_dated_flows → combine_realized_and_funding
+    (external_flows=...)` seam and the DQ-02 flow-coverage terminus segmentation were
+    NOT byte-pinned in the reconstruct direction. This case drives BOTH: a REAL priced
+    (stablecoin) deposit near the retention floor (non-empty external flows) AND a
+    past-retention window that actually triggers terminus segmentation, asserting the
+    reconstructed member series persisted THROUGH the stitch equals a direct-primitive
+    reference (combine → terminus → clip) at rtol 1e-12.
+
+    Dates are computed RELATIVE to the live retention floor so the segmentation fires
+    deterministically regardless of the wall-clock date (the reference and the
+    production path both call the real `datetime.now`, so they agree by construction)."""
+    from datetime import timezone
+    from services.broker_dailies import combine_realized_and_funding
+    from services.ccxt_flows import ccxt_rows_to_dated_flows
+    from services.stitch_composite import clip_to_window
+    from services.nav_twr import (
+        apply_flow_coverage_terminus,
+        flow_coverage_gap_evidence,
+        flow_coverage_terminus_day,
+        flow_retention_floor,
+        negative_nav_guard_pre_terminus,
+    )
+
+    now_utc = datetime.now(timezone.utc)
+    floor = flow_retention_floor("bybit", now_utc)   # tz-aware midnight, now − 365d
+    assert floor is not None
+    _iso = lambda ts: ts.date().isoformat()  # noqa: E731
+    pre1 = floor - pd.Timedelta(days=40)   # past-retention → segmented away
+    pre2 = floor - pd.Timedelta(days=30)
+    post1 = floor + pd.Timedelta(days=20)  # within retention → survives
+    post2 = floor + pd.Timedelta(days=40)
+    dep_day = floor + pd.Timedelta(days=3)  # boundary flow (≤ floor+7) → gap evidence
+    floor_iso = _iso(floor)
+
+    my_realized = [
+        _ccxt_realized(_iso(pre1), 120.0),
+        _ccxt_realized(_iso(pre2), -60.0),
+        _ccxt_realized(_iso(post1), 90.0),
+        _ccxt_realized(_iso(post2), 30.0),
+    ]
+    deposit_row = {
+        "id": "dep-boundary",
+        "type": "deposit",
+        "currency": "USDT",              # stablecoin → valued 1.0, no price index needed
+        "amount": 500.0,
+        "timestamp": _iso(dep_day) + "T12:00:00+00:00",
+        "internal": None,
+        "info": {},
+    }
+    window_start = _iso(pre1)
+
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2020-01-01", "2020-02-01"),   # deribit, disjoint far-past window
+            _member(2, window_start, None),           # bybit — reconstructs w/ segmentation
+        ],
+        # GEOMETRIC/calendar convention (no allocated-capital override): the terminus
+        # segmentation introduces interior NaN chain-breaks, which the geometric compute
+        # honours (the simple/arithmetic Zavara path correctly REFUSES them — F-5).
+        strategy_row={
+            "id": _STRATEGY_ID, "asset_class": "crypto",
+            "returns_denominator_config": None,
+        },
+    )
+    m1 = _returns([("2020-01-01", 0.02), ("2020-01-02", 0.01)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,          # gate CLOSED → single cash pass
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=my_realized,
+        deposits=[deposit_row],
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    # Reference: the derive primitives called DIRECTLY on the SAME inputs the helper
+    # composed — combine (with REAL external flows) → the evidence-gated terminus →
+    # clip — mirroring _reconstruct_ccxt_member's exact sequence.
+    ref_flows = ccxt_rows_to_dated_flows([deposit_row], venue="bybit", price_index={})
+    assert ref_flows, "the external-flows seam must carry a real priced deposit"
+    ref_returns, ref_meta = combine_realized_and_funding(
+        list(my_realized), [],
+        account_balance=10_000.0, balance_error=False,
+        external_flows=ref_flows, open_unrealized_usd=0.0,
+    )
+    _pre_seg_present = int(ref_returns.notna().sum())
+    now_naive = now_utc.replace(tzinfo=None)
+    start = flow_coverage_terminus_day(
+        "bybit", first_return_day=ref_returns.index[0], now_utc=now_naive
+    )
+    assert start is not None, "window must extend before retention → terminus candidate"
+    guard_pre = negative_nav_guard_pre_terminus(
+        ref_returns, terminus=start,
+        negative_nav_guard_fired=bool(ref_meta.get("negative_nav_guard")),
+    )
+    assert flow_coverage_gap_evidence(
+        external_flows=ref_flows, retention_floor=floor,
+        pre_terminus_nav_guard_fired=guard_pre,
+    ), "boundary flow near the retention floor must be gap-coverage evidence"
+    ref_seg, ref_flags = apply_flow_coverage_terminus(ref_returns, start)
+    assert ref_flags.get("flow_coverage_incomplete"), "terminus must actually segment"
+    assert int(ref_seg.notna().sum()) < _pre_seg_present, "segmentation must drop days"
+    ref_clipped = clip_to_window(ref_seg, window_start, None)
+    ref_map = {
+        ts.date().isoformat(): float(v)
+        for ts, v in ref_clipped.items()
+        if pd.notna(v)
+    }
+    assert ref_map, "reference must contribute at least one post-terminus day"
+    assert all(day >= floor_iso for day in ref_map), "pre-terminus days must be NaN'd"
+
+    persisted = {
+        r["date"]: r["daily_return"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+        if r["date"] >= floor_iso   # isolate the seq-2 post-terminus region
+    }
+    assert set(persisted) == set(ref_map), (
+        f"seq-2 persisted days {sorted(persisted)} != reference {sorted(ref_map)}"
+    )
+    for day, ref_val in ref_map.items():
+        assert persisted[day] == pytest.approx(ref_val, rel=1e-12, abs=0.0), (
+            f"byte-consistency broke on {day}: {persisted[day]} != {ref_val}"
+        )
+
+
+@pytest.mark.asyncio
 async def test_permanent_preflight_failure_stamps_terminal_failed() -> None:
     """Finding 4: a PERMANENT member-key preflight failure (missing / inactive key)
     used to `return ctx` WITHOUT stamping strategy_analytics — the wizard poller
