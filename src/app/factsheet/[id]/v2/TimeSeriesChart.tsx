@@ -246,8 +246,15 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     // boundary date's index. Skip if the date is absent or off the visible
     // [xStart, xEnd] window; clamp x to the plot (ddHighlights idiom, pan/zoom safe).
     const boundaryNodes = boundaries.flatMap((b, i) => {
-      const idx = indexOfDate(dates, b.date);
-      if (idx < 0 || idx < xStart || idx > xEnd) return [];
+      // L-1: a member's `first_day` can be a guard/NaN day that is ABSENT from
+      // the present series → `indexOfDate` misses. Fall back to the first PRESENT
+      // day at or after the boundary date (`firstIndexAfter`, the gap-seam idiom)
+      // so the seam renders at the key's real first visible day instead of
+      // silently vanishing — otherwise the sr-only summary claims a handoff that
+      // has no marker.
+      const exact = indexOfDate(dates, b.date);
+      const idx = exact >= 0 ? exact : firstIndexAfter(dates, b.date);
+      if (idx >= dates.length || idx < xStart || idx > xEnd) return [];
       const x = Math.max(PAD.left, Math.min(plotRight, X(idx)));
       return [
         <g key={`seg-bound-${i}`} data-idx={idx}>

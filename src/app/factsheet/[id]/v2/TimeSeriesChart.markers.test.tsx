@@ -208,6 +208,38 @@ describe("TimeSeriesChart — Phase 90 FS-01/FS-02 markers (RED until 90-04)", (
   });
 });
 
+describe("TimeSeriesChart — Phase 90 L-1: boundary on a guard/absent day", () => {
+  // "2023-01-08" is NOT in SPARSE_DATES (present days jump 01-06 → 01-09). A
+  // member whose first_day landed on a guard/NaN day is absent from the axis, so
+  // indexOfDate misses; the fix falls back to the first PRESENT day at/after it.
+  const GUARD_BOUNDARY = { date: "2023-01-08", seq: 2, label: "Key 2" };
+
+  function guardBoundaryPayload(): FactsheetPayload {
+    const base = buildScenarioFactsheetPayload({ portfolioDaily: sparsePoints() });
+    return {
+      ...base,
+      segmentBoundaries: [GUARD_BOUNDARY],
+      missingSegments: [],
+      dataQuality: { composite: true },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the seam at the first PRESENT day after an absent boundary date (not silently dropped)", () => {
+    const { container } = renderChart(guardBoundaryPayload(), markersConfig);
+    const boundaryLines = Array.from(
+      container.querySelectorAll(DASHED_BOUNDARY),
+    ).filter(mutedStroke);
+    // Pre-fix: indexOfDate("2023-01-08") === -1 → the seam vanished (0 lines).
+    expect(
+      boundaryLines.length,
+      "the seam must render at the first present day after the absent boundary date",
+    ).toBe(1);
+    // "2023-01-08" resolves to index 5 ("2023-01-09"), the first present day after it.
+    const idxNode = container.querySelector("[data-idx]");
+    expect(idxNode?.getAttribute("data-idx")).toBe("5");
+  });
+});
+
 describe("TimeSeriesChart — Phase 90 D7 replacement pin (GREEN today AND after)", () => {
   it("GREEN: segmentMarkers=true but NO boundary/gap fields → zero markers", () => {
     const { container } = renderChart(payloadNoMarkerFields(), markersConfig);
