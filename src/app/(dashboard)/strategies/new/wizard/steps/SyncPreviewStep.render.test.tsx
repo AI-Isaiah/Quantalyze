@@ -872,3 +872,68 @@ describe("[mig-20260707120000] SyncPreviewStep — fresh complete_with_warnings 
     expect(syncPosts).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// [UAT] Data-heavy slow-path copy + 15-minute retry threshold.
+// A composite stitch over multi-year, multi-key history can legitimately run
+// up to ~15 minutes. The WARN copy (60s+) now says so, and RETRY_THRESHOLD_MS
+// moved 180_000 → 900_000 so the "taking much longer than expected" alarm no
+// longer contradicts that promise at 3 minutes. This pins both.
+// ---------------------------------------------------------------------------
+describe("[UAT] SyncPreviewStep — data-heavy warn copy + 15-min retry threshold", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  it("shows the data-heavy 15-min copy at 60s and holds the retry alarm past the old 3-min mark", async () => {
+    // status="computing" forever → stays in the polling phase that renders the
+    // slow-path copy while the elapsed clock advances.
+    installSupabaseMock(() => ({ kind: "row", status: "computing" }));
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // WARN threshold (60s): the data-heavy 15-minute copy appears; no retry alarm.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(61_000);
+    });
+    expect(
+      screen.getByText(/data-heavy operation and can take up to 15 minutes/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/taking much longer than expected/i),
+    ).not.toBeInTheDocument();
+
+    // Advance past the OLD 180s retry threshold (total ~205s) but well before
+    // 15 min: the retry alarm STILL must not appear — proves RETRY_THRESHOLD_MS
+    // moved 180_000 → 900_000 (with the old value this assertion would fail).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(144_000);
+    });
+    expect(
+      screen.queryByText(/taking much longer than expected/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText(/up to 15 minutes/i)).toBeInTheDocument();
+  });
+});

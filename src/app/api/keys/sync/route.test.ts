@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import { SUPPORTED_EXCHANGES } from "@/lib/closed-sets";
 
 /**
  * Tests for POST /api/keys/sync — the feature-flagged sync route rewrite
@@ -180,10 +181,17 @@ vi.mock("@/lib/supabase/admin", () => ({
         return {
           update: (patch: Record<string, unknown>) => {
             mockStrategiesUpdate(patch);
-            return {
-              eq: (_col: string, _val: unknown) =>
-                Promise.resolve({ error: null }),
+            // Chainable + awaitable: the derive filters by BOTH .eq("id") and
+            // .eq("user_id") (belt-and-braces owner scope), so `eq` returns the
+            // same thenable to support `.eq().eq()` then `await`.
+            const chain: {
+              eq: (col: string, val: unknown) => typeof chain;
+              then: (resolve: (v: { error: null }) => unknown) => unknown;
+            } = {
+              eq: (_col: string, _val: unknown) => chain,
+              then: (resolve) => resolve({ error: null }),
             };
+            return chain;
           },
         };
       }
@@ -195,6 +203,10 @@ vi.mock("@/lib/supabase/admin", () => ({
 // 89-02: unified-backbone flag seam. Default OFF (existing tests exercise the
 // legacy handler); the hoist-ordering pin flips it TRUE to prove the composite
 // branch still wins ahead of it.
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: vi.fn(),
+}));
+
 vi.mock("@/lib/feature-flags", () => ({
   isUnifiedBackboneActive: async () => unifiedActive.value,
 }));
@@ -1153,5 +1165,29 @@ describe("POST /api/keys/sync", () => {
       });
       consoleSpy.mockRestore();
     });
+  });
+});
+
+// ── UAT tripwire: the composite asset_class='crypto' hardcode ────────────────
+// Both the preview kickoff (this route) and finalize-wizard HARDCODE
+// asset_class='crypto' for a composite, ahead of the worker's real venue-blend
+// annualization. That is correct ONLY while every SUPPORTED_EXCHANGES venue is
+// crypto (√365). Non-crypto venues are on the roadmap (e.g. MetaTrader5, a
+// traditional √252 venue). When one is added, an all-MT5 composite would blend
+// to √252 while these hardcodes assert √365 — the worker guard would fail-loud
+// (safe, but it BLOCKS the composite), and a mixed composite could mis-label.
+// This test reddens the instant the supported set changes, forcing whoever adds
+// the venue to replace the hardcodes with a per-member-venue derive
+// (isCryptoExchange over the members, mirroring "365 if ANY leg crypto else 252").
+describe("[UAT] composite asset_class hardcode tripwire", () => {
+  it("every SUPPORTED_EXCHANGES venue is crypto — else the 'crypto' hardcode must be revisited", () => {
+    // Sorted exact pin: adding ANY venue (crypto or not) reddens this and forces
+    // a conscious review of the keys/sync + finalize-wizard asset_class derive.
+    expect([...SUPPORTED_EXCHANGES].sort()).toEqual([
+      "binance",
+      "bybit",
+      "deribit",
+      "okx",
+    ]);
   });
 });
