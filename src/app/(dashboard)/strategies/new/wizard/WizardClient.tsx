@@ -157,6 +157,17 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   const [syncSnapshot, setSyncSnapshot] = useState<SyncPreviewSnapshot | null>(
     null,
   );
+  // Phase 94.1 / F2 — MultiKeyConnectStep reports whether connect_key holds
+  // UNSAVED panel/credential edits (a new/edited key not yet flushed through
+  // its Continue → set-members POST). While dirty, connect_key counts as
+  // INCOMPLETE so the clickable stepper cannot jump forward past it
+  // (`stepCompleted('connect_key')` below). This closes the hole where a user
+  // returns to connect_key after review, edits a panel, then clicks the
+  // review/submit stepper cell (bypassing Continue) — the edits would be
+  // silently dropped and the strategy would finalize with the OLD members +
+  // OLD snapshot. Backward navigation stays free. Reset to false whenever the
+  // step unmounts (the child's cleanup) so it never lingers on a later step.
+  const [connectKeyDirty, setConnectKeyDirty] = useState<boolean>(false);
   const [metadataDraft, setMetadataDraft] = useState<MetadataDraft | null>(
     initialDraft
       ? {
@@ -416,7 +427,13 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     (key: WizardStepKey): boolean => {
       switch (key) {
         case "connect_key":
-          return strategyId != null;
+          // Phase 94.1 / F2 — a strategy draft exists AND connect_key has no
+          // uncommitted panel/credential edits. The `!connectKeyDirty` clause
+          // blocks a forward stepper jump while the user is mid-edit on
+          // connect_key (unsaved edits would otherwise be dropped, finalizing
+          // stale members). Backward nav is unaffected (it never consults
+          // completion — see stepNavigable's `target < current` fast-path).
+          return strategyId != null && !connectKeyDirty;
         case "sync_preview":
           return syncSnapshot != null;
         case "metadata":
@@ -427,7 +444,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
           return false;
       }
     },
-    [strategyId, syncSnapshot, metadataDraft],
+    [strategyId, syncSnapshot, metadataDraft, connectKeyDirty],
   );
 
   const stepNavigable = useCallback(
@@ -462,6 +479,16 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     (result: ConnectKeySuccess) => {
       setStrategyId(result.strategyId);
       setApiKeyId(result.apiKeyId);
+      // Phase 94.1 / F1 — a (re)submitted key set invalidates any cached
+      // crawl/stitch snapshot. On a first-time connect syncSnapshot is already
+      // null (no-op); on a re-continue after a back-nav key/window CHANGE it
+      // forces SyncPreviewStep past the cachedSnapshot short-circuit
+      // (SyncPreviewStep.tsx: `if (cachedSnapshot) …`) into the DB
+      // freshness/marker probe, so the factsheet reflects the CURRENT member
+      // set — never a stale snapshot whose provenance ({A,B}) no longer matches
+      // the persisted keys ({A,B,C}). WIZ-05 durability still applies from the
+      // persisted COMPLETE composite row, not the discarded in-memory snapshot.
+      setSyncSnapshot(null);
       setStep("sync_preview");
       persistPointer("sync_preview", result.strategyId);
       trackForQuantsEventClient("wizard_step_complete_1", {
@@ -708,6 +735,8 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 wizardSessionId={wizardSessionId}
                 onSuccess={handleConnectSuccess}
                 draftStrategyId={strategyId}
+                // Phase 94.1 / F2 — dirty signal gates forward stepper jumps.
+                onDirtyChange={setConnectKeyDirty}
               />
             )}
 
