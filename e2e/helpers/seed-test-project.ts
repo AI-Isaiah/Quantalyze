@@ -762,6 +762,7 @@ export async function seedCompositeStrategy(opts?: {
   name?: string;
   variant?: "published" | "failed";
   mtm?: "available" | "gated";
+  ownerUserId?: string;
 }): Promise<{
   strategyId: string;
   ownerUserId: string;
@@ -772,22 +773,33 @@ export async function seedCompositeStrategy(opts?: {
   const mtm = opts?.mtm ?? "available";
 
   // 1. Owner user + profile — mirrors seedStrategyWithHistory:377-395.
-  const ownerEmail = `e2e-composite-owner-${uniqueSuffix(6)}@example.test`;
-  const { data: ownerData, error: ownerError } =
-    await admin.auth.admin.createUser({
-      email: ownerEmail,
-      password: `composite-${uniqueSuffix(8)}`,
-      email_confirm: true,
-    });
-  if (ownerError || !ownerData.user) {
-    throw new Error(
-      `[seed] seedCompositeStrategy (owner) failed: ${ownerError?.message ?? "no user"}`,
-    );
+  //    When `ownerUserId` is supplied (e.g. the logged-in allocator, whose
+  //    profile seedTestAllocator already upserted) reuse it and SKIP both the
+  //    createUser and the profiles upsert — the composite must be owned by that
+  //    user so the RLS-bound wizard reads (strategy_keys / csv_daily_returns,
+  //    owner-only, no published exemption) resolve. When absent, self-create a
+  //    fresh owner (the render-spec caller relies on this).
+  let ownerUserId: string;
+  if (opts?.ownerUserId) {
+    ownerUserId = opts.ownerUserId;
+  } else {
+    const ownerEmail = `e2e-composite-owner-${uniqueSuffix(6)}@example.test`;
+    const { data: ownerData, error: ownerError } =
+      await admin.auth.admin.createUser({
+        email: ownerEmail,
+        password: `composite-${uniqueSuffix(8)}`,
+        email_confirm: true,
+      });
+    if (ownerError || !ownerData.user) {
+      throw new Error(
+        `[seed] seedCompositeStrategy (owner) failed: ${ownerError?.message ?? "no user"}`,
+      );
+    }
+    ownerUserId = ownerData.user.id;
+    await admin
+      .from("profiles")
+      .upsert({ id: ownerUserId, display_name: ownerEmail }, { onConflict: "id" });
   }
-  const ownerUserId = ownerData.user.id;
-  await admin
-    .from("profiles")
-    .upsert({ id: ownerUserId, display_name: ownerEmail }, { onConflict: "id" });
 
   // 2. strategies row. A composite carries api_key_id = NULL (the single-key
   //    link is never set — add-key/route.ts DIVERGENCE (1)). `published` for the

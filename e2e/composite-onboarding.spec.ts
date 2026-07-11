@@ -164,8 +164,10 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
 
     // Default = published Zavara-shaped composite (91-02). Its strategyId is
     // what the stubs echo, so the preview poller + factsheet read the seeded rows.
-    const composite = await seedCompositeStrategy();
+    // The composite is owned by the logged-in allocator so the RLS-bound wizard
+    // reads resolve (allocator created FIRST so it exists before the composite).
     const allocator = await seedTestAllocator();
+    const composite = await seedCompositeStrategy({ ownerUserId: allocator.userId });
     await stubWizardLiveCalls(page, composite.strategyId);
     await loginViaForm(page, allocator.email, allocator.password);
 
@@ -257,13 +259,20 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // admin/strategy-review route (25/25), and the sole-published-writer source
     // scan. This test proves ONLY the GUI surface: the wizard failed gate and
     // the discoverability status gate. It never re-derives the backend behaviour.
-    const failed = await seedCompositeStrategy({ variant: "failed" });
+    // Allocator created FIRST so both composites can be owned by it — the
+    // RLS-bound wizard reads only resolve for the logged-in owner.
+    const allocator = await seedTestAllocator();
+    const failed = await seedCompositeStrategy({
+      variant: "failed",
+      ownerUserId: allocator.userId,
+    });
     // A published composite as the false-green POSITIVE CONTROL for the
     // discoverability assertion below (proves the id-based lookup surface
     // actually renders a published composite before we assert the failed one
     // is absent).
-    const publishedControl = await seedCompositeStrategy();
-    const allocator = await seedTestAllocator();
+    const publishedControl = await seedCompositeStrategy({
+      ownerUserId: allocator.userId,
+    });
     await stubWizardLiveCalls(page, failed.strategyId);
     await loginViaForm(page, allocator.email, allocator.password);
 
