@@ -160,8 +160,8 @@ const BASE = resolveBaselineRef();
 const CHANGED = changedFiles(BASE);
 
 /**
- * The frozen client islands as NINE file paths after the scenario.ts + #597
- * compute.ts reviewed-edit carve-outs (the chart-interactivity island =
+ * The frozen client islands as EIGHT file paths after the scenario.ts + #597
+ * compute.ts + Phase-90 TimeSeriesChart.tsx reviewed-edit carve-outs (the chart-interactivity island =
  * EquityChart + TouchTooltip + useTapPin). Every one is verified to exist on
  * disk at planning time. A diff to ANY of them during a v1.4 restyle is an
  * exit-gate violation — the visual layer is free, the locked spine is not.
@@ -200,7 +200,7 @@ const FROZEN_ISLANDS: string[] = [
   // pin), GUARD-02 (FactsheetBody.scenario-mode.test.tsx, byte-identity), and
   // FactsheetView.kpistrip.test.tsx (the composite basis relabel). The other two
   // factsheet SVGs (HistogramChart/MasterBrush) STAY FROZEN below.
-  // The remaining NINE islands below STAY FROZEN — no RSC-ification / reshape
+  // The remaining EIGHT islands below STAY FROZEN — no RSC-ification / reshape
   // of the FactsheetProvider, useBreakpoint, the MC worker, the chart-
   // interactivity island (EquityChart/TouchTooltip/useTapPin), or the 3 SVGs.
   "src/app/factsheet/[id]/v2/factsheet-context.tsx",
