@@ -210,6 +210,45 @@ Possible fixes (try in order):
 When re-enabled, remove the three `@pytest.mark.skip` decorators in
 `test_compute_jobs_fencing.py`.
 
+**Re-justified 2026-07-12 (Phase 97 / v1.9.1 CI-02.1)**
+
+Deferral re-affirmed (roadmap CI-02 success criterion 2, "explicitly
+re-justified" arm) — the 3 tests stay collected-and-skipped through the
+v1.9.1 ship. The 2026-05-13 investigation above remains the evidence base;
+nothing in it was invalidated. New this round:
+
+- **(a) CI-01 does NOT resolve this.** Phase 97's per-run-`job_id` claim
+  scoping (CI-01, absorbing PR #610) fixed a *different* root cause —
+  foreign-row isolation under `pytest-xdist` parallelism, where a claim
+  could grab another test's row. That is orthogonal to the
+  `httpx.ReadTimeout @ ~120s` contention flake documented above, which is
+  driven by shared test-project latency (python + e2e CI jobs concurrent),
+  not row selection. So CI-01's fix leaves this timeout unaddressed.
+- **(b) Re-enable-behind-`_rpc_retry_timeout` was evaluated and declined
+  pre-ship.** The only venue that can demonstrate stabilization is live CI
+  (these fence tests execute solely against the shared test project), so the
+  first canary would be the milestone→main ship PR itself. Gambling the ship
+  PR's `python` check on an undemonstrable stabilization is not acceptable
+  this close to the release.
+- **(c) The fence contract stays independently pinned** regardless of the
+  skip: the mocked equivalents (`_is_serialization_failure` classifier,
+  `LATE_MARK_IGNORED` contract, `dispatch_tick` token threading), the
+  migration-117 self-verify DO block (runs on every prod + test-DB apply),
+  and the 9 other live fence tests all pass.
+- **(d) Concrete post-ship re-enable recipe:** remove the three
+  `@pytest.mark.skip` decorators and wrap the contention-prone RPCs
+  (`reset_stalled_compute_jobs` and the late
+  `mark_compute_job_done` / `mark_compute_job_failed` calls) in the existing
+  `_rpc_retry_timeout` guard — a genuine timeout becomes `pytest.skip` (a
+  `BaseException`, so the tests' `except Exception` cannot swallow it) while
+  the asserted `serialization_failure` re-raises immediately and still
+  reaches the assertion. Then canary on a **non-ship** PR's `python` check
+  before merging. This matches, in substance, the re-enable recipe now
+  recorded verbatim in the headline test's skip reason.
+- **(e) Isolation is NOT a blocker for the re-enable:** the 3 tests'
+  `_claim_one` sites are already own-`job_id` scoped (Phase 97 / 97-01), so
+  the future re-enable only has to solve the timeout, not isolation.
+
 ---
 
 ## Phase 17 review-fix follow-ups (deferred from /ship pre-landing review, 2026-05-03)
