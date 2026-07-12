@@ -14,6 +14,7 @@ supabase / exchange mocks (no live DB / creds); run with
 """
 from __future__ import annotations
 
+import logging
 from contextlib import ExitStack
 from datetime import datetime
 from types import SimpleNamespace
@@ -2506,3 +2507,96 @@ async def test_member_progress_write_failure_is_fail_open() -> None:
     assert _progress_calls(fake_fail), "expected the worker to attempt a progress write"
     # The authoritative output is byte-identical to the happy path.
     assert _by_basis(fake_fail) == _by_basis(fake_ok)
+
+
+class _FailFirstNProgress(_FakeSupabase):
+    """A fake that raises on the FIRST ``fail_n`` set_compute_job_progress writes
+    then succeeds — so a test can exercise a SINGLE transient blip (streak resets)
+    vs a persistent outage. All other RPCs succeed."""
+
+    def __init__(self, *, members: list[dict[str, Any]], fail_n: int) -> None:
+        super().__init__(members=members)
+        self._fail_n = fail_n
+        self._prog_attempts = 0
+
+    def rpc(self, name: str, args: dict[str, Any]) -> SimpleNamespace:
+        self.rpc_calls.append((name, args))
+        if name == "set_compute_job_progress":
+            self._prog_attempts += 1
+            if self._prog_attempts <= self._fail_n:
+                def _boom() -> SimpleNamespace:
+                    raise RuntimeError("simulated transient progress failure")
+                return SimpleNamespace(execute=_boom)
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=None))
+
+
+@pytest.mark.asyncio
+async def test_member_progress_persistent_outage_escalates_to_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SF-2b: N CONSECUTIVE set_compute_job_progress failures within one stitch
+    escalate from warning to error-level (a systemic frozen-heartbeat outage is
+    visible, not buried). Stays fail-open — the stitch still completes."""
+    from services.job_worker import _MEMBER_PROGRESS_MAX_CONSECUTIVE_FAILURES
+
+    members = [
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ]
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # Every progress write raises → the consecutive streak climbs past the cap.
+    fake = _FakeSupabase(
+        members=[dict(m) for m in members],
+        raise_on_rpc="set_compute_job_progress",
+    )
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        with _apply(_deribit_patches(
+            fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+        )):
+            result = await run_stitch_composite_job(dict(_PROG_JOB))
+
+    # Fail-open: the stitch still completed despite every heartbeat write failing.
+    assert result.outcome == DispatchOutcome.DONE
+    # There ARE enough writes to cross the threshold (5 cash-pass writes ≥ 3).
+    assert len(_progress_calls(fake)) >= _MEMBER_PROGRESS_MAX_CONSECUTIVE_FAILURES
+    error_records = [
+        r for r in caplog.records
+        if r.name == "quantalyze.analytics.job_worker"
+        and r.levelno == logging.ERROR
+    ]
+    assert error_records, "expected an error-level escalation on a persistent outage"
+    assert any("CONSECUTIVELY" in r.getMessage() for r in error_records)
+
+
+@pytest.mark.asyncio
+async def test_member_progress_single_blip_stays_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SF-2b: a SINGLE transient set_compute_job_progress failure self-heals on the
+    next boundary (streak resets) and stays at warning — it must NOT escalate to
+    error-level."""
+    members = [
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ]
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # Only the FIRST progress write fails; the rest succeed → streak never ≥ 3.
+    fake = _FailFirstNProgress(members=[dict(m) for m in members], fail_n=1)
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics.job_worker"):
+        with _apply(_deribit_patches(
+            fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+        )):
+            result = await run_stitch_composite_job(dict(_PROG_JOB))
+
+    assert result.outcome == DispatchOutcome.DONE
+    jw_records = [
+        r for r in caplog.records if r.name == "quantalyze.analytics.job_worker"
+    ]
+    warnings = [r for r in jw_records if r.levelno == logging.WARNING]
+    errors = [r for r in jw_records if r.levelno == logging.ERROR]
+    # The single blip logged a warning …
+    assert warnings, "expected a warning for the single transient failure"
+    # … and did NOT escalate to error.
+    assert not errors, "a single transient blip must not escalate to error-level"

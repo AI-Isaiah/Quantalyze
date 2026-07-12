@@ -2848,6 +2848,14 @@ class _CcxtMemberDegrade(Exception):
 # watchdog stale threshold — out of scope for this fail-safe).
 _COMPOSITE_PER_CRAWL_SECONDS = 120.0  # ~90-day Deribit native backfill, conservative
 
+# SF-2b — after this many CONSECUTIVE set_compute_job_progress write failures
+# within a single stitch, escalate from a per-boundary warning to error-level so
+# a PERSISTENT heartbeat-write outage (claim-token drift, permission regression,
+# bad deploy) is visible rather than buried in easily-missed warnings. A single
+# transient blip self-heals on the next boundary and stays at warning. Matches
+# the frontend MAX_CONSECUTIVE_POLL_ERRORS=3 convention.
+_MEMBER_PROGRESS_MAX_CONSECUTIVE_FAILURES = 3
+
 
 def _composite_max_members() -> int:
     """The largest member count whose worst-case 2-crawls-per-member fan-out fits
@@ -3351,7 +3359,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             for m in members
         }
 
+        # SF-2b — consecutive set_compute_job_progress failure counter for THIS
+        # stitch. Reset on any successful write; a run of >= the threshold means
+        # the heartbeat is systemically frozen (not a one-off blip) and escalates
+        # to error-level so a write outage is not buried in per-boundary warnings.
+        progress_write_failures = 0
+
         async def _write_member_progress() -> None:
+            nonlocal progress_write_failures
             # No-op off the cash pass (Pitfall 1) or when the job carries no id
             # (unit harness / legacy call shape). Send a SNAPSHOT (dict copy per
             # entry) so later mutations never rewrite an already-emitted payload.
@@ -3373,17 +3388,36 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
             try:
                 await db_execute(_rpc)
+                # A clean write clears the consecutive-failure streak.
+                progress_write_failures = 0
             except asyncio.CancelledError:
                 raise  # never swallow cancellation — propagate to worker shutdown
             except Exception as _prog_exc:  # noqa: BLE001
                 # Fail-open: the stitch is authoritative; a progress-write blip
                 # (DB hiccup, lost claim-token ownership) must never kill a
                 # multi-minute crawl. The next boundary write self-heals.
-                logger.warning(
-                    "run_stitch_composite_job: set_compute_job_progress write "
-                    "failed for job %s (progress is cosmetic; stitch continues): %s",
-                    job.get("id"), _prog_exc,
-                )
+                progress_write_failures += 1
+                if (
+                    progress_write_failures
+                    >= _MEMBER_PROGRESS_MAX_CONSECUTIVE_FAILURES
+                ):
+                    # SF-2b: a PERSISTENT outage — the heartbeat is frozen and the
+                    # stall channel may be blind to a live crawl. Escalate so it
+                    # surfaces (claim-token drift / permission regression / bad
+                    # deploy). Still fail-open: the stitch continues.
+                    logger.error(
+                        "run_stitch_composite_job: set_compute_job_progress write "
+                        "failed %d times CONSECUTIVELY for job %s — heartbeat is "
+                        "frozen (systemic write outage; the stall channel may be "
+                        "blind to a live crawl). Stitch continues (fail-open): %s",
+                        progress_write_failures, job.get("id"), _prog_exc,
+                    )
+                else:
+                    logger.warning(
+                        "run_stitch_composite_job: set_compute_job_progress write "
+                        "failed for job %s (progress is cosmetic; stitch continues): %s",
+                        job.get("id"), _prog_exc,
+                    )
 
         # Initial all-'waiting' snapshot so the poller shows the full member
         # roster before the first crawl starts.
