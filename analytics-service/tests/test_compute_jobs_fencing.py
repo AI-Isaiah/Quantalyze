@@ -689,15 +689,29 @@ def strategy_id(admin):
         pass
 
 
-def _claim_one(admin, worker_id: str) -> dict[str, Any] | None:
-    """Call claim_compute_jobs_with_priority and return the first row, or
-    None if nothing was claimed."""
+def _claim_one(
+    admin, worker_id: str, *, want_job_id: str | None = None
+) -> dict[str, Any] | None:
+    """Call claim_compute_jobs_with_priority and return OUR row.
+
+    Phase-97 CI-01: the claim RPC returns the batch head of the GLOBAL claim
+    queue, which — on the shared test Supabase project hit by interleaved
+    grouped DB tests and the concurrent e2e job — may be a FOREIGN pending row,
+    not the one this test seeded. Pass ``want_job_id`` to scope the return to
+    OUR job (``r["id"] == want_job_id``), returning None when our job was not
+    in the batch (never a foreign row). The legacy arm (``want_job_id=None``)
+    returns ``data[0]`` and exists only so the offline decoy can pin the
+    global-queue defect the scoping removes.
+    """
     res = admin.rpc("claim_compute_jobs_with_priority", {
         "p_batch_size": 50,
         "p_worker_id": worker_id,
         "p_unified_backbone_active": False,
     }).execute()
-    return res.data[0] if res.data else None
+    rows = res.data or []
+    if want_job_id is not None:
+        return next((r for r in rows if r["id"] == want_job_id), None)
+    return rows[0] if rows else None
 
 
 def test_claim_stamps_claim_token(admin, strategy_id):
@@ -711,7 +725,7 @@ def test_claim_stamps_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-claim-test")
+        claimed = _claim_one(admin, "p97-claim-test", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         assert claimed.get("claim_token") is not None, (
             "claim RPC must populate claim_token on every claim"
@@ -872,7 +886,7 @@ def test_mark_compute_job_failed_writes_error_kind(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "hotfix-mark-failed")
+        claimed = _claim_one(admin, "hotfix-mark-failed", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         token = claimed["claim_token"]
 
@@ -913,7 +927,7 @@ def test_reclaim_invalidates_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-w1")
+        claimed = _claim_one(admin, "p97-w1", want_job_id=job_id)
         assert claimed is not None
         token1 = claimed["claim_token"]
         assert token1 is not None
@@ -1064,7 +1078,7 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
     job_id = job["id"]
     try:
         # W1 claim
-        w1 = _claim_one(admin, "p97-w1")
+        w1 = _claim_one(admin, "p97-w1", want_job_id=job_id)
         assert w1 is not None and w1["id"] == job_id
         token1 = w1["claim_token"]
         assert token1 is not None
@@ -1078,7 +1092,7 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
         }).execute()
 
         # W2 claim
-        w2 = _claim_one(admin, "p97-w2")
+        w2 = _claim_one(admin, "p97-w2", want_job_id=job_id)
         assert w2 is not None and w2["id"] == job_id
         token2 = w2["claim_token"]
         assert token2 is not None
@@ -1147,7 +1161,7 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
     }).execute().data[0]
     job_id = job["id"]
     try:
-        w1 = _claim_one(admin, "p97-w1-fail")
+        w1 = _claim_one(admin, "p97-w1-fail", want_job_id=job_id)
         token1 = w1["claim_token"]
 
         admin.table("compute_jobs").update({
@@ -1157,7 +1171,7 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
             "p_stale_threshold": "1 second",
         }).execute()
 
-        w2 = _claim_one(admin, "p97-w2-fail")
+        w2 = _claim_one(admin, "p97-w2-fail", want_job_id=job_id)
         token2 = w2["claim_token"]
         assert token2 != token1
 
@@ -1205,7 +1219,11 @@ def test_mark_done_without_token_raises_strict(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        _claim_one(admin, "p97-strict")
+        claimed = _claim_one(admin, "p97-strict", want_job_id=job_id)
+        assert claimed is not None and claimed["id"] == job_id, (
+            "p97-strict: our seeded job must be the one claimed — the later "
+            "status=='running' assertion silently depends on it"
+        )
         raised = False
         try:
             admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
@@ -1505,7 +1523,7 @@ def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-w1-perkind")
+        claimed = _claim_one(admin, "p97-w1-perkind", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         token1 = claimed["claim_token"]
         assert token1 is not None
@@ -1582,7 +1600,7 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
     job_id = job["id"]
     try:
         # W1 claim
-        w1 = _claim_one(admin, "p97-w1-w2-faster")
+        w1 = _claim_one(admin, "p97-w1-w2-faster", want_job_id=job_id)
         assert w1 is not None and w1["id"] == job_id
         token1 = w1["claim_token"]
         assert token1 is not None
@@ -1596,7 +1614,7 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
         }).execute()
 
         # W2 claim → token2
-        w2 = _claim_one(admin, "p97-w2-w2-faster")
+        w2 = _claim_one(admin, "p97-w2-w2-faster", want_job_id=job_id)
         assert w2 is not None and w2["id"] == job_id
         token2 = w2["claim_token"]
         assert token2 != token1
@@ -1830,13 +1848,19 @@ def test_claim_includes_failed_retry_when_backoff_elapsed(admin):
         job_id = row["id"]
 
         claimed = _claim_with_priority(admin, worker_id="g21-001-worker")
-        assert len(claimed) == 1, (
-            f"PR #82 regression: expected exactly 1 row claimed, got "
-            f"{len(claimed)}. failed_retry rows whose backoff has elapsed "
-            "must enter the claim pool — pre-089 they were wedged behind "
-            "the status='pending' filter."
+        # Phase-97 CI-01: scope to OUR seeded row before the count assertion —
+        # a foreign pending row from an interleaved grouped DB test (or the
+        # concurrent e2e job) could otherwise inflate len(claimed) and break
+        # the exact-1 contract. The intent is unchanged: our failed_retry row
+        # with elapsed backoff MUST enter the claim pool.
+        ours = [c for c in claimed if c["id"] == job_id]
+        assert len(ours) == 1, (
+            f"PR #82 regression: expected exactly our 1 seeded row claimed, "
+            f"got {len(ours)} of ours (batch total {len(claimed)}). "
+            "failed_retry rows whose backoff has elapsed must enter the claim "
+            "pool — pre-089 they were wedged behind the status='pending' filter."
         )
-        assert claimed[0]["id"] == job_id
+        assert ours[0]["id"] == job_id
 
         # Verify the row flipped to running (the canonical claim post-state).
         post = (
@@ -2678,7 +2702,7 @@ def test_advance_sync_cursor_fence_owned_orphan_backcompat(admin, strategy_id):
         }).execute())
 
     try:
-        claimed = _claim_one(admin, "advance-fence-test")
+        claimed = _claim_one(admin, "advance-fence-test", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         token = claimed["claim_token"]
         assert token is not None
