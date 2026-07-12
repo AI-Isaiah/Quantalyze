@@ -33,6 +33,10 @@ import {
 } from "@/lib/composite/compositeAttribution";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
+import type {
+  SyncProgressResponse,
+  MemberProgressStatus,
+} from "@/lib/sync-progress";
 
 /**
  * SyncPreviewStep kicks off /api/keys/sync, polls strategy_analytics
@@ -309,6 +313,36 @@ function halfOpenEndToInclusiveLast(halfOpenEnd: string): string {
   )}`;
 }
 
+/**
+ * PROG-02 — the LOCKED live per-key status label set (95-04 decision 3). These
+ * are the exact user-facing strings; the map doubles as an exhaustiveness check
+ * over `MemberProgressStatus`.
+ */
+const MEMBER_STATUS_LABEL: Record<MemberProgressStatus, string> = {
+  waiting: "Waiting",
+  in_process: "In process",
+  successful: "Successful",
+  degraded: "Degraded",
+};
+
+/**
+ * Per-status chip color. Successful → positive; Degraded → the canonical amber
+ * warning token (#B45309, AA at caption size — DESIGN.md Color); In process →
+ * accent (paired with a pulsing dot matching the card's existing dot idiom);
+ * Waiting → muted. Degraded is amber (RECOVERABLE), never negative red.
+ */
+const MEMBER_STATUS_CHIP_CLASS: Record<MemberProgressStatus, string> = {
+  waiting: "text-text-muted",
+  in_process: "text-accent",
+  successful: "text-positive",
+  degraded: "text-warning",
+};
+
+/** Title-case a lowercase exchange slug for the per-key identity fallback. */
+function capitalizeExchange(exchange: string): string {
+  return exchange.charAt(0).toUpperCase() + exchange.slice(1);
+}
+
 export function SyncPreviewStep({
   strategyId,
   apiKeyId,
@@ -323,8 +357,16 @@ export function SyncPreviewStep({
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
   const [gateResult, setGateResult] = useState<StrategyGateResult | null>(null);
   const [snapshot, setSnapshot] = useState<SyncPreviewSnapshot | null>(null);
-  const [expandLog, setExpandLog] = useState(false);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
+  // PROG-02/03 — the last GET /api/strategies/[id]/sync-progress projection.
+  // COSMETIC: piggybacked on the poll tick, fail-open (never blocks the
+  // authoritative strategy_analytics poll). Composite-only; null on single-key.
+  const [syncProgress, setSyncProgress] = useState<SyncProgressResponse | null>(
+    null,
+  );
+  // PROG-03 — retry CTA in-flight guard (disables the button, prevents a
+  // double re-enqueue). Server-side idempotency is the real defense.
+  const [retrying, setRetrying] = useState(false);
   const [computationError, setComputationError] = useState<string | null>(null);
   // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
   // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
@@ -604,6 +646,29 @@ export function SyncPreviewStep({
         const nextError = statusRow?.computation_error ?? null;
         setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
         setComputationError((prev) => (prev === nextError ? prev : nextError));
+
+        // PROG-02/03 — piggyback the per-key progress projection on this tick
+        // (composite only; no new timer, cadence follows POLL_BACKOFF_MS). This
+        // is COSMETIC: a failure is swallowed with a console.warn and MUST NOT
+        // touch `consecutiveErrors` / `heavyFetchErrors` — strategy_analytics
+        // above stays the authoritative poll. Fire-and-forget so a slow/hung
+        // progress route never delays the status loop; the setState is guarded
+        // by the effect's `stopped` flag + `mountedRef`.
+        if (isComposite) {
+          void fetch(`/api/strategies/${strategyId}/sync-progress`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((json: SyncProgressResponse | null) => {
+              if (!stopped && mountedRef.current && json) {
+                setSyncProgress(json);
+              }
+            })
+            .catch((progressErr) => {
+              console.warn(
+                "[wizard:SyncPreviewStep] sync-progress fetch failed (cosmetic, ignored):",
+                progressErr,
+              );
+            });
+        }
 
         // Hard-failure terminal state. Bail BEFORE the heavy Promise.all
         // (H-0195): on `failed` the analytics row is errored, so the 5
@@ -1567,7 +1632,9 @@ export function SyncPreviewStep({
               : phase === "kicking_off"
                 ? "Contacting exchange..."
                 : isComposite
-                  ? "Stitching composite…"
+                  ? computationStatus === "computing"
+                    ? "Trades are being processed…"
+                    : "Trades are being downloaded…"
                   : computationStatus === "computing"
                     ? "Computing analytics..."
                     : "Fetching trades..."}
@@ -1576,6 +1643,46 @@ export function SyncPreviewStep({
             {elapsedSeconds}s
           </span>
         </div>
+
+        {isComposite &&
+          syncProgress?.memberProgress &&
+          syncProgress.memberProgress.length > 0 && (
+            <ul
+              data-testid="wizard-member-progress"
+              className="mt-3 space-y-1.5 border-t border-border pt-3"
+            >
+              {[...syncProgress.memberProgress]
+                .sort((a, b) => a.seq - b.seq)
+                .map((m) => {
+                  const identity =
+                    m.label ??
+                    (m.exchange ? capitalizeExchange(m.exchange) : null);
+                  return (
+                    <li
+                      key={m.seq}
+                      data-testid={`member-progress-${m.seq}`}
+                      className="flex items-center justify-between gap-3 text-caption"
+                    >
+                      <span className="text-text-secondary">
+                        {`Key ${m.seq}`}
+                        {identity ? ` — ${identity}` : ""}
+                      </span>
+                      <span
+                        className={cn(
+                          "inline-flex items-center font-medium",
+                          MEMBER_STATUS_CHIP_CLASS[m.status],
+                        )}
+                      >
+                        {m.status === "in_process" && (
+                          <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                        )}
+                        {MEMBER_STATUS_LABEL[m.status]}
+                      </span>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
 
         {showSlowHint && !showWarn && (
           <p className="mt-2 text-caption text-text-muted">
@@ -1598,28 +1705,6 @@ export function SyncPreviewStep({
               and come back — the draft is saved.
             </p>
           </div>
-        )}
-
-        {showWarn && (
-          <button
-            type="button"
-            onClick={() => setExpandLog((v) => !v)}
-            className="mt-2 text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
-            data-testid="wizard-sync-expand-log"
-          >
-            {expandLog ? "Hide details" : "Show me what is happening"}
-          </button>
-        )}
-
-        {expandLog && (
-          <pre className="mt-2 overflow-x-auto rounded border border-border bg-white px-3 py-2 text-micro text-text-muted">
-            strategy_id={strategyId}
-            {"\n"}
-            status={computationStatus ?? "unknown"}
-            {"\n"}
-            elapsed={elapsedSeconds}s{"\n"}
-            {computationError ? `error=${computationError}\n` : ""}
-          </pre>
         )}
       </div>
     </section>
