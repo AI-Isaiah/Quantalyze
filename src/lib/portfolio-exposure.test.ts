@@ -18,7 +18,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 interface HoldingRow {
@@ -265,8 +265,9 @@ describe("getAllocationSeries", () => {
 
 describe("no-admin-import (T-98-07 owner-RLS boundary, source-level)", () => {
   it("the module source imports nothing from @/lib/supabase/admin", () => {
-    const modulePath = fileURLToPath(
-      new URL("./portfolio-exposure.ts", import.meta.url),
+    const modulePath = resolve(
+      process.cwd(),
+      "src/lib/portfolio-exposure.ts",
     );
     const src = readFileSync(modulePath, "utf8");
     expect(src).not.toMatch(/supabase\/admin/);
