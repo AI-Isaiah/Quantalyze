@@ -3,40 +3,57 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { safeCompare } from "@/lib/timing-safe-compare";
 
 /**
- * Vercel Cron — weekly (Sundays 02:00 UTC), deletes wizard-draft
- * strategies (`source='wizard' AND status='draft'`) whose `created_at`
- * is older than 30 days. The user has clearly abandoned the wizard.
+ * Vercel Cron — daily (02:00 UTC). Deletes ABANDONED wizard-draft strategies
+ * (`source='wizard' AND status='draft'`) and best-effort revokes their now-
+ * orphaned API keys, in ONE atomic transaction via the
+ * `cleanup_abandoned_wizard_drafts()` RPC (SECURITY DEFINER, migration
+ * 20260713120000). The route is a thin auth gate + single-RPC dispatch +
+ * response shaping; the DB owns the predicate and atomicity.
  *
- * M-0255: REJECTED wizard drafts are EXEMPT. An admin rejection sets
- * `review_note` (status stays 'draft', source stays 'wizard'), so a non-null
- * review_note marks a "sent back for changes" row the user may still re-edit —
- * one that carries trades + strategy_analytics. created_at is never reset on
- * reject, so without this exemption the sweep CASCADE-deletes a rejected draft
- * 30 days after its ORIGINAL submission — silent data loss. Only genuinely
- * abandoned in-progress drafts (`review_note IS NULL`) are collected.
+ * Abandonment window = created_at < now() - 7 days (lives in the RPC, NOT here
+ * — the old route-level day-count constant is gone). ⚠️ LOCKED
+ * requirement-deviation (96-VALIDATION
+ * decision 1): the requirement asked for 24h, but `strategies` has no
+ * `updated_at`, so a 24h-on-`created_at` sweep would delete a draft a user
+ * intends to RESUME on day 2 — colliding with Phase-94 wizard resumability.
+ * 7d is realistically past abandonment while still preventing accumulation;
+ * reversible (add `updated_at` + a moddatetime trigger and window on that for
+ * stricter hygiene).
  *
- * Why the policy: a wizard draft is a `strategies` row in the
- * draft → pending_review pipeline (migration 031). Without a sweep,
- * abandoned drafts accumulate forever and pollute both the user's
- * "Resume draft" UI and the admin queue. 30 days is conservative —
- * typical wizard sessions complete in under an hour.
+ * M-0255: REJECTED wizard drafts (status='draft' but `review_note` set by the
+ * admin reject path) are EXEMPT — their created_at is never reset, so sweeping
+ * them would CASCADE-delete a row the user may still re-edit. The exemption
+ * (`review_note IS NULL`) is now enforced INSIDE the RPC.
  *
- * Cascade: ON DELETE CASCADE on strategy_analytics + trades wipes
- * downstream rows automatically. Linked `api_keys` rows are best-effort
- * revoked only when no other strategy still references them — same
- * logic the user-driven `/api/strategies/draft/[id]` DELETE handler
- * uses.
+ * Race safety (CLEAN-01): the sweep is a single guarded DELETE re-checking
+ * `status='draft'`. finalize (`finalize_wizard_strategy`) promotes
+ * draft→pending_review via a committed guarded UPDATE under `SELECT … FOR
+ * UPDATE` (verified in 96-01) — READ-COMMITTED EvalPlanQual serializes the two
+ * on the row lock, so no torn state. Residual "cron wins → finalize 404s
+ * (GATE_DRAFT_GONE)" is clean/recoverable.
+ *
+ * Response is monitor-stable: `{deleted, orphaned_keys_revoked,
+ * key_sweep_errors}`. `key_sweep_errors` is now CONSTANTLY 0 — the sweep is
+ * one transaction, so a partial failure is impossible: any failure fails the
+ * WHOLE call → a plain 500, which Vercel Cron treats as FAILED and alerts on
+ * (preserving H-1251's loud-degradation intent without the old per-key
+ * machinery). The key is kept in the shape so monitors read it uniformly.
+ *
+ * Schedule weekly→daily: with a 7d window a weekly cadence leaves drafts alive
+ * 7-14 days; daily keeps effective lifetime 7-8 days. Planner discretion (NOT
+ * a locked decision), trivially reversible — see `vercel.json`
+ * (`/api/cron/cleanup-wizard-drafts`, `0 2 * * *`).
  *
  * Auth: Bearer ${CRON_SECRET}, timing-safe — mirrors cleanup-ack-tokens.
  * Vercel Cron dispatches GET; POST accepted for manual incident response.
  *
- * Schedule + secret: see `vercel.json`
- * (`/api/cron/cleanup-wizard-drafts`).
+ * @audit-skip: cron garbage collection, no user attribution. The user-driven
+ * /api/strategies/draft/[id] DELETE handler emits an audit event for
+ * user-initiated cleanup; this sweep collects drafts the user never returned
+ * to finish, and the deletion happens inside the SECURITY DEFINER RPC.
  */
 
 export const dynamic = "force-dynamic";
-
-const ABANDON_DAYS = 30;
 
 async function handle(req: NextRequest): Promise<NextResponse> {
   const auth = req.headers.get("authorization") ?? "";
@@ -46,129 +63,38 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
 
   const admin = createAdminClient();
-  const cutoff = new Date(
-    Date.now() - ABANDON_DAYS * 24 * 60 * 60 * 1000,
-  ).toISOString();
 
-  // Find abandoned wizard drafts. Capture api_key_id so we can
-  // best-effort clean orphaned keys after the cascade fires.
-  const { data: drafts, error: selectError } = await admin
-    .from("strategies")
-    .select("id, api_key_id")
-    .eq("source", "wizard")
-    .eq("status", "draft")
-    // M-0255: exempt rejected drafts (review_note set) from the sweep —
-    // only genuinely abandoned in-progress drafts are eligible.
-    .is("review_note", null)
-    .lt("created_at", cutoff);
+  // One atomic transaction owns the whole job (draft sweep + scoped orphaned-
+  // key revoke). RETURNS TABLE(deleted_drafts int, swept_keys int) → supabase-js
+  // hands back `data` as an array of one row.
+  const { data, error } = await admin.rpc("cleanup_abandoned_wizard_drafts");
 
-  if (selectError) {
-    console.error("[cron/cleanup-wizard-drafts] select failed:", selectError);
+  if (error) {
+    console.error(
+      "[cron/cleanup-wizard-drafts] cleanup RPC failed:",
+      error,
+    );
     // Generic envelope — keep the raw PostgREST message in the log, not the
     // response body (it can carry SQL state / table / constraint names).
-    return NextResponse.json({ error: "Cron select failed" }, { status: 500 });
-  }
-
-  const draftRows = drafts ?? [];
-  if (draftRows.length === 0) {
-    // Keep the success shape consistent across every clean run so a monitor
-    // can read key_sweep_errors uniformly (a clean drafts-present run also
-    // returns key_sweep_errors:0).
-    return NextResponse.json({
-      deleted: 0,
-      orphaned_keys_revoked: 0,
-      key_sweep_errors: 0,
-    });
-  }
-
-  const draftIds = draftRows.map((d) => d.id);
-
-  // Hard-delete the wizard-draft rows. ON DELETE CASCADE handles
-  // strategy_analytics + trades. Re-apply the source/status filter as a
-  // belt-and-suspenders TOCTOU guard — between the select above and now,
-  // a row could have flipped to pending_review.
-  // @audit-skip: cron garbage collection, no user attribution. The
-  // user-driven /api/strategies/draft/[id] DELETE handler emits an
-  // audit event for user-initiated cleanup; this sweep handles drafts
-  // the user never returned to finish.
-  const { error: delError, count: deletedCount } = await admin
-    .from("strategies")
-    .delete({ count: "exact" })
-    .in("id", draftIds)
-    .eq("source", "wizard")
-    .eq("status", "draft")
-    // M-0255: belt-and-suspenders TOCTOU guard — a row could have been
-    // rejected (review_note written) between the select above and now;
-    // never hard-delete a rejected draft.
-    .is("review_note", null);
-
-  if (delError) {
-    console.error("[cron/cleanup-wizard-drafts] delete failed:", delError);
-    return NextResponse.json({ error: "Cron delete failed" }, { status: 500 });
-  }
-
-  // Best-effort revoke orphaned api_keys — only when no strategy still
-  // references the key. Mirrors the user-driven DELETE handler so a
-  // shared key isn't accidentally yanked from a different live strategy.
-  let orphanedKeysRevoked = 0;
-  // Track per-key sweep failures so a partially-failed run can't masquerade
-  // as a clean one. Without this, a 200 `{orphaned_keys_revoked: N}` is
-  // indistinguishable from "M other keys were kept because still-referenced"
-  // vs. "M keys FAILED to revoke and orphan rows now point at deleted
-  // strategies" (H-1251). Mirrors the sibling cron `errors[]` convention.
-  const sweepErrors: string[] = [];
-  const apiKeyIds = Array.from(
-    new Set(
-      draftRows
-        .map((d) => d.api_key_id)
-        .filter((k): k is string => typeof k === "string" && k.length > 0),
-    ),
-  );
-
-  for (const keyId of apiKeyIds) {
-    // M-0347: atomic check+delete via the shared delete_api_key_if_unreferenced
-    // RPC. As service_role the auth.uid()-IS-NULL arm lets the cron revoke ANY
-    // unreferenced key, and the NOT EXISTS makes the reference check + delete a
-    // single statement — closing the prior two-step "count then delete" TOCTOU
-    // where a wizard re-attaching the key mid-sweep got its strategy yanked.
-    // The RPC returns rows deleted (0 = still referenced, kept; 1 = revoked).
-    // @audit-skip: cron garbage collection, no user attribution.
-    const { data: revoked, error: keyErr } = await admin.rpc(
-      "delete_api_key_if_unreferenced",
-      { p_api_key_id: keyId },
+    return NextResponse.json(
+      { error: "Cron cleanup failed" },
+      { status: 500 },
     );
-    if (keyErr) {
-      // A failed revoke means an orphan may have been left pointing at the
-      // strategies we just deleted — real integrity drift, not a no-op. Surface
-      // it loudly so the run reports degraded (M-1144/M-1145/H-1251).
-      console.error(
-        `[cron/cleanup-wizard-drafts] atomic key revoke failed for key=${keyId} (orphan NOT revoked):`,
-        keyErr,
-      );
-      sweepErrors.push(`${keyId}: revoke failed: ${keyErr.message}`);
-      continue;
-    }
-    // revoked === 0 → key is still referenced by a live strategy, correctly
-    // kept (no error, no increment); revoked > 0 → orphan successfully swept.
-    if ((revoked ?? 0) > 0) orphanedKeysRevoked += 1;
   }
 
-  // H-1251: when any orphan-sweep step errored, the run is degraded — orphan
-  // api_keys rows may have been left pointing at deleted strategies. Return a
-  // non-2xx (500) so Vercel Cron treats the run as FAILED and alerts: a 207
-  // Multi-Status is still in the 2xx family, so Vercel would key it as success
-  // and bury the partial failure. (The per-key console.error above also names
-  // each failing key.) A retried run early-returns once the drafts are gone, so
-  // this is alert-only, not auto-heal — surfacing the orphan is the point.
-  return NextResponse.json(
-    {
-      deleted: deletedCount ?? draftIds.length,
-      orphaned_keys_revoked: orphanedKeysRevoked,
-      key_sweep_errors: sweepErrors.length,
-      ...(sweepErrors.length > 0 ? { errors: sweepErrors.slice(0, 5) } : {}),
-    },
-    { status: sweepErrors.length > 0 ? 500 : 200 },
-  );
+  const row = (Array.isArray(data) ? data[0] : data) as
+    | { deleted_drafts?: number; swept_keys?: number }
+    | null
+    | undefined;
+
+  return NextResponse.json({
+    deleted: row?.deleted_drafts ?? 0,
+    orphaned_keys_revoked: row?.swept_keys ?? 0,
+    // Constant 0: a partial sweep is structurally impossible (one transaction);
+    // any failure short-circuits above to a 500. Kept for monitor-shape
+    // continuity across clean runs.
+    key_sweep_errors: 0,
+  });
 }
 
 export const GET = handle;
