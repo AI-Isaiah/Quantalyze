@@ -1086,14 +1086,20 @@ export function SyncPreviewStep({
     if (snapshot) onComplete(snapshot);
   }, [snapshot, onComplete]);
 
-  // PROG-03 — idempotent retry for a route-detected stall. Re-POSTs the SAME
-  // kickoff shape (`:451-455`); server-side idempotency (the partial-unique
-  // index `compute_jobs_one_inflight_per_kind_strategy`) makes a genuinely
-  // inflight job a no-op and re-enqueues a watchdog-reclaimed/dead one. Never
-  // routes into the SYNC_FAILED terminal gate — the authoritative analytics
-  // poll owns terminal transitions and keeps running. On a 2xx we clear
-  // `syncProgress` so the interrupted banner drops until the next route poll
-  // re-asserts `stalled`; a non-2xx keeps it visible so the user can retry.
+  // PROG-03 / SF-1 — idempotent retry for a stall (route-detected OR the SF-1
+  // backstop). Re-POSTs the SAME kickoff shape (`:451-455`); the partial-unique
+  // index `compute_jobs_one_inflight_per_kind_strategy` makes a genuinely
+  // inflight (`pending`/`running`) job a no-op and re-enqueues a
+  // watchdog-reclaimed/dead one. (NB: `failed_retry` is EXCLUDED from that index
+  // — the manual Retry is SUPPRESSED during that backoff, F-3, so this handler
+  // is never invoked then.) Never routes into the SYNC_FAILED terminal gate.
+  // On a 2xx we (a) reset the SF-1 backstop patience clock so the amber banner
+  // DROPS and the 15-min window restarts — a re-claimed run may write the SAME
+  // `computing` status, which the poll dedups, so the [computationStatus] reset
+  // effect never fires and the clock MUST be reset here explicitly — and (b)
+  // drop the `stalled` flag WITHOUT wiping the live per-key panel (keep
+  // memberProgress; the next poll refreshes it — losing the panel at the anxious
+  // moment is a regression). A non-2xx keeps the banner visible to retry.
   const handleRetrySync = useCallback(async () => {
     if (retrying) return;
     setRetrying(true);
@@ -1103,7 +1109,13 @@ export function SyncPreviewStep({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ strategy_id: strategyId }),
       });
-      if (res.ok && mountedRef.current) setSyncProgress(null);
+      if (res.ok && mountedRef.current) {
+        statusChangedAtRef.current = Date.now();
+        setStallBackstop(false);
+        setSyncProgress((prev) =>
+          prev ? { ...prev, stalled: false } : prev,
+        );
+      }
     } catch (retryErr) {
       console.warn(
         "[wizard:SyncPreviewStep] retry sync POST failed:",

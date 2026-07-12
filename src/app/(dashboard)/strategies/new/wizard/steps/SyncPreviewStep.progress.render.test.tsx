@@ -461,6 +461,57 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     warnSpy.mockRestore();
   });
 
+  // F-2 — a 2xx retry drops the banner, KEEPS the live per-key panel, and does
+  // not immediately re-fire the backstop on the deduped `computing` status.
+  it("clears the backstop on retry without wiping the panel", async () => {
+    installWaitingMock("computing");
+    // Healthy channel: stalled:false + populated members → the banner fires via
+    // the SF-1 backstop (status unchanged), and the panel is populated.
+    progressOutcome = {
+      kind: "json",
+      body: { jobStatus: "running", stalled: false, memberProgress: MEMBERS_3 },
+    };
+    await renderWaiting();
+    expect(screen.getByTestId("wizard-member-progress")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+
+    // Past 15min → the backstop fires.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+    });
+    const retry = screen.getByRole("button", { name: /retry sync/i });
+    expect(retry).toBeInTheDocument();
+
+    // Click retry (2xx).
+    await act(async () => {
+      fireEvent.click(retry);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Banner GONE (clock reset + stallBackstop cleared) …
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+    // … the live per-key panel is NOT wiped …
+    expect(screen.getByTestId("wizard-member-progress")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("member-progress-1")).getByText("Successful"),
+    ).toBeInTheDocument();
+
+    // … and the backstop does NOT immediately re-fire on the deduped `computing`
+    // status shortly after (the 15-min window restarted).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+  });
+
   // F-1 — a stuck composite at >=15min shows EXACTLY the amber recoverable
   // banner, never ALSO the red Error-severity "much longer / leave this page"
   // block (contradicting severity stacked in one viewport).
