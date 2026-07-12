@@ -55,6 +55,13 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 
 export const dynamic = "force-dynamic";
 
+// Soft sanity threshold (observability only, NOT a hard cap): a single cron run
+// deleting more than this many drafts is almost certainly a runaway first-run and
+// must be loud in the logs. A hard cap mid-sweep would break the RPC's single-
+// transaction atomicity, so this only escalates the log level — behavior is
+// unchanged (the route still returns 200 with the counts).
+const CLEANUP_SANITY_WARN_THRESHOLD = 500;
+
 async function handle(req: NextRequest): Promise<NextResponse> {
   const auth = req.headers.get("authorization") ?? "";
   const expected = `Bearer ${process.env.CRON_SECRET}`;
@@ -87,9 +94,26 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     | null
     | undefined;
 
+  const deleted = row?.deleted_drafts ?? 0;
+  const orphanedKeysRevoked = row?.swept_keys ?? 0;
+
+  // Observability for a DESTRUCTIVE cron: Vercel Cron only alerts on non-2xx, so a
+  // large SUCCESSFUL deletion would otherwise be invisible. Always log the
+  // magnitude on success so the first real destructive run is auditable.
+  console.info(
+    `[cron/cleanup-wizard-drafts] deleted=${deleted} orphaned_keys_revoked=${orphanedKeysRevoked}`,
+  );
+  // Soft sanity warning (NOT a hard cap — see CLEANUP_SANITY_WARN_THRESHOLD):
+  // escalate to WARN so a runaway sweep is loud without altering behavior.
+  if (deleted > CLEANUP_SANITY_WARN_THRESHOLD) {
+    console.warn(
+      `[cron/cleanup-wizard-drafts] unexpectedly large cleanup: deleted=${deleted} exceeds sanity threshold ${CLEANUP_SANITY_WARN_THRESHOLD} — verify this is not a runaway sweep`,
+    );
+  }
+
   return NextResponse.json({
-    deleted: row?.deleted_drafts ?? 0,
-    orphaned_keys_revoked: row?.swept_keys ?? 0,
+    deleted,
+    orphaned_keys_revoked: orphanedKeysRevoked,
     // Constant 0: a partial sweep is structurally impossible (one transaction);
     // any failure short-circuits above to a 500. Kept for monitor-shape
     // continuity across clean runs.

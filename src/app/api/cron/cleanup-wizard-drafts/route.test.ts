@@ -118,9 +118,11 @@ describe.each([
     process.env.CRON_SECRET = "cron-secret-at-least-16-chars";
     recorders = makeRecorders();
     vi.resetModules();
-    // Silence the route's bare console.error (Sentry-deferral pattern).
+    // Silence the route's bare console.error (Sentry-deferral pattern) plus the
+    // success-path console.info/console.warn observability logs (96-FIX-1).
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -278,6 +280,86 @@ describe.each([
     });
     expect(recorders.rpcCalls).toHaveLength(1);
     expect(recorders.rpcCalls[0].fn).toBe("cleanup_abandoned_wizard_drafts");
+  });
+
+  // --- Observability: destructive-cron logging (96-FIX-1) -----------------
+
+  it("logs the deleted/orphaned counts on a successful run (a destructive cron's magnitude must be observable)", async () => {
+    // Vercel Cron only alerts on non-2xx, so a large SUCCESSFUL deletion is
+    // invisible unless the route logs its magnitude. RED without the console.info.
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 7, swept_keys: 4 }],
+      error: null,
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(200);
+    const loggedCounts = infoSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          typeof arg === "string" &&
+          arg.includes("deleted=7") &&
+          arg.includes("orphaned_keys_revoked=4"),
+      ),
+    );
+    expect(loggedCounts).toBe(true);
+  });
+
+  it("emits a distinct WARN when the deletion count exceeds the sanity threshold (runaway first-run is loud)", async () => {
+    // 501 > CLEANUP_SANITY_WARN_THRESHOLD (500). Behavior is UNCHANGED (still 200
+    // with the counts) — this is observability only, not a hard cap (a hard cap
+    // mid-sweep would break the RPC's single-transaction atomicity).
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 501, swept_keys: 12 }],
+      error: null,
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({
+      deleted: 501,
+      orphaned_keys_revoked: 12,
+      key_sweep_errors: 0,
+    });
+    const warnedLarge = warnSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          typeof arg === "string" && arg.includes("501") && /large/i.test(arg),
+      ),
+    );
+    expect(warnedLarge).toBe(true);
+  });
+
+  it("does NOT warn when the deletion count is at or below the sanity threshold", async () => {
+    // 500 is NOT > 500 — pins the threshold boundary so a future off-by-one that
+    // widened the warn band (e.g. `>=`) would redden here.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 500, swept_keys: 0 }],
+      error: null,
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(200);
+    const warnedLarge = warnSpy.mock.calls.some((call) =>
+      call.some((arg) => typeof arg === "string" && /large/i.test(arg)),
+    );
+    expect(warnedLarge).toBe(false);
   });
 
   // --- RPC error + purity -------------------------------------------------
