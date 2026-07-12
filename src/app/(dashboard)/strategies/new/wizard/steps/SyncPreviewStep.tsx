@@ -1133,6 +1133,34 @@ export function SyncPreviewStep({
     if (snapshot) onComplete(snapshot);
   }, [snapshot, onComplete]);
 
+  // PROG-03 — idempotent retry for a route-detected stall. Re-POSTs the SAME
+  // kickoff shape (`:451-455`); server-side idempotency (the partial-unique
+  // index `compute_jobs_one_inflight_per_kind_strategy`) makes a genuinely
+  // inflight job a no-op and re-enqueues a watchdog-reclaimed/dead one. Never
+  // routes into the SYNC_FAILED terminal gate — the authoritative analytics
+  // poll owns terminal transitions and keeps running. On a 2xx we clear
+  // `syncProgress` so the interrupted banner drops until the next route poll
+  // re-asserts `stalled`; a non-2xx keeps it visible so the user can retry.
+  const handleRetrySync = useCallback(async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const res = await fetch("/api/keys/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId }),
+      });
+      if (res.ok && mountedRef.current) setSyncProgress(null);
+    } catch (retryErr) {
+      console.warn(
+        "[wizard:SyncPreviewStep] retry sync POST failed:",
+        retryErr,
+      );
+    } finally {
+      if (mountedRef.current) setRetrying(false);
+    }
+  }, [retrying, strategyId]);
+
   const errorEnvelope = errorCode
     ? buildEnvelope(errorCode, correlationId, {
         trades: gateResult?.detail?.trades as number | undefined,
@@ -1707,6 +1735,39 @@ export function SyncPreviewStep({
           </div>
         )}
       </div>
+
+      {/* PROG-03 — distinct, recoverable interrupted state. EXCLUSIVELY
+          route-driven (`syncProgress.stalled`, job-heartbeat-derived) — never
+          inferred from elapsed time or a strategy_analytics status regression
+          (RT-1: a member-set change legitimately resets analytics to pending
+          while the job re-stitches; the route returns stalled:false). Renders
+          ALONGSIDE the spinner card — polling continues, the job may
+          self-recover via the watchdog reclaim. Amber = recoverable, not red. */}
+      {isComposite && syncProgress?.stalled === true && (
+        <div
+          data-testid="wizard-sync-interrupted"
+          role="status"
+          className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-4 py-3"
+        >
+          <p className="text-body font-medium text-text-primary">
+            This sync appears to have been interrupted
+          </p>
+          <p className="mt-1 text-caption text-text-secondary">
+            This can happen if the worker restarted mid-run. You can retry
+            safely — a healthy run already in progress is unaffected.
+          </p>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={handleRetrySync}
+            disabled={retrying}
+            className="mt-3"
+            data-testid="wizard-sync-retry"
+          >
+            {retrying ? "Retrying…" : "Retry sync"}
+          </Button>
+        </div>
+      )}
     </section>
   );
 }
