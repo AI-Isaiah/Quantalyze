@@ -743,3 +743,113 @@ async def test_mtm_compute_valueerror_degrades() -> None:
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SUMMARY_COVERAGE
     )
+
+
+# ── FINDING 1: asset-class annualization clock (#597 √365 crypto) ────────────
+
+def _projecting_strategy_supabase() -> MagicMock:
+    """A supabase mock that simulates postgrest COLUMN PROJECTION for the
+    strategies select: ``.table('strategies').select(cols)`` returns ONLY the
+    columns named in ``cols`` (comma-separated), projected off a full crypto row.
+
+    This exercises the REAL ``_load_strategy_and_key`` select STRING — exactly as
+    postgrest behaves in production, where a column absent from the select is
+    absent from the returned row. If ``asset_class`` is dropped from the
+    strategies select (job_worker.py:441), the projected strategy_row will not
+    carry it, and ``periods_per_year_for_asset_class(None)`` falls back to 252.
+    The api_keys ``select('*')`` returns the full owner-matched Deribit key."""
+    full_strategy = {
+        "id": _STRATEGY_ID,
+        "user_id": "alloc-1",
+        "api_key_id": "key-drb",
+        "asset_class": "crypto",
+        "returns_denominator_config": None,
+    }
+    key_row = {"id": "key-drb", "user_id": "alloc-1", "exchange": "deribit"}
+    sb = MagicMock()
+
+    def _table(name: str) -> MagicMock:
+        tbl = MagicMock()
+
+        def _select(cols: str) -> MagicMock:
+            chain = MagicMock()
+
+            def _execute() -> MagicMock:
+                if name == "strategies":
+                    requested = {c.strip() for c in cols.split(",")}
+                    projected = {
+                        k: v for k, v in full_strategy.items() if k in requested
+                    }
+                    return MagicMock(data=projected)
+                return MagicMock(data=dict(key_row))
+
+            chain.eq.return_value = chain
+            chain.maybe_single.return_value = chain
+            chain.execute.side_effect = _execute
+            return chain
+
+        tbl.select.side_effect = _select
+        return tbl
+
+    sb.table.side_effect = _table
+    return sb
+
+
+@pytest.mark.asyncio
+async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
+    """FINDING 1 regression (#597 ship-blocker): the single-key MTM object MUST
+    annualize on the crypto √365 clock. ``ctx.strategy_row`` is built from the
+    REAL ``_load_strategy_and_key`` select (postgrest column projection) — NOT an
+    injected ``{"asset_class": "crypto"}`` dict, which masks the production select
+    and is exactly why the bug shipped. If ``asset_class`` is dropped from the
+    strategies select at job_worker.py:441, the projected row lacks it,
+    ``periods_per_year_for_asset_class(None)`` returns the 252 default, and the
+    ``compute_all_metrics`` call receives 252 instead of 365 — this reddens.
+    Neuters: revert the select to omit ``asset_class`` → seen_periods == [252]."""
+    from services.job_worker import _load_strategy_and_key
+
+    # Build the strategy_row through the PRODUCTION select string (projected).
+    sb = _projecting_strategy_supabase()
+    with patch(
+        "services.job_worker.db_execute",
+        new=AsyncMock(side_effect=lambda fn: fn()),
+    ):
+        strategy_row, key_row, err = await _load_strategy_and_key(sb, _STRATEGY_ID)
+    assert err is None and strategy_row is not None
+    assert strategy_row.get("asset_class") == "crypto", (
+        "the _load_strategy_and_key select dropped asset_class — the MTM object "
+        "would annualize on the 252 default instead of the crypto √365 clock (#597)"
+    )
+
+    # Run the derive with that REAL projected strategy_row; capture the periods
+    # the MTM compute_all_metrics receives.
+    ctx, _capture = _ctx(strategy_row=strategy_row)
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+
+    from services import metrics as _metrics_mod
+
+    _real_compute = _metrics_mod.compute_all_metrics
+    seen_periods: list[int] = []
+
+    def _spy(*args: Any, **kw: Any) -> Any:
+        seen_periods.append(kw.get("periods_per_year"))
+        return _real_compute(*args, **kw)
+
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch("services.metrics.compute_all_metrics", new=MagicMock(side_effect=_spy)),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert seen_periods == [365], (
+        f"MTM compute_all_metrics received periods_per_year={seen_periods} — a "
+        "crypto/Deribit book MUST annualize on √365 (#597), not the 252 default; "
+        "asset_class was dropped from the single-key _load_strategy select"
+    )

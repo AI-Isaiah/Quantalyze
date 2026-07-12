@@ -438,7 +438,7 @@ async def _load_strategy_and_key(
     def _load_strategy() -> dict[str, Any] | None:
         res = (
             supabase.table("strategies")
-            .select("id, user_id, api_key_id, returns_denominator_config")
+            .select("id, user_id, api_key_id, asset_class, returns_denominator_config")
             .eq("id", strategy_id)
             .maybe_single()
             .execute()
