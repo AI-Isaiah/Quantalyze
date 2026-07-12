@@ -65,6 +65,7 @@ vi.mock("./components/OpenPositionsTable", () => ({
 }));
 
 import { HoldingsTabPanel } from "./HoldingsTabPanel";
+import { EMPTY_EXPOSURE } from "./lib/exposure-props";
 
 const SPOT_USDT = {
   symbol: "USDT",
@@ -113,6 +114,7 @@ const PAYLOAD = {
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
   strategies: [],
+  exposure: EMPTY_EXPOSURE,
 };
 
 function renderAndReadProps() {

@@ -42,6 +42,7 @@ vi.mock("./components/HoldingsTable", () => ({
 }));
 
 import { HoldingsTabPanel } from "./HoldingsTabPanel";
+import { EMPTY_EXPOSURE } from "./lib/exposure-props";
 import { buildHoldingRef } from "./lib/holding-outcome-adapter";
 
 const REVOKED_HOLDING = {
@@ -105,6 +106,7 @@ const STUB_PAYLOAD = {
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
   strategies: [],
+  exposure: EMPTY_EXPOSURE,
 };
 
 function renderPanel() {

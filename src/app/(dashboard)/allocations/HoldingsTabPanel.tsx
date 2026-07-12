@@ -34,8 +34,17 @@ import {
   type OpenPositionRow,
 } from "./components/OpenPositionsTable";
 import { ScenarioFlaggedHoldingsList } from "./ScenarioFlaggedHoldingsList";
+// Phase 99 / 99-04 — DIRECT imports of the three exposure widgets. NOT routed
+// through the B7b-locked widgets/index.ts WIDGET_COMPONENTS barrel (these are
+// section-mounted, not part of the configurable dashboard grid).
+import { ExposureByClass } from "./widgets/positions/ExposureByClass";
+import { NetExposureChart } from "./widgets/positions/NetExposureChart";
+import { AllocationOverTime } from "./widgets/allocation/AllocationOverTime";
+import type { ExposureSectionData } from "./lib/exposure-props";
 
-export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
+export function HoldingsTabPanel(
+  props: MyAllocationDashboardPayload & { exposure: ExposureSectionData },
+) {
   const holdingsSummary = useMemo(() => props.holdingsSummary ?? [], [props.holdingsSummary]);
   const flaggedHoldings = props.flaggedHoldings ?? [];
   const matchDecisionsByHoldingRef = props.matchDecisionsByHoldingRef ?? {};
@@ -136,7 +145,23 @@ export function HoldingsTabPanel(props: MyAllocationDashboardPayload) {
       {/* Section 1 — onboarded strategies (renders its own "Strategies" header). */}
       <HoldingsTable strategyRows={strategyRows} />
 
-      {/* Section 2 — raw exchange positions (always shown). */}
+      {/* Section 2 — Exposure (PI-01/02/03). Sits BETWEEN Strategies and
+          Exchange Positions per the 99-UI-SPEC placement. Additive: fed by the
+          distinct `exposure` prop; renders honest-empty when the trio is empty. */}
+      <section aria-label="Exposure" className="grid gap-4">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+          Exposure
+        </h3>
+        <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <ExposureByClass snapshot={props.exposure.snapshot} />
+          <NetExposureChart {...props.exposure.netSeries} />
+          <div className="lg:col-span-2">
+            <AllocationOverTime {...props.exposure.allocationSeries} />
+          </div>
+        </div>
+      </section>
+
+      {/* Section 3 — raw exchange positions (always shown). */}
       <section className="grid gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exchange Positions

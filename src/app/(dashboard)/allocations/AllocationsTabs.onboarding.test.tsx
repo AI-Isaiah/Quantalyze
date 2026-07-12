@@ -83,13 +83,17 @@ vi.mock("next/link", () => ({
 
 import { AllocationsTabs } from "./AllocationsTabs";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
 
 // --- Stub props -------------------------------------------------------------
 
 function basePayload(
-  overrides: Partial<MyAllocationDashboardPayload> = {},
-): MyAllocationDashboardPayload {
+  overrides: Partial<
+    MyAllocationDashboardPayload & { exposure: ExposureSectionData }
+  > = {},
+): MyAllocationDashboardPayload & { exposure: ExposureSectionData } {
   return {
+    exposure: EMPTY_EXPOSURE,
     portfolio: null,
     analytics: null,
     strategies: [],

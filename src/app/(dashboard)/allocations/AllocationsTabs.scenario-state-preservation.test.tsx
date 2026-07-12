@@ -151,6 +151,7 @@ vi.mock("./lib/scenario-adapter", () => {
 
 import { AllocationsTabs } from "./AllocationsTabs";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
 
 // --- localStorage shim — useScenarioState persists drafts here --------------
 
@@ -161,7 +162,10 @@ const ORIGINAL_LOCALSTORAGE_DESCRIPTOR = Object.getOwnPropertyDescriptor(
 
 const ALLOCATOR_ID = "00000000-1111-2222-3333-444444444444";
 
-const STUB_PROPS: MyAllocationDashboardPayload = {
+const STUB_PROPS: MyAllocationDashboardPayload & {
+  exposure: ExposureSectionData;
+} = {
+  exposure: EMPTY_EXPOSURE,
   portfolio: null,
   analytics: null,
   strategies: [],

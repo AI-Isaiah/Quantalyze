@@ -30,6 +30,7 @@ import { Tweaks } from "./components/Tweaks";
 import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import type { ExposureSectionData } from "./lib/exposure-props";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
 
@@ -357,7 +358,9 @@ export function computeTabStripScroll(args: {
   return null; // already in view — no scroll, and never any vertical movement
 }
 
-export function AllocationsTabs(props: MyAllocationDashboardPayload) {
+export function AllocationsTabs(
+  props: MyAllocationDashboardPayload & { exposure: ExposureSectionData },
+) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
