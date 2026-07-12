@@ -111,9 +111,23 @@ export function useBasisMetrics(payload: FactsheetPayload): {
 export function mtmDisabledReasonCopy(reason?: string): string {
   switch (reason) {
     case "unsmoothed_options_book":
-      // The live composite-gate return (stitch_composite.py:303) for any
-      // options-member composite — the honest CURRENT meaning (the dropped
-      // daily-mark smoothing explanation is retired).
+      // The live composite-gate return (stitch_composite.py `mark_to_market_
+      // available`, :325) for any options-member composite — the honest CURRENT
+      // meaning (the dropped daily-mark smoothing explanation is retired).
+      //
+      // Phase 102 reachability audit (composite-only, verified against the
+      // backend): this reason is stamped ONLY on composite rows. Its sole
+      // producer is `mark_to_market_available(members)`, whose sole caller
+      // (job_worker.py:4195, inside run_stitch_composite_job) writes it into a
+      // flags dict with `composite=True`. The single-key broker-derive path
+      // stamps only the `mtm_*` structural reasons (SECOND_PASS_TIMEOUT /
+      // ANCHOR_RACE / SUMMARY_COVERAGE / SERIES_UNCOMPUTABLE) — a single-key
+      // options book ATTEMPTS the MTM second pass (job_worker.py:2307-2310) and
+      // degrades to one of those, never to `unsmoothed_options_book`. And a
+      // composite→single transition explicitly DROPS a stale composite-era
+      // reason (analytics_runner.py:2387-2390, `not _was_composite`). So the
+      // "composites…" wording is correctly attributed and never renders under a
+      // single-key options factsheet.
       return "Mark-to-market unavailable: composites that include an options book report cash settlement only.";
     case "mtm_basis_unavailable_for_venue":
       return "Mark-to-market unavailable for this venue.";
