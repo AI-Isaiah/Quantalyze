@@ -5,8 +5,9 @@
  *   - Suggestions render as a RANKED LIST sorted by `score` DESC.
  *   - NO pie/donut/weight-bar/"allocation %" framing anywhere (absence asserted).
  *   - Mandatory footer disclaimer renders verbatim.
- *   - All four narrative metric tooltips render verbatim (Score / Corr w/
- *     portfolio / Sharpe lift / DD improvement).
+ *   - The narrative metric glossary renders one entry per rendered column
+ *     label (Sharpe lift / Corr w/ portfolio / DD improve); the never-rendered
+ *     "Score" column is NOT documented (red-team F-2).
  *   - 0-portfolio honest gate (PortfolioOptimizer NOT mounted, no fake rows).
  *   - Portfolio switch remounts PortfolioOptimizer with null initials.
  */
@@ -59,15 +60,17 @@ const SUGGESTIONS = [
 const FOOTER =
   "Ranked by modeled fit from historical daily returns — suggestions, not an allocation and not a forecast.";
 
+// The rendered column labels PortfolioOptimizer emits; every glossary entry
+// must align to one of these (red-team F-2).
+const COLUMN_LABELS = ["Sharpe lift", "Corr w/ portfolio", "DD improve"];
+
 const TOOLTIPS = {
-  score:
-    "Composite fit ranking — how much this strategy is modeled to improve your portfolio. Higher is better; useful for ordering, not sizing.",
-  corr:
-    "Correlation of this strategy's daily returns with your current portfolio. Lower means more diversification benefit.",
   sharpe:
-    "Modeled change in your portfolio's Sharpe ratio if this strategy were added. Positive means better risk-adjusted return in backtest.",
+    "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest.",
+  corr:
+    "Correlation of this strategy's daily returns with your current portfolio, from -1 to 1 (not a percentage). Lower means more diversification benefit.",
   dd:
-    "Modeled reduction in maximum drawdown from adding this strategy, based on historical returns.",
+    "Modeled reduction in your portfolio's maximum drawdown from adding this strategy, as a percentage of NAV.",
 };
 
 function prefetch(overrides: Partial<OptimizerPrefetch> = {}): OptimizerPrefetch {
@@ -112,12 +115,24 @@ describe("OptimizerPanel", () => {
     expect(screen.getByText(FOOTER)).toBeInTheDocument();
   });
 
-  it("renders all four narrative metric tooltips verbatim", () => {
+  it("renders the narrative metric glossary verbatim (one per column)", () => {
     render(<OptimizerPanel prefetch={prefetch()} />);
-    expect(screen.getByTitle(TOOLTIPS.score)).toBeInTheDocument();
     expect(screen.getByTitle(TOOLTIPS.corr)).toBeInTheDocument();
     expect(screen.getByTitle(TOOLTIPS.sharpe)).toBeInTheDocument();
     expect(screen.getByTitle(TOOLTIPS.dd)).toBeInTheDocument();
+  });
+
+  it("glossary labels match the rendered column labels; 'Score' is NOT documented (F-2)", () => {
+    render(<OptimizerPanel prefetch={prefetch()} />);
+    // Rendered synchronously before the dynamic PortfolioOptimizer resolves, so
+    // these <dt> labels are the glossary's own — one per real column label.
+    for (const label of COLUMN_LABELS) {
+      expect(screen.getByText(label, { selector: "dt" })).toBeInTheDocument();
+    }
+    // "Score" is only a sort key, never a rendered column → must not be a glossary entry.
+    expect(
+      screen.queryByText("Score", { selector: "dt" }),
+    ).not.toBeInTheDocument();
   });
 
   it("renders suggestions as a ranked list sorted by score DESC", async () => {

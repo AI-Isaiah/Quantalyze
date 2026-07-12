@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
-import { cn, formatPercent } from "@/lib/utils";
+import { cn, formatNumber, formatPercent } from "@/lib/utils";
 
 export type OptimizerSuggestion = {
   strategy_id: string;
@@ -41,18 +41,39 @@ function liftClass(value: number | null): string {
   return value > 0 ? "text-positive" : "text-text-secondary";
 }
 
+/**
+ * Per-metric unit (red-team F-2 honesty fix). The optimizer output mixes true
+ * fractions with unitless quantities; rendering them all as `formatPercent`
+ * (×100 + "%") turned a 0.45 CORRELATION into "+45.00%" and a 0.15 unitless
+ * SHARPE delta into "+15.00%" — both misread as allocation/weight %s on the demo
+ * page. Correlation is a −1..1 coefficient and Sharpe-lift is a unitless delta,
+ * so both render as plain decimals; only `dd_improvement` (a reduction in the
+ * portfolio's max drawdown, itself a fraction of NAV) is a genuine percentage.
+ * This is a correctness fix on BOTH surfaces this component mounts on
+ * (/allocations via OptimizerPanel AND /portfolios/[id]).
+ */
+type MetricUnit = "percent" | "decimal" | "signedDecimal";
+
+function formatMetric(value: number | null, unit: MetricUnit): string {
+  if (unit === "percent") return formatPercent(value);
+  if (value == null || !Number.isFinite(value)) return "—";
+  const decimal = formatNumber(value, 2); // negatives keep their natural "-".
+  return unit === "signedDecimal" && value > 0 ? `+${decimal}` : decimal;
+}
+
 // Phase 100 / PI-05 (UI-SPEC W3): verbatim narrative tooltips on the metric
-// labels. SC-4-additive — a `title` attribute is the ONLY change to this shared
-// component's render (also mounts on /portfolios/[id]:353); values, ordering,
-// and every other DOM node are byte-identical. "title fallback acceptable" per
-// the plan's accessible-tooltip contract.
+// labels. Also mounts on /portfolios/[id]:353. The `title` attribute + the
+// per-metric `unit` formatting are the render surface; ordering and every other
+// DOM node are unchanged.
 function MetricCell({
   label,
   value,
+  unit,
   tooltip,
 }: {
   label: string;
   value: number | null;
+  unit: MetricUnit;
   tooltip?: string;
 }) {
   return (
@@ -69,7 +90,7 @@ function MetricCell({
           liftClass(value),
         )}
       >
-        {formatPercent(value)}
+        {formatMetric(value, unit)}
       </p>
     </div>
   );
@@ -98,17 +119,20 @@ function SuggestionRow({
         <MetricCell
           label="Sharpe lift"
           value={suggestion.sharpe_lift}
-          tooltip="Modeled change in your portfolio's Sharpe ratio if this strategy were added. Positive means better risk-adjusted return in backtest."
+          unit="signedDecimal"
+          tooltip="Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest."
         />
         <MetricCell
-          label="Corr reduction"
+          label="Corr w/ portfolio"
           value={suggestion.corr_with_portfolio}
-          tooltip="Correlation of this strategy's daily returns with your current portfolio. Lower means more diversification benefit."
+          unit="decimal"
+          tooltip="Correlation of this strategy's daily returns with your current portfolio, from -1 to 1 (not a percentage). Lower means more diversification benefit."
         />
         <MetricCell
           label="DD improve"
           value={suggestion.dd_improvement}
-          tooltip="Modeled reduction in maximum drawdown from adding this strategy, based on historical returns."
+          unit="percent"
+          tooltip="Modeled reduction in your portfolio's maximum drawdown from adding this strategy, as a percentage of NAV."
         />
       </div>
       <div className="flex items-center gap-2">

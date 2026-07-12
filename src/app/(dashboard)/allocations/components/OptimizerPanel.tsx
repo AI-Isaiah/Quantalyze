@@ -13,8 +13,8 @@ import type { OptimizerPrefetch } from "../lib/watchlist-read";
  * `PortfolioOptimizer` (mounted via next/dynamic exactly like
  * portfolios/[id]/page.tsx:68). This wrapper owns ONLY the concerns
  * PortfolioOptimizer does not: the portfolio selector, the 0-portfolio honest
- * gate, the mandatory ranked-list footer disclaimer, and the four narrative
- * metric tooltips. PortfolioOptimizer already solves
+ * gate, the mandatory ranked-list footer disclaimer, and the narrative metric
+ * glossary (one entry per rendered column). PortfolioOptimizer already solves
  * pending/computing/failed/stale/skeleton + the refresh POST — none of that is
  * reimplemented here.
  *
@@ -41,23 +41,27 @@ const PortfolioOptimizer = dynamic(
 const FOOTER =
   "Ranked by modeled fit from historical daily returns — suggestions, not an allocation and not a forecast.";
 
-/** Verbatim UI-SPEC W3 narrative tooltips — the honest metric glossary. */
+/**
+ * Honest metric glossary. Red-team F-2: every entry's label MUST match a column
+ * actually rendered by PortfolioOptimizer ("Sharpe lift" / "Corr w/ portfolio" /
+ * "DD improve") — the old glossary documented a "Score" column that is never
+ * rendered (score only orders the list) and mislabelled the others, so a reader
+ * could not map a tooltip to the column it describes. Copy also states the unit
+ * (unitless delta / -1..1 coefficient / percentage) so no value reads as an
+ * allocation %.
+ */
 const METRIC_TOOLTIPS: { label: string; copy: string }[] = [
   {
-    label: "Score",
-    copy: "Composite fit ranking — how much this strategy is modeled to improve your portfolio. Higher is better; useful for ordering, not sizing.",
+    label: "Sharpe lift",
+    copy: "Modeled change in your portfolio's Sharpe ratio if this strategy were added — a unitless delta, not a percentage. Positive means better risk-adjusted return in backtest.",
   },
   {
     label: "Corr w/ portfolio",
-    copy: "Correlation of this strategy's daily returns with your current portfolio. Lower means more diversification benefit.",
+    copy: "Correlation of this strategy's daily returns with your current portfolio, from -1 to 1 (not a percentage). Lower means more diversification benefit.",
   },
   {
-    label: "Sharpe lift",
-    copy: "Modeled change in your portfolio's Sharpe ratio if this strategy were added. Positive means better risk-adjusted return in backtest.",
-  },
-  {
-    label: "DD improvement",
-    copy: "Modeled reduction in maximum drawdown from adding this strategy, based on historical returns.",
+    label: "DD improve",
+    copy: "Modeled reduction in your portfolio's maximum drawdown from adding this strategy, as a percentage of NAV.",
   },
 ];
 
@@ -144,7 +148,7 @@ export function OptimizerPanel({ prefetch }: { prefetch: OptimizerPrefetch }) {
         computationStatus={computationStatus}
       />
 
-      {/* Honest metric glossary — four verbatim narrative tooltips. */}
+      {/* Honest metric glossary — one entry per rendered column label. */}
       <dl className="flex flex-wrap gap-x-5 gap-y-1">
         {METRIC_TOOLTIPS.map(({ label, copy }) => (
           <div key={label} className="flex items-center">
