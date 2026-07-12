@@ -6,7 +6,7 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { readCompositeFactsheet, singleKeyDataQuality } from "./composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
 import type { DailyReturn } from "./types";
 
@@ -395,5 +395,118 @@ describe("Finding B — singleKeyDataQuality single-key DQ opt (one owner)", () 
       { dataQuality: singleKeyDataQuality({ insufficient_window: true }) },
     )!;
     expect(fixed.dataQuality).toEqual({ composite: false, insufficientWindow: true });
+  });
+});
+
+/**
+ * Phase 102 (MTM-01) — singleKeyBasisOpts: the ONE single-key MTM read helper.
+ * Mirrors the composite mtmGate assembly (readCompositeFactsheet :167-170) but for
+ * a single-key options strategy, colocated so BOTH factsheet surfaces (the
+ * `/factsheet/[id]/v2` route + the discovery detail page) consume one owner and
+ * can't diverge (the "one path" lesson). Two load-bearing invariants:
+ *   - F-4 (T-102-01): `mtmGate.available` is gated on `computation_status ∈
+ *     {complete, complete_with_warnings}` — a failed/computing row NEVER exposes a
+ *     live-looking MTM object (its payload carries NO metricsByBasis at all).
+ *   - SC-4 (T-102-SC keystone): the helper threads ONLY the `mark_to_market` key,
+ *     NEVER the raw `metrics_json_by_basis` column — a lingering `cash_settlement`
+ *     key (composite→single stale window) would activate the build-payload.ts:243
+ *     cash overlay and perturb the byte-identical cash headline.
+ */
+describe("MTM-01 singleKeyBasisOpts — F-4 gate + SC-4-safe single-key threading", () => {
+  const MTM_FULL = {
+    cumulative_return: 0.9,
+    volatility: 0.25,
+    max_drawdown: -0.18,
+    cagr: 0.7,
+    sharpe: 2.2,
+    sortino: 2.9,
+    calmar: 0.9,
+  };
+
+  it("F4-1 (F-4 gate): a non-DONE computation_status NEVER exposes a live-looking MTM object", () => {
+    // Neuter check: forcing the DONE gate always-true makes this RED (available
+    // true + metricsByBasis threaded on a failed/computing/undefined-status row).
+    for (const status of ["failed", "computing", undefined, null, "complete_with_warnings_x"]) {
+      const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, status);
+      expect(out.mtmGate?.available).toBe(false);
+      // Structural F-4: a non-DONE row's payload carries NO MTM object at all.
+      expect(out.metricsByBasis).toBeUndefined();
+    }
+  });
+
+  it("F4-2: computation_status complete / complete_with_warnings → available + threaded MTM object", () => {
+    for (const status of ["complete", "complete_with_warnings"]) {
+      const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, status);
+      expect(out.mtmGate?.available).toBe(true);
+      expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
+    }
+  });
+
+  it("SC4-1 (stale-key hazard): a lingering cash_settlement key is NEVER threaded — only mark_to_market", () => {
+    // The 101-01 "Observed-but-out-of-scope #1" composite→single stale window: the
+    // raw column may still carry a cash_settlement key. Neuter check: threading the
+    // raw column instead of {mark_to_market} makes this RED (a cash key survives →
+    // build-payload.ts:243 overlay fires → cash headline perturbed → SC-4 breach).
+    const STALE_CASH = {
+      cumulative_return: 0.05,
+      volatility: 0.99,
+      max_drawdown: -0.5,
+      cagr: 0.01,
+      sharpe: 0.1,
+      sortino: 0.1,
+      calmar: 0.1,
+    };
+    const out = singleKeyBasisOpts(
+      {},
+      { cash_settlement: STALE_CASH, mark_to_market: MTM_FULL },
+      "complete",
+    );
+    expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
+    expect(out.metricsByBasis && "cash_settlement" in out.metricsByBasis).toBe(false);
+  });
+
+  it("HONEST-1: no MTM key + an honest reason → disabled-with-reason, no MTM object", () => {
+    const out = singleKeyBasisOpts(
+      { mtm_gated_reason: "mtm_summary_coverage_incomplete" },
+      {}, // no mark_to_market key
+      "complete",
+    );
+    expect(out.mtmGate).toEqual({ available: false, reason: "mtm_summary_coverage_incomplete" });
+    expect(out.metricsByBasis).toBeUndefined();
+  });
+
+  it("SILENT-1: no MTM key AND no reason → EMPTY result (every non-options single-key; byte-identical)", () => {
+    const out = singleKeyBasisOpts({}, {}, "complete");
+    expect(out).toEqual({});
+    expect("mtmGate" in out).toBe(false);
+    expect("metricsByBasis" in out).toBe(false);
+  });
+
+  it("SILENT-1 (null/undefined jsonb): a null / absent metrics_json_by_basis with no reason → EMPTY", () => {
+    expect(singleKeyBasisOpts(null, null, "complete")).toEqual({});
+    expect(singleKeyBasisOpts(undefined, undefined, "complete")).toEqual({});
+    // A non-object jsonb (string / number / array) with no reason is also EMPTY.
+    expect(singleKeyBasisOpts({}, "garbage", "complete")).toEqual({});
+    expect(singleKeyBasisOpts({}, [MTM_FULL], "complete")).toEqual({});
+  });
+
+  it("DEGEN-1: a present-but-degenerate MTM object (fails hasBasisHeadline) with a DONE status → unavailable, no MTM object", () => {
+    // A non-finite headline (cumulative_return null) is a real data defect: DONE
+    // but not displayable → available false, and NO MTM object threaded.
+    const DEGEN = { ...MTM_FULL, cumulative_return: null as unknown as number };
+    const out = singleKeyBasisOpts({}, { mark_to_market: DEGEN }, "complete");
+    expect(out.mtmGate?.available).toBe(false);
+    expect(out.metricsByBasis).toBeUndefined();
+  });
+
+  it("a non-string mtm_gated_reason is coerced to undefined (server-truth, mirrors :169)", () => {
+    const out = singleKeyBasisOpts(
+      { mtm_gated_reason: 42 as unknown },
+      { mark_to_market: MTM_FULL },
+      "complete",
+    );
+    // Reason drops to undefined; the MTM object is still available (DONE + headline).
+    expect(out.mtmGate).toEqual({ available: true, reason: undefined });
+    expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
   });
 });
