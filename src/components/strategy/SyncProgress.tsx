@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { Button } from "@/components/ui/Button";
 import type { StrategyAnalytics } from "@/lib/types";
 
@@ -139,7 +140,6 @@ export function SyncProgress({
   const [showWarnings, setShowWarnings] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [exchangeName, setExchangeName] = useState<string | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isActive = syncStatus === "syncing" || syncStatus === "computing";
@@ -205,81 +205,38 @@ export function SyncProgress({
     };
   }, [isActive]);
 
-  // NEW-C37-01: poll attempt counter persists across re-renders so the
-  // timeout is measured in poll cycles, not wall-clock seconds. We use a
-  // ref (not state) so incrementing it doesn't trigger a re-render.
-  const pollAttemptsRef = useRef(0);
-
-  const pollStatus = useCallback(async () => {
-    // NEW-C37-01: increment attempt count and short-circuit on timeout.
-    pollAttemptsRef.current += 1;
-    if (pollAttemptsRef.current > POLL_MAX_ATTEMPTS) {
-      onStatusChange?.("error");
-      return;
-    }
-
-    const supabase = createClient();
-    // FINDING-2: destructure error from strategy_analytics poll query. Pre-fix:
-    // {error} was discarded, so RLS regression / network timeout / PostgREST 5xx
-    // were indistinguishable from a legitimately-missing row and silently
-    // consumed grace polls. PGRST116 (0 rows via .single()) is the expected
-    // "row not yet created" case — log everything else.
-    const { data, error: pollErr } = await supabase
-      .from("strategy_analytics")
-      .select("computation_status, computation_error, computed_at")
-      .eq("strategy_id", strategyId)
-      .single();
-    if (pollErr && pollErr.code !== "PGRST116") {
-      console.error(
-        `[SyncProgress] strategy_analytics poll failed [strategy_id=${strategyId}]:`,
-        pollErr.message,
-        pollErr.code,
-      );
-    }
-
-    // NEW-C37-01: after grace period, treat a permanently-missing row as a
-    // failure so the poller breaks out with a recoverable error surface
-    // instead of polling forever.
-    if (!data) {
-      if (pollAttemptsRef.current > MISSING_ROW_GRACE_POLLS) {
-        onStatusChange?.("error");
+  // UX-03 (#46): the 3s-cadence / 120s-cap / 30s-missing-row-grace poll loop now
+  // lives in the shared `useStrategySyncPoller` hook (schedule:number →
+  // setInterval semantics). The attempt counter, the increment-before-cap check,
+  // the PGRST116-aware missing-row grace, the non-PGRST116 console.error, and the
+  // counter reset on re-activation are all transplanted verbatim; the pins in
+  // SyncProgress.poll.test.tsx prove zero behavior change. Everything below stays
+  // SURFACE policy: the toSyncStatus forward filter (idle-drop) and the "error"
+  // escalation sink are passed as callbacks — the hook never imports toSyncStatus.
+  useStrategySyncPoller({
+    enabled: isActive,
+    strategyId,
+    schedule: 3000,
+    maxAttempts: POLL_MAX_ATTEMPTS,
+    missingRowGracePolls: MISSING_ROW_GRACE_POLLS,
+    onStatus: (db) => {
+      // audit-2026-05-07 C-0142: route DB status → UI status via the
+      // discriminated converter. We only forward states that map cleanly to a
+      // UI-visible transition (computing / complete / error); "idle" (from DB
+      // "pending") is not propagated mid-sync because the caller already primed
+      // us with "syncing" / "computing".
+      const next = toSyncStatus(db);
+      if (
+        next === "computing" ||
+        next === "complete" ||
+        next === "complete_with_warnings" ||
+        next === "error"
+      ) {
+        onStatusChange?.(next);
       }
-      return;
-    }
-
-    // audit-2026-05-07 C-0142: route DB status → UI status via the
-    // discriminated converter. Adding a new ComputationStatus variant at
-    // the source forces a compile error in `toSyncStatus`, so we can't
-    // silently drop it here. We only forward states that map cleanly to a
-    // UI-visible transition (computing / complete / error); "idle" (from
-    // DB "pending") is not propagated mid-sync because the caller already
-    // primed us with "syncing" / "computing".
-    const db: ComputationStatus = data.computation_status;
-    const next = toSyncStatus(db);
-    if (
-      next === "computing" ||
-      next === "complete" ||
-      next === "complete_with_warnings" ||
-      next === "error"
-    ) {
-      onStatusChange?.(next);
-    }
-  }, [strategyId, onStatusChange]);
-
-  useEffect(() => {
-    if (isActive) {
-      // NEW-C37-01: reset attempt counter when a fresh poll cycle starts.
-      pollAttemptsRef.current = 0;
-      intervalRef.current = setInterval(pollStatus, 3000);
-    }
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [isActive, pollStatus]);
+    },
+    onError: () => onStatusChange?.("error"),
+  });
 
   // Step-based label for active states
   function getActiveLabel(): string {
