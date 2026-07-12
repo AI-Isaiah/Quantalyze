@@ -22,9 +22,13 @@ import math
 import pandas as pd
 import pytest
 
+from types import SimpleNamespace
+
 from services.basis_series import (
+    KIND_MTM_DAILY_RETURNS,
     BasisSeriesResult,
     derive_basis_series,
+    persist_basis_series,
 )
 from services.broker_dailies import gap_fill_daily_returns
 from services.metrics import compute_all_metrics
@@ -206,3 +210,93 @@ def test_degenerate_input_raises_valueerror() -> None:
         derive_basis_series(
             s, None, periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
         )
+
+
+# ── Task 3: persist_basis_series (pure-stub supabase — no live DB) ──────────────
+
+class _StubQuery:
+    """Records a delete filter chain: .delete().eq(...).eq(...).execute()."""
+
+    def __init__(self, fake: "_StubSupabase", table: str) -> None:
+        self.fake = fake
+        self.table = table
+        self._op: str | None = None
+        self._eqs: list[tuple[str, object]] = []
+
+    def delete(self) -> "_StubQuery":
+        self._op = "delete"
+        return self
+
+    def eq(self, col: str, val: object) -> "_StubQuery":
+        self._eqs.append((col, val))
+        return self
+
+    def execute(self) -> SimpleNamespace:
+        if self._op == "delete":
+            self.fake.deletes.append((self.table, list(self._eqs)))
+        return SimpleNamespace(data=[])
+
+
+class _StubSupabase:
+    def __init__(self) -> None:
+        self.rpc_calls: list[tuple[str, dict]] = []
+        self.deletes: list[tuple[str, list[tuple[str, object]]]] = []
+
+    def table(self, name: str) -> _StubQuery:
+        return _StubQuery(self, name)
+
+    def rpc(self, name: str, args: dict) -> SimpleNamespace:
+        self.rpc_calls.append((name, args))
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=None))
+
+
+def _result() -> BasisSeriesResult:
+    return derive_basis_series(
+        _fixture_mtm(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+    )
+
+
+def test_persist_upserts_via_batch_rpc() -> None:
+    """Upsert routes the payload through the existing service-role-only batch RPC
+    with the exact `{kind: payload}` shape. Neuter the payload keys / kind → RED."""
+    fake = _StubSupabase()
+    r = _result()
+    persist_basis_series(fake, "strat-1", basis="mark_to_market", result=r)
+
+    assert len(fake.rpc_calls) == 1
+    name, args = fake.rpc_calls[0]
+    assert name == "upsert_strategy_analytics_series_batch"
+    assert args["p_strategy_id"] == "strat-1"
+    assert set(args["p_kinds"]) == {KIND_MTM_DAILY_RETURNS}
+    payload = args["p_kinds"][KIND_MTM_DAILY_RETURNS]
+    assert payload == {
+        "schema": 1,
+        "basis": "mark_to_market",
+        "rows": r.series_rows,
+        "gap_spans": r.gap_spans,
+        "conventions": r.conventions,
+    }
+    assert fake.deletes == []  # upsert path never deletes
+
+
+def test_persist_none_heals_via_delete() -> None:
+    """result=None DELETES the (strategy_id, kind) row — the heal path (Pitfall 5:
+    a stale series must never outlive the scalars' authoritative-NULL write).
+    Neuter (drop the kind filter / skip the delete) → RED."""
+    fake = _StubSupabase()
+    persist_basis_series(fake, "strat-1", basis="mark_to_market", result=None)
+
+    assert fake.rpc_calls == []  # heal never upserts
+    assert fake.deletes == [
+        ("strategy_analytics_series",
+         [("strategy_id", "strat-1"), ("kind", KIND_MTM_DAILY_RETURNS)]),
+    ]
+
+
+def test_persist_unknown_basis_raises() -> None:
+    """Only 'mark_to_market' is mapped in Phase 103 — an unknown basis raises
+    ValueError (the kind map is where cash joins later)."""
+    fake = _StubSupabase()
+    with pytest.raises(ValueError):
+        persist_basis_series(fake, "strat-1", basis="cash_settlement", result=_result())
