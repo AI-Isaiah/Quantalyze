@@ -266,6 +266,46 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
       screen.getByText(/^Binance\s*·\s*Last synced/),
     ).toBeInTheDocument();
   });
+
+  // UX-01 (#30) — Deribit went live in v1.7 but the local exchangeIcon map was
+  // missing the `deribit` case, so the badge fell through to the "?" fallback,
+  // making a live-and-correct key look broken. The canonical 3-letter tag is
+  // "DRB" (AllocatorExchangeManager EXCHANGE_TAGS, DESIGN.md no-emoji convention).
+  // Pins the badge render: a deribit row must show "DRB", never "?". FAILS
+  // without the map entry.
+  it("renders the DRB badge (not '?') for a deribit key row", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-drb",
+          user_id: "user-a",
+          exchange: "deribit",
+          label: "My Deribit",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My Deribit")).toBeInTheDocument();
+    });
+    // Canonical badge text renders …
+    expect(screen.getByText("DRB")).toBeInTheDocument();
+    // … and the degraded "?" fallback does NOT.
+    expect(screen.queryByText("?")).not.toBeInTheDocument();
+  });
 });
 
 // mig 20260707120000 — a warned sync (complete_with_warnings) is a terminal
