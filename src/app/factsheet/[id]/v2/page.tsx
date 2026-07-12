@@ -8,7 +8,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -125,10 +125,25 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     // public-safe on a published row (unchanged RLS boundary — the outer
     // request-scoped signature probe stays the auth gate). singleKeyBasisOpts
     // returns `{}` for every non-options single-key strategy → byte-identical.
+    //
+    // MTM-04 (Phase 103): additionally read the persisted `mtm_daily_returns`
+    // series so charts follow the toggle. Gated by the SHARED cheap predicate
+    // (`shouldReadSingleKeyMtmSeries`) so the hot non-options path stays
+    // roundtrip-free and both surfaces read identically; the series is read via
+    // the SAME service-role admin `supabase` handle (deny-all RLS on
+    // strategy_analytics_series — no visibility widening, same gate as the scalar
+    // MTM object) and threaded as the 4th arg. A failed/malformed row degrades to
+    // no-bundle (charts stay cash).
+    const mtmSeries = shouldReadSingleKeyMtmSeries(
+      analytics?.metrics_json_by_basis,
+      analytics?.computation_status,
+    )
+      ? await readMtmSeries(supabase, id)
+      : null;
     buildOpts = {
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
-      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status),
+      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status, mtmSeries),
     };
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API

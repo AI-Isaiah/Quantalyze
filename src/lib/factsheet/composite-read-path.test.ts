@@ -12,6 +12,7 @@ import {
   singleKeyBasisOpts,
   parseMtmSeriesPayload,
   readMtmSeries,
+  shouldReadSingleKeyMtmSeries,
 } from "./composite-read-path";
 import type { ParsedMtmSeries } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
@@ -810,5 +811,34 @@ describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owne
     expect(out).not.toBeNull();
     expect("mtmSeries" in out!.buildOpts).toBe(false);
     err.mockRestore();
+  });
+});
+
+/**
+ * Phase 103 (MTM-04) — shouldReadSingleKeyMtmSeries: the cheap DONE + mark_to_market
+ * -object predicate both single-key surfaces share to skip the DB roundtrip for the
+ * hot non-options path.
+ */
+describe("MTM-04 shouldReadSingleKeyMtmSeries — cheap shared read gate", () => {
+  const MTM = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+
+  it("DONE + mark_to_market object → true", () => {
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: MTM }, "complete")).toBe(true);
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: MTM }, "complete_with_warnings")).toBe(true);
+  });
+
+  it("not DONE → false (no roundtrip for computing/failed)", () => {
+    for (const s of ["computing", "failed", undefined, null, "complete_x"]) {
+      expect(shouldReadSingleKeyMtmSeries({ mark_to_market: MTM }, s)).toBe(false);
+    }
+  });
+
+  it("no mark_to_market object → false (hot non-options path stays roundtrip-free)", () => {
+    expect(shouldReadSingleKeyMtmSeries({}, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({ cash_settlement: MTM }, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: null }, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: [MTM] }, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries(null, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries("garbage", "complete")).toBe(false);
   });
 });

@@ -364,6 +364,37 @@ export function singleKeyBasisOpts(
 }
 
 /**
+ * Phase 103 (MTM-04) — the cheapest honest predicate deciding whether a single-key
+ * strategy should incur the `mtm_daily_returns` DB roundtrip. Mirrors
+ * {@link singleKeyBasisOpts}' F-4 gate: the raw `metrics_json_by_basis` carries a
+ * `mark_to_market` OBJECT AND `computation_status` is DONE. Both factsheet surfaces
+ * (the `/factsheet/[id]/v2` route + the discovery detail page) call THIS one
+ * predicate so they can't diverge on when to read (the "one path" lesson).
+ *
+ * It is deliberately CHEAPER than the full `hasBasisHeadline` gate: a degenerate
+ * mark_to_market object (present key, no finite headline) may pass here and waste
+ * ONE read — but `singleKeyBasisOpts` still applies the full `available` gate
+ * before threading, so a false-positive here NEVER leaks a bundle. This keeps the
+ * hot non-options path (no mark_to_market key, or not DONE) roundtrip-free.
+ */
+export function shouldReadSingleKeyMtmSeries(
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): boolean {
+  const done = computationStatus === "complete" || computationStatus === "complete_with_warnings";
+  if (!done) return false;
+  if (
+    metricsJsonByBasis === null ||
+    typeof metricsJsonByBasis !== "object" ||
+    Array.isArray(metricsJsonByBasis)
+  ) {
+    return false;
+  }
+  const mtm = (metricsJsonByBasis as Record<string, unknown>).mark_to_market;
+  return mtm !== null && typeof mtm === "object" && !Array.isArray(mtm);
+}
+
+/**
  * HARD-05 (Phase 93) — strict coercion of the server `degraded_members` DQ list
  * into the closed render shape `{ seq, venue }[]`. A degraded member is a composite
  * member EXCLUDED from the stitch (a ccxt venue not yet reconstructed). ONLY an

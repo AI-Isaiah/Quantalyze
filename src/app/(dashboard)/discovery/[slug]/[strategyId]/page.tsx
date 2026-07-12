@@ -11,7 +11,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -118,6 +118,19 @@ export default async function StrategyDetailPage({
     // cannot diverge. getStrategyDetail selects `strategy_analytics (*)`
     // (queries.ts:416) so `computation_status` arrives on the row; `{}` for every
     // non-options single-key strategy keeps the payload byte-identical.
+    //
+    // MTM-04 (Phase 103): mirror the factsheet route — read the persisted
+    // `mtm_daily_returns` series through the SAME shared predicate + reader so the
+    // two surfaces can't diverge. The series lives behind deny-all RLS, so it needs
+    // the service-role admin handle (created here only when the cheap gate holds —
+    // the hot non-options path stays roundtrip-free). Degrades to no-bundle on a
+    // failed/malformed row.
+    const mtmSeries = shouldReadSingleKeyMtmSeries(
+      analyticsRow?.metrics_json_by_basis,
+      analyticsRow?.computation_status,
+    )
+      ? await readMtmSeries(createAdminClient(), strategy.id)
+      : null;
     buildOpts = {
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
@@ -125,6 +138,7 @@ export default async function StrategyDetailPage({
         dqf,
         analyticsRow?.metrics_json_by_basis,
         analyticsRow?.computation_status,
+        mtmSeries,
       ),
     };
   }
