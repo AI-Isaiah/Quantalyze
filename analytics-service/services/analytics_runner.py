@@ -227,6 +227,14 @@ class DataQualityFlags(TypedDict, total=False):
     # every young account complete_with_warnings would be factsheet-wide blast
     # radius (roadmap Pitfall #12). The CAGR value it annotates is unchanged. ---
     insufficient_window: bool
+    # --- Phase 101 (MTM-01): the machine reason stamped by the broker derive
+    # (job_worker._prestamp_dq_flags) when a single-key options book's
+    # mark_to_market pass structurally degrades. run_csv_strategy_analytics is now
+    # a PRODUCER of this key (it bridges the prestamped value through its wholesale
+    # data_quality_flags rebuild), so it must be enumerated here. An availability
+    # annotation ONLY — like insufficient_window it NEVER promotes
+    # computation_status. Read by Phase-102's disabled-with-reason toggle. ---
+    mtm_gated_reason: str
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -2359,6 +2367,28 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             if existing_flags.get(_flag):
                 data_quality_flags[_flag] = True  # type: ignore[literal-required]
                 _warned = True
+
+        # Phase 101 (MTM-01): the broker derive PRESTAMPS `mtm_gated_reason` onto
+        # this row (job_worker._prestamp_dq_flags) BEFORE enqueuing this CSV run,
+        # when the single-key mark_to_market pass structurally degraded. This
+        # rebuild REBUILDS data_quality_flags WHOLESALE (the fresh dict above), so
+        # an unbridged reason is wiped seconds after being stamped — Phase 102's
+        # disabled-with-reason toggle would then read nothing. Carry it
+        # PRESENT-ONLY and NON-PROMOTING: it is an availability annotation (like
+        # insufficient_window / HARD-04), NOT a NAV/allocated warn flag, so it must
+        # NEVER touch `_warned` (the composite path likewise never promotes on this
+        # key). EXCLUDE composite→single transitions: a stale composite-era reason
+        # (e.g. `unsmoothed_options_book`) is meaningless for the NEW single-key
+        # headline and must not masquerade as a fresh single-key verdict — mirror
+        # the Finding-5 by-basis NULLing below (`_was_composite` is hoisted here
+        # from its original site so both this exclusion and `_clear_stale_by_basis`
+        # read the one lookup). The next broker derive re-evaluates and re-stamps
+        # honestly.
+        _was_composite = bool(existing_flags.get("composite"))
+        _mtm_reason = existing_flags.get("mtm_gated_reason")
+        if _mtm_reason and not _was_composite:
+            data_quality_flags["mtm_gated_reason"] = _mtm_reason
+
         csv_status = "complete_with_warnings" if _warned else "complete"
 
         # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
@@ -2382,8 +2412,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # single-key strategy (never a composite) is byte-identical (no extra
         # column write). run_stitch_composite_job owns its OWN by-basis write and
         # never routes through this function, so any recompute HERE is genuinely
-        # single-key.
-        _was_composite = bool(existing_flags.get("composite"))
+        # single-key. (`_was_composite` is assigned above, hoisted so the Phase-101
+        # mtm_gated_reason exclusion shares the same lookup.)
         _clear_stale_by_basis = _was_composite
 
         def _mark_complete() -> None:
