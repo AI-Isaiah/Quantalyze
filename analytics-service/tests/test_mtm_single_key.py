@@ -560,3 +560,110 @@ async def test_benchmark_failure_never_gates_mtm() -> None:
     assert isinstance(by_basis, dict) and "mark_to_market" in by_basis
     assert pd.notna(by_basis["mark_to_market"]["cumulative_return"])
     assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
+
+
+# ── Task 3: SC-4 derive-level cash parity (falsifiable) ─────────────────────
+
+def _cash_track(capture: dict) -> dict:
+    """Extract EVERYTHING the cash track persists, for byte-equality comparison:
+    the csv_daily_returns upsert payload lists, the reconcile-delete span filters,
+    and the prestamp data_quality_flags. Deliberately EXCLUDES metrics_json_by_basis
+    (an additive MTM-only column) — SC-4 protects the cash outputs, not the additive
+    by-basis write."""
+    csv_upserts = [
+        payload for name, payload, _c in capture["upserts"]
+        if name == "csv_daily_returns"
+    ]
+    csv_deletes = [
+        d["filters"] for d in capture["deletes"]
+        if d["table"] == "csv_daily_returns"
+    ]
+    prestamp = _find_prestamp(capture)
+    dq = dict(prestamp["data_quality_flags"]) if prestamp else {}
+    return {"csv_upserts": csv_upserts, "csv_deletes": csv_deletes, "dq_flags": dq}
+
+
+async def _run_mtm_off() -> dict:
+    """Run B: a perp-only book (has_option_activity=False) — the pre-Phase-101
+    single-pass shape. The MTM pass is never attempted."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=False)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    return _cash_track(capture)
+
+
+@pytest.mark.asyncio
+async def test_sc4_cash_parity_mtm_on_vs_off() -> None:
+    """SC-4 (Wave-0 gap 2, derive level): the cash track is BYTE-IDENTICAL whether
+    the MTM pass runs (run A, options book, succeeds) or is skipped (run B, perp-only).
+    combine returns a DISTINCT MTM series, so a mutation that reassigns the cash
+    `returns`/`meta`/`native_ledger` to the MTM pass would perturb the csv payload or
+    the delete span and FAIL this test."""
+    # Run A: options book, MTM pass runs + succeeds (distinct MTM series).
+    ctx_a, cap_a = _ctx(strategy_row={"asset_class": "crypto"})
+    reports_a = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_a, _ = _recording_ledger(reports_a)
+    combine_a = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx_a, key_mode=False, ledger_mock=ledger_a, combine_mock=combine_a,
+    ) + [_patch_benchmark()]):
+        result_a = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result_a.outcome == DispatchOutcome.DONE
+    track_a = _cash_track(cap_a)
+
+    track_b = await _run_mtm_off()
+
+    assert track_a["csv_upserts"] == track_b["csv_upserts"], (
+        "MTM pass perturbed the csv_daily_returns cash payload — SC-4 breach"
+    )
+    assert track_a["csv_deletes"] == track_b["csv_deletes"], (
+        "MTM pass perturbed the reconcile-delete span — SC-4 breach"
+    )
+    # On the success path neither run stamps mtm_gated_reason.
+    assert "mtm_gated_reason" not in track_a["dq_flags"]
+    assert track_a["dq_flags"] == track_b["dq_flags"], (
+        "MTM pass perturbed the cash data_quality_flags — SC-4 breach"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sc4_cash_parity_mtm_degraded() -> None:
+    """SC-4: when the MTM pass RAISES (degrade path) the cash track is STILL
+    byte-identical to the MTM-off run — minus the additive mtm_gated_reason flag
+    (asserted separately in Task 2). Proves a degrade cannot perturb cash outputs."""
+    ctx_a, cap_a = _ctx(strategy_row={"asset_class": "crypto"})
+    reports_a = [_report(has_option_activity=True)]
+    ledger_a, _ = _recording_ledger(
+        reports_a,
+        side_effects=[None, LedgerValuationError("pre-rollout straddle")],
+    )
+    combine_a = MagicMock(
+        return_value=(_cash_series(), {"used_heuristic_capital": False})
+    )
+    with _apply(_base_patches(
+        ctx_a, key_mode=False, ledger_mock=ledger_a, combine_mock=combine_a,
+    ) + [_patch_benchmark()]):
+        result_a = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result_a.outcome == DispatchOutcome.DONE
+    track_a = _cash_track(cap_a)
+
+    track_b = await _run_mtm_off()
+
+    assert track_a["csv_upserts"] == track_b["csv_upserts"]
+    assert track_a["csv_deletes"] == track_b["csv_deletes"]
+    # Pop the additive degrade-only flag; the rest of the cash DQ dict must match.
+    dq_a = dict(track_a["dq_flags"])
+    assert dq_a.pop("mtm_gated_reason", None) == MTM_REASON_SUMMARY_COVERAGE
+    assert dq_a == track_b["dq_flags"], (
+        "a degraded MTM pass perturbed the cash data_quality_flags beyond the "
+        "additive mtm_gated_reason — SC-4 breach"
+    )
