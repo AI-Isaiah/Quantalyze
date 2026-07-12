@@ -20,6 +20,9 @@ The RT-1 invalidation in `set_wizard_composite_members` resets `strategy_analyti
 ### P4 (LOW): cleanup sweep check-then-delete race (D-1)
 `cleanup_abandoned_wizard_drafts` evaluates its 3× `NOT EXISTS` anti-joins under READ COMMITTED, so a key attached to a fresh draft in the ms-window between the sweep's snapshot and its DELETE could be swept (recoverable — re-enter the key; published composites safe via the BEFORE DELETE guard; pre-existing class). Fix if picked up: run the sweep SERIALIZABLE or `SELECT … FOR UPDATE` the candidate keys.
 
+### P3: analytics `python` CI parallelization deferred (#610 absorption)
+Phase 97 absorbed #610's `pytest -n auto --dist loadgroup` but it FLAKES: the global-claim fence tests (`test_compute_jobs_fencing.py`) fail non-deterministically under xdist ordering even with every live-DB module pinned to one `shared_test_db` group — imperfect per-test `compute_jobs` cleanup pollutes a later global-`claim_compute_jobs_with_priority` assertion (tie-break picks a foreign row / `single()` → 0 rows / seeded row claimed out of the batch). The `python` job reverted to SERIAL (matches main, green); the `want_job_id` scoping + decoy regression + xdist_group infra all landed. To re-enable `-n auto`: give each global-claim fence test an isolated claim space (dedicated priority/kind partition, or a clean-table fixture, or a separate serial pytest invocation for the live-DB module with `--cov-append`).
+
 ### P4 (LOW): correlation-id server-log uniformity residual (D-2)
 The composite error routes now log the inbound `X-Correlation-Id`; a fully uniform "every wizard-hit route logs the inbound id" pass is a broader cross-cutting task (sync-progress intentionally excluded — its only failure degrades to 200, so it never shows the user an id to match).
 

@@ -70,6 +70,8 @@ typecheck:
 	$(MYPY) services/ routers/ models/
 
 test:
-	$(PYTEST) -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
+	# SERIAL (v1.9.1 Phase 97): `-n auto --dist loadgroup` deferred — the global-claim
+	# fence tests flake under xdist ordering (see .github/workflows/ci.yml python step).
+	$(PYTEST) --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
 
 ci: lint test
