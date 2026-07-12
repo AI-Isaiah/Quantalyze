@@ -41,16 +41,26 @@ function liftClass(value: number | null): string {
   return value > 0 ? "text-positive" : "text-text-secondary";
 }
 
+// Phase 100 / PI-05 (UI-SPEC W3): verbatim narrative tooltips on the metric
+// labels. SC-4-additive — a `title` attribute is the ONLY change to this shared
+// component's render (also mounts on /portfolios/[id]:353); values, ordering,
+// and every other DOM node are byte-identical. "title fallback acceptable" per
+// the plan's accessible-tooltip contract.
 function MetricCell({
   label,
   value,
+  tooltip,
 }: {
   label: string;
   value: number | null;
+  tooltip?: string;
 }) {
   return (
     <div className="text-right">
-      <p className="text-micro uppercase tracking-wider text-text-muted font-medium">
+      <p
+        title={tooltip}
+        className="text-micro uppercase tracking-wider text-text-muted font-medium"
+      >
         {label}
       </p>
       <p
@@ -85,12 +95,21 @@ function SuggestionRow({
         </p>
       </div>
       <div className="flex items-center gap-4 sm:gap-6">
-        <MetricCell label="Sharpe lift" value={suggestion.sharpe_lift} />
+        <MetricCell
+          label="Sharpe lift"
+          value={suggestion.sharpe_lift}
+          tooltip="Modeled change in your portfolio's Sharpe ratio if this strategy were added. Positive means better risk-adjusted return in backtest."
+        />
         <MetricCell
           label="Corr reduction"
           value={suggestion.corr_with_portfolio}
+          tooltip="Correlation of this strategy's daily returns with your current portfolio. Lower means more diversification benefit."
         />
-        <MetricCell label="DD improve" value={suggestion.dd_improvement} />
+        <MetricCell
+          label="DD improve"
+          value={suggestion.dd_improvement}
+          tooltip="Modeled reduction in maximum drawdown from adding this strategy, based on historical returns."
+        />
       </div>
       <div className="flex items-center gap-2">
         <Link
