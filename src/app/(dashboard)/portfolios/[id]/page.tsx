@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import dynamic from "next/dynamic";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
-import { PortfolioKPIRow } from "@/components/portfolio/PortfolioKPIRow";
+import { PortfolioKpiPanel } from "@/components/portfolio/PortfolioKpiPanel";
 import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdownTable";
 import { AlertsList } from "@/components/portfolio/AlertsList";
 import { MorningBriefing } from "@/components/portfolio/MorningBriefing";
@@ -288,7 +288,7 @@ function DashboardContent({
       {alerts.length > 0 && <AlertsList alerts={alerts} />}
 
       {/* KPI row */}
-      <PortfolioKPIRow analytics={analytics} />
+      <PortfolioKpiPanel analytics={analytics} />
 
       {/* Equity curve + correlation — primary evidence panel */}
       <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6">
