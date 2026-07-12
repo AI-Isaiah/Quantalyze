@@ -1587,6 +1587,18 @@ export function SyncPreviewStep({
   const showSlowHint = elapsedMs >= SLOW_HINT_MS;
   const showWarn = elapsedMs >= WARN_THRESHOLD_MS;
   const showRetry = elapsedMs >= RETRY_THRESHOLD_MS;
+  // F-3 — the queue is auto-retrying during a `failed_retry` backoff; a manual
+  // re-POST would INSERT A SECOND job (the partial-unique index + in-flight
+  // SELECT both EXCLUDE `failed_retry`), so suppress the manual Retry and relabel
+  // honestly. Only actionable when the route surfaces the status (channel alive).
+  const isAutoRetrying = syncProgress?.jobStatus === "failed_retry";
+  // F-1 — the amber recoverable "taking longer" banner (route stall OR the SF-1
+  // backstop). Computed once so the red Error-severity `showRetry` block can be
+  // suppressed when it is up: rendering both at t≈15min stacks two near-duplicate
+  // banners with contradicting severity (red "leave this page" vs amber "retry
+  // safely"). Composite-only (single-key never has the amber banner).
+  const showInterruptedBanner =
+    isComposite && (syncProgress?.stalled === true || stallBackstop);
 
   return (
     <section aria-labelledby="wizard-sync-heading">
@@ -1679,7 +1691,7 @@ export function SyncPreviewStep({
           </p>
         )}
 
-        {showRetry && (
+        {showRetry && !showInterruptedBanner && (
           <div className="mt-2 space-y-2">
             <p className="text-caption text-negative">
               Sync is taking much longer than expected. You can leave this page
@@ -1698,8 +1710,10 @@ export function SyncPreviewStep({
           that resets analytics to pending CHANGES the status and resets the
           stall clock, so it is not inferred from a status regression. Renders
           ALONGSIDE the spinner card — polling continues, the job may
-          self-recover via the watchdog reclaim. Amber = recoverable, not red. */}
-      {isComposite && (syncProgress?.stalled === true || stallBackstop) && (
+          self-recover via the watchdog reclaim. Amber = recoverable, not red.
+          When up, it SUPPRESSES the red `showRetry` Error block above (F-1) —
+          exactly one banner renders for a stuck composite. */}
+      {showInterruptedBanner && (
         <div
           data-testid="wizard-sync-interrupted"
           role="status"

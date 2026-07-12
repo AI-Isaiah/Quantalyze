@@ -461,6 +461,31 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     warnSpy.mockRestore();
   });
 
+  // F-1 — a stuck composite at >=15min shows EXACTLY the amber recoverable
+  // banner, never ALSO the red Error-severity "much longer / leave this page"
+  // block (contradicting severity stacked in one viewport).
+  it("suppresses the red 'leave this page' block when the amber banner is up", async () => {
+    installWaitingMock("computing");
+    progressOutcome = {
+      kind: "json",
+      body: { jobStatus: "running", stalled: true, memberProgress: MEMBERS_3 },
+    };
+    await renderWaiting();
+    // Past RETRY_THRESHOLD_MS — both the red showRetry block and the amber
+    // banner would otherwise fire (both keyed on 15 min).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+    });
+
+    // The amber recoverable banner is up …
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    // … and the red "leave this page" Error block is suppressed (RED without
+    // the F-1 suppression: both render, two contradicting banners).
+    expect(
+      screen.queryByText(/you can leave this page and come back/i),
+    ).not.toBeInTheDocument();
+  });
+
   // SF-1 / RT-1 — the backstop keys off computation_status UNCHANGED, not raw
   // elapsed: a genuine status change (e.g. a re-stitch resetting analytics)
   // RESETS the stall clock, so the backstop does not fire on a still-progressing
