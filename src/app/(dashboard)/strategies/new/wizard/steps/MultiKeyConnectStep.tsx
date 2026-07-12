@@ -16,6 +16,10 @@ import {
 } from "./ConnectKeyStep";
 import { type WizardErrorCode } from "@/lib/wizardErrors";
 import type { SupportedExchange } from "@/lib/utils";
+import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -41,21 +45,6 @@ import type { SupportedExchange } from "@/lib/utils";
  * duplication is intentional — Phase-91 QA should verify the two credential
  * surfaces stay in lockstep (labels, placeholders, secret handling).
  */
-
-// ── Credential posture / correlation-id (mirrors ConnectKeyStep verbatim) ─────
-function readCorrelationId(): string {
-  if (typeof document !== "undefined") {
-    const meta = document.querySelector<HTMLMetaElement>(
-      'meta[name="x-correlation-id"]',
-    );
-    const value = meta?.getAttribute("content");
-    if (value && value.length > 0) return value;
-  }
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
 
 function genId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -349,7 +338,7 @@ export function MultiKeyConnectStep({
   const [continueError, setContinueError] = useState<WizardErrorCode | null>(
     null,
   );
-  const [correlationId] = useState<string>(() => readCorrelationId());
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
   // Phase 94.1 / F3 — rehydration lifecycle. "loading" while the WIZ-01
   // members GET is in flight, "error" when it fails (non-ok / throw /
   // unparseable body). Gates a loading placeholder + an actionable retry
@@ -414,7 +403,7 @@ export function MultiKeyConnectStep({
         // flight. Set inside the async IIFE (not synchronously in the effect
         // body) per react-hooks/set-state-in-effect.
         setRehydrateStatus("loading");
-        const res = await fetch(
+        const res = await wizardFetch(
           `/api/strategies/composite/members?strategy_id=${draftStrategyId}`,
         );
         if (cancelled) return;
@@ -594,7 +583,7 @@ export function MultiKeyConnectStep({
         EXCHANGES.find((e) => e.id === p.exchange)?.requiresPassphrase ?? false;
       updatePanel(idx, { status: "validating", errorCode: null });
       try {
-        const res = await fetch("/api/strategies/composite/add-key", {
+        const res = await wizardFetch("/api/strategies/composite/add-key", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -728,7 +717,7 @@ export function MultiKeyConnectStep({
     setContinueError(null);
     try {
       const keys = buildSetMembersKeys(current);
-      const res = await fetch("/api/strategies/composite/set-members", {
+      const res = await wizardFetch("/api/strategies/composite/set-members", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ strategy_id: strategyId, keys }),

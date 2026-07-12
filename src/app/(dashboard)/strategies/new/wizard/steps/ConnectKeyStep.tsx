@@ -9,6 +9,10 @@ import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
+import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -16,30 +20,6 @@ import type { SupportedExchange } from "@/lib/utils";
  * /api/strategies/create-with-key. All error states render scripted
  * copy from wizardErrors.ts — never raw server strings.
  */
-
-/**
- * Read the correlation_id from the <meta name="x-correlation-id"> tag the
- * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
- * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
- * wave window when 16-02 has not yet merged into this branch). Once 16-02
- * is fully integrated this helper will always read the meta tag and the
- * fallback path becomes a defensive no-op.
- */
-function readCorrelationId(): string {
-  if (typeof document !== "undefined") {
-    const meta = document.querySelector<HTMLMetaElement>(
-      'meta[name="x-correlation-id"]',
-    );
-    const value = meta?.getAttribute("content");
-    if (value && value.length > 0) return value;
-  }
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  // Minimal fallback for non-secure contexts where crypto.randomUUID is
-  // unavailable. Rare in modern browsers; covered for completeness.
-  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
 
 // B8: the user-allowlist exchange ids derive from the single SupportedExchange
 // set; the ExchangeOption[] array below adds component-specific UI metadata.
@@ -159,12 +139,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   const [passphrase, setPassphrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
-  // Phase 16 Plan 06: correlation_id for the envelope. Reads the
-  // <meta name="x-correlation-id"> tag rendered by the root layout (Plan
-  // 16-02 / OBSERV-09); falls back to a fresh UUID v4 when the meta tag
-  // is not yet present (Plan 16-02 lands in a parallel wave; this step
-  // ships first to avoid blocking on cross-wave merge ordering).
-  const [correlationId] = useState<string>(() => readCorrelationId());
+  // UX-02: the wizard session correlation id — the SAME id wizardFetch sends
+  // on every request below, so the id shown in an error envelope matches the
+  // failing request's server logs / Sentry tag / compute_jobs.metadata.
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
 
   // UAT/F-4: report the in-progress draft up so a switch to multi-key mode can
   // carry it into the first panel instead of discarding it. No-op (single-key
@@ -197,7 +175,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     setSubmitting(true);
 
     try {
-      const res = await fetch("/api/strategies/create-with-key", {
+      const res = await wizardFetch("/api/strategies/create-with-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

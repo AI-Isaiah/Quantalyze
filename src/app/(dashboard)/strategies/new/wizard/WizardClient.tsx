@@ -27,6 +27,7 @@ import {
   saveWizardState,
   type WizardStepKey,
 } from "@/lib/wizard/localStorage";
+import { wizardFetch } from "@/lib/wizard/wizard-correlation";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
 
@@ -576,7 +577,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     });
 
     try {
-      const res = await fetch(`/api/strategies/draft/${strategyId}`, {
+      const res = await wizardFetch(`/api/strategies/draft/${strategyId}`, {
         method: "DELETE",
       });
       // NEW-C14-08: only reset state on confirmed delete (2xx) or

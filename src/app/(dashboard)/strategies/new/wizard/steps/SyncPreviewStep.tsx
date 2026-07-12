@@ -29,6 +29,10 @@ import {
 } from "@/app/(dashboard)/allocations/components/CoverageTimeline";
 import { unionOf, type CoverageSpan } from "@/lib/scenario-window";
 import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
+import {
   partitionAttribution,
   attributionBasisFromConfig,
 } from "@/lib/composite/compositeAttribution";
@@ -83,26 +87,6 @@ export function deriveDetectedMarkets(
     if (base) set.add(base);
   }
   return Array.from(set).slice(0, limit);
-}
-
-/**
- * Read the correlation_id from the <meta name="x-correlation-id"> tag the
- * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
- * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
- * wave window when 16-02 has not yet merged into this branch).
- */
-function readCorrelationId(): string {
-  if (typeof document !== "undefined") {
-    const meta = document.querySelector<HTMLMetaElement>(
-      'meta[name="x-correlation-id"]',
-    );
-    const value = meta?.getAttribute("content");
-    if (value && value.length > 0) return value;
-  }
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 const SLOW_HINT_MS = 15_000;
@@ -386,8 +370,9 @@ export function SyncPreviewStep({
   // Init false so a single-key run never re-renders and the poll effect never
   // restarts on the single-key path (SC-4 neutrality).
   const [isComposite, setIsComposite] = useState(false);
-  // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
-  const [correlationId] = useState<string>(() => readCorrelationId());
+  // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
+  // every sync request, so a copied envelope id matches server logs.
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
   // useRef initializer must be a non-impure value for React Compiler's
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
@@ -503,7 +488,7 @@ export function SyncPreviewStep({
           // preserved without blocking a legitimate stale single-key re-sync on
           // a transient marker-read blip.
         }
-        const res = await fetch("/api/keys/sync", {
+        const res = await wizardFetch("/api/keys/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
@@ -633,7 +618,7 @@ export function SyncPreviewStep({
       // slow/hung progress route never delays the status loop; the setState is
       // guarded by `mountedRef`.
       if (isComposite) {
-        void fetch(`/api/strategies/${strategyId}/sync-progress`)
+        void wizardFetch(`/api/strategies/${strategyId}/sync-progress`)
           .then((r) => (r.ok ? r.json() : null))
           .then((json: SyncProgressResponse | null) => {
             if (!mountedRef.current || !json) return;
@@ -1104,7 +1089,7 @@ export function SyncPreviewStep({
     if (retrying) return;
     setRetrying(true);
     try {
-      const res = await fetch("/api/keys/sync", {
+      const res = await wizardFetch("/api/keys/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ strategy_id: strategyId }),

@@ -9,6 +9,7 @@ import {
 } from "@/lib/wizardErrors";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
 import type { MetadataDraft } from "./MetadataStep";
+import { wizardFetch } from "@/lib/wizard/wizard-correlation";
 
 /**
  * Phase 15 / CSV-01..CSV-02 — sub-step 3 of the CSV branch.
@@ -95,7 +96,7 @@ export function CsvSubmitStep({
     setSubmitting(true);
 
     try {
-      const res = await fetch("/api/strategies/csv-finalize", {
+      const res = await wizardFetch("/api/strategies/csv-finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
