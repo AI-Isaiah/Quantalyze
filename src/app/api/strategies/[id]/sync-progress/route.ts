@@ -180,8 +180,14 @@ export async function GET(
         const entry = (e ?? {}) as Record<string, unknown>;
         return {
           seq: Number(entry.seq),
-          exchange: (entry.exchange as string | null | undefined) ?? null,
-          label: (entry.label as string | null | undefined) ?? null,
+          // Security L1 — harden exchange/label symmetrically with seq/status: a
+          // non-string value (object, number) in these positions projects to
+          // null rather than passing through verbatim. Only the trusted worker
+          // writes member_progress, so this is defense-in-depth, but the
+          // projection must be UNIFORMLY defensive (never a bare ?? coalesce
+          // that lets a truthy non-string through).
+          exchange: typeof entry.exchange === "string" ? entry.exchange : null,
+          label: typeof entry.label === "string" ? entry.label : null,
           status: coerceMemberProgressStatus(entry.status),
         };
       });

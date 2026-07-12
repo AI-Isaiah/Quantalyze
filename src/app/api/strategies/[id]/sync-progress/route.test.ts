@@ -304,6 +304,30 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
     expect(JSON.stringify(body)).not.toContain("junk");
   });
 
+  // ── Security L1: non-string exchange/label project to null ────────
+  it("projects a non-string exchange/label to null (uniform defensive projection)", async () => {
+    rpcResult.data = [
+      stitchRow({
+        status: "running",
+        metadata: {
+          member_progress_at: ago(30_000),
+          member_progress: [
+            // A rogue non-string exchange (object) and label (number) must NOT
+            // pass through verbatim — they harden to null like seq/status.
+            { seq: 1, exchange: { nested: "obj" }, label: 42, status: "in_process" },
+          ],
+        },
+      }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    const body = await res.json();
+    expect(body.memberProgress).toEqual([
+      { seq: 1, exchange: null, label: null, status: "in_process" },
+    ]);
+    // The rogue nested object never survives the projection.
+    expect(JSON.stringify(body)).not.toContain("nested");
+  });
+
   // ── PROG-03 stall: TRUE past the 12-min threshold ─────────────────
   it("flags stalled:true when a running job's heartbeat is older than the threshold", async () => {
     rpcResult.data = [
