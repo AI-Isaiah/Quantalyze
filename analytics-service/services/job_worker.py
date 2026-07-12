@@ -3420,7 +3420,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 # fire on ordinary preemption). Anything else (true, or contract
                 # drift on .data) counts as a clean write and clears the streak,
                 # exactly as before.
-                if resp.data is False:
+                if isinstance(resp.data, bool) and resp.data is False:
                     progress_fenced_off = True
                     logger.info(
                         "run_stitch_composite_job: set_compute_job_progress "
