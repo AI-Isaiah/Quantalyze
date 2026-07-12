@@ -518,17 +518,52 @@ export interface TradeMixBuckets {
 /**
  * One row in the `strategy_analytics_series` sibling table.
  * Heavy series payloads keyed by (strategy_id, kind).
- * Read via fetch_strategy_lazy_metrics(strategy_id, panel_id) RPC.
  *
- * The union has exactly 12 sibling kinds. `equity_series_1y` lives in
+ * The union has exactly 13 sibling kinds. `equity_series_1y` lives in
  * `metrics_json` (above-the-fold series), NOT in the sibling table.
+ *
+ * Read paths differ by kind:
+ *   - The 12 lazy-metrics kinds are read via the
+ *     `fetch_strategy_lazy_metrics(strategy_id, panel_id)` RPC (panel map).
+ *   - `mtm_daily_returns` (Phase 103, MTM-04) is read DIRECTLY via the
+ *     service-role admin client (`.eq("kind","mtm_daily_returns")`, no RPC panel
+ *     entry) — the same direct-read pattern `composite-read-path.ts` uses for
+ *     `csv_daily_returns`. The kind is unconstrained TEXT (migration
+ *     20260428120919 — "add a kind = INSERT a row, no ALTER TABLE"), so no DDL
+ *     ships for it; the anti-divergence guard lives on the Python derive side.
  */
 export type StrategyAnalyticsSeriesKind =
   | "daily_returns_grid"
   | "rolling_sortino_3m" | "rolling_sortino_6m" | "rolling_sortino_12m"
   | "rolling_volatility_3m" | "rolling_volatility_6m" | "rolling_volatility_12m"
   | "rolling_alpha" | "rolling_beta"
-  | "exposure_series" | "turnover_series" | "log_returns_series";
+  | "exposure_series" | "turnover_series" | "log_returns_series"
+  | "mtm_daily_returns";
+
+/**
+ * The `strategy_analytics_series.kind` string for the persisted MTM daily-return
+ * series (Phase 103). SINGLE TS SOURCE of the literal — the reader
+ * (`composite-read-path.ts readMtmSeries`) references THIS constant, never a bare
+ * string, so the py/ts literal-duplication the plan-check flagged is a documented
+ * cross-link (Python owner: `analytics-service/services/basis_series.py:58`
+ * `KIND_MTM_DAILY_RETURNS`).
+ */
+export const MTM_DAILY_RETURNS_SERIES_KIND = "mtm_daily_returns" as const;
+
+/**
+ * Persisted JSONB payload of an `mtm_daily_returns` row (Phase 103). Written by
+ * `analytics-service/services/basis_series.py persist_basis_series` — `rows` is
+ * the SPARSE honest series (gap days ABSENT, never 0.0), `gap_spans` the derived
+ * inclusive coverage mask. Untrusted-shape on read (DB JSONB → RSC boundary):
+ * `parseMtmSeriesPayload` coerces defensively before it reaches the payload.
+ */
+export type MtmDailyReturnsSeriesPayload = {
+  schema: number;
+  basis: "mark_to_market";
+  rows: Array<{ date: string; return: number }>;
+  gap_spans: Array<{ start: string; end: string }>;
+  conventions: { periods_per_year: number; cumulative_method: string; day_basis: string };
+};
 
 /**
  * audit-2026-05-07 M-0581: discriminated payload shape per kind.
@@ -570,6 +605,12 @@ export type StrategyAnalyticsSeriesRow =
       strategy_id: string;
       kind: "daily_returns_grid";
       payload: Record<string, Record<string, number>>;
+      computed_at: string;
+    }
+  | {
+      strategy_id: string;
+      kind: "mtm_daily_returns";
+      payload: MtmDailyReturnsSeriesPayload;
       computed_at: string;
     };
 

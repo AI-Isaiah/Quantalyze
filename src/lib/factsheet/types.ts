@@ -374,6 +374,60 @@ export type RollWindowPick = {
 };
 
 /**
+ * Phase 103 (MTM-04) — a per-basis series bundle. Every field is a STRUCTURAL
+ * CLONE of its {@link FactsheetCommon} sibling so a client view-merge
+ * `{...payload, ...bundle}` stays well-typed and each panel that is a pure
+ * function of the strategy's OWN daily-return series follows the active basis.
+ *
+ * Derived by `buildFactsheetPayload`'s internal `deriveSeriesBundle` from the
+ * basis-selected `DailyReturn[]` — its OWN date axis + OWN gap mask (MTM gaps ≠
+ * cash gaps: never overlay an MTM values array on the cash date axis, Pitfall-1).
+ *
+ * CARRIES: the three chart tracks (equity/drawdown/returns) + rolling + worst-10
+ * + comparators (IN the bundle purely so the MTM axis and the comparator arrays
+ * share ONE coherent date axis — Pitfall-1) + the two heatmap panels + EVERY
+ * dailies-derivable statistics panel (quantiles, streaks, calmarByYear,
+ * bootstrapCI, styleDrift, stressWindows).
+ *
+ * EXCLUDES (stay top-level CASH by construction — the client merge passes them
+ * through as cash with ZERO per-panel branching): correlations / correlationMatrix
+ * (EXTERNAL-DATA — need BTC/ETH/SPX/Gold/IEF series with no MTM equivalent), and
+ * strategyMetrics (the KpiStrip's persisted-scalar overlay owns MTM there, Phase
+ * 102). stressWindows is the MIXED panel: its strategy columns follow MTM, its
+ * BTC-benchmark column is basis-invariant BY CONSTRUCTION (the same BTC series
+ * aligned to the MTM date axis — no new math, no cash-held-for-honesty).
+ */
+export type BasisSeriesBundle = {
+  dates: string[];
+  strategyReturns: number[];
+  strategyEquity: number[];
+  strategyDrawdowns: number[];
+  strategyRollingVol: Array<number | null>;
+  strategyRollingSharpe: Array<number | null>;
+  strategyRollingSortino: Array<number | null>;
+  rollingWindow: RollWindowPick;
+  rollingBetaWindow: RollWindowPick;
+  strategyWorst10: Array<{ start: number; trough: number; recover: number; depth: number }>;
+  comparators: {
+    btc: ComparatorBlock;
+    spx: ComparatorBlock;
+    none: ComparatorBlock;
+  };
+  monthlyReturns: MonthlyReturnsRow[];
+  dailyHeatmap: DailyHeatmapYear[];
+  /** Per-basis coverage mask — for MTM, derived from the persisted `gap_spans`
+   *  (Python-owned, single implementation) via `deriveSegmentMarkers`. Optional
+   *  so an absent mask serializes away (byte-identity discipline). */
+  missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
+  quantiles: QuantilePayload;
+  streaks: StreakPayload;
+  calmarByYear: CalmarYearPayload[];
+  bootstrapCI: BootstrapCIPayload;
+  styleDrift: StyleDriftPayload | null;
+  stressWindows: StressWindowPayload;
+};
+
+/**
  * Fields shared by every factsheet payload regardless of ingest source.
  * The discriminated {@link FactsheetPayload} adds `ingestSource` plus the
  * api-only synthesized panels on top of this base.
@@ -516,6 +570,17 @@ export type FactsheetCommon = {
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;
+  /**
+   * Phase 103 (MTM-04) — per-basis series bundles keyed by basis. The cash
+   * series stays TOP-LEVEL (the fields above), so this is ADDITIVE-ONLY:
+   * absent when no persisted MTM series feeds the build → the object serializes
+   * away and the cash payload is BYTE-IDENTICAL (SC-4). Present only
+   * `mark_to_market` in Phase 103; the client (Plan 04) picks the active-basis
+   * bundle via `useBasis()` and view-merges it over the cash top-level. External
+   * panels (correlations/correlationMatrix) are NOT in the bundle, so the merge
+   * passes them through as cash with zero per-panel branching.
+   */
+  seriesByBasis?: { mark_to_market?: BasisSeriesBundle };
 };
 
 /**

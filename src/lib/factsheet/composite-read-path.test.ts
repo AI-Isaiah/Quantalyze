@@ -6,7 +6,14 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts } from "./composite-read-path";
+import {
+  readCompositeFactsheet,
+  singleKeyDataQuality,
+  singleKeyBasisOpts,
+  parseMtmSeriesPayload,
+  readMtmSeries,
+} from "./composite-read-path";
+import type { ParsedMtmSeries } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
 import type { DailyReturn } from "./types";
 
@@ -508,5 +515,300 @@ describe("MTM-01 singleKeyBasisOpts — F-4 gate + SC-4-safe single-key threadin
     // Reason drops to undefined; the MTM object is still available (DONE + headline).
     expect(out.mtmGate).toEqual({ available: true, reason: undefined });
     expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
+  });
+
+  // ---- MTM-04 (Phase 103) — 4th-param MTM series threading ----
+  const SERIES: ParsedMtmSeries = {
+    dailyReturns: [
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+      { date: "2025-08-05", value: 0.03 },
+    ],
+    gapSpans: [{ start: "2025-08-03", end: "2025-08-04" }],
+  };
+
+  it("MTM-04: available (DONE + headline) + parsed series → threads buildOpts.mtmSeries", () => {
+    const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, "complete", SERIES);
+    expect(out.mtmGate?.available).toBe(true);
+    expect(out.mtmSeries).toBe(SERIES);
+  });
+
+  it("MTM-04 (structural F-4 gate): a non-DONE status NEVER threads the MTM series, even when a parsed series is supplied", () => {
+    // Neuter check: forcing the DONE gate true (or removing the `available &&`
+    // guard on the mtmSeries spread) makes this RED — a failed/computing row would
+    // leak a live-looking MTM SERIES bundle. The series rides the SAME F-4 gate as
+    // the scalar object.
+    for (const status of ["failed", "computing", undefined, null]) {
+      const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, status, SERIES);
+      expect(out.mtmGate?.available).toBe(false);
+      expect(out.mtmSeries).toBeUndefined();
+    }
+  });
+
+  it("MTM-04: available but the reader returned null (degraded/failed series read) → no mtmSeries key", () => {
+    const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, "complete", null);
+    expect(out.mtmGate?.available).toBe(true);
+    expect("mtmSeries" in out).toBe(false);
+  });
+
+  it("MTM-04 (SILENT-1): a non-options single-key strategy passing a series still returns EMPTY (no MTM key/reason → {})", () => {
+    // A stray series with no MTM scalar object + no reason must NOT resurrect a
+    // bundle — the early SILENT-1 return keeps the payload byte-identical.
+    const out = singleKeyBasisOpts({}, {}, "complete", SERIES);
+    expect(out).toEqual({});
+    expect("mtmSeries" in out).toBe(false);
+  });
+});
+
+/**
+ * Phase 103 (MTM-04) — parseMtmSeriesPayload: the DB-JSONB → RSC trust-boundary
+ * coercion (T-103-05). A malformed/failed series row must degrade to no-bundle
+ * (charts stay cash, V5), never crash or fabricate.
+ */
+describe("MTM-04 parseMtmSeriesPayload — strict coercion of the untrusted series row", () => {
+  const VALID = {
+    schema: 1,
+    basis: "mark_to_market",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+      { date: "2025-08-05", return: 0.03 },
+    ],
+    gap_spans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  it("valid payload → maps `return`→`value`, ascending rows + gapSpans", () => {
+    const out = parseMtmSeriesPayload(VALID);
+    expect(out).not.toBeNull();
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+      { date: "2025-08-05", value: 0.03 },
+    ]);
+    expect(out!.gapSpans).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
+  });
+
+  it("non-object / array / null payloads → null", () => {
+    for (const raw of [null, undefined, 42, "x", true, [VALID]]) {
+      expect(parseMtmSeriesPayload(raw as unknown)).toBeNull();
+    }
+  });
+
+  it("missing / non-array `rows` → null", () => {
+    expect(parseMtmSeriesPayload({ ...VALID, rows: undefined })).toBeNull();
+    expect(parseMtmSeriesPayload({ ...VALID, rows: "nope" })).toBeNull();
+    expect(parseMtmSeriesPayload({ ...VALID, rows: {} })).toBeNull();
+  });
+
+  it("fewer than 2 VALID rows → null (mirrors the build-payload dedup<2 guard)", () => {
+    expect(parseMtmSeriesPayload({ ...VALID, rows: [{ date: "2025-08-01", return: 0.02 }] })).toBeNull();
+    // 3 rows but only 1 valid (bad date, non-finite return) → <2 → null.
+    expect(
+      parseMtmSeriesPayload({
+        ...VALID,
+        rows: [
+          { date: "2025-08-01", return: 0.02 },
+          { date: 42, return: 0.01 },
+          { date: "2025-08-03", return: Infinity },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("drops invalid rows but keeps ≥2 valid ones (strict per-row coercion)", () => {
+    const out = parseMtmSeriesPayload({
+      ...VALID,
+      rows: [
+        { date: "2025-08-01", return: 0.02 },
+        { date: "", return: 0.01 }, // empty date — dropped
+        { date: "2025-08-02", return: NaN }, // non-finite — dropped
+        { date: "2025-08-03", return: -0.04 },
+        "junk", // not an object — dropped
+        { date: "2025-08-04", return: 0.05 },
+      ],
+    });
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-03", value: -0.04 },
+      { date: "2025-08-04", value: 0.05 },
+    ]);
+  });
+
+  it("gap_spans coerced defensively: non-array → [], junk entries dropped", () => {
+    expect(parseMtmSeriesPayload({ ...VALID, gap_spans: "nope" })!.gapSpans).toEqual([]);
+    expect(parseMtmSeriesPayload({ ...VALID, gap_spans: undefined })!.gapSpans).toEqual([]);
+    expect(
+      parseMtmSeriesPayload({
+        ...VALID,
+        gap_spans: [
+          { start: "2025-08-03", end: "2025-08-04" },
+          { start: 3, end: "x" }, // non-string start — dropped
+          "junk",
+          { start: "2025-08-10" }, // missing end — dropped
+        ],
+      })!.gapSpans,
+    ).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
+  });
+});
+
+/**
+ * Phase 103 (MTM-04, T-103-06) — readMtmSeries: service-role direct read of the
+ * `mtm_daily_returns` row, degrade-never-throw on error/absent/malformed.
+ */
+describe("MTM-04 readMtmSeries — service-role direct read + degrade", () => {
+  const VALID_PAYLOAD = {
+    schema: 1,
+    basis: "mark_to_market",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+    ],
+    gap_spans: [],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  function mockSeriesAdmin(
+    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+  ): SupabaseClient {
+    const chain = {
+      select: () => chain,
+      eq: () => chain,
+      maybeSingle: () => Promise.resolve(result),
+    };
+    return { from: () => chain } as unknown as SupabaseClient;
+  }
+
+  it("valid row → ParsedMtmSeries", async () => {
+    const out = await readMtmSeries(mockSeriesAdmin({ data: { payload: VALID_PAYLOAD }, error: null }), "s1");
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+    ]);
+  });
+
+  it("read error → null + console.error (degrade, never throw)", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const out = await readMtmSeries(mockSeriesAdmin({ data: null, error: { message: "boom" } }), "s1");
+    expect(out).toBeNull();
+    expect(err).toHaveBeenCalledOnce();
+    err.mockRestore();
+  });
+
+  it("missing row (maybeSingle null) → null", async () => {
+    const out = await readMtmSeries(mockSeriesAdmin({ data: null, error: null }), "s1");
+    expect(out).toBeNull();
+  });
+
+  it("malformed payload (garbage shape) → null (no throw)", async () => {
+    const out = await readMtmSeries(mockSeriesAdmin({ data: { payload: { rows: "x" } }, error: null }), "s1");
+    expect(out).toBeNull();
+  });
+});
+
+/**
+ * Phase 103 (MTM-04) — readCompositeFactsheet threads the persisted MTM series
+ * into buildOpts ONLY when the scalar MTM gate is available, and SKIPS the extra
+ * DB roundtrip entirely for a non-MTM composite.
+ */
+describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owner)", () => {
+  const MTM_HEADLINE = {
+    cumulative_return: 0.9,
+    volatility: 0.25,
+    max_drawdown: -0.18,
+    cagr: 0.7,
+    sharpe: 2.2,
+    sortino: 2.9,
+    calmar: 0.9,
+  };
+  const MTM_PAYLOAD = {
+    schema: 1,
+    basis: "mark_to_market",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+      { date: "2025-08-05", return: 0.03 },
+    ],
+    gap_spans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  function mockAdminMulti(opts: {
+    sparseRows?: { date: string; daily_return: number }[] | null;
+    mtmPayload?: unknown;
+    mtmError?: { message?: string } | null;
+    mtmRowNull?: boolean;
+  }): { admin: SupabaseClient; mtmReads: () => number } {
+    let mtmReadCount = 0;
+    const from = (table: string) => {
+      if (table === "strategy_analytics_series") {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: () => {
+            mtmReadCount++;
+            return Promise.resolve({
+              data: opts.mtmRowNull ? null : { payload: opts.mtmPayload },
+              error: opts.mtmError ?? null,
+            });
+          },
+        };
+        return chain;
+      }
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        order: () => chain,
+        limit: () => Promise.resolve({ data: opts.sparseRows ?? SPARSE_ROWS, error: null }),
+      };
+      return chain;
+    };
+    return { admin: { from } as unknown as SupabaseClient, mtmReads: () => mtmReadCount };
+  }
+
+  it("mtmAvailable + valid MTM row → threads buildOpts.mtmSeries (mapped series + gapSpans)", async () => {
+    const { admin, mtmReads } = mockAdminMulti({ mtmPayload: MTM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH, mark_to_market: MTM_HEADLINE },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.mtmSeries).toEqual({
+      dailyReturns: [
+        { date: "2025-08-01", value: 0.02 },
+        { date: "2025-08-02", value: -0.01 },
+        { date: "2025-08-05", value: 0.03 },
+      ],
+      gapSpans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    });
+    expect(mtmReads()).toBe(1);
+  });
+
+  it("NOT mtmAvailable (no mark_to_market headline) → no mtmSeries AND no MTM roundtrip", async () => {
+    const { admin, mtmReads } = mockAdminMulti({ mtmPayload: MTM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH }, // no mark_to_market
+      returnsDenominatorConfig: null,
+    });
+    expect("mtmSeries" in out!.buildOpts).toBe(false);
+    // The extra DB read is SKIPPED for every non-MTM composite.
+    expect(mtmReads()).toBe(0);
+  });
+
+  it("mtmAvailable but the MTM series read errors → degrade to no mtmSeries (composite still renders)", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { admin } = mockAdminMulti({ mtmError: { message: "boom" } });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH, mark_to_market: MTM_HEADLINE },
+      returnsDenominatorConfig: null,
+    });
+    expect(out).not.toBeNull();
+    expect("mtmSeries" in out!.buildOpts).toBe(false);
+    err.mockRestore();
   });
 });

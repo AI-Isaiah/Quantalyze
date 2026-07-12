@@ -61,6 +61,21 @@ export type BuildFactsheetOpts = {
   metricsByBasis?: FactsheetCommon["metricsByBasis"];
   dataQuality?: FactsheetCommon["dataQuality"];
   mtmGate?: FactsheetCommon["mtmGate"];
+  /**
+   * Phase 103 (MTM-04) — the persisted MTM daily series (read from the
+   * `mtm_daily_returns` `strategy_analytics_series` row via
+   * `composite-read-path.ts readMtmSeries`). When present with ≥2 valid rows,
+   * `buildFactsheetPayload` emits `payload.seriesByBasis.mark_to_market` derived
+   * by the SAME `deriveSeriesBundle` as cash (own axis + own mask from
+   * `gapSpans`). Threaded ONLY when the scalar MTM gate is `available` (the F-4
+   * DONE + hasBasisHeadline gate), so a non-options / gated strategy passes
+   * `undefined` and the cash payload stays byte-identical (SC-4). `gapSpans` is
+   * the Python-derived coverage mask — reused, never re-derived client-side.
+   */
+  mtmSeries?: {
+    dailyReturns: DailyReturn[];
+    gapSpans: Array<{ start: string; end: string }>;
+  };
 };
 
 /**
