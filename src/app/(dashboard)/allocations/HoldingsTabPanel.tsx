@@ -152,7 +152,7 @@ export function HoldingsTabPanel(
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exposure
         </h3>
-        <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <ExposureByClass snapshot={props.exposure.snapshot} />
           <NetExposureChart {...props.exposure.netSeries} />
           <div className="lg:col-span-2">
