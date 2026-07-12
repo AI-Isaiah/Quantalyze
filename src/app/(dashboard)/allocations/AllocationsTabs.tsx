@@ -31,6 +31,7 @@ import { OnboardingBanner } from "./components/OnboardingBanner";
 import { MandateQuickSetCard } from "./components/MandateQuickSetCard";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
 import type { ExposureSectionData } from "./lib/exposure-props";
+import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
 import { useCrossTabStorage } from "@/lib/storage/cross-tab";
 import { rawStringCodec } from "@/lib/storage/codecs";
 
@@ -359,7 +360,19 @@ export function computeTabStripScroll(args: {
 }
 
 export function AllocationsTabs(
-  props: MyAllocationDashboardPayload & { exposure: ExposureSectionData },
+  // Phase 100 / 100-04 — `favorites` / `optimizer` / `note` are ADDITIVE props
+  // threaded from page.tsx's Promise.all straight through to HoldingsTabPanel
+  // (already spread via `{...props}`); the polled `MyAllocationDashboardPayload`
+  // and the Phase-99 `exposure` prop are untouched (SC-4). They are OPTIONAL at
+  // this shared-client boundary so the pre-existing AllocationsTabs test
+  // call-sites stay byte-unmodified (SC-4 regression gate) — page.tsx ALWAYS
+  // supplies all three; HoldingsTabPanel renders honest-empty if any is absent.
+  props: MyAllocationDashboardPayload & {
+    exposure: ExposureSectionData;
+    favorites?: FavoriteRow[];
+    optimizer?: OptimizerPrefetch;
+    note?: { initialContent: string; initialLastSavedAt: Date | null };
+  },
 ) {
   const router = useRouter();
   const pathname = usePathname();
