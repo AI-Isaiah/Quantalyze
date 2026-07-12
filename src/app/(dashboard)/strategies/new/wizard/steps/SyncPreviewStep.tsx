@@ -1734,20 +1734,35 @@ export function SyncPreviewStep({
           <p className="text-body font-medium text-text-primary">
             This sync is taking longer than expected
           </p>
-          <p className="mt-1 text-caption text-text-secondary">
-            You can retry safely — a healthy run already in progress is
-            unaffected.
-          </p>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={handleRetrySync}
-            disabled={retrying}
-            className="mt-3"
-            data-testid="wizard-sync-retry"
-          >
-            {retrying ? "Retrying…" : "Retry sync"}
-          </Button>
+          {isAutoRetrying ? (
+            // F-3 — the queue is AUTO-RETRYING (`failed_retry` backoff). A manual
+            // re-POST would INSERT A SECOND stitch (the partial-unique index +
+            // the in-flight SELECT both EXCLUDE `failed_retry`), so relabel
+            // honestly and suppress the manual Retry — the job retries on its own.
+            <p
+              className="mt-1 text-caption text-text-secondary"
+              data-testid="wizard-sync-auto-retrying"
+            >
+              The sync is retrying automatically — no action needed.
+            </p>
+          ) : (
+            <>
+              <p className="mt-1 text-caption text-text-secondary">
+                You can retry safely — a healthy run already in progress is
+                unaffected.
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleRetrySync}
+                disabled={retrying}
+                className="mt-3"
+                data-testid="wizard-sync-retry"
+              >
+                {retrying ? "Retrying…" : "Retry sync"}
+              </Button>
+            </>
+          )}
         </div>
       )}
     </section>

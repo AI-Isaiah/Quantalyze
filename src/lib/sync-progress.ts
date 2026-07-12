@@ -120,6 +120,9 @@ export interface SyncProgressResponse {
  * A false positive is low-harm by construction: the 95-04 retry CTA re-POSTs
  * /api/keys/sync, which the partial-unique index
  * `compute_jobs_one_inflight_per_kind_strategy` makes a no-op while the job is
- * genuinely inflight (T-95-09: accept).
+ * genuinely inflight — i.e. `pending`/`running` (T-95-09: accept). NB (F-3): that
+ * index EXCLUDES `failed_retry`, so a re-POST during a retry backoff would insert
+ * a SECOND stitch rather than no-op; the client suppresses the manual Retry
+ * whenever `jobStatus === "failed_retry"` (the job auto-retries) to close that gap.
  */
 export const STALL_THRESHOLD_MS = 720_000; // 12 min

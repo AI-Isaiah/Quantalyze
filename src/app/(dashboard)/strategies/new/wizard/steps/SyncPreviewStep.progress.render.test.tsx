@@ -461,6 +461,46 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     warnSpy.mockRestore();
   });
 
+  // F-3 — during a `failed_retry` backoff the queue auto-retries; the manual
+  // Retry is SUPPRESSED (a re-POST would insert a duplicate stitch — the
+  // idempotency index excludes failed_retry) and the copy relabels honestly.
+  it("suppresses the manual Retry during a failed_retry backoff", async () => {
+    installWaitingMock("computing");
+    // failed_retry is never `stalled` (route truth) → the banner fires via the
+    // SF-1 backstop; the channel surfaces jobStatus so the client can relabel.
+    progressOutcome = {
+      kind: "json",
+      body: {
+        jobStatus: "failed_retry",
+        stalled: false,
+        memberProgress: MEMBERS_3,
+      },
+    };
+    await renderWaiting();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+    });
+
+    // The banner is up, but relabeled to the auto-retry copy …
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("wizard-sync-auto-retrying"),
+    ).toBeInTheDocument();
+    // … and the manual Retry CTA is GONE (RED without F-3 — the enabled button
+    // would let a click insert a SECOND in-flight stitch).
+    expect(
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
+
+    // No retry re-POST is even possible — only the single mount kickoff exists.
+    const posts = fetchSpy.mock.calls.filter(
+      (c) =>
+        String(c[0]).includes("/api/keys/sync") &&
+        (c[1] as RequestInit | undefined)?.method === "POST",
+    );
+    expect(posts).toHaveLength(1);
+  });
+
   // F-2 — a 2xx retry drops the banner, KEEPS the live per-key panel, and does
   // not immediately re-fire the backstop on the deduped `computing` status.
   it("clears the backstop on retry without wiping the panel", async () => {
