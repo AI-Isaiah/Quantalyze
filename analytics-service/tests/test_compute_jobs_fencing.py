@@ -1046,17 +1046,37 @@ def test_defer_compute_job_null_token_backcompat(admin, strategy_id):
 
 
 @pytest.mark.skip(reason=(
-    "P1 TODO — flaky httpx.ReadTimeout at ~120s under live-DB suite load. "
-    "Fence logic in mig 117 mark_compute_job_done verified correct by inspection: "
-    "UPDATE → NOT FOUND → SELECT → RAISE serialization_failure has no hang path. "
+    # (1) ROOT CAUSE — unchanged since the 2026-05-13 investigation:
+    "P1 TODO — flaky httpx.ReadTimeout at ~120s under live-DB suite load "
+    "(contention/latency on the shared test project qmnijlgmdhviwzwfyzlc when the "
+    "python CI job runs concurrently with the e2e job). Fence logic in mig 117 "
+    "mark_compute_job_done is verified correct by inspection: UPDATE → NOT FOUND → "
+    "SELECT → RAISE serialization_failure has no hang path — the timeout is "
+    "infrastructural, NOT a fence failure. "
+    # (2) RE-JUSTIFIED 2026-07 (Phase 97 / v1.9.1 CI-02.1) — deferral, NOT re-enable:
+    "Re-justified 2026-07-12 (Phase 97 / CI-02.1): the Phase-97 per-run-job_id claim "
+    "scoping (CI-01, absorbing PR #610) fixed a DIFFERENT failure mode — foreign-row "
+    "isolation under xdist parallelism — and does NOT address this ReadTimeout "
+    "contention flake, so CI-01 does not make these safe to re-enable. Re-enabling "
+    "before the v1.9.1 ship was declined because stabilization is only demonstrable "
+    "on live CI (these fence tests run only against the shared test project), so the "
+    "milestone→main ship PR itself would have been the first canary — an unacceptable "
+    "gamble on the ship PR's python check. "
+    # (3) CONTRACT INDEPENDENTLY PINNED (this test is supplementary live coverage):
     "989 other tests pass on the same admin client incl. 9/12 fence tests "
-    "(claim, reclaim, token rotation, unexpected-status raise, idempotent already-done). "
-    "Mocked equivalents (_is_serialization_failure classifier, LATE_MARK_IGNORED contract, "
-    "dispatch_tick token threading) also pass. Likely test Supabase project load / "
-    "PostgREST connection pool state under the newly-enabled live suite (drain + "
-    "transition + fence ~ 30 tests added 2026-05-13). Re-enable after either "
-    "(a) bumping postgrest_client_timeout, (b) sharding the live suite, or "
-    "(c) investigating server-side latency on the test project. See TODOS.md."
+    "(claim, reclaim, token rotation, unexpected-status raise, idempotent already-done); "
+    "mocked equivalents (_is_serialization_failure classifier, LATE_MARK_IGNORED "
+    "contract, dispatch_tick token threading) pass; and the migration-117 self-verify "
+    "DO block pins the fence server-side on every prod + test-DB apply. "
+    # (4) SANCTIONED POST-SHIP RE-ENABLE RECIPE:
+    "Re-enable (post-ship) by removing this skip and wrapping the contention-prone RPCs "
+    "(reset_stalled_compute_jobs and the late mark_compute_job_done / "
+    "mark_compute_job_failed calls) in the existing _rpc_retry_timeout guard: a genuine "
+    "timeout becomes pytest.skip (a BaseException, so the enclosing `except Exception` "
+    "cannot swallow it) while the asserted serialization_failure re-raises immediately "
+    "and still reaches the assertion. Then canary on a NON-ship PR's python check. "
+    "The 3 tests' _claim_one sites are already own-job_id scoped (97-01), so isolation "
+    "is not a blocker for the re-enable. See TODOS.md (PR #149 / L165 tracker)."
 ))
 def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, strategy_id):
     """The headline P97 / G12.A.2 regression. Sequence:
@@ -1146,8 +1166,12 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
 
 
 @pytest.mark.skip(reason=(
-    "P1 TODO — same flaky timeout pattern as test_late_mark_done_with_stale_token. "
-    "See that test's skip reason + TODOS.md for the full investigation."
+    "P1 TODO — same flaky httpx.ReadTimeout pattern as "
+    "test_late_mark_done_with_stale_token. Re-justified 2026-07-12 (Phase 97 / "
+    "CI-02.1) on the same grounds: CI-01's per-run-job_id scoping addresses a "
+    "different (isolation) root cause, not this timeout; re-enable via the "
+    "_rpc_retry_timeout guard post-ship. See that test's skip reason + TODOS.md "
+    "for the full investigation and re-enable recipe."
 ))
 def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, strategy_id):
     """Same contract as mark_done — mark_failed must reject the prior
@@ -1571,8 +1595,12 @@ def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
 
 
 @pytest.mark.skip(reason=(
-    "P1 TODO — same flaky timeout pattern as test_late_mark_done_with_stale_token. "
-    "See that test's skip reason + TODOS.md for the full investigation."
+    "P1 TODO — same flaky httpx.ReadTimeout pattern as "
+    "test_late_mark_done_with_stale_token. Re-justified 2026-07-12 (Phase 97 / "
+    "CI-02.1) on the same grounds: CI-01's per-run-job_id scoping addresses a "
+    "different (isolation) root cause, not this timeout; re-enable via the "
+    "_rpc_retry_timeout guard post-ship. See that test's skip reason + TODOS.md "
+    "for the full investigation and re-enable recipe."
 ))
 def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, strategy_id):
     """The fence must engage even on the already-done branch. Sequence:
