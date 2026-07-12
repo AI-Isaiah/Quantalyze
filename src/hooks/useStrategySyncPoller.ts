@@ -70,6 +70,7 @@ export interface UseStrategySyncPollerOptions {
    */
   onTerminal?: (
     status: ComputationStatus,
+    error: string | null,
   ) => Promise<"done" | "repoll"> | "done" | "repoll";
   /** Escalation sink: wizard `failPolling`→SYNC_FAILED; SyncProgress `onStatusChange("error")`. */
   onError: () => void;
@@ -90,14 +91,17 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
   // re-render on a 1s elapsed timer). Re-running would reset the effect-local
   // counters (breaking the SyncProgress cap and the wizard escalation pins), so
   // the callbacks live in refs read from inside the timer callbacks instead of in
-  // the effect deps. Assigning during render keeps them current before any timer
-  // (which only fires after commit) can read them.
+  // the effect deps. This sync effect runs on every commit — before any poll
+  // timer (≥ the first schedule delay away) can fire — so the refs are always
+  // current; it is declared BEFORE the poll effect so it flushes first.
   const onStatusRef = useRef(opts.onStatus);
   const onTerminalRef = useRef(opts.onTerminal);
   const onErrorRef = useRef(opts.onError);
-  onStatusRef.current = opts.onStatus;
-  onTerminalRef.current = opts.onTerminal;
-  onErrorRef.current = opts.onError;
+  useEffect(() => {
+    onStatusRef.current = opts.onStatus;
+    onTerminalRef.current = opts.onTerminal;
+    onErrorRef.current = opts.onError;
+  });
 
   // A `readonly number[]` schedule (module constant) has a stable identity, so it
   // is safe in the deps; a primitive `number` is stable by value.
@@ -230,7 +234,7 @@ export function useStrategySyncPoller(opts: UseStrategySyncPollerOptions): void 
         // complete_with_warnings). Non-terminal (pending/computing) → keep polling.
         if (nextStatus === "failed" || isComputedAnalytics(nextStatus)) {
           const result = onTerminalRef.current
-            ? await onTerminalRef.current(nextStatus)
+            ? await onTerminalRef.current(nextStatus, nextError)
             : "done";
           if (stopped) return;
           if (result === "repoll") {

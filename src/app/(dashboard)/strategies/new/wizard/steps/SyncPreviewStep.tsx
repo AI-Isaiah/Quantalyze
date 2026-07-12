@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { Button } from "@/components/ui/Button";
 import {
   FactsheetPreview,
@@ -541,183 +542,123 @@ export function SyncPreviewStep({
     return () => window.clearInterval(id);
   }, [phase]);
 
-  useEffect(() => {
-    if (phase !== "waiting_for_complete") return;
-    const supabase = createClient();
+  // UX-03 (#46): heavy terminal-fetch failure counter. SEPARATE from the hook's
+  // status-read consecutive-error counter — the narrow status read can keep
+  // succeeding (resetting that counter) while the heavy Promise.all persistently
+  // REJECTS (a network blip, an aborted fetch, a transport-level trades/api_keys
+  // error). With a shared counter such a throw oscillates 0→1→0 and never
+  // escalates, so the wizard spins forever (H-0197, narrowed to heavy-fetch-only
+  // faults). A ref (not a poll-local `let`) so it survives the 1s elapsed-timer
+  // re-renders that recreate the onTerminal closure; per the invariant it never
+  // needs a reset — every non-throwing heavy outcome (passed / gate-fail) stops
+  // the loop, so the only path that repolls is a throw. (A Supabase error
+  // returned AS A VALUE on a heavy read throws below, so it escalates here too;
+  // an RLS denial on `trades` instead drops tradeCount to 0 via `?? 0` and the
+  // gate fails INSUFFICIENT_TRADES — a terminal, loop-stopping outcome.)
+  const heavyFetchErrorsRef = useRef(0);
 
-    // `stopped` is checked at the top of every tick AND before every
-    // self-reschedule so the loop hard-stops the instant the effect
-    // tears down (phase change / strategyId change / unmount). The old
-    // setInterval relied on the effect re-running to clear the timer,
-    // which left the previous interval's closure firing 1-2 extra polls
-    // against a stale `phase` after a setPhase() (H-0195). A
-    // self-scheduling setTimeout with a local guard cannot fire again
-    // once cleared.
-    let stopped = false;
-    let timerId: number | undefined;
-    let tick = 0;
-    // Count of CONSECUTIVE status-read failures (Supabase `error` or a
-    // transport throw before the terminal fetch); reset to 0 on any clean
-    // status read.
-    let consecutiveErrors = 0;
-    // Count of CONSECUTIVE terminal/heavy-fetch failures. Tracked separately
-    // from `consecutiveErrors` because the narrow status read can keep
-    // succeeding (resetting `consecutiveErrors`) while the heavy Promise.all
-    // persistently REJECTS — e.g. a network blip, an aborted fetch, or a
-    // transport-level error on a trades/api_keys query. (A Supabase error
-    // returned AS A VALUE — `{ data, error }` with a non-null `error` — is NOT
-    // caught here: the destructured results ignore `.error`, so e.g. an RLS
-    // denial on `trades` drops `tradeCount` to 0 via `?? 0` and the gate fails
-    // with INSUFFICIENT_TRADES — a terminal, loop-stopping outcome, not a
-    // heavyFetchErrors escalation.) With a shared counter a persistent throw
-    // oscillates 0→1→0 and never escalates, so the wizard spins forever
-    // (H-0197, narrowed to heavy-fetch-only faults). A dedicated counter never
-    // needs a reset: every non-throwing heavy outcome (passed / gate-fail)
-    // sets `stopped = true` and terminates the loop, so the only path that
-    // reschedules is a throw.
-    let heavyFetchErrors = 0;
+  /**
+   * Stop polling and surface a recoverable SYNC_FAILED envelope. Used when the
+   * status read keeps failing (H-0197 / H-0198) — the hook's escalation sink —
+   * AND by the heavy terminal arm's own escalation below, so the user gets an
+   * exit affordance instead of an indefinite spinner. Fires the same
+   * `wizard_error` funnel event as the gate-failure path.
+   */
+  const failPolling = () => {
+    if (!mountedRef.current) return;
+    setErrorCode("SYNC_FAILED");
+    setPhase("gate_failed");
+    trackForQuantsEventClient("wizard_error", {
+      wizard_session_id: wizardSessionId,
+      step: "sync_preview",
+      code: "SYNC_FAILED",
+    });
+  };
 
-    const scheduleNext = () => {
-      if (stopped) return;
-      const delay =
-        POLL_BACKOFF_MS[Math.min(tick, POLL_BACKOFF_MS.length - 1)];
-      tick += 1;
-      timerId = window.setTimeout(poll, delay);
-    };
+  // UX-03 (#46): the status-poll loop (self-scheduling setTimeout over
+  // POLL_BACKOFF_MS, the strategy_analytics status read, the consecutive-error
+  // escalation, terminal detection) now lives in the shared
+  // `useStrategySyncPoller`. What STAYS here is the surface-specific work: the
+  // per-tick status setState + the 95-04 sync-progress piggyback (onStatus), the
+  // SYNC_FAILED escalation sink (onError), and the heavy composite/single-key
+  // terminal arms incl. their heavyFetchErrors escalation + WIZ-05/RT-1 stall
+  // behavior (onTerminal). The kickoff effect + elapsed timer + waiting render
+  // are untouched; the three frozen wizard tests + the 95-04 sibling prove zero
+  // behavior change.
+  useStrategySyncPoller({
+    enabled: phase === "waiting_for_complete",
+    strategyId,
+    schedule: POLL_BACKOFF_MS,
+    maxConsecutiveErrors: MAX_CONSECUTIVE_POLL_ERRORS,
+    onError: failPolling,
+    onStatus: (nextStatus, nextError) => {
+      // Keep the two status columns in state so the waiting render's phase-aware
+      // copy (downloaded vs processed) + the failure line update each tick.
+      setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
+      setComputationError((prev) => (prev === nextError ? prev : nextError));
 
-    /**
-     * Stop polling and surface a recoverable SYNC_FAILED envelope. Used
-     * when the status read keeps failing (H-0197 / H-0198) so the user
-     * gets an exit affordance instead of an indefinite spinner. Fires
-     * the same `wizard_error` funnel event as the gate-failure path so
-     * the drop-off is recorded in PostHog.
-     */
-    const failPolling = () => {
-      if (stopped || !mountedRef.current) return;
-      stopped = true;
-      setErrorCode("SYNC_FAILED");
-      setPhase("gate_failed");
-      trackForQuantsEventClient("wizard_error", {
-        wizard_session_id: wizardSessionId,
-        step: "sync_preview",
-        code: "SYNC_FAILED",
-      });
-    };
-
-    const poll = async () => {
-      if (stopped) return;
-      try {
-        // Lightweight status poll: only read the two status columns
-        // while we wait for completion so each tick is cheap. The
-        // heavy analytics columns (sparkline, metrics) only load once
-        // on the terminal state.
-        const { data: statusRow, error: statusError } = await supabase
-          .from("strategy_analytics")
-          .select("computation_status, computation_error")
-          .eq("strategy_id", strategyId)
-          .maybeSingle();
-
-        if (stopped) return;
-
-        // A Supabase `error` (RLS denial, transient 503) is NOT the same
-        // as a genuine `pending` row. Without this branch an RLS
-        // regression returns { data: null, error } and `nextStatus`
-        // silently collapses to "pending" via the ?? default — the
-        // wizard then spins forever on a permissions misconfig nobody
-        // can see (H-0198). Treat it as a poll failure and let the
-        // consecutive-error counter escalate.
-        if (statusError) {
-          console.error(
-            "[wizard:SyncPreviewStep] poll status error:",
-            statusError,
-          );
-          consecutiveErrors += 1;
-          if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
-            failPolling();
-            return;
-          }
-          scheduleNext();
-          return;
-        }
-
-        consecutiveErrors = 0;
-
-        const nextStatus = statusRow?.computation_status ?? "pending";
-        const nextError = statusRow?.computation_error ?? null;
-        setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
-        setComputationError((prev) => (prev === nextError ? prev : nextError));
-
-        // PROG-02/03 — piggyback the per-key progress projection on this tick
-        // (composite only; no new timer, cadence follows POLL_BACKOFF_MS). This
-        // is COSMETIC: a failure is swallowed with a console.warn and MUST NOT
-        // touch `consecutiveErrors` / `heavyFetchErrors` — strategy_analytics
-        // above stays the authoritative poll. Fire-and-forget so a slow/hung
-        // progress route never delays the status loop; the setState is guarded
-        // by the effect's `stopped` flag + `mountedRef`.
-        if (isComposite) {
-          void fetch(`/api/strategies/${strategyId}/sync-progress`)
-            .then((r) => (r.ok ? r.json() : null))
-            .then((json: SyncProgressResponse | null) => {
-              if (!stopped && mountedRef.current && json) {
-                setSyncProgress(json);
-              }
-            })
-            .catch((progressErr) => {
-              console.warn(
-                "[wizard:SyncPreviewStep] sync-progress fetch failed (cosmetic, ignored):",
-                progressErr,
-              );
-            });
-        }
-
-        // Hard-failure terminal state. Bail BEFORE the heavy Promise.all
-        // (H-0195): on `failed` the analytics row is errored, so the 5
-        // trades/api_keys queries are pure waste, and the gate would only
-        // ever map this to GATE_ANALYTICS_FAILED anyway. Route straight
-        // to the scripted analytics-failed envelope, carrying
-        // computation_error for the detail line, and stop polling.
-        if (nextStatus === "failed") {
-          stopped = true;
-          if (!mountedRef.current) return;
-          setErrorCode("GATE_ANALYTICS_FAILED");
-          setPhase("gate_failed");
-          trackForQuantsEventClient("wizard_error", {
-            wizard_session_id: wizardSessionId,
-            step: "sync_preview",
-            code: "GATE_ANALYTICS_FAILED",
+      // PROG-02/03 — piggyback the per-key progress projection on this tick
+      // (composite only; no new timer, cadence follows POLL_BACKOFF_MS). This is
+      // COSMETIC: a failure is swallowed with a console.warn and MUST NOT touch
+      // the authoritative strategy_analytics poll. Fire-and-forget so a
+      // slow/hung progress route never delays the status loop; the setState is
+      // guarded by `mountedRef`.
+      if (isComposite) {
+        void fetch(`/api/strategies/${strategyId}/sync-progress`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((json: SyncProgressResponse | null) => {
+            if (mountedRef.current && json) {
+              setSyncProgress(json);
+            }
+          })
+          .catch((progressErr) => {
+            console.warn(
+              "[wizard:SyncPreviewStep] sync-progress fetch failed (cosmetic, ignored):",
+              progressErr,
+            );
           });
-          return;
-        }
+      }
+    },
+    onTerminal: async (nextStatus, nextError) => {
+      const supabase = createClient();
 
-        // Terminal SUCCESS includes complete_with_warnings — else a warned
-        // first compute (e.g. a Deribit onboarding tripping a DQ guard) polls
-        // forever, since the runner now persists that status instead of it
-        // being laundered to 'complete' (mig 20260707120000).
-        if (!isComputedAnalytics(nextStatus)) {
-          scheduleNext();
-          return;
-        }
+      // Hard-failure terminal state. Bail BEFORE the heavy Promise.all (H-0195):
+      // on `failed` the analytics row is errored, so the 5 trades/api_keys
+      // queries are pure waste, and the gate would only ever map this to
+      // GATE_ANALYTICS_FAILED anyway. Route straight to the scripted
+      // analytics-failed envelope, carrying computation_error for the detail
+      // line (already threaded via onStatus above), and stop polling.
+      if (nextStatus === "failed") {
+        if (!mountedRef.current) return "done";
+        setErrorCode("GATE_ANALYTICS_FAILED");
+        setPhase("gate_failed");
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "sync_preview",
+          code: "GATE_ANALYTICS_FAILED",
+        });
+        return "done";
+      }
 
-        // Terminal state reached. Fetch the heavy analytics row, trade
-        // count + span, sample symbols for market detection, and the
-        // exchange name in one Promise.all so the user moves to the
-        // factsheet preview as fast as possible.
-        //
-        // Wrapped in its own try/catch (separate from the status-read catch
-        // below) so a persistently-throwing heavy fetch escalates via
-        // `heavyFetchErrors` instead of being masked by the line-above
-        // `consecutiveErrors = 0` reset. One transient heavy fault is still
-        // tolerated; the threshold matches the status-read path.
-        try {
-          // COMPOSITE ARM (Pitfall 1/4/5): the composite reads the stitched
-          // result directly (analytics mask + members + full series +
-          // denominator config) and NEVER routes through checkStrategyGate or
-          // queries `trades` (a composite has 0 trades — the single-key gate
-          // would false-fail INSUFFICIENT_TRADES). Its only gate is the shared
-          // `nextStatus === "failed"` branch above, which fires before this
-          // read. Supabase error-as-value on any read throws so the existing
-          // heavyFetchErrors escalation (H-0197) applies unchanged.
-          if (isComposite) {
+      // Terminal SUCCESS (isComputedAnalytics, incl. complete_with_warnings).
+      // Fetch the heavy analytics row, trade count + span, sample symbols for
+      // market detection, and the exchange name in one Promise.all so the user
+      // moves to the factsheet preview as fast as possible.
+      //
+      // Wrapped in its own try/catch so a persistently-throwing heavy fetch
+      // escalates via `heavyFetchErrorsRef` instead of being masked. One
+      // transient heavy fault is still tolerated; the threshold matches the
+      // status-read path.
+      try {
+        // COMPOSITE ARM (Pitfall 1/4/5): the composite reads the stitched
+        // result directly (analytics mask + members + full series +
+        // denominator config) and NEVER routes through checkStrategyGate or
+        // queries `trades` (a composite has 0 trades — the single-key gate
+        // would false-fail INSUFFICIENT_TRADES). Its only gate is the shared
+        // `nextStatus === "failed"` branch above, which fires before this
+        // read. Supabase error-as-value on any read throws so the existing
+        // heavyFetchErrors escalation (H-0197) applies unchanged.
+        if (isComposite) {
             const [analyticsRes, membersRes, seriesRes, stratRes] =
               await Promise.all([
                 supabase
@@ -769,7 +710,7 @@ export function SyncPreviewStep({
               );
             }
 
-            if (!mountedRef.current) return;
+            if (!mountedRef.current) return "done";
 
             const analyticsRow =
               (analyticsRes.data as Record<string, unknown> | null) ?? null;
@@ -838,8 +779,7 @@ export function SyncPreviewStep({
             // stitched composite always persists ≥1 day, so this never hides a
             // real result.
             if (series.length === 0) {
-              scheduleNext();
-              return;
+              return "repoll";
             }
 
             const compositeMetrics: FactsheetPreviewMetric[] = [
@@ -935,10 +875,9 @@ export function SyncPreviewStep({
               },
             };
 
-            stopped = true;
             setSnapshot(compositeSnapshot);
             setPhase("passed");
-            return;
+            return "done";
           }
 
           const [
@@ -1010,7 +949,7 @@ export function SyncPreviewStep({
 
           const keyRow = keyRowResult.data;
 
-          if (!mountedRef.current) return;
+          if (!mountedRef.current) return "done";
 
           const gate = checkStrategyGate({
             apiKeyId,
@@ -1031,7 +970,6 @@ export function SyncPreviewStep({
           });
 
           if (!gate.passed) {
-            stopped = true;
             setGateResult(gate);
             const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
             setErrorCode(wizardCode);
@@ -1042,7 +980,7 @@ export function SyncPreviewStep({
               code: wizardCode,
               trade_count: tradeCount ?? 0,
             });
-            return;
+            return "done";
           }
 
           const metrics: FactsheetPreviewMetric[] = [
@@ -1077,57 +1015,31 @@ export function SyncPreviewStep({
             computedAt: analytics?.computed_at ?? null,
           };
 
-          stopped = true;
           setSnapshot(nextSnapshot);
           setPhase("passed");
+          return "done";
         } catch (heavyErr) {
           // The terminal fetch / gate evaluation threw (network blip, an
           // aborted fetch, or a transport-level rejection). One transient
-          // fault is tolerated, but a persistent heavy-fetch fault
-          // must escalate — the narrow status read keeps succeeding above,
-          // so `consecutiveErrors` would never reach the threshold (H-0197,
-          // heavy-fetch-narrowed). Count consecutive heavy failures and
-          // surface the recoverable SYNC_FAILED envelope past the threshold.
-          if (stopped) return;
+          // fault is tolerated, but a persistent heavy-fetch fault must
+          // escalate — the hook's status read keeps succeeding, so its
+          // consecutive-error counter would never reach the threshold
+          // (H-0197, heavy-fetch-narrowed). Count consecutive heavy failures
+          // in a ref and surface the recoverable SYNC_FAILED envelope past it.
+          if (!mountedRef.current) return "done";
           console.error(
             "[wizard:SyncPreviewStep] terminal fetch error:",
             heavyErr,
           );
-          heavyFetchErrors += 1;
-          if (heavyFetchErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          heavyFetchErrorsRef.current += 1;
+          if (heavyFetchErrorsRef.current >= MAX_CONSECUTIVE_POLL_ERRORS) {
             failPolling();
-            return;
+            return "done";
           }
-          scheduleNext();
+          return "repoll";
         }
-      } catch (err) {
-        // A thrown status read (network blip, aborted fetch, transient 503)
-        // is tolerated once, but repeated throws must not leave the wizard
-        // spinning forever (H-0197). Count consecutive failures and
-        // escalate to a recoverable SYNC_FAILED envelope past the
-        // threshold; otherwise back off and retry.
-        if (stopped) return;
-        console.error("[wizard:SyncPreviewStep] poll error:", err);
-        consecutiveErrors += 1;
-        if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
-          failPolling();
-          return;
-        }
-        scheduleNext();
-      }
-    };
-
-    // Schedule the first poll after one base interval, exactly matching
-    // the replaced setInterval's first-tick latency (setInterval also
-    // waits one period before its first callback) so resume/timing
-    // behaviour is unchanged.
-    timerId = window.setTimeout(poll, POLL_BACKOFF_MS[0]);
-
-    return () => {
-      stopped = true;
-      if (timerId !== undefined) window.clearTimeout(timerId);
-    };
-  }, [phase, strategyId, apiKeyId, wizardSessionId, isComposite]);
+      },
+    });
 
   const handleUseThisKey = useCallback(() => {
     if (snapshot) onComplete(snapshot);
