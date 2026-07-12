@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ExposureByClass } from "./ExposureByClass";
 import type { ExposureSnapshot, ExposureSlice } from "@/lib/portfolio-exposure";
@@ -104,6 +104,67 @@ describe("<ExposureByClass> — honest-empty", () => {
     // no fabricated numbers, no KPI strip, no title
     expect(screen.queryByTestId("kpi-gross")).toBeNull();
     expect(screen.queryByText("Exposure by asset class")).toBeNull();
+  });
+});
+
+describe("<ExposureByClass> — drilldown table", () => {
+  it("renders a real table with the six UI-SPEC columns in order, sorted by valueUsd desc", () => {
+    render(<ExposureByClass snapshot={HEDGED} />);
+    const table = screen.getByRole("table");
+    const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toEqual(["Venue", "Symbol", "Type", "Side", "Gross", "Net"]);
+
+    const rows = table.querySelectorAll("tbody tr");
+    expect(rows).toHaveLength(2);
+    // binance spot $300K sorts before deribit derivative $100K
+    expect(rows[0].textContent).toContain("binance");
+    expect(rows[1].textContent).toContain("deribit");
+  });
+
+  it("renders Type as Spot/Deriv, lowercase muted Side, and signed Net without color", () => {
+    render(<ExposureByClass snapshot={HEDGED} />);
+    const rows = screen.getByRole("table").querySelectorAll("tbody tr");
+    // spot row
+    expect(within(rows[0] as HTMLElement).getByText("Spot")).toBeTruthy();
+    // derivative short row
+    const shortRow = rows[1] as HTMLElement;
+    expect(within(shortRow).getByText("Deriv")).toBeTruthy();
+    const sideCell = within(shortRow).getByText("short");
+    expect(sideCell.className).toContain("text-caption");
+    expect(sideCell.className).toContain("text-text-secondary");
+    const netCell = within(shortRow).getByText("-$100K");
+    expect(netCell.className).not.toContain("text-negative");
+  });
+
+  it("wraps the table in a max-h-64 scroll region only when slices exceed 12", () => {
+    const many = snap(
+      Array.from({ length: 14 }, (_, i) => ({
+        holdingType: "spot" as const,
+        venue: "binance",
+        symbol: `SYM${i}`,
+        side: "long" as const,
+        valueUsd: (14 - i) * 1000,
+        signedValueUsd: (14 - i) * 1000,
+      })),
+    );
+    const { getByTestId, unmount } = render(<ExposureByClass snapshot={many} />);
+    const wrapper = getByTestId("drilldown");
+    expect(wrapper.className).toContain("max-h-64");
+    expect(wrapper.className).toContain("overflow-y-auto");
+    unmount();
+
+    const few = snap(
+      Array.from({ length: 5 }, (_, i) => ({
+        holdingType: "spot" as const,
+        venue: "binance",
+        symbol: `SYM${i}`,
+        side: "long" as const,
+        valueUsd: (5 - i) * 1000,
+        signedValueUsd: (5 - i) * 1000,
+      })),
+    );
+    render(<ExposureByClass snapshot={few} />);
+    expect(screen.getByTestId("drilldown").className).not.toContain("max-h-64");
   });
 });
 
