@@ -690,18 +690,23 @@ def strategy_id(admin):
 
 
 def _claim_one(
-    admin, worker_id: str, *, want_job_id: str | None = None
+    admin, worker_id: str, *, want_job_id: str
 ) -> dict[str, Any] | None:
     """Call claim_compute_jobs_with_priority and return OUR row.
 
     Phase-97 CI-01: the claim RPC returns the batch head of the GLOBAL claim
     queue, which — on the shared test Supabase project hit by interleaved
     grouped DB tests and the concurrent e2e job — may be a FOREIGN pending row,
-    not the one this test seeded. Pass ``want_job_id`` to scope the return to
-    OUR job (``r["id"] == want_job_id``), returning None when our job was not
-    in the batch (never a foreign row). The legacy arm (``want_job_id=None``)
-    returns ``data[0]`` and exists only so the offline decoy can pin the
-    global-queue defect the scoping removes.
+    not the one this test seeded. ``want_job_id`` scopes the return to OUR job
+    (``r["id"] == want_job_id``), returning None when our job was not in the
+    batch (never a foreign row).
+
+    ``want_job_id`` is a REQUIRED keyword-only param on purpose (red-team F-1):
+    the old ``data[0]`` global-head fallback is DELETED, so a future caller that
+    omits ``want_job_id`` (e.g. a copy-pasted pre-97 ``_claim_one(admin, "w1")``
+    snippet) fails at call time with a TypeError instead of silently reverting
+    that site to the flaky foreign-row global-head behavior. That keeps the
+    fence-flake fix from being able to regress unnoticed offline.
     """
     res = admin.rpc("claim_compute_jobs_with_priority", {
         "p_batch_size": 50,
@@ -709,9 +714,7 @@ def _claim_one(
         "p_unified_backbone_active": False,
     }).execute()
     rows = res.data or []
-    if want_job_id is not None:
-        return next((r for r in rows if r["id"] == want_job_id), None)
-    return rows[0] if rows else None
+    return next((r for r in rows if r["id"] == want_job_id), None)
 
 
 def test_claim_stamps_claim_token(admin, strategy_id):
@@ -790,9 +793,10 @@ def test_claim_one_decoy_foreign_row_offline():
     batch holds only foreign rows, the scoped call returns None, never a
     foreign row.
 
-    This test FAILS against the unscoped helper (TypeError: no `want_job_id`)
-    and PASSES after the Task 2 scoping. It is the ONLY isolation signal that
-    runs without the live test Supabase project.
+    This test PASSES against the scoped helper. It is the ONLY isolation signal
+    that runs without the live test Supabase project, and it also pins that the
+    global-head foot-gun is CLOSED (red-team F-1): `want_job_id` is required, so
+    a call omitting it can no longer silently revert a site to flaky behavior.
     """
     own_id = str(uuid.uuid4())
     foreign_id = str(uuid.uuid4())
@@ -811,13 +815,24 @@ def test_claim_one_decoy_foreign_row_offline():
         "the claim batch"
     )
 
-    # Legacy (unscoped) arm: returns the FOREIGN row at data[0] — this is the
-    # exact defect the scoping removes at the call sites.
-    legacy = _claim_one(stub, "decoy-offline")
-    assert legacy is not None and legacy["id"] == foreign_id, (
-        "unscoped _claim_one returns data[0] (the foreign row) — the "
-        "global-queue assumption this regression pins"
+    # The OLD global-head behavior (inlined, since the fallback arm is now
+    # DELETED): data[0] is the FOREIGN row — the exact defect the required
+    # scoping removes. Reproduce it locally so the scoped-vs-unscoped
+    # distinction stays visible in the decoy.
+    old_global_head = (
+        stub.rpc("claim_compute_jobs_with_priority", {}).execute().data[0]
     )
+    assert old_global_head["id"] == foreign_id, (
+        "the pre-97 global-head arm returned data[0] (the foreign row) — the "
+        "global-queue defect the required scoping removes"
+    )
+
+    # Foot-gun CLOSED (red-team F-1): `want_job_id` is a required keyword-only
+    # param with no default, so a future caller that omits it (e.g. a
+    # copy-pasted pre-97 `_claim_one(admin, "w1")` snippet) fails at call time
+    # instead of silently reverting that site to flaky global-head behavior.
+    with pytest.raises(TypeError):
+        _claim_one(stub, "decoy-offline")  # type: ignore[call-arg]
 
     # Only-foreign batch: the scoped call must return None, never a foreign row.
     only_foreign = _StubAdmin([foreign_row])
