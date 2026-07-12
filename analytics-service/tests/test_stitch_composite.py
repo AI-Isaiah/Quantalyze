@@ -21,6 +21,7 @@ import pytest
 from services.broker_dailies import gap_fill_daily_returns
 from services.metrics import compute_all_metrics
 from services.stitch_composite import (
+    MTM_REASON_OPTIONS,
     CompositeOverlapError,
     MemberBasisSignal,
     MemberWindow,
@@ -201,6 +202,24 @@ def test_mtm_gate_perp_only_deribit_is_available() -> None:
 def test_mtm_gate_options_active_deribit_gates_off() -> None:
     members = [MemberBasisSignal(1, "deribit", has_option_activity=True)]
     assert mark_to_market_available(members) == (False, "unsmoothed_options_book")
+
+
+def test_mtm_gate_options_reason_pins_frontend_literal() -> None:
+    """Phase 102 MTM-02 (Option A, COMPOSE-1): an options-member composite stays
+    honestly gated OFF via the VALUE-IMPORTED constant (rename-decouple guard,
+    mirrors the 101-02 pattern), AND the constant's value is pinned character-exact
+    to ``"unsmoothed_options_book"`` — the machine reason the frontend copy switch
+    (plan 102-01 basis-context.tsx) keys off. A silent constant rename that changed
+    the emitted string would decouple the frontend copy from the machine reason;
+    this pin fails first. Neuter: change the constant's value → RED here (and the
+    frontend copy switch would silently fall through to the generic default)."""
+    members = [
+        MemberBasisSignal(1, "deribit", has_option_activity=True),
+        MemberBasisSignal(2, "deribit", has_option_activity=False),
+    ]
+    assert mark_to_market_available(members) == (False, MTM_REASON_OPTIONS)
+    # The frontend copy switch (plan 102-01) depends on this EXACT literal.
+    assert MTM_REASON_OPTIONS == "unsmoothed_options_book"
 
 
 @pytest.mark.parametrize("venue", ["binance", "okx", "bybit"])

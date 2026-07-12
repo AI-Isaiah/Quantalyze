@@ -31,6 +31,7 @@ from services.deribit_ingest import (
 from services.native_nav import NativeLedger
 from services.nav_twr import NavReconstructionError
 from services.job_worker import DispatchOutcome, run_stitch_composite_job
+from services.stitch_composite import MTM_REASON_OPTIONS
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +579,10 @@ async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
     by_basis = _by_basis(fake)
     assert by_basis is not None
     assert list(by_basis) == ["cash_settlement"]  # exactly one key, no null
+    # Phase 102 MTM-02 (Option A, COMPOSE-2): an options-member composite persists
+    # NO mark_to_market key (never a JSON null in the by-basis object) — the honest-
+    # disabled contract, tied to the value-imported constant (rename-decouple guard).
+    assert "mark_to_market" not in by_basis
     # mtm_gated_reason surfaced in the merged DQ flags.
     dq = None
     for table, payload, _ in reversed(fake.upserts):
@@ -587,7 +592,7 @@ async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
             dq = payload["data_quality_flags"]
             break
     assert dq is not None
-    assert dq.get("mtm_gated_reason") == "unsmoothed_options_book"
+    assert dq.get("mtm_gated_reason") == MTM_REASON_OPTIONS == "unsmoothed_options_book"
 
 
 @pytest.mark.asyncio
