@@ -32,15 +32,30 @@ BEGIN
       USING ERRCODE = 'insufficient_privilege';
   END IF;
 
-  -- Ownership + composite-draft guard in ONE least-disclosure lookup: filtering
-  -- by user_id means "not found" and "not owned" are indistinguishable to the
-  -- caller (no existence oracle). A single-key strategy (api_key_id NOT NULL)
-  -- can NEVER acquire members through this fn (protects composite-detection).
+  -- Ownership + composite-DRAFT guard in ONE least-disclosure lookup: filtering
+  -- by user_id AND status='draft' means "not found", "not owned", and
+  -- "not a draft (already published/pending_review/archived)" are ALL
+  -- indistinguishable to the caller (no existence oracle, uniform 42501).
+  -- A single-key strategy (api_key_id NOT NULL) can NEVER acquire members
+  -- through this fn (protects composite-detection).
+  --
+  -- RT2-FINDING-1: the status='draft' predicate is LOAD-BEARING, not cosmetic.
+  -- The fn's name/comments/error all say "composite DRAFT", but a PUBLISHED
+  -- composite ALSO keeps api_key_id NULL, so without this predicate an owner
+  -- POSTing /api/strategies/composite/set-members for their OWN published
+  -- composite would wholesale-rewrite strategy_keys AND (via the RT-FINDING-1
+  -- invalidation below) flip the published strategy_analytics.computation_status
+  -- complete -> pending, degrading the live public factsheet to the computing
+  -- placeholder until a re-stitch re-attests over the post-review member set —
+  -- with zero admin visibility. The wizard set-members flow ONLY ever targets a
+  -- draft (the "Continue" handoff runs strictly before finalize_wizard_strategy
+  -- moves the row off 'draft'), so gating to draft breaks no legitimate caller.
   SELECT api_key_id
     INTO v_api_key_id
     FROM strategies
    WHERE id = p_strategy_id
-     AND user_id = p_user_id;
+     AND user_id = p_user_id
+     AND status = 'draft';
   IF NOT FOUND THEN
     RAISE EXCEPTION 'set_wizard_composite_members: no composite draft for the caller'
       USING ERRCODE = 'insufficient_privilege';

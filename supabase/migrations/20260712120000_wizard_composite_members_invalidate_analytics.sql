@@ -88,15 +88,30 @@ BEGIN
       USING ERRCODE = 'insufficient_privilege';
   END IF;
 
-  -- Ownership + composite-draft guard in ONE least-disclosure lookup: filtering
-  -- by user_id means "not found" and "not owned" are indistinguishable to the
-  -- caller (no existence oracle). A single-key strategy (api_key_id NOT NULL)
-  -- can NEVER acquire members through this fn (protects composite-detection).
+  -- Ownership + composite-DRAFT guard in ONE least-disclosure lookup: filtering
+  -- by user_id AND status='draft' means "not found", "not owned", and
+  -- "not a draft (already published/pending_review/archived)" are ALL
+  -- indistinguishable to the caller (no existence oracle, uniform 42501).
+  -- A single-key strategy (api_key_id NOT NULL) can NEVER acquire members
+  -- through this fn (protects composite-detection).
+  --
+  -- RT2-FINDING-1: the status='draft' predicate is LOAD-BEARING, not cosmetic.
+  -- The fn's name/comments/error all say "composite DRAFT", but a PUBLISHED
+  -- composite ALSO keeps api_key_id NULL, so without this predicate an owner
+  -- POSTing /api/strategies/composite/set-members for their OWN published
+  -- composite would wholesale-rewrite strategy_keys AND (via the RT-FINDING-1
+  -- invalidation below) flip the published strategy_analytics.computation_status
+  -- complete -> pending, degrading the live public factsheet to the computing
+  -- placeholder until a re-stitch re-attests over the post-review member set —
+  -- with zero admin visibility. The wizard set-members flow ONLY ever targets a
+  -- draft (the "Continue" handoff runs strictly before finalize_wizard_strategy
+  -- moves the row off 'draft'), so gating to draft breaks no legitimate caller.
   SELECT api_key_id
     INTO v_api_key_id
     FROM strategies
    WHERE id = p_strategy_id
-     AND user_id = p_user_id;
+     AND user_id = p_user_id
+     AND status = 'draft';
   IF NOT FOUND THEN
     RAISE EXCEPTION 'set_wizard_composite_members: no composite draft for the caller'
       USING ERRCODE = 'insufficient_privilege';
@@ -179,7 +194,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.set_wizard_composite_members IS
-  'ONB-03/L-4 + RT-FINDING-1: wholesale delete-then-insert of a composite draft''s strategy_keys members (seq derived server-side from window_start ASC). When the incoming member set DIFFERS from the persisted one (order-independent signature over api_key_id+window_start+window_end), invalidates a stale COMPLETED strategy_analytics row (computation_status complete/complete_with_warnings -> pending) so the wizard verify step re-stitches instead of short-circuiting to the old metrics; an identical re-Continue leaves analytics untouched (WIZ-05 no-op invariant). Only touches completed/idle rows, never a computing row the worker owns. Guards: auth.uid()=p_user_id, strategy owned by caller, api_key_id IS NULL. Returns the member count written.';
+  'ONB-03/L-4 + RT-FINDING-1: wholesale delete-then-insert of a composite draft''s strategy_keys members (seq derived server-side from window_start ASC). When the incoming member set DIFFERS from the persisted one (order-independent signature over api_key_id+window_start+window_end), invalidates a stale COMPLETED strategy_analytics row (computation_status complete/complete_with_warnings -> pending) so the wizard verify step re-stitches instead of short-circuiting to the old metrics; an identical re-Continue leaves analytics untouched (WIZ-05 no-op invariant). Only touches completed/idle rows, never a computing row the worker owns. Guards: auth.uid()=p_user_id, strategy owned by caller, status=''draft'' (a published/pending_review/archived composite is rejected with the SAME uniform not-owned 42501 so an owner cannot rewrite an attested member set or invalidate published analytics), api_key_id IS NULL. Returns the member count written.';
 
 -- Grants are unchanged by CREATE OR REPLACE, but re-assert for clarity/idempotence.
 REVOKE ALL ON FUNCTION public.set_wizard_composite_members(uuid, uuid, jsonb)
@@ -209,10 +224,12 @@ BEGIN
   IF v_set_src NOT ILIKE '%IS DISTINCT FROM%' THEN
     RAISE EXCEPTION 'wizard_composite_invalidate self-verify: the change-detection gate (signature compare) is missing — a no-op re-Continue would re-stitch (WIZ-05 violated)';
   END IF;
-  -- (c) guards survived the replace.
+  -- (c) guards survived the replace, INCLUDING the RT2-FINDING-1 draft gate
+  --     (a published composite must not be rewritable through this fn).
   IF v_set_src NOT ILIKE '%search_path%'
-     OR v_set_src NOT ILIKE '%single-key strategy%' THEN
-    RAISE EXCEPTION 'wizard_composite_invalidate self-verify: a guard (search_path / composite-only) regressed in the replace';
+     OR v_set_src NOT ILIKE '%single-key strategy%'
+     OR v_set_src NOT ILIKE '%status = ''draft''%' THEN
+    RAISE EXCEPTION 'wizard_composite_invalidate self-verify: a guard (search_path / composite-only / draft-only) regressed in the replace';
   END IF;
   -- (d) grants intact.
   IF NOT has_function_privilege('authenticated',
