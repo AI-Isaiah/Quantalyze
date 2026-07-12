@@ -349,6 +349,47 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(statusPollCount).toBeGreaterThan(pollsBefore);
   });
 
+  // SF-3 — a degraded/empty read must NOT wipe a populated panel or flip stalled.
+  it("keeps last-known progress when a degraded/empty read arrives mid-flight", async () => {
+    installWaitingMock("computing");
+    // First read: populated members + stalled → panel + interrupted both show.
+    progressOutcome = {
+      kind: "json",
+      body: { jobStatus: "running", stalled: true, memberProgress: MEMBERS_3 },
+    };
+    await renderWaiting();
+    expect(screen.getByTestId("wizard-member-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+
+    // Next read is a couldn't-read blip: degraded:true, empty panel,
+    // stalled:false. The client must KEEP last-known state, not overwrite it.
+    progressOutcome = {
+      kind: "json",
+      body: {
+        jobStatus: null,
+        stalled: false,
+        memberProgress: [],
+        degraded: true,
+      },
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000); // second poll → degraded fetch
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0); // flush the fire-and-forget setState
+    });
+
+    // Panel + interrupted STILL present — the degraded read did NOT clear the
+    // populated panel or flip `stalled` to false (RED without the SF-3 guard:
+    // the empty degrade body would overwrite and both would disappear).
+    const panel = screen.getByTestId("wizard-member-progress");
+    expect(panel).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("member-progress-1")).getByText("Successful"),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+  });
+
   // NOT-STALLED NEVER INTERRUPTED — route truth, not elapsed time (RT-1 render half).
   it("never renders the interrupted state on stalled:false even past 15 minutes", async () => {
     installWaitingMock("computing");

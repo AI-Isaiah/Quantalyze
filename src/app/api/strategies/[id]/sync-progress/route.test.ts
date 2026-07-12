@@ -540,7 +540,9 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
   });
 
   // ── RPC failure degrades to an empty 200 (never hard-fails the poll) ──
-  it("degrades to an empty 200 (never a hard fail) when the RPC errors", async () => {
+  // SF-3: the degrade branch carries `degraded:true` so the client can tell
+  // "couldn't read" apart from a real idle.
+  it("degrades to a degraded:true 200 (never a hard fail) when the RPC errors", async () => {
     rpcResult.data = null;
     rpcResult.error = { message: "boom" };
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -551,8 +553,29 @@ describe("GET /api/strategies/[id]/sync-progress", () => {
       jobStatus: null,
       stalled: false,
       memberProgress: [],
+      degraded: true,
     });
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
+  });
+
+  // ── SF-3: a REAL read is NOT degraded (distinct from the couldn't-read blip) ──
+  it("a real read (running job) is degraded:false/absent, unlike the RPC-degrade branch", async () => {
+    rpcResult.data = [
+      stitchRow({
+        status: "running",
+        metadata: {
+          member_progress_at: ago(30_000),
+          member_progress: [
+            { seq: 1, exchange: "deribit", label: "D", status: "in_process" },
+          ],
+        },
+      }),
+    ];
+    const res = await call(TEST_STRATEGY_ID);
+    const body = await res.json();
+    // The `degraded` key is ABSENT on a real read (the client treats
+    // absent === not degraded); it is present ONLY on the rpcError branch.
+    expect("degraded" in body).toBe(false);
   });
 });

@@ -67,6 +67,20 @@ const IDLE: SyncProgressResponse = {
   memberProgress: [],
 };
 
+/**
+ * SF-3 — the DEGRADE response for the `if (rpcError)` branch. Shape-identical to
+ * IDLE but carries `degraded: true` so the client can tell "couldn't read" apart
+ * from a real idle and keep its last-known progress rather than wiping the live
+ * panel / flipping `stalled` to false on a transient RPC blip. A REAL idle
+ * (no stitch_composite job) still returns IDLE (degraded absent).
+ */
+const DEGRADED: SyncProgressResponse = {
+  jobStatus: null,
+  stalled: false,
+  memberProgress: [],
+  degraded: true,
+};
+
 /** Minimal shape we read off a `get_user_compute_jobs` row. */
 interface ComputeJobRow {
   kind?: string;
@@ -146,7 +160,14 @@ export async function GET(
           `[api/strategies/sync-progress] get_user_compute_jobs failed for ${id}:`,
           rpcError,
         );
-        return NextResponse.json(IDLE, { status: 200, headers: NO_STORE_HEADERS });
+        // SF-3: degrade to a 200 the poll never hard-fails on, but flag it
+        // `degraded:true` so the client keeps its last-known progress rather
+        // than treating a couldn't-read blip as a real idle (empty panel /
+        // stalled:false). Distinct from the real-idle IDLE below.
+        return NextResponse.json(DEGRADED, {
+          status: 200,
+          headers: NO_STORE_HEADERS,
+        });
       }
 
       // Filter to stitch_composite and pick the LATEST by created_at. The RPC

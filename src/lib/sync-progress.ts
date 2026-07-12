@@ -91,6 +91,15 @@ export interface SyncProgressResponse {
   stalled: boolean;
   /** [] until the worker's first member-progress write. */
   memberProgress: MemberProgressEntry[];
+  /**
+   * SF-3 — TRUE only on the `if (rpcError)` degrade branch (the owner-scoped
+   * RPC read failed), so the client can distinguish "couldn't read" from a real
+   * idle. Real reads OMIT this field (absent === not degraded). A degraded
+   * payload is NOT evidence of "not stalled": the client keeps its last-known
+   * `memberProgress`/`stalled` instead of overwriting them with the empty
+   * degrade body until a real read arrives.
+   */
+  degraded?: boolean;
 }
 
 /**

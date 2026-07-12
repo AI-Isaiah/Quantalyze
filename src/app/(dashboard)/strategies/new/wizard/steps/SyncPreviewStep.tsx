@@ -607,9 +607,21 @@ export function SyncPreviewStep({
         void fetch(`/api/strategies/${strategyId}/sync-progress`)
           .then((r) => (r.ok ? r.json() : null))
           .then((json: SyncProgressResponse | null) => {
-            if (mountedRef.current && json) {
-              setSyncProgress(json);
-            }
+            if (!mountedRef.current || !json) return;
+            // SF-3 — a DEGRADED read (`json.degraded === true`, the route's
+            // rpcError branch) or an EMPTY read that arrives while we already
+            // hold a populated in-flight snapshot must NOT wipe the live panel
+            // or flip `stalled` to false: a couldn't-read blip is not evidence
+            // of "not stalled". Keep last-known state until a REAL, non-empty
+            // read arrives. A non-empty read (real progress) always replaces.
+            setSyncProgress((prev) => {
+              const incomingEmpty =
+                json.degraded === true || json.memberProgress.length === 0;
+              const havePopulated =
+                prev != null && prev.memberProgress.length > 0;
+              if (incomingEmpty && havePopulated) return prev;
+              return json;
+            });
           })
           .catch((progressErr) => {
             console.warn(
