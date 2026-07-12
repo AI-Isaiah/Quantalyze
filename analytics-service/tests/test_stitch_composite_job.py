@@ -168,6 +168,7 @@ class _FakeSupabase:
         members: list[dict[str, Any]],
         strategy_row: dict[str, Any] | None = None,
         existing_flags: dict[str, Any] | None = None,
+        raise_on_rpc: str | None = None,
     ) -> None:
         self.members = members
         self.strategy_row = strategy_row if strategy_row is not None else {
@@ -178,12 +179,19 @@ class _FakeSupabase:
         self.upserts: list[tuple[str, Any, str | None]] = []
         self.deletes: list[tuple[str, list[tuple[str, Any]]]] = []
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        # PROG-02 fail-open harness: when set, .execute() on the named RPC raises
+        # so a test can prove the progress side-channel never kills the stitch.
+        self.raise_on_rpc = raise_on_rpc
 
     def table(self, name: str) -> _FakeQuery:
         return _FakeQuery(self, name)
 
     def rpc(self, name: str, args: dict[str, Any]) -> SimpleNamespace:
         self.rpc_calls.append((name, args))
+        if self.raise_on_rpc is not None and name == self.raise_on_rpc:
+            def _boom() -> SimpleNamespace:
+                raise RuntimeError(f"simulated {name} failure")
+            return SimpleNamespace(execute=_boom)
         return SimpleNamespace(execute=lambda: SimpleNamespace(data=None))
 
 
@@ -2231,3 +2239,270 @@ async def test_persisted_cumulative_method_is_raw_worker_vocabulary() -> None:
     persisted = _persisted_dqf(fake)["cumulative_method"]
     assert persisted in {"geometric", "simple"}
     assert persisted != "arithmetic"
+
+
+# ---------------------------------------------------------------------------
+# PROG-02 (plan 95-02) — TestMemberProgress: the worker publishes per-member
+# stitch progress into compute_jobs.metadata via the claim-token-fenced
+# set_compute_job_progress RPC, cash-pass-only, fail-open, secretless.
+# ---------------------------------------------------------------------------
+
+_PROG_JOB = {"strategy_id": _STRATEGY_ID, "id": "job-prog-1", "claim_token": "tok-prog-1"}
+
+# The five ciphertext key names that must NEVER reach a progress payload (WIZ-01).
+_FORBIDDEN_KEYS = frozenset({
+    "api_key_encrypted", "api_secret_encrypted", "passphrase_encrypted",
+    "dek_encrypted", "nonce",
+})
+
+
+def _ctx_secretful(exchange: str = "deribit", label: str | None = None) -> MagicMock:
+    """A preflight ctx whose key_row mirrors the REAL api_keys row shape — it
+    carries every ciphertext field. The worker must build progress entries
+    FIELD-BY-FIELD and never spread this row (Test 5 proves no leak)."""
+    ctx = MagicMock()
+    ctx.exchange = AsyncMock()
+    ctx.supabase = MagicMock()
+    ctx.strategy_row = None
+    key_row: dict[str, Any] = {
+        "id": f"key-{exchange}",
+        "user_id": "owner-1",
+        "exchange": exchange,
+        "api_key_encrypted": "CIPHERTEXT_KEY",
+        "api_secret_encrypted": "CIPHERTEXT_SECRET",
+        "passphrase_encrypted": "CIPHERTEXT_PASS",
+        "dek_encrypted": "CIPHERTEXT_DEK",
+        "nonce": "CIPHERTEXT_NONCE",
+    }
+    if label is not None:
+        key_row["label"] = label
+    ctx.key_row = key_row
+    return ctx
+
+
+def _progress_payloads(fake: _FakeSupabase) -> list[list[dict[str, Any]]]:
+    """The p_progress array of every set_compute_job_progress RPC, in order."""
+    return [
+        args["p_progress"]
+        for name, args in fake.rpc_calls
+        if name == "set_compute_job_progress"
+    ]
+
+
+def _progress_calls(fake: _FakeSupabase) -> list[tuple[str, dict[str, Any]]]:
+    return [(n, a) for n, a in fake.rpc_calls if n == "set_compute_job_progress"]
+
+
+def _status_track(payloads: list[list[dict[str, Any]]], seq: int) -> list[str]:
+    return [next(e for e in p if e["seq"] == seq)["status"] for p in payloads]
+
+
+def _walk_keys(obj: Any) -> set[str]:
+    """Every dict key appearing at ANY depth in a JSON-ish structure."""
+    keys: set[str] = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            keys.add(str(k))
+            keys |= _walk_keys(v)
+    elif isinstance(obj, (list, tuple)):
+        for it in obj:
+            keys |= _walk_keys(it)
+    return keys
+
+
+@pytest.mark.asyncio
+async def test_member_progress_writes_are_fenced_with_job_id_and_token() -> None:
+    """Test 1: every set_compute_job_progress RPC carries p_job_id == job['id']
+    and p_claim_token == job['claim_token'] (the fence the RPC enforces)."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job(dict(_PROG_JOB))
+    assert result.outcome == DispatchOutcome.DONE
+    calls = _progress_calls(fake)
+    assert calls, "expected the worker to publish member progress"
+    for _name, args in calls:
+        assert args["p_job_id"] == _PROG_JOB["id"]
+        assert args["p_claim_token"] == _PROG_JOB["claim_token"]
+
+
+@pytest.mark.asyncio
+async def test_member_progress_payload_sequence_waiting_to_successful() -> None:
+    """Test 2: first write is all-waiting; then per seq ascending an in_process
+    then a successful write; the final payload is all-successful and the
+    successful entry carries the resolved exchange + label."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {})],
+        has_option_activity=True,  # gate CLOSED → single cash pass
+        preflight_side_effect=[
+            _ctx_secretful("deribit", label="Main account"),
+            _ctx_secretful("deribit", label=None),
+        ],
+    )):
+        result = await run_stitch_composite_job(dict(_PROG_JOB))
+    assert result.outcome == DispatchOutcome.DONE
+    payloads = _progress_payloads(fake)
+    # First write: every member waiting, exchange/label still null.
+    assert payloads[0] == [
+        {"seq": 1, "exchange": None, "label": None, "status": "waiting"},
+        {"seq": 2, "exchange": None, "label": None, "status": "waiting"},
+    ]
+    # seq 1 advances waiting → in_process → successful, then stays successful.
+    assert _status_track(payloads, 1) == [
+        "waiting", "in_process", "successful", "successful", "successful",
+    ]
+    # seq 2 stays waiting until its turn, then in_process → successful.
+    assert _status_track(payloads, 2) == [
+        "waiting", "waiting", "waiting", "in_process", "successful",
+    ]
+    # Final payload: all successful, with resolved exchange + label backfilled.
+    final = payloads[-1]
+    assert all(e["status"] == "successful" for e in final)
+    seq1 = next(e for e in final if e["seq"] == 1)
+    assert seq1["exchange"] == "deribit"
+    assert seq1["label"] == "Main account"
+    seq2 = next(e for e in final if e["seq"] == 2)
+    assert seq2["exchange"] == "deribit"
+    assert seq2["label"] is None  # no label on the api_keys row → stays null
+
+
+@pytest.mark.asyncio
+async def test_member_progress_degraded_member_marked_degraded() -> None:
+    """Test 3: a degraded ccxt member ends status 'degraded' for its seq while
+    the reconstructable Deribit member ends 'successful'."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),   # deribit — reconstructs
+        _member(2, "2024-02-01", None),           # bybit — degrades
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],   # only the Deribit member reconstructs
+        has_option_activity=True,     # single cash pass
+        preflight_side_effect=[_ctx_secretful("deribit"), _ctx_secretful("bybit")],
+    ) + _ccxt_fetch_patches(
+        flows_raise=NavReconstructionError("unpriceable non-stable flow"),
+    )):
+        result = await run_stitch_composite_job(dict(_PROG_JOB))
+    assert result.outcome == DispatchOutcome.DONE
+    final = _progress_payloads(fake)[-1]
+    seq1 = next(e for e in final if e["seq"] == 1)
+    seq2 = next(e for e in final if e["seq"] == 2)
+    assert seq1["status"] == "successful"
+    assert seq2["status"] == "degraded"
+    assert seq2["exchange"] == "bybit"
+
+
+@pytest.mark.asyncio
+async def test_member_progress_not_written_on_mtm_second_pass() -> None:
+    """Test 4 (SC-4 pass-scoping / Pitfall 1): with the MTM second pass
+    admissible, progress is written ONLY on the cash pass — the per-member
+    counter never restarts. For a 2-member run: 1 all-waiting + 2×(in_process,
+    successful) = 5 writes, and the MTM pass adds ZERO."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=False,
+    )))
+    patches = _deribit_patches(
+        fake,
+        # cash pass (m1, m2) THEN MTM pass (m1, m2) → 4 combine calls.
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=False,  # gate OPEN → MTM second pass runs
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job(dict(_PROG_JOB))
+    assert result.outcome == DispatchOutcome.DONE
+    payloads = _progress_payloads(fake)
+    # Exactly the cash-pass write count — the MTM pass is report_progress=False.
+    assert len(payloads) == 5, (
+        f"expected 5 cash-pass-only progress writes, got {len(payloads)} — the "
+        "MTM pass leaked progress writes (counter restart, Pitfall 1)"
+    )
+    assert all(e["status"] == "successful" for e in payloads[-1])
+
+
+@pytest.mark.asyncio
+async def test_member_progress_never_leaks_ciphertext() -> None:
+    """Test 5 (WIZ-01 secretless boundary): no progress payload contains any of
+    the five ciphertext key names at ANY depth, even though the preflight ctx
+    key_row carries all of them."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {})],
+        has_option_activity=True,
+        preflight_side_effect=[
+            _ctx_secretful("deribit", label="k1"),
+            _ctx_secretful("deribit", label="k2"),
+        ],
+    )):
+        result = await run_stitch_composite_job(dict(_PROG_JOB))
+    assert result.outcome == DispatchOutcome.DONE
+    payloads = _progress_payloads(fake)
+    assert payloads, "expected progress writes to assert secretlessness against"
+    for payload in payloads:
+        leaked = _FORBIDDEN_KEYS & _walk_keys(payload)
+        assert not leaked, f"progress payload leaked ciphertext keys: {leaked}"
+
+
+@pytest.mark.asyncio
+async def test_member_progress_write_failure_is_fail_open() -> None:
+    """Test 6 (fail-open): when set_compute_job_progress raises, the stitch still
+    completes with the SAME DispatchResult and the SAME by-basis metrics as the
+    happy path — a progress-write blip must never kill a 20-minute stitch."""
+    members = [
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ]
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+
+    # Baseline: progress writes succeed.
+    fake_ok = _FakeSupabase(members=[dict(m) for m in members])
+    with _apply(_deribit_patches(
+        fake_ok, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result_ok = await run_stitch_composite_job(dict(_PROG_JOB))
+
+    # Fault-injected: every set_compute_job_progress .execute() raises.
+    fake_fail = _FakeSupabase(
+        members=[dict(m) for m in members],
+        raise_on_rpc="set_compute_job_progress",
+    )
+    with _apply(_deribit_patches(
+        fake_fail, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result_fail = await run_stitch_composite_job(dict(_PROG_JOB))
+
+    assert result_ok.outcome == DispatchOutcome.DONE
+    assert result_fail.outcome == result_ok.outcome
+    # The progress RPC WAS attempted (and raised) — proving the fail-open path ran.
+    assert _progress_calls(fake_fail), "expected the worker to attempt a progress write"
+    # The authoritative output is byte-identical to the happy path.
+    assert _by_basis(fake_fail) == _by_basis(fake_ok)
