@@ -3312,7 +3312,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # signal; mark_to_market_available gates OFF non-native venues).
         return returns, False, dict(meta)
 
-    async def _reconstruct_all(basis: str) -> tuple[
+    async def _reconstruct_all(
+        basis: str, report_progress: bool = False
+    ) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
         list[dict[str, Any]], list[dict[str, Any]],
     ] | DispatchResult:
@@ -3322,14 +3324,77 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         (Finding 3) + the DEGRADED members (HARD-05: ccxt members skipped from the
         stitch with a machine-readable DQ reason), or a DispatchResult on a
         preflight FAILED/DEFERRED or a typed permanent / transient reconstruction
-        error."""
+        error.
+
+        PROG-02: when ``report_progress`` is True (the CASH pass only — Pitfall 1:
+        the MTM second pass must NOT restart the per-member counter), publish
+        per-member ``{seq, exchange, label, status}`` progress into
+        compute_jobs.metadata via the claim-token-fenced set_compute_job_progress
+        RPC. Best-effort / fail-open: a progress-write failure NEVER fails the
+        stitch (progress is a cosmetic side-channel; the stitch is authoritative)."""
         clipped: list[tuple[int, pd.Series]] = []
         signals: list[MemberBasisSignal] = []
         venues: list[str] = []
         metas: list[dict[str, Any]] = []
         degraded: list[dict[str, Any]] = []
+
+        # PROG-02: per-seq progress records, seeded all-'waiting'. Entries are
+        # built FIELD-BY-FIELD (never a key_row spread — WIZ-01 secretless
+        # boundary) and back-filled with exchange/label once preflight resolves.
+        progress_by_seq: dict[int, dict[str, Any]] = {
+            int(m["seq"]): {
+                "seq": int(m["seq"]),
+                "exchange": None,
+                "label": None,
+                "status": "waiting",
+            }
+            for m in members
+        }
+
+        async def _write_member_progress() -> None:
+            # No-op off the cash pass (Pitfall 1) or when the job carries no id
+            # (unit harness / legacy call shape). Send a SNAPSHOT (dict copy per
+            # entry) so later mutations never rewrite an already-emitted payload.
+            if not report_progress or job.get("id") is None:
+                return
+            progress_list = [
+                dict(progress_by_seq[s]) for s in sorted(progress_by_seq)
+            ]
+
+            def _rpc() -> None:
+                supabase.rpc(
+                    "set_compute_job_progress",
+                    {
+                        "p_job_id": job.get("id"),
+                        "p_claim_token": job.get("claim_token"),
+                        "p_progress": progress_list,
+                    },
+                ).execute()
+
+            try:
+                await db_execute(_rpc)
+            except asyncio.CancelledError:
+                raise  # never swallow cancellation — propagate to worker shutdown
+            except Exception as _prog_exc:  # noqa: BLE001
+                # Fail-open: the stitch is authoritative; a progress-write blip
+                # (DB hiccup, lost claim-token ownership) must never kill a
+                # multi-minute crawl. The next boundary write self-heals.
+                logger.warning(
+                    "run_stitch_composite_job: set_compute_job_progress write "
+                    "failed for job %s (progress is cosmetic; stitch continues): %s",
+                    job.get("id"), _prog_exc,
+                )
+
+        # Initial all-'waiting' snapshot so the poller shows the full member
+        # roster before the first crawl starts.
+        await _write_member_progress()
+
         for m in members:
             seq = int(m["seq"])
+            # PROG-02: this member's crawl is starting — mark in_process and
+            # publish before the (slow) preflight + reconstruction begins.
+            progress_by_seq[seq]["status"] = "in_process"
+            await _write_member_progress()
             # M-1: thread the PARENT stitch job's id + claim_token into the member
             # preflight job. _allocator_key_preflight → _check_circuit_breaker →
             # _defer reads job["id"] / job.get("claim_token"); a member key with a
@@ -3365,6 +3430,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     )
                 return ctx
             venue = str(ctx.key_row["exchange"])
+            # PROG-02: back-fill exchange + label FIELD-BY-FIELD from the resolved
+            # api_keys row (never spread key_row — WIZ-01). This runs for BOTH the
+            # degrade and success terminal writes below.
+            progress_by_seq[seq]["exchange"] = venue
+            progress_by_seq[seq]["label"] = ctx.key_row.get("label")
             if venue in _COMPOSITE_DEGRADE_VENUES:
                 # HARD-05 (Plan 93-04): try-reconstruct-then-degrade. ATTEMPT honest
                 # reconstruction of the ccxt (binance/okx/bybit) member through the
@@ -3395,6 +3465,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                         {"seq": seq, "venue": venue, "reason": deg.reason}
                     )
                     venues.append(venue)
+                    progress_by_seq[seq]["status"] = "degraded"  # PROG-02
+                    await _write_member_progress()
                     continue
                 except (NavReconstructionError, *_PERMANENT_LEDGER_ERRORS):
                     # Structural: this MEMBER cannot be honestly reconstructed →
@@ -3410,6 +3482,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                         }
                     )
                     venues.append(venue)
+                    progress_by_seq[seq]["status"] = "degraded"  # PROG-02
+                    await _write_member_progress()
                     continue
                 except ccxt.RateLimitExceeded as exc:
                     # Mirror the deribit arm EXACTLY: stamp the member key row so the
@@ -3453,6 +3527,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 )
                 venues.append(venue)
                 metas.append(member_meta)
+                progress_by_seq[seq]["status"] = "successful"  # PROG-02
+                await _write_member_progress()
                 continue
             if venue != "deribit":
                 # A venue OUTSIDE _COMPOSITE_CRYPTO_VENUES is a truly UNKNOWN
@@ -3526,10 +3602,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             signals.append(MemberBasisSignal(seq=seq, venue=venue, has_option_activity=has_opt))
             venues.append(venue)
             metas.append(member_meta)
+            progress_by_seq[seq]["status"] = "successful"  # PROG-02
+            await _write_member_progress()
         return clipped, signals, venues, metas, degraded
 
-    # 3. CASH_SETTLEMENT fan-out (always).
-    cash_result = await _reconstruct_all(cash_pnl_basis)
+    # 3. CASH_SETTLEMENT fan-out (always). PROG-02: report_progress=True ONLY on
+    # the cash pass — the MTM second pass (below) stays default False so it can
+    # never restart the per-member progress counter (Pitfall 1).
+    cash_result = await _reconstruct_all(cash_pnl_basis, report_progress=True)
     if isinstance(cash_result, DispatchResult):
         return cash_result
     clipped_cash, member_signals, venues, member_metas, degraded_members = cash_result
