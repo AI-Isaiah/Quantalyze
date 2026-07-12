@@ -126,12 +126,19 @@ COMMENT ON FUNCTION public.cleanup_abandoned_wizard_drafts() IS
   'single-axis orphan-revoke RPC. service_role only (cron).';
 
 -- ==========================================================================
--- 2. Self-verifying DO block — apply-time proof of all safety cases.
---    Model: the DO block in 20260602183000_b5b_api_key_delete_atomicity.sql.
---    ⚠️ The cleanup_abandoned_wizard_drafts() call below ALSO performs the first
---       REAL cleanup of genuinely-stale drafts at apply time — that is the intended
---       7d policy TAKING EFFECT, not a side effect. Any wrong deletion of a SEEDED
---       case RAISEs and aborts the entire apply.
+-- 2. Self-verifying DO block — apply-time proof of all safety cases, FULLY
+--    ISOLATED. Model: the DO block in 20260602183000_b5b_api_key_delete_atomicity.sql.
+--    ⚠️ The seed + PERFORM cleanup_abandoned_wizard_drafts() + all assertions run
+--       inside a plpgsql SUBTRANSACTION that ALWAYS rolls back on success (the
+--       sentinel-exception pattern). Net apply-time real-data mutation = ZERO — this
+--       migration is a pure CREATE FUNCTION + a rolled-back self-test. It does NOT
+--       delete any real stale drafts/keys at apply time: coupling an irreversible
+--       bulk deletion to a schema merge would be an unobservable side effect. The
+--       FIRST real run happens via the cron (96-03), which RETURNS (deleted_drafts,
+--       swept_keys) and is logged/monitorable.
+--    ⚠️ Fail-loud preserved: a genuine case failure RAISEs a DIFFERENT errcode (the
+--       default P0001) that is NOT caught by the success handler, so it propagates
+--       out and ABORTS the entire apply.
 -- ==========================================================================
 DO $$
 DECLARE
@@ -161,6 +168,10 @@ DECLARE
   v_sd uuid := gen_random_uuid();  -- published single-key for key_d
   v_cnt integer;
 BEGIN
+  -- Subtransaction (savepoint): every seed + the PERFORM's real deletions + the
+  -- assertions below are undone when this block exits via the ZZ999 success
+  -- sentinel. Nothing here survives to COMMIT.
+  BEGIN
   INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
   VALUES (v_user, '00000000-0000-0000-0000-000000000000',
           'clean-selftest-' || v_user || '@quantalyze.test', now(), now());
@@ -245,7 +256,7 @@ BEGIN
   VALUES (v_user, v_key_e, 'binance', 'BTCUSDT', DATE '2026-01-01', 'derivative', 'long',
     1, 50000, 50000);
 
-  -- ---- ONE sweep call (also performs the real apply-time stale-draft cleanup) ----
+  -- ---- ONE sweep call against the synthetic seeds (rolled back below) ----
   PERFORM public.cleanup_abandoned_wizard_drafts();
 
   -- All six doomed drafts gone; both spared drafts survive.
@@ -296,17 +307,20 @@ BEGIN
     RAISE EXCEPTION 'cleanup self-verify: a spared draft''s key was wrongly swept (surviving=%)', v_cnt;
   END IF;
 
-  -- ---- self-cleaning: remove every seeded row (idempotent re-run safe) ----
-  -- Order: allocator_holdings (RESTRICT on api_key) → strategies (cascades
-  -- strategy_keys, clears published-composite membership so the delete guard
-  -- does not fire) → api_keys → profiles → auth.users.
-  DELETE FROM public.allocator_holdings WHERE allocator_id = v_user;
-  DELETE FROM public.strategies WHERE user_id = v_user;
-  DELETE FROM public.api_keys WHERE user_id = v_user;
-  DELETE FROM public.profiles WHERE id = v_user;
-  DELETE FROM auth.users WHERE id = v_user;
-
-  RAISE NOTICE 'cleanup_abandoned_wizard_drafts self-verify passed: A/F swept, B/C/D/E + review_note + 1d spared, no 23503 abort, pre-cascade capture proven.';
+    -- All cases passed. Raise the success sentinel: this rolls the ENTIRE
+    -- subtransaction back — the synthetic seeds AND the real deletions the
+    -- function performed during the test — so no self-cleaning DELETEs are
+    -- needed and net apply-time data mutation is zero.
+    RAISE EXCEPTION 'SELFVERIFY_OK' USING ERRCODE = 'ZZ999';
+  EXCEPTION
+    WHEN SQLSTATE 'ZZ999' THEN
+      -- Success path: the subtransaction (seeds + the function's real deletions)
+      -- has been rolled back to the savepoint. Nothing persists.
+      RAISE NOTICE 'cleanup_abandoned_wizard_drafts self-verify PASSED (isolated, rolled back): A/F swept, B/C/D/E + review_note + 1d spared, no 23503 abort, pre-cascade capture proven; ZERO real data mutation at apply.';
+      -- Any OTHER exception (a real case failure = P0001, or a seed/constraint
+      -- error) is intentionally NOT handled here → it propagates out of this
+      -- block and ABORTS the whole migration apply (fail-loud).
+  END;
 END $$;
 
 COMMIT;
