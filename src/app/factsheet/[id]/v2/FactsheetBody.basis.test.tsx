@@ -337,3 +337,139 @@ describe("FactsheetBody — Phase 102 single-key options MTM toggle", () => {
     expect(within(container).queryByText(/MODELED/)).toBeNull();
   });
 });
+
+/**
+ * Phase 103 (MTM-04) — the KEYSTONE falsifiable per-basis SERIES test. This is the
+ * test that did NOT exist in Phase 102 (Nyquist): it proves the CHARTS and every
+ * DAILIES-DERIVABLE panel read the MTM bundle under mark_to_market, while the
+ * EXTERNAL-DATA panels (correlations) stay cash — falsifiable BOTH ways:
+ *   - neuter the useBasisSeriesView merge (return payload always) → the charts +
+ *     dailies-derivable panels stay cash under MTM → the MTM sentinels vanish → RED.
+ *   - a wrongly-following external panel (correlations changing under MTM) → RED
+ *     the other way (the SENTINEL correlation would no longer match cash).
+ *
+ * The fixture's MTM bundle carries DISTINGUISHABLE sentinels the cash top-level
+ * cannot produce: a shorter 200-day axis, a single MTM-only gap span
+ * ("5d — no data"), a calmar-by-year row for the impossible year "1999", and a
+ * P5 quantile of exactly -9.0% ("P5 -9.0%").
+ */
+function bundleFromScenario(p: FactsheetPayload) {
+  return {
+    dates: p.dates,
+    strategyReturns: p.strategyReturns,
+    strategyEquity: p.strategyEquity,
+    strategyDrawdowns: p.strategyDrawdowns,
+    strategyRollingVol: p.strategyRollingVol,
+    strategyRollingSharpe: p.strategyRollingSharpe,
+    strategyRollingSortino: p.strategyRollingSortino,
+    rollingWindow: p.rollingWindow,
+    rollingBetaWindow: p.rollingBetaWindow,
+    strategyWorst10: p.strategyWorst10,
+    comparators: p.comparators,
+    monthlyReturns: p.monthlyReturns,
+    dailyHeatmap: p.dailyHeatmap,
+    // MTM-only coverage mask (the cash top-level base() carries NONE), so the
+    // cumulative chart's gap seam is the falsifiable "charts followed" proof.
+    missingSegments: [{ start: "2023-03-01", end: "2023-03-05", kind: "gap" as const, days: 5 }],
+    // Sentinel quantiles: P5 = -9.0% is far outside the calm cash distribution.
+    quantiles: { p05: -0.09, p25: -0.02, p50: 0.0234, p75: 0.03, p95: 0.08, min: -0.2, max: 0.2, mean: 0.01 },
+    streaks: p.streaks,
+    // Sentinel year the cash series (all 2023) can never produce.
+    calmarByYear: [{ year: "1999", ret: 0.42, max_dd: -0.1, calmar: 4.2, days: 250 }],
+    bootstrapCI: p.bootstrapCI,
+    styleDrift: p.styleDrift,
+    stressWindows: p.stressWindows,
+  };
+}
+
+// (h) single-key options, MTM available WITH a full per-basis SERIES bundle whose
+//     values are distinguishable from the cash top-level (distinct axis + gap +
+//     sentinel calmar year + sentinel P5). Also injects a SENTINEL cash
+//     correlation (external-data — never in the bundle) to pin the passthrough.
+function fixtureSingleKeyMtmBundle(): FactsheetPayload {
+  const cash = base(); // 300 days
+  const mtm = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(200, 0.004),
+    benchmark: null,
+  }) as unknown as FactsheetPayload;
+  return {
+    ...cash,
+    correlations: [{ name: "SENTINEL_BTC", rho: 0.42 }],
+    metricsByBasis: { mark_to_market: MTM },
+    mtmGate: { available: true },
+    seriesByBasis: { mark_to_market: bundleFromScenario(mtm) },
+  } as unknown as FactsheetPayload;
+}
+
+describe("FactsheetBody — Phase 103 MTM-04 per-basis SERIES (charts + panels follow)", () => {
+  it("KEYSTONE: charts + dailies-derivable panels follow the MTM bundle; external panels stay cash (falsifiable BOTH ways)", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
+
+    // Default cash: the MTM sentinels are ABSENT; the external correlation is present.
+    expect(container.textContent).not.toContain("5d — no data");
+    expect(container.textContent).not.toContain("1999");
+    expect(container.textContent).not.toContain("P5 -9.0%");
+    expect(container.textContent).toContain("SENTINEL_BTC");
+
+    // Toggle to mark_to_market.
+    fireEvent.click(getByText("Mark-to-market"));
+
+    // (1) CHARTS follow: the cumulative chart renders the MTM bundle's gap seam.
+    //     Neuter the useBasisSeriesView merge → charts stay cash → NO gap → RED.
+    expect(container.textContent).toContain("5d — no data");
+    // The basis-aware caption confirms the charts followed (not the fallback copy).
+    expect(getByText("Charts show the mark-to-market series.")).toBeTruthy();
+
+    // (1b) DAILIES-DERIVABLE panels follow: Calmar-by-year (sentinel year) AND the
+    //      quantile box (sentinel P5). Both go RED if the merge is neutered.
+    expect(container.textContent).toContain("1999");
+    expect(container.textContent).toContain("P5 -9.0%");
+
+    // (1c) EXTERNAL panel stays cash: correlations pass through UNCHANGED under MTM
+    //      (falsifiable the other way — a bundle wrongly carrying correlations
+    //      would drop the sentinel). No MTM-implying label is added to it.
+    expect(container.textContent).toContain("SENTINEL_BTC");
+  });
+
+  it("cash unchanged + toggling back restores cash (the MTM sentinels disappear)", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    expect(container.textContent).not.toContain("1999");
+    expect(container.textContent).not.toContain("5d — no data");
+
+    fireEvent.click(getByText("Mark-to-market"));
+    expect(container.textContent).toContain("1999");
+    expect(container.textContent).toContain("5d — no data");
+
+    fireEvent.click(getByText("Cash settlement"));
+    expect(container.textContent).not.toContain("1999");
+    expect(container.textContent).not.toContain("5d — no data");
+    // Cash caption is empty (unchanged idiom), never the MTM copy.
+    expect(container.textContent).not.toContain("Charts show the mark-to-market series.");
+  });
+
+  it("FALLBACK: bundle ABSENT under MTM → charts stay cash + honest fallback caption; KpiStrip scalars STILL swap (Phase 102 preserved)", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmAvailable()); // no seriesByBasis
+    fireEvent.click(getByText("Mark-to-market"));
+    // No bundle → charts DID NOT follow → no MTM gap seam.
+    expect(container.textContent).not.toContain("5d — no data");
+    // Honest fallback caption (stale cache / not-yet-backfilled — Zavara pre-backfill).
+    expect(
+      getByText(
+        "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only.",
+      ),
+    ).toBeTruthy();
+    // The persisted MTM scalar overlay (Phase 102) still relabels the KpiStrip.
+    expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
+  });
+
+  it("NO-PERSISTENCE: toggling the bundle fixture writes NOTHING to localStorage or the URL", () => {
+    const searchBefore = window.location.search;
+    const { getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    fireEvent.click(getByText("Mark-to-market"));
+    const factsheetWrites = localStorageMock.setItem.mock.calls.filter(
+      (call) => typeof call[0] === "string" && /^factsheet/.test(call[0] as string),
+    );
+    expect(factsheetWrites).toEqual([]);
+    expect(window.location.search).toBe(searchBefore);
+  });
+});
