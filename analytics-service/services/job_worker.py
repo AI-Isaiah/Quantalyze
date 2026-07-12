@@ -4180,6 +4180,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         conventions + the global BTC benchmark → the full MetricsResult
         (metrics_json + sibling_kinds).
 
+        CASH-ONLY as of Phase 103 (MTM-04): the mark_to_market basis routes through
+        services/basis_series.py (dailies-canonical) instead of this closure; the
+        backbone merge (Phases 104-106) later moves cash there too.
+
         This is the ONE canonical composite compute. Its ``metrics_json`` is used
         for BOTH the headline ``strategy_analytics`` scalars AND
         ``metrics_json_by_basis.cash_settlement`` so the two can never diverge —
@@ -4226,8 +4230,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
     # member (research A2 — no single-pass dual-basis path); gated ⇒ omit the MTM
     # key and carry the reason for Phase 90.
+    # Phase 103 (MTM-04): the composite MTM basis routes through the SAME shared
+    # dailies-canonical helper as the single-key seam (services/basis_series.py) —
+    # NOT the bespoke _metrics_result_for compute (that path is what the backbone
+    # merge deletes). Initialize the derived result to None so the persist heal
+    # covers the gated (mtm_ok False) and any future degrade shape.
+    from services.basis_series import (
+        BasisSeriesResult,
+        derive_basis_series,
+        persist_basis_series,
+    )
+
     mtm_ok, mtm_reason = mark_to_market_available(member_signals)
     mtm_metrics_json: dict[str, Any] | None = None
+    _mtm_basis_result: BasisSeriesResult | None = None
     if mtm_ok:
         mtm_result = await _reconstruct_all(PNL_BASIS_MARK_TO_MARKET)
         if isinstance(mtm_result, DispatchResult):
@@ -4280,7 +4296,27 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 error_kind="transient",
             )
         try:
-            mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)
+            # Phase 103 (MTM-04): stitch → the ONE shared derive_basis_series (same
+            # convention variables the cash _metrics_result_for closure uses). The
+            # stitch stays INSIDE this try so CompositeOverlapError handling below is
+            # untouched; derive_basis_series propagates compute_all_metrics's
+            # ValueError into the existing F-5 arm. The persisted MTM dailies are the
+            # canonical source for Plans 03/04.
+            # Phase 103 (MTM-04): stitch → the ONE shared derive_basis_series (same
+            # convention variables the cash _metrics_result_for closure uses). The
+            # stitch stays INSIDE this try so CompositeOverlapError handling below is
+            # untouched; derive_basis_series propagates compute_all_metrics's
+            # ValueError into the existing F-5 arm. The persisted MTM dailies are the
+            # canonical source for Plans 03/04.
+            stitched_mtm = stitch_clipped_series(clipped_mtm)
+            _mtm_basis_result = derive_basis_series(
+                stitched_mtm,
+                benchmark_rets,
+                periods_per_year=periods_per_year,
+                cumulative_method=cumulative_method,
+                day_basis=day_basis,
+            )
+            mtm_metrics_json = dict(_mtm_basis_result.metrics_json)
         except CompositeOverlapError as exc:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
@@ -4535,6 +4571,24 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 "stitch_composite: sibling-series batch upsert failed for %s: %s",
                 strategy_id, str(sibling_exc),
             )
+
+    # Phase 103 (MTM-04): persist (or HEAL) the stitched mark_to_market daily-return
+    # series row through the SAME BasisSeriesResult the MTM scalars came from — the
+    # dailies-canonical route Plans 03/04 read. Lands HERE in the persist phase,
+    # AFTER the csv_daily_returns cash writes and the headline/by-basis upsert, so a
+    # failed stitch never half-persists. Success (mtm_metrics_json is not None) →
+    # the row; every other shape — gated (mtm_ok False) or any future degrade →
+    # persist_basis_series(result=None) DELETES any stale row (Pitfall 5), so a
+    # previously-successful strategy that re-derives gated loses its stale series.
+    def _persist_mtm_series() -> None:
+        persist_basis_series(
+            supabase,
+            strategy_id,
+            basis="mark_to_market",
+            result=_mtm_basis_result if mtm_metrics_json is not None else None,
+        )
+
+    await db_execute(_persist_mtm_series)
 
     logger.info(
         "stitch_composite: strategy %s stitched %d members (%d days, venues=%s, "
