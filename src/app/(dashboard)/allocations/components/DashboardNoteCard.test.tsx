@@ -94,4 +94,47 @@ describe("DashboardNoteCard (UI-SPEC W1 — dashboard note card)", () => {
       content: "Rebalance BTC next week.",
     });
   });
+
+  // Red-team F-1: the card is always-editable, so a focus→blur with NO typing
+  // must NOT fire a PATCH — otherwise save(staleContent) last-write-wins clobbers
+  // another tab's concurrent edit (and burns an audit/rate-limit slot for nothing).
+  it("focus→blur with UNCHANGED content fires NO PATCH (dirty check)", async () => {
+    render(
+      <DashboardNoteCard
+        initialContent="Existing book note."
+        initialLastSavedAt={new Date("2026-07-15T00:00:00Z")}
+      />,
+    );
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.focus(ta);
+      fireEvent.blur(ta);
+    });
+    // No edit happened → no network write.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("edit then blur DOES fire exactly one PATCH from a non-empty initial note", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      makeResponse(200, { updated_at: "2026-07-16T00:00:00Z" }),
+    );
+    render(
+      <DashboardNoteCard
+        initialContent="Existing book note."
+        initialLastSavedAt={new Date("2026-07-15T00:00:00Z")}
+      />,
+    );
+    const ta = screen.getByRole("textbox") as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(ta, { target: { value: "Existing book note. Trim BTC." } });
+    });
+    await act(async () => {
+      fireEvent.blur(ta);
+    });
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+    const body = JSON.parse(
+      (fetchSpy.mock.calls[0][1] as RequestInit).body as string,
+    );
+    expect(body.content).toBe("Existing book note. Trim BTC.");
+  });
 });
