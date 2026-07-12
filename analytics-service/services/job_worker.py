@@ -2942,14 +2942,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # (:3834-3840, 4018-4020) MINUS the cash key — the headline IS the cash truth
     # for single-key, and the strict basis-metrics.ts overlay stays byte-identical
     # only when cash_settlement is ABSENT from the by-basis object.
-    from services.metrics import (
-        compute_all_metrics,
-        periods_per_year_for_asset_class,
-    )
+    from services.metrics import periods_per_year_for_asset_class
     from services.allocated_capital import metrics_day_basis
     from services.stitch_composite import MTM_REASON_SERIES_UNCOMPUTABLE
+    from services.basis_series import (
+        BasisSeriesResult,
+        derive_basis_series,
+        persist_basis_series,
+    )
 
     mtm_metrics_json: dict[str, Any] | None = None
+    _mtm_basis_result: BasisSeriesResult | None = None
     if mtm_returns is not None:
         _mtm_periods = periods_per_year_for_asset_class(
             ctx.strategy_row.get("asset_class")
@@ -2977,17 +2980,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 strategy_id, _bench_exc,
             )
         try:
-            # dict(result.metrics_json) — the SAME already-JSON-safe object the
-            # composite persists (degenerate scalars are JSON null via _safe_float;
-            # postgrest rejects NaN, so never hand-build).
-            _mtm_result = compute_all_metrics(
+            # Phase 103 (MTM-04): series + scalars from the ONE shared
+            # derive_basis_series — the dailies-canonical route the backbone merge
+            # extends. Scalars remain a derived cache (round-trip guard in
+            # test_basis_series.py). dict(result.metrics_json) is the SAME
+            # already-JSON-safe object the composite persists (degenerate scalars are
+            # JSON null via _safe_float; postgrest rejects NaN, so never hand-build).
+            # The helper propagates compute_all_metrics's ValueError by design, so the
+            # surrounding degrade arm is untouched.
+            _mtm_basis_result = derive_basis_series(
                 mtm_returns,
                 _mtm_benchmark_rets,
                 periods_per_year=_mtm_periods,
                 cumulative_method=_mtm_cumulative,
                 day_basis=_mtm_day_basis,
             )
-            mtm_metrics_json = dict(_mtm_result.metrics_json)
+            mtm_metrics_json = dict(_mtm_basis_result.metrics_json)
         except ValueError as _mtm_compute_exc:
             # Mirror the composite F-5 guard (:3844) but DEGRADE instead of failing
             # the job: a cumulative_method='simple' series with an interior chain-break
@@ -3100,6 +3108,32 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         ).execute()
 
     await db_execute(_prestamp_dq_flags)
+
+    # Phase 103 (MTM-04): persist (or HEAL) the mark_to_market daily-return series
+    # row from the SAME BasisSeriesResult the scalar cache above came from — the
+    # dailies-canonical route Plans 03/04 read. The success matrix MIRRORS the
+    # authoritative metrics_json_by_basis write: a fresh series row ONLY when the
+    # second pass SUCCEEDED (mtm_attempted and mtm_metrics_json is not None); every
+    # other terminal-DONE shape (degrade / compute-reject / not-attempted) → DELETE
+    # any stale row (Pitfall 5 heal, mirroring the by-basis SQL NULL) so a stale
+    # series can never outlive an authoritative-NULL scalar write. Sync helper
+    # wrapped in db_execute exactly like the prestamp above; fail-loud on the same
+    # idiom (a persist failure retries the whole derive — cash rows already landed
+    # above and re-derive idempotently).
+    _persist_mtm_series_result = (
+        _mtm_basis_result
+        if (mtm_attempted and mtm_metrics_json is not None)
+        else None
+    )
+
+    def _persist_mtm_series(
+        result: BasisSeriesResult | None = _persist_mtm_series_result,
+    ) -> None:
+        persist_basis_series(
+            ctx.supabase, strategy_id, basis="mark_to_market", result=result,
+        )
+
+    await db_execute(_persist_mtm_series)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:

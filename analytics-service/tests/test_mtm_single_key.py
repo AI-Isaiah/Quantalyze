@@ -847,8 +847,12 @@ async def test_mtm_compute_valueerror_degrades() -> None:
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [
         _patch_benchmark(),
+        # Phase 103: the compute now lives INSIDE derive_basis_series, which binds
+        # compute_all_metrics via a from-import — patch the helper's bound name so
+        # the ValueError propagates out of the shared route into the seam's degrade
+        # arm (patching services.metrics.compute_all_metrics would miss it).
         patch(
-            "services.metrics.compute_all_metrics",
+            "services.basis_series.compute_all_metrics",
             new=MagicMock(side_effect=ValueError("interior chain-break")),
         ),
     ]):
@@ -964,7 +968,12 @@ async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [
         _patch_benchmark(),
-        patch("services.metrics.compute_all_metrics", new=MagicMock(side_effect=_spy)),
+        # Phase 103: the compute is now the one inside derive_basis_series — spy on
+        # the helper's bound compute_all_metrics to observe the periods it receives.
+        patch(
+            "services.basis_series.compute_all_metrics",
+            new=MagicMock(side_effect=_spy),
+        ),
     ]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
@@ -1129,3 +1138,128 @@ async def test_mtm_second_pass_timeout_degrades_loud_not_failed_final() -> None:
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SECOND_PASS_TIMEOUT
     ), "a bounded second-pass timeout must stamp the distinct timeout reason"
+
+
+# ── Phase 103 (MTM-04): single-key seam routes through the shared derive ─────
+# The MTM scalars AND the persisted mtm_daily_returns series row now come from the
+# ONE shared services.basis_series.derive_basis_series call (Plan 103-01). These
+# tests pin the WIRING (call-site invokes the helper, not a parallel inline
+# compute) and the persist/heal matrix (success → row from the SAME result;
+# degrade / not-attempted → delete the stale row). The seam imports the helper
+# function-locally, so patching the SOURCE module attribute
+# (services.basis_series.*) reaches the call-time binding.
+
+
+@pytest.mark.asyncio
+async def test_single_key_routes_through_shared_derive_and_persists() -> None:
+    """WIRING: an options book whose MTM pass succeeds derives its scalars via
+    derive_basis_series — called ONCE with (mtm_returns, benchmark_rets=None) and
+    the crypto √365 / geometric / calendar conventions — and hands the SAME
+    BasisSeriesResult to persist_basis_series(basis='mark_to_market'). Neutering the
+    call site to a parallel inline compute would leave the spy uncalled → reddens."""
+    import services.basis_series as _bs
+
+    ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    _real_derive = _bs.derive_basis_series
+    _captured: dict[str, Any] = {}
+
+    def _derive_spy(*a: Any, **k: Any) -> Any:
+        r = _real_derive(*a, **k)
+        _captured["result"] = r
+        return r
+
+    derive_spy = MagicMock(side_effect=_derive_spy)
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch("services.basis_series.derive_basis_series", new=derive_spy),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    derive_spy.assert_called_once()
+    _args, _kw = derive_spy.call_args
+    pd.testing.assert_series_equal(_args[0], _mtm_series())
+    assert _args[1] is None, "benchmark_rets must be None (patched fetch → (None, True))"
+    assert _kw["periods_per_year"] == 365, "crypto/Deribit MTM annualizes on √365"
+    assert _kw["cumulative_method"] == "geometric"
+    assert _kw["day_basis"] == "calendar"
+    # persist got the EXACT BasisSeriesResult the derive produced — never a
+    # separately-computed object (that would bypass the anti-divergence guard).
+    persist_spy.assert_called_once()
+    _pkw = persist_spy.call_args.kwargs
+    assert _pkw["basis"] == "mark_to_market"
+    assert _pkw["result"] is _captured["result"]
+
+
+@pytest.mark.asyncio
+async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
+    """WIRING FALSIFIABILITY: patch derive_basis_series to RAISE ValueError → the
+    seam degrades EXACTLY like the compute-reject path (DONE, SQL-NULL by-basis,
+    SERIES_UNCOMPUTABLE reason) AND heals the stale series row
+    (persist_basis_series(..., result=None)). Proves the seam INVOKES the helper —
+    a parallel inline compute would ignore the patch and persist a live object."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch(
+            "services.basis_series.derive_basis_series",
+            new=MagicMock(side_effect=ValueError("helper reject")),
+        ),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["metrics_json_by_basis"] is None
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SERIES_UNCOMPUTABLE
+    )
+    persist_spy.assert_called_once()
+    assert persist_spy.call_args.kwargs["result"] is None, (
+        "a degraded derive must HEAL the stale series row (result=None), never "
+        "persist a stale object next to an authoritative-NULL scalar write"
+    )
+
+
+@pytest.mark.asyncio
+async def test_single_key_not_attempted_heals_series_row() -> None:
+    """HEAL matrix (not-attempted): a perp-only book never attempts the MTM pass,
+    yet the seam AUTHORITATIVELY heals — persist_basis_series(..., result=None)
+    deletes any stale mtm_daily_returns row, mirroring the by-basis SQL-NULL write.
+    Neuter (gate the persist behind mtm_attempted) → the heal is skipped → reddens."""
+    ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=False)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    persist_spy.assert_called_once()
+    assert persist_spy.call_args.kwargs["result"] is None, (
+        "a not-attempted MTM derive must heal (delete) the series row"
+    )
