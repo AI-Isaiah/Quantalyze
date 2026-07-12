@@ -17,9 +17,10 @@ import {
  * Body shape (PATCH): { scope_kind, scope_ref, content }
  * Query shape (GET):  ?scope_kind=<kind>&scope_ref=<ref>
  *
- * scope_kinds: portfolio | holding | bridge_outcome | strategy
- * scope_ref:   UUID text (portfolio/bridge_outcome/strategy) or
- *              `{venue}:{symbol}:{holding_type}` (holding)
+ * scope_kinds: portfolio | holding | bridge_outcome | strategy | dashboard
+ * scope_ref:   UUID text (portfolio/bridge_outcome/strategy),
+ *              `{venue}:{symbol}:{holding_type}` (holding), or the literal
+ *              `allocations` (dashboard — the allocator's whole-book note)
  *
  * Ownership is enforced per-scope at the app layer (D-09) — the four
  * scopes have distinct validity predicates that don't collapse into a
@@ -54,6 +55,7 @@ const ALLOWED_KINDS = [
   "holding",
   "bridge_outcome",
   "strategy",
+  "dashboard",
 ] as const;
 
 const BodySchema = z.object({
@@ -70,15 +72,20 @@ const BodySchema = z.object({
 
 /**
  * Resolve the audit entity_id per scope. Finding #8 pins this mapping:
- * holding has no single aggregate row → caller's user_id; all other
- * scopes use scope_ref (which is already a UUID).
+ * holding AND dashboard have no single aggregate UUID row → caller's user_id;
+ * all other scopes use scope_ref (which is already a UUID). dashboard's
+ * scope_ref is the literal 'allocations' — NOT a UUID (would break the
+ * UUID-typed audit_log.entity_id column) AND constant across ALL users (a
+ * cross-user audit key), so its entity_id MUST be the caller's user_id.
  */
 function resolveEntityId(
   scope_kind: ScopeKind,
   scope_ref: string,
   userId: string,
 ): string {
-  return scope_kind === "holding" ? userId : scope_ref;
+  return scope_kind === "holding" || scope_kind === "dashboard"
+    ? userId
+    : scope_ref;
 }
 
 export async function GET(request: NextRequest) {

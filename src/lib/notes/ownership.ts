@@ -21,13 +21,23 @@ import { parseHoldingScopeRef } from "./scope-ref";
  *   - strategy        → strategies row exists with status='published'
  *                       (any allocator may note any published strategy —
  *                       "all verified strategies are publicly notable")
+ *   - dashboard       → the allocator's whole-book note (Phase 100 PI-04).
+ *                       scope_ref is the fixed literal 'allocations'; there is
+ *                       no per-row target to own, so validity is trivially the
+ *                       authed user with a well-formed scope_ref. RLS
+ *                       (user_id = auth.uid()) carries the real owner gate.
  *
  * Returns `{ok:false}` on any mismatch. The route returns 403 with a
  * generic "Forbidden" (D-09 — no reason leak to the client). The `reason`
  * field is diagnostic-only.
  */
 
-export type ScopeKind = "portfolio" | "holding" | "bridge_outcome" | "strategy";
+export type ScopeKind =
+  | "portfolio"
+  | "holding"
+  | "bridge_outcome"
+  | "strategy"
+  | "dashboard";
 
 export interface OwnershipCheckResult {
   ok: boolean;
@@ -94,6 +104,15 @@ export async function checkScopeOwnership(
         .eq("status", "published")
         .maybeSingle();
       return data ? { ok: true } : { ok: false, reason: "strategy not published" };
+    }
+    case "dashboard": {
+      // Phase 100 PI-04: the allocator's whole-book note. scope_ref is the
+      // fixed literal 'allocations' — there is no per-row target to own, so the
+      // only validity check is the well-formed scope_ref. The DB-layer owner
+      // gate is RLS (user_id = auth.uid()).
+      return scope_ref === "allocations"
+        ? { ok: true }
+        : { ok: false, reason: "invalid dashboard scope_ref" };
     }
   }
 }
