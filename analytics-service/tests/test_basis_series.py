@@ -17,12 +17,10 @@ manufactures sparsity (LOCKED: no new math).
 """
 from __future__ import annotations
 
-import math
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
-
-from types import SimpleNamespace
 
 from services.basis_series import (
     KIND_MTM_DAILY_RETURNS,
