@@ -32,6 +32,10 @@
 --     F. pre-cascade capture: a member key of a doomed composite with NO surviving
 --        refs → SWEPT. Only passes if member ids are captured BEFORE the draft-delete
 --        CASCADE destroys the strategy_keys rows (96-VALIDATION decision 3).
+--     G. cascade-on-swept-key: key_a (swept) carries one row in each of its three
+--        UNGUARDED ON DELETE CASCADE children (csv_daily_returns, key_permission_audit,
+--        compute_jobs) → the sweep SUCCEEDS (no 23503) and CASCADE-deletes them. Would
+--        redden if any of those FKs were later flipped to RESTRICT.
 --   Behavioral, sanitize-unaffected (MANDATORY — plan-checker Warning-3): a normal
 --   `sanitize_user` run STILL deletes the user's api_keys. The sanitize path is
 --   historically critical — a stray guard here would abort GDPR account deletion.
@@ -230,6 +234,24 @@ BEGIN
   VALUES (v_user, v_key_e, 'binance', 'BTCUSDT', DATE '2026-01-01', 'derivative', 'long',
     1, 50000, 50000);
 
+  -- ---- Case G: CASCADE children on the SWEPT orphan key_a ----------------------
+  -- api_keys has 3 UNGUARDED ON DELETE CASCADE children keyed on api_key_id:
+  -- csv_daily_returns (per-key axis), key_permission_audit, compute_jobs. They are
+  -- safe-by-construction (a swept key has no live strategy), but no other case here
+  -- attaches a CASCADE child to a swept key, so the proof never exercises what
+  -- happens when a swept key HAS cascade children. Attach one of each to key_a and
+  -- assert below the sweep SUCCEEDS (no 23503) and CASCADE-deletes them. A future
+  -- FK-action change to RESTRICT would abort the real cron (23503) and now reddens
+  -- here. (compute_jobs.api_key_id admits only kind='poll_allocator_positions' per
+  -- compute_jobs_kind_target_coherence; the FK is plain api_keys(id), so any key
+  -- kind is valid.)
+  INSERT INTO public.csv_daily_returns (api_key_id, allocator_id, date, daily_return)
+  VALUES (v_key_a, v_user, DATE '2026-01-02', 0.0055);
+  INSERT INTO public.key_permission_audit (api_key_id, caller_ip)
+  VALUES (v_key_a, '203.0.113.7');
+  INSERT INTO public.compute_jobs (api_key_id, kind, status)
+  VALUES (v_key_a, 'poll_allocator_positions', 'pending');
+
   -- ---- ONE sweep call: deletes the doomed drafts + sweeps their orphaned keys -----
   PERFORM public.cleanup_abandoned_wizard_drafts();
 
@@ -278,7 +300,23 @@ BEGIN
     RAISE EXCEPTION 'CLEAN-02 Case F: doomed-composite member with no surviving refs was NOT swept — pre-cascade capture missing (count=%)', v_cnt;
   END IF;
 
-  RAISE NOTICE 'CLEAN-02 Part 2 OK: A/F swept, B/C/D/E spared, no 23503 abort, pre-cascade capture proven.';
+  -- Case G: all three ON DELETE CASCADE children of the swept key_a must be gone.
+  -- Proves the sweep did NOT abort (a RESTRICT FK would raise 23503, aborting the
+  -- whole call — Case A would then also survive) AND that the CASCADE fired.
+  SELECT count(*) INTO v_cnt FROM public.csv_daily_returns WHERE api_key_id = v_key_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'CLEAN-02 Case G: csv_daily_returns child of swept key_a not CASCADE-deleted (count=%)', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM public.key_permission_audit WHERE api_key_id = v_key_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'CLEAN-02 Case G: key_permission_audit child of swept key_a not CASCADE-deleted (count=%)', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE api_key_id = v_key_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'CLEAN-02 Case G: compute_jobs child of swept key_a not CASCADE-deleted (count=%)', v_cnt;
+  END IF;
+
+  RAISE NOTICE 'CLEAN-02 Part 2 OK: A/F swept, B/C/D/E spared, no 23503 abort, pre-cascade capture proven, key_a CASCADE children (csv_daily_returns/key_permission_audit/compute_jobs) purged.';
 END $$;
 
 -- ==========================================================================

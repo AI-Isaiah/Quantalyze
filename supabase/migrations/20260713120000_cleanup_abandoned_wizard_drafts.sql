@@ -256,6 +256,25 @@ BEGIN
   VALUES (v_user, v_key_e, 'binance', 'BTCUSDT', DATE '2026-01-01', 'derivative', 'long',
     1, 50000, 50000);
 
+  -- ---- CASCADE-child coverage on a SWEPT key (Case A) ----
+  -- api_keys has 3 UNGUARDED ON DELETE CASCADE children keyed on api_key_id:
+  -- csv_daily_returns (per-key axis, mig 20260624120000), key_permission_audit
+  -- (mig 052), and compute_jobs (mig 066). They are safe-by-construction — a
+  -- swept key has no live strategy — but nothing else here attaches a CASCADE
+  -- child to a SWEPT key, so the proof never exercises the cascade-on-swept-key
+  -- path. Attach one of each to key_a and assert below that the sweep SUCCEEDS
+  -- (no 23503 abort) AND that the children are CASCADE-deleted. A future edit
+  -- flipping one of these FKs to RESTRICT would abort the real cron (23503) and
+  -- now reddens this self-test too. (compute_jobs.api_key_id only admits
+  -- kind='poll_allocator_positions' per compute_jobs_kind_target_coherence; the
+  -- FK is plain api_keys(id), so any key kind is valid.)
+  INSERT INTO public.csv_daily_returns (api_key_id, allocator_id, date, daily_return)
+  VALUES (v_key_a, v_user, DATE '2026-01-02', 0.0055);
+  INSERT INTO public.key_permission_audit (api_key_id, caller_ip)
+  VALUES (v_key_a, '203.0.113.7');
+  INSERT INTO public.compute_jobs (api_key_id, kind, status)
+  VALUES (v_key_a, 'poll_allocator_positions', 'pending');
+
   -- ---- ONE sweep call against the synthetic seeds (rolled back below) ----
   PERFORM public.cleanup_abandoned_wizard_drafts();
 
@@ -279,6 +298,21 @@ BEGIN
   SELECT count(*) INTO v_cnt FROM public.api_keys WHERE id = v_key_f;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'cleanup self-verify Case F: pre-cascade capture missing — member key not swept (count=%)', v_cnt;
+  END IF;
+  -- Cascade-on-swept-key: all three ON DELETE CASCADE children of the swept
+  -- key_a must be gone. This proves the sweep did NOT abort (a RESTRICT FK would
+  -- raise 23503 and abort the whole call) AND that the CASCADE actually fired.
+  SELECT count(*) INTO v_cnt FROM public.csv_daily_returns WHERE api_key_id = v_key_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'cleanup self-verify cascade: csv_daily_returns child of swept key_a not CASCADE-deleted (count=%)', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM public.key_permission_audit WHERE api_key_id = v_key_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'cleanup self-verify cascade: key_permission_audit child of swept key_a not CASCADE-deleted (count=%)', v_cnt;
+  END IF;
+  SELECT count(*) INTO v_cnt FROM public.compute_jobs WHERE api_key_id = v_key_a;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'cleanup self-verify cascade: compute_jobs child of swept key_a not CASCADE-deleted (count=%)', v_cnt;
   END IF;
   -- Case B: still a member of a surviving strategy → SPARED.
   SELECT count(*) INTO v_cnt FROM public.api_keys WHERE id = v_key_b;
@@ -316,7 +350,7 @@ BEGIN
     WHEN SQLSTATE 'ZZ999' THEN
       -- Success path: the subtransaction (seeds + the function's real deletions)
       -- has been rolled back to the savepoint. Nothing persists.
-      RAISE NOTICE 'cleanup_abandoned_wizard_drafts self-verify PASSED (isolated, rolled back): A/F swept, B/C/D/E + review_note + 1d spared, no 23503 abort, pre-cascade capture proven; ZERO real data mutation at apply.';
+      RAISE NOTICE 'cleanup_abandoned_wizard_drafts self-verify PASSED (isolated, rolled back): A/F swept, B/C/D/E + review_note + 1d spared, no 23503 abort, pre-cascade capture proven, key_a CASCADE children (csv_daily_returns/key_permission_audit/compute_jobs) purged; ZERO real data mutation at apply.';
       -- Any OTHER exception (a real case failure = P0001, or a seed/constraint
       -- error) is intentionally NOT handled here → it propagates out of this
       -- block and ABORTS the whole migration apply (fail-loud).
