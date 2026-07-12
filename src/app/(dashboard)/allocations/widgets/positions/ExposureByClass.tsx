@@ -31,6 +31,11 @@ const CLASS_LABEL: Record<HoldingClass, string> = {
   spot: "Spot",
   derivative: "Derivatives",
 };
+// Compact class label for the dense drilldown table (99-UI-SPEC § Widget 1 · 4).
+const CLASS_LABEL_SHORT: Record<HoldingClass, string> = {
+  spot: "Spot",
+  derivative: "Deriv",
+};
 const CLASS_COLOR: Record<HoldingClass, string> = {
   spot: CHART_ACCENT,
   derivative: DERIVATIVE_COLOR,
@@ -126,6 +131,53 @@ export function ExposureByClass({ snapshot }: { snapshot: ExposureSnapshot | nul
             </div>
           );
         })}
+      </div>
+
+      {/* Drilldown table — per (venue, symbol, type, side) slice, valueUsd desc.
+          Table idiom copied from CompositionDonut. Class identity is carried by
+          label + swatch, never color alone (WCAG 1.4.1). Side/Net never colored
+          by direction. Scrolls only past 12 rows. */}
+      <div
+        data-testid="drilldown"
+        className={`mt-4 overflow-x-auto ${snapshot.slices.length > 12 ? "max-h-64 overflow-y-auto" : ""}`}
+      >
+        <table className="w-full text-small">
+          <thead>
+            <tr className="border-b border-border text-left text-caption text-text-muted uppercase tracking-wider">
+              <th className="py-2 pr-4">Venue</th>
+              <th className="py-2 pr-4">Symbol</th>
+              <th className="py-2 pr-4">Type</th>
+              <th className="py-2 pr-4">Side</th>
+              <th className="py-2 pr-4 text-right font-metric">Gross</th>
+              <th className="py-2 text-right font-metric">Net</th>
+            </tr>
+          </thead>
+          <tbody>
+            {[...snapshot.slices]
+              .sort((a, b) => b.valueUsd - a.valueUsd)
+              .map((s) => (
+                <tr
+                  key={`${s.holdingType}|${s.venue}|${s.symbol}|${s.side}`}
+                  className="border-b border-border/50 transition-colors hover:bg-page/50"
+                >
+                  <td className="py-2 pr-4">{s.venue}</td>
+                  <td className="py-2 pr-4">{s.symbol}</td>
+                  <td className="py-2 pr-4">
+                    <span className="flex items-center gap-1.5">
+                      <span
+                        className="inline-block h-2.5 w-2.5 rounded-sm"
+                        style={{ backgroundColor: CLASS_COLOR[s.holdingType] }}
+                      />
+                      {CLASS_LABEL_SHORT[s.holdingType]}
+                    </span>
+                  </td>
+                  <td className="py-2 pr-4 text-caption text-text-secondary">{s.side}</td>
+                  <td className="py-2 pr-4 text-right font-metric">{formatCurrency(s.valueUsd)}</td>
+                  <td className="py-2 text-right font-metric">{formatCurrency(s.signedValueUsd)}</td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
       </div>
     </Card>
   );
