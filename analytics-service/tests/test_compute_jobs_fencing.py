@@ -46,6 +46,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -721,6 +722,131 @@ def test_claim_stamps_claim_token(admin, strategy_id):
         assert row["claim_token"] == claimed["claim_token"]
     finally:
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+# ----------------------------------------------------------------------------
+# Phase-97 CI-01 — decoy-foreign-row regression (the repro-gate for the
+# per-run-`job_id` claim scoping).
+# ----------------------------------------------------------------------------
+# PR #610 parallelizes this suite under `pytest -n auto --dist loadgroup` and
+# pins every shared-test-DB module to a single `xdist_group("shared_test_db")`.
+# But xdist_group SERIALIZES; it does NOT ISOLATE — the grouped fence/claim
+# tests still run against the ONE shared Supabase test project (also hit by the
+# concurrently-running e2e job). The old `_claim_one` returned `res.data[0]`,
+# assuming the head of the GLOBAL claim queue is OUR job. A single FOREIGN
+# pending compute_jobs row (from an interleaved grouped DB test, or the e2e
+# job) claimed into the same batch lands at `data[0]` and breaks every fence
+# assertion that reads `claimed["id"] == our_job_id`.
+#
+# These two tests pin WHY the scoping is load-bearing. The OFFLINE one is the
+# local repro-gate (no DB, no skip — the only signal that works without a live
+# CI run): it FAILS against the unscoped helper (no `want_job_id` kwarg →
+# TypeError) and PASSES once Task 2 threads the own-row filter through.
+
+
+class _StubExecute:
+    """Minimal stand-in for a supabase-py request builder's `.execute()`."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=list(self._rows))
+
+
+class _StubAdmin:
+    """Offline stub whose `claim_compute_jobs_with_priority` RPC returns a
+    fixed row list — no supabase import, runs everywhere."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def rpc(self, name: str, params: dict) -> _StubExecute:
+        assert name == "claim_compute_jobs_with_priority", (
+            f"decoy stub only models the claim RPC, got {name!r}"
+        )
+        return _StubExecute(self._rows)
+
+
+def test_claim_one_decoy_foreign_row_offline():
+    """OFFLINE repro-gate: a FOREIGN row at the head of the claim batch must
+    NOT be mistaken for our job. `_claim_one(..., want_job_id=own)` returns OUR
+    row even when a foreign row is `data[0]`; the legacy (unscoped) arm returns
+    the foreign row — pinning exactly why the scoping is load-bearing. When the
+    batch holds only foreign rows, the scoped call returns None, never a
+    foreign row.
+
+    This test FAILS against the unscoped helper (TypeError: no `want_job_id`)
+    and PASSES after the Task 2 scoping. It is the ONLY isolation signal that
+    runs without the live test Supabase project.
+    """
+    own_id = str(uuid.uuid4())
+    foreign_id = str(uuid.uuid4())
+    own_row = {"id": own_id, "claim_token": str(uuid.uuid4()), "status": "running"}
+    foreign_row = {
+        "id": foreign_id, "claim_token": str(uuid.uuid4()), "status": "running",
+    }
+
+    # Foreign row FIRST in the batch — exactly the ordering that broke data[0].
+    stub = _StubAdmin([foreign_row, own_row])
+
+    # Scoped arm: returns OUR row despite the foreign row at data[0].
+    claimed = _claim_one(stub, "decoy-offline", want_job_id=own_id)
+    assert claimed is not None and claimed["id"] == own_id, (
+        "scoped _claim_one must return OUR job even when a foreign row heads "
+        "the claim batch"
+    )
+
+    # Legacy (unscoped) arm: returns the FOREIGN row at data[0] — this is the
+    # exact defect the scoping removes at the call sites.
+    legacy = _claim_one(stub, "decoy-offline")
+    assert legacy is not None and legacy["id"] == foreign_id, (
+        "unscoped _claim_one returns data[0] (the foreign row) — the "
+        "global-queue assumption this regression pins"
+    )
+
+    # Only-foreign batch: the scoped call must return None, never a foreign row.
+    only_foreign = _StubAdmin([foreign_row])
+    assert _claim_one(only_foreign, "decoy-offline", want_job_id=own_id) is None, (
+        "scoped _claim_one must return None (not a foreign row) when our job "
+        "was not in the batch"
+    )
+
+
+def test_claim_one_decoy_foreign_row_live(admin, strategy_id):
+    """LIVE supplement (skips locally without the test Supabase project): seed
+    our own pending job, insert a decoy pending job on a SECOND throwaway
+    strategy (a distinct dedupe partition, so both are claimable in one batch),
+    then the scoped `_claim_one` returns OUR job with a non-NULL claim_token —
+    never the decoy."""
+    own_job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    own_job_id = own_job["id"]
+
+    # Decoy on a distinct partition — both rows are independently claimable.
+    decoy_strategy_id = _make_strategy(admin)
+    decoy_job_id = _insert_pending_sync_trades(admin, decoy_strategy_id)
+    try:
+        claimed = _claim_one(admin, "decoy-live", want_job_id=own_job_id)
+        assert claimed is not None and claimed["id"] == own_job_id, (
+            "scoped _claim_one must return OUR seeded job, not the decoy row"
+        )
+        assert claimed.get("claim_token") is not None
+    finally:
+        # Clean up BOTH jobs + the throwaway strategy. The claim RPC will have
+        # stamped the decoy `running` as a side effect (watchdog self-heals it,
+        # but delete anyway).
+        admin.table("compute_jobs").delete().eq("id", own_job_id).execute()
+        admin.table("compute_jobs").delete().eq("id", decoy_job_id).execute()
+        try:
+            admin.table("strategies").delete().eq("id", decoy_strategy_id).execute()
+        except Exception:
+            pass
 
 
 def test_mark_compute_job_failed_writes_error_kind(admin, strategy_id):
