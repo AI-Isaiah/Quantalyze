@@ -410,20 +410,130 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
   });
 
-  // NOT-STALLED NEVER INTERRUPTED — route truth, not elapsed time (RT-1 render half).
-  it("never renders the interrupted state on stalled:false even past 15 minutes", async () => {
+  // NOT-STALLED, PRE-BACKSTOP — a healthy stalled:false read does NOT prematurely
+  // show the taking-longer state before the 15-min backstop patience (route
+  // truth, not naive elapsed time). The backstop itself is covered below.
+  it("does not render the interrupted state on stalled:false before the backstop patience", async () => {
     installWaitingMock("computing");
     progressOutcome = {
       kind: "json",
       body: { jobStatus: "running", stalled: false, memberProgress: MEMBERS_3 },
     };
     await renderWaiting();
-    // Advance well past RETRY_THRESHOLD_MS (15 min).
+    // Advance to just UNDER RETRY_THRESHOLD_MS (15 min) — status unchanged but
+    // the patience budget has not elapsed, so no exit affordance yet.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14 * 60_000);
+    });
+
+    expect(screen.queryByTestId("wizard-sync-interrupted")).not.toBeInTheDocument();
+  });
+
+  // SF-1 BACKSTOP — a genuinely stuck job whose sync-progress channel is DEAD
+  // still surfaces the retry affordance after the 15-min patience. Without the
+  // backstop this spins "Trades are being downloaded…" forever (only the
+  // cosmetic stalled channel drove the exit, and here it is suppressed).
+  it("surfaces the retry affordance after 15-min patience when the channel is suppressed", async () => {
+    installWaitingMock("running"); // stuck, non-terminal; status never advances
+    progressOutcome = { kind: "reject" }; // sync-progress channel dead
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await renderWaiting();
+
+    // Not yet — the backstop has not elapsed and stalled is unknowable.
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+
+    // Advance past RETRY_THRESHOLD_MS (15 min) with the status frozen.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(16 * 60_000);
     });
 
-    expect(screen.queryByTestId("wizard-sync-interrupted")).not.toBeInTheDocument();
+    const banner = screen.getByTestId("wizard-sync-interrupted");
+    expect(banner).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /retry sync/i }),
+    ).toBeInTheDocument();
+    // Neutral copy applies to the backstop path too.
+    expect(
+      within(banner).getByText(/taking longer than expected/i),
+    ).toBeInTheDocument();
+    warnSpy.mockRestore();
+  });
+
+  // SF-1 / RT-1 — the backstop keys off computation_status UNCHANGED, not raw
+  // elapsed: a genuine status change (e.g. a re-stitch resetting analytics)
+  // RESETS the stall clock, so the backstop does not fire on a still-progressing
+  // job even well past 15 minutes of total elapsed time.
+  it("does not fire the backstop when computation_status keeps advancing", async () => {
+    let dynamicStatus = "pending";
+    statusPollCount = 0;
+    currentClientFactory = () => ({
+      from: () => ({
+        select: (cols: string) => {
+          if (cols === "computation_status, computed_at") {
+            return {
+              eq: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({ data: null, error: null }),
+              }),
+            };
+          }
+          if (cols === "computation_status, computation_error") {
+            return {
+              eq: () => ({
+                maybeSingle: () => {
+                  statusPollCount += 1;
+                  return Promise.resolve({
+                    data: {
+                      computation_status: dynamicStatus,
+                      computation_error: null,
+                    },
+                    error: null,
+                  });
+                },
+              }),
+            };
+          }
+          return {
+            eq: () => ({
+              order: () => ({
+                maybeSingle: () =>
+                  Promise.resolve({ data: null, error: null }),
+              }),
+              maybeSingle: () => Promise.resolve({ data: null, error: null }),
+            }),
+          };
+        },
+      }),
+    });
+    progressOutcome = { kind: "reject" }; // channel dead → only the backstop could fire
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await renderWaiting();
+
+    // Hold "pending" for ~14 min (under the patience).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14 * 60_000);
+    });
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+
+    // The job ADVANCES to "computing" — this resets the stall clock.
+    dynamicStatus = "computing";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(20_000); // let a poll pick up the change
+    });
+
+    // Another ~14 min elapses (total ~28 min), but the status has only been
+    // unchanged for ~14 min since the advance → the backstop must NOT fire.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14 * 60_000);
+    });
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+    warnSpy.mockRestore();
   });
 
   // FAIL-OPEN — a rejecting/500 sync-progress fetch never crashes or interrupts.

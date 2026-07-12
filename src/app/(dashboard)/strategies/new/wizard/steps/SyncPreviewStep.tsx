@@ -368,6 +368,12 @@ export function SyncPreviewStep({
   // PROG-03 — retry CTA in-flight guard (disables the button, prevents a
   // double re-enqueue). Server-side idempotency is the real defense.
   const [retrying, setRetrying] = useState(false);
+  // SF-1 backstop — TRUE once the poll has sat in `waiting_for_complete` with an
+  // UNCHANGED computation_status for the full RETRY_THRESHOLD_MS patience. This
+  // exit affordance is INDEPENDENT of the cosmetic `syncProgress.stalled`
+  // channel, so a genuinely stalled job never becomes an indefinite hang even
+  // when the sync-progress route is dead (degrades to IDLE / sustained 429).
+  const [stallBackstop, setStallBackstop] = useState(false);
   const [computationError, setComputationError] = useState<string | null>(null);
   // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
   // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
@@ -386,6 +392,12 @@ export function SyncPreviewStep({
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
+  // SF-1 backstop — wall-clock of the LAST observed computation_status change.
+  // A status that has not advanced for RETRY_THRESHOLD_MS means the job is stuck
+  // (or legitimately slow — the retry is an idempotent no-op either way). A real
+  // re-stitch (RT-1: a member-set change resets analytics to pending) CHANGES
+  // the status and so RESETS this clock, correctly delaying the backstop.
+  const statusChangedAtRef = useRef<number>(0);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -534,10 +546,27 @@ export function SyncPreviewStep({
     // re-run inert (it never re-crawls when a snapshot is already held).
   }, [strategyId, cachedSnapshot]);
 
+  // SF-1 backstop — record when the observed computation_status last advanced.
+  // Fires on mount (null) and on every change; a status frozen for the whole
+  // patience window is the stuck signal the backstop keys off. Cheap ref write,
+  // no re-render.
+  useEffect(() => {
+    statusChangedAtRef.current = Date.now();
+  }, [computationStatus]);
+
   useEffect(() => {
     if (phase !== "waiting_for_complete" && phase !== "kicking_off") return;
     const id = window.setInterval(() => {
-      setElapsedMs(Date.now() - startedAtRef.current);
+      const now = Date.now();
+      setElapsedMs(now - startedAtRef.current);
+      // SF-1 — still waiting AND the analytics status has not advanced for the
+      // full 15-min patience budget → surface the exit affordance even if the
+      // cosmetic sync-progress stall channel is dead. Only fires in
+      // `waiting_for_complete` (a terminal transition leaves this phase).
+      setStallBackstop(
+        phase === "waiting_for_complete" &&
+          now - statusChangedAtRef.current >= RETRY_THRESHOLD_MS,
+      );
     }, 1000);
     return () => window.clearInterval(id);
   }, [phase]);
@@ -1660,14 +1689,17 @@ export function SyncPreviewStep({
         )}
       </div>
 
-      {/* PROG-03 — distinct, recoverable interrupted state. EXCLUSIVELY
-          route-driven (`syncProgress.stalled`, job-heartbeat-derived) — never
-          inferred from elapsed time or a strategy_analytics status regression
-          (RT-1: a member-set change legitimately resets analytics to pending
-          while the job re-stitches; the route returns stalled:false). Renders
+      {/* PROG-03 / SF-1 — distinct, recoverable "taking longer" state. Shows
+          when the route stall channel fires (`syncProgress.stalled`,
+          job-heartbeat-derived) OR the elapsed-patience BACKSTOP fires
+          (`stallBackstop`: computation_status unchanged past RETRY_THRESHOLD_MS)
+          — so a genuine stall is NEVER an indefinite hang even when the cosmetic
+          sync-progress channel is dead. The backstop respects RT-1: a re-stitch
+          that resets analytics to pending CHANGES the status and resets the
+          stall clock, so it is not inferred from a status regression. Renders
           ALONGSIDE the spinner card — polling continues, the job may
           self-recover via the watchdog reclaim. Amber = recoverable, not red. */}
-      {isComposite && syncProgress?.stalled === true && (
+      {isComposite && (syncProgress?.stalled === true || stallBackstop) && (
         <div
           data-testid="wizard-sync-interrupted"
           role="status"
