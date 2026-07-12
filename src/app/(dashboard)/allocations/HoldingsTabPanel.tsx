@@ -41,15 +41,50 @@ import { ExposureByClass } from "./widgets/positions/ExposureByClass";
 import { NetExposureChart } from "./widgets/positions/NetExposureChart";
 import { AllocationOverTime } from "./widgets/allocation/AllocationOverTime";
 import type { ExposureSectionData } from "./lib/exposure-props";
+// Phase 100 / 100-04 (PI-04 + PI-05) — the two demo-hero sections mounted below
+// the exposure trio, fed by the distinct `favorites` / `optimizer` / `note`
+// props threaded from page.tsx (wave-1 exports from plans 100-01 / 100-02).
+import { WatchlistPanel } from "./components/WatchlistPanel";
+import { OptimizerPanel } from "./components/OptimizerPanel";
+import { DashboardNoteCard } from "./components/DashboardNoteCard";
+import type { FavoriteRow, OptimizerPrefetch } from "./lib/watchlist-read";
+
+/** Honest-empty optimizer state when the prop is absent (test harnesses). */
+const EMPTY_OPTIMIZER: OptimizerPrefetch = {
+  portfolios: [],
+  defaultPortfolioId: null,
+  initialSuggestions: null,
+  computedAt: null,
+  computationStatus: null,
+};
 
 export function HoldingsTabPanel(
-  props: MyAllocationDashboardPayload & { exposure: ExposureSectionData },
+  // `favorites` / `optimizer` / `note` are ADDITIVE (100-04). Optional here so
+  // the panel renders honest-empty in harnesses that don't supply them; page.tsx
+  // always threads all three (SC-4).
+  props: MyAllocationDashboardPayload & {
+    exposure: ExposureSectionData;
+    favorites?: FavoriteRow[];
+    optimizer?: OptimizerPrefetch;
+    note?: { initialContent: string; initialLastSavedAt: Date | null };
+  },
 ) {
   const holdingsSummary = useMemo(() => props.holdingsSummary ?? [], [props.holdingsSummary]);
   const flaggedHoldings = props.flaggedHoldings ?? [];
   const matchDecisionsByHoldingRef = props.matchDecisionsByHoldingRef ?? {};
   const apiKeys = useMemo(() => props.apiKeys ?? [], [props.apiKeys]);
   const strategies = useMemo(() => props.strategies ?? [], [props.strategies]);
+
+  // Phase 100 / 100-04 — additive section inputs (honest-empty when absent).
+  const favorites = useMemo(() => props.favorites ?? [], [props.favorites]);
+  const optimizer = props.optimizer ?? EMPTY_OPTIMIZER;
+  const note = props.note ?? { initialContent: "", initialLastSavedAt: null };
+  // Real cross-link: the watchlist "Suggested" chip lights up ONLY for favorites
+  // that are ALSO a current optimizer suggestion. [] when nothing is computed.
+  const suggestedIds = useMemo(
+    () => (optimizer.initialSuggestions ?? []).map((s) => s.strategy_id),
+    [optimizer.initialSuggestions],
+  );
 
   const [showRevoked, setShowRevoked] = useState(true);
 
@@ -145,9 +180,10 @@ export function HoldingsTabPanel(
       {/* Section 1 — onboarded strategies (renders its own "Strategies" header). */}
       <HoldingsTable strategyRows={strategyRows} />
 
-      {/* Section 2 — Exposure (PI-01/02/03). Sits BETWEEN Strategies and
-          Exchange Positions per the 99-UI-SPEC placement. Additive: fed by the
-          distinct `exposure` prop; renders honest-empty when the trio is empty. */}
+      {/* Section 2 — Exposure (PI-01/02/03). Sits directly after Strategies per
+          the 99-UI-SPEC placement (the 100-04 Watchlist/Notes sections now follow
+          it, before Exchange Positions). Additive: fed by the distinct `exposure`
+          prop; renders honest-empty when the trio is empty. */}
       <section aria-label="Exposure" className="grid gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exposure
@@ -161,7 +197,37 @@ export function HoldingsTabPanel(
         </div>
       </section>
 
-      {/* Section 3 — raw exchange positions (always shown). */}
+      {/* Section 3 — Watchlist & Optimizer (PI-05). Mounts directly BELOW the
+          exposure trio per the 100-UI-SPEC composition. Additive: fed by the
+          distinct `favorites` / `optimizer` props; each panel renders honest-empty
+          when its data is empty (zero fabricated rows). The two panels reflow on
+          THIS section's own width (stacked <1024px) via a @container host on a
+          SEPARATE ancestor from the @5xl:grid-cols-2 variant — the CompareTable
+          idiom (DESIGN.md 2026-06-29). The parent grid's gap-8 gives the 32px
+          section gap the UI-SPEC pins. */}
+      <section aria-label="Watchlist & Optimizer" className="grid gap-4">
+        <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
+          Watchlist &amp; Optimizer
+        </h3>
+        <div className="@container">
+          <div className="grid grid-cols-1 gap-6 @5xl:grid-cols-2">
+            <WatchlistPanel favorites={favorites} suggestedIds={suggestedIds} />
+            <OptimizerPanel prefetch={optimizer} />
+          </div>
+        </div>
+      </section>
+
+      {/* Section 4 — Notes (PI-04), full-width. DashboardNoteCard owns its own
+          "Notes" heading + autosave; the <section> is an aria landmark only (no
+          duplicate section heading). */}
+      <section aria-label="Notes">
+        <DashboardNoteCard
+          initialContent={note.initialContent}
+          initialLastSavedAt={note.initialLastSavedAt}
+        />
+      </section>
+
+      {/* Section 5 — raw exchange positions (always shown). */}
       <section className="grid gap-4">
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
           Exchange Positions

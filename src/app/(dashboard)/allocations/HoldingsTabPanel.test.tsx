@@ -207,8 +207,8 @@ function makeSuggestion(id: string) {
   };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function renderP100(props: Record<string, unknown>) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return render(<HoldingsTabPanel {...(props as any)} />);
 }
 
@@ -233,11 +233,13 @@ describe("HoldingsTabPanel — Watchlist/Optimizer + Notes (100-04 wiring)", () 
     expect(iWatchOpt).toBeLessThan(iNotes);
     expect(iNotes).toBeLessThan(iExchange);
 
-    // Both new sections are real aria landmarks.
-    expect(
-      container.querySelector('section[aria-label="Watchlist & Optimizer"]'),
-    ).not.toBeNull();
-    expect(container.querySelector('section[aria-label="Notes"]')).not.toBeNull();
+    // Both new sections are real aria landmarks. (Matched via getAttribute — a
+    // literal `&` in a CSS attribute selector trips jsdom's selector parser.)
+    const sectionLabels = Array.from(container.querySelectorAll("section")).map(
+      (s) => s.getAttribute("aria-label"),
+    );
+    expect(sectionLabels).toContain("Watchlist & Optimizer");
+    expect(sectionLabels).toContain("Notes");
   });
 
   it("SC-4: the Phase-99 Exposure section is unchanged and still precedes the new sections", () => {
