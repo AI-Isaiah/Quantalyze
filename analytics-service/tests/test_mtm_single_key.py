@@ -667,3 +667,79 @@ async def test_sc4_cash_parity_mtm_degraded() -> None:
         "a degraded MTM pass perturbed the cash data_quality_flags beyond the "
         "additive mtm_gated_reason — SC-4 breach"
     )
+
+
+# ── Convention + compute-degrade coverage ───────────────────────────────────
+
+_ALLOC_CONFIG = {
+    "denominator": "allocated_capital",
+    # cash headline (so the additive MTM second pass still runs) + the allocated
+    # simple/active conventions the MTM object must mirror.
+    "pnl_basis": "cash_settlement",
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+    "capital_schedule": [
+        {"effective_from": "2024-01-01", "capital_usd": 100000.0},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_mtm_object_uses_allocated_capital_conventions() -> None:
+    """An allocated-capital strategy (Zavara-style simple/active override) still
+    persists a finite mark_to_market object — proving the MTM compute reads the
+    override's cumulative_method/day_basis (not the geometric/calendar default)."""
+    ctx, capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _ALLOC_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict) and set(by_basis) == {"mark_to_market"}
+    assert pd.notna(by_basis["mark_to_market"]["cumulative_return"])
+
+
+@pytest.mark.asyncio
+async def test_mtm_compute_valueerror_degrades() -> None:
+    """A compute_all_metrics ValueError (e.g. a simple-basis interior chain-break)
+    on the MTM object DEGRADES: the derive still completes DONE, persists SQL NULL,
+    and stamps the reason — the cash headline is never failed by an MTM compute
+    rejection. Fails if the compute-level except is removed (job would raise)."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch(
+            "services.metrics.compute_all_metrics",
+            new=MagicMock(side_effect=ValueError("interior chain-break")),
+        ),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["metrics_json_by_basis"] is None
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SUMMARY_COVERAGE
+    )
