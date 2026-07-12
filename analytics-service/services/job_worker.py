@@ -2825,6 +2825,75 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         meta.get("used_heuristic_capital"),
     )
 
+    # ── MTM-01 (Phase 101): compute the additive mark_to_market metrics object ──
+    # STRATEGY-mode only (key-mode returned above). When the second pass produced a
+    # series (mtm_returns is not None) compute its seven-scalar headline object with
+    # the SAME conventions run_csv_strategy_analytics threads for the cash headline
+    # (analytics_runner.py:2291-2316) so the MTM object is convention-comparable:
+    # asset-class annualization clock (#597 √365 crypto / √252 traditional) + the
+    # allocated-capital cumulative_method/day_basis (geometric+calendar when no
+    # override). This is the single-key sibling of the composite MTM compute
+    # (:3834-3840, 4018-4020) MINUS the cash key — the headline IS the cash truth
+    # for single-key, and the strict basis-metrics.ts overlay stays byte-identical
+    # only when cash_settlement is ABSENT from the by-basis object.
+    from services.metrics import (
+        compute_all_metrics,
+        periods_per_year_for_asset_class,
+    )
+    from services.allocated_capital import metrics_day_basis
+
+    mtm_metrics_json: dict[str, Any] | None = None
+    if mtm_returns is not None:
+        _mtm_periods = periods_per_year_for_asset_class(
+            ctx.strategy_row.get("asset_class")
+            if isinstance(ctx.strategy_row, dict)
+            else None
+        )
+        if denominator_config is not None:
+            _mtm_cumulative = denominator_config.cumulative_method
+            _mtm_day_basis = metrics_day_basis(denominator_config.metrics_basis)
+        else:
+            _mtm_cumulative = "geometric"
+            _mtm_day_basis = "calendar"
+        # Benchmark: guarded exactly like the composite (:3808-3817). The seven
+        # guaranteed scalars are benchmark-INVARIANT, so a BTC benchmark blip must
+        # NEVER gate MTM — on failure log a warning and compute benchmark_rets=None.
+        from services.benchmark import get_benchmark_returns
+
+        _mtm_benchmark_rets: pd.Series | None = None
+        try:
+            _mtm_benchmark_rets, _ = await get_benchmark_returns("BTC")
+        except Exception as _bench_exc:  # noqa: BLE001
+            logger.warning(
+                "derive_broker_dailies: MTM benchmark fetch failed for strategy "
+                "%s (computing mark_to_market without the benchmark family): %s",
+                strategy_id, _bench_exc,
+            )
+        try:
+            # dict(result.metrics_json) — the SAME already-JSON-safe object the
+            # composite persists (degenerate scalars are JSON null via _safe_float;
+            # postgrest rejects NaN, so never hand-build).
+            _mtm_result = compute_all_metrics(
+                mtm_returns,
+                _mtm_benchmark_rets,
+                periods_per_year=_mtm_periods,
+                cumulative_method=_mtm_cumulative,
+                day_basis=_mtm_day_basis,
+            )
+            mtm_metrics_json = dict(_mtm_result.metrics_json)
+        except ValueError as _mtm_compute_exc:
+            # Mirror the composite F-5 guard (:3844) but DEGRADE instead of failing
+            # the job: a cumulative_method='simple' series with an interior chain-break
+            # rejects. The cash headline is unaffected, so stamp the machine reason and
+            # omit the key rather than fail the whole derive.
+            mtm_metrics_json = None
+            mtm_gated_reason = MTM_REASON_SUMMARY_COVERAGE
+            logger.warning(
+                "derive_broker_dailies: mark_to_market metrics compute rejected the "
+                "series for strategy %s (interior chain-break) — degrading: %s",
+                strategy_id, scrub_freeform_string(str(_mtm_compute_exc)),
+            )
+
     # DQ-02 + DQ-01 (v1.8): PRE-STAMP the coverage terminus flag AND the DQ-01
     # NAV-denominator guard flags (negative_nav_guard / dust_nav_guard /
     # flow_dominated_guard) onto strategy_analytics so the CSV analytics run
@@ -2865,12 +2934,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     if mtm_attempted and mtm_gated_reason is not None:
         _prestamp_flags["mtm_gated_reason"] = mtm_gated_reason
 
-    def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
+    # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
+    # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete
+    # upsert OMITS metrics_json_by_basis for never-composite rows (Finding 5 gates on
+    # the prior `composite` flag), so a prestamped mark_to_market key SURVIVES the
+    # finalizer. This mirrors the composite persist (:4016-4020) MINUS the cash key:
+    # the headline IS the cash truth for single-key, and the strict basis-metrics.ts
+    # overlay stays byte-identical only when cash_settlement is ABSENT from the
+    # by-basis object (writing a cash key would activate a recomputed cash overlay
+    # and risk SC-4 divergence).
+    _prestamp_payload: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "data_quality_flags": _prestamp_flags,
+    }
+    if mtm_attempted:
+        # An options-book, strategy-mode, cash-headline derive. Success → the
+        # additive object; degrade → SQL NULL (Python None, never JSON null — the
+        # Phase-85 CHECK) which HEALS a stale mark_to_market key left by a prior
+        # successful derive whose data later gated (composite Finding-5 drop-stale).
+        _prestamp_payload["metrics_json_by_basis"] = (
+            {"mark_to_market": mtm_metrics_json}
+            if mtm_metrics_json is not None
+            else None
+        )
+    # When the pass was NOT attempted (perp-only, ccxt, key-mode, MTM-configured
+    # headline) the metrics_json_by_basis column is left OUT of the payload — the
+    # column is UNTOUCHED and every non-options derive stays byte-identical (SC-4).
+
+    def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
         ctx.supabase.table("strategy_analytics").upsert(
-            {
-                "strategy_id": strategy_id,
-                "data_quality_flags": flags,
-            },
+            payload,
             on_conflict="strategy_id",
         ).execute()
 

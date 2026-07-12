@@ -400,3 +400,163 @@ def _find_prestamp(capture: dict) -> dict | None:
         ):
             return payload
     return None
+
+
+_SEVEN_SCALARS = (
+    "cumulative_return", "volatility", "max_drawdown",
+    "cagr", "sharpe", "sortino", "calmar",
+)
+
+
+def _patch_benchmark(*, raises: bool = False) -> Any:
+    """Patch the function-local ``from services.benchmark import
+    get_benchmark_returns`` at its SOURCE. Default: return (None, True) so the
+    real supabase-backed fetch is never hit. ``raises=True`` simulates a blip."""
+    if raises:
+        return patch(
+            "services.benchmark.get_benchmark_returns",
+            new=AsyncMock(side_effect=RuntimeError("benchmark fetch blip")),
+        )
+    return patch(
+        "services.benchmark.get_benchmark_returns",
+        new=AsyncMock(return_value=(None, True)),
+    )
+
+
+# ── Task 2: metrics compute + additive prestamp persistence ─────────────────
+
+@pytest.mark.asyncio
+async def test_finite_mtm_object_persisted() -> None:
+    """Wave-0 gap 1: an options book whose MTM pass succeeds persists
+    metrics_json_by_basis == {"mark_to_market": <seven-scalar dict>} with a FINITE
+    cumulative_return and NO cash_settlement key. compute_all_metrics runs for real
+    over the MTM series."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict), "must persist a metrics_json_by_basis object"
+    assert set(by_basis.keys()) == {"mark_to_market"}, (
+        "single-key by-basis must carry ONLY mark_to_market — a cash_settlement "
+        "key would activate the recomputed cash overlay and risk SC-4 divergence"
+    )
+    mtm = by_basis["mark_to_market"]
+    for _k in _SEVEN_SCALARS:
+        assert _k in mtm, f"MTM object missing headline scalar {_k!r}"
+    assert mtm["cumulative_return"] is not None
+    assert pd.notna(mtm["cumulative_return"])
+    # No degrade reason on the success path.
+    assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
+
+
+@pytest.mark.asyncio
+async def test_degraded_mtm_persists_null_and_reason() -> None:
+    """Wave-0 gap 3: a degraded MTM pass persists metrics_json_by_basis IS None
+    (SQL NULL — heals a stale key) AND data_quality_flags.mtm_gated_reason."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(
+        reports,
+        side_effects=[None, LedgerValuationError("summary hole mid-window")],
+    )
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert "metrics_json_by_basis" in prestamp, (
+        "an ATTEMPTED-but-degraded pass must WRITE the column (SQL NULL) to heal "
+        "a stale mark_to_market key from a prior successful derive"
+    )
+    assert prestamp["metrics_json_by_basis"] is None
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SUMMARY_COVERAGE
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_options_deribit_leaves_by_basis_untouched() -> None:
+    """Zero blast radius: a perp-only Deribit derive writes NO metrics_json_by_basis
+    key and NO mtm_gated_reason — byte-identical to the pre-Phase-101 payload."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=False)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert "metrics_json_by_basis" not in prestamp, (
+        "a non-options derive must leave the by-basis column UNTOUCHED"
+    )
+    assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
+
+
+@pytest.mark.asyncio
+async def test_ccxt_venue_leaves_by_basis_untouched() -> None:
+    """Zero blast radius: a ccxt (binance) strategy derive never attempts the MTM
+    pass — no metrics_json_by_basis key in the prestamp payload."""
+    from tests.test_derive_broker_dailies_dualmode import (
+        _build_ctx as _dm_ctx,
+        _patches as _dm_patches,
+        _two_day_returns,
+    )
+
+    ctx, capture = _dm_ctx(
+        key_row={"id": "key-b", "exchange": "binance", "user_id": "user-1"},
+        strategy_row={"id": "strat-1", "user_id": "user-1"},
+    )
+    patches = _dm_patches(ctx, key_mode=False, returns=_two_day_returns())
+    with _apply(list(patches)):
+        result = await run_derive_broker_dailies_job(
+            {"kind": "derive_broker_dailies", "strategy_id": "strat-1"}
+        )
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert "metrics_json_by_basis" not in prestamp, (
+        "a ccxt derive must never write the single-key by-basis column"
+    )
+    assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
+
+
+@pytest.mark.asyncio
+async def test_benchmark_failure_never_gates_mtm() -> None:
+    """A get_benchmark_returns blip must NOT gate MTM — the seven guaranteed
+    scalars are benchmark-invariant, so a finite mark_to_market object still
+    persists (computed with benchmark_rets=None)."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark(raises=True)]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict) and "mark_to_market" in by_basis
+    assert pd.notna(by_basis["mark_to_market"]["cumulative_return"])
+    assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
