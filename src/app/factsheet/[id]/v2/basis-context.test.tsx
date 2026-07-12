@@ -134,7 +134,7 @@ describe("basis-context", () => {
   it("Test 6 — mtmDisabledReasonCopy is a closed set with an honest, basis-agnostic default", () => {
     // Phase 102 (MTM-01) honest reason copy — character-exact pins (DESIGN.md
     // voice: factual, institutional, no contractions, never fabricating).
-    // The stale unsmoothed_options_book Phase-83 smoothing framing is GONE.
+    // The dropped daily-mark smoothing framing on the options-book reason is GONE.
     expect(mtmDisabledReasonCopy("unsmoothed_options_book")).toBe(
       "Mark-to-market unavailable: composites that include an options book report cash settlement only.",
     );

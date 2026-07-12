@@ -101,7 +101,7 @@ function base(): FactsheetPayload {
 function fixtureSingleKey(): FactsheetPayload {
   return base();
 }
-// (b) composite, MTM GATED with the un-smoothed-options reason.
+// (b) composite, MTM GATED with the options-book reason.
 function fixtureCompositeGated(): FactsheetPayload {
   return {
     ...base(),
@@ -178,7 +178,7 @@ describe("FactsheetBody — Phase 90 FS-03 basis toggle (RED until 90-05)", () =
     expect(cMtm.getAttribute("aria-disabled")).not.toBe("true");
 
     // (b) gated on the options-book reason: disabled + the rewritten Phase-102
-    // honest copy (the stale Phase-83 smoothing framing is gone).
+    // honest copy (the dropped daily-mark smoothing framing is gone).
     const b = renderBody(fixtureCompositeGated());
     const bMtm = within(b.container).getByText("Mark-to-market");
     expect(bMtm.getAttribute("aria-disabled")).toBe("true");

@@ -6,7 +6,7 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, mtmDisabledReasonCopy, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
 // wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
 // L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
@@ -1069,6 +1069,11 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
+  // Phase 102 (DESIGN.md tone split): amber --color-warning is reserved for
+  // transient/recoverable reasons (timeout, anchor-race — the system re-attempts
+  // on the next derive); steady-state honest-empty reasons render muted. Amber on
+  // a steady reason would falsely signal self-healing (RESEARCH Pitfall 4).
+  const mtmReasonTransient = mtmReasonTone(payload.mtmGate?.reason) === "transient";
   // Phase 90.5 (LEV-01, D1/D2/D5) + Phase 102: fail-closed eligibility — the
   // leverage cluster renders IFF single-key (composite !== true) AND periodsPerYear
   // present AND the CASH basis is active. Before Phase 102 the leverage cluster and
@@ -1192,14 +1197,19 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               },
             ]}
           />
-          {!mtmAvailable && (
-            <p
-              className="text-caption"
-              style={{ color: "var(--color-warning, #B45309)" }}
-            >
-              {mtmReason}
-            </p>
-          )}
+          {!mtmAvailable &&
+            (mtmReasonTransient ? (
+              // Transient/recoverable → amber (system re-attempts on next derive).
+              <p
+                className="text-caption"
+                style={{ color: "var(--color-warning, #B45309)" }}
+              >
+                {mtmReason}
+              </p>
+            ) : (
+              // Steady-state honest-empty → muted (#64748B, WCAG-AA 4.85:1 on white).
+              <p className="text-caption text-text-muted">{mtmReason}</p>
+            ))}
         </div>
       )}
       <DisplayMenu />

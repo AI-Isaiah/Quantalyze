@@ -95,15 +95,60 @@ export function useBasisMetrics(payload: FactsheetPayload): {
 
 /**
  * Closed-set MTM disabled-reason copy (CONTEXT D1 / UI-SPEC Copywriting),
- * character-exact. Server truth only — no client ledger predicate.
+ * character-exact. Server truth only — no client ledger predicate; a graceful
+ * basis-agnostic default handles any un-enumerated reason (the TS union at
+ * types.ts:500 is OPEN, so nothing mechanically requires enumerating a new
+ * reason to render — the default degrades honestly).
+ *
+ * Phase 102 (MTM-01) rewrote every string to the honest current meaning
+ * (DESIGN.md voice: factual, institutional, no contractions, never fabricating,
+ * coverage-mask honesty). The dropped daily-mark smoothing framing that the
+ * options-book reason used to carry is GONE — smoothing was permanently
+ * retired in Phase 101. The default is
+ * basis-agnostic ("for this strategy") because the old "for this composite" was
+ * wrong for a single-key options strategy.
  */
 export function mtmDisabledReasonCopy(reason?: string): string {
   switch (reason) {
     case "unsmoothed_options_book":
-      return "Mark-to-market disabled: un-smoothed options book (Phase-83 daily-mark smoothing not applied)";
+      // The live composite-gate return (stitch_composite.py:303) for any
+      // options-member composite — the honest CURRENT meaning (the dropped
+      // daily-mark smoothing explanation is retired).
+      return "Mark-to-market unavailable: composites that include an options book report cash settlement only.";
     case "mtm_basis_unavailable_for_venue":
       return "Mark-to-market unavailable for this venue.";
+    case "mtm_summary_coverage_incomplete":
+      return "Mark-to-market unavailable: settlement history does not fully cover this book, so a mark-to-market series cannot be reconstructed.";
+    case "mtm_series_uncomputable":
+      return "Mark-to-market unavailable: the reconstructed mark-to-market series could not produce valid metrics.";
+    case "mtm_second_pass_timeout":
+      return "Mark-to-market temporarily unavailable: reconstruction exceeded its time budget and will be retried on the next data refresh.";
+    case "mtm_anchor_race":
+      // The reason constant ships in plan 102-02 (the vocabulary owner); the
+      // "mtm_anchor_race" string literal is the cross-language contract — both
+      // plans pin the same literal.
+      return "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.";
     default:
-      return "Mark-to-market unavailable for this composite.";
+      return "Mark-to-market unavailable for this strategy.";
+  }
+}
+
+/**
+ * DESIGN.md tone split for the MTM disabled-reason surface. `--color-warning`
+ * amber is RESERVED for transient/recoverable states the system re-attempts on
+ * its own — so ONLY the two reasons that self-heal on the next derive
+ * (`mtm_second_pass_timeout`, `mtm_anchor_race`) are "transient". Every other
+ * reason (coverage hole, uncomputable series, venue, options-composite, unknown/
+ * default) is a steady-state honest-empty condition rendered in muted text; amber
+ * there would falsely signal self-healing (RESEARCH Pitfall 4 + DESIGN.md Color:
+ * "warning is reserved for transient recoverable states").
+ */
+export function mtmReasonTone(reason?: string): "transient" | "steady" {
+  switch (reason) {
+    case "mtm_second_pass_timeout":
+    case "mtm_anchor_race":
+      return "transient";
+    default:
+      return "steady";
   }
 }
