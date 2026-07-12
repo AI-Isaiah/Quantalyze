@@ -3,6 +3,7 @@
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 
 import { usePayload } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 
 /**
  * Named market-stress windows — how the strategy fared during specific
@@ -11,8 +12,12 @@ import { usePayload } from "./factsheet-context";
  * series are dropped server-side.
  */
 export function StressWindowsPanel() {
-  const payload = usePayload();
-  const { windows, benchName, totalCatalogued, droppedOutOfRange, droppedPartial } = payload.stressWindows;
+  // Phase 103 (MTM-04): MIXED panel. Its strategy columns (stratReturn/stratMaxDD)
+  // recompute from the MTM series → follow the active basis; the benchmark column
+  // is basis-invariant BY CONSTRUCTION (same BTC series aligned to the MTM axis, no
+  // new math). The whole stressWindows block is in the bundle; cash view === payload.
+  const view = useBasisSeriesView(usePayload());
+  const { windows, benchName, totalCatalogued, droppedOutOfRange, droppedPartial } = view.stressWindows;
   // Honest empty state when nothing in our catalogue overlaps the observation
   // window — better to render a one-liner than silently disappear.
   if (windows.length === 0) {

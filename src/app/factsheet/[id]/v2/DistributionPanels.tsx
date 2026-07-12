@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -198,9 +199,11 @@ export function EndOfYearBarsPanel() {
 /* -------------------- Quantile box plot -------------------- */
 
 export function QuantileBoxPlotPanel() {
-  const payload = usePayload();
+  // Phase 103 (MTM-04): the daily-return quantile box is a pure function of the
+  // strategy's own daily series → follows the active basis (cash === payload).
+  const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const q = payload.quantiles;
+  const q = view.quantiles;
   // Use min/max as the visible range; clamp at twice the P95-P05 IQR-ish so
   // a 50% tail-event day doesn't push the box into a tiny sliver.
   const span = Math.max(Math.abs(q.p95 - q.p05), 0.005);
@@ -327,9 +330,13 @@ function Kpi({ label, value, tone }: { label: string; value: string; tone: "mute
 /* -------------------- Correlation strip -------------------- */
 
 export function CorrelationStripPanel() {
-  const payload = usePayload();
+  // Phase 103 (MTM-04): correlations are EXTERNAL-DATA (need BTC/ETH/SPX/Gold/IEF
+  // series with no MTM equivalent) → NOT in the bundle, so the view-merge passes
+  // them through as CASH under BOTH bases with zero branching. No basis label is
+  // added (honesty by construction: the panel physically carries cash values).
+  const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const rows = payload.correlations.filter(r => Number.isFinite(r.rho));
+  const rows = view.correlations.filter(r => Number.isFinite(r.rho));
   if (rows.length === 0) return null;
   const VB_W = 880;
   // CHART-03 portrait: taller mobile rows; desktop ROW_H = today's literal (26).
@@ -437,9 +444,11 @@ export function CorrelationStripPanel() {
  * the matrix doubles as a small data table.
  */
 export function CorrelationsMatrixPanel() {
-  const payload = usePayload();
+  // Phase 103 (MTM-04): EXTERNAL-DATA (see CorrelationStripPanel) → passes through
+  // as CASH under both bases via the view-merge, no basis label.
+  const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const { labels, matrix } = payload.correlationMatrix;
+  const { labels, matrix } = view.correlationMatrix;
   if (labels.length === 0) return null;
 
   const N = labels.length;

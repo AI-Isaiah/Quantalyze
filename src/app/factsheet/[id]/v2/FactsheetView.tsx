@@ -6,7 +6,7 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisSeriesView, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
 // wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
 // L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
@@ -349,13 +349,19 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   }
   // F4 (UI-SPEC §4 zero-shift): render the eyebrow PERSISTENTLY (reserved line
   // height) so toggling cash↔MTM no longer pops it in/out and reflows the right
-  // rail. NOTE (deviation from the finding's literal "swap CASH↔MTM text"): the
-  // MetricsColumn distributional stats are cash-ONLY (D5 — skew/VaR/win-rate have
-  // NO persisted MTM counterpart), so labeling the column "MARK-TO-MARKET" would
-  // be the exact no-invented-data violation this milestone forbids. Instead the
-  // eyebrow flags "these stayed CASH" under MTM, and holds a blank line (nbsp)
-  // under cash — reserving height without emitting a "BASIS ·" string that would
-  // duplicate the KpiStrip eyebrow or mislabel the column.
+  // rail. The eyebrow flags "the SUMMARY SCALAR metrics here stayed CASH" under
+  // MTM, and holds a blank line (nbsp) under cash.
+  //
+  // Phase 103 (MTM-04) SCOPE UPDATE (was "distributional stats are cash-ONLY"):
+  // the DAILIES-DERIVABLE rail panels — Calmar-by-year, Bootstrap CI, the Worst-10
+  // table, Style Drift, and the Extended-Metrics quantile rows (P5/P95/Median) —
+  // NOW follow the active basis (they have a per-basis bundle counterpart). What
+  // STAYS cash here is the strategyMetrics-derived SCALAR tables (Compound/Main/
+  // Returns/Risk/Extended-scalars/Benchmark α·β·IR — no persisted MTM counterpart;
+  // the KpiStrip owns MTM for the headline scalars, Phase 102). So the rail is
+  // MIXED under MTM and the blanket "BASIS · CASH SETTLEMENT" wording now
+  // under-describes it. Kept verbatim (composite-only; single-key options shows NO
+  // eyebrow) pending a design decision — FLAGGED in 103-04-SUMMARY / red team.
   const onMtm = basis === "mark_to_market";
   return (
     <div className="flex flex-col gap-4 min-w-0">
@@ -387,10 +393,20 @@ const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSorti
 function PerformanceCharts() {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
-  // Phase 90 (FS-03): charts stay cash always; under MTM we caption that. Plus
-  // the FS-01/02 visually-hidden AT summary for the stitched track. Composite-only.
+  // Phase 103 (MTM-04): charts NOW follow the basis (each chart reads through
+  // useBasisSeriesView). This component owns the basis-aware caption + the FS-01/02
+  // AT gap summary — both keyed on the ACTIVE view so the a11y gap count matches
+  // exactly what the charts render.
   const { basis } = useBasis();
+  const view = useBasisSeriesView(payload);
   const composite = payload.dataQuality?.composite === true;
+  // The MTM toggle renders for a composite OR any single-key options strategy in
+  // the MTM basis story (mtmGate present) — the SAME predicate as the ControlBar
+  // SegmentedControl gate. The caption region pre-mounts on this (F5 discipline).
+  const mtmToggleAvailable = composite || payload.mtmGate != null;
+  // Bundle presence decides the honest three-state caption: absent (stale cache /
+  // not-yet-backfilled / gated) → charts fall back to cash + the "showing cash" copy.
+  const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
   // Defensive fallbacks: a cache entry created before the rollingWindow
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
@@ -448,9 +464,11 @@ function PerformanceCharts() {
         // F6 (IN-05): N boundaries ⇒ N+1 keys, but a 1-member composite has 0
         // boundaries and therefore NO handoffs — don't claim "1 keys" or "seam
         // markers at each key handoff". Pluralize and guard the handoff clause.
-        const nBoundaries = payload.segmentBoundaries?.length ?? 0;
+        const nBoundaries = view.segmentBoundaries?.length ?? 0;
         const nKeys = nBoundaries + 1;
-        const nGaps = payload.missingSegments?.length ?? 0;
+        // Count the ACTIVE view's gaps — MTM gaps ≠ cash gaps (an MTM axis carries
+        // its own coverage mask), so the AT summary matches the rendered charts.
+        const nGaps = view.missingSegments?.length ?? 0;
         return (
           <span className="sr-only">
             Stitched from {nKeys} key{nKeys === 1 ? "" : "s"}.
@@ -459,20 +477,27 @@ function PerformanceCharts() {
           </span>
         );
       })()}
-      {/* FS-03 (composite-only): charts never swap basis. F5 (IN-03): PRE-MOUNT
-          this role=status region (rendered for every composite, empty under cash)
-          so the caption text is a CONTENT change on an existing live region
-          rather than a mount-on-toggle region — several SRs do not reliably
-          announce a live region that appears at the same instant as its content.
-          role="status" carries an implicit aria-live="polite"; this is now the
-          SINGLE authoritative announcer for the basis switch (the KpiStrip
-          eyebrow's redundant aria-live was dropped to avoid a double
-          announcement). */}
-      {composite && (
+      {/* Phase 103 (MTM-04): charts NOW follow the toggle, so the caption is
+          basis-aware three-state (was the stale cash-only copy). F5 (IN-03):
+          PRE-MOUNT this role=status region whenever the MTM toggle can render
+          (composite OR single-key options) — empty under cash — so the caption is
+          a CONTENT change on an existing live region, never a mount-on-toggle
+          region (several SRs do not reliably announce a live region that appears at
+          the same instant as its content). role="status" carries an implicit
+          aria-live="polite"; it is the SINGLE authoritative announcer for the basis
+          switch (the KpiStrip eyebrow's redundant aria-live was dropped).
+          Three states:
+            - cash                     → "" (empty, unchanged idiom)
+            - MTM + bundle present     → charts DID follow → mark-to-market copy
+            - MTM + bundle ABSENT      → honest fallback (stale cache / not yet
+              re-derived/backfilled — Zavara pre-backfill) → cash charts + cash copy */}
+      {mtmToggleAvailable && (
         <p role="status" className="text-caption text-text-secondary">
-          {basis === "mark_to_market"
-            ? "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."
-            : ""}
+          {basis !== "mark_to_market"
+            ? ""
+            : mtmBundlePresent
+              ? "Charts show the mark-to-market series."
+              : "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."}
         </p>
       )}
       {!roll.enough && (

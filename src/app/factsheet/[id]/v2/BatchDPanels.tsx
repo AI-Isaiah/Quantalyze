@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { usePayload } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 
 /**
  * Batch D analytical panels. Three pieces:
@@ -15,8 +16,10 @@ import { usePayload } from "./factsheet-context";
  */
 
 export function StyleDriftPanel() {
-  const payload = usePayload();
-  const sd = payload.styleDrift;
+  // Phase 103 (MTM-04): the 50/50 half-vs-half KS drift is a pure function of the
+  // strategy's own daily series → follows the active basis (cash view === payload).
+  const view = useBasisSeriesView(usePayload());
+  const sd = view.styleDrift;
   if (!sd) return null;
   const { h1, h2, ksD, ksP } = sd;
   const ksSignificant = ksP < 0.05;

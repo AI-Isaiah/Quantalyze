@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import type { JointMetrics } from "@/lib/factsheet/types";
 import { usePayload, useActiveComparator } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
@@ -400,9 +401,15 @@ function CumulativeReturnsPanel() {
  * one place: skew, kurtosis, VaR/CVaR, win/loss asymmetry, profit factor.
  */
 function ExtendedMetricsPanel() {
-  const payload = usePayload();
-  const m = payload.strategyMetrics;
-  const q = payload.quantiles;
+  // Phase 103 (MTM-04): the quantile rows (P5/P95/Median daily) follow the active
+  // basis via `view.quantiles`; `strategyMetrics` is NOT in the bundle, so the
+  // skew/kurtosis/VaR/tail rows pass through as CASH (the KpiStrip owns MTM for
+  // headline scalars, Phase 102). NOTE: this panel is therefore MIXED-basis under
+  // MTM — the composite rail eyebrow (MetricsColumnWithBasis) discloses that the
+  // summary scalar metrics here stay cash. Flagged for design in 103-04-SUMMARY.
+  const view = useBasisSeriesView(usePayload());
+  const m = view.strategyMetrics;
+  const q = view.quantiles;
   return (
     <Panel title="Extended Metrics">
       <Kpm>
@@ -462,8 +469,12 @@ function ratioStr(win: number, loss: number): string {
  * trough→recovery, total). Indices map to dates via payload.dates.
  */
 function WorstDrawdownsTablePanel() {
-  const payload = usePayload();
-  const rows = payload.strategyWorst10;
+  // Phase 103 (MTM-04): the worst-10 table follows the active basis so it stays
+  // coherent with the Worst-DDs chart bands. Its indices are into the ACTIVE date
+  // axis, so BOTH strategyWorst10 AND dates must come from the view (an MTM index
+  // mapped onto the cash calendar would mislabel peak/trough/recovery dates).
+  const view = useBasisSeriesView(usePayload());
+  const rows = view.strategyWorst10;
   if (rows.length === 0) return null;
   return (
     <Panel title="Worst 10 Drawdowns">
@@ -508,9 +519,9 @@ function WorstDrawdownsTablePanel() {
             return (
               <tr key={i} className="border-b border-border/30 last:border-0">
                 <td className="py-1 pr-1 text-right font-mono tabular-nums text-text-2">#{i + 1}</td>
-                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(payload.dates[r.start])}</td>
-                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(payload.dates[r.trough])}</td>
-                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(payload.dates[r.recover])}</td>
+                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.start])}</td>
+                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.trough])}</td>
+                <td className="py-1 px-1 font-mono whitespace-nowrap text-text-2">{ymd(view.dates[r.recover])}</td>
                 <td className="py-1 px-1 text-right font-mono tabular-nums" style={{ color: "var(--color-negative)" }}>
                   {(r.depth * 100).toFixed(2)}%
                 </td>
