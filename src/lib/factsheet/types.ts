@@ -155,6 +155,10 @@ export type BootstrapCIPayload = {
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
   n_resamples: number;
   block_len: number;
+  /** Phase 103 (MTM-04, Finding #6): the basis-selected observation count the
+   *  resamples were drawn FROM — the low-N reliability gate reads THIS so an MTM
+   *  bootstrap over a short MTM window warns even when cash clears 252. */
+  n: number;
 };
 
 /** Style-drift summary — strategy returns split 50/50 with KS test.

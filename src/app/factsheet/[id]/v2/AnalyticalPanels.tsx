@@ -322,13 +322,15 @@ export function CalmarByYearPanel() {
 }
 
 export function BootstrapCIPanel() {
-  // Phase 103 (MTM-04): the bootstrap CIs resample the strategy's own daily series
-  // → follow the active basis. `strategyMetrics` is NOT in the bundle, so
-  // `view.strategyMetrics.n` passes through as the CASH observation count (the
-  // KpiStrip owns MTM there, Phase 102) — the low-N warning stays cash-coarse.
+  // Phase 103 (MTM-04, Finding #6): the bootstrap CIs resample the strategy's own
+  // daily series → follow the active basis. The reliability (low-N) gate reads the
+  // resample count OFF the bootstrap payload itself (`b.n`, the basis-selected
+  // series length the resamples were drawn from), NOT the cash `strategyMetrics.n`.
+  // A genuinely short MTM window (MTM n<252 while cash n≥252) therefore fires the
+  // warning instead of silently inheriting the cash count and suppressing it.
   const view = useBasisSeriesView(usePayload());
   const b = view.bootstrapCI;
-  const lowN = view.strategyMetrics.n < 252;
+  const lowN = b.n < 252;
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
@@ -336,7 +338,7 @@ export function BootstrapCIPanel() {
       </header>
       {lowN && (
         <p className="mb-2 text-micro italic" style={{ color: "var(--color-warning, #B45309)" }}>
-          ⚠ Bootstrap resamples are drawn from {view.strategyMetrics.n} observations.
+          ⚠ Bootstrap resamples are drawn from {b.n} observations.
           CI width is wide and may understate true uncertainty below 252 days (1 year).
         </p>
       )}

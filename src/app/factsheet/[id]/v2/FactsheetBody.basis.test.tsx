@@ -382,7 +382,10 @@ function bundleFromScenario(p: FactsheetPayload) {
     streaks: p.streaks,
     // Sentinel year the cash series (all 2023) can never produce.
     calmarByYear: [{ year: "1999", ret: 0.42, max_dd: -0.1, calmar: 4.2, days: 250 }],
-    bootstrapCI: p.bootstrapCI,
+    // Phase 103 Finding #6 sentinel: an MTM resample count BELOW 252 while the cash
+    // series (300 days) clears it — the low-N reliability warning must fire under MTM
+    // ("drawn from 180 observations") and NOT under cash.
+    bootstrapCI: { ...p.bootstrapCI, n: 180 },
     styleDrift: p.styleDrift,
     stressWindows: p.stressWindows,
   };
@@ -512,5 +515,15 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     // MTM: 3Y/5Y recompute from the bundle's equity curve.
     // Neuter (CumulativeReturnsPanel eq → payload.strategyEquity) → cash → RED.
     expect(cumSection().textContent).toContain("+554.00%");
+  });
+
+  it("Finding #6: the bootstrap low-N warning reflects the MTM resample count", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    // Cash: 300-day series clears 252 → no low-N warning, and never the MTM count.
+    expect(container.textContent).not.toContain("drawn from 180 observations");
+    fireEvent.click(getByText("Mark-to-market"));
+    // MTM: the bundle's bootstrap n=180 (<252) fires the reliability warning.
+    // Neuter (BootstrapCIPanel lowN → view.strategyMetrics.n = cash 300) → RED.
+    expect(container.textContent).toContain("drawn from 180 observations");
   });
 });

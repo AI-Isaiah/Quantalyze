@@ -17,6 +17,12 @@ export type BootstrapCISummary = {
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapHistogram };
   n_resamples: number;
   block_len: number;
+  /** Phase 103 (MTM-04, Finding #6): the observation count the resamples are drawn
+   *  FROM (the basis-selected series length). Threaded onto the payload so the
+   *  reliability (low-N) gate reflects the SAME series the bootstrap resampled —
+   *  under MTM a genuinely short MTM window must fire the warning even when the
+   *  cash series clears 252. */
+  n: number;
 };
 
 /**
@@ -59,6 +65,7 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
     max_dd: { point: point.max_dd, ...ci95(maxDds), hist: histogram(maxDds, 40) },
     n_resamples,
     block_len,
+    n,
   };
 }
 
