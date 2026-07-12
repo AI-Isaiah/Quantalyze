@@ -9,6 +9,7 @@ import {
   useBasis,
   useBasisMetrics,
   mtmDisabledReasonCopy,
+  mtmReasonTone,
 } from "./basis-context";
 
 /**
@@ -130,19 +131,53 @@ describe("basis-context", () => {
     expect(m.n).toBe(250);
   });
 
-  it("Test 6 — mtmDisabledReasonCopy is a closed set with an unknown fallback", () => {
-    // Enumerated from basis-context.tsx:100-108 — no invented keys.
+  it("Test 6 — mtmDisabledReasonCopy is a closed set with an honest, basis-agnostic default", () => {
+    // Phase 102 (MTM-01) honest reason copy — character-exact pins (DESIGN.md
+    // voice: factual, institutional, no contractions, never fabricating).
+    // The stale unsmoothed_options_book Phase-83 smoothing framing is GONE.
     expect(mtmDisabledReasonCopy("unsmoothed_options_book")).toBe(
-      "Mark-to-market disabled: un-smoothed options book (Phase-83 daily-mark smoothing not applied)",
+      "Mark-to-market unavailable: composites that include an options book report cash settlement only.",
     );
+    // Unchanged — the venue reason keeps its byte-identical copy.
     expect(mtmDisabledReasonCopy("mtm_basis_unavailable_for_venue")).toBe(
       "Mark-to-market unavailable for this venue.",
     );
-    // Fallback: unknown reason AND undefined both hit the default arm.
-    const fallback = "Mark-to-market unavailable for this composite.";
+    expect(mtmDisabledReasonCopy("mtm_summary_coverage_incomplete")).toBe(
+      "Mark-to-market unavailable: settlement history does not fully cover this book, so a mark-to-market series cannot be reconstructed.",
+    );
+    expect(mtmDisabledReasonCopy("mtm_series_uncomputable")).toBe(
+      "Mark-to-market unavailable: the reconstructed mark-to-market series could not produce valid metrics.",
+    );
+    expect(mtmDisabledReasonCopy("mtm_second_pass_timeout")).toBe(
+      "Mark-to-market temporarily unavailable: reconstruction exceeded its time budget and will be retried on the next data refresh.",
+    );
+    expect(mtmDisabledReasonCopy("mtm_anchor_race")).toBe(
+      "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.",
+    );
+    // Fallback: unknown reason AND undefined both hit the basis-agnostic default
+    // (the old "for this composite" default was wrong for single-key — RESEARCH A4).
+    const fallback = "Mark-to-market unavailable for this strategy.";
     expect(mtmDisabledReasonCopy("some_unrecognized_reason")).toBe(fallback);
     expect(mtmDisabledReasonCopy(undefined)).toBe(fallback);
     expect(mtmDisabledReasonCopy()).toBe(fallback);
+  });
+
+  it("Test 6b — mtmReasonTone: amber ONLY for transient/recoverable reasons (DESIGN.md)", () => {
+    // DESIGN.md: warning-amber is reserved for transient/recoverable states the
+    // system re-attempts on its own. Only the timeout + anchor-race reasons
+    // self-heal on the next derive; every steady-state honest-empty reason is muted.
+    expect(mtmReasonTone("mtm_second_pass_timeout")).toBe("transient");
+    expect(mtmReasonTone("mtm_anchor_race")).toBe("transient");
+    // Steady-state honest-empty — muted, not amber (amber would falsely signal
+    // self-healing; RESEARCH Pitfall 4).
+    expect(mtmReasonTone("mtm_summary_coverage_incomplete")).toBe("steady");
+    expect(mtmReasonTone("mtm_series_uncomputable")).toBe("steady");
+    expect(mtmReasonTone("mtm_basis_unavailable_for_venue")).toBe("steady");
+    expect(mtmReasonTone("unsmoothed_options_book")).toBe("steady");
+    // Unknown + undefined default to steady.
+    expect(mtmReasonTone("some_unrecognized_reason")).toBe("steady");
+    expect(mtmReasonTone(undefined)).toBe("steady");
+    expect(mtmReasonTone()).toBe("steady");
   });
 
   it("Test 7 — GUARD-04: source has no storage/URL/cookie/history access", () => {

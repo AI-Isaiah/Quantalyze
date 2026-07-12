@@ -177,20 +177,22 @@ describe("FactsheetBody — Phase 90 FS-03 basis toggle (RED until 90-05)", () =
     const cMtm = within(c.container).getByText("Mark-to-market");
     expect(cMtm.getAttribute("aria-disabled")).not.toBe("true");
 
-    // (b) gated on un-smoothed options: disabled + verbatim D1 copy.
+    // (b) gated on the options-book reason: disabled + the rewritten Phase-102
+    // honest copy (the stale Phase-83 smoothing framing is gone).
     const b = renderBody(fixtureCompositeGated());
     const bMtm = within(b.container).getByText("Mark-to-market");
     expect(bMtm.getAttribute("aria-disabled")).toBe("true");
     expect(bMtm.getAttribute("title")).toBe(
-      "Mark-to-market disabled: un-smoothed options book (Phase-83 daily-mark smoothing not applied)",
+      "Mark-to-market unavailable: composites that include an options book report cash settlement only.",
     );
 
-    // (d) gated with no reason: generic composite fallback copy.
+    // (d) gated with no reason: the basis-agnostic default fallback copy (Phase 102
+    // rewrote "for this composite" → "for this strategy").
     const d = renderBody(fixtureCompositeNoReason());
     const dMtm = within(d.container).getByText("Mark-to-market");
     expect(dMtm.getAttribute("aria-disabled")).toBe("true");
     expect(dMtm.getAttribute("title")).toBe(
-      "Mark-to-market unavailable for this composite.",
+      "Mark-to-market unavailable for this strategy.",
     );
   });
 
