@@ -11,7 +11,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -57,6 +57,7 @@ export default async function StrategyDetailPage({
         returns_series?: unknown;
         data_quality_flags?: unknown;
         metrics_json_by_basis?: unknown;
+        computation_status?: unknown;
       }
     | null
     | undefined;
@@ -111,7 +112,21 @@ export default async function StrategyDetailPage({
     // despite the server truth. Thread it through the ONE shared owner
     // (`singleKeyDataQuality`) so this discovery surface and the factsheet route
     // can't diverge on the DQ opt (the composite "one path" lesson).
-    buildOpts = { ...(buildOpts ?? {}), dataQuality: singleKeyDataQuality(dqf) };
+    //
+    // MTM-01 (Phase 102): mirror the factsheet route's single-key OPTIONS MTM read
+    // through the SAME shared owner (`singleKeyBasisOpts`) so the two surfaces
+    // cannot diverge. getStrategyDetail selects `strategy_analytics (*)`
+    // (queries.ts:416) so `computation_status` arrives on the row; `{}` for every
+    // non-options single-key strategy keeps the payload byte-identical.
+    buildOpts = {
+      ...(buildOpts ?? {}),
+      dataQuality: singleKeyDataQuality(dqf),
+      ...singleKeyBasisOpts(
+        dqf,
+        analyticsRow?.metrics_json_by_basis,
+        analyticsRow?.computation_status,
+      ),
+    };
   }
 
   // RED-TEAM-H2: Never fall back to "now" for a missing computed_at — that

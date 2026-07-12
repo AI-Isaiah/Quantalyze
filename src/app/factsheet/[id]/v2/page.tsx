@@ -8,7 +8,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -41,7 +41,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        returns_denominator_config,
-       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis )`,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`,
       )
       .eq("id", id),
   )
@@ -116,7 +116,20 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     // despite the server truth. Thread it through the ONE shared owner
     // (`singleKeyDataQuality`) so this route and the discovery detail page can't
     // diverge on the DQ opt (the composite "one path" lesson).
-    buildOpts = { ...(buildOpts ?? {}), dataQuality: singleKeyDataQuality(dqf) };
+    //
+    // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
+    // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason,
+    // read through the SAME shared owner (`singleKeyBasisOpts`) both surfaces use.
+    // The F-4 `computation_status`-DONE gate rides the `${id}::${computedAt}` cache
+    // key (:344) because a re-derive stamps a fresh computed_at; status is
+    // public-safe on a published row (unchanged RLS boundary — the outer
+    // request-scoped signature probe stays the auth gate). singleKeyBasisOpts
+    // returns `{}` for every non-options single-key strategy → byte-identical.
+    buildOpts = {
+      ...(buildOpts ?? {}),
+      dataQuality: singleKeyDataQuality(dqf),
+      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status),
+    };
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an

@@ -1059,19 +1059,28 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
   const shareMode = useShareMode();
-  // Phase 90 (FS-03, D2/D5): composite-only cash↔MTM toggle. NEVER apiKeyId —
-  // the server-truth `dataQuality.composite` marker. MTM enabled iff the
-  // persisted `mark_to_market` basis exists (`mtmGate.available`); otherwise
-  // disabled with the mapped closed-set reason (D1). Default cash.
+  // Phase 90 (FS-03, D2/D5) + Phase 102 (MTM-01): cash↔MTM toggle. NEVER apiKeyId —
+  // the server-truth `dataQuality.composite` marker OR (Phase 102) a single-key
+  // options strategy that participates in the MTM basis story (`payload.mtmGate`
+  // present). MTM enabled iff the persisted `mark_to_market` basis exists
+  // (`mtmGate.available`); otherwise disabled with the mapped closed-set reason
+  // (D1). Default cash.
   const { basis, setBasis } = useBasis();
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
-  // Phase 90.5 (LEV-01, D1/D2/D5): fail-closed eligibility — the leverage cluster
-  // renders IFF single-key (composite !== true) AND periodsPerYear present. It
-  // occupies the SAME mr-auto slot as the composite BASIS control; the two never
-  // coexist (D1), so they never compete for the slot.
-  const leverageEligible = !composite && payload.periodsPerYear != null;
+  // Phase 90.5 (LEV-01, D1/D2/D5) + Phase 102: fail-closed eligibility — the
+  // leverage cluster renders IFF single-key (composite !== true) AND periodsPerYear
+  // present AND the CASH basis is active. Before Phase 102 the leverage cluster and
+  // the BASIS control could never coexist (composite-only toggle), so they shared
+  // the mr-auto slot freely. A single-key options strategy now shows BOTH controls
+  // (LEV-MTM-1): leverage models the CASH return path, so we hide the leverage input
+  // while MTM is displayed rather than let it recompute a leverage-scaled CASH
+  // number under an MTM label (no-invented-data). Leverage state is ephemeral —
+  // flipping back to cash restores it. Both mr-auto flex children wrap; the leverage
+  // input simply hides under MTM, so they never overlap.
+  const leverageEligible =
+    !composite && payload.periodsPerYear != null && basis === "cash_settlement";
   const { leverage, setLeverage } = useLeverage();
   // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
   // channel does not exist on the factsheet). Interactive fail-loud contract
@@ -1167,7 +1176,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
           )}
         </div>
       )}
-      {composite && (
+      {(composite || payload.mtmGate != null) && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <SegmentedControl
             ariaLabel="Metrics basis"

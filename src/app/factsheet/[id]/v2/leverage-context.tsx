@@ -85,8 +85,10 @@ export function useModeledLeverage(payload: FactsheetPayload): {
  * the resolved basis metrics.
  *
  *   - `leverage === 1` (or `periodsPerYear` absent — fail-closed when the
- *     annualization basis wasn't emitted, e.g. a stale v4 cache entry) → the
- *     basis metrics object UNTOUCHED (same reference; byte-identity, no clone).
+ *     annualization basis wasn't emitted, e.g. a stale v4 cache entry — or the
+ *     active basis is `mark_to_market`, where leverage would fabricate an MTM line
+ *     off the cash series; Phase 102 LEV-MTM-1) → the basis metrics object
+ *     UNTOUCHED (same reference; byte-identity, no clone).
  *   - `leverage !== 1` → a light KPI-slice recompute: `compute()` on
  *     `strategyReturns.map(r => L*r)` with rf=0 and the payload's
  *     `periodsPerYear`. Standalone compute() only — NO full payload rebuild, NO
@@ -118,10 +120,23 @@ export function useLeveragedMetrics(payload: FactsheetPayload): {
   }>(() => {
     const appliedLeverage = sanitizeLeverage(leverage);
     // Fail-closed / identity short-circuit: no recompute when the applied
-    // multiplier is 1 (covers both L=1 and a bad value sanitized to 1) or the
-    // annualization basis is absent (stale v4 cache). Same object reference →
-    // byte-identity; `modeled` false so no label ever shows.
-    if (appliedLeverage === 1 || payload.periodsPerYear == null) {
+    // multiplier is 1 (covers both L=1 and a bad value sanitized to 1), the
+    // annualization basis is absent (stale v4 cache), OR the active basis is
+    // mark_to_market. Same object reference → byte-identity; `modeled` false so no
+    // label ever shows.
+    //
+    // LEV-MTM-1 (Phase 102, no-invented-data): leverage models the CASH return
+    // path — `payload.strategyReturns` IS the cash series — so recomputing it under
+    // an MTM label would FABRICATE a mark-to-market line that was never persisted.
+    // Under MTM we return the basis-overlaid `m` (the persisted MTM scalars) with
+    // `modeled: false`, so the MODELED eyebrow can never decouple from the numbers
+    // (the same SFH-3 / IN-01 principle guarding the fail-closed branches above).
+    // The ControlBar additionally hides the leverage input while MTM is displayed.
+    if (
+      appliedLeverage === 1 ||
+      payload.periodsPerYear == null ||
+      basis === "mark_to_market"
+    ) {
       return { m, modeled: false, appliedLeverage };
     }
     const { eq: _eq, dd: _dd, ...summary } = compute(
@@ -131,7 +146,7 @@ export function useLeveragedMetrics(payload: FactsheetPayload): {
       payload.periodsPerYear,
     );
     return { m: summary as ComputeSummary, modeled: true, appliedLeverage };
-  }, [leverage, payload, m]);
+  }, [leverage, payload, m, basis]);
   return {
     basis,
     m: result.m,
