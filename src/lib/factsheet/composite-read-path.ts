@@ -199,6 +199,70 @@ export function singleKeyDataQuality(
 }
 
 /**
+ * Phase 102 (MTM-01) — the SINGLE-KEY counterpart of the composite `mtmGate`
+ * assembly built inline in {@link readCompositeFactsheet} (:167-170). A single-key
+ * options strategy persists its MTM basis into `metrics_json_by_basis.mark_to_market`
+ * (Phase 101) plus a surviving `data_quality_flags.mtm_gated_reason` on honest
+ * degrade, but — like the Finding-B `insufficient_window` flag — the single-key arm
+ * of both factsheet surfaces never threaded it. This is the ONE owner both surfaces
+ * (the `/factsheet/[id]/v2` route + the discovery detail page) delegate to, so they
+ * can't diverge (the "one path" lesson, this file's header).
+ *
+ * Two load-bearing invariants (falsifiable in composite-read-path.test.ts):
+ *   - F-4 (T-102-01): `available` is gated on `computationStatus ∈ {complete,
+ *     complete_with_warnings}` — the EXACT terminal-success literals the runner
+ *     writes (analytics_runner.py:1938-1940 stored-trades, :2392 CSV-broker; the
+ *     same pair the PDF route admits at pdf/route.ts:231-232). A failed/computing
+ *     row NEVER exposes a live-looking MTM object: `metricsByBasis` is threaded
+ *     ONLY when `available`, so the payload is structurally MTM-free otherwise.
+ *   - SC-4 (T-102-SC keystone): thread ONLY the `mark_to_market` key, NEVER the raw
+ *     `metrics_json_by_basis` column. A lingering `cash_settlement` key (a composite→
+ *     single stale window; 101-01 "Observed-but-out-of-scope #1") would activate the
+ *     build-payload.ts:243 cash overlay and perturb the byte-identical cash headline.
+ *
+ * Returns `{}` for every non-options single-key strategy (no MTM key AND no reason)
+ * so the toggle never renders and the payload stays byte-identical to today.
+ * Defensive on unknown jsonb, mirroring the strict-coercion style of this file.
+ */
+export function singleKeyBasisOpts(
+  dqf: { mtm_gated_reason?: unknown } | null | undefined,
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate"> {
+  // 1. Extract the persisted mark_to_market object iff the raw jsonb is a non-null
+  //    non-array object AND its `mark_to_market` value is a non-null non-array object.
+  let mtm: Record<string, number> | undefined;
+  if (
+    metricsJsonByBasis !== null &&
+    typeof metricsJsonByBasis === "object" &&
+    !Array.isArray(metricsJsonByBasis)
+  ) {
+    const cand = (metricsJsonByBasis as Record<string, unknown>).mark_to_market;
+    if (cand !== null && typeof cand === "object" && !Array.isArray(cand)) {
+      mtm = cand as Record<string, number>;
+    }
+  }
+  // 2. Extract the reason iff a string (same server-truth coercion as :169).
+  const reason = typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined;
+  // 3. Neither present → {} : every non-options single-key strategy hits this,
+  //    renders no toggle, and is byte-identical to today.
+  if (mtm === undefined && reason === undefined) return {};
+  // 4. F-4 DONE gate — exact runner terminal-success literals (no third success
+  //    literal exists; verified against analytics_runner.py).
+  const done = computationStatus === "complete" || computationStatus === "complete_with_warnings";
+  // 5. Available iff DONE and the MTM object carries a trustworthy headline. A
+  //    degraded-MTM row still reports "complete" (Phase 101-02), so BOTH gates.
+  const available = done && hasBasisHeadline(mtm);
+  // 6. Thread ONLY the mark_to_market key, and ONLY when available. This makes F-4
+  //    structural (a failed row's payload carries NO MTM object) and closes the
+  //    stale-cash_settlement-key hazard by construction (SC-4).
+  return {
+    metricsByBasis: available && mtm ? { mark_to_market: mtm } : undefined,
+    mtmGate: { available, reason },
+  };
+}
+
+/**
  * HARD-05 (Phase 93) — strict coercion of the server `degraded_members` DQ list
  * into the closed render shape `{ seq, venue }[]`. A degraded member is a composite
  * member EXCLUDED from the stitch (a ccxt venue not yet reconstructed). ONLY an

@@ -477,13 +477,16 @@ export type FactsheetCommon = {
    */
   missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
   /**
-   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` always
-   * present on a composite; `mark_to_market` OMITTED (never JSON null) when the
-   * venue/book can't produce an MTM basis. Drives the KpiStrip/MetricsColumn
-   * basis relabel (D5) and the D3 cash-scalar overlay onto `strategyMetrics`.
+   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` is present on a
+   * COMPOSITE payload (drives the D3 cash-scalar overlay onto `strategyMetrics` at
+   * build-payload.ts:243) but ABSENT on a single-key options payload, which carries
+   * ONLY `mark_to_market` (Phase 101/102 decision — the SC-4 keystone: with no
+   * cash key the cash overlay is a no-op, so the cash headline stays byte-identical).
+   * `mark_to_market` is OMITTED (never JSON null) when the venue/book can't produce
+   * an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
    */
   metricsByBasis?: {
-    cash_settlement: Record<string, number>;
+    cash_settlement?: Record<string, number>;
     mark_to_market?: Record<string, number>;
   };
   /**
