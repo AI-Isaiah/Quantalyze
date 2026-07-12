@@ -138,7 +138,7 @@ describe("WatchlistPanel", () => {
     }
     await waitFor(() =>
       expect(screen.getByRole("status")).toHaveTextContent(
-        "Removed 2 strategies from watchlist",
+        "Removed 2 from watchlist",
       ),
     );
     // Both removed rows are gone; the untouched one remains.
@@ -168,6 +168,52 @@ describe("WatchlistPanel", () => {
       expect(names).toContain("Aurora Carry");
       expect(names).not.toContain("Zephyr Momentum");
     });
+  });
+
+  // Red-team F-3: a partial failure silently restored rows AND only announced
+  // the success count — the user never learned some removals failed.
+  it("announces the failure count on a partial-failure bulk remove", async () => {
+    mockFetch.mockResolvedValueOnce(okResponse());
+    mockFetch.mockResolvedValueOnce(errResponse());
+
+    render(<WatchlistPanel favorites={FAVORITES} suggestedIds={[]} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Zephyr Momentum/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Aurora Carry/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove 2 from watchlist/i }),
+    );
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Removed 1, 1 failed — restored to list",
+      ),
+    );
+  });
+
+  // Red-team F-3: when a bulk remove empties the list, the honest-empty branch
+  // must STILL render the live region with its message (previously it early-
+  // returned without the region, so the announcement was lost on unmount).
+  it("keeps the live region + message when a bulk remove empties the list", async () => {
+    render(<WatchlistPanel favorites={FAVORITES} suggestedIds={[]} />);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Select all/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove 3 from watchlist/i }),
+    );
+
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(3));
+    // Honest-empty copy is now showing …
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "No favorites yet. Star strategies in Discovery to build your watchlist.",
+        ),
+      ).toBeInTheDocument(),
+    );
+    // … and the live region survived the empty transition with its message.
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Removed 3 from watchlist",
+    );
   });
 
   it("per-row star is aria-pressed and issues a remove PUT", async () => {

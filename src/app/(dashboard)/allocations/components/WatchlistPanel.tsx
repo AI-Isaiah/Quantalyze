@@ -81,23 +81,31 @@ export function WatchlistPanel({
     </div>
   );
 
+  // Red-team F-3: the live region is hoisted OUT of the table branch and mounted
+  // by the always-rendered Card, so it survives a bulk-remove that empties the
+  // list (`rows.length === 0`). If it lived only in the table branch, emptying
+  // the list would unmount it and the "Removed N…" announcement — set AFTER the
+  // optimistic row removal — would never reach a screen reader.
+  const liveRegion = (
+    <p role="status" aria-live="polite" className="sr-only">
+      {status}
+    </p>
+  );
+
   // Honest-empty — heading kept, verbatim copy, browse link; NO table.
-  if (rows.length === 0) {
-    return (
-      <Card>
-        {heading}
-        <p className="text-small text-text-secondary">
-          No favorites yet. Star strategies in Discovery to build your watchlist.
-        </p>
-        <Link
-          href="/discovery"
-          className="mt-4 inline-flex items-center justify-center rounded-lg border border-border bg-white px-3 py-1.5 text-caption font-medium text-text-primary transition-colors hover:bg-page"
-        >
-          Browse strategies →
-        </Link>
-      </Card>
-    );
-  }
+  const emptyState = (
+    <>
+      <p className="text-small text-text-secondary">
+        No favorites yet. Star strategies in Discovery to build your watchlist.
+      </p>
+      <Link
+        href="/discovery"
+        className="mt-4 inline-flex items-center justify-center rounded-lg border border-border bg-white px-3 py-1.5 text-caption font-medium text-text-primary transition-colors hover:bg-page"
+      >
+        Browse strategies →
+      </Link>
+    </>
+  );
 
   function toggleRow(id: string) {
     setSelected((prev) => {
@@ -139,7 +147,13 @@ export function WatchlistPanel({
         [...prev, ...failed].sort((a, b) => b.created_at.localeCompare(a.created_at)),
       );
     }
-    setStatus(`Removed ${success} strategies from watchlist`);
+    // Red-team F-3: announce failures too — a silent partial rollback left the
+    // user believing every selected row was removed.
+    setStatus(
+      failed.length > 0
+        ? `Removed ${success}, ${failed.length} failed — restored to list`
+        : `Removed ${success} from watchlist`,
+    );
   }
 
   const controls = (
@@ -285,14 +299,20 @@ export function WatchlistPanel({
   return (
     <Card>
       {heading}
-      {controls}
-      <table className="w-full border-collapse">
-        {header}
-        {body}
-      </table>
-      <p role="status" aria-live="polite" className="sr-only">
-        {status}
-      </p>
+      {/* Stable across both states so bulk-remove announcements survive an
+          empty transition (F-3). */}
+      {liveRegion}
+      {rows.length === 0 ? (
+        emptyState
+      ) : (
+        <>
+          {controls}
+          <table className="w-full border-collapse">
+            {header}
+            {body}
+          </table>
+        </>
+      )}
     </Card>
   );
 }
