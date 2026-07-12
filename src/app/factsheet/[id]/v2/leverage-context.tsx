@@ -4,7 +4,7 @@ import { createContext, useContext, useMemo, useState, type ReactNode } from "re
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
 import { sanitizeLeverage } from "@/lib/leverage";
 import { compute } from "@/lib/factsheet/compute";
-import { useBasisMetrics, type Basis } from "./basis-context";
+import { useBasis, useBasisMetrics, type Basis } from "./basis-context";
 
 /**
  * Phase 90.5 (LEV-01, CONTEXT D2/D5) — the NARROW, EPHEMERAL leverage context.
@@ -61,20 +61,32 @@ export function useLeverage(): LeverageContextValue {
  * Round-3 perf — the CHEAP modeled predicate, WITHOUT re-running `compute()`.
  * `modeled` is exactly the condition under which {@link useLeveragedMetrics}
  * runs a recompute (the sanitized multiplier is a real non-1 leverage AND the
- * annualization basis is present), so a consumer that only needs the label/gate
- * (the M-3 "BASE · 1× TRACK" rail eyebrow) reads it here for O(1) instead of
- * paying the O(n) KPI-slice recompute a second time. `signal: false` — the
- * interactive recompute path (`useLeveragedMetrics`) owns the SFH-2 coercion
- * signal; this predicate read must not double-fire it.
+ * annualization basis is present AND the active basis is not `mark_to_market`),
+ * so a consumer that only needs the label/gate (the M-3 "BASE · 1× TRACK" rail
+ * eyebrow) reads it here for O(1) instead of paying the O(n) KPI-slice recompute
+ * a second time. `signal: false` — the interactive recompute path
+ * (`useLeveragedMetrics`) owns the SFH-2 coercion signal; this predicate read
+ * must not double-fire it.
  */
 export function useModeledLeverage(payload: FactsheetPayload): {
   modeled: boolean;
   appliedLeverage: number;
 } {
   const { leverage } = useLeverage();
+  const { basis } = useBasis();
   const appliedLeverage = sanitizeLeverage(leverage, { signal: false });
   return {
-    modeled: appliedLeverage !== 1 && payload.periodsPerYear != null,
+    // LEV-MTM-2 (Phase 102): mirror useLeveragedMetrics' `mark_to_market`
+    // short-circuit (:135-140). Under MTM the leverage recompute never runs
+    // (leverage models the CASH return path only — recomputing it under an MTM
+    // label would fabricate a mark-to-market line), so this CHEAP predicate must
+    // also report `modeled: false`. Otherwise the rail's "BASE · 1× TRACK"
+    // eyebrow would render while the KpiStrip shows unlevered MTM with no MODELED
+    // eyebrow — the two surfaces disagreeing about "modeled leverage".
+    modeled:
+      appliedLeverage !== 1 &&
+      payload.periodsPerYear != null &&
+      basis !== "mark_to_market",
     appliedLeverage,
   };
 }

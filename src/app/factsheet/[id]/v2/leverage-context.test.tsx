@@ -10,11 +10,12 @@ import { compute } from "@/lib/factsheet/compute";
 // assertable and no real @sentry import fires under jsdom.
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 import { captureToSentry } from "@/lib/sentry-capture";
-import { BasisProvider, useBasisMetrics } from "./basis-context";
+import { BasisProvider, useBasis, useBasisMetrics } from "./basis-context";
 import {
   LeverageProvider,
   useLeverage,
   useLeveragedMetrics,
+  useModeledLeverage,
 } from "./leverage-context";
 
 /**
@@ -156,6 +157,35 @@ describe("leverage-context", () => {
     expect(result.current.levered.appliedLeverage).toBe(10);
     // SFH-2 — the out-of-band 999 is a real coercion → Sentry-visible.
     expect(captureToSentry).toHaveBeenCalled();
+  });
+
+  it("Test 7 — LEV-MTM-2: useModeledLeverage reports not-modeled under mark_to_market (rail eyebrow agrees with the strip)", () => {
+    const payload = makePayload(365);
+    function useModeledProbe(p: FactsheetPayload) {
+      const lev = useLeverage();
+      const basisCtx = useBasis();
+      const modeledCtx = useModeledLeverage(p);
+      return { lev, basisCtx, modeledCtx };
+    }
+    const { result } = renderHook(() => useModeledProbe(payload), { wrapper });
+
+    // Residual leverage != 1 on the default cash basis => modeled true (the
+    // "BASE · 1× TRACK" rail eyebrow would render, matching the KpiStrip's
+    // MODELED · 2× state).
+    act(() => result.current.lev.setLeverage(2));
+    expect(result.current.modeledCtx.modeled).toBe(true);
+    expect(result.current.modeledCtx.appliedLeverage).toBe(2);
+
+    // Toggle to MTM WITHOUT clearing the ephemeral leverage state (the control
+    // hides but the state persists). useLeveragedMetrics short-circuits to
+    // unlevered MTM with modeled:false; useModeledLeverage MUST agree, else the
+    // rail eyebrow and the strip disagree about "modeled leverage". Reddens if
+    // the `basis !== "mark_to_market"` guard is reverted.
+    act(() => result.current.basisCtx.setBasis("mark_to_market"));
+    expect(result.current.modeledCtx.modeled).toBe(false);
+    // The sanitized multiplier the hook resolved is unchanged (2); only the
+    // modeled predicate flips.
+    expect(result.current.modeledCtx.appliedLeverage).toBe(2);
   });
 
   it("Test 6 — GUARD-04: source has no storage/URL/cookie/history access", () => {
