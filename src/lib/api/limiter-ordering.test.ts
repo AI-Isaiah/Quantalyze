@@ -134,6 +134,12 @@ const NO_INPUT = new Set([
   // "burn-a-token-on-bad-body" bug cannot occur — same NO_INPUT shape as its
   // sibling strategies/browse/route.ts above.
   "strategies/[id]/returns/route.ts",
+  // Phase 95 / Plan 95-03 — composite stitch-progress GET. withAuth +
+  // per-(user,strategy) syncProgressLimiter (`sync-progress:<user.id>:<id>`),
+  // but NO request body: the only input is the `[id]` URL param, validated
+  // (isUuid → 400) BEFORE auth/checkLimit — same NO_INPUT shape as the
+  // returns/browse siblings above.
+  "strategies/[id]/sync-progress/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).
