@@ -536,6 +536,15 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(
       screen.queryByTestId("wizard-sync-interrupted"),
     ).not.toBeInTheDocument();
+    // F-2b — the retry must ALSO reset the MOUNT patience clock, not just the
+    // SF-1 backstop clock. Without that reset, `elapsedMs` is still past
+    // RETRY_THRESHOLD_MS, so as the amber banner drops the red Error-severity
+    // "taking much longer / leave this page" block instantly re-appears (and
+    // persists on the deduped `computing` status) — replacing the reassuring
+    // retry with the scariest copy in the flow. It must be absent post-retry.
+    expect(
+      screen.queryByText(/you can leave this page and come back/i),
+    ).not.toBeInTheDocument();
     // … the live per-key panel is NOT wiped …
     expect(screen.getByTestId("wizard-member-progress")).toBeInTheDocument();
     expect(

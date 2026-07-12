@@ -1097,6 +1097,19 @@ export function SyncPreviewStep({
       if (res.ok && mountedRef.current) {
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
+        // F-2b — a successful retry is a legitimate "fresh wait starts now"
+        // event, so reset the MOUNT patience clock too, not just the SF-1
+        // backstop clock. Both banners key off elapsed clocks (the amber
+        // `showInterruptedBanner` off `stallBackstop`, the red
+        // `showRetry`/"leave this page" block off `elapsedMs`). Resetting only
+        // the backstop dropped the amber banner but left `elapsedMs` past
+        // RETRY_THRESHOLD_MS, so the scariest copy in the flow ("taking much
+        // longer than expected … leave this page") instantly replaced the
+        // reassuring retry — and persisted, since a re-claimed run often writes
+        // the SAME `computing` status and never re-advances any clock. Reset
+        // both so the whole patience window restarts on retry.
+        startedAtRef.current = Date.now();
+        setElapsedMs(0);
         setSyncProgress((prev) =>
           prev ? { ...prev, stalled: false } : prev,
         );
