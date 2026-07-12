@@ -267,6 +267,16 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
 }
 
+# FIX-2 (Fable): the single-key MTM SECOND pass is a FULL-HISTORY crawl that runs
+# INSIDE the same derive_broker_dailies budget as the cash pass. Bound it to a
+# fraction of the REMAINING budget (never a blind global ceiling bump, which would
+# also relax perp-only/ccxt derives and mask real hangs) so it can never push the
+# whole derive past the outer wait_for into a silent transient→failed_final — which
+# would ALSO sink the healthy cash headline. If too little budget remains to
+# plausibly finish, the pass is skipped and DEGRADED loudly. Options books only.
+_MTM_SECOND_PASS_BUDGET_FRACTION = 0.7
+_MTM_SECOND_PASS_MIN_SECONDS = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Error classification
@@ -1917,6 +1927,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     exchange. On 429, stamps last_429_at.
     """
     is_key_mode = bool(job.get("api_key_id"))
+    # FIX-2 (Fable): stamp the derive start on the event-loop monotonic clock so
+    # the additive MTM second pass can bound itself to the REMAINING budget.
+    _derive_start = asyncio.get_running_loop().time()
     if is_key_mode:
         ctx = await _allocator_key_preflight(job, "run_derive_broker_dailies_job")
     else:
@@ -2052,7 +2065,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.redact import scrub_freeform_string
-            from services.stitch_composite import MTM_REASON_SUMMARY_COVERAGE
+            from services.stitch_composite import (
+                MTM_REASON_SECOND_PASS_TIMEOUT,
+                MTM_REASON_SUMMARY_COVERAGE,
+            )
 
             # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
             # (ledger-incomplete/unenumerable/scope, or material-equity-empty)
@@ -2267,65 +2283,126 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 #     gate signal; perp-only MTM ≡ cash (the Phase-82 amendment is
                 #     dark under a no-option book), so skipping avoids doubling every
                 #     Deribit crawl for zero information.
-                # Timeout envelope: derive_broker_dailies has a 15-min budget (:266);
-                # one extra crawl worst-cases ~120 s (the composite per-crawl ceiling,
-                # :2849) — comfortably inside. A future budget tune must account for
-                # this options-only second crawl.
+                # Timeout envelope (FIX-2, Fable — corrected): derive_broker_dailies
+                # has a FIXED 15-min budget (:266) and this second pass is a FULL
+                # -HISTORY crawl (since_ms=None) — the ENTIRE txn-log re-crawl PLUS a
+                # second dense-marks index fetch, NOT a bounded ~90-day backfill. The
+                # earlier "~120 s (composite per-crawl ceiling)" justification was
+                # unsound: _COMPOSITE_PER_CRAWL_SECONDS is a ~90-day backfill ceiling,
+                # whereas here BOTH crawls are full-history and share the one 15-min
+                # budget. A large book whose single crawl already nears the budget
+                # would, unbounded, push the whole derive past the outer wait_for →
+                # asyncio.TimeoutError → classified transient → 3 attempts →
+                # failed_final, SILENTLY, taking the healthy cash headline down with
+                # it. Mitigation (options books only, no dispatch refactor / no blind
+                # global ceiling bump): BOUND the second pass to a fraction of the
+                # REMAINING budget so the cash pass always keeps its headroom, and on
+                # timeout DEGRADE LOUDLY with a distinct machine reason. Residual: if
+                # the CASH pass ALONE already nears the 15-min budget, the outer
+                # wait_for can still fire during the cash pass — that is a cash-pass
+                # sizing limit, not introduced by the second pass, and is out of scope
+                # here (a true full-book budget tune is Phase-102 follow-up).
                 if (
                     not is_key_mode
                     and pnl_basis == DEFAULT_PNL_BASIS
                     and _completeness.has_option_activity
                 ):
                     mtm_attempted = True
-                    try:
-                        _mtm_ledger, _mtm_completeness = (
-                            await build_deribit_native_ledger(
-                                ctx.exchange,
-                                account_state=account_state,
-                                pnl_basis=PNL_BASIS_MARK_TO_MARKET,
-                                exclude_spot_extraction=exclude_spot_extraction,
-                            )
-                        )
-                        assert_ledger_complete(_mtm_completeness)
-                        # Bind to MTM-only names — NEVER reassign returns/meta/
-                        # _completeness/native_ledger. The MTM meta guard flags are
-                        # DISCARDED (mirror the composite Finding-9 discard): the
-                        # cash-pass flags are authoritative.
-                        mtm_returns, _mtm_meta = combine_native_ledger(
-                            _mtm_ledger,
-                            _mtm_completeness.indexable_currencies,
-                            denominator_config=denominator_config,
-                        )
-                    except (
-                        LedgerValuationError,
-                        NavReconstructionError,
-                        LedgerCompletenessError,
-                        LedgerTruncatedError,
-                        CurrencyEnumerationError,
-                        ScopeAuthError,
-                    ) as _mtm_exc:
-                        # DELIBERATE ASYMMETRY vs the cash pass narrowing (:2249,
-                        # rationale :2256-2259): a STRUCTURAL mark_to_market failure
-                        # (a pre-rollout straddle with no boundary V₀ anchor, or a
-                        # mid-window summary hole — deribit_txn.py:636-650) DEGRADES —
-                        # the cash factsheet still ships and we stamp a FIXED machine
-                        # reason (no exception-text interpolation, T-74-03). We do NOT
-                        # catch bare ValueError / json.JSONDecodeError: a transient
-                        # network/parse ValueError escaping the second crawl must fall
-                        # through and stay transient-retryable (the outer :2414 arm /
-                        # dispatcher retries the WHOLE derive), NEVER be permanently
-                        # stamped as a coverage reason. DeribitTransientReadError,
-                        # ccxt network errors, and RateLimitExceeded likewise
-                        # propagate. Structural ⇒ degrade; transient ⇒ retry all.
+                    _derive_budget = float(
+                        TIMEOUT_PER_KIND.get("derive_broker_dailies", 15 * 60)
+                    )
+                    _mtm_remaining = _derive_budget - (
+                        asyncio.get_running_loop().time() - _derive_start
+                    )
+                    _mtm_pass_timeout = (
+                        _mtm_remaining * _MTM_SECOND_PASS_BUDGET_FRACTION
+                    )
+                    if _mtm_pass_timeout < _MTM_SECOND_PASS_MIN_SECONDS:
+                        # The cash pass already consumed most of the budget — do NOT
+                        # start a second full-history crawl that cannot plausibly
+                        # finish (it would only risk sinking the derive). DEGRADE
+                        # LOUD with the distinct timeout reason; the cash headline
+                        # ships unaffected. (mtm_returns stays None → the persist
+                        # writes an authoritative SQL NULL for the by-basis object.)
                         mtm_returns = None
-                        mtm_gated_reason = MTM_REASON_SUMMARY_COVERAGE
+                        mtm_gated_reason = MTM_REASON_SECOND_PASS_TIMEOUT
                         logger.warning(
-                            "derive_broker_dailies: mark_to_market second pass "
-                            "degraded for strategy %s (structural reconstruction "
-                            "failure) — cash derive unaffected: %s",
-                            strategy_id,
-                            scrub_freeform_string(str(_mtm_exc)),
+                            "derive_broker_dailies: skipping mark_to_market second "
+                            "pass for strategy %s — only %.0fs of the %.0fs derive "
+                            "budget remained (below the %.0fs floor); degrading the "
+                            "additive object, cash derive unaffected",
+                            strategy_id, _mtm_remaining, _derive_budget,
+                            _MTM_SECOND_PASS_MIN_SECONDS,
                         )
+                    else:
+                        try:
+                            # Bound the full-history second crawl to the remaining
+                            # budget so it can never sink the whole derive (FIX-2).
+                            _mtm_ledger, _mtm_completeness = await asyncio.wait_for(
+                                build_deribit_native_ledger(
+                                    ctx.exchange,
+                                    account_state=account_state,
+                                    pnl_basis=PNL_BASIS_MARK_TO_MARKET,
+                                    exclude_spot_extraction=exclude_spot_extraction,
+                                ),
+                                timeout=_mtm_pass_timeout,
+                            )
+                            assert_ledger_complete(_mtm_completeness)
+                            # Bind to MTM-only names — NEVER reassign returns/meta/
+                            # _completeness/native_ledger. The MTM meta guard flags
+                            # are DISCARDED (mirror the composite Finding-9 discard):
+                            # the cash-pass flags are authoritative.
+                            mtm_returns, _mtm_meta = combine_native_ledger(
+                                _mtm_ledger,
+                                _mtm_completeness.indexable_currencies,
+                                denominator_config=denominator_config,
+                            )
+                        except asyncio.TimeoutError:
+                            # FIX-2: the bounded second crawl overran its slice of
+                            # the remaining budget. DEGRADE LOUD with the distinct
+                            # reason (never let it escape as a transient that retries
+                            # the WHOLE derive to failed_final and sinks the cash
+                            # headline).
+                            mtm_returns = None
+                            mtm_gated_reason = MTM_REASON_SECOND_PASS_TIMEOUT
+                            logger.warning(
+                                "derive_broker_dailies: mark_to_market second pass "
+                                "exceeded its bounded %.0fs budget for strategy %s "
+                                "— degrading the additive object, cash unaffected",
+                                _mtm_pass_timeout, strategy_id,
+                            )
+                        except (
+                            LedgerValuationError,
+                            NavReconstructionError,
+                            LedgerCompletenessError,
+                            LedgerTruncatedError,
+                            CurrencyEnumerationError,
+                            ScopeAuthError,
+                        ) as _mtm_exc:
+                            # DELIBERATE ASYMMETRY vs the cash pass narrowing (:2249,
+                            # rationale :2256-2259): a STRUCTURAL mark_to_market
+                            # failure (a pre-rollout straddle with no boundary V₀
+                            # anchor, or a mid-window summary hole —
+                            # deribit_txn.py:636-650) DEGRADES — the cash factsheet
+                            # still ships and we stamp a FIXED machine reason (no
+                            # exception-text interpolation, T-74-03). We do NOT catch
+                            # bare ValueError / json.JSONDecodeError: a transient
+                            # network/parse ValueError escaping the second crawl must
+                            # fall through and stay transient-retryable (the outer
+                            # :2414 arm / dispatcher retries the WHOLE derive), NEVER
+                            # be permanently stamped as a coverage reason.
+                            # DeribitTransientReadError, ccxt network errors, and
+                            # RateLimitExceeded likewise propagate. Structural ⇒
+                            # degrade; transient ⇒ retry all.
+                            mtm_returns = None
+                            mtm_gated_reason = MTM_REASON_SUMMARY_COVERAGE
+                            logger.warning(
+                                "derive_broker_dailies: mark_to_market second pass "
+                                "degraded for strategy %s (structural reconstruction "
+                                "failure) — cash derive unaffected: %s",
+                                strategy_id,
+                                scrub_freeform_string(str(_mtm_exc)),
+                            )
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,

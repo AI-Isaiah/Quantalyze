@@ -1011,3 +1011,42 @@ async def test_terminal_failure_clears_stale_by_basis() -> None:
         "object can't render on a FAILED row"
     )
     assert failed["metrics_json_by_basis"] is None
+
+
+# ── FIX 2 (Fable): the bounded MTM second pass degrades LOUD on timeout ──────
+
+@pytest.mark.asyncio
+async def test_mtm_second_pass_timeout_degrades_loud_not_failed_final() -> None:
+    """FIX-2 regression: the additive MTM second pass is a FULL-HISTORY crawl bounded
+    (asyncio.wait_for) to a fraction of the REMAINING derive budget. If it times out
+    it must DEGRADE LOUD with the distinct ``mtm_second_pass_timeout`` reason — the
+    cash headline still ships DONE and metrics_json_by_basis is authoritatively NULL
+    — NEVER escape as a transient that retries the WHOLE derive to failed_final and
+    sinks the healthy cash headline. Simulated by the SECOND (MTM) ledger crawl
+    raising asyncio.TimeoutError (what wait_for propagates on expiry).
+    Neuter: remove the ``except asyncio.TimeoutError`` arm → the TimeoutError
+    propagates out of the handler (result is not DONE / raises) → reddens."""
+    import asyncio as _asyncio
+
+    from services.stitch_composite import MTM_REASON_SECOND_PASS_TIMEOUT
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(
+        reports, side_effects=[None, _asyncio.TimeoutError()]
+    )
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "an MTM second-pass timeout must DEGRADE (cash ships DONE), never fail the "
+        "whole derive to a retried transient"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["metrics_json_by_basis"] is None
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SECOND_PASS_TIMEOUT
+    ), "a bounded second-pass timeout must stamp the distinct timeout reason"

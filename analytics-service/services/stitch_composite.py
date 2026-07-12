@@ -117,6 +117,15 @@ MTM_REASON_SUMMARY_COVERAGE = "mtm_summary_coverage_incomplete"
 # explanation for a non-coverage cause. Same vocabulary owner (this module) so
 # the single-key and composite reasons never fork.
 MTM_REASON_SERIES_UNCOMPUTABLE = "mtm_series_uncomputable"
+# Phase 101 (MTM-01) single-key derive gate: the additive mark_to_market SECOND
+# crawl (a FULL-HISTORY txn-log + dense-marks pass) was BOUNDED to the remaining
+# derive budget and did not finish in time, so it was DEGRADED rather than allowed
+# to silently push the whole derive past the outer wait_for into a
+# transient→failed_final (which would ALSO sink the healthy cash headline). This
+# is a RESOURCE/timeout degrade — distinct from a coverage hole or a math
+# chain-break — LOUD and machine-distinct so a large-book timeout is diagnosable
+# and Phase 102's reason UI can explain it honestly.
+MTM_REASON_SECOND_PASS_TIMEOUT = "mtm_second_pass_timeout"
 
 
 def windows_overlap(a: MemberWindow, b: MemberWindow) -> bool:
