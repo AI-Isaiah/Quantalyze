@@ -5,6 +5,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { keyWindowsSchema } from "@/lib/composite/keyWindowsSchema";
+import { getCorrelationId } from "@/lib/correlation-id";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -123,8 +124,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     });
 
     if (error) {
+      // Log the inbound correlation_id (the wizard sends it and DISPLAYS it in
+      // its error copy) so a user copying the shown id can find THIS failure in
+      // the server logs. The id is not a secret; it is not added to the body.
+      const correlationId = await getCorrelationId();
       console.error(
-        "[strategies/composite/set-members] RPC error:",
+        `[strategies/composite/set-members] RPC error [correlation_id=${correlationId}]:`,
         error.message,
         error.code,
       );
@@ -151,8 +156,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   } catch (err) {
     // Never forward the raw message — it can carry internal detail (H-0305).
     const message = err instanceof Error ? err.message : "Member write failed";
+    const correlationId = await getCorrelationId();
     console.error(
-      "[strategies/composite/set-members] caught exception:",
+      `[strategies/composite/set-members] caught exception [correlation_id=${correlationId}]:`,
       message,
     );
     return NextResponse.json(

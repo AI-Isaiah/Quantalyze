@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { isUuid } from "@/lib/utils";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { getCorrelationId } from "@/lib/correlation-id";
 import type { SupabaseClient, User } from "@supabase/supabase-js";
 
 /**
@@ -62,8 +63,12 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
       .maybeSingle();
 
     if (ownerErr) {
+      // Log the inbound correlation_id (UX-02 sends it; the client DISPLAYS it
+      // in the WIZARD_KEYS_LOAD_FAILED envelope) so a user who copies the shown
+      // id can find THIS failure in the server logs. The id is not a secret.
+      const correlationId = await getCorrelationId();
       console.error(
-        "[strategies/composite/members] ownership probe error:",
+        `[strategies/composite/members] ownership probe error [correlation_id=${correlationId}]:`,
         ownerErr.message,
       );
       return NextResponse.json(
@@ -98,8 +103,9 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
       .order("seq", { ascending: true });
 
     if (error) {
+      const correlationId = await getCorrelationId();
       console.error(
-        "[strategies/composite/members] member read error:",
+        `[strategies/composite/members] member read error [correlation_id=${correlationId}]:`,
         error.message,
       );
       return NextResponse.json(
@@ -140,7 +146,11 @@ export const GET = withAuth(async (req: NextRequest, user: User) => {
   } catch (err) {
     // Never forward the raw message — it can carry internal detail (H-0305).
     const message = err instanceof Error ? err.message : "Member read failed";
-    console.error("[strategies/composite/members] caught exception:", message);
+    const correlationId = await getCorrelationId();
+    console.error(
+      `[strategies/composite/members] caught exception [correlation_id=${correlationId}]:`,
+      message,
+    );
     return NextResponse.json(
       { code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },

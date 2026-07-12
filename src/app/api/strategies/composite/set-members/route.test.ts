@@ -17,6 +17,15 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// Inbound correlation_id the wizard sends and DISPLAYS in its error copy;
+// getCorrelationId() reads it from the request headers. F-2 pins that it reaches
+// the error-path server log. Map.get() satisfies the headers() contract.
+const INBOUND_CORRELATION_ID = "wizard:22222222-2222-4222-8222-222222222222";
+vi.mock("next/headers", () => ({
+  headers: async () =>
+    new Map([["x-correlation-id", INBOUND_CORRELATION_ID]]),
+}));
+
 const MOCK_USER = { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as unknown as
   import("@supabase/supabase-js").User;
 
@@ -213,6 +222,45 @@ describe("POST /api/strategies/composite/set-members — RPC guard mapping (T-88
     // The raw RPC message must never reach the client (H-0305).
     expect(JSON.stringify(json)).not.toContain(RAW_MSG);
     consoleErr.mockRestore();
+  });
+
+  it("logs the inbound X-Correlation-Id on the RPC-error path, but never in the body (F-2)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "no composite draft for the caller" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ strategy_id: STRATEGY_ID, keys: VALID_KEYS }),
+    );
+
+    // The displayed id must be findable in the server log for this failure.
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain(INBOUND_CORRELATION_ID);
+    // ...but it is never echoed into the response body.
+    expect(JSON.stringify(await res.json())).not.toContain(
+      INBOUND_CORRELATION_ID,
+    );
+
+    errSpy.mockRestore();
+  });
+
+  it("logs the inbound X-Correlation-Id on the caught-exception path (F-2)", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    rpcMock.mockRejectedValue(new Error("boom: unexpected throw"));
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ strategy_id: STRATEGY_ID, keys: VALID_KEYS }),
+    );
+
+    expect(res.status).toBe(500);
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain(INBOUND_CORRELATION_ID);
+
+    errSpy.mockRestore();
   });
 });
 

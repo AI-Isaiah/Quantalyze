@@ -17,6 +17,17 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// Inbound correlation_id the wizard sends (UX-02) and DISPLAYS in the
+// WIZARD_KEYS_LOAD_FAILED envelope. getCorrelationId() reads it from the
+// request headers; the F-2 pin proves it reaches the error-path server log so a
+// user copying the shown id can find the failure. Map.get() satisfies the
+// headers() contract the helper uses.
+const INBOUND_CORRELATION_ID = "wizard:11111111-1111-4111-8111-111111111111";
+vi.mock("next/headers", () => ({
+  headers: async () =>
+    new Map([["x-correlation-id", INBOUND_CORRELATION_ID]]),
+}));
+
 const MOCK_USER = { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as unknown as
   import("@supabase/supabase-js").User;
 
@@ -231,6 +242,76 @@ describe("GET /api/strategies/composite/members — owner-scope, no existence or
     expect(JSON.stringify(await resA.json())).toBe(
       JSON.stringify(await resB.json()),
     );
+  });
+});
+
+describe("GET /api/strategies/composite/members — inbound correlation_id is logged on error paths (F-2)", () => {
+  beforeEach(resetMocks);
+
+  it("member-read 500 logs the inbound X-Correlation-Id (findable in server logs)", async () => {
+    orderMock.mockResolvedValue({
+      data: null,
+      error: { message: "boom: member read failed" },
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const GET = await importGet();
+    const res = await GET(makeReq(`?strategy_id=${STRATEGY_ID}`));
+
+    expect(res.status).toBe(500);
+    // The displayed id must appear in the error log so a user copying it from
+    // the WIZARD_KEYS_LOAD_FAILED envelope can find THIS failure server-side.
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain(INBOUND_CORRELATION_ID);
+    expect(logged).toContain("member read error");
+
+    errSpy.mockRestore();
+  });
+
+  it("ownership-probe 500 logs the inbound X-Correlation-Id", async () => {
+    maybeSingleMock.mockResolvedValue({
+      data: null,
+      error: { message: "boom: ownership probe failed" },
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const GET = await importGet();
+    const res = await GET(makeReq(`?strategy_id=${STRATEGY_ID}`));
+
+    expect(res.status).toBe(500);
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain(INBOUND_CORRELATION_ID);
+
+    errSpy.mockRestore();
+  });
+
+  it("caught-exception 500 logs the inbound X-Correlation-Id", async () => {
+    orderMock.mockRejectedValue(new Error("boom: unexpected throw"));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const GET = await importGet();
+    const res = await GET(makeReq(`?strategy_id=${STRATEGY_ID}`));
+
+    expect(res.status).toBe(500);
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain(INBOUND_CORRELATION_ID);
+
+    errSpy.mockRestore();
+  });
+
+  it("does NOT leak the correlation id into the 500 response body (no-leak posture holds)", async () => {
+    orderMock.mockResolvedValue({
+      data: null,
+      error: { message: "boom" },
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const GET = await importGet();
+    const res = await GET(makeReq(`?strategy_id=${STRATEGY_ID}`));
+
+    expect(await res.json()).toEqual({ code: "UNKNOWN" });
+
+    errSpy.mockRestore();
   });
 });
 
