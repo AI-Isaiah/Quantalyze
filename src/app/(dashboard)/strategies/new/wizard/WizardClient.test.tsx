@@ -12,7 +12,7 @@
  *   plus the wizard_start telemetry gating on `hydrated`.
  */
 import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // --- Navigation ---
 const pushMock = vi.fn();
@@ -62,6 +62,10 @@ const clearWizardStateMock = vi.fn();
 // Phase 15: capture saveWizardState so the CSV autosave test can assert the
 // debounced write of the typed strategy name.
 const saveWizardStateMock = vi.fn(async (..._args: unknown[]) => {});
+// WIZ-03: a spy (not a bare arrow) so a test can assert whether the wizard
+// regenerated its session id. Only the DESTRUCTIVE "Try another key" path calls
+// it after mount; the non-destructive "Review your keys" path must NOT.
+const newWizardSessionIdMock = vi.fn(() => "ssr-session-throwaway");
 vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   return {
@@ -69,10 +73,132 @@ vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
     loadWizardState: vi.fn(async () => null),
     saveWizardState: saveWizardStateMock,
     clearWizardState: () => clearWizardStateMock(),
-    newWizardSessionId: () => "ssr-session-throwaway",
+    newWizardSessionId: () => newWizardSessionIdMock(),
     deriveWizardResumeOverrides: () => resumeOverrides,
   };
 });
+
+// WIZ-03: stub the two step children so this WizardClient-level test drives the
+// step machine + callback wiring directly, not the children's internals.
+// SyncPreviewStep exposes BOTH review affordances as separate buttons so each
+// WizardClient callback (non-destructive onReviewKeys vs destructive
+// onTryAnotherKey) can be exercised in isolation. MultiKeyConnectStep renders a
+// marker so "step is now connect_key" is observable. None of the pre-existing
+// tests assert either child's content, so these stubs are inert for them.
+// WIZ-04: a minimal snapshot the sync-complete trigger fires so the stepper
+// tests can drive syncSnapshot != null (⇒ metadata/review become navigable).
+const SYNC_SNAPSHOT = {
+  tradeCount: 42,
+  csvRowCount: 0,
+  earliestTradeAt: null,
+  latestTradeAt: null,
+  detectedMarkets: ["BTC"],
+  exchange: "binance",
+  metrics: [],
+  sparkline: null,
+  computedAt: null,
+};
+
+vi.mock("./steps/SyncPreviewStep", () => ({
+  SyncPreviewStep: (props: {
+    wizardSessionId: string;
+    onComplete: (snapshot: typeof SYNC_SNAPSHOT) => void;
+    onReviewKeys?: () => void;
+    onTryAnotherKey: () => void;
+    cachedSnapshot?: typeof SYNC_SNAPSHOT | null;
+  }) => (
+    <div data-testid="mock-sync-preview">
+      <span data-testid="sync-session">{props.wizardSessionId}</span>
+      {/* F1: expose whether WizardClient handed us a cached snapshot. A stale
+          snapshot surviving a member change would render "present" here. */}
+      <span data-testid="cached-snapshot">
+        {props.cachedSnapshot ? "present" : "null"}
+      </span>
+      {/* WIZ-04: drive handleSyncComplete so syncSnapshot is set and the
+          stepper's forward review cell becomes navigable. Inert for the
+          pre-existing tests, which never click it. */}
+      <button
+        type="button"
+        data-testid="sync-complete"
+        onClick={() => props.onComplete(SYNC_SNAPSHOT)}
+      >
+        Complete sync
+      </button>
+      <button
+        type="button"
+        data-testid="sync-review-keys"
+        onClick={() => props.onReviewKeys?.()}
+      >
+        Review your keys
+      </button>
+      <button
+        type="button"
+        data-testid="sync-try-another"
+        onClick={() => props.onTryAnotherKey()}
+      >
+        Try another key
+      </button>
+    </div>
+  ),
+}));
+
+vi.mock("./steps/MultiKeyConnectStep", () => ({
+  MultiKeyConnectStep: (props: {
+    wizardSessionId: string;
+    onSuccess?: (result: {
+      strategyId: string;
+      apiKeyId: string;
+      exchange: string;
+    }) => void;
+    onDirtyChange?: (dirty: boolean) => void;
+  }) => (
+    <div data-testid="mock-connect-step">
+      <span data-testid="connect-session">{props.wizardSessionId}</span>
+      {/* F1: drive handleConnectSuccess (a re-connect after a member change).
+          WizardClient must invalidate any cached syncSnapshot on this path. */}
+      <button
+        type="button"
+        data-testid="connect-success"
+        onClick={() =>
+          props.onSuccess?.({
+            strategyId: "strat-reconnected",
+            apiKeyId: "key-reconnected",
+            exchange: "okx",
+          })
+        }
+      >
+        Connect success
+      </button>
+      {/* F2: drive the dirty signal so the stepper-gating test can prove a
+          forward jump is blocked while connect_key holds unsaved edits. */}
+      <button
+        type="button"
+        data-testid="connect-dirty"
+        onClick={() => props.onDirtyChange?.(true)}
+      >
+        Mark dirty
+      </button>
+      <button
+        type="button"
+        data-testid="connect-clean"
+        onClick={() => props.onDirtyChange?.(false)}
+      >
+        Mark clean
+      </button>
+    </div>
+  ),
+}));
+
+// WIZ-04: stub the metadata + review steps so the stepper-navigation tests
+// observe the active step without depending on either step's internals. The
+// pre-existing tests never reach these steps, so the stubs are inert for them.
+vi.mock("./steps/MetadataStep", () => ({
+  MetadataStep: () => <div data-testid="mock-metadata-step" />,
+}));
+
+vi.mock("./steps/ReviewStep", () => ({
+  ReviewStep: () => <div data-testid="mock-review-step" />,
+}));
 
 const DRAFT = {
   id: "draft-1",
@@ -102,6 +228,7 @@ beforeEach(async () => {
   saveWizardStateMock.mockClear();
   onAuthStateChangeMock.mockClear();
   unsubscribeMock.mockClear();
+  newWizardSessionIdMock.mockClear();
   ({ WizardClient } = await import("./WizardClient"));
 });
 
@@ -295,5 +422,221 @@ describe("[Phase 15] WizardClient — CSV strategy-name autosave (BUG P1)", () =
       return arg?.strategyName === "A";
     });
     expect(intermediateWrite).toBeUndefined();
+  });
+});
+
+describe("[94-03] WizardClient — non-destructive composite review (WIZ-03)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // RED before Task 1: WizardClient passed NO onReviewKeys prop, so the mock's
+  // `props.onReviewKeys?.()` was a no-op — the step stayed sync_preview and
+  // mock-connect-step never appeared. GREEN once onReviewKeys wires
+  // setStep("connect_key") + persistPointer.
+  it("Review your keys navigates to connect_key WITHOUT deleting the draft or minting a new session", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    // initialDraft present → the wizard mounts on sync_preview.
+    const reviewBtn = await screen.findByTestId("sync-review-keys");
+    const sessionBefore = screen.getByTestId("sync-session").textContent;
+    // newWizardSessionId is called once at mount (the useState initializer).
+    const sessionGensAtMount = newWizardSessionIdMock.mock.calls.length;
+
+    fireEvent.click(reviewBtn);
+
+    // Step transitioned to connect_key (where the composite rehydrates, WIZ-02).
+    expect(await screen.findByTestId("mock-connect-step")).toBeInTheDocument();
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+
+    // Non-destructive: NO DELETE fetch to the draft route was issued.
+    const deleteCalls = fetchSpy.mock.calls.filter(
+      (c) =>
+        String(c[0]).includes("/api/strategies/draft/") &&
+        (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+    expect(deleteCalls).toHaveLength(0);
+
+    // Session id survives the round-trip: no NEW session was minted after mount,
+    // and the connect step received the same id the sync step held.
+    expect(newWizardSessionIdMock.mock.calls.length).toBe(sessionGensAtMount);
+    expect(screen.getByTestId("connect-session").textContent).toBe(sessionBefore);
+  });
+
+  // Destructive pin (research Pitfall 3): the split must NOT blanket-remove the
+  // single-key "Try another key" delete. This fails if onTryAnotherKey were
+  // pointed at the non-destructive callback.
+  it("Try another key (single-key destructive path) still issues the draft DELETE", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    fireEvent.click(await screen.findByTestId("sync-try-another"));
+
+    await waitFor(() => {
+      const deleteCalls = fetchSpy.mock.calls.filter(
+        (c) =>
+          String(c[0]).includes("/api/strategies/draft/draft-1") &&
+          (c[1] as RequestInit | undefined)?.method === "DELETE",
+      );
+      expect(deleteCalls).toHaveLength(1);
+    });
+    // And the destructive path re-arms the F6 fence by minting a fresh session.
+    expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
+describe("[94-04] WizardClient — clickable stepper (WIZ-04)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Forward-skip block (T-94-15 / research Pitfall 4). At connect_key with no
+  // strategyId, NO forward step is complete, so none is navigable — the render
+  // guards at :699/:724 (strategyId && syncSnapshot && metadataDraft) can never
+  // be reached with missing deps. This is the RED-under-mutation pin: neuter
+  // stepNavigable to always-true and the forward cells appear ⇒ these fail.
+  it("blocks forward navigation to steps whose prerequisites are missing", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    // Active step (connect_key) is inert (no button); every forward step is
+    // non-navigable because its data prerequisites are absent.
+    expect(screen.queryByTestId("wizard-step-connect_key")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-sync_preview")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-metadata")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-review")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-submit")).toBeNull();
+  });
+
+  // "Change nothing, go forward" (T-94-16). After reaching review-eligible
+  // state, a backward click then a forward click redoes NO work: handleStepSelect
+  // is setStep + persistPointer only, and syncSnapshot/metadataDraft persist in
+  // WizardClient state — so the round-trip issues zero network calls (no
+  // /api/keys/sync POST, no add-key/set-members POST).
+  it("returns forward to a completed step after a backward click with no refetch", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    // initialDraft seeds strategyId + metadataDraft; syncSnapshot starts null.
+    render(<WizardClient initialDraft={DRAFT} />);
+    await screen.findByTestId("mock-sync-preview");
+
+    // review is not navigable yet — syncSnapshot is missing (forward-skip block).
+    expect(screen.queryByTestId("wizard-step-review")).toBeNull();
+
+    // Complete sync → syncSnapshot set, step advances to metadata.
+    fireEvent.click(screen.getByTestId("sync-complete"));
+    await screen.findByTestId("mock-metadata-step");
+
+    // Now every lower-ordinal step is complete ⇒ review is navigable.
+    await screen.findByTestId("wizard-step-review");
+
+    // Inventory network calls, then run the back → forward round-trip.
+    const callsBeforeRoundTrip = fetchSpy.mock.calls.length;
+
+    fireEvent.click(screen.getByTestId("wizard-step-sync_preview"));
+    await screen.findByTestId("mock-sync-preview");
+
+    fireEvent.click(await screen.findByTestId("wizard-step-review"));
+    await screen.findByTestId("mock-review-step");
+
+    // No work redone: the stepper round-trip issued no new fetch calls.
+    expect(fetchSpy.mock.calls.length).toBe(callsBeforeRoundTrip);
+  });
+});
+
+describe("[94.1 F1] WizardClient — stale snapshot invalidation on re-connect", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Root cause: handleConnectSuccess set strategyId/apiKeyId/step but NOT
+  // syncSnapshot. Combined with `cachedSnapshot={syncSnapshot}` + SyncPreviewStep's
+  // unconditional cached-snapshot short-circuit, a user who went back, CHANGED a
+  // key/window, and re-continued re-entered sync_preview with the OLD snapshot
+  // (member set {A,B}) even though the fresh set was {A,B,C} — finalizing a
+  // composite whose displayed provenance ≠ its actual keys. The fix adds
+  // setSyncSnapshot(null) so the re-entry re-probes the DB for the CURRENT set.
+  //
+  // RED without the fix: syncSnapshot survives the re-connect, so
+  // SyncPreviewStep receives the stale object → cached-snapshot reads "present".
+  it("clears the cached syncSnapshot when a (re)connect succeeds so SyncPreviewStep re-probes instead of rendering the stale snapshot", async () => {
+    // initialDraft → mounts on sync_preview with strategyId already set.
+    render(<WizardClient initialDraft={DRAFT} />);
+    await screen.findByTestId("mock-sync-preview");
+
+    // Complete a sync → syncSnapshot is set (would be the stale cache), advance
+    // to metadata.
+    fireEvent.click(screen.getByTestId("sync-complete"));
+    await screen.findByTestId("mock-metadata-step");
+
+    // Back-nav to connect_key via the clickable stepper (backward always free).
+    fireEvent.click(await screen.findByTestId("wizard-step-connect_key"));
+    await screen.findByTestId("mock-connect-step");
+
+    // The user changed the key set and re-continued → handleConnectSuccess.
+    fireEvent.click(screen.getByTestId("connect-success"));
+
+    // Back on sync_preview: the cached snapshot must have been invalidated so
+    // the step re-probes the DB for the CURRENT member set (no stale render).
+    await screen.findByTestId("mock-sync-preview");
+    expect(screen.getByTestId("cached-snapshot")).toHaveTextContent("null");
+  });
+});
+
+describe("[94.1 F2] WizardClient — dirty connect_key blocks forward stepper jump", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Root cause: stepCompleted/stepNavigable derived completion purely from
+  // WizardClient state (strategyId/syncSnapshot/metadataDraft) with NO knowledge
+  // of unsaved MultiKeyConnectStep panel edits. A user who reached review, went
+  // back to connect_key, edited a panel, then clicked the review/submit stepper
+  // cell (instead of Continue) jumped forward — the client-only edits were never
+  // POSTed and the strategy finalized with old members + old snapshot. The fix
+  // threads an onDirtyChange signal into stepCompleted('connect_key').
+  //
+  // RED without the fix: connect_key stays "complete" while dirty, so the
+  // forward review/submit cells remain navigable and this assertion fails.
+  it("blocks the forward review/submit stepper cells while connect_key holds unsaved edits, and restores them when clean", async () => {
+    // initialDraft seeds strategyId + metadataDraft; syncSnapshot starts null.
+    render(<WizardClient initialDraft={DRAFT} />);
+    await screen.findByTestId("mock-sync-preview");
+
+    // Complete sync → syncSnapshot set, advance to metadata. Now every
+    // lower-ordinal step is complete ⇒ review becomes navigable.
+    fireEvent.click(screen.getByTestId("sync-complete"));
+    await screen.findByTestId("mock-metadata-step");
+    await screen.findByTestId("wizard-step-review");
+
+    // Back-nav to connect_key (backward always allowed).
+    fireEvent.click(screen.getByTestId("wizard-step-connect_key"));
+    await screen.findByTestId("mock-connect-step");
+
+    // Sanity: with connect_key clean, the forward review cell is still navigable.
+    await screen.findByTestId("wizard-step-review");
+
+    // The user edits a panel → connect_key reports dirty. Forward jumps must be
+    // blocked (review + submit cells disappear); the stale-member finalize hole
+    // is closed. Backward remains free.
+    fireEvent.click(screen.getByTestId("connect-dirty"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-step-review")).toBeNull(),
+    );
+    expect(screen.queryByTestId("wizard-step-submit")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-metadata")).toBeNull();
+
+    // Committing (or clearing) the edit re-opens forward navigation.
+    fireEvent.click(screen.getByTestId("connect-clean"));
+    await screen.findByTestId("wizard-step-review");
   });
 });

@@ -4,86 +4,61 @@ import type { NextRequest } from "next/server";
 /**
  * Cron route handler tests for /api/cron/cleanup-wizard-drafts.
  *
- * Coverage targets the seven behaviors flagged in the v0.17.1.4 specialist
- * review — the cron landed with +136 LOC and zero unit tests:
+ * Rewritten in 96-03 for the single-RPC contract. The route no longer does a
+ * SELECT-then-DELETE two-step plus a per-key `delete_api_key_if_unreferenced`
+ * orphan-sweep loop — the DB now owns atomicity: the route makes exactly ONE
+ * `rpc("cleanup_abandoned_wizard_drafts")` call (SECURITY DEFINER, shipped in
+ * 96-02) and shapes the monitor-stable response.
  *
- *   1. Missing/wrong CRON_SECRET → 401 (no header, wrong bearer)
- *   2. safeCompare reaches crypto.timingSafeEqual on equal-length inputs
- *      (constant-time path is exercised, not just the length short-circuit)
- *   3. Happy-path delete — 3 wizard drafts → 3 deletes + 3 key revokes
- *   4. TOCTOU re-filter — DELETE clause re-applies source='wizard' and
- *      status='draft' so a row that flipped to pending_review between the
- *      SELECT and the DELETE is not clobbered
- *   5. Orphaned-key revoke logic — refCount > 0 must SKIP the api_keys
- *      delete (the most dangerous path: getting it wrong yanks a key from
- *      a live, published strategy that happens to share the key)
- *   6. Cutoff math — `created_at < (now - 30d).toISOString()` is the .lt
- *      filter value
- *   7. Empty result — 0 drafts → {deleted:0, orphaned_keys_revoked:0}
+ * Coverage (5 behaviors):
+ *   1. Auth — missing/wrong CRON_SECRET → 401; unset env → 401.
+ *   2. Auth — safeCompare (timing-safe) is the comparator, reached on an
+ *      equal-length wrong bearer; a `true` return alone accepts the request.
+ *   3. Happy path — valid bearer → `rpc` called EXACTLY ONCE with
+ *      "cleanup_abandoned_wizard_drafts" and no args; the RETURNS TABLE row
+ *      `[{deleted_drafts, swept_keys}]` maps to
+ *      `{deleted, orphaned_keys_revoked, key_sweep_errors: 0}`.
+ *   4. Zero-work run — `[{deleted_drafts:0, swept_keys:0}]` → the same uniform
+ *      shape so a monitor reads `key_sweep_errors` identically across clean runs.
+ *   5. RPC error — a PostgREST error → 500 with a GENERIC body (the raw SQL
+ *      detail must NOT reach the wire — least-disclosure) while console.error
+ *      still carries the detail for ops. Plus a purity assertion: the route
+ *      touches NO table (`from` is never called) and issues NO
+ *      `delete_api_key_if_unreferenced` RPC — the loop is gone.
  *
- * Mocking strategy mirrors the project's recorder pattern: a `recorders`
- * object captures every Supabase chain call (.from, .select, .eq, .lt, .in,
- * .delete) so each test can assert the exact call shape recorded by the
- * route. `createAdminClient` is mocked to return a chainable builder that
- * records into `recorders` and resolves with the seeded `data/error` values.
- *
- * `import "server-only"` throws under jsdom; mock it so the route module
- * can be imported. Each test uses `vi.resetModules()` + `vi.doMock()` so
- * the mock is fresh per case (the route reads CRON_SECRET at call time, not
- * at import time, but the supabase mock is captured at route import).
+ * `import "server-only"` (transitively via @/lib/supabase/admin) throws under
+ * jsdom; stubbing it lets the route module import cleanly. Each test uses
+ * `vi.resetModules()` + `vi.doMock()` so the mocked admin client is fresh per
+ * case (the route reads CRON_SECRET at call time, but the supabase mock is
+ * captured at route import).
  */
 
-// `import "server-only"` (transitively via @/lib/supabase/admin) throws in
-// jsdom. Stubbing it lets the route import cleanly.
+// `import "server-only"` throws in jsdom. Stubbing it lets the route import.
 vi.mock("server-only", () => ({}));
 
 // ---------------------------------------------------------------------------
 // Types & helpers
 // ---------------------------------------------------------------------------
 
-type DraftRow = { id: string; api_key_id: string | null };
+type RpcResult = { data: unknown; error: { message: string } | null };
 
 interface Recorders {
+  // Every rpc(fn, args) the route invokes. The single-RPC contract means this
+  // must contain exactly one { fn: "cleanup_abandoned_wizard_drafts" } entry
+  // and NOTHING for the obsolete "delete_api_key_if_unreferenced" loop.
+  rpcCalls: Array<{ fn: string; args: unknown }>;
+  // Every .from(table). The single-RPC route must never build a table chain —
+  // this stays empty. (The obsolete route hit "strategies" twice.)
   fromCalls: string[];
-  selectCalls: Array<{
-    table: string;
-    columns: string;
-    options: Record<string, unknown> | undefined;
-  }>;
-  eqCalls: Array<{ stage: string; col: string; val: unknown }>;
-  ltCalls: Array<{ col: string; val: unknown }>;
-  // M-0255: `.is(col, null)` filter calls, stage-tagged like eqCalls, so the
-  // rejected-draft exemption can be asserted on both the SELECT and the DELETE.
-  isCalls: Array<{ stage: string; col: string; val: unknown }>;
-  inCalls: Array<{ col: string; vals: unknown[] }>;
-  deleteCalls: Array<{ table: string; options: Record<string, unknown> | undefined }>;
-  // The cron makes two strategies chain shapes plus one RPC. Each test seeds
-  // the response sequence; the mock dispatches by chain shape (select+lt →
-  // SELECT_DRAFTS, delete+in → DELETE_DRAFTS) and the rpc() stub returns a
-  // per-key result for the delete_api_key_if_unreferenced orphan sweep.
-  selectDraftsResponse: { data: DraftRow[] | null; error: { message: string } | null };
-  deleteDraftsResponse: { count: number | null; error: { message: string } | null };
-  // M-0347: captured delete_api_key_if_unreferenced RPC invocations + a
-  // per-key seeded result. `data` is the rows the RPC reports deleted
-  // (1 = orphan revoked, 0 = still referenced → kept); `error` injects a
-  // failure so the loud-surfacing (500 + errors[]) path can be exercised.
-  rpcCalls: Array<{ fn: string; args: Record<string, unknown> }>;
-  rpcResultByKey: Record<string, { data: number | null; error: { message: string } | null }>;
+  // The seeded result the mocked rpc() resolves with.
+  rpcResult: RpcResult;
 }
 
 function makeRecorders(): Recorders {
   return {
-    fromCalls: [],
-    selectCalls: [],
-    eqCalls: [],
-    ltCalls: [],
-    isCalls: [],
-    inCalls: [],
-    deleteCalls: [],
-    selectDraftsResponse: { data: [], error: null },
-    deleteDraftsResponse: { count: 0, error: null },
     rpcCalls: [],
-    rpcResultByKey: {},
+    fromCalls: [],
+    rpcResult: { data: [{ deleted_drafts: 0, swept_keys: 0 }], error: null },
   };
 }
 
@@ -96,151 +71,33 @@ function makeReq(headers: Record<string, string> = {}): NextRequest {
 }
 
 /**
- * Builds a chainable Supabase mock that records every call into `recorders`
- * and dispatches the awaited result based on which chain shape was used.
- *
- * Two strategies chain shapes + one RPC the route under test invokes:
- *   A. SELECT_DRAFTS  : .from("strategies").select("id, api_key_id")
- *                       .eq("source","wizard").eq("status","draft")
- *                       .lt("created_at", cutoff)
- *   B. DELETE_DRAFTS  : .from("strategies").delete({count:"exact"})
- *                       .in("id", draftIds)
- *                       .eq("source","wizard").eq("status","draft")
- *   R. ORPHAN_REVOKE  : .rpc("delete_api_key_if_unreferenced",{p_api_key_id})
- *                       — atomic check+delete; returns rows deleted.
- *
- * Each chain method records and returns the chain itself (a thenable). The
- * thenable resolves based on the shape captured during the chain build; rpc()
- * resolves to the per-key seeded result.
+ * Minimal admin-client stub for the single-RPC route:
+ *   - `rpc(fn, args)` records the call and resolves the seeded result.
+ *   - `from(table)` records the table then returns an inert thenable chain.
+ *     The single-RPC route never calls it (asserted via `fromCalls`); the
+ *     chain exists only so an accidental/obsolete table path resolves to an
+ *     empty result instead of throwing, keeping the purity assertion the
+ *     signal rather than an unhandled TypeError.
  */
 function createSupabaseMock(recorders: Recorders) {
   return {
-    // Shape R: ORPHAN_REVOKE — the atomic delete_api_key_if_unreferenced RPC.
-    // Returns { data: <rows deleted>, error } seeded per api_key_id.
-    rpc(fn: string, args: Record<string, unknown>) {
+    rpc(fn: string, args?: unknown) {
       recorders.rpcCalls.push({ fn, args });
-      const keyId = String(args.p_api_key_id ?? "");
-      const seeded = recorders.rpcResultByKey[keyId];
-      // Default: orphan revoked (1 row). Tests that need "still referenced"
-      // (0) or an error seed rpcResultByKey explicitly.
-      return Promise.resolve(
-        seeded ?? { data: 1, error: null },
-      );
+      return Promise.resolve(recorders.rpcResult);
     },
     from(table: string) {
       recorders.fromCalls.push(table);
-
-      type ChainState = {
-        table: string;
-        verb: "select" | "delete" | null;
-        selectColumns: string | null;
-        selectOptions: Record<string, unknown> | undefined;
-        deleteOptions: Record<string, unknown> | undefined;
-        // Captured chain filters — needed at resolve time to pick the right
-        // queued response.
-        eqs: Array<[string, unknown]>;
-        ins: Array<[string, unknown[]]>;
-        lts: Array<[string, unknown]>;
-      };
-
-      const state: ChainState = {
-        table,
-        verb: null,
-        selectColumns: null,
-        selectOptions: undefined,
-        deleteOptions: undefined,
-        eqs: [],
-        ins: [],
-        lts: [],
-      };
-
-      const resolve = (): {
-        data?: unknown;
-        error: { message: string } | null;
-        count?: number | null;
-      } => {
-        // Shape A: SELECT_DRAFTS — strategies.select(... id, api_key_id ...)
-        if (
-          state.table === "strategies" &&
-          state.verb === "select"
-        ) {
-          return {
-            data: recorders.selectDraftsResponse.data,
-            error: recorders.selectDraftsResponse.error,
-          };
-        }
-
-        // Shape B: DELETE_DRAFTS — strategies.delete({count:"exact"}).in().eq().eq()
-        if (state.table === "strategies" && state.verb === "delete") {
-          return {
-            data: null,
-            count: recorders.deleteDraftsResponse.count,
-            error: recorders.deleteDraftsResponse.error,
-          };
-        }
-
-        return { data: null, error: null };
-      };
-
       const chain: Record<string, unknown> = {};
-
-      chain.select = (
-        columns: string,
-        options?: Record<string, unknown>,
-      ) => {
-        state.verb = "select";
-        state.selectColumns = columns;
-        state.selectOptions = options;
-        recorders.selectCalls.push({ table, columns, options });
-        return chain;
-      };
-
-      chain.delete = (options?: Record<string, unknown>) => {
-        state.verb = "delete";
-        state.deleteOptions = options;
-        recorders.deleteCalls.push({ table, options });
-        return chain;
-      };
-
-      chain.eq = (col: string, val: unknown) => {
-        state.eqs.push([col, val]);
-        recorders.eqCalls.push({
-          stage: `${state.table}:${state.verb ?? "?"}`,
-          col,
-          val,
-        });
-        return chain;
-      };
-
-      chain.lt = (col: string, val: unknown) => {
-        state.lts.push([col, val]);
-        recorders.ltCalls.push({ col, val });
-        return chain;
-      };
-
-      chain.is = (col: string, val: unknown) => {
-        recorders.isCalls.push({
-          stage: `${state.table}:${state.verb ?? "?"}`,
-          col,
-          val,
-        });
-        return chain;
-      };
-
-      chain.in = (col: string, vals: unknown[]) => {
-        state.ins.push([col, vals]);
-        recorders.inCalls.push({ col, vals });
-        return chain;
-      };
-
-      // Make the chain a thenable so `await chain.eq(...)` resolves into
-      // the captured response. PostgREST's builder works the same way.
-      chain.then = <T1, T2>(
-        onFulfilled: (val: ReturnType<typeof resolve>) => T1,
-        onRejected?: (err: unknown) => T2,
-      ): Promise<T1 | T2> =>
-        Promise.resolve(resolve()).then(onFulfilled, onRejected);
-
+      for (const m of ["select", "delete", "eq", "lt", "is", "in"]) {
+        chain[m] = () => chain;
+      }
+      chain.then = (
+        onFulfilled: (v: {
+          data: never[];
+          error: null;
+          count: number;
+        }) => unknown,
+      ) => Promise.resolve({ data: [], error: null, count: 0 }).then(onFulfilled);
       return chain;
     },
   };
@@ -261,9 +118,11 @@ describe.each([
     process.env.CRON_SECRET = "cron-secret-at-least-16-chars";
     recorders = makeRecorders();
     vi.resetModules();
-    // Silence the route's bare console.error (Sentry-deferral pattern).
+    // Silence the route's bare console.error (Sentry-deferral pattern) plus the
+    // success-path console.info/console.warn observability logs (96-FIX-1).
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -299,6 +158,7 @@ describe.each([
     const body = await res.json();
     expect(body.error).toBe("Unauthorized");
     // Auth guard short-circuits BEFORE any supabase call.
+    expect(recorders.rpcCalls).toHaveLength(0);
     expect(recorders.fromCalls).toHaveLength(0);
   });
 
@@ -306,7 +166,7 @@ describe.each([
     const handler = await getHandler();
     const res = await handler(makeReq());
     expect(res.status).toBe(401);
-    expect(recorders.fromCalls).toHaveLength(0);
+    expect(recorders.rpcCalls).toHaveLength(0);
   });
 
   it("returns 401 when the Authorization header is wrong", async () => {
@@ -315,7 +175,7 @@ describe.each([
       makeReq({ authorization: "Bearer wrong-secret-value-here-pad" }),
     );
     expect(res.status).toBe(401);
-    expect(recorders.fromCalls).toHaveLength(0);
+    expect(recorders.rpcCalls).toHaveLength(0);
   });
 
   it("uses safeCompare (timing-safe) for the bearer check, not naive ===", async () => {
@@ -324,13 +184,6 @@ describe.each([
     // time comparator on every call AND that it does NOT fall back to a
     // naive `===` (which would short-circuit on a length-mismatching
     // attacker input and leak prefix bytes via timing).
-    //
-    // The mock asserts two things:
-    //   1. `safeCompare` is the function the route delegates to (called
-    //      with the request's Authorization header and `Bearer ${SECRET}`).
-    //   2. When `safeCompare` returns `true`, the route accepts the
-    //      request — proving the auth gate's truth value flows through
-    //      the timing-safe comparator and not some other check.
     const safeCompareSpy = vi.fn<(a: string, b: string) => boolean>(() => false);
     vi.doMock("@/lib/timing-safe-compare", () => ({
       safeCompare: safeCompareSpy,
@@ -359,7 +212,10 @@ describe.each([
     // that signal alone (proves the gate is wired through `safeCompare`,
     // not a separate naive comparator that could short-circuit on length).
     safeCompareSpy.mockReturnValueOnce(true);
-    recorders.selectDraftsResponse = { data: [], error: null };
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 0, swept_keys: 0 }],
+      error: null,
+    };
     const resAccept = await handler(
       makeReq({ authorization: wrongSameLength }),
     );
@@ -367,10 +223,16 @@ describe.each([
     expect(safeCompareSpy).toHaveBeenCalledTimes(2);
   });
 
-  // --- Empty result -------------------------------------------------------
+  // --- Happy path ---------------------------------------------------------
 
-  it("returns 200 {deleted:0, orphaned_keys_revoked:0} when no drafts match", async () => {
-    recorders.selectDraftsResponse = { data: [], error: null };
+  it("calls the cleanup RPC exactly once and maps its row to the monitor shape", async () => {
+    // RETURNS TABLE(deleted_drafts int, swept_keys int) → supabase-js returns
+    // `data` as an array of one row. The route maps deleted_drafts→deleted and
+    // swept_keys→orphaned_keys_revoked, and pins key_sweep_errors:0.
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 3, swept_keys: 2 }],
+      error: null,
+    };
 
     const handler = await getHandler();
     const res = await handler(
@@ -379,388 +241,84 @@ describe.each([
 
     expect(res.status).toBe(200);
     const body = await res.json();
+    expect(body).toEqual({
+      deleted: 3,
+      orphaned_keys_revoked: 2,
+      key_sweep_errors: 0,
+    });
+
+    // Exactly ONE rpc call, to the atomic cleanup function, with no args.
+    expect(recorders.rpcCalls).toHaveLength(1);
+    expect(recorders.rpcCalls[0].fn).toBe("cleanup_abandoned_wizard_drafts");
+    // No args object (or an empty one) — the window/predicate live in SQL.
+    expect(recorders.rpcCalls[0].args ?? {}).toEqual({});
+    // Purity: the atomic RPC owns the whole job — no table chains at all.
+    expect(recorders.fromCalls).toHaveLength(0);
+  });
+
+  // --- Zero-work run ------------------------------------------------------
+
+  it("returns the uniform monitor shape on a zero-work run", async () => {
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 0, swept_keys: 0 }],
+      error: null,
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // Same keys as a work-present run so a monitor reads key_sweep_errors
+    // uniformly across every clean run.
     expect(body).toEqual({
       deleted: 0,
       orphaned_keys_revoked: 0,
       key_sweep_errors: 0,
     });
-    // Only the SELECT_DRAFTS call should have run; no DELETE, no count,
-    // no api_keys touch.
-    expect(recorders.fromCalls).toEqual(["strategies"]);
-    expect(recorders.deleteCalls).toHaveLength(0);
+    expect(recorders.rpcCalls).toHaveLength(1);
+    expect(recorders.rpcCalls[0].fn).toBe("cleanup_abandoned_wizard_drafts");
   });
 
-  // --- Cutoff math --------------------------------------------------------
+  // --- Observability: destructive-cron logging (96-FIX-1) -----------------
 
-  it("filters drafts on created_at < (now - 30d).toISOString()", async () => {
-    recorders.selectDraftsResponse = { data: [], error: null };
-    const before = Date.now();
-
-    const handler = await getHandler();
-    await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    const after = Date.now();
-    expect(recorders.ltCalls).toHaveLength(1);
-    const [{ col, val }] = recorders.ltCalls;
-    expect(col).toBe("created_at");
-    expect(typeof val).toBe("string");
-    const cutoffMs = Date.parse(val as string);
-    expect(Number.isFinite(cutoffMs)).toBe(true);
-    // ABANDON_DAYS=30. Allow the small wall-clock drift between the
-    // pre/post timestamps captured around the handler call.
-    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
-    expect(cutoffMs).toBeGreaterThanOrEqual(before - THIRTY_DAYS_MS - 5);
-    expect(cutoffMs).toBeLessThanOrEqual(after - THIRTY_DAYS_MS + 5);
-
-    // Source/status filters are belt-on the SELECT.
-    const selectEqs = recorders.eqCalls.filter(
-      (c) => c.stage === "strategies:select",
-    );
-    expect(selectEqs).toEqual(
-      expect.arrayContaining([
-        { stage: "strategies:select", col: "source", val: "wizard" },
-        { stage: "strategies:select", col: "status", val: "draft" },
-      ]),
-    );
-  });
-
-  // --- Happy path ---------------------------------------------------------
-
-  it("deletes 3 wizard drafts and revokes 3 orphaned keys on the happy path", async () => {
-    const drafts: DraftRow[] = [
-      { id: "draft-a", api_key_id: "key-a" },
-      { id: "draft-b", api_key_id: "key-b" },
-      { id: "draft-c", api_key_id: "key-c" },
-    ];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 3, error: null };
-    // All three keys are orphaned — the atomic RPC reports 1 deleted row each
-    // (default rpc result also returns 1; explicit here for clarity).
-    recorders.rpcResultByKey = {
-      "key-a": { data: 1, error: null },
-      "key-b": { data: 1, error: null },
-      "key-c": { data: 1, error: null },
-    };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({
-      deleted: 3,
-      orphaned_keys_revoked: 3,
-      key_sweep_errors: 0,
-    });
-
-    // Only two from() calls (SELECT then DELETE on strategies); the orphan
-    // revokes go through the atomic RPC, which does not call from().
-    expect(recorders.fromCalls).toEqual(["strategies", "strategies"]);
-    // Three atomic orphan-revoke RPCs, one per distinct key, in order.
-    expect(recorders.rpcCalls).toEqual([
-      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-a" } },
-      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-b" } },
-      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-c" } },
-    ]);
-    // The DELETE_DRAFTS call requested an exact count.
-    const deleteDraft = recorders.deleteCalls.find((c) => c.table === "strategies");
-    expect(deleteDraft?.options).toEqual({ count: "exact" });
-    // The .in("id", [...]) was called with all three draft ids.
-    expect(recorders.inCalls).toHaveLength(1);
-    expect(recorders.inCalls[0]).toEqual({
-      col: "id",
-      vals: ["draft-a", "draft-b", "draft-c"],
-    });
-  });
-
-  // --- TOCTOU re-filter ---------------------------------------------------
-
-  it("re-applies source='wizard' AND status='draft' on the DELETE clause (TOCTOU guard)", async () => {
-    const drafts: DraftRow[] = [{ id: "draft-x", api_key_id: null }];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 1, error: null };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    expect(res.status).toBe(200);
-    // The eqCalls during the DELETE stage MUST include both source=wizard
-    // and status=draft so a row that flipped to pending_review between the
-    // SELECT and the DELETE is left intact instead of clobbered.
-    const deleteEqs = recorders.eqCalls.filter(
-      (c) => c.stage === "strategies:delete",
-    );
-    expect(deleteEqs).toEqual(
-      expect.arrayContaining([
-        { stage: "strategies:delete", col: "source", val: "wizard" },
-        { stage: "strategies:delete", col: "status", val: "draft" },
-      ]),
-    );
-    // null api_key_id → no orphan-key sweep at all (no RPC, two from() calls).
-    expect(recorders.fromCalls).toEqual(["strategies", "strategies"]);
-    expect(recorders.rpcCalls).toHaveLength(0);
-  });
-
-  // --- M-0255: rejected wizard drafts are exempt from the hard-delete -----
-
-  it("M-0255: exempts rejected drafts via .is('review_note', null) on BOTH the SELECT and the DELETE", async () => {
-    // A rejected wizard draft is source='wizard' + status='draft' but carries
-    // a review_note (written by the admin reject path). Its created_at is never
-    // reset, so without the `.is("review_note", null)` guard the sweep would
-    // CASCADE-delete it — and its trades + strategy_analytics — 30 days after
-    // the ORIGINAL submission, which is silent data loss the user never sees.
-    // Both the discovery SELECT and the belt-and-suspenders DELETE must apply
-    // the exemption so a row rejected between the two statements is still
-    // spared. Neuter check: drop either `.is(...)` from the route → this fails.
-    const drafts: DraftRow[] = [{ id: "draft-inprogress", api_key_id: null }];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 1, error: null };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    expect(res.status).toBe(200);
-    expect(recorders.isCalls).toEqual(
-      expect.arrayContaining([
-        { stage: "strategies:select", col: "review_note", val: null },
-        { stage: "strategies:delete", col: "review_note", val: null },
-      ]),
-    );
-    // Exactly one exemption per stage — no accidental drop or double-filter.
-    expect(
-      recorders.isCalls.filter((c) => c.col === "review_note" && c.val === null),
-    ).toHaveLength(2);
-  });
-
-  // --- Orphan-key revoke logic (the dangerous path) -----------------------
-
-  it("does NOT count a still-referenced key as revoked (atomic RPC returns 0 deletions)", async () => {
-    // key-shared is still referenced by a live strategy: the atomic RPC's
-    // NOT EXISTS guard deletes 0 rows for it (the key survives). key-orphan
-    // has no references → 1 row deleted. The cron consults BOTH via the RPC
-    // but only counts the actual deletion. A regression that counted a
-    // 0-deletion RPC as a revoke (or skipped the still-referenced key's RPC)
-    // would fail here.
-    const drafts: DraftRow[] = [
-      { id: "draft-shared", api_key_id: "key-shared" },
-      { id: "draft-orphan", api_key_id: "key-orphan" },
-    ];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 2, error: null };
-    recorders.rpcResultByKey = {
-      // Live strategy still uses this key → RPC deletes nothing.
-      "key-shared": { data: 0, error: null },
-      "key-orphan": { data: 1, error: null },
-    };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    // Only the orphan counted as revoked — the shared key's 0-deletion RPC is
-    // NOT an error: zero sweep errors.
-    expect(body).toEqual({
-      deleted: 2,
-      orphaned_keys_revoked: 1,
-      key_sweep_errors: 0,
-    });
-
-    // Both keys went through the atomic RPC (the still-referenced one is kept
-    // by the NOT EXISTS guard inside the single statement, not by a skip).
-    expect(recorders.rpcCalls).toEqual([
-      {
-        fn: "delete_api_key_if_unreferenced",
-        args: { p_api_key_id: "key-shared" },
-      },
-      {
-        fn: "delete_api_key_if_unreferenced",
-        args: { p_api_key_id: "key-orphan" },
-      },
-    ]);
-  });
-
-  it("dedupes api_key_id and skips drafts with null api_key_id", async () => {
-    // Two drafts share the same api_key_id (key-dup); a third has null.
-    // The route MUST count refs for key-dup exactly once and skip the null.
-    const drafts: DraftRow[] = [
-      { id: "d1", api_key_id: "key-dup" },
-      { id: "d2", api_key_id: "key-dup" },
-      { id: "d3", api_key_id: null },
-    ];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 3, error: null };
-    recorders.rpcResultByKey = { "key-dup": { data: 1, error: null } };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toEqual({
-      deleted: 3,
-      orphaned_keys_revoked: 1,
-      key_sweep_errors: 0,
-    });
-
-    // Exactly one orphan-revoke RPC (key-dup). Null was filtered out before
-    // the loop; the duplicate was deduped via the Set in the route.
-    expect(recorders.rpcCalls).toEqual([
-      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-dup" } },
-    ]);
-  });
-
-  // --- Error paths --------------------------------------------------------
-
-  it("returns 500 with a GENERIC body (no raw PostgREST message) when the SELECT errors", async () => {
-    // M-1146: the response body must NOT echo the raw PostgREST message
-    // (it can carry SQL state / table / constraint names). The detail
-    // belongs in the server log, not the wire — even to a CRON_SECRET holder.
-    const errorSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
-    recorders.selectDraftsResponse = {
-      data: null,
-      error: { message: "DB connection failed: relation auth.foo missing" },
-    };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.error).toBe("Cron select failed");
-    // The raw message must NOT leak to the caller…
-    expect(JSON.stringify(body)).not.toContain("DB connection failed");
-    expect(JSON.stringify(body)).not.toContain("auth.foo");
-    // …but it MUST still be logged for ops visibility.
-    const loggedRaw = errorSpy.mock.calls.some((call) =>
-      call.some(
-        (arg) =>
-          (typeof arg === "object" &&
-            arg !== null &&
-            JSON.stringify(arg).includes("DB connection failed")) ||
-          (typeof arg === "string" && arg.includes("DB connection failed")),
-      ),
-    );
-    expect(loggedRaw).toBe(true);
-  });
-
-  it("returns 500 with a GENERIC body (no raw PostgREST message) when the DELETE errors", async () => {
-    // M-1146: same generic-envelope contract on the delete error path.
-    const errorSpy = vi
-      .spyOn(console, "error")
-      .mockImplementation(() => {});
-    recorders.selectDraftsResponse = {
-      data: [{ id: "draft-a", api_key_id: null }],
+  it("logs the deleted/orphaned counts on a successful run (a destructive cron's magnitude must be observable)", async () => {
+    // Vercel Cron only alerts on non-2xx, so a large SUCCESSFUL deletion is
+    // invisible unless the route logs its magnitude. RED without the console.info.
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 7, swept_keys: 4 }],
       error: null,
     };
-    recorders.deleteDraftsResponse = {
-      count: null,
-      error: { message: "FK violation on constraint strategies_api_key_id_fkey" },
-    };
 
     const handler = await getHandler();
     const res = await handler(
       makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
     );
 
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.error).toBe("Cron delete failed");
-    expect(JSON.stringify(body)).not.toContain("FK violation");
-    expect(JSON.stringify(body)).not.toContain("strategies_api_key_id_fkey");
-    const loggedRaw = errorSpy.mock.calls.some((call) =>
+    expect(res.status).toBe(200);
+    const loggedCounts = infoSpy.mock.calls.some((call) =>
       call.some(
         (arg) =>
-          (typeof arg === "object" &&
-            arg !== null &&
-            JSON.stringify(arg).includes("FK violation")) ||
-          (typeof arg === "string" && arg.includes("FK violation")),
+          typeof arg === "string" &&
+          arg.includes("deleted=7") &&
+          arg.includes("orphaned_keys_revoked=4"),
       ),
     );
-    expect(loggedRaw).toBe(true);
+    expect(loggedCounts).toBe(true);
   });
 
-  it("M-1144/M-1145/H-1251: an RPC revoke error is non-fatal to the loop but surfaced loudly (500 + errors)", async () => {
-    // The atomic delete_api_key_if_unreferenced RPC collapses the prior two
-    // failure modes (errored ref-count AND errored delete) into one: any RPC
-    // error means an orphan may have been left pointing at a strategy we just
-    // deleted — real integrity drift. The orphan-sweep loop must NOT abort
-    // (key-good still gets swept), but the failure must NOT masquerade as a
-    // clean run: the run is degraded → 500 (Vercel Cron alerts on non-2xx; a
-    // 207 would still be keyed as success), the failing key is named in
-    // errors[], and key_sweep_errors counts it. A regression that swallowed
-    // the error back to a clean 200, aborted the loop, or dropped the
-    // errors[]/count would fail this test.
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const drafts: DraftRow[] = [
-      { id: "d1", api_key_id: "key-bad" },
-      { id: "d2", api_key_id: "key-good" },
-    ];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: 2, error: null };
-    recorders.rpcResultByKey = {
-      "key-bad": { data: null, error: { message: "fk violation" } },
-      "key-good": { data: 1, error: null },
+  it("emits a distinct WARN when the deletion count exceeds the sanity threshold (runaway first-run is loud)", async () => {
+    // 501 > CLEANUP_SANITY_WARN_THRESHOLD (500). Behavior is UNCHANGED (still 200
+    // with the counts) — this is observability only, not a hard cap (a hard cap
+    // mid-sweep would break the RPC's single-transaction atomicity).
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 501, swept_keys: 12 }],
+      error: null,
     };
-
-    const handler = await getHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-
-    // Degraded run — NOT a clean 200; 500 so Vercel Cron alerts.
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.deleted).toBe(2);
-    // key-good still swept despite key-bad's error — the loop did not abort.
-    expect(body.orphaned_keys_revoked).toBe(1);
-    expect(body.key_sweep_errors).toBe(1);
-    expect(body.errors).toHaveLength(1);
-    expect(body.errors[0]).toContain("key-bad");
-    expect(body.errors[0]).toContain("revoke failed");
-
-    // Both keys were attempted via the RPC — the loop continued after the
-    // first failure.
-    expect(recorders.rpcCalls).toEqual([
-      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-bad" } },
-      { fn: "delete_api_key_if_unreferenced", args: { p_api_key_id: "key-good" } },
-    ]);
-
-    // Surfaced via console.error (red in Vercel logs), not console.warn.
-    const loggedError = errorSpy.mock.calls.some((call) =>
-      call.some(
-        (arg) => typeof arg === "string" && arg.includes("key=key-bad"),
-      ),
-    );
-    expect(loggedError).toBe(true);
-  });
-
-  it("falls back to draftIds.length when DELETE returns count=null", async () => {
-    // PostgREST may return count:null on certain auth/RLS configurations
-    // even when the delete succeeded. The route's `?? draftIds.length`
-    // fallback keeps the response monotonic with what we asked to delete.
-    const drafts: DraftRow[] = [
-      { id: "d1", api_key_id: null },
-      { id: "d2", api_key_id: null },
-    ];
-    recorders.selectDraftsResponse = { data: drafts, error: null };
-    recorders.deleteDraftsResponse = { count: null, error: null };
 
     const handler = await getHandler();
     const res = await handler(
@@ -770,9 +328,91 @@ describe.each([
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({
-      deleted: 2,
-      orphaned_keys_revoked: 0,
+      deleted: 501,
+      orphaned_keys_revoked: 12,
       key_sweep_errors: 0,
     });
+    const warnedLarge = warnSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          typeof arg === "string" && arg.includes("501") && /large/i.test(arg),
+      ),
+    );
+    expect(warnedLarge).toBe(true);
+  });
+
+  it("does NOT warn when the deletion count is at or below the sanity threshold", async () => {
+    // 500 is NOT > 500 — pins the threshold boundary so a future off-by-one that
+    // widened the warn band (e.g. `>=`) would redden here.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: [{ deleted_drafts: 500, swept_keys: 0 }],
+      error: null,
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(200);
+    const warnedLarge = warnSpy.mock.calls.some((call) =>
+      call.some((arg) => typeof arg === "string" && /large/i.test(arg)),
+    );
+    expect(warnedLarge).toBe(false);
+  });
+
+  // --- RPC error + purity -------------------------------------------------
+
+  it("returns 500 with a GENERIC body (no raw PostgREST detail) when the RPC errors, and stays single-RPC", async () => {
+    // Because the cleanup is ONE transaction, any failure fails the whole call
+    // → a plain 500 (Vercel Cron alerts on non-2xx, preserving H-1251's intent
+    // without the old per-key sweep machinery). The body must NOT echo the raw
+    // PostgREST message — it can carry SQL state / table / constraint names;
+    // the detail belongs in the log only (T-96-10 least-disclosure).
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    recorders.rpcResult = {
+      data: null,
+      error: {
+        message:
+          "update or delete on table \"api_keys\" violates foreign key constraint 23503 details relation allocator_holdings",
+      },
+    };
+
+    const handler = await getHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // Generic envelope only — no SQL detail on the wire.
+    expect(body.error).toBeTruthy();
+    expect(JSON.stringify(body)).not.toContain("23503");
+    expect(JSON.stringify(body)).not.toContain("allocator_holdings");
+    expect(JSON.stringify(body)).not.toContain("foreign key constraint");
+
+    // …but the detail MUST still be logged for ops visibility.
+    const loggedRaw = errorSpy.mock.calls.some((call) =>
+      call.some(
+        (arg) =>
+          (typeof arg === "object" &&
+            arg !== null &&
+            JSON.stringify(arg).includes("allocator_holdings")) ||
+          (typeof arg === "string" && arg.includes("allocator_holdings")),
+      ),
+    );
+    expect(loggedRaw).toBe(true);
+
+    // Purity: exactly one RPC — the atomic cleanup — and NEVER the obsolete
+    // per-key orphan-sweep RPC or any table chain.
+    expect(recorders.rpcCalls).toHaveLength(1);
+    expect(recorders.rpcCalls[0].fn).toBe("cleanup_abandoned_wizard_drafts");
+    expect(
+      recorders.rpcCalls.some(
+        (c) => c.fn === "delete_api_key_if_unreferenced",
+      ),
+    ).toBe(false);
+    expect(recorders.fromCalls).toHaveLength(0);
   });
 });

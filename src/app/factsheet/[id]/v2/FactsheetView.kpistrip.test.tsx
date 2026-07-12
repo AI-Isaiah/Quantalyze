@@ -385,3 +385,117 @@ describe("FactsheetView — Phase 90 F6: sr-only stitched summary grammar", () =
     expect(text).not.toContain("handoff");
   });
 });
+
+describe("FactsheetView hero strip — HARD-04 insufficient_window server-truth caveat", () => {
+  // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire —
+  // isolating the SERVER-truth insufficient_window signal.
+  function insufficientWindowPayload(insufficientWindow: boolean): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: { composite: true, insufficientWindow },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the server-truth caveat when dataQuality.insufficientWindow is true", () => {
+    const { getByText } = renderComposite(insufficientWindowPayload(true));
+    expect(
+      getByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).toBeInTheDocument();
+  });
+
+  it("does NOT render the caveat when insufficientWindow is absent/false", () => {
+    const { queryByText } = renderComposite(insufficientWindowPayload(false));
+    expect(
+      queryByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).not.toBeInTheDocument();
+  });
+
+  // Finding B (Phase 92 hardening): the caveat surface must NOT be gated on
+  // `composite` — a SINGLE-KEY strategy (`dataQuality.composite === false`, the
+  // shape `singleKeyDataQuality` now threads on both pages' non-composite arm)
+  // with the server-truth flag must render the identical caveat. Pre-Finding-B the
+  // single-key arm never set `dataQuality`, so this surface was dead single-key;
+  // this pins that FactsheetView renders on the flag alone, composite or not.
+  function singleKeyInsufficientWindowPayload(insufficientWindow: boolean): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: { composite: false, insufficientWindow },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("SINGLE-KEY (composite:false): renders the server-truth caveat when insufficientWindow is true", () => {
+    const { getByText } = renderComposite(singleKeyInsufficientWindowPayload(true));
+    expect(
+      getByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).toBeInTheDocument();
+  });
+
+  it("SINGLE-KEY (composite:false): does NOT render the caveat when insufficientWindow is false", () => {
+    const { queryByText } = renderComposite(singleKeyInsufficientWindowPayload(false));
+    expect(
+      queryByText(/annualized metrics are flagged as computed on an insufficient window/),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("FactsheetView hero strip — HARD-05 degraded_members server-truth caveat", () => {
+  // n=300 (>=252) so the client-count n<252 heuristic caveat does NOT fire —
+  // isolating the SERVER-truth degraded-member signal.
+  function degradedPayload(
+    degradedMembers: Array<{ seq: number; venue: string }>,
+  ): FactsheetPayload {
+    const p = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    return {
+      ...p,
+      dataQuality: { composite: true, degradedMembers },
+    } as unknown as FactsheetPayload;
+  }
+
+  it("renders the degraded-member caveat naming the excluded key + venue", () => {
+    const { getByText } = renderComposite(
+      degradedPayload([{ seq: 2, venue: "bybit" }]),
+    );
+    expect(getByText(/Key 2 \(bybit\)/)).toBeInTheDocument();
+    expect(
+      getByText(/excluded from this track record/),
+    ).toBeInTheDocument();
+  });
+
+  it("names every excluded member for a multi-degrade composite", () => {
+    const { getByText } = renderComposite(
+      degradedPayload([
+        { seq: 2, venue: "bybit" },
+        { seq: 3, venue: "okx" },
+      ]),
+    );
+    expect(getByText(/Key 2 \(bybit\), Key 3 \(okx\)/)).toBeInTheDocument();
+    // Plural pronoun for >1 excluded member.
+    expect(getByText(/their data is excluded/)).toBeInTheDocument();
+  });
+
+  it("does NOT render the caveat when degradedMembers is empty/absent", () => {
+    const { queryByText } = renderComposite(degradedPayload([]));
+    expect(queryByText(/excluded from this track record/)).not.toBeInTheDocument();
+    const { queryByText: q2 } = renderComposite(
+      {
+        ...buildScenarioFactsheetPayload({
+          portfolioDaily: makeReturnsSeries(300),
+          benchmark: null,
+        }),
+        dataQuality: { composite: true },
+      } as unknown as FactsheetPayload,
+    );
+    expect(q2(/excluded from this track record/)).not.toBeInTheDocument();
+  });
+});

@@ -54,6 +54,18 @@ def periods_per_year_for_asset_class(asset_class: str | None) -> int:
 # rescale-proof constant and the PROJECT.md wording ("365 / elapsed-calendar-days").
 _CALENDAR_DAYS_PER_YEAR = 365.0
 
+# HARD-04 (#67, phase decision 2026-07-11): an annualization window under
+# ~MIN_ANNUALIZATION_DAYS calendar days is FLAGGED as insufficient (the
+# `insufficient_window` DQ flag) rather than silently over-annualized. A
+# days-old / flow-dominated live track annualizes CAGR with exponent
+# 365 / elapsed_days, which EXPLODES for a tiny elapsed span (e.g. a 3-day
+# suffix left after an upstream chain-break annualizes a +3% move to +3,960%).
+# The flag is a DQ ANNOTATION ONLY — the CAGR value it annotates is NEVER
+# altered (HARD-04 hard rule, value-invariant). Conservative founder-tunable
+# default (tune like FLOW_DOM_RATIO / PNL_DOM_RATIO): 90 days ≈ one quarter,
+# below which annualizing a short live window is not statistically meaningful.
+MIN_ANNUALIZATION_DAYS = 90
+
 
 # PR #181 take-2 red-team F16: when a fundamental qs.stats shape regression
 # trips multiple scalars at once (e.g., a future qs upgrade returns Series
@@ -270,6 +282,16 @@ class MetricsResult:
 
     metrics_json: dict[str, Any] = field(default_factory=dict)
     sibling_kinds: dict[str, Any] = field(default_factory=dict)
+    # HARD-04 (#67): DQ annotation lifted by BOTH callers into
+    # strategy_analytics.data_quality_flags (job_worker composite merged_flags +
+    # analytics_runner single-key). It rides a FIELD, NOT a metrics_json key, on
+    # purpose: analytics_runner.py:1925/:2373 spread `metrics_json` into the
+    # strategy_analytics UPSERT as top-level columns, and job_worker.py
+    # :3386/:3506/:3595 copy `metrics_json` wholesale into metrics_json_by_basis.
+    # A new metrics_json key would therefore become an UNKNOWN upsert column
+    # (PostgREST failure) and mutate every full-dict golden. Annotation-only: the
+    # CAGR value it flags is byte-identical with or without this field set.
+    insufficient_window: bool = False
 
     def __getitem__(self, key: str) -> Any:
         # Backward-compat shim: old callers expected a bare dict; proxy
@@ -592,6 +614,17 @@ def compute_all_metrics(
             if len(_cagr_basis) >= 1
             else _safe_float(float("nan"))
         )
+        # HARD-04 (#67): DQ annotation ONLY — the `cagr` value above is untouched.
+        # The simple path is NaN-free by its fail-loud contract (the interior-NaN
+        # guard above), so the FULL returns index IS the annualization window (no
+        # interior break to trim). Flag when that calendar span is under the
+        # founder-tunable MIN_ANNUALIZATION_DAYS (strict `<`; a degenerate <2-day
+        # window is trivially insufficient).
+        if len(returns.index) < 2:
+            insufficient_window = True
+        else:
+            _simple_elapsed_days = max((returns.index[-1] - returns.index[0]).days, 1)
+            insufficient_window = _simple_elapsed_days < MIN_ANNUALIZATION_DAYS
         # Max drawdown on the running-SUM (cumulative-fraction) series: the deepest
         # (cum − running_peak). Non-positive fraction; 0.0 for a monotone series.
         # F4: run on the UNCLIPPED cumsum (returns.cumsum()), the SAME series
@@ -650,6 +683,19 @@ def compute_all_metrics(
             cagr = _safe_float(
                 (1.0 + total_return) ** (_CALENDAR_DAYS_PER_YEAR / _elapsed_days) - 1.0
             )
+        # HARD-04 (#67): DQ annotation ONLY — the `cagr` expression above is NOT
+        # touched. Flag when the RETAINED-suffix calendar span (the SAME days
+        # total_return compounds — reusing the already-computed _elapsed_days) is
+        # under MIN_ANNUALIZATION_DAYS, or when the window is trivially degenerate
+        # (<2 days / no total_return). A flow-heavy / P&L-dominated window already
+        # breaks the chain upstream (flow_dominated_guard / pnl_dominated_guard),
+        # which SHORTENS this retained _cagr_index suffix — so the elapsed-days
+        # rule fires on the trustworthy window and no separate flow trigger is
+        # needed at this site (research §d + resolved decision 2).
+        if total_return is None or len(_cagr_index) < 2:
+            insufficient_window = True
+        else:
+            insufficient_window = _elapsed_days < MIN_ANNUALIZATION_DAYS
         max_dd = _safe_float(qs.stats.max_drawdown(returns))
         # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
         dd_series = qs.stats.to_drawdown_series(returns_for_chart)
@@ -1184,7 +1230,11 @@ def compute_all_metrics(
         "log_returns_series": _log_returns_series(returns),
     }
 
-    return MetricsResult(metrics_json=sanitized, sibling_kinds=sibling_kinds)
+    return MetricsResult(
+        metrics_json=sanitized,
+        sibling_kinds=sibling_kinds,
+        insufficient_window=insufficient_window,
+    )
 
 
 def compute_risk_of_ruin(

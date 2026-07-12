@@ -1046,3 +1046,154 @@ def test_material_value_orphan_still_refuses_after_fold() -> None:
         )
     assert exc.value.currencies == ["BTC"]
     assert exc.value.venue == "deribit"
+
+
+# ---------------------------------------------------------------------------
+# Phase 92 HARD-01 — inverse-perpetual P&L-dominated near-zero-equity blow-up.
+#
+# A pure, offline repro on the REAL reconstruct_native_nav_and_twr (research §a
+# root cause, §f fixture design). A single INDEXED "BTC" bucket over 7 UTC days
+# whose day-3 native P&L (0.52 BTC ≈ $45,760) dwarfs a small-but-ABOVE-dust prev
+# NAV (0.030 BTC × $88,000 ≈ $2,640) → an un-guarded per-day return r ≈ 17.3/day
+# (the ~1,700%/day live blow-up class). None of the three existing denominator
+# guards (negative / dust<$1000 / flow-dominated) fires (research §a A3), because
+# there was NO P&L-magnitude guard — the defect. Plan 92-02 added the
+# pnl_dominated_guard at the source and promoted the 92-01 strict-xfail below to
+# an ENFORCED regression (marker removed; now GREEN on the fixed commit).
+#
+# All quantities are SYNTHETIC (0.025 BTC deposit / $88k mark) — never a real
+# account balance (T-92-01). No network / no shared Supabase test DB (Pitfall 6).
+# ---------------------------------------------------------------------------
+
+_BLOWUP_MARK = 88000.0  # constant USD mark for BTC across all 7 days
+_BLOWUP_DEPOSIT_BTC = 0.025  # inception deposit on day 1 (seeds pre-history ≈ 0)
+# Per-day native BTC P&L. Day 3 is the P&L-DOMINATED day (0.52 BTC on a ~0.030
+# BTC book). Days 4–7 are small POSITIVE gains so the post-fix retained suffix
+# (after the guarded d3 break) is a rising ≥4-day window (Plan 92-02 asserts
+# CAGR > 0 on it while the curve rises).
+_BLOWUP_PNL_BTC = [0.002, 0.003, 0.52, 0.005, 0.004, 0.006, 0.002]
+
+
+def _pnl_dominated_blowup_ledger() -> NativeLedger:
+    """A full_history=True single-BTC ledger reproducing the HARD-01 blow-up.
+
+    Backward roll (B(d-1) = B(d) − pnl(d) − flow(d)), terminal = deposit + Σpnl:
+
+        Σpnl        = 0.002+0.003+0.52+0.005+0.004+0.006+0.002 = 0.542 BTC
+        terminal    = 0.025 (deposit) + 0.542                  = 0.567 BTC
+        B(d7)=0.567 B(d6)=0.565 B(d5)=0.559 B(d4)=0.555
+        B(d3)=0.550 B(d2)=0.030 B(d1)=0.027 B(pre)=0.000  ✓ inception ≈ 0
+
+    Pre-history balance rolls to EXACTLY 0 (0.027 − pnl_d1 0.002 − deposit 0.025),
+    so the §5 inception gate reconciles under full_history=True and valuation
+    proceeds to the divide. prev0 = 0 ⇒ day 1 is guarded NaN (negative_nav_guard,
+    a leading terminus — NOT the bug). The blow-up is day 3:
+
+        prev(d3) = B(d2)×mark = 0.030 × 88000 = $2,640  (> DUST_NAV_FLOOR $1000)
+        cur(d3)  = B(d3)×mark = 0.550 × 88000 = $48,400
+        r(d3)    = (48400 − 2640 − 0) / 2640  = 45760/2640 ≈ 17.33   (UN-GUARDED)
+    """
+    days = pd.date_range(start="2024-01-01", periods=7, freq="D")
+    pnl = pd.Series([float(v) for v in _BLOWUP_PNL_BTC], index=days, name="native_pnl")
+    marks = pd.Series([_BLOWUP_MARK] * 7, index=days, name="native_pnl")
+    terminal = _BLOWUP_DEPOSIT_BTC + sum(_BLOWUP_PNL_BTC)  # 0.567 BTC (exact float)
+    return NativeLedger(
+        native_pnl={"BTC": pnl},
+        terminal_native_equity={"BTC": terminal},
+        marks={"BTC": marks},
+        # ONE inception deposit on day 1 in NATIVE BTC units. The core reads
+        # (utc_day_iso, currency, quantity) and re-values at its own mark; the
+        # usd_signed slot (0.025 × 88000) is ignored for a branch-2 coin but kept
+        # honest and finite (validate_flow_shape).
+        native_flows=[
+            ExternalFlow(
+                "2024-01-01", _BLOWUP_DEPOSIT_BTC * _BLOWUP_MARK, "BTC",
+                _BLOWUP_DEPOSIT_BTC,
+            )
+        ],
+        terminal_upnl_native={},
+        full_history=True,
+    )
+
+
+def test_inverse_perpetual_pnl_dominated_day_is_guarded() -> None:
+    """ENFORCED post-fix regression (Plan 92-02 removed the 92-01 strict-xfail):
+    every emitted per-day return is bounded — a P&L-dominated day breaks the
+    chain (NaN) + flags ``pnl_dominated_guard``, never emits an un-interpretable
+    ~17x/day return. This FAILED pre-fix on day 3 (r ≈ 17.3, the 92-01 RED
+    evidence) and PASSES on the fixed commit (the phase repro gate). Day 1 is NaN
+    (negative_nav_guard, prev0 ≈ 0 from the deposit-seeded inception) — a leading
+    terminus, not the bug.
+
+    Mutation-honest: reverting the ``pnl_dominated_guard`` at the source re-emits
+    day 3's r ≈ 17.3 and reddens the ``exploded.empty`` assert; dropping the
+    NAV_TWR_GUARD_KEYS registration reddens the meta/status asserts below."""
+    ledger = _pnl_dominated_blowup_ledger()
+    returns, meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    emitted = returns.dropna()
+    assert not emitted.empty  # the series reached the divide (not all-guarded)
+    # The bug: an un-guarded P&L-dominated day. Post-fix, every retained return
+    # is bounded; pre-fix, day 3's r ≈ 17.3 blows past this and reddens the assert.
+    exploded = emitted[emitted.abs() >= 5.0]
+    assert exploded.empty, (
+        "un-guarded P&L-dominated return(s) emitted (HARD-01 blow-up): "
+        f"{exploded.to_dict()}"
+    )
+    # The guard FIRED (day 3): the meta carries the boolean flag (no raw
+    # magnitude leak) and the status is promoted via NAV_TWR_GUARD_KEYS.
+    assert meta.get("pnl_dominated_guard") is True
+    assert meta["computation_status_hint"] == "complete_with_warnings"
+
+
+def test_blowup_fixture_nav_valuation_matches_hand_model() -> None:
+    """Branch-selector diagnostic (research §b / §h Q1) — is the small denominator
+    ECONOMICALLY REAL (fix branch b1: add a magnitude guard) or a VALUATION ARTIFACT
+    (fix branch b2: fix native_nav._value_over_calendar / equity sourcing)?
+
+    Under CORRECT valuation NAV(d) = Σ_c B_c(d)×mark_c(d); with a single BTC bucket
+    and a CONSTANT mark ($88,000) the mark cancels in the ratio, so each emitted
+    per-day return equals pnl_t / B_{t-1} (flow-free days). Hand-computed backward
+    roll (see _pnl_dominated_blowup_ledger docstring): B(d1)=0.027, B(d2)=0.030,
+    B(d3)=0.550, B(d4)=0.555, B(d5)=0.559, B(d6)=0.565.
+
+        r(d2 2024-01-02) = pnl_d2 / B_d1 = 0.003 / 0.027  ≈ 0.111111
+        r(d4 2024-01-04) = pnl_d4 / B_d3 = 0.005 / 0.550  ≈ 0.009091
+        r(d5 2024-01-05) = pnl_d5 / B_d4 = 0.004 / 0.555  ≈ 0.007207
+        r(d6 2024-01-06) = pnl_d6 / B_d5 = 0.006 / 0.559  ≈ 0.010734
+        r(d7 2024-01-07) = pnl_d7 / B_d6 = 0.002 / 0.565  ≈ 0.003540
+
+    We assert ONLY the non-dominated days (d2, d4..d7 — they survive both pre- and
+    post-fix). d3 is deliberately NOT asserted: post-fix it becomes a guarded NaN,
+    and its pre-fix magnitude (r ≈ 17.33) is already captured by Task 1's --runxfail
+    RED evidence. If these match → the reconstruction VALUES the equity correctly
+    and the tiny denominator is real → SELECT BRANCH b1. If they diverge → the NAV
+    is mis-valued → SELECT BRANCH b2. The assertion outcome IS the selector."""
+    ledger = _pnl_dominated_blowup_ledger()
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+
+    d1, d2, d3, d4, d5, d6, d7 = (
+        pd.Timestamp(f"2024-01-0{n}") for n in range(1, 8)
+    )
+    # Day 1 is a leading terminus (prev0 ≈ 0 → negative_nav_guard).
+    assert pd.isna(returns.loc[d1])
+
+    p = _BLOWUP_PNL_BTC
+    # Hand-model per-day returns on the CORRECT valuation (mark cancels).
+    expected = {
+        d2: p[1] / 0.027,   # 0.003 / B_d1
+        d4: p[3] / 0.550,   # 0.005 / B_d3
+        d5: p[4] / 0.555,   # 0.004 / B_d4
+        d6: p[5] / 0.559,   # 0.006 / B_d5
+        d7: p[6] / 0.565,   # 0.002 / B_d6
+    }
+    for day, want in expected.items():
+        assert returns.loc[day] == pytest.approx(want, rel=1e-9), (
+            f"NAV valuation diverges from the hand model on {day.date()} "
+            f"(emitted {returns.loc[day]} vs hand {want}) → selects fix branch b2"
+        )
+    # d3 (the P&L-dominated day) is intentionally NOT asserted here.
+    assert d3 in returns.index  # present, magnitude captured by the xfail repro

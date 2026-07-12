@@ -56,6 +56,13 @@ import type { User } from "@supabase/supabase-js";
  *   (d) portfolio.py (Python /api/portfolio-analytics) — writes
  *       computation_status for portfolio_analytics rows only, not strategy.
  *   (e) Initial strategy creation: migration 001 DEFAULT 'pending' on INSERT.
+ *   (f) set_wizard_composite_members RPC (migration 20260712120000, RT-1) —
+ *       when the composite draft's member set CHANGES, resets a COMPLETED row
+ *       ('complete'/'complete_with_warnings' → 'pending') to invalidate the
+ *       stale stitch so the wizard re-stitches. Scoped to completed/IDLE rows
+ *       ONLY (never a 'computing' row the worker owns), so it does not race the
+ *       worker's compute-time writes; an identical re-Continue leaves it
+ *       untouched (WIZ-05 no-op invariant).
  * No other paths write strategy_analytics.computation_status for strategies.
  * ──────────────────────────────────────────────────────────────────────
  */

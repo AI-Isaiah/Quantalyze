@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, act } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { renderToString } from "react-dom/server";
 import { WizardChrome } from "./WizardChrome";
+import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 // Hydration-safety regression for the savedAt path.
 //
@@ -155,5 +157,87 @@ describe("[H-0181] WizardChrome — progress-saved toast lifecycle", () => {
       vi.advanceTimersByTime(1500);
     });
     expect(screen.queryByTestId(TOAST_TESTID)).toBeNull();
+  });
+});
+
+// WIZ-04 — clickable free stepper. Navigable, non-active cells render as real
+// <button>s that fire onStepSelect on click AND on keyboard Enter (button
+// semantics, DESIGN.md:241). The active cell and non-navigable cells stay inert
+// <div>s, and omitting onStepSelect renders zero rail buttons (CSV byte-neutral).
+describe("[WIZ-04] WizardChrome — clickable stepper", () => {
+  // At sync_preview with connect_key past+complete, connect_key is navigable
+  // (backward) and sync_preview is active; metadata/review/submit are ahead.
+  const stepperProps = {
+    ...baseProps,
+    savedAt: null,
+    currentStep: "sync_preview" as WizardStepKey,
+    onStepSelect: vi.fn<(key: WizardStepKey) => void>(),
+    // Only the past connect_key cell is navigable in this fixture.
+    stepNavigable: (key: WizardStepKey) => key === "connect_key",
+  };
+
+  afterEach(() => {
+    stepperProps.onStepSelect.mockClear();
+  });
+
+  it("renders a navigable past cell as a button that fires onStepSelect on click", () => {
+    render(
+      <WizardChrome {...stepperProps}>
+        <div />
+      </WizardChrome>,
+    );
+    const cell = screen.getByTestId("wizard-step-connect_key");
+    expect(cell.tagName).toBe("BUTTON");
+
+    cell.click();
+    expect(stepperProps.onStepSelect).toHaveBeenCalledExactlyOnceWith(
+      "connect_key",
+    );
+  });
+
+  it("activates a navigable cell on keyboard Enter (DESIGN.md:241 conformance)", async () => {
+    const user = userEvent.setup();
+    render(
+      <WizardChrome {...stepperProps}>
+        <div />
+      </WizardChrome>,
+    );
+    const cell = screen.getByTestId("wizard-step-connect_key");
+    cell.focus();
+    expect(cell).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(stepperProps.onStepSelect).toHaveBeenCalledExactlyOnceWith(
+      "connect_key",
+    );
+  });
+
+  it("keeps the active and non-navigable cells inert (not buttons); aria-current on active", () => {
+    render(
+      <WizardChrome {...stepperProps}>
+        <div />
+      </WizardChrome>,
+    );
+    // Active cell (sync_preview) is not a button and carries aria-current.
+    expect(screen.queryByTestId("wizard-step-sync_preview")).toBeNull();
+    const active = screen.getByText("Verify data").closest("[aria-current]");
+    expect(active).not.toBeNull();
+    expect(active).toHaveAttribute("aria-current", "step");
+
+    // Forward non-navigable cells are not buttons.
+    expect(screen.queryByTestId("wizard-step-metadata")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-review")).toBeNull();
+    expect(screen.queryByTestId("wizard-step-submit")).toBeNull();
+  });
+
+  it("renders zero rail buttons when onStepSelect is omitted (CSV byte-neutral)", () => {
+    render(
+      <WizardChrome {...baseProps} savedAt={null} currentStep="sync_preview">
+        <div />
+      </WizardChrome>,
+    );
+    // No step cell is a button; the only buttons are the footer controls
+    // (Request a Call), never the stepper rail.
+    expect(screen.queryByTestId(/^wizard-step-/)).toBeNull();
   });
 });

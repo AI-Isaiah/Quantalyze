@@ -860,6 +860,90 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the insufficient-window DQ caveat (HARD-04)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          insufficient_window: true,
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(
+        /Short track record — annualized metrics are computed on an insufficient window and may not be meaningful\./,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /use this composite and continue/i }),
+    ).toBeEnabled();
+  });
+
+  it("renders the degraded-member DQ caveat (HARD-05)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          degraded_members: [
+            { seq: 2, venue: "bybit", reason: "venue_reconstruction_unavailable" },
+          ],
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(/Key 2 \(bybit\)/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/data is excluded from this composite/),
+    ).toBeInTheDocument();
+    // Warnings never block — submit stays enabled.
+    expect(
+      screen.getByRole("button", { name: /use this composite and continue/i }),
+    ).toBeEnabled();
+  });
+
+  it("renders the degraded-member caveat as the ONLY caveat (hasDqCaveat OR extended)", async () => {
+    // No mtm/benchmark/insufficient flags — the amber Data quality block appears
+    // solely because degraded_members is present.
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          degraded_members: [
+            { seq: 3, venue: "okx", reason: "venue_reconstruction_unavailable" },
+          ],
+        },
+      }),
+    });
+
+    expect(screen.getByText(/Data quality/)).toBeInTheDocument();
+    expect(screen.getByText(/Key 3 \(okx\)/)).toBeInTheDocument();
+  });
+
+  it("strict-coerces malformed degraded_members to nothing (T-93-03-02)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          degraded_members: "bybit" as unknown, // malformed (not an array of objects)
+        },
+      }),
+    });
+    expect(
+      screen.queryByText(/data is excluded from this composite/),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders no DQ caveat block when neither flag is set", async () => {
     await renderPassed({
       analyticsRow: defaultAnalyticsRow({
@@ -877,6 +961,14 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByText(/Benchmark overlay unavailable/),
+    ).not.toBeInTheDocument();
+    // HARD-04: the insufficient-window caveat must NOT render when the flag is absent.
+    expect(
+      screen.queryByText(/annualized metrics are computed on an insufficient window/),
+    ).not.toBeInTheDocument();
+    // HARD-05: the degraded-member caveat must NOT render when the flag is absent.
+    expect(
+      screen.queryByText(/data is excluded from this composite/),
     ).not.toBeInTheDocument();
   });
 
@@ -1028,5 +1120,159 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
         name: /Key A: covers 2025-01-01.2025-01-08/,
       }),
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 93 Plan 02 — HARD-02 Task 2: the Data-window column must render a
+ * member's ENTERED (declared) window even when reconstructed per_key coverage is
+ * absent (first_day/last_day null, n_days 0). A zero-coverage member previously
+ * rendered "—" in the Data window column — a reconstructed n_days=0 masquerading
+ * as a missing window. The three-tier fallback shows the DECLARED strategy_keys
+ * window (Tier 2) while leaving the Days column (coverage) honest.
+ *
+ * Test 1 is RED against the pre-fix code (the window cell renders "—"); Tests 2
+ * and 3 pin the unchanged actual-coverage path and the bounded-declared-end path.
+ */
+// Single seq=1 member with a DECLARED open-ended window but ZERO reconstructed
+// coverage (the Branch-A symptom). The interior series is present but falls
+// entirely outside the (empty) per_key window, so the attribution row is
+// days:0 / contribution:null.
+const DECLARED_FALLBACK_MEMBERS: MemberRow[] = [
+  {
+    api_key_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    window_start: "2025-08-03",
+    window_end: null,
+    seq: 1,
+    api_keys: { exchange: "deribit", label: "Key A" },
+  },
+];
+const DECLARED_FALLBACK_SERIES = [
+  { date: "2025-08-05", daily_return: 0.01 },
+  { date: "2025-08-06", daily_return: -0.02 },
+];
+
+describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  async function renderPassed(opts: Partial<CompositeMockOpts>) {
+    installCompositeSupabaseMock({
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+      ...opts,
+    });
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+  }
+
+  // Test 1 (the symptom) — a member with a DECLARED window but null/0 per_key
+  // coverage renders its entered window (Tier 2), NOT "—". Days stays 0 (honest
+  // coverage). RED against pre-fix code (renders "—").
+  it("renders the declared open-ended window (not '—') when per_key coverage is absent", async () => {
+    await renderPassed({
+      members: DECLARED_FALLBACK_MEMBERS,
+      series: DECLARED_FALLBACK_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          per_key: [{ seq: 1, first_day: null, last_day: null, n_days: 0 }],
+          gap_spans: [],
+          gap_day_count: 0,
+        },
+      }),
+    });
+
+    // Tier 2: declared strategy_keys window; open-ended → "live".
+    expect(screen.getByText("2025-08-03 – live")).toBeInTheDocument();
+    // Days column stays coverage-honest.
+    const daysCell = screen.getByText("2025-08-03 – live").closest("tr");
+    expect(daysCell).not.toBeNull();
+    expect(within(daysCell as HTMLElement).getByText("0")).toBeInTheDocument();
+  });
+
+  // Test 2 (regression) — actual reconstructed coverage still wins when present
+  // (Tier 1 unchanged: pk.first_day/last_day).
+  it("renders actual per_key coverage when present (declared window not consulted)", async () => {
+    await renderPassed({
+      members: [
+        {
+          api_key_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          window_start: "2025-08-03",
+          window_end: null,
+          seq: 1,
+          api_keys: { exchange: "deribit", label: "Key A" },
+        },
+      ],
+      series: [
+        { date: "2025-08-03", daily_return: 0.01 },
+        { date: "2025-09-24", daily_return: -0.02 },
+      ],
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          per_key: [
+            { seq: 1, first_day: "2025-08-03", last_day: "2025-09-24", n_days: 2 },
+          ],
+          gap_spans: [],
+          gap_day_count: 0,
+        },
+      }),
+    });
+
+    expect(screen.getByText("2025-08-03 – 2025-09-24")).toBeInTheDocument();
+    expect(screen.queryByText("2025-08-03 – live")).not.toBeInTheDocument();
+  });
+
+  // Test 3 (bounded declared end) — declared windowStart + windowEnd with absent
+  // coverage renders the bounded declared window.
+  it("renders the declared bounded window when per_key coverage is absent", async () => {
+    await renderPassed({
+      members: [
+        {
+          api_key_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+          window_start: "2025-08-03",
+          window_end: "2025-09-30",
+          seq: 1,
+          api_keys: { exchange: "deribit", label: "Key A" },
+        },
+      ],
+      series: DECLARED_FALLBACK_SERIES,
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          per_key: [{ seq: 1, first_day: null, last_day: null, n_days: 0 }],
+          gap_spans: [],
+          gap_day_count: 0,
+        },
+      }),
+    });
+
+    expect(screen.getByText("2025-08-03 – 2025-09-30")).toBeInTheDocument();
   });
 });

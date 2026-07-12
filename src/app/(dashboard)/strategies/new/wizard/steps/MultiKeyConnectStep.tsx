@@ -16,6 +16,10 @@ import {
 } from "./ConnectKeyStep";
 import { type WizardErrorCode } from "@/lib/wizardErrors";
 import type { SupportedExchange } from "@/lib/utils";
+import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -41,21 +45,6 @@ import type { SupportedExchange } from "@/lib/utils";
  * duplication is intentional — Phase-91 QA should verify the two credential
  * surfaces stay in lockstep (labels, placeholders, secret handling).
  */
-
-// ── Credential posture / correlation-id (mirrors ConnectKeyStep verbatim) ─────
-function readCorrelationId(): string {
-  if (typeof document !== "undefined") {
-    const meta = document.querySelector<HTMLMetaElement>(
-      'meta[name="x-correlation-id"]',
-    );
-    const value = meta?.getAttribute("content");
-    if (value && value.length > 0) return value;
-  }
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
 
 function genId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -168,6 +157,36 @@ function newPanel(): PanelState {
   };
 }
 
+/**
+ * Pure panel→keys[] mapping the wizard POSTs to
+ * `/api/strategies/composite/set-members`. Extracted from `handleContinue` so
+ * the FIRST member's entered `windowStart` VALUE can be pinned offline
+ * (`MultiKeyConnectStep.payload.test.ts`) — a silent field drop/rename here goes
+ * RED. Behaviour is byte-identical to the former inline map: `window_end` is
+ * null for an open-ended (`stillLive`) or blank-end member, `seq` is the 1-based
+ * panel index, and order is preserved.
+ */
+export function buildSetMembersKeys(
+  panels: ReadonlyArray<{
+    apiKeyId: string | null;
+    windowStart: string;
+    windowEnd: string;
+    stillLive: boolean;
+  }>,
+): Array<{
+  api_key_id: string | null;
+  window_start: string;
+  window_end: string | null;
+  seq: number;
+}> {
+  return panels.map((p, i) => ({
+    api_key_id: p.apiKeyId,
+    window_start: p.windowStart,
+    window_end: p.stillLive ? null : p.windowEnd || null,
+    seq: i + 1,
+  }));
+}
+
 interface FieldError {
   start?: string;
   end?: string;
@@ -255,11 +274,61 @@ function computeValidation(panels: PanelState[]): {
 export interface MultiKeyConnectStepProps {
   wizardSessionId: string;
   onSuccess: (result: ConnectKeySuccess) => void;
+  /**
+   * WIZ-02: the composite draft's strategy id, threaded from WizardClient so a
+   * re-mounted step can rehydrate State B from the WIZ-01 GET. Named
+   * `draftStrategyId` (NOT strategyId) to avoid shadowing the local
+   * `const [strategyId, setStrategyId]` state below.
+   */
+  draftStrategyId?: string | null;
+  /**
+   * Phase 94.1 / F2 — reports whether connect_key holds UNSAVED edits vs the
+   * last-committed member set: a State-B panel that is not yet validated, a
+   * validated set reordered/removed since the last successful Continue, or a
+   * typed-but-unsubmitted State-A single-key draft. WizardClient factors this
+   * into `stepCompleted('connect_key')` so the clickable stepper cannot jump
+   * FORWARD past connect_key while edits are pending (they would be silently
+   * dropped). Optional — the standalone/legacy single-key wizard omits it.
+   */
+  onDirtyChange?: (dirty: boolean) => void;
+}
+
+/**
+ * WIZ-02: a WIZ-01 GET member → rehydrated PanelState. Mirrors a post-validate
+ * panel (validatePanel success, above): status "validated", apiKeyId set,
+ * plaintext EMPTY. The three credential fields are hardcoded to "" (T-94-06) —
+ * no secret ever enters browser state on rehydrate.
+ */
+function toRehydratedPanel(member: {
+  exchange: string;
+  nickname: string | null;
+  window_start: string;
+  window_end: string | null;
+  api_key_id: string;
+}): PanelState {
+  return {
+    id: genId(),
+    exchange: member.exchange as ExchangeId,
+    nickname: member.nickname ?? "",
+    apiKey: "",
+    apiSecret: "",
+    passphrase: "",
+    showSecret: false,
+    windowStart: member.window_start,
+    windowEnd: member.window_end ?? "",
+    stillLive: member.window_end == null,
+    status: "validated",
+    apiKeyId: member.api_key_id,
+    errorCode: null,
+    confirmingRemove: false,
+  };
 }
 
 export function MultiKeyConnectStep({
   wizardSessionId,
   onSuccess,
+  draftStrategyId,
+  onDirtyChange,
 }: MultiKeyConnectStepProps) {
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [panels, setPanels] = useState<PanelState[]>([]);
@@ -269,7 +338,26 @@ export function MultiKeyConnectStep({
   const [continueError, setContinueError] = useState<WizardErrorCode | null>(
     null,
   );
-  const [correlationId] = useState<string>(() => readCorrelationId());
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  // Phase 94.1 / F3 — rehydration lifecycle. "loading" while the WIZ-01
+  // members GET is in flight, "error" when it fails (non-ok / throw /
+  // unparseable body). Gates a loading placeholder + an actionable retry
+  // envelope so a failed/in-flight rehydration is DISTINGUISHABLE from an
+  // empty single-key wizard (pre-fix both showed the same blank State-A form).
+  const [rehydrateStatus, setRehydrateStatus] = useState<
+    "idle" | "loading" | "error"
+  >("idle");
+  // Retry nonce — bumped by the error-envelope Retry control to re-run the
+  // rehydration effect below.
+  const [retryTick, setRetryTick] = useState(0);
+  // Phase 94.1 / F2 — signature of the last-COMMITTED member set (after a
+  // rehydrate or a successful Continue). Compared against the current panels'
+  // signature to detect uncommitted reorders/removals of already-validated
+  // keys (adds/edits are caught separately by the not-all-validated check).
+  const [committedSig, setCommittedSig] = useState<string | null>(null);
+  // Phase 94.1 / F2 — whether the State-A single-key form holds a typed but
+  // un-submitted credential draft (dirty). Updated from onSingleDraftChange.
+  const [singleDraftDirty, setSingleDraftDirty] = useState(false);
 
   // Latest-panels ref for reads inside event handlers (validate / continue /
   // add) that must see current state without re-binding callbacks. Synced in an
@@ -278,6 +366,106 @@ export function MultiKeyConnectStep({
   useEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
+
+  // F4 — latest single-key dirtiness for reads inside the rehydration effect
+  // below, synced in an effect (never written during render) to mirror
+  // `panelsRef`. The rehydration clobber guard must see the CURRENT dirtiness at
+  // GET-resolve time; reading `singleDraftRef.current` directly in the effect
+  // would violate react-hooks/immutability (a ref written in a callback, read in
+  // an effect). Declared BEFORE the rehydration effect so the write-effect
+  // precedes the read (the same ordering `panelsRef` relies on).
+  const singleDraftDirtyRef = useRef(false);
+  useEffect(() => {
+    singleDraftDirtyRef.current = singleDraftDirty;
+  }, [singleDraftDirty]);
+
+  // WIZ-02: mount rehydration. When the step re-mounts for an existing composite
+  // draft (back-nav — WizardClient threads its strategyId as draftStrategyId),
+  // fetch the WIZ-01 GET and rebuild State B so stored keys appear pre-filled and
+  // verified rather than a blank single-key form. The panels carry EMPTY
+  // plaintext (toRehydratedPanel) and status "validated", so the gating
+  // predicates (allValidated) accept them with no re-validation, and the
+  // secretless set-members resubmit works by construction.
+  //
+  // Guards: no draftStrategyId → no fetch (byte-neutral State A). Empty
+  // membership → stays single-key State A (single-key drafts have no
+  // strategy_keys rows). Never clobbers in-progress work: applies only when
+  // still on the pristine single-key path (mode single, no panels), checked via
+  // panelsRef at resolve time. A non-ok/failed GET degrades honestly to State A
+  // (the pre-phase behavior) with the error logged — no secret-touching path.
+  useEffect(() => {
+    if (!draftStrategyId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        // F3 — enter the loading state so State A shows the "loading your saved
+        // keys" banner (not a bare blank form) while the members GET is in
+        // flight. Set inside the async IIFE (not synchronously in the effect
+        // body) per react-hooks/set-state-in-effect.
+        setRehydrateStatus("loading");
+        const res = await wizardFetch(
+          `/api/strategies/composite/members?strategy_id=${draftStrategyId}`,
+        );
+        if (cancelled) return;
+        if (!res.ok) {
+          console.error(
+            "[wizard:MultiKeyConnectStep] members GET non-ok:",
+            res.status,
+          );
+          // F3 — surface a distinguishable, retryable error rather than
+          // degrading silently to the blank State-A form.
+          setRehydrateStatus("error");
+          return;
+        }
+        const data = (await res.json().catch(() => ({}))) as {
+          members?: Array<{
+            exchange: string;
+            nickname: string | null;
+            window_start: string;
+            window_end: string | null;
+            api_key_id: string;
+          }>;
+        };
+        if (cancelled) return;
+        const members = data.members;
+        if (!Array.isArray(members) || members.length === 0) {
+          // Definitively single-key/CSV (or a present-but-empty membership):
+          // resolve to idle so State A renders normally.
+          setRehydrateStatus("idle");
+          return;
+        }
+        // F4 — the clobber guard bails not only when State-B panels already
+        // exist, but ALSO when the State-A single-key form holds an
+        // in-progress typed draft. Single-key typing lands in
+        // `singleDraftRef.current` (never in `panels`), so a slow GET resolving
+        // mid-typing would otherwise flip mode→multi + replace panels and blow
+        // the user's in-progress entry away. Both refs are read at RESOLVE time
+        // so a slow fetch + concurrent typing/panel-work is respected.
+        if (panelsRef.current.length > 0 || singleDraftDirtyRef.current) {
+          setRehydrateStatus("idle");
+          return;
+        }
+        const rehydrated = members.map(toRehydratedPanel);
+        setStrategyId(draftStrategyId);
+        setMode("multi");
+        setPanels(rehydrated);
+        // F2 — the rehydrated set IS the committed set (it mirrors the persisted
+        // strategy_keys rows); seed the signature so it is NOT reported dirty
+        // until the user actually edits it.
+        setCommittedSig(JSON.stringify(buildSetMembersKeys(rehydrated)));
+        setRehydrateStatus("idle");
+      } catch (err) {
+        if (cancelled) return;
+        // Logs only `err`, never member/panel fields (T-94-07).
+        console.error("[wizard:MultiKeyConnectStep] members GET threw:", err);
+        setRehydrateStatus("error");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [draftStrategyId, retryTick]);
+
   const focusRef = useRef<string | null>(null);
   const cardRefs = useRef<Map<string, HTMLButtonElement | null>>(new Map());
   // UAT/F-4: the latest unvalidated draft the user typed into the single-key
@@ -286,6 +474,10 @@ export function MultiKeyConnectStep({
   const singleDraftRef = useRef<ConnectKeyDraft | null>(null);
   const onSingleDraftChange = useCallback((draft: ConnectKeyDraft) => {
     singleDraftRef.current = draft;
+    // F2 — a typed-but-unsubmitted single-key credential is an unsaved edit on
+    // connect_key. Report it so a forward stepper jump is blocked until the
+    // user either submits (single-key onSuccess) or clears the field.
+    setSingleDraftDirty(!!draft.apiKey || !!draft.apiSecret);
   }, []);
 
   const registerCardRef = useCallback(
@@ -391,7 +583,7 @@ export function MultiKeyConnectStep({
         EXCHANGES.find((e) => e.id === p.exchange)?.requiresPassphrase ?? false;
       updatePanel(idx, { status: "validating", errorCode: null });
       try {
-        const res = await fetch("/api/strategies/composite/add-key", {
+        const res = await wizardFetch("/api/strategies/composite/add-key", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -456,6 +648,31 @@ export function MultiKeyConnectStep({
     summaryLines.length > 0 || Object.keys(fieldErrors).length > 0;
   const canContinue = allValidated && !hasBlockingError && !continuing;
 
+  // Phase 94.1 / F2 — connect_key "dirty vs last-saved set". In State B the set
+  // is dirty when any panel is not yet validated (a fresh add or a re-opened
+  // edit → no persisted member for it) OR when the validated set's signature
+  // diverges from the last-committed one (an uncommitted reorder/removal). In
+  // State A the single-key draft is dirty when credentials are typed but not
+  // submitted. Reported up so the clickable stepper blocks a forward jump that
+  // would bypass the Continue → set-members POST and drop the edits.
+  const currentSig = allValidated
+    ? JSON.stringify(buildSetMembersKeys(panels))
+    : null;
+  const dirty =
+    mode === "multi"
+      ? currentSig === null || currentSig !== committedSig
+      : singleDraftDirty;
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+  // Reset the parent's dirty flag when this step unmounts (e.g. Continue
+  // advanced the wizard) so a stale `true` never lingers on a later step.
+  useEffect(() => {
+    return () => {
+      onDirtyChange?.(false);
+    };
+  }, [onDirtyChange]);
+
   const summaryEnvelope =
     summaryLines.length > 0
       ? {
@@ -499,13 +716,8 @@ export function MultiKeyConnectStep({
     setContinuing(true);
     setContinueError(null);
     try {
-      const keys = current.map((p, i) => ({
-        api_key_id: p.apiKeyId,
-        window_start: p.windowStart,
-        window_end: p.stillLive ? null : p.windowEnd || null,
-        seq: i + 1,
-      }));
-      const res = await fetch("/api/strategies/composite/set-members", {
+      const keys = buildSetMembersKeys(current);
+      const res = await wizardFetch("/api/strategies/composite/set-members", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ strategy_id: strategyId, keys }),
@@ -519,6 +731,9 @@ export function MultiKeyConnectStep({
         setContinuing(false);
         return;
       }
+      // F2 — the current set is now persisted; mark it committed so the step is
+      // not reported dirty if the user navigates back to it without editing.
+      setCommittedSig(JSON.stringify(keys));
       const first = current[0];
       onSuccess({
         strategyId,
@@ -533,23 +748,64 @@ export function MultiKeyConnectStep({
   }, [continuing, strategyId, onSuccess]);
 
   // ── State A: byte-identical ConnectKeyStep + the ONE ghost affordance ───────
+  // The rehydration loading/error affordances (F3) render as NON-form-replacing
+  // banners ABOVE a still-mounted ConnectKeyStep — NOT as early returns that
+  // unmount it. RT-FINDING-2: an early-return error branch destroyed the
+  // in-progress single-key credentials the user typed during the loading window
+  // (ConnectKeyStep's useState unmounts), and stranded them on a blank form
+  // after Retry (a stale singleDraftDirtyRef then bailed the guard, and the
+  // rehydration effect never re-ran). Keeping the form mounted across
+  // loading→error→retry preserves typed credentials and F4's guard reasoning,
+  // and never strands the user. No draftStrategyId ⇒ status stays "idle" ⇒ no
+  // banner ⇒ byte-neutral single-key wizard.
   if (mode === "single") {
     return (
-      <ConnectKeyStep
-        wizardSessionId={wizardSessionId}
-        onSuccess={onSuccess}
-        onDraftChange={onSingleDraftChange}
-        footerSlot={
-          <Button
-            type="button"
-            variant="ghost"
-            data-testid="multi-add-key"
-            onClick={enterMulti}
+      <>
+        {/* F3 — non-blocking "loading your saved keys" banner while the members
+            GET is in flight. Additive, not a form-replacing skeleton (F4). */}
+        {rehydrateStatus === "loading" && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="mb-4 rounded-md border border-border bg-page px-4 py-3"
+            data-testid="rehydrate-loading"
           >
-            + Add another key window
-          </Button>
-        }
-      />
+            <p className="text-caption text-text-secondary">
+              Loading your saved keys…
+            </p>
+          </div>
+        )}
+        {/* F3 + RT-2 — retryable error banner ABOVE the form (not replacing it),
+            symmetric with the loading banner. RT-3: WIZARD_KEYS_LOAD_FAILED
+            carries NEUTRAL copy (no "composite" assertion) so it reads correctly
+            for a resumed single-key draft, whose membership is empty. */}
+        {rehydrateStatus === "error" && (
+          <div className="mb-4" data-testid="rehydrate-error">
+            <WizardErrorEnvelope
+              envelope={buildEnvelope("WIZARD_KEYS_LOAD_FAILED", correlationId)}
+              onRetry={() => {
+                setRehydrateStatus("loading");
+                setRetryTick((t) => t + 1);
+              }}
+            />
+          </div>
+        )}
+        <ConnectKeyStep
+          wizardSessionId={wizardSessionId}
+          onSuccess={onSuccess}
+          onDraftChange={onSingleDraftChange}
+          footerSlot={
+            <Button
+              type="button"
+              variant="ghost"
+              data-testid="multi-add-key"
+              onClick={enterMulti}
+            >
+              + Add another key window
+            </Button>
+          }
+        />
+      </>
     );
   }
 

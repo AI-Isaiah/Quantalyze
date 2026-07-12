@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.41.1.0] - 2026-07-12
+### Composite Onboarding Hardening (milestone v1.9.1, #596 follow-up)
+Fixes the live SC-3 dogfooding cluster on the multi-key composite wizard and
+hardens the surrounding onboarding/stitch-progress surface. Single-key and
+existing published Deribit-only composite metrics stay byte-identical (SC-4).
+
+### Fixed
+- **Composite factsheet analytics no longer blow up on inverse-Deribit per-key returns (Phase 92/93).** A per-key daily return of millions of percent (an inverse-contract valuation artifact) drove CAGR/Cumulative to `0.0%`. `pnl_dominated_guard` (`nav_twr.py`) clamps only genuinely degenerate days (`|r| ≥ 10`, i.e. ≥1000%/day) *after* the dust-NAV denominator guard, so every legitimate day is a strict no-op; the shared `NAV_TWR_GUARD_KEYS` registry propagates the guard identically on native and ccxt member paths. The dropped first-key data window is restored.
+- **Composite stitch progress is now honest and never an indefinite hang (Phase 95).** A new secretless, owner-scoped `GET /api/strategies/[id]/sync-progress` route projects only `{jobStatus, stalled, memberProgress:[{seq,exchange,label,status}]}` — no ciphertext, no raw metadata. The worker writes best-effort per-member progress (`set_compute_job_progress` SECDEF RPC, fenced on `claim_token`+`status='running'`); the wizard shows a per-key panel, an amber "interrupted" banner backed by a 12-min client stall backstop, and an idempotent Retry. `useStrategySyncPoller` unifies the wizard and key-manager poll loops.
+- **Retry no longer re-exposes the red "leave this page" banner (ship review).** The mount patience clock and the stall backstop ran on two independent clocks, so a successful Retry (which reset only the backstop) instantly re-showed the scariest copy in the flow. Retry now resets both.
+- **`set_wizard_composite_members` is gated to `status='draft'` (ship review, MEDIUM).** The SECDEF member-set writer checked only ownership + `api_key_id IS NULL` — which a *published* composite also satisfies — so an owner could rewrite a published composite's attested member set and knock its public analytics from `complete` to `pending`. Now a non-draft id returns the same uniform not-owned error (no existence oracle).
+- **Progress worker honours the fence boolean (ship review).** `_write_member_progress` now reads `set_compute_job_progress`'s return; on a fenced `false` (lost claim token) it latches off and logs the preemption once, instead of counting the no-op as a clean write and masking claim-token drift from the SF-2b escalation.
+
+### Added
+- **Composite wizard resumability (Phase 94).** A composite draft reopens with its member keys rehydrated (new owner-scoped `composite/members` GET + `set-members` routes), a non-destructive "Review your keys" path distinct from the destructive "Try another key", a clickable/keyboard-navigable stepper, and a cached-snapshot back-nav that never re-kicks a COMPLETE stitch. Composite factsheet KPIs render on the v2 FactsheetView.
+- **Onboarding hygiene (Phase 96).** A daily `cleanup_abandoned_wizard_drafts` SECDEF cron atomically deletes ≥7-day abandoned wizard drafts and sweeps the orphaned api_keys they leave behind (three `NOT EXISTS` anti-joins spare any key still referenced by a strategy/membership/holding; the published-composite delete-guard and the `sanitize_user` GDPR exemption are both respected). Wizard fetches carry an `X-Correlation-Id`; Deribit keys show a `DRB` badge instead of a `?`.
+
+### Changed
+- **Analytics compute-job claim scoping + fence-test hardening (Phase 97).** The live compute-job claim helpers now scope their claim/assert to their own `job_id` (`want_job_id`, a required kwarg so a caller cannot silently revert to global-head behavior), pinned by an offline decoy-foreign-row regression that needs no live DB. The `pytest-xdist -n auto` parallelization (absorbed from `#610`) is **deferred**: even with every live-DB module pinned to one `shared_test_db` xdist group, the global-`claim_compute_jobs_with_priority` fence tests flake under xdist ordering (imperfect per-test `compute_jobs` cleanup pollutes a later global-claim assertion), so the `python` job stays serial (matching main, proven green) until per-test claim-space isolation lands. The scoping, decoy regression, and grouping infra all ship.
+
+### Notes
+- **Accepted known-limitations carried forward:** (1) a changed member set on a still-`computing` stitch is re-attested only by the `finalize after()` re-enqueue backstop (the invalidation resets `complete`/`complete_with_warnings`, not an in-flight run); (2) the cleanup sweep's check-then-delete is READ COMMITTED (D-1, ms-window, once-daily, recoverable, pre-existing); (3) a same-user `draft→published` TOCTOU on set-members touches only the caller's own rows. None is a cross-tenant path.
+- **SC-3 piece 3 remains an OPEN post-deploy human_verification gate** — the one-shot LIVE GUI-onboarded Zavara session (real Deribit keys + running worker + `USE_COMPUTE_JOBS_QUEUE=true`) is still a user smoke test; this milestone is not fully GUI-live-attested until it runs.
+
 ## [0.41.0.1] - 2026-07-11
 ### Fixed
 - **Multi-key composite onboarding UAT fixes (v1.9 follow-up, from live dogfooding).**

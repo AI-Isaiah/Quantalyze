@@ -535,6 +535,409 @@ describe("[ONB-01] MultiKeyConnectStep — credential posture (T-88-18/19)", () 
   });
 });
 
+describe("[WIZ-02] MultiKeyConnectStep — State B rehydration (back-nav)", () => {
+  const AK1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const AK2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+
+  // Two members that pass keyWindowsSchema (monotone seq, adjacent handoff, the
+  // open-ended/live window LAST): member 1 is bounded binance, member 2 is a
+  // live-window deribit key (window_end null). The GET NEVER returns secrets —
+  // WIZ-01 is secretless by construction — so nothing here plants credentials.
+  const MEMBERS = [
+    {
+      seq: 1,
+      api_key_id: AK1,
+      exchange: "binance",
+      nickname: "First key",
+      window_start: "2025-08-03",
+      window_end: "2025-09-27",
+      verified: true,
+    },
+    {
+      seq: 2,
+      api_key_id: AK2,
+      exchange: "deribit",
+      nickname: null,
+      window_start: "2025-09-27",
+      window_end: null,
+      verified: true,
+    },
+  ];
+
+  /** Route the WIZ-01 members GET + set-members; add-key is deliberately routed
+   *  so a spurious re-validation would be observable (and asserted absent). */
+  function routeRehydrateFetch(members: unknown[]) {
+    return vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/members")) {
+          return jsonResponse({ ok: true, members }, 200);
+        }
+        if (url.includes("composite/set-members")) {
+          return jsonResponse({ ok: true, member_count: members.length }, 200);
+        }
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        return jsonResponse({}, 200);
+      });
+  }
+
+  it("rehydrates State B with verified panels on mount — no blank form, no re-validation", async () => {
+    const fetchSpy = routeRehydrateFetch(MEMBERS);
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // State B renders (the ordered KeyPanel list), the single-key ConnectKeyStep
+    // form is gone — back-nav does NOT show a blank single-key form.
+    await waitFor(() =>
+      expect(screen.getByTestId("multi-key-list")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("wizard-connect-submit")).toBeNull();
+
+    // The GET was fetched with the draft's strategy_id.
+    expect(
+      fetchSpy.mock.calls.some((c) =>
+        String(c[0]).includes(`composite/members?strategy_id=${STRATEGY_ID}`),
+      ),
+    ).toBe(true);
+
+    // Two panels, both collapsed to their verified summary (status "validated").
+    expect(screen.getByTestId("key-0-summary")).toHaveTextContent("Binance");
+    expect(screen.getByTestId("key-0-summary")).toHaveTextContent("2025-08-03");
+    expect(screen.getByTestId("key-1-summary")).toHaveTextContent("Deribit");
+    // The live-window member shows "live" (window_end null → stillLive).
+    expect(screen.getByTestId("key-1-summary")).toHaveTextContent("live");
+    // Verified pill on each panel.
+    expect(
+      within(screen.getByTestId("key-0-summary")).getByTestId("trust-tier-label"),
+    ).toHaveAttribute("data-trust-tier", "api_verified");
+
+    // NEGATIVE SPACE: rehydration must NOT re-validate — no add-key POST fires.
+    expect(
+      fetchSpy.mock.calls.some((c) => String(c[0]).includes("composite/add-key")),
+    ).toBe(false);
+  });
+
+  it("enables Continue with empty secrets and resubmits secretlessly via set-members (api_key_id only)", async () => {
+    const fetchSpy = routeRehydrateFetch(MEMBERS);
+    const onSuccess = vi.fn();
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={onSuccess}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const cont = await screen.findByTestId("multi-continue");
+    // Continue is enabled for the rehydrated keys with NO secret re-entry.
+    expect(cont).not.toBeDisabled();
+    fireEvent.click(cont);
+
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    const setCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/set-members"),
+    )!;
+    const rawBody = (setCall[1] as RequestInit).body as string;
+    const body = JSON.parse(rawBody);
+
+    // Body carries the draft's strategy_id + both api_key_ids with pinned windows.
+    expect(body.strategy_id).toBe(STRATEGY_ID);
+    expect(body.keys).toEqual([
+      {
+        api_key_id: AK1,
+        window_start: "2025-08-03",
+        window_end: "2025-09-27",
+        seq: 1,
+      },
+      {
+        api_key_id: AK2,
+        window_start: "2025-09-27",
+        window_end: null,
+        seq: 2,
+      },
+    ]);
+
+    // SECRETLESS BY CONSTRUCTION: the payload carries NO plaintext credential
+    // fields (camelCase apiKey/apiSecret/passphrase never appear).
+    expect(rawBody).not.toContain("apiKey");
+    expect(rawBody).not.toContain("apiSecret");
+    expect(rawBody).not.toContain("passphrase");
+
+    // And no add-key re-validation happened on the whole rehydrate→Continue flow.
+    expect(
+      fetchSpy.mock.calls.some((c) => String(c[0]).includes("composite/add-key")),
+    ).toBe(false);
+  });
+
+  it("stays on single-key State A when the draft has no composite members", async () => {
+    const fetchSpy = routeRehydrateFetch([]);
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // The GET fires but returns []; the step stays byte-neutral State A: the
+    // single-key ConnectKeyStep form + the ghost affordance, no State B list.
+    await waitFor(() =>
+      expect(
+        fetchSpy.mock.calls.some((c) =>
+          String(c[0]).includes("composite/members"),
+        ),
+      ).toBe(true),
+    );
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
+    expect(screen.getByTestId("multi-add-key")).toHaveTextContent(
+      "+ Add another key window",
+    );
+    expect(screen.queryByTestId("multi-key-list")).toBeNull();
+  });
+
+  it("never fetches composite/members without a draftStrategyId", async () => {
+    const fetchSpy = routeRehydrateFetch(MEMBERS);
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+
+    // State A single-key form renders and no rehydration fetch is ever issued.
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
+    await waitFor(() => Promise.resolve());
+    expect(
+      fetchSpy.mock.calls.some((c) => String(c[0]).includes("composite/members")),
+    ).toBe(false);
+  });
+});
+
+describe("[94.1 F3/F4] MultiKeyConnectStep — rehydration status + draft protection", () => {
+  const AK1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const MEMBERS = [
+    {
+      seq: 1,
+      api_key_id: AK1,
+      exchange: "binance",
+      nickname: "First key",
+      window_start: "2025-01-01",
+      window_end: "2025-06-01",
+    },
+  ];
+
+  /** A hand-controlled promise so a test can hold the members GET pending
+   *  (loading window) and resolve/reject it on demand. */
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  // F3 — Root cause: the rehydration mount effect only console.error'd on a
+  // failed/pending GET, leaving the blank single-key State-A form. A user with
+  // stored composite keys returning to a blank form (no spinner, no error) could
+  // not tell a rehydration was even attempted — "keys lost". The fix tracks a
+  // rehydration status and renders a loading indicator + a retryable error.
+  it("F3: shows a loading indicator while the members GET is in flight (not a bare blank form)", async () => {
+    const d = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return d.promise;
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // A loading indication is present while the GET is pending (RED pre-fix: no
+    // such element existed — only the blank form).
+    expect(await screen.findByTestId("rehydrate-loading")).toBeInTheDocument();
+
+    // Resolve empty to settle the effect (avoids act warnings on teardown).
+    d.resolve(jsonResponse({ ok: true, members: [] }, 200));
+    await waitFor(() =>
+      expect(screen.queryByTestId("rehydrate-loading")).toBeNull(),
+    );
+  });
+
+  it("F3: surfaces a retryable error envelope (not the blank single-key form) when the members GET fails, and Retry refetches", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/members")) {
+          return jsonResponse({}, 500);
+        }
+        return jsonResponse({}, 200);
+      });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    // Distinguishable, actionable error — not a silent blank fallback. The
+    // neutral WIZARD_KEYS_LOAD_FAILED code (RT-3) is used, and (RT-2) the error
+    // renders as a banner ABOVE the still-usable form (not form-replacing), so
+    // the single-key submit CTA remains present rather than being unmounted.
+    expect(within(err).getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "WIZARD_KEYS_LOAD_FAILED",
+    );
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
+
+    // Retry re-issues the members GET (recoverable envelope → Retry control).
+    const membersCallsBefore = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("composite/members"),
+    ).length;
+    fireEvent.click(within(err).getByRole("button", { name: "Retry" }));
+    await waitFor(() => {
+      const membersCallsAfter = fetchSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("composite/members"),
+      ).length;
+      expect(membersCallsAfter).toBeGreaterThan(membersCallsBefore);
+    });
+  });
+
+  // F4 — Root cause: the clobber guard only checked `panelsRef.current.length`,
+  // but single-key typing lands in `singleDraftRef.current`, never in `panels`.
+  // A slow GET resolving mid-typing then flipped mode→multi + replaced panels,
+  // blowing the in-progress single-key entry away. The fix extends the guard to
+  // also bail when the single-key draft is dirty.
+  it("F4: does NOT clobber an in-progress single-key draft when a slow rehydrate resolves with stored members", async () => {
+    const d = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return d.promise;
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // The single-key form stays usable during the loading window (the F3 banner
+    // is additive, not a form-replacing skeleton) — the user types a key.
+    fireEvent.change(await screen.findByLabelText("API Key"), {
+      target: { value: "IN_PROGRESS_KEY" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "IN_PROGRESS_SECRET" },
+    });
+
+    // Only NOW does the slow GET resolve with stored composite members.
+    d.resolve(jsonResponse({ ok: true, members: MEMBERS }, 200));
+
+    // The guard bails: mode stays single (no State-B list) and the typed draft
+    // survives verbatim (RED pre-fix: mode flips to multi, the draft is gone).
+    await waitFor(() =>
+      expect(screen.queryByTestId("rehydrate-loading")).toBeNull(),
+    );
+    expect(screen.queryByTestId("multi-key-list")).toBeNull();
+    expect(screen.getByLabelText("API Key")).toHaveValue("IN_PROGRESS_KEY");
+    expect(screen.getByLabelText("API Secret")).toHaveValue(
+      "IN_PROGRESS_SECRET",
+    );
+  });
+
+  // RT-2 — Root cause: the F3 error branch was a form-REPLACING early return. A
+  // user who typed single-key credentials during the loading window then hit a
+  // transient GET failure had ConnectKeyStep unmounted (its useState creds
+  // destroyed — the exact clobber F4 exists to prevent, on the error path). The
+  // fix renders the error as a banner ABOVE the still-mounted form.
+  it("RT-2: a failed rehydrate keeps the in-progress single-key credentials mounted and never strands the user on a blank form", async () => {
+    const d = deferred<Response>();
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return d.promise;
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    // Type credentials during the loading window…
+    fireEvent.change(await screen.findByLabelText("API Key"), {
+      target: { value: "TYPED_KEY" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "TYPED_SECRET" },
+    });
+
+    // …then the GET fails transiently.
+    d.resolve(jsonResponse({}, 500));
+
+    // The error banner appears, but the form is STILL mounted with the typed
+    // credentials intact (RED pre-fix: the form-replacing return unmounts the
+    // ConnectKeyStep, destroying both values and the submit CTA).
+    await screen.findByTestId("rehydrate-error");
+    expect(screen.getByLabelText("API Key")).toHaveValue("TYPED_KEY");
+    expect(screen.getByLabelText("API Secret")).toHaveValue("TYPED_SECRET");
+    // Not stranded: the primary submit CTA is present alongside the Retry.
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("rehydrate-error")).getByRole("button", {
+        name: "Retry",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  // RT-3 — Root cause: the rehydration GET fires for ANY api draft, and on a
+  // transient failure it hard-blocked behind COMPOSITE_MEMBERSHIP_UNKNOWN whose
+  // copy asserts "multi-key composite" — wrong for a resumed SINGLE-KEY draft
+  // (membership definitionally empty). The fix uses neutral WIZARD_KEYS_LOAD_FAILED
+  // copy and keeps the single-key form usable.
+  it("RT-3: a failed rehydration surfaces neutral copy (no 'composite' assertion) and leaves the single-key form usable", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) return jsonResponse({}, 500);
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    expect(within(err).getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "WIZARD_KEYS_LOAD_FAILED",
+    );
+    // The copy must NOT assert composite/multi-key to a (possibly single-key) user.
+    expect(err.textContent ?? "").not.toMatch(/composite/i);
+    // Not hard-blocked: the single-key form remains available.
+    expect(screen.getByTestId("wizard-connect-submit")).toBeInTheDocument();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — tap targets (v1.4 flex-compression)", () => {
   it("Move and Remove controls carry explicit >=44px width AND height classes", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);

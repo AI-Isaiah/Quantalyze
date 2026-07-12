@@ -11,6 +11,7 @@ import {
   formatKeyError,
 } from "@/lib/wizardErrors";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
+import { wizardFetch } from "@/lib/wizard/wizard-correlation";
 
 /**
  * Phase 15 / CSV-01..CSV-02 — sub-step 1 of the CSV branch.
@@ -264,7 +265,7 @@ export function CsvUploadStep({
       formData.append("wizard_session_id", wizardSessionId);
       // NOTE: strategy_name is NOT sent here — finalize-time only.
 
-      const res = await fetch("/api/strategies/csv-validate", {
+      const res = await wizardFetch("/api/strategies/csv-validate", {
         method: "POST",
         body: formData,
       });

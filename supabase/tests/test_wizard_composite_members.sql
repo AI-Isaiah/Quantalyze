@@ -60,6 +60,7 @@ DECLARE
   key_b        UUID;
   strat_comp   UUID;
   strat_single UUID;
+  strat_pub    UUID;   -- RT2-FINDING-1: a PUBLISHED composite (draft-gate probe)
   v_count      INTEGER;
   v_seq1       INTEGER;
   v_seq2       INTEGER;
@@ -67,6 +68,7 @@ DECLARE
   row_cnt      INTEGER;
   raised       BOOLEAN;
   err_msg      TEXT;
+  v_status     TEXT;   -- RT-FINDING-1: strategy_analytics.computation_status probe
 BEGIN
   -- ----- SEED (service-role context — bypasses RLS, fires triggers) ----------
   -- Tenant A: 4 api_keys + one composite DRAFT (api_key_id defaults NULL) + one
@@ -254,8 +256,152 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (Part 5): the single-key strategy gained % strategy_keys rows despite the guard', row_cnt;
   END IF;
 
+  -- ======================================================================
+  -- Part 6/7/8 — RT-FINDING-1: stale composite analytics invalidation.
+  -- ======================================================================
+  -- A member-set CHANGE must invalidate a COMPLETED strategy_analytics row
+  -- (complete/complete_with_warnings -> pending) so the wizard verify step
+  -- re-stitches instead of short-circuiting to the OLD set's metrics; a NO-OP
+  -- re-Continue (identical set) must leave the row 'complete' (WIZ-05 latency
+  -- invariant). Establish a known 2-member baseline, then stamp a 'complete'
+  -- composite analytics row and exercise the three cases.
+  SELECT public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01')
+    )
+  ) INTO v_count;
+  IF v_count <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6 setup): baseline write returned %, expected 2', v_count;
+  END IF;
+
+  -- Stamp a COMPLETED composite analytics row (mirrors a finished stitch).
+  INSERT INTO strategy_analytics (strategy_id, computation_status, data_quality_flags)
+  VALUES (strat_comp, 'complete', jsonb_build_object('composite', true))
+  ON CONFLICT (strategy_id) DO UPDATE
+    SET computation_status = 'complete', computation_error = NULL;
+
+  -- Part 6 — NO-OP re-Continue (identical set): analytics stays 'complete'.
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01')
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 6): an IDENTICAL re-Continue invalidated analytics (status=%, expected complete) — WIZ-05 no-op latency invariant broken', v_status;
+  END IF;
+
+  -- Part 7 — CHANGED set (add key3): analytics invalidated to 'pending'.
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01'),
+      jsonb_build_object('api_key_id', key3::text, 'window_start', '2025-09-01', 'window_end', NULL)
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 7): adding a key did NOT invalidate the stale composite analytics (status=%, expected pending) — the verify step would show 3 keys beside 2-key metrics', v_status;
+  END IF;
+
+  -- Part 8 — CHANGED window at the SAME count (edit key3 window_end): still
+  -- invalidated. Proves the signature catches window edits, not just add/remove.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'complete', computation_error = NULL
+   WHERE strategy_id = strat_comp;
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', key2::text, 'window_start', '2025-06-01', 'window_end', '2025-09-01'),
+      jsonb_build_object('api_key_id', key3::text, 'window_start', '2025-09-01', 'window_end', '2025-12-01')
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'pending' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 8): a window-end edit at the same member count did NOT invalidate analytics (status=%, expected pending)', v_status;
+  END IF;
+
+  -- ======================================================================
+  -- Part 9 — RT-1 nit: a NON-CANONICAL (uppercase) api_key_id is still a NO-OP.
+  -- ======================================================================
+  -- The incoming signature must normalize api_key_id via ::uuid::text so that a
+  -- client sending an UPPERCASE UUID string for the SAME member set does not read
+  -- as "changed" — which would trigger an unnecessary re-stitch and defeat the
+  -- WIZ-05 no-op latency win. Re-stamp 'complete', re-submit the Part-8 set
+  -- verbatim but with UPPERCASED api_key_id strings, and assert it stays complete.
+  UPDATE public.strategy_analytics
+     SET computation_status = 'complete', computation_error = NULL
+   WHERE strategy_id = strat_comp;
+  PERFORM public.set_wizard_composite_members(
+    uid_a, strat_comp,
+    jsonb_build_array(
+      jsonb_build_object('api_key_id', upper(key1::text), 'window_start', '2025-01-01', 'window_end', '2025-06-01'),
+      jsonb_build_object('api_key_id', upper(key2::text), 'window_start', '2025-06-01', 'window_end', '2025-09-01'),
+      jsonb_build_object('api_key_id', upper(key3::text), 'window_start', '2025-09-01', 'window_end', '2025-12-01')
+    )
+  );
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_comp;
+  IF v_status <> 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 9): an identical set re-submitted with UPPERCASE api_key_id was treated as CHANGED (status=%, expected complete) — the incoming signature is not canonicalized via ::uuid::text (WIZ-05 no-op broken on non-canonical UUIDs)', v_status;
+  END IF;
+
+  -- ======================================================================
+  -- Part 10 — RT2-FINDING-1: a PUBLISHED composite owned by the caller is
+  -- REJECTED (uniform not-owned) and its analytics is NOT invalidated.
+  -- ======================================================================
+  -- The fn is named/commented "composite DRAFT", but a PUBLISHED composite ALSO
+  -- keeps api_key_id NULL. WITHOUT the status='draft' gate, an owner POSTing
+  -- /api/strategies/composite/set-members for their OWN published composite would
+  -- wholesale-rewrite strategy_keys AND flip the published analytics
+  -- complete -> pending (public factsheet degrades to the computing placeholder).
+  -- The gate must reject it via the SAME uniform not-owned 42501 (no existence
+  -- oracle) and leave both strategy_keys and strategy_analytics untouched.
+  -- Seed a published composite (api_key_id NULL, status='published') owned by
+  -- uid_a with a COMPLETE analytics row.
+  INSERT INTO strategies (user_id, name, status, source, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'wizcomp mem published', 'published', 'wizard', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_pub;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, data_quality_flags)
+  VALUES (strat_pub, 'complete', jsonb_build_object('composite', true))
+  ON CONFLICT (strategy_id) DO UPDATE
+    SET computation_status = 'complete', computation_error = NULL;
+
+  raised := FALSE;
+  BEGIN
+    PERFORM public.set_wizard_composite_members(
+      uid_a, strat_pub,
+      jsonb_build_array(
+        jsonb_build_object('api_key_id', key1::text, 'window_start', '2025-01-01', 'window_end', NULL)
+      )
+    );
+  EXCEPTION WHEN OTHERS THEN
+    raised := TRUE; err_msg := SQLERRM;
+  END;
+  IF NOT raised THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 10): a PUBLISHED composite owned by the caller was ACCEPTED — the status=''draft'' gate is missing (an owner can rewrite an attested member set + invalidate published analytics)';
+  END IF;
+  IF err_msg NOT LIKE '%no composite draft%' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 10): published composite raised the WRONG arm (expected the uniform not-owned message, got: %)', err_msg;
+  END IF;
+  -- Analytics NOT invalidated — the published factsheet stays 'complete'.
+  SELECT computation_status INTO v_status FROM public.strategy_analytics WHERE strategy_id = strat_pub;
+  IF v_status <> 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 10): the published composite''s analytics was INVALIDATED (status=%, expected complete) — the live public factsheet would degrade to the computing placeholder', v_status;
+  END IF;
+  -- No member write leaked onto the published composite.
+  SELECT count(*) INTO row_cnt FROM public.strategy_keys WHERE strategy_id = strat_pub;
+  IF row_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (Part 10): the published composite gained % strategy_keys rows despite the draft gate', row_cnt;
+  END IF;
+
   PERFORM set_config('request.jwt.claims', NULL, true);
-  RAISE NOTICE 'test_wizard_composite_members: ALL PASS (wholesale seq-by-window, idempotent re-submit, reorder without L-4, owner-coherence, composite-only guard).';
+  RAISE NOTICE 'test_wizard_composite_members: ALL PASS (wholesale seq-by-window, idempotent re-submit, reorder without L-4, owner-coherence, composite-only guard, RT-1 stale-analytics invalidation on change + no-op preservation incl. non-canonical UUID, RT2-1 published-composite draft gate).';
 END
 $$;
 

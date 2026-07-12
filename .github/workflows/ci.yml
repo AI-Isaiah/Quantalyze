@@ -981,6 +981,21 @@ jobs:
       # Combined measured ~87% clears the 80 floor; exchange/internal/csv
       # routers (32/36/42%) are now inside the denominator so they can no
       # longer regress unseen. Keep byte-identical with Makefile `test:`.
+      #
+      # SERIAL (v1.9.1 Phase 97): the `-n auto --dist loadgroup` parallelization
+      # (absorbed from #610) is DEFERRED. Even with every live-DB module pinned
+      # to one `shared_test_db` xdist_group worker, the GLOBAL-claim fence tests
+      # (`test_compute_jobs_fencing.py`) flake under `-n auto`: the group's own
+      # tests run in a loadgroup-variable order and any imperfect per-test
+      # compute_jobs cleanup pollutes a later global-`claim_compute_jobs_with_priority`
+      # assertion (tie-break picks a foreign row / `single()` finds 0 rows /
+      # the seeded row is claimed out of the batch → None). Main's stable serial
+      # order avoids this. The `want_job_id` claim scoping + decoy regression +
+      # xdist_group infra all LAND (they are correct and the offline decoy pins
+      # the scoping); re-enabling `-n auto` needs per-test claim-space isolation
+      # first (TODOS: v1.9.1 Phase-97 parallelization deferral). The cross-run
+      # `concurrency: shared-test-db` group above still prevents two runs from
+      # contending. Keep byte-identical with Makefile `test:`.
       - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           SUPABASE_TEST_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || '' }}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
+import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { Button } from "@/components/ui/Button";
 import {
   FactsheetPreview,
@@ -28,11 +29,19 @@ import {
 } from "@/app/(dashboard)/allocations/components/CoverageTimeline";
 import { unionOf, type CoverageSpan } from "@/lib/scenario-window";
 import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
+import {
   partitionAttribution,
   attributionBasisFromConfig,
 } from "@/lib/composite/compositeAttribution";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
+import type {
+  SyncProgressResponse,
+  MemberProgressStatus,
+} from "@/lib/sync-progress";
 
 /**
  * SyncPreviewStep kicks off /api/keys/sync, polls strategy_analytics
@@ -78,26 +87,6 @@ export function deriveDetectedMarkets(
     if (base) set.add(base);
   }
   return Array.from(set).slice(0, limit);
-}
-
-/**
- * Read the correlation_id from the <meta name="x-correlation-id"> tag the
- * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
- * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
- * wave window when 16-02 has not yet merged into this branch).
- */
-function readCorrelationId(): string {
-  if (typeof document !== "undefined") {
-    const meta = document.querySelector<HTMLMetaElement>(
-      'meta[name="x-correlation-id"]',
-    );
-    const value = meta?.getAttribute("content");
-    if (value && value.length > 0) return value;
-  }
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 const SLOW_HINT_MS = 15_000;
@@ -167,6 +156,13 @@ export interface CompositePreviewData {
   mtmGatedReason: string | null;
   benchmarkUnavailable: boolean;
   benchmarkNote: string | null;
+  // HARD-04 (#67): server-truth sub-90-day annualization-window flag
+  // (data_quality_flags.insufficient_window).
+  insufficientWindow: boolean;
+  // HARD-05 (Phase 93): composite members EXCLUDED from the stitch (a ccxt venue
+  // not yet reconstructed) — a closed { seq, venue } shape (the server `reason`
+  // enum is server-only vocabulary, dropped on parse). Empty => nothing renders.
+  degradedMembers: { seq: number; venue: string }[];
   series: { date: string; daily_return: number }[]; // full stitched series
   rawDenominatorConfig: unknown;
   /**
@@ -206,6 +202,21 @@ export interface SyncPreviewStepProps {
   wizardSessionId: string;
   onComplete: (snapshot: SyncPreviewSnapshot) => void;
   onTryAnotherKey: () => void;
+  /**
+   * WIZ-03 (non-destructive composite review). Composite "Review your keys"
+   * navigates back to `connect_key` WITHOUT deleting the draft or minting a
+   * fresh session (the destructive `onTryAnotherKey` path is single-key only).
+   * When absent, the composite buttons fall back to `onTryAnotherKey` so a
+   * missing wiring degrades to the prior behaviour rather than a dead click.
+   */
+  onReviewKeys?: () => void;
+  /**
+   * WIZ-05 (cached crawl snapshot). The completed snapshot WizardClient already
+   * holds (`syncSnapshot`). When present, the mount effect renders it directly
+   * and short-circuits BEFORE any strategy_analytics read or /api/keys/sync
+   * kickoff — returning to this step after a back-nav never re-crawls/re-stitches.
+   */
+  cachedSnapshot?: SyncPreviewSnapshot | null;
 }
 
 type Phase =
@@ -287,20 +298,66 @@ function halfOpenEndToInclusiveLast(halfOpenEnd: string): string {
   )}`;
 }
 
+/**
+ * PROG-02 — the LOCKED live per-key status label set (95-04 decision 3). These
+ * are the exact user-facing strings; the map doubles as an exhaustiveness check
+ * over `MemberProgressStatus`.
+ */
+const MEMBER_STATUS_LABEL: Record<MemberProgressStatus, string> = {
+  waiting: "Waiting",
+  in_process: "In process",
+  successful: "Successful",
+  degraded: "Degraded",
+};
+
+/**
+ * Per-status chip color. Successful → positive; Degraded → the canonical amber
+ * warning token (#B45309, AA at caption size — DESIGN.md Color); In process →
+ * accent (paired with a pulsing dot matching the card's existing dot idiom);
+ * Waiting → muted. Degraded is amber (RECOVERABLE), never negative red.
+ */
+const MEMBER_STATUS_CHIP_CLASS: Record<MemberProgressStatus, string> = {
+  waiting: "text-text-muted",
+  in_process: "text-accent",
+  successful: "text-positive",
+  degraded: "text-warning",
+};
+
+/** Title-case a lowercase exchange slug for the per-key identity fallback. */
+function capitalizeExchange(exchange: string): string {
+  return exchange.charAt(0).toUpperCase() + exchange.slice(1);
+}
+
 export function SyncPreviewStep({
   strategyId,
   apiKeyId,
   wizardSessionId,
   onComplete,
   onTryAnotherKey,
+  onReviewKeys,
+  cachedSnapshot,
 }: SyncPreviewStepProps) {
   const [phase, setPhase] = useState<Phase>("kicking_off");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
   const [gateResult, setGateResult] = useState<StrategyGateResult | null>(null);
   const [snapshot, setSnapshot] = useState<SyncPreviewSnapshot | null>(null);
-  const [expandLog, setExpandLog] = useState(false);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
+  // PROG-02/03 — the last GET /api/strategies/[id]/sync-progress projection.
+  // COSMETIC: piggybacked on the poll tick, fail-open (never blocks the
+  // authoritative strategy_analytics poll). Composite-only; null on single-key.
+  const [syncProgress, setSyncProgress] = useState<SyncProgressResponse | null>(
+    null,
+  );
+  // PROG-03 — retry CTA in-flight guard (disables the button, prevents a
+  // double re-enqueue). Server-side idempotency is the real defense.
+  const [retrying, setRetrying] = useState(false);
+  // SF-1 backstop — TRUE once the poll has sat in `waiting_for_complete` with an
+  // UNCHANGED computation_status for the full RETRY_THRESHOLD_MS patience. This
+  // exit affordance is INDEPENDENT of the cosmetic `syncProgress.stalled`
+  // channel, so a genuinely stalled job never becomes an indefinite hang even
+  // when the sync-progress route is dead (degrades to IDLE / sustained 429).
+  const [stallBackstop, setStallBackstop] = useState(false);
   const [computationError, setComputationError] = useState<string | null>(null);
   // Composite discriminator (Finding-H / Pitfall 1): threaded from SERVER TRUTH
   // — the `/api/keys/sync` kickoff response's `composite` field (true ONLY when
@@ -313,18 +370,40 @@ export function SyncPreviewStep({
   // Init false so a single-key run never re-renders and the poll effect never
   // restarts on the single-key path (SC-4 neutrality).
   const [isComposite, setIsComposite] = useState(false);
-  // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
-  const [correlationId] = useState<string>(() => readCorrelationId());
+  // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
+  // every sync request, so a copied envelope id matches server logs.
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
   // useRef initializer must be a non-impure value for React Compiler's
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
   const mountedRef = useRef(true);
+  // SF-1 backstop — wall-clock of the LAST observed computation_status change.
+  // A status that has not advanced for RETRY_THRESHOLD_MS means the job is stuck
+  // (or legitimately slow — the retry is an idempotent no-op either way). A real
+  // re-stitch (RT-1: a member-set change resets analytics to pending) CHANGES
+  // the status and so RESETS this clock, correctly delaying the backstop.
+  const statusChangedAtRef = useRef<number>(0);
 
   useEffect(() => {
     mountedRef.current = true;
     startedAtRef.current = Date.now();
     (async () => {
       try {
+        // WIZ-05 (cached crawl snapshot) — FIRST, before any DB probe or
+        // kickoff POST. WizardClient renders SyncPreviewStep only while
+        // step === "sync_preview", so a back-nav unmounts then remounts this
+        // effect. When WizardClient still holds the completed snapshot
+        // (`syncSnapshot`, threaded as cachedSnapshot), render it directly and
+        // return: no strategy_analytics read, no /api/keys/sync POST, no poll
+        // (phase "passed" never enters the poll effect) — regardless of the
+        // freshness window. Mirrors the freshness-skip idiom below but keys off
+        // the client-held snapshot instead of a DB freshness probe.
+        if (cachedSnapshot) {
+          setSnapshot(cachedSnapshot);
+          if (cachedSnapshot.composite) setIsComposite(true);
+          setPhase("passed");
+          return;
+        }
         // QA report 2026-05-21 ISSUE-005 — skip the /api/keys/sync
         // round-trip on resume when the analytics row is both COMPLETE
         // and fresh (within SYNC_FRESHNESS_WINDOW_MS). The worker is
@@ -350,41 +429,66 @@ export function SyncPreviewStep({
         const computedAtMs = existing?.computed_at
           ? Date.parse(existing.computed_at)
           : null;
+        const isComplete = isComputedAnalytics(existing?.computation_status);
         const isFresh =
-          isComputedAnalytics(existing?.computation_status) &&
+          isComplete &&
           computedAtMs !== null &&
           Number.isFinite(computedAtMs) &&
           Date.now() - computedAtMs < SYNC_FRESHNESS_WINDOW_MS;
-        if (isFresh) {
-          // R2-2 (freshness-skip resume): the kickoff POST is SKIPPED here, so
-          // there is no server `composite` field to thread. Determine
-          // composite-ness DETERMINISTICALLY from the marker the stitch worker
-          // persists (`data_quality_flags.composite`) via a SEPARATE lightweight
-          // read — we do NOT re-derive/re-enqueue a fresh composite, and we do
-          // NOT touch the frozen `computation_status, computed_at` read above.
-          // Fail CLOSED to SYNC_FAILED when the marker row can't be read (error
-          // or missing row) rather than silently routing a possible composite
-          // through the single-key arm. A present row WITHOUT the marker is
-          // definitively single-key/CSV → byte-neutral resume.
+        if (isComplete) {
+          // The kickoff POST is (potentially) SKIPPED on a resume, so there is
+          // no server `composite` field to thread. Determine composite-ness
+          // DETERMINISTICALLY from the marker the stitch worker persists
+          // (`data_quality_flags.composite`) via a SEPARATE lightweight read —
+          // we do NOT re-derive/re-enqueue a fresh composite, and we do NOT
+          // touch the frozen `computation_status, computed_at` read above.
+          //
+          // WIZ-05 durability (resolved decision 1): this read now runs for ANY
+          // complete row (fresh OR stale), not only fresh ones, so a COMPLETE
+          // composite short-circuits the kickoff regardless of the 5-minute
+          // window — a finished stitch never needs re-running merely to display
+          // (the hard-reload case). Cost on the complete-and-stale SINGLE-KEY
+          // resume is one extra lightweight marker read before the unchanged
+          // re-sync POST.
           const { data: dqRow, error: dqErr } = await supabase
             .from("strategy_analytics")
             .select("data_quality_flags")
             .eq("strategy_id", strategyId)
             .maybeSingle();
           if (!mountedRef.current) return;
-          if (dqErr || !dqRow) {
-            setErrorCode("SYNC_FAILED");
-            setPhase("gate_failed");
-            return;
-          }
-          const dqFlags = (dqRow.data_quality_flags ?? {}) as {
+          const dqFlags = (dqRow?.data_quality_flags ?? {}) as {
             composite?: unknown;
           };
-          if (dqFlags.composite === true) setIsComposite(true);
-          setPhase("waiting_for_complete");
-          return;
+          if (dqFlags.composite === true) {
+            // COMPLETE composite (fresh OR stale) → skip the kickoff; the
+            // existing poll materializes the snapshot from the persisted rows.
+            setIsComposite(true);
+            setPhase("waiting_for_complete");
+            return;
+          }
+          if (isFresh) {
+            // FRESH resume, non-composite (or unreadable marker). The fresh-skip
+            // path has NO kickoff-POST fallback, so it fails CLOSED to
+            // SYNC_FAILED when the marker row can't be read (error or missing
+            // row) rather than silently routing a possible composite through the
+            // single-key arm — byte-identical to the prior freshness-skip guard.
+            // A present row WITHOUT the marker is definitively single-key/CSV →
+            // byte-neutral resume.
+            if (dqErr || !dqRow) {
+              setErrorCode("SYNC_FAILED");
+              setPhase("gate_failed");
+              return;
+            }
+            setPhase("waiting_for_complete");
+            return;
+          }
+          // STALE, non-composite (or unreadable marker) → fall through to the
+          // kickoff POST exactly as today. The route fails CLOSED (503) on an
+          // unknowable membership, so the end-to-end fail-closed guarantee is
+          // preserved without blocking a legitimate stale single-key re-sync on
+          // a transient marker-read blip.
         }
-        const res = await fetch("/api/keys/sync", {
+        const res = await wizardFetch("/api/keys/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
@@ -423,170 +527,164 @@ export function SyncPreviewStep({
     return () => {
       mountedRef.current = false;
     };
-  }, [strategyId]);
+    // cachedSnapshot is stable WizardClient state; the early return keeps any
+    // re-run inert (it never re-crawls when a snapshot is already held).
+  }, [strategyId, cachedSnapshot]);
+
+  // SF-1 backstop — record when the observed computation_status last advanced.
+  // Fires on mount (null) and on every change; a status frozen for the whole
+  // patience window is the stuck signal the backstop keys off. Cheap ref write,
+  // no re-render.
+  useEffect(() => {
+    statusChangedAtRef.current = Date.now();
+  }, [computationStatus]);
 
   useEffect(() => {
     if (phase !== "waiting_for_complete" && phase !== "kicking_off") return;
     const id = window.setInterval(() => {
-      setElapsedMs(Date.now() - startedAtRef.current);
+      const now = Date.now();
+      setElapsedMs(now - startedAtRef.current);
+      // SF-1 — still waiting AND the analytics status has not advanced for the
+      // full 15-min patience budget → surface the exit affordance even if the
+      // cosmetic sync-progress stall channel is dead. Only fires in
+      // `waiting_for_complete` (a terminal transition leaves this phase).
+      setStallBackstop(
+        phase === "waiting_for_complete" &&
+          now - statusChangedAtRef.current >= RETRY_THRESHOLD_MS,
+      );
     }, 1000);
     return () => window.clearInterval(id);
   }, [phase]);
 
-  useEffect(() => {
-    if (phase !== "waiting_for_complete") return;
-    const supabase = createClient();
+  // UX-03 (#46): heavy terminal-fetch failure counter. SEPARATE from the hook's
+  // status-read consecutive-error counter — the narrow status read can keep
+  // succeeding (resetting that counter) while the heavy Promise.all persistently
+  // REJECTS (a network blip, an aborted fetch, a transport-level trades/api_keys
+  // error). With a shared counter such a throw oscillates 0→1→0 and never
+  // escalates, so the wizard spins forever (H-0197, narrowed to heavy-fetch-only
+  // faults). A ref (not a poll-local `let`) so it survives the 1s elapsed-timer
+  // re-renders that recreate the onTerminal closure; per the invariant it never
+  // needs a reset — every non-throwing heavy outcome (passed / gate-fail) stops
+  // the loop, so the only path that repolls is a throw. (A Supabase error
+  // returned AS A VALUE on a heavy read throws below, so it escalates here too;
+  // an RLS denial on `trades` instead drops tradeCount to 0 via `?? 0` and the
+  // gate fails INSUFFICIENT_TRADES — a terminal, loop-stopping outcome.)
+  const heavyFetchErrorsRef = useRef(0);
 
-    // `stopped` is checked at the top of every tick AND before every
-    // self-reschedule so the loop hard-stops the instant the effect
-    // tears down (phase change / strategyId change / unmount). The old
-    // setInterval relied on the effect re-running to clear the timer,
-    // which left the previous interval's closure firing 1-2 extra polls
-    // against a stale `phase` after a setPhase() (H-0195). A
-    // self-scheduling setTimeout with a local guard cannot fire again
-    // once cleared.
-    let stopped = false;
-    let timerId: number | undefined;
-    let tick = 0;
-    // Count of CONSECUTIVE status-read failures (Supabase `error` or a
-    // transport throw before the terminal fetch); reset to 0 on any clean
-    // status read.
-    let consecutiveErrors = 0;
-    // Count of CONSECUTIVE terminal/heavy-fetch failures. Tracked separately
-    // from `consecutiveErrors` because the narrow status read can keep
-    // succeeding (resetting `consecutiveErrors`) while the heavy Promise.all
-    // persistently REJECTS — e.g. a network blip, an aborted fetch, or a
-    // transport-level error on a trades/api_keys query. (A Supabase error
-    // returned AS A VALUE — `{ data, error }` with a non-null `error` — is NOT
-    // caught here: the destructured results ignore `.error`, so e.g. an RLS
-    // denial on `trades` drops `tradeCount` to 0 via `?? 0` and the gate fails
-    // with INSUFFICIENT_TRADES — a terminal, loop-stopping outcome, not a
-    // heavyFetchErrors escalation.) With a shared counter a persistent throw
-    // oscillates 0→1→0 and never escalates, so the wizard spins forever
-    // (H-0197, narrowed to heavy-fetch-only faults). A dedicated counter never
-    // needs a reset: every non-throwing heavy outcome (passed / gate-fail)
-    // sets `stopped = true` and terminates the loop, so the only path that
-    // reschedules is a throw.
-    let heavyFetchErrors = 0;
+  /**
+   * Stop polling and surface a recoverable SYNC_FAILED envelope. Used when the
+   * status read keeps failing (H-0197 / H-0198) — the hook's escalation sink —
+   * AND by the heavy terminal arm's own escalation below, so the user gets an
+   * exit affordance instead of an indefinite spinner. Fires the same
+   * `wizard_error` funnel event as the gate-failure path.
+   */
+  const failPolling = () => {
+    if (!mountedRef.current) return;
+    setErrorCode("SYNC_FAILED");
+    setPhase("gate_failed");
+    trackForQuantsEventClient("wizard_error", {
+      wizard_session_id: wizardSessionId,
+      step: "sync_preview",
+      code: "SYNC_FAILED",
+    });
+  };
 
-    const scheduleNext = () => {
-      if (stopped) return;
-      const delay =
-        POLL_BACKOFF_MS[Math.min(tick, POLL_BACKOFF_MS.length - 1)];
-      tick += 1;
-      timerId = window.setTimeout(poll, delay);
-    };
+  // UX-03 (#46): the status-poll loop (self-scheduling setTimeout over
+  // POLL_BACKOFF_MS, the strategy_analytics status read, the consecutive-error
+  // escalation, terminal detection) now lives in the shared
+  // `useStrategySyncPoller`. What STAYS here is the surface-specific work: the
+  // per-tick status setState + the 95-04 sync-progress piggyback (onStatus), the
+  // SYNC_FAILED escalation sink (onError), and the heavy composite/single-key
+  // terminal arms incl. their heavyFetchErrors escalation + WIZ-05/RT-1 stall
+  // behavior (onTerminal). The kickoff effect + elapsed timer + waiting render
+  // are untouched; the three frozen wizard tests + the 95-04 sibling prove zero
+  // behavior change.
+  useStrategySyncPoller({
+    enabled: phase === "waiting_for_complete",
+    strategyId,
+    schedule: POLL_BACKOFF_MS,
+    maxConsecutiveErrors: MAX_CONSECUTIVE_POLL_ERRORS,
+    onError: failPolling,
+    onStatus: (nextStatus, nextError) => {
+      // Keep the two status columns in state so the waiting render's phase-aware
+      // copy (downloaded vs processed) + the failure line update each tick.
+      setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
+      setComputationError((prev) => (prev === nextError ? prev : nextError));
 
-    /**
-     * Stop polling and surface a recoverable SYNC_FAILED envelope. Used
-     * when the status read keeps failing (H-0197 / H-0198) so the user
-     * gets an exit affordance instead of an indefinite spinner. Fires
-     * the same `wizard_error` funnel event as the gate-failure path so
-     * the drop-off is recorded in PostHog.
-     */
-    const failPolling = () => {
-      if (stopped || !mountedRef.current) return;
-      stopped = true;
-      setErrorCode("SYNC_FAILED");
-      setPhase("gate_failed");
-      trackForQuantsEventClient("wizard_error", {
-        wizard_session_id: wizardSessionId,
-        step: "sync_preview",
-        code: "SYNC_FAILED",
-      });
-    };
-
-    const poll = async () => {
-      if (stopped) return;
-      try {
-        // Lightweight status poll: only read the two status columns
-        // while we wait for completion so each tick is cheap. The
-        // heavy analytics columns (sparkline, metrics) only load once
-        // on the terminal state.
-        const { data: statusRow, error: statusError } = await supabase
-          .from("strategy_analytics")
-          .select("computation_status, computation_error")
-          .eq("strategy_id", strategyId)
-          .maybeSingle();
-
-        if (stopped) return;
-
-        // A Supabase `error` (RLS denial, transient 503) is NOT the same
-        // as a genuine `pending` row. Without this branch an RLS
-        // regression returns { data: null, error } and `nextStatus`
-        // silently collapses to "pending" via the ?? default — the
-        // wizard then spins forever on a permissions misconfig nobody
-        // can see (H-0198). Treat it as a poll failure and let the
-        // consecutive-error counter escalate.
-        if (statusError) {
-          console.error(
-            "[wizard:SyncPreviewStep] poll status error:",
-            statusError,
-          );
-          consecutiveErrors += 1;
-          if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
-            failPolling();
-            return;
-          }
-          scheduleNext();
-          return;
-        }
-
-        consecutiveErrors = 0;
-
-        const nextStatus = statusRow?.computation_status ?? "pending";
-        const nextError = statusRow?.computation_error ?? null;
-        setComputationStatus((prev) => (prev === nextStatus ? prev : nextStatus));
-        setComputationError((prev) => (prev === nextError ? prev : nextError));
-
-        // Hard-failure terminal state. Bail BEFORE the heavy Promise.all
-        // (H-0195): on `failed` the analytics row is errored, so the 5
-        // trades/api_keys queries are pure waste, and the gate would only
-        // ever map this to GATE_ANALYTICS_FAILED anyway. Route straight
-        // to the scripted analytics-failed envelope, carrying
-        // computation_error for the detail line, and stop polling.
-        if (nextStatus === "failed") {
-          stopped = true;
-          if (!mountedRef.current) return;
-          setErrorCode("GATE_ANALYTICS_FAILED");
-          setPhase("gate_failed");
-          trackForQuantsEventClient("wizard_error", {
-            wizard_session_id: wizardSessionId,
-            step: "sync_preview",
-            code: "GATE_ANALYTICS_FAILED",
+      // PROG-02/03 — piggyback the per-key progress projection on this tick
+      // (composite only; no new timer, cadence follows POLL_BACKOFF_MS). This is
+      // COSMETIC: a failure is swallowed with a console.warn and MUST NOT touch
+      // the authoritative strategy_analytics poll. Fire-and-forget so a
+      // slow/hung progress route never delays the status loop; the setState is
+      // guarded by `mountedRef`.
+      if (isComposite) {
+        void wizardFetch(`/api/strategies/${strategyId}/sync-progress`)
+          .then((r) => (r.ok ? r.json() : null))
+          .then((json: SyncProgressResponse | null) => {
+            if (!mountedRef.current || !json) return;
+            // SF-3 — a DEGRADED read (`json.degraded === true`, the route's
+            // rpcError branch) or an EMPTY read that arrives while we already
+            // hold a populated in-flight snapshot must NOT wipe the live panel
+            // or flip `stalled` to false: a couldn't-read blip is not evidence
+            // of "not stalled". Keep last-known state until a REAL, non-empty
+            // read arrives. A non-empty read (real progress) always replaces.
+            setSyncProgress((prev) => {
+              const incomingEmpty =
+                json.degraded === true || json.memberProgress.length === 0;
+              const havePopulated =
+                prev != null && prev.memberProgress.length > 0;
+              if (incomingEmpty && havePopulated) return prev;
+              return json;
+            });
+          })
+          .catch((progressErr) => {
+            console.warn(
+              "[wizard:SyncPreviewStep] sync-progress fetch failed (cosmetic, ignored):",
+              progressErr,
+            );
           });
-          return;
-        }
+      }
+    },
+    onTerminal: async (nextStatus, nextError) => {
+      const supabase = createClient();
 
-        // Terminal SUCCESS includes complete_with_warnings — else a warned
-        // first compute (e.g. a Deribit onboarding tripping a DQ guard) polls
-        // forever, since the runner now persists that status instead of it
-        // being laundered to 'complete' (mig 20260707120000).
-        if (!isComputedAnalytics(nextStatus)) {
-          scheduleNext();
-          return;
-        }
+      // Hard-failure terminal state. Bail BEFORE the heavy Promise.all (H-0195):
+      // on `failed` the analytics row is errored, so the 5 trades/api_keys
+      // queries are pure waste, and the gate would only ever map this to
+      // GATE_ANALYTICS_FAILED anyway. Route straight to the scripted
+      // analytics-failed envelope, carrying computation_error for the detail
+      // line (already threaded via onStatus above), and stop polling.
+      if (nextStatus === "failed") {
+        if (!mountedRef.current) return "done";
+        setErrorCode("GATE_ANALYTICS_FAILED");
+        setPhase("gate_failed");
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "sync_preview",
+          code: "GATE_ANALYTICS_FAILED",
+        });
+        return "done";
+      }
 
-        // Terminal state reached. Fetch the heavy analytics row, trade
-        // count + span, sample symbols for market detection, and the
-        // exchange name in one Promise.all so the user moves to the
-        // factsheet preview as fast as possible.
-        //
-        // Wrapped in its own try/catch (separate from the status-read catch
-        // below) so a persistently-throwing heavy fetch escalates via
-        // `heavyFetchErrors` instead of being masked by the line-above
-        // `consecutiveErrors = 0` reset. One transient heavy fault is still
-        // tolerated; the threshold matches the status-read path.
-        try {
-          // COMPOSITE ARM (Pitfall 1/4/5): the composite reads the stitched
-          // result directly (analytics mask + members + full series +
-          // denominator config) and NEVER routes through checkStrategyGate or
-          // queries `trades` (a composite has 0 trades — the single-key gate
-          // would false-fail INSUFFICIENT_TRADES). Its only gate is the shared
-          // `nextStatus === "failed"` branch above, which fires before this
-          // read. Supabase error-as-value on any read throws so the existing
-          // heavyFetchErrors escalation (H-0197) applies unchanged.
-          if (isComposite) {
+      // Terminal SUCCESS (isComputedAnalytics, incl. complete_with_warnings).
+      // Fetch the heavy analytics row, trade count + span, sample symbols for
+      // market detection, and the exchange name in one Promise.all so the user
+      // moves to the factsheet preview as fast as possible.
+      //
+      // Wrapped in its own try/catch so a persistently-throwing heavy fetch
+      // escalates via `heavyFetchErrorsRef` instead of being masked. One
+      // transient heavy fault is still tolerated; the threshold matches the
+      // status-read path.
+      try {
+        // COMPOSITE ARM (Pitfall 1/4/5): the composite reads the stitched
+        // result directly (analytics mask + members + full series +
+        // denominator config) and NEVER routes through checkStrategyGate or
+        // queries `trades` (a composite has 0 trades — the single-key gate
+        // would false-fail INSUFFICIENT_TRADES). Its only gate is the shared
+        // `nextStatus === "failed"` branch above, which fires before this
+        // read. Supabase error-as-value on any read throws so the existing
+        // heavyFetchErrors escalation (H-0197) applies unchanged.
+        if (isComposite) {
             const [analyticsRes, membersRes, seriesRes, stratRes] =
               await Promise.all([
                 supabase
@@ -638,7 +736,7 @@ export function SyncPreviewStep({
               );
             }
 
-            if (!mountedRef.current) return;
+            if (!mountedRef.current) return "done";
 
             const analyticsRow =
               (analyticsRes.data as Record<string, unknown> | null) ?? null;
@@ -654,6 +752,8 @@ export function SyncPreviewStep({
               mtm_gated_reason?: string | null;
               benchmark_unavailable?: boolean;
               benchmark_note?: string | null;
+              insufficient_window?: boolean;
+              degraded_members?: unknown;
             };
 
             const members: CompositeMemberKeyRow[] = (
@@ -705,8 +805,7 @@ export function SyncPreviewStep({
             // stitched composite always persists ≥1 day, so this never hides a
             // real result.
             if (series.length === 0) {
-              scheduleNext();
-              return;
+              return "repoll";
             }
 
             const compositeMetrics: FactsheetPreviewMetric[] = [
@@ -773,6 +872,22 @@ export function SyncPreviewStep({
                 mtmGatedReason: dq.mtm_gated_reason ?? null,
                 benchmarkUnavailable: dq.benchmark_unavailable === true,
                 benchmarkNote: dq.benchmark_note ?? null,
+                // HARD-04 (#67): strict server-truth coercion (mirror
+                // benchmark_unavailable) — a malformed value renders nothing.
+                insufficientWindow: dq.insufficient_window === true,
+                // HARD-05 (Phase 93): strict-coerce the degraded-member records —
+                // ONLY objects with a finite numeric seq + non-empty string venue
+                // survive; malformed jsonb yields [] (renders nothing, T-92-05).
+                // The server `reason` enum is dropped (server-only vocabulary).
+                degradedMembers: Array.isArray(dq.degraded_members)
+                  ? dq.degraded_members.flatMap((e): { seq: number; venue: string }[] => {
+                      if (typeof e !== "object" || e === null) return [];
+                      const { seq, venue } = e as { seq?: unknown; venue?: unknown };
+                      if (typeof seq !== "number" || !Number.isFinite(seq)) return [];
+                      if (typeof venue !== "string" || venue.length === 0) return [];
+                      return [{ seq, venue }];
+                    })
+                  : [],
                 series,
                 rawDenominatorConfig:
                   (stratRes.data as { returns_denominator_config?: unknown } | null)
@@ -786,10 +901,9 @@ export function SyncPreviewStep({
               },
             };
 
-            stopped = true;
             setSnapshot(compositeSnapshot);
             setPhase("passed");
-            return;
+            return "done";
           }
 
           const [
@@ -861,7 +975,7 @@ export function SyncPreviewStep({
 
           const keyRow = keyRowResult.data;
 
-          if (!mountedRef.current) return;
+          if (!mountedRef.current) return "done";
 
           const gate = checkStrategyGate({
             apiKeyId,
@@ -882,7 +996,6 @@ export function SyncPreviewStep({
           });
 
           if (!gate.passed) {
-            stopped = true;
             setGateResult(gate);
             const wizardCode = gate.code ? gateFailureToWizardError(gate.code) : "UNKNOWN";
             setErrorCode(wizardCode);
@@ -893,7 +1006,7 @@ export function SyncPreviewStep({
               code: wizardCode,
               trade_count: tradeCount ?? 0,
             });
-            return;
+            return "done";
           }
 
           const metrics: FactsheetPreviewMetric[] = [
@@ -928,61 +1041,88 @@ export function SyncPreviewStep({
             computedAt: analytics?.computed_at ?? null,
           };
 
-          stopped = true;
           setSnapshot(nextSnapshot);
           setPhase("passed");
+          return "done";
         } catch (heavyErr) {
           // The terminal fetch / gate evaluation threw (network blip, an
           // aborted fetch, or a transport-level rejection). One transient
-          // fault is tolerated, but a persistent heavy-fetch fault
-          // must escalate — the narrow status read keeps succeeding above,
-          // so `consecutiveErrors` would never reach the threshold (H-0197,
-          // heavy-fetch-narrowed). Count consecutive heavy failures and
-          // surface the recoverable SYNC_FAILED envelope past the threshold.
-          if (stopped) return;
+          // fault is tolerated, but a persistent heavy-fetch fault must
+          // escalate — the hook's status read keeps succeeding, so its
+          // consecutive-error counter would never reach the threshold
+          // (H-0197, heavy-fetch-narrowed). Count consecutive heavy failures
+          // in a ref and surface the recoverable SYNC_FAILED envelope past it.
+          if (!mountedRef.current) return "done";
           console.error(
             "[wizard:SyncPreviewStep] terminal fetch error:",
             heavyErr,
           );
-          heavyFetchErrors += 1;
-          if (heavyFetchErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
+          heavyFetchErrorsRef.current += 1;
+          if (heavyFetchErrorsRef.current >= MAX_CONSECUTIVE_POLL_ERRORS) {
             failPolling();
-            return;
+            return "done";
           }
-          scheduleNext();
+          return "repoll";
         }
-      } catch (err) {
-        // A thrown status read (network blip, aborted fetch, transient 503)
-        // is tolerated once, but repeated throws must not leave the wizard
-        // spinning forever (H-0197). Count consecutive failures and
-        // escalate to a recoverable SYNC_FAILED envelope past the
-        // threshold; otherwise back off and retry.
-        if (stopped) return;
-        console.error("[wizard:SyncPreviewStep] poll error:", err);
-        consecutiveErrors += 1;
-        if (consecutiveErrors >= MAX_CONSECUTIVE_POLL_ERRORS) {
-          failPolling();
-          return;
-        }
-        scheduleNext();
-      }
-    };
-
-    // Schedule the first poll after one base interval, exactly matching
-    // the replaced setInterval's first-tick latency (setInterval also
-    // waits one period before its first callback) so resume/timing
-    // behaviour is unchanged.
-    timerId = window.setTimeout(poll, POLL_BACKOFF_MS[0]);
-
-    return () => {
-      stopped = true;
-      if (timerId !== undefined) window.clearTimeout(timerId);
-    };
-  }, [phase, strategyId, apiKeyId, wizardSessionId, isComposite]);
+      },
+    });
 
   const handleUseThisKey = useCallback(() => {
     if (snapshot) onComplete(snapshot);
   }, [snapshot, onComplete]);
+
+  // PROG-03 / SF-1 — idempotent retry for a stall (route-detected OR the SF-1
+  // backstop). Re-POSTs the SAME kickoff shape (`:451-455`); the partial-unique
+  // index `compute_jobs_one_inflight_per_kind_strategy` makes a genuinely
+  // inflight (`pending`/`running`) job a no-op and re-enqueues a
+  // watchdog-reclaimed/dead one. (NB: `failed_retry` is EXCLUDED from that index
+  // — the manual Retry is SUPPRESSED during that backoff, F-3, so this handler
+  // is never invoked then.) Never routes into the SYNC_FAILED terminal gate.
+  // On a 2xx we (a) reset the SF-1 backstop patience clock so the amber banner
+  // DROPS and the 15-min window restarts — a re-claimed run may write the SAME
+  // `computing` status, which the poll dedups, so the [computationStatus] reset
+  // effect never fires and the clock MUST be reset here explicitly — and (b)
+  // drop the `stalled` flag WITHOUT wiping the live per-key panel (keep
+  // memberProgress; the next poll refreshes it — losing the panel at the anxious
+  // moment is a regression). A non-2xx keeps the banner visible to retry.
+  const handleRetrySync = useCallback(async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const res = await wizardFetch("/api/keys/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId }),
+      });
+      if (res.ok && mountedRef.current) {
+        statusChangedAtRef.current = Date.now();
+        setStallBackstop(false);
+        // F-2b — a successful retry is a legitimate "fresh wait starts now"
+        // event, so reset the MOUNT patience clock too, not just the SF-1
+        // backstop clock. Both banners key off elapsed clocks (the amber
+        // `showInterruptedBanner` off `stallBackstop`, the red
+        // `showRetry`/"leave this page" block off `elapsedMs`). Resetting only
+        // the backstop dropped the amber banner but left `elapsedMs` past
+        // RETRY_THRESHOLD_MS, so the scariest copy in the flow ("taking much
+        // longer than expected … leave this page") instantly replaced the
+        // reassuring retry — and persisted, since a re-claimed run often writes
+        // the SAME `computing` status and never re-advances any clock. Reset
+        // both so the whole patience window restarts on retry.
+        startedAtRef.current = Date.now();
+        setElapsedMs(0);
+        setSyncProgress((prev) =>
+          prev ? { ...prev, stalled: false } : prev,
+        );
+      }
+    } catch (retryErr) {
+      console.warn(
+        "[wizard:SyncPreviewStep] retry sync POST failed:",
+        retryErr,
+      );
+    } finally {
+      if (mountedRef.current) setRetrying(false);
+    }
+  }, [retrying, strategyId]);
 
   const errorEnvelope = errorCode
     ? buildEnvelope(errorCode, correlationId, {
@@ -1015,7 +1155,7 @@ export function SyncPreviewStep({
         <div className="mt-6 flex gap-3">
           <Button
             type="button"
-            onClick={onTryAnotherKey}
+            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
             {isComposite ? "Review your keys" : "Try another key"}
@@ -1124,7 +1264,13 @@ export function SyncPreviewStep({
     const hasGaps = gapSpans.length > 0;
     const hasMtmCaveat = composite.mtmGatedReason != null;
     const hasBenchmarkCaveat = composite.benchmarkUnavailable;
-    const hasDqCaveat = hasMtmCaveat || hasBenchmarkCaveat;
+    const hasInsufficientWindowCaveat = composite.insufficientWindow;
+    const hasDegradedMembers = composite.degradedMembers.length > 0;
+    const hasDqCaveat =
+      hasMtmCaveat ||
+      hasBenchmarkCaveat ||
+      hasInsufficientWindowCaveat ||
+      hasDegradedMembers;
     const hasWarnings = hasGaps || hasDqCaveat;
 
     return (
@@ -1204,10 +1350,19 @@ export function SyncPreviewStep({
               {attributionRows.map((row) => {
                 const pk = perKeyBySeq.get(row.seq);
                 const member = memberBySeq.get(row.seq);
+                // Tier 1: actual reconstructed coverage when present. Tier 2:
+                // the member's DECLARED entered window from strategy_keys (user-
+                // entered metadata read from the DB, never invented) — so an
+                // entered window never renders "—" behind a reconstructed
+                // n_days=0. The Days column stays coverage-honest below. "live"
+                // matches the wizard's open-ended (stillLive) vocabulary. Tier 3:
+                // "—" only when no window was ever entered.
                 const windowText =
                   pk?.first_day && pk?.last_day
                     ? `${pk.first_day} – ${pk.last_day}`
-                    : "—";
+                    : member?.windowStart
+                      ? `${member.windowStart} – ${member.windowEnd ?? "live"}`
+                      : "—";
                 const contributionClass =
                   row.contribution === null
                     ? "text-text-muted"
@@ -1325,6 +1480,22 @@ export function SyncPreviewStep({
                   {hasBenchmarkCaveat && (
                     <p>Benchmark overlay unavailable for this period.</p>
                   )}
+                  {hasInsufficientWindowCaveat && (
+                    <p>
+                      Short track record — annualized metrics are computed on an
+                      insufficient window and may not be meaningful.
+                    </p>
+                  )}
+                  {hasDegradedMembers && (
+                    <p>
+                      {composite.degradedMembers
+                        .map((d) => `Key ${d.seq} (${d.venue})`)
+                        .join(", ")}{" "}
+                      could not be included —{" "}
+                      {composite.degradedMembers.length > 1 ? "their" : "its"} data
+                      is excluded from this composite.
+                    </p>
+                  )}
                 </div>
               </div>
             )}
@@ -1337,7 +1508,7 @@ export function SyncPreviewStep({
           </Button>
           <Button
             variant="ghost"
-            onClick={onTryAnotherKey}
+            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
             Review your keys
@@ -1411,7 +1582,7 @@ export function SyncPreviewStep({
           </Button>
           <Button
             variant="ghost"
-            onClick={onTryAnotherKey}
+            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
             data-testid="wizard-try-another-key"
           >
             Try another key
@@ -1426,6 +1597,18 @@ export function SyncPreviewStep({
   const showSlowHint = elapsedMs >= SLOW_HINT_MS;
   const showWarn = elapsedMs >= WARN_THRESHOLD_MS;
   const showRetry = elapsedMs >= RETRY_THRESHOLD_MS;
+  // F-3 — the queue is auto-retrying during a `failed_retry` backoff; a manual
+  // re-POST would INSERT A SECOND job (the partial-unique index + in-flight
+  // SELECT both EXCLUDE `failed_retry`), so suppress the manual Retry and relabel
+  // honestly. Only actionable when the route surfaces the status (channel alive).
+  const isAutoRetrying = syncProgress?.jobStatus === "failed_retry";
+  // F-1 — the amber recoverable "taking longer" banner (route stall OR the SF-1
+  // backstop). Computed once so the red Error-severity `showRetry` block can be
+  // suppressed when it is up: rendering both at t≈15min stacks two near-duplicate
+  // banners with contradicting severity (red "leave this page" vs amber "retry
+  // safely"). Composite-only (single-key never has the amber banner).
+  const showInterruptedBanner =
+    isComposite && (syncProgress?.stalled === true || stallBackstop);
 
   return (
     <section aria-labelledby="wizard-sync-heading">
@@ -1452,7 +1635,9 @@ export function SyncPreviewStep({
               : phase === "kicking_off"
                 ? "Contacting exchange..."
                 : isComposite
-                  ? "Stitching composite…"
+                  ? computationStatus === "computing"
+                    ? "Trades are being processed…"
+                    : "Trades are being downloaded…"
                   : computationStatus === "computing"
                     ? "Computing analytics..."
                     : "Fetching trades..."}
@@ -1461,6 +1646,46 @@ export function SyncPreviewStep({
             {elapsedSeconds}s
           </span>
         </div>
+
+        {isComposite &&
+          syncProgress?.memberProgress &&
+          syncProgress.memberProgress.length > 0 && (
+            <ul
+              data-testid="wizard-member-progress"
+              className="mt-3 space-y-1.5 border-t border-border pt-3"
+            >
+              {[...syncProgress.memberProgress]
+                .sort((a, b) => a.seq - b.seq)
+                .map((m) => {
+                  const identity =
+                    m.label ??
+                    (m.exchange ? capitalizeExchange(m.exchange) : null);
+                  return (
+                    <li
+                      key={m.seq}
+                      data-testid={`member-progress-${m.seq}`}
+                      className="flex items-center justify-between gap-3 text-caption"
+                    >
+                      <span className="text-text-secondary">
+                        {`Key ${m.seq}`}
+                        {identity ? ` — ${identity}` : ""}
+                      </span>
+                      <span
+                        className={cn(
+                          "inline-flex items-center font-medium",
+                          MEMBER_STATUS_CHIP_CLASS[m.status],
+                        )}
+                      >
+                        {m.status === "in_process" && (
+                          <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+                        )}
+                        {MEMBER_STATUS_LABEL[m.status]}
+                      </span>
+                    </li>
+                  );
+                })}
+            </ul>
+          )}
 
         {showSlowHint && !showWarn && (
           <p className="mt-2 text-caption text-text-muted">
@@ -1476,7 +1701,7 @@ export function SyncPreviewStep({
           </p>
         )}
 
-        {showRetry && (
+        {showRetry && !showInterruptedBanner && (
           <div className="mt-2 space-y-2">
             <p className="text-caption text-negative">
               Sync is taking much longer than expected. You can leave this page
@@ -1484,29 +1709,60 @@ export function SyncPreviewStep({
             </p>
           </div>
         )}
-
-        {showWarn && (
-          <button
-            type="button"
-            onClick={() => setExpandLog((v) => !v)}
-            className="mt-2 text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
-            data-testid="wizard-sync-expand-log"
-          >
-            {expandLog ? "Hide details" : "Show me what is happening"}
-          </button>
-        )}
-
-        {expandLog && (
-          <pre className="mt-2 overflow-x-auto rounded border border-border bg-white px-3 py-2 text-micro text-text-muted">
-            strategy_id={strategyId}
-            {"\n"}
-            status={computationStatus ?? "unknown"}
-            {"\n"}
-            elapsed={elapsedSeconds}s{"\n"}
-            {computationError ? `error=${computationError}\n` : ""}
-          </pre>
-        )}
       </div>
+
+      {/* PROG-03 / SF-1 — distinct, recoverable "taking longer" state. Shows
+          when the route stall channel fires (`syncProgress.stalled`,
+          job-heartbeat-derived) OR the elapsed-patience BACKSTOP fires
+          (`stallBackstop`: computation_status unchanged past RETRY_THRESHOLD_MS)
+          — so a genuine stall is NEVER an indefinite hang even when the cosmetic
+          sync-progress channel is dead. The backstop respects RT-1: a re-stitch
+          that resets analytics to pending CHANGES the status and resets the
+          stall clock, so it is not inferred from a status regression. Renders
+          ALONGSIDE the spinner card — polling continues, the job may
+          self-recover via the watchdog reclaim. Amber = recoverable, not red.
+          When up, it SUPPRESSES the red `showRetry` Error block above (F-1) —
+          exactly one banner renders for a stuck composite. */}
+      {showInterruptedBanner && (
+        <div
+          data-testid="wizard-sync-interrupted"
+          role="status"
+          className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-4 py-3"
+        >
+          <p className="text-body font-medium text-text-primary">
+            This sync is taking longer than expected
+          </p>
+          {isAutoRetrying ? (
+            // F-3 — the queue is AUTO-RETRYING (`failed_retry` backoff). A manual
+            // re-POST would INSERT A SECOND stitch (the partial-unique index +
+            // the in-flight SELECT both EXCLUDE `failed_retry`), so relabel
+            // honestly and suppress the manual Retry — the job retries on its own.
+            <p
+              className="mt-1 text-caption text-text-secondary"
+              data-testid="wizard-sync-auto-retrying"
+            >
+              The sync is retrying automatically — no action needed.
+            </p>
+          ) : (
+            <>
+              <p className="mt-1 text-caption text-text-secondary">
+                You can retry safely — a healthy run already in progress is
+                unaffected.
+              </p>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={handleRetrySync}
+                disabled={retrying}
+                className="mt-3"
+                data-testid="wizard-sync-retry"
+              >
+                {retrying ? "Retrying…" : "Retry sync"}
+              </Button>
+            </>
+          )}
+        </div>
+      )}
     </section>
   );
 }

@@ -496,8 +496,21 @@ export type FactsheetCommon = {
     available: boolean;
     reason?: "unsmoothed_options_book" | "mtm_basis_unavailable_for_venue" | string;
   };
-  /** Server-truth composite discriminator (`data_quality_flags.composite`). */
-  dataQuality?: { composite: boolean };
+  /**
+   * Server-truth composite discriminator (`data_quality_flags.composite`).
+   * HARD-04 (#67): `insufficientWindow` flags a sub-90-calendar-day
+   * annualization window (CAGR-site DQ annotation). Optional — pre-existing
+   * cached payloads lack it, so readers MUST treat absent as false.
+   * HARD-05 (Phase 93): `degradedMembers` lists composite members EXCLUDED from
+   * the stitch (a ccxt venue not yet reconstructed) with honest zero coverage —
+   * a closed `{seq, venue}` shape (the server `reason` enum is dropped as
+   * server-only vocabulary). Absent/empty => nothing renders.
+   */
+  dataQuality?: {
+    composite: boolean;
+    insufficientWindow?: boolean;
+    degradedMembers?: Array<{ seq: number; venue: string }>;
+  };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;
 };

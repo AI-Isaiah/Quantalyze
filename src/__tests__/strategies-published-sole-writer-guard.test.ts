@@ -124,14 +124,30 @@ function sqlHasPublishWrite(sql: string): boolean {
 }
 
 function latestDefFile(fnName: string): string {
-  const files = walk(MIGRATIONS_DIR, [".sql"])
-    .filter((f) => !f.includes(`${join("migrations", "down")}`))
+  const nonDown = walk(MIGRATIONS_DIR, [".sql"]).filter(
+    (f) => !f.includes(`${join("migrations", "down")}`),
+  );
+  // Prefer files that DEFINE the function (CREATE [OR REPLACE] FUNCTION), not
+  // ones that merely MENTION it in a comment — otherwise a later migration that
+  // references the name in prose (e.g. cleanup_abandoned_wizard_drafts' EPQ
+  // race-proof comment naming finalize_wizard_strategy) would be mis-picked as
+  // the "latest def" and the body read would be the wrong RPC. Fall back to
+  // mention-match for names that are NOT SQL functions (e.g. `process_key_long`
+  // is a compute_jobs KIND string, defined in Python, only referenced in SQL).
+  const defRe = new RegExp(`\\bFUNCTION\\s+(?:public\\.)?${fnName}\\b`, "i");
+  const defFiles = nonDown
+    .filter((f) => defRe.test(readFileSync(f, "utf8")))
+    .sort();
+  if (defFiles.length > 0) {
+    return defFiles[defFiles.length - 1];
+  }
+  const mentionFiles = nonDown
     .filter((f) => readFileSync(f, "utf8").includes(fnName))
     .sort();
-  if (files.length === 0) {
-    throw new Error(`no migration defines ${fnName}`);
+  if (mentionFiles.length === 0) {
+    throw new Error(`no migration defines or mentions ${fnName}`);
   }
-  return files[files.length - 1];
+  return mentionFiles[mentionFiles.length - 1];
 }
 
 describe("Phase 87 PUB-01 / W-1 — strategies.status='published' sole-writer guard", () => {

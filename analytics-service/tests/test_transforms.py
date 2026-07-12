@@ -229,6 +229,42 @@ class TestTradesToDailyReturnsWithStatus:
         assert "twr_chain_broken" not in meta_clean
         assert meta_clean["computation_status_hint"] == "complete"
 
+    def test_every_guard_key_round_trips_through_merge_status_meta(self):
+        """Phase 92 hardening (Finding A): EVERY key in the ONE shared
+        ``NAV_TWR_GUARD_KEYS`` source must survive the ``_merge_status_meta``
+        boundary onto the returned meta — not just the subset a hand-maintained
+        allowlist happened to enumerate. Pre-fix, ``pnl_dominated_guard`` (added
+        to NAV_TWR_GUARD_KEYS / NavTWRMeta / _build_nav_meta in 92-02) was OMITTED
+        from the explicit per-key copy list here, so on the live CCXT broker path
+        (Bybit/OKX/Binance realized+funding → trades_to_daily_returns_with_status
+        → reconstruct_nav_and_twr → chain_linked_twr → _build_nav_meta →
+        _merge_status_meta) the specific DQ flag was silently DROPPED while the
+        coarse ``complete_with_warnings`` promotion still fired. The by-construction
+        loop makes the single-owner claim real: a per-key round-trip proves any
+        NAV_TWR_GUARD_KEYS entry reaches data_quality_flags.
+
+        Mutation-honest: reverting the loop to a partial hand-copy list drops any
+        omitted key and reddens the failing key's assertion.
+        """
+        import services.transforms as transforms_mod
+        from services.nav_twr import NAV_TWR_GUARD_KEYS
+
+        for guard_key in NAV_TWR_GUARD_KEYS:
+            meta = transforms_mod._merge_status_meta(
+                {"computation_status_hint": "complete_with_warnings", guard_key: True},
+                used_heuristic_capital=False,
+                balance_error=False,
+            )
+            assert meta.get(guard_key) is True, (
+                f"guard key {guard_key!r} must be carried THROUGH the "
+                "_merge_status_meta boundary (by-construction over "
+                f"NAV_TWR_GUARD_KEYS) so the runner lift / job_worker pre-stamp "
+                f"reach data_quality_flags; got {meta!r}"
+            )
+            assert meta["computation_status_hint"] == "complete_with_warnings", (
+                f"a fired {guard_key!r} is a warn condition; status must promote"
+            )
+
     def test_balance_error_propagates_to_warnings(self):
         """The audit's headline case: exchange API failed, caller
         passes balance_error=True. Even though account_balance is also

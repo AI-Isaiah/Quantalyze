@@ -1,8 +1,54 @@
+import functools
 import pytest
 import pandas as pd
 import numpy as np
 import json
 from pathlib import Path
+
+
+# ── CI speed: parallelize the offline test bulk with pytest-xdist ─────────────
+# The suite runs under `pytest -n auto --dist loadgroup` in CI and `make test`.
+# ~3.6k tests are pure/offline and distribute freely across workers. A handful
+# of files exercise the SHARED remote Supabase test project (fencing/claim,
+# drain, RPC round-trips). Running two of those concurrently races the shared
+# rows exactly like two CI runs would — which is why the python job also carries
+# a repo-wide `concurrency: shared-test-db` group. We pin every DB-touching
+# module to a single xdist group so they land on ONE worker and stay serialized
+# relative to each other (the same no-intra-run-race property the old serial job
+# had), while the offline bulk parallelizes.
+#
+# Detection is content-based (not a hardcoded file list) so a future DB test is
+# grouped automatically: any test module whose source references the shared
+# test-DB env vars or the `_need_supabase` guard is treated as DB-touching.
+# Both the PostgREST idiom (SUPABASE_TEST_URL / SUPABASE_TEST_SERVICE_KEY /
+# _need_supabase) and the psycopg idiom (TEST_SUPABASE_DB_URL / HAS_LIVE_DB) hit
+# the shared remote test project, so both must group. Deliberately NOT the bare
+# `SUPABASE_URL`: it names the app/prod env var and appears in ~10 offline unit
+# files that never touch the shared DB — grouping them would pin the bulk to one
+# worker and defeat the parallelism.
+_DB_MODULE_SENTINELS = (
+    "SUPABASE_TEST_URL",
+    "SUPABASE_TEST_SERVICE_KEY",
+    "_need_supabase",
+    "TEST_SUPABASE_DB_URL",
+    "HAS_LIVE_DB",
+)
+
+
+@functools.lru_cache(maxsize=None)
+def _is_shared_db_module(path: str) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            source = fh.read()
+    except OSError:
+        return False
+    return any(sentinel in source for sentinel in _DB_MODULE_SENTINELS)
+
+
+def pytest_collection_modifyitems(config, items):
+    for item in items:
+        if _is_shared_db_module(str(item.fspath)):
+            item.add_marker(pytest.mark.xdist_group("shared_test_db"))
 
 
 # PR #181 take-2 red-team F16: services.metrics maintains a process-level

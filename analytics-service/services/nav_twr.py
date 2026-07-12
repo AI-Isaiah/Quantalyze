@@ -64,6 +64,20 @@ DUST_NAV_FLOOR = 1000.0
 # computed return, and is tuned against real accounts at the Phase 78 gate.
 FLOW_DOM_RATIO = 1.0
 
+# P&L-dominated guard ratio (Phase 92 HARD-01): the missing sibling of
+# ``FLOW_DOM_RATIO``. Where FLOW_DOM_RATIO guards a dominating external *flow*,
+# this guards a dominating single-day *P&L* on a small-but-above-dust prior NAV
+# — the inverse-perpetual near-zero-equity blow-up class. When the day's P&L
+# numerator ``|cur - prev - F_t| >= PNL_DOM_RATIO * NAV_{t-1}`` the resulting
+# per-day return ``r`` is |r| >= 10 (>=1,000%/day), which is beyond any
+# legitimate daily return: the live blow-up class is 10–100x/day and the phase
+# repro emits ~17x/day (research §a). Break the link + flag (NaN, never a
+# substituted/clamped value), mirroring FLOW_DOM_RATIO exactly. 10.0 is the
+# founder-tunable, warning-locked default — a NO-OP for every normal account so
+# the SC-4 byte-identity pins hold (research §h Q3 / Pitfall 5); tuned against
+# real accounts at the acceptance gate exactly like FLOW_DOM_RATIO.
+PNL_DOM_RATIO = 10.0
+
 # Phase 77 FLOW-04 — terminal uPnL wedge materiality (Q5). When the MTM anchor's
 # open-uPnL wedge is |open_unrealized_usd|/anchor_nav > 5%, the realized-basis
 # terminal is materially below the reported (MTM) anchor and the intra-window NAV
@@ -115,6 +129,14 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     dust_nav_guard: bool
     negative_nav_guard: bool
     flow_dominated_guard: bool
+    # Phase 92 HARD-01: the day's P&L numerator dwarfed a small-but-above-dust
+    # prior NAV (``|cur - prev - F_t| >= PNL_DOM_RATIO * NAV_{t-1}``) — the
+    # inverse-perpetual near-zero-equity blow-up. The missing sibling of
+    # ``flow_dominated_guard``: FLOW guards a dominating flow, this guards a
+    # dominating P&L day. Break-and-flag (NaN, never substitute); rides the SAME
+    # complete_with_warnings channel. A BOOL only — never the raw NAV/P&L
+    # magnitude (account-size leak, T-73-02 / :24-25 leak discipline).
+    pnl_dominated_guard: bool
     # DQ-02: a flow-coverage retention gap segmented the series at a terminus
     # (pre-terminus TWR refused). 76-04 lifts this into the DataQualityFlags
     # TypedDict + the 74-03 promotion predicate; here it rides the SAME
@@ -167,6 +189,7 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "dust_nav_guard",
     "negative_nav_guard",
     "flow_dominated_guard",
+    "pnl_dominated_guard",
     "flow_coverage_incomplete",
     "unrealized_pnl_in_anchor",
     "unrealized_pnl_unreadable",
@@ -343,7 +366,12 @@ def chain_linked_twr(
     exactly 0 would divide by zero): that day's return is omitted and the
     ``negative_nav_guard`` flag is raised. The threshold-based dust / negative /
     flow-dominated guards live in the fail-loud guard block (DQ-01) which
-    generalises this same break — see ``_guard_denominator``.
+    generalises this same break — see ``_guard_denominator``. Phase 92 adds one
+    more break at THIS call site: the ``pnl_dominated_guard`` (the missing
+    sibling of ``flow_dominated_guard``) NaN-breaks a day whose P&L numerator
+    dwarfs a small-but-above-dust prior NAV (``|pnl_t| >= PNL_DOM_RATIO * prev``)
+    — it lives here, not in ``_guard_denominator``, because that helper is not
+    passed the day's P&L.
 
     ``prev0`` (§1.4, App A #2) is an ADDITIVE keyword. ``prev0=None`` (default)
     keeps EXACTLY today's arithmetic — day-0 ``prev`` is the reconstructed
@@ -389,6 +417,18 @@ def chain_linked_twr(
             flags[guard_key] = True
             continue  # break the chain-link for this day; NEVER substitute
 
+        # Phase 92 HARD-01 — the P&L-magnitude guard, the missing sibling of
+        # flow_dominated_guard. _guard_denominator sees only (prev, flow), not
+        # the day's P&L, so this check lives at the call site (research §b1). A
+        # day whose P&L numerator dwarfs a small-but-above-dust prior NAV
+        # (|pnl_t| >= PNL_DOM_RATIO * prev, i.e. |r| >= 10) is not an
+        # interpretable return — break the chain (NaN) + flag, mirroring the
+        # _guard_denominator block above. NEVER substitute/clamp.
+        pnl_t = cur - prev - flow_t
+        if abs(pnl_t) >= PNL_DOM_RATIO * prev:
+            flags["pnl_dominated_guard"] = True
+            continue
+
         returns[t] = (cur - prev - flow_t) / prev
 
     return pd.Series(returns, index=index, name="returns"), flags
@@ -410,7 +450,14 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
 
     There is deliberately NO clamp/floor/replace here: a guarded day yields NaN
     (a break), never a fabricated number (the forbidden substitution class the
-    source-scan test bans)."""
+    source-scan test bans).
+
+    NOTE (Phase 92 HARD-01): this helper sees only ``prev_nav`` and ``flow`` — it
+    canNOT judge a P&L-dominated day (the day's P&L is not passed here). Its
+    missing sibling, the ``pnl_dominated_guard``, is therefore wired at the
+    ``chain_linked_twr`` call site (``|pnl_t| >= PNL_DOM_RATIO * prev_nav``),
+    guarding a dominating *P&L* just as ``flow_dominated_guard`` guards a
+    dominating *flow*."""
     if prev_nav <= 0:
         return "negative_nav_guard"
     if prev_nav < DUST_NAV_FLOOR:
@@ -495,18 +542,16 @@ def _build_nav_meta(flags: Mapping[str, bool]) -> NavTWRMeta:
             "complete_with_warnings" if warn else "complete"
         ),
     }
-    if flags.get("dust_nav_guard"):
-        meta["dust_nav_guard"] = True
-    if flags.get("negative_nav_guard"):
-        meta["negative_nav_guard"] = True
-    if flags.get("flow_dominated_guard"):
-        meta["flow_dominated_guard"] = True
-    if flags.get("flow_coverage_incomplete"):
-        meta["flow_coverage_incomplete"] = True
-    if flags.get("unrealized_pnl_in_anchor"):
-        meta["unrealized_pnl_in_anchor"] = True
-    if flags.get("twr_chain_broken"):
-        meta["twr_chain_broken"] = True
+    # SHOULD-1 (Phase 92 hardening): derive the additive per-key carry BY
+    # CONSTRUCTION from the ONE shared NAV_TWR_GUARD_KEYS source (mirroring
+    # transforms._merge_status_meta) so a newly-added guard key can never be
+    # silently dropped by a stale hand-maintained allowlist. The core only ever
+    # sets bool guard keys here (the list-valued pre_summary_rollout_option_dailies
+    # originates in the broker wiring, never in these flags), so a bool set is
+    # correct for every key it can carry.
+    for _guard_key in NAV_TWR_GUARD_KEYS:
+        if flags.get(_guard_key):
+            meta[_guard_key] = True  # type: ignore[literal-required]
     return meta
 
 

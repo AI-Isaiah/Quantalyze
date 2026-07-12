@@ -12,26 +12,10 @@ import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
 import type { MetadataDraft } from "./MetadataStep";
-
-/**
- * Read the correlation_id from the <meta name="x-correlation-id"> tag the
- * root layout renders server-side (Plan 16-02 / OBSERV-09). Falls back to
- * a fresh UUID v4 when the meta tag is absent (e.g., during the parallel
- * wave window when 16-02 has not yet merged into this branch).
- */
-function readCorrelationId(): string {
-  if (typeof document !== "undefined") {
-    const meta = document.querySelector<HTMLMetaElement>(
-      'meta[name="x-correlation-id"]',
-    );
-    const value = meta?.getAttribute("content");
-    if (value && value.length > 0) return value;
-  }
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `cid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
+import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
 
 /**
  * Step 4 of the wizard. Renders a read-only summary of the draft and
@@ -62,8 +46,9 @@ export function SubmitStep({
 }: SubmitStepProps) {
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
-  // Phase 16 Plan 06: correlation_id for the envelope. See readCorrelationId().
-  const [correlationId] = useState<string>(() => readCorrelationId());
+  // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
+  // the finalize-wizard request, so a copied envelope id matches server logs.
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
@@ -71,7 +56,7 @@ export function SubmitStep({
     setSubmitting(true);
 
     try {
-      const res = await fetch("/api/strategies/finalize-wizard", {
+      const res = await wizardFetch("/api/strategies/finalize-wizard", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

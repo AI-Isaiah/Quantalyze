@@ -8,7 +8,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -84,7 +84,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
   // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
   // the arithmetic running-cumulative curve, and thread the marker/basis fields.
   const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
     | null
     | undefined;
   const isComposite = dqf?.composite === true;
@@ -108,6 +108,15 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     if (!composite) return null;
     dailyReturns = composite.dailyReturns;
     buildOpts = composite.buildOpts;
+  } else {
+    // HARD-04 (#67) / Finding B: single-key strategies persist
+    // `insufficient_window` at the analytics_runner CAGR site too, but buildOpts
+    // was assigned ONLY on the composite arm, so `payload.dataQuality` stayed
+    // undefined and the FactsheetView :876 caveat never rendered single-key
+    // despite the server truth. Thread it through the ONE shared owner
+    // (`singleKeyDataQuality`) so this route and the discovery detail page can't
+    // diverge on the DQ opt (the composite "one path" lesson).
+    buildOpts = { ...(buildOpts ?? {}), dataQuality: singleKeyDataQuality(dqf) };
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an

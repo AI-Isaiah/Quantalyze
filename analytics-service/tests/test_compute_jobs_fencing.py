@@ -46,6 +46,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -688,15 +689,32 @@ def strategy_id(admin):
         pass
 
 
-def _claim_one(admin, worker_id: str) -> dict[str, Any] | None:
-    """Call claim_compute_jobs_with_priority and return the first row, or
-    None if nothing was claimed."""
+def _claim_one(
+    admin, worker_id: str, *, want_job_id: str
+) -> dict[str, Any] | None:
+    """Call claim_compute_jobs_with_priority and return OUR row.
+
+    Phase-97 CI-01: the claim RPC returns the batch head of the GLOBAL claim
+    queue, which — on the shared test Supabase project hit by interleaved
+    grouped DB tests and the concurrent e2e job — may be a FOREIGN pending row,
+    not the one this test seeded. ``want_job_id`` scopes the return to OUR job
+    (``r["id"] == want_job_id``), returning None when our job was not in the
+    batch (never a foreign row).
+
+    ``want_job_id`` is a REQUIRED keyword-only param on purpose (red-team F-1):
+    the old ``data[0]`` global-head fallback is DELETED, so a future caller that
+    omits ``want_job_id`` (e.g. a copy-pasted pre-97 ``_claim_one(admin, "w1")``
+    snippet) fails at call time with a TypeError instead of silently reverting
+    that site to the flaky foreign-row global-head behavior. That keeps the
+    fence-flake fix from being able to regress unnoticed offline.
+    """
     res = admin.rpc("claim_compute_jobs_with_priority", {
         "p_batch_size": 50,
         "p_worker_id": worker_id,
         "p_unified_backbone_active": False,
     }).execute()
-    return res.data[0] if res.data else None
+    rows = res.data or []
+    return next((r for r in rows if r["id"] == want_job_id), None)
 
 
 def test_claim_stamps_claim_token(admin, strategy_id):
@@ -710,7 +728,7 @@ def test_claim_stamps_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-claim-test")
+        claimed = _claim_one(admin, "p97-claim-test", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         assert claimed.get("claim_token") is not None, (
             "claim RPC must populate claim_token on every claim"
@@ -721,6 +739,143 @@ def test_claim_stamps_claim_token(admin, strategy_id):
         assert row["claim_token"] == claimed["claim_token"]
     finally:
         admin.table("compute_jobs").delete().eq("id", job_id).execute()
+
+
+# ----------------------------------------------------------------------------
+# Phase-97 CI-01 — decoy-foreign-row regression (the repro-gate for the
+# per-run-`job_id` claim scoping).
+# ----------------------------------------------------------------------------
+# PR #610 parallelizes this suite under `pytest -n auto --dist loadgroup` and
+# pins every shared-test-DB module to a single `xdist_group("shared_test_db")`.
+# But xdist_group SERIALIZES; it does NOT ISOLATE — the grouped fence/claim
+# tests still run against the ONE shared Supabase test project (also hit by the
+# concurrently-running e2e job). The old `_claim_one` returned `res.data[0]`,
+# assuming the head of the GLOBAL claim queue is OUR job. A single FOREIGN
+# pending compute_jobs row (from an interleaved grouped DB test, or the e2e
+# job) claimed into the same batch lands at `data[0]` and breaks every fence
+# assertion that reads `claimed["id"] == our_job_id`.
+#
+# These two tests pin WHY the scoping is load-bearing. The OFFLINE one is the
+# local repro-gate (no DB, no skip — the only signal that works without a live
+# CI run): it FAILS against the unscoped helper (no `want_job_id` kwarg →
+# TypeError) and PASSES once Task 2 threads the own-row filter through.
+
+
+class _StubExecute:
+    """Minimal stand-in for a supabase-py request builder's `.execute()`."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=list(self._rows))
+
+
+class _StubAdmin:
+    """Offline stub whose `claim_compute_jobs_with_priority` RPC returns a
+    fixed row list — no supabase import, runs everywhere."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def rpc(self, name: str, params: dict) -> _StubExecute:
+        assert name == "claim_compute_jobs_with_priority", (
+            f"decoy stub only models the claim RPC, got {name!r}"
+        )
+        return _StubExecute(self._rows)
+
+
+def test_claim_one_decoy_foreign_row_offline():
+    """OFFLINE repro-gate: a FOREIGN row at the head of the claim batch must
+    NOT be mistaken for our job. `_claim_one(..., want_job_id=own)` returns OUR
+    row even when a foreign row is `data[0]`; the legacy (unscoped) arm returns
+    the foreign row — pinning exactly why the scoping is load-bearing. When the
+    batch holds only foreign rows, the scoped call returns None, never a
+    foreign row.
+
+    This test PASSES against the scoped helper. It is the ONLY isolation signal
+    that runs without the live test Supabase project, and it also pins that the
+    global-head foot-gun is CLOSED (red-team F-1): `want_job_id` is required, so
+    a call omitting it can no longer silently revert a site to flaky behavior.
+    """
+    own_id = str(uuid.uuid4())
+    foreign_id = str(uuid.uuid4())
+    own_row = {"id": own_id, "claim_token": str(uuid.uuid4()), "status": "running"}
+    foreign_row = {
+        "id": foreign_id, "claim_token": str(uuid.uuid4()), "status": "running",
+    }
+
+    # Foreign row FIRST in the batch — exactly the ordering that broke data[0].
+    stub = _StubAdmin([foreign_row, own_row])
+
+    # Scoped arm: returns OUR row despite the foreign row at data[0].
+    claimed = _claim_one(stub, "decoy-offline", want_job_id=own_id)
+    assert claimed is not None and claimed["id"] == own_id, (
+        "scoped _claim_one must return OUR job even when a foreign row heads "
+        "the claim batch"
+    )
+
+    # The OLD global-head behavior (inlined, since the fallback arm is now
+    # DELETED): data[0] is the FOREIGN row — the exact defect the required
+    # scoping removes. Reproduce it locally so the scoped-vs-unscoped
+    # distinction stays visible in the decoy.
+    old_global_head = (
+        stub.rpc("claim_compute_jobs_with_priority", {}).execute().data[0]
+    )
+    assert old_global_head["id"] == foreign_id, (
+        "the pre-97 global-head arm returned data[0] (the foreign row) — the "
+        "global-queue defect the required scoping removes"
+    )
+
+    # Foot-gun CLOSED (red-team F-1): `want_job_id` is a required keyword-only
+    # param with no default, so a future caller that omits it (e.g. a
+    # copy-pasted pre-97 `_claim_one(admin, "w1")` snippet) fails at call time
+    # instead of silently reverting that site to flaky global-head behavior.
+    with pytest.raises(TypeError):
+        _claim_one(stub, "decoy-offline")  # type: ignore[call-arg]
+
+    # Only-foreign batch: the scoped call must return None, never a foreign row.
+    only_foreign = _StubAdmin([foreign_row])
+    assert _claim_one(only_foreign, "decoy-offline", want_job_id=own_id) is None, (
+        "scoped _claim_one must return None (not a foreign row) when our job "
+        "was not in the batch"
+    )
+
+
+def test_claim_one_decoy_foreign_row_live(admin, strategy_id):
+    """LIVE supplement (skips locally without the test Supabase project): seed
+    our own pending job, insert a decoy pending job on a SECOND throwaway
+    strategy (a distinct dedupe partition, so both are claimable in one batch),
+    then the scoped `_claim_one` returns OUR job with a non-NULL claim_token —
+    never the decoy."""
+    own_job = admin.table("compute_jobs").insert({
+        "strategy_id": strategy_id,
+        "kind": "sync_trades",
+        "status": "pending",
+        "priority": "normal",
+        "exchange": "okx",
+    }).execute().data[0]
+    own_job_id = own_job["id"]
+
+    # Decoy on a distinct partition — both rows are independently claimable.
+    decoy_strategy_id = _make_strategy(admin)
+    decoy_job_id = _insert_pending_sync_trades(admin, decoy_strategy_id)
+    try:
+        claimed = _claim_one(admin, "decoy-live", want_job_id=own_job_id)
+        assert claimed is not None and claimed["id"] == own_job_id, (
+            "scoped _claim_one must return OUR seeded job, not the decoy row"
+        )
+        assert claimed.get("claim_token") is not None
+    finally:
+        # Clean up BOTH jobs + the throwaway strategy. The claim RPC will have
+        # stamped the decoy `running` as a side effect (watchdog self-heals it,
+        # but delete anyway).
+        admin.table("compute_jobs").delete().eq("id", own_job_id).execute()
+        admin.table("compute_jobs").delete().eq("id", decoy_job_id).execute()
+        try:
+            admin.table("strategies").delete().eq("id", decoy_strategy_id).execute()
+        except Exception:
+            pass
 
 
 def test_mark_compute_job_failed_writes_error_kind(admin, strategy_id):
@@ -746,7 +901,7 @@ def test_mark_compute_job_failed_writes_error_kind(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "hotfix-mark-failed")
+        claimed = _claim_one(admin, "hotfix-mark-failed", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         token = claimed["claim_token"]
 
@@ -787,7 +942,7 @@ def test_reclaim_invalidates_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-w1")
+        claimed = _claim_one(admin, "p97-w1", want_job_id=job_id)
         assert claimed is not None
         token1 = claimed["claim_token"]
         assert token1 is not None
@@ -906,17 +1061,37 @@ def test_defer_compute_job_null_token_backcompat(admin, strategy_id):
 
 
 @pytest.mark.skip(reason=(
-    "P1 TODO — flaky httpx.ReadTimeout at ~120s under live-DB suite load. "
-    "Fence logic in mig 117 mark_compute_job_done verified correct by inspection: "
-    "UPDATE → NOT FOUND → SELECT → RAISE serialization_failure has no hang path. "
+    # (1) ROOT CAUSE — unchanged since the 2026-05-13 investigation:
+    "P1 TODO — flaky httpx.ReadTimeout at ~120s under live-DB suite load "
+    "(contention/latency on the shared test project qmnijlgmdhviwzwfyzlc when the "
+    "python CI job runs concurrently with the e2e job). Fence logic in mig 117 "
+    "mark_compute_job_done is verified correct by inspection: UPDATE → NOT FOUND → "
+    "SELECT → RAISE serialization_failure has no hang path — the timeout is "
+    "infrastructural, NOT a fence failure. "
+    # (2) RE-JUSTIFIED 2026-07 (Phase 97 / v1.9.1 CI-02.1) — deferral, NOT re-enable:
+    "Re-justified 2026-07-12 (Phase 97 / CI-02.1): the Phase-97 per-run-job_id claim "
+    "scoping (CI-01, absorbing PR #610) fixed a DIFFERENT failure mode — foreign-row "
+    "isolation under xdist parallelism — and does NOT address this ReadTimeout "
+    "contention flake, so CI-01 does not make these safe to re-enable. Re-enabling "
+    "before the v1.9.1 ship was declined because stabilization is only demonstrable "
+    "on live CI (these fence tests run only against the shared test project), so the "
+    "milestone→main ship PR itself would have been the first canary — an unacceptable "
+    "gamble on the ship PR's python check. "
+    # (3) CONTRACT INDEPENDENTLY PINNED (this test is supplementary live coverage):
     "989 other tests pass on the same admin client incl. 9/12 fence tests "
-    "(claim, reclaim, token rotation, unexpected-status raise, idempotent already-done). "
-    "Mocked equivalents (_is_serialization_failure classifier, LATE_MARK_IGNORED contract, "
-    "dispatch_tick token threading) also pass. Likely test Supabase project load / "
-    "PostgREST connection pool state under the newly-enabled live suite (drain + "
-    "transition + fence ~ 30 tests added 2026-05-13). Re-enable after either "
-    "(a) bumping postgrest_client_timeout, (b) sharding the live suite, or "
-    "(c) investigating server-side latency on the test project. See TODOS.md."
+    "(claim, reclaim, token rotation, unexpected-status raise, idempotent already-done); "
+    "mocked equivalents (_is_serialization_failure classifier, LATE_MARK_IGNORED "
+    "contract, dispatch_tick token threading) pass; and the migration-117 self-verify "
+    "DO block pins the fence server-side on every prod + test-DB apply. "
+    # (4) SANCTIONED POST-SHIP RE-ENABLE RECIPE:
+    "Re-enable (post-ship) by removing this skip and wrapping the contention-prone RPCs "
+    "(reset_stalled_compute_jobs and the late mark_compute_job_done / "
+    "mark_compute_job_failed calls) in the existing _rpc_retry_timeout guard: a genuine "
+    "timeout becomes pytest.skip (a BaseException, so the enclosing `except Exception` "
+    "cannot swallow it) while the asserted serialization_failure re-raises immediately "
+    "and still reaches the assertion. Then canary on a NON-ship PR's python check. "
+    "The 3 tests' _claim_one sites are already own-job_id scoped (97-01), so isolation "
+    "is not a blocker for the re-enable. See TODOS.md (PR #149 / L165 tracker)."
 ))
 def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, strategy_id):
     """The headline P97 / G12.A.2 regression. Sequence:
@@ -938,7 +1113,7 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
     job_id = job["id"]
     try:
         # W1 claim
-        w1 = _claim_one(admin, "p97-w1")
+        w1 = _claim_one(admin, "p97-w1", want_job_id=job_id)
         assert w1 is not None and w1["id"] == job_id
         token1 = w1["claim_token"]
         assert token1 is not None
@@ -952,7 +1127,7 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
         }).execute()
 
         # W2 claim
-        w2 = _claim_one(admin, "p97-w2")
+        w2 = _claim_one(admin, "p97-w2", want_job_id=job_id)
         assert w2 is not None and w2["id"] == job_id
         token2 = w2["claim_token"]
         assert token2 is not None
@@ -1006,8 +1181,12 @@ def test_late_mark_done_with_stale_token_raises_serialization_failure(admin, str
 
 
 @pytest.mark.skip(reason=(
-    "P1 TODO — same flaky timeout pattern as test_late_mark_done_with_stale_token. "
-    "See that test's skip reason + TODOS.md for the full investigation."
+    "P1 TODO — same flaky httpx.ReadTimeout pattern as "
+    "test_late_mark_done_with_stale_token. Re-justified 2026-07-12 (Phase 97 / "
+    "CI-02.1) on the same grounds: CI-01's per-run-job_id scoping addresses a "
+    "different (isolation) root cause, not this timeout; re-enable via the "
+    "_rpc_retry_timeout guard post-ship. See that test's skip reason + TODOS.md "
+    "for the full investigation and re-enable recipe."
 ))
 def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, strategy_id):
     """Same contract as mark_done — mark_failed must reject the prior
@@ -1021,7 +1200,7 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
     }).execute().data[0]
     job_id = job["id"]
     try:
-        w1 = _claim_one(admin, "p97-w1-fail")
+        w1 = _claim_one(admin, "p97-w1-fail", want_job_id=job_id)
         token1 = w1["claim_token"]
 
         admin.table("compute_jobs").update({
@@ -1031,7 +1210,7 @@ def test_late_mark_failed_with_stale_token_raises_serialization_failure(admin, s
             "p_stale_threshold": "1 second",
         }).execute()
 
-        w2 = _claim_one(admin, "p97-w2-fail")
+        w2 = _claim_one(admin, "p97-w2-fail", want_job_id=job_id)
         token2 = w2["claim_token"]
         assert token2 != token1
 
@@ -1079,7 +1258,11 @@ def test_mark_done_without_token_raises_strict(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        _claim_one(admin, "p97-strict")
+        claimed = _claim_one(admin, "p97-strict", want_job_id=job_id)
+        assert claimed is not None and claimed["id"] == job_id, (
+            "p97-strict: our seeded job must be the one claimed — the later "
+            "status=='running' assertion silently depends on it"
+        )
         raised = False
         try:
             admin.rpc("mark_compute_job_done", {"p_job_id": job_id}).execute()
@@ -1379,7 +1562,7 @@ def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
     }).execute().data[0]
     job_id = job["id"]
     try:
-        claimed = _claim_one(admin, "p97-w1-perkind")
+        claimed = _claim_one(admin, "p97-w1-perkind", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         token1 = claimed["claim_token"]
         assert token1 is not None
@@ -1427,8 +1610,12 @@ def test_reclaim_per_kind_override_invalidates_claim_token(admin, strategy_id):
 
 
 @pytest.mark.skip(reason=(
-    "P1 TODO — same flaky timeout pattern as test_late_mark_done_with_stale_token. "
-    "See that test's skip reason + TODOS.md for the full investigation."
+    "P1 TODO — same flaky httpx.ReadTimeout pattern as "
+    "test_late_mark_done_with_stale_token. Re-justified 2026-07-12 (Phase 97 / "
+    "CI-02.1) on the same grounds: CI-01's per-run-job_id scoping addresses a "
+    "different (isolation) root cause, not this timeout; re-enable via the "
+    "_rpc_retry_timeout guard post-ship. See that test's skip reason + TODOS.md "
+    "for the full investigation and re-enable recipe."
 ))
 def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, strategy_id):
     """The fence must engage even on the already-done branch. Sequence:
@@ -1456,7 +1643,7 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
     job_id = job["id"]
     try:
         # W1 claim
-        w1 = _claim_one(admin, "p97-w1-w2-faster")
+        w1 = _claim_one(admin, "p97-w1-w2-faster", want_job_id=job_id)
         assert w1 is not None and w1["id"] == job_id
         token1 = w1["claim_token"]
         assert token1 is not None
@@ -1470,7 +1657,7 @@ def test_late_mark_done_after_w2_completed_raises_serialization_failure(admin, s
         }).execute()
 
         # W2 claim → token2
-        w2 = _claim_one(admin, "p97-w2-w2-faster")
+        w2 = _claim_one(admin, "p97-w2-w2-faster", want_job_id=job_id)
         assert w2 is not None and w2["id"] == job_id
         token2 = w2["claim_token"]
         assert token2 != token1
@@ -1704,13 +1891,19 @@ def test_claim_includes_failed_retry_when_backoff_elapsed(admin):
         job_id = row["id"]
 
         claimed = _claim_with_priority(admin, worker_id="g21-001-worker")
-        assert len(claimed) == 1, (
-            f"PR #82 regression: expected exactly 1 row claimed, got "
-            f"{len(claimed)}. failed_retry rows whose backoff has elapsed "
-            "must enter the claim pool — pre-089 they were wedged behind "
-            "the status='pending' filter."
+        # Phase-97 CI-01: scope to OUR seeded row before the count assertion —
+        # a foreign pending row from an interleaved grouped DB test (or the
+        # concurrent e2e job) could otherwise inflate len(claimed) and break
+        # the exact-1 contract. The intent is unchanged: our failed_retry row
+        # with elapsed backoff MUST enter the claim pool.
+        ours = [c for c in claimed if c["id"] == job_id]
+        assert len(ours) == 1, (
+            f"PR #82 regression: expected exactly our 1 seeded row claimed, "
+            f"got {len(ours)} of ours (batch total {len(claimed)}). "
+            "failed_retry rows whose backoff has elapsed must enter the claim "
+            "pool — pre-089 they were wedged behind the status='pending' filter."
         )
-        assert claimed[0]["id"] == job_id
+        assert ours[0]["id"] == job_id
 
         # Verify the row flipped to running (the canonical claim post-state).
         post = (
@@ -2552,7 +2745,7 @@ def test_advance_sync_cursor_fence_owned_orphan_backcompat(admin, strategy_id):
         }).execute())
 
     try:
-        claimed = _claim_one(admin, "advance-fence-test")
+        claimed = _claim_one(admin, "advance-fence-test", want_job_id=job_id)
         assert claimed is not None and claimed["id"] == job_id
         token = claimed["claim_token"]
         assert token is not None

@@ -27,6 +27,7 @@ import {
   saveWizardState,
   type WizardStepKey,
 } from "@/lib/wizard/localStorage";
+import { wizardFetch } from "@/lib/wizard/wizard-correlation";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
 
@@ -76,6 +77,19 @@ const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4 | 5> = {
   csv_review: 4,
   csv_submit: 5,
 };
+
+/**
+ * Phase 94 / WIZ-04: the ordered API-branch step keys the clickable-stepper
+ * forward-navigability check walks. Only the API branch is clickable this
+ * phase (composite-wizard scope); the CSV branch stays inert.
+ */
+const API_STEP_ORDER: WizardStepKey[] = [
+  "connect_key",
+  "sync_preview",
+  "metadata",
+  "review",
+  "submit",
+];
 
 /**
  * Phase 15 fix: debounce window for the CSV strategy-name autosave (below).
@@ -144,6 +158,17 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
   const [syncSnapshot, setSyncSnapshot] = useState<SyncPreviewSnapshot | null>(
     null,
   );
+  // Phase 94.1 / F2 — MultiKeyConnectStep reports whether connect_key holds
+  // UNSAVED panel/credential edits (a new/edited key not yet flushed through
+  // its Continue → set-members POST). While dirty, connect_key counts as
+  // INCOMPLETE so the clickable stepper cannot jump forward past it
+  // (`stepCompleted('connect_key')` below). This closes the hole where a user
+  // returns to connect_key after review, edits a panel, then clicks the
+  // review/submit stepper cell (bypassing Continue) — the edits would be
+  // silently dropped and the strategy would finalize with the OLD members +
+  // OLD snapshot. Backward navigation stays free. Reset to false whenever the
+  // step unmounts (the child's cleanup) so it never lingers on a later step.
+  const [connectKeyDirty, setConnectKeyDirty] = useState<boolean>(false);
   const [metadataDraft, setMetadataDraft] = useState<MetadataDraft | null>(
     initialDraft
       ? {
@@ -392,10 +417,79 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     [wizardSessionId],
   );
 
+  // Phase 94 / WIZ-04 — clickable free stepper (API branch only).
+  //
+  // Completion predicate mirrors the render guards exactly (connect_key ⇔
+  // strategyId, sync_preview ⇔ syncSnapshot, metadata/review ⇔ metadataDraft)
+  // so free navigation can never reach a step whose data prerequisites are
+  // absent — the review/submit guards below (strategyId && syncSnapshot &&
+  // metadataDraft) would otherwise render a blank (research Pitfall 4).
+  const stepCompleted = useCallback(
+    (key: WizardStepKey): boolean => {
+      switch (key) {
+        case "connect_key":
+          // Phase 94.1 / F2 — a strategy draft exists AND connect_key has no
+          // uncommitted panel/credential edits. The `!connectKeyDirty` clause
+          // blocks a forward stepper jump while the user is mid-edit on
+          // connect_key (unsaved edits would otherwise be dropped, finalizing
+          // stale members). Backward nav is unaffected (it never consults
+          // completion — see stepNavigable's `target < current` fast-path).
+          return strategyId != null && !connectKeyDirty;
+        case "sync_preview":
+          return syncSnapshot != null;
+        case "metadata":
+        case "review":
+          return metadataDraft != null;
+        // submit is never pre-completed; CSV keys are out of scope this phase.
+        default:
+          return false;
+      }
+    },
+    [strategyId, syncSnapshot, metadataDraft, connectKeyDirty],
+  );
+
+  const stepNavigable = useCallback(
+    (key: WizardStepKey): boolean => {
+      // The active step is a no-op (not navigable).
+      if (key === step) return false;
+      const target = STEP_INDEX[key];
+      const current = STEP_INDEX[step];
+      // Backward is always allowed (state persists ⇒ no rework on return).
+      if (target < current) return true;
+      // Forward is allowed only when every lower-ordinal step is complete —
+      // this blocks skipping past an incomplete step into a guard-failed blank.
+      return API_STEP_ORDER.every(
+        (s) => STEP_INDEX[s] >= target || stepCompleted(s),
+      );
+    },
+    [step, stepCompleted],
+  );
+
+  // Clicking a step navigates and persists the resume pointer — nothing else.
+  // No state clearing, no session regen: syncSnapshot/metadataDraft stay intact
+  // so a backward-then-forward round-trip redoes no work (T-94-16).
+  const handleStepSelect = useCallback(
+    (key: WizardStepKey) => {
+      setStep(key);
+      persistPointer(key, strategyId);
+    },
+    [persistPointer, strategyId],
+  );
+
   const handleConnectSuccess = useCallback(
     (result: ConnectKeySuccess) => {
       setStrategyId(result.strategyId);
       setApiKeyId(result.apiKeyId);
+      // Phase 94.1 / F1 — a (re)submitted key set invalidates any cached
+      // crawl/stitch snapshot. On a first-time connect syncSnapshot is already
+      // null (no-op); on a re-continue after a back-nav key/window CHANGE it
+      // forces SyncPreviewStep past the cachedSnapshot short-circuit
+      // (SyncPreviewStep.tsx: `if (cachedSnapshot) …`) into the DB
+      // freshness/marker probe, so the factsheet reflects the CURRENT member
+      // set — never a stale snapshot whose provenance ({A,B}) no longer matches
+      // the persisted keys ({A,B,C}). WIZ-05 durability still applies from the
+      // persisted COMPLETE composite row, not the discarded in-memory snapshot.
+      setSyncSnapshot(null);
       setStep("sync_preview");
       persistPointer("sync_preview", result.strategyId);
       trackForQuantsEventClient("wizard_step_complete_1", {
@@ -483,7 +577,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     });
 
     try {
-      const res = await fetch(`/api/strategies/draft/${strategyId}`, {
+      const res = await wizardFetch(`/api/strategies/draft/${strategyId}`, {
         method: "DELETE",
       });
       // NEW-C14-08: only reset state on confirmed delete (2xx) or
@@ -568,6 +662,12 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         toastKey={toastKey}
         steps={source === "csv" ? WIZARD_STEPS_CSV : undefined}
         source={source}
+        // Phase 94 / WIZ-04: clickable stepper on the API/composite branch
+        // only. The CSV branch passes undefined for both props, so WizardChrome
+        // renders its inert <div> cells byte-identically (WIZ-04 scope is the
+        // composite wizard; CSV clickability is out of this phase).
+        onStepSelect={source === "api" ? handleStepSelect : undefined}
+        stepNavigable={source === "api" ? stepNavigable : undefined}
       >
         {sessionExpired && (
           <div className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-caption text-text-secondary">
@@ -635,6 +735,9 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
               <MultiKeyConnectStep
                 wizardSessionId={wizardSessionId}
                 onSuccess={handleConnectSuccess}
+                draftStrategyId={strategyId}
+                // Phase 94.1 / F2 — dirty signal gates forward stepper jumps.
+                onDirtyChange={setConnectKeyDirty}
               />
             )}
 
@@ -643,7 +746,23 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 strategyId={strategyId}
                 apiKeyId={apiKeyId}
                 wizardSessionId={wizardSessionId}
+                // WIZ-05: thread the completed snapshot WizardClient already
+                // captured (handleSyncComplete) so a back-nav to sync_preview
+                // renders the cached crawl/stitch result instead of re-kicking.
+                cachedSnapshot={syncSnapshot}
                 onComplete={handleSyncComplete}
+                onReviewKeys={() => {
+                  // WIZ-03: composite "Review your keys" is NON-destructive —
+                  // it is a pure step transition back to connect_key. Unlike
+                  // onTryAnotherKey it does NOT handleDeleteDraft (which would
+                  // cascade away every strategy_keys member) and does NOT
+                  // regenerate wizardSessionId (the F6 duplicate-submit fence is
+                  // only re-armed on the destructive discard-the-key path). The
+                  // draft + its members + the session all survive; the
+                  // MultiKeyConnectStep rehydrates the stored keys via WIZ-02.
+                  setStep("connect_key");
+                  persistPointer("connect_key", strategyId);
+                }}
                 onTryAnotherKey={() => {
                   setStep("connect_key");
                   // Regenerate the idempotency token OPTIMISTICALLY (before the

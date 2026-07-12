@@ -2,10 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260710180000_wizard_composite.sql
--- --------------------------------------------------------------------------
--- FUNCTION 2: set_wizard_composite_members — wholesale member write.
--- --------------------------------------------------------------------------
+-- source migration: 20260712120000_wizard_composite_members_invalidate_analytics.sql
 CREATE OR REPLACE FUNCTION public.set_wizard_composite_members(
   p_user_id UUID,
   p_strategy_id UUID,
@@ -21,6 +18,8 @@ DECLARE
   v_auth_uid UUID := auth.uid();
   v_api_key_id UUID;
   v_count INTEGER;
+  v_existing_sig TEXT[];
+  v_incoming_sig TEXT[];
 BEGIN
   IF v_auth_uid IS NULL THEN
     RAISE EXCEPTION 'set_wizard_composite_members called without an auth session'
@@ -33,15 +32,30 @@ BEGIN
       USING ERRCODE = 'insufficient_privilege';
   END IF;
 
-  -- Ownership + composite-draft guard in ONE least-disclosure lookup: filtering
-  -- by user_id means "not found" and "not owned" are indistinguishable to the
-  -- caller (no existence oracle). A single-key strategy (api_key_id NOT NULL)
-  -- can NEVER acquire members through this fn (protects composite-detection).
+  -- Ownership + composite-DRAFT guard in ONE least-disclosure lookup: filtering
+  -- by user_id AND status='draft' means "not found", "not owned", and
+  -- "not a draft (already published/pending_review/archived)" are ALL
+  -- indistinguishable to the caller (no existence oracle, uniform 42501).
+  -- A single-key strategy (api_key_id NOT NULL) can NEVER acquire members
+  -- through this fn (protects composite-detection).
+  --
+  -- RT2-FINDING-1: the status='draft' predicate is LOAD-BEARING, not cosmetic.
+  -- The fn's name/comments/error all say "composite DRAFT", but a PUBLISHED
+  -- composite ALSO keeps api_key_id NULL, so without this predicate an owner
+  -- POSTing /api/strategies/composite/set-members for their OWN published
+  -- composite would wholesale-rewrite strategy_keys AND (via the RT-FINDING-1
+  -- invalidation below) flip the published strategy_analytics.computation_status
+  -- complete -> pending, degrading the live public factsheet to the computing
+  -- placeholder until a re-stitch re-attests over the post-review member set —
+  -- with zero admin visibility. The wizard set-members flow ONLY ever targets a
+  -- draft (the "Continue" handoff runs strictly before finalize_wizard_strategy
+  -- moves the row off 'draft'), so gating to draft breaks no legitimate caller.
   SELECT api_key_id
     INTO v_api_key_id
     FROM strategies
    WHERE id = p_strategy_id
-     AND user_id = p_user_id;
+     AND user_id = p_user_id
+     AND status = 'draft';
   IF NOT FOUND THEN
     RAISE EXCEPTION 'set_wizard_composite_members: no composite draft for the caller'
       USING ERRCODE = 'insufficient_privilege';
@@ -49,6 +63,35 @@ BEGIN
   IF v_api_key_id IS NOT NULL THEN
     RAISE EXCEPTION 'set_wizard_composite_members: target is a single-key strategy, not a composite draft';
   END IF;
+
+  -- RT-FINDING-1: capture the EXISTING member signature BEFORE the wholesale
+  -- delete so a genuine change vs a no-op re-Continue can be distinguished. The
+  -- signature is order-independent over the stitch-determining tuple
+  -- (api_key_id, window_start, window_end) — seq is derived, not an input, so a
+  -- pure reorder that yields the same tuple SET is NOT a stitch-affecting change.
+  -- window_end NULL (open-ended/live) normalizes to '' on both sides.
+  SELECT array_agg(sig ORDER BY sig)
+    INTO v_existing_sig
+    FROM (
+      SELECT sk.api_key_id::text || '|' || sk.window_start::text || '|'
+             || COALESCE(sk.window_end::text, '')
+        FROM strategy_keys sk
+       WHERE sk.strategy_id = p_strategy_id
+    ) AS e(sig);
+
+  SELECT array_agg(sig ORDER BY sig)
+    INTO v_incoming_sig
+    FROM (
+      -- Normalize the incoming api_key_id via ::uuid::text so it is CANONICAL
+      -- (lowercase, brace-free) and symmetric with the existing side's
+      -- sk.api_key_id::text. A non-canonical client UUID (uppercase/braces)
+      -- would otherwise produce a mismatched signature → a false "changed" →
+      -- an unnecessary re-stitch, defeating the WIZ-05 no-op latency win.
+      SELECT (elem->>'api_key_id')::uuid::text || '|'
+             || (elem->>'window_start')::date::text || '|'
+             || COALESCE((elem->>'window_end')::date::text, '')
+        FROM jsonb_array_elements(p_members) AS elem
+    ) AS i(sig);
 
   -- WHOLESALE rewrite: DELETE all members, then INSERT with seq derived from
   -- window_start ASC order (1-indexed). No in-place seq UPDATE ⇒ no transient
@@ -73,6 +116,23 @@ BEGIN
   FROM jsonb_array_elements(p_members) AS elem;
 
   GET DIAGNOSTICS v_count = ROW_COUNT;
+
+  -- RT-FINDING-1: when the member set ACTUALLY changed, invalidate a stale
+  -- COMPLETED composite analytics row so the wizard re-stitches instead of
+  -- short-circuiting to the old metrics. Scoped to completed/idle rows only
+  -- (never a 'computing' row the worker owns) — see the writer-discipline
+  -- justification in the migration header. An identical re-Continue skips this
+  -- (WIZ-05 no-op latency invariant). IS DISTINCT FROM handles the NULL
+  -- (no prior members) case as "changed" — harmless (no completed row to reset
+  -- on a first write, and the kickoff derives it fresh anyway).
+  IF v_existing_sig IS DISTINCT FROM v_incoming_sig THEN
+    UPDATE strategy_analytics
+       SET computation_status = 'pending',
+           computation_error = NULL
+     WHERE strategy_id = p_strategy_id
+       AND computation_status IN ('complete', 'complete_with_warnings');
+  END IF;
+
   RETURN v_count;
 END;
 $$;

@@ -2795,6 +2795,44 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
     {"deribit", "binance", "okx", "bybit"}
 )
 
+# HARD-05 (Phase 93): the ccxt crypto venues a composite member can declare that
+# this phase does NOT yet reconstruct natively (Plan 93-04 attaches the honest
+# reconstruction attempt). A member on one of these venues is NOT a hard failure:
+# it DEGRADES out of the stitch with a machine-readable data-quality reason
+# (`venue_reconstruction_unavailable`) the user sees, rather than killing the whole
+# composite (the Phase-86 Deribit-only fence is lifted). Derived from
+# _COMPOSITE_CRYPTO_VENUES so the two sets can never drift.
+_COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {"deribit"}
+
+
+class _CcxtMemberDegrade(Exception):
+    """HARD-05 (Phase 93.1 hardening): a ccxt composite member that reconstructed
+    WITHOUT raising a structural ledger error but is nonetheless NOT honestly
+    representable in the stitch — it must DEGRADE (visible DQ reason) rather than
+    join. Carries a fixed machine-readable ``reason`` enum literal (leak-safe: no
+    exception text / USD / NAV interpolated), routed to the SAME degrade channel as
+    the structural `reconstruction_failed` path. Two cases (mirroring the single-key
+    derive path's guards, which the composite ccxt arm previously OMITTED):
+
+      * ``insufficient_history`` — the reconstructed series has < 2 interpretable
+        (non-NaN) days (a brand-new / inactive account, or a series entirely NaN'd
+        by the DQ-02 terminus). ``run_derive_broker_dailies_job`` short-circuits this
+        at :2558; the composite arm let an EMPTY series reach ``clip_to_window`` →
+        ``TypeError`` → 'unknown' retry-to-failed_final on the whole (healthy)
+        composite, OR a 0-day member joining 'complete' with no caveat.
+      * ``realized_stream_unavailable`` — the realized/closed-PnL trade stream is
+        EMPTY while funding rows are PRESENT. A real perp trader has trades; an
+        empty-realized + funding-present member is the Bybit-INVERSE gap (closed-PnL
+        is fetched category='linear' only, so inverse realized is invisible) — it
+        would reconstruct a fabricated funding-only track (100% of trading PnL
+        absent). Degrade honestly instead of shipping fabrication (HARD-05
+        OR-criterion). Full inverse SUPPORT is deferred (D-2).
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
 # Phase 86 / Finding 8 — a composite fans out over its members with (worst case,
 # when MTM is admissible) TWO sequential exchange crawls per member. The
 # stitch_composite handler runs under a FIXED TIMEOUT_PER_KIND["stitch_composite"]
@@ -2809,6 +2847,14 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
 # member count plumbed into the dispatch-level wait_for AND the main_worker
 # watchdog stale threshold — out of scope for this fail-safe).
 _COMPOSITE_PER_CRAWL_SECONDS = 120.0  # ~90-day Deribit native backfill, conservative
+
+# SF-2b — after this many CONSECUTIVE set_compute_job_progress write failures
+# within a single stitch, escalate from a per-boundary warning to error-level so
+# a PERSISTENT heartbeat-write outage (claim-token drift, permission regression,
+# bad deploy) is visible rather than buried in easily-missed warnings. A single
+# transient blip self-heals on the next boundary and stays at warning. Matches
+# the frontend MAX_CONSECUTIVE_POLL_ERRORS=3 convention.
+_MEMBER_PROGRESS_MAX_CONSECUTIVE_FAILURES = 3
 
 
 def _composite_max_members() -> int:
@@ -3101,21 +3147,332 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         )
         return returns, bool(completeness.has_option_activity), dict(member_meta)
 
-    async def _reconstruct_all(basis: str) -> tuple[
+    async def _reconstruct_ccxt_member(
+        ctx: Any, venue: str
+    ) -> tuple[pd.Series, bool, dict[str, Any]]:
+        """HARD-05 (Plan 93-04) — one ccxt (binance/okx/bybit) member's dense
+        daily-return series reconstructed HONESTLY through the SAME derive-path
+        primitives the single-key broker path uses (``run_derive_broker_dailies_
+        job``, :2318-2560). NOT a fork: the math lives in the reused primitives
+        (``combine_realized_and_funding`` + ``ccxt_rows_to_dated_flows`` + the
+        evidence-gated flow-coverage terminus), so the reconstructed series is
+        byte-consistent with the derive semantics (research A3 / SC-4). The derive
+        path (``run_derive_broker_dailies_job``) is DELIBERATELY not refactored —
+        composing the shared primitives here avoids extracting an orchestrator
+        while keeping the MATH single-sourced (research Pitfall 3).
+
+        Returns ``(returns, has_option_activity=False, meta)`` in the SAME shape as
+        ``_reconstruct_deribit``. ``has_option_activity=False`` keeps the MTM gate
+        OFF: ``mark_to_market_available`` already gates OFF any non-native (ccxt)
+        venue, so the MTM second pass can never meaningfully request a ccxt member
+        (it ships cash-only — no options book signal).
+
+        Plan-checker Note 2: the derive primitives are imported FUNCTION-LOCALLY
+        inside ``run_derive_broker_dailies_job`` (NOT in this scope), so they are
+        re-imported here. ``fetch_all_trades`` is a module global and
+        ``_resolve_ccxt_flow_price_index`` is module-level — both referenced
+        directly.
+        """
+        from services.broker_dailies import combine_realized_and_funding
+        from services.nav_twr import (
+            DUST_NAV_FLOOR,
+            apply_flow_coverage_terminus,
+            flow_coverage_gap_evidence,
+            flow_coverage_terminus_day,
+            flow_retention_floor,
+            negative_nav_guard_pre_terminus,
+        )
+        from services.exchange import fetch_account_equity_and_upnl_usd
+        from services.ccxt_flow_fetch import fetch_ccxt_transfers
+        from services.ccxt_flows import ccxt_rows_to_dated_flows
+        from services.funding_fetch import (
+            fetch_funding_binance,
+            fetch_funding_bybit,
+            fetch_funding_okx,
+        )
+
+        # Current total equity anchor + the venue-gated companion open-uPnL wedge
+        # (OKX totalEq; Bybit/Binance realized-basis walletBalance → structural 0.0).
+        equity, balance_error, open_unrealized_usd, upnl_unreadable = (
+            await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
+        )
+        # since_ms=None ⇒ ENTIRE account history (mirrors the derive block).
+        realized = await fetch_all_trades(ctx.exchange, since_ms=None)
+        # Funding label is a log/match-key only (it never scopes the exchange call);
+        # strategy_id is a stable label and the rows are consumed IN-MEMORY only
+        # (fed straight to combine — NEVER upserted per-key here).
+        if venue == "binance":
+            funding = await fetch_funding_binance(ctx.exchange, strategy_id, None)
+        elif venue == "okx":
+            funding = await fetch_funding_okx(ctx.exchange, strategy_id, None)
+        elif venue == "bybit":
+            funding = await fetch_funding_bybit(ctx.exchange, strategy_id, None)
+        else:  # pragma: no cover — routing only ever passes the 3 ccxt venues
+            raise NavReconstructionError(
+                f"unsupported ccxt composite venue {venue!r}"
+            )
+
+        # FIX B (Phase 93.1 red-team HIGH): realized-empty + funding-present is the
+        # honest-reconstruction-impossible signal. `fetch_all_trades` fetches closed
+        # PnL as category='linear' only (exchange.py:1576), so a Bybit-INVERSE perp
+        # member's realized stream comes back EMPTY while its funding settlements do
+        # NOT — combine would then fabricate a ~1e-8/day funding-only track (BTC
+        # funding summed as USD over heuristic capital) with 100% of trading PnL
+        # missing, flagged only by `used_heuristic_capital`. A real perp trader has
+        # trades: an empty realized stream alongside present funding means realized
+        # could not be fetched, not that the account never traded. DEGRADE visibly
+        # rather than ship the fabrication (full inverse support is deferred — D-2).
+        if not realized and funding:
+            raise _CcxtMemberDegrade("realized_stream_unavailable")
+
+        # Bound the flow lookback to the venue's deposit-history retention via the
+        # SHARED normalized floor (LOW-2 — the SAME source the DQ-02 terminus gate
+        # uses, so the two "retention" definitions can never drift).
+        _now_utc = datetime.now(timezone.utc)
+        now_ms = int(_now_utc.timestamp() * 1000)
+        _retention_floor = flow_retention_floor(venue, _now_utc)
+        _flow_since_ms = (
+            0
+            if _retention_floor is None
+            else max(0, int(_retention_floor.timestamp() * 1000))
+        )
+        _deposits = await fetch_ccxt_transfers(
+            ctx.exchange, "deposits", _flow_since_ms, now_ms
+        )
+        _withdrawals = await fetch_ccxt_transfers(
+            ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+        )
+        _flow_rows = list(_deposits) + list(_withdrawals)
+        _price_index = await _resolve_ccxt_flow_price_index(
+            ctx.exchange, venue, ctx.supabase, _flow_rows
+        )
+        # ccxt_rows_to_dated_flows raises NavReconstructionError (structural) on an
+        # unpriceable non-stable flow — the routing catches it and DEGRADES.
+        external_flows = ccxt_rows_to_dated_flows(
+            _flow_rows, venue=venue, price_index=_price_index
+        )
+
+        # FLOW-04 noise guard (Pitfall 5 / T-77-08): the open-uPnL wedge is only
+        # trustworthy relative to a trustworthy anchor. Force it to 0.0 on a
+        # balance-error read, a missing equity, or a dust base.
+        if balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR:
+            open_unrealized_usd = 0.0
+
+        returns, meta = combine_realized_and_funding(
+            realized,
+            funding,
+            account_balance=equity,
+            balance_error=balance_error,
+            external_flows=external_flows,
+            open_unrealized_usd=open_unrealized_usd,
+        )
+
+        # MUST-2: an unreadable open-uPnL field on a TRUSTWORTHY anchor →
+        # unrealized_pnl_unreadable (LOUD complete_with_warnings), so a wrong/renamed
+        # field name never silently coalesces to a flat book. Gated on a healthy
+        # anchor (the wedge is already force-zeroed on a dust/heuristic base above).
+        if upnl_unreadable and not (
+            balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR
+        ):
+            meta["unrealized_pnl_unreadable"] = True
+
+        # DQ-02 (CRITICAL-1) evidence-gated flow-coverage terminus. When the return
+        # window extends BEFORE the venue's deposit-history retention, the earliest
+        # capital moves are UNFETCHABLE — segment ONLY on EVIDENCE of a real
+        # truncation (a pre-terminus negative-NAV guard OR a fetched flow at the
+        # retention floor); a flow-less account with clean NAV keeps FULL history.
+        if not returns.empty:
+            _flow_coverage_start_day = flow_coverage_terminus_day(
+                venue,
+                first_return_day=returns.index[0],
+                now_utc=datetime.now(timezone.utc).replace(tzinfo=None),
+            )
+            if _flow_coverage_start_day is not None:
+                _guard_pre_terminus = negative_nav_guard_pre_terminus(
+                    returns,
+                    terminus=_flow_coverage_start_day,
+                    negative_nav_guard_fired=bool(meta.get("negative_nav_guard")),
+                )
+                if not flow_coverage_gap_evidence(
+                    external_flows=external_flows,
+                    retention_floor=_retention_floor,
+                    pre_terminus_nav_guard_fired=_guard_pre_terminus,
+                ):
+                    _flow_coverage_start_day = None
+            returns, _coverage_flags = apply_flow_coverage_terminus(
+                returns, _flow_coverage_start_day
+            )
+            if _coverage_flags.get("flow_coverage_incomplete"):
+                meta["flow_coverage_incomplete"] = True
+
+        # FIX A (Phase 93.1 red-team HIGH): mirror the single-key derive path's
+        # terminal insufficient-history short-circuit (run_derive_broker_dailies_job
+        # :2558) the composite ccxt arm previously OMITTED. Gate on INTERPRETABLE
+        # (non-NaN) days — after the DQ-02 terminus a thin series may be all-NaN or
+        # < 2 real days. Raising HERE guarantees an empty/thin series NEVER reaches
+        # `clip_to_window` at the append site (whose `>=` on an empty RangeIndex
+        # raises TypeError → 'unknown' retry-to-failed_final on the whole composite),
+        # and never joins the stitch as a silent 0-day 'complete' member. DEGRADE it.
+        if returns.empty or int(returns.notna().sum()) < 2:
+            raise _CcxtMemberDegrade("insufficient_history")
+
+        # Cash basis only — has_option_activity is False for ccxt (no options book
+        # signal; mark_to_market_available gates OFF non-native venues).
+        return returns, False, dict(meta)
+
+    async def _reconstruct_all(
+        basis: str, report_progress: bool = False
+    ) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
-        list[dict[str, Any]],
+        list[dict[str, Any]], list[dict[str, Any]],
     ] | DispatchResult:
         """Fan out over every member for ``basis``: preflight (worker-only
         decrypt) → reconstruct → clip. Returns the clipped (seq, series) list +
         per-member MTM signals + venues + per-member NavTWRMeta guard dicts
-        (Finding 3), or a DispatchResult on a preflight FAILED/DEFERRED or a
-        typed permanent / transient reconstruction error."""
+        (Finding 3) + the DEGRADED members (HARD-05: ccxt members skipped from the
+        stitch with a machine-readable DQ reason), or a DispatchResult on a
+        preflight FAILED/DEFERRED or a typed permanent / transient reconstruction
+        error.
+
+        PROG-02: when ``report_progress`` is True (the CASH pass only — Pitfall 1:
+        the MTM second pass must NOT restart the per-member counter), publish
+        per-member ``{seq, exchange, label, status}`` progress into
+        compute_jobs.metadata via the claim-token-fenced set_compute_job_progress
+        RPC. Best-effort / fail-open: a progress-write failure NEVER fails the
+        stitch (progress is a cosmetic side-channel; the stitch is authoritative)."""
         clipped: list[tuple[int, pd.Series]] = []
         signals: list[MemberBasisSignal] = []
         venues: list[str] = []
         metas: list[dict[str, Any]] = []
+        degraded: list[dict[str, Any]] = []
+
+        # PROG-02: per-seq progress records, seeded all-'waiting'. Entries are
+        # built FIELD-BY-FIELD (never a key_row spread — WIZ-01 secretless
+        # boundary) and back-filled with exchange/label once preflight resolves.
+        progress_by_seq: dict[int, dict[str, Any]] = {
+            int(m["seq"]): {
+                "seq": int(m["seq"]),
+                "exchange": None,
+                "label": None,
+                "status": "waiting",
+            }
+            for m in members
+        }
+
+        # SF-2b — consecutive set_compute_job_progress failure counter for THIS
+        # stitch. Reset on any successful write; a run of >= the threshold means
+        # the heartbeat is systemically frozen (not a one-off blip) and escalates
+        # to error-level so a write outage is not buried in per-boundary warnings.
+        progress_write_failures = 0
+        # SF-2b latch — set once set_compute_job_progress RETURNS false (a fenced
+        # NO-OP: this run lost its claim token — a watchdog reclaim + re-claim
+        # rotated/NULLed it, or the row is no longer 'running'). The RPC's
+        # documented contract is "false => lost ownership, stop writing"; an
+        # explicit false is EXPECTED preemption, NOT a write outage, so we latch
+        # OFF further member-progress writes for the remainder of this run
+        # (a re-claimed worker owns the heartbeat now) rather than counting it
+        # toward the SF-2b escalation. Latched (not re-derived each call) so the
+        # preemption is logged EXACTLY ONCE.
+        progress_fenced_off = False
+
+        async def _write_member_progress() -> None:
+            nonlocal progress_write_failures, progress_fenced_off
+            # No-op off the cash pass (Pitfall 1), when the job carries no id
+            # (unit harness / legacy call shape), or once this run has been
+            # FENCED OFF (a prior write returned false → lost claim-token
+            # ownership; a re-claimed worker owns the heartbeat now). Send a
+            # SNAPSHOT (dict copy per entry) so later mutations never rewrite an
+            # already-emitted payload.
+            if (
+                not report_progress
+                or job.get("id") is None
+                or progress_fenced_off
+            ):
+                return
+            progress_list = [
+                dict(progress_by_seq[s]) for s in sorted(progress_by_seq)
+            ]
+
+            def _rpc() -> APIResponse:
+                # supabase.rpc() is typed Any (stub gap); re-assert the runtime
+                # APIResponse (same boundary bridge as _cooldown_remaining) so the
+                # fence boolean surfaced on `.data` stays typed for the caller.
+                resp: APIResponse = supabase.rpc(
+                    "set_compute_job_progress",
+                    {
+                        "p_job_id": job.get("id"),
+                        "p_claim_token": job.get("claim_token"),
+                        "p_progress": progress_list,
+                    },
+                ).execute()
+                return resp
+
+            try:
+                resp = await db_execute(_rpc)
+                # set_compute_job_progress RETURNS BOOLEAN: true = the fenced
+                # merge WROTE; false = a fenced NO-OP (this run lost its claim
+                # token — reclaim rotated/NULLed it, or the row is no longer
+                # 'running'). An explicit false is EXPECTED preemption, NEVER a
+                # write outage: honour the RPC's "false => stop writing" contract
+                # by latching OFF further writes and logging ONCE, WITHOUT
+                # touching progress_write_failures (it is neither a success to
+                # reset nor an outage to escalate — escalating would let SF-2b
+                # fire on ordinary preemption). Anything else (true, or contract
+                # drift on .data) counts as a clean write and clears the streak,
+                # exactly as before.
+                if isinstance(resp.data, bool) and resp.data is False:
+                    progress_fenced_off = True
+                    logger.info(
+                        "run_stitch_composite_job: set_compute_job_progress "
+                        "returned false for job %s — this run lost its claim "
+                        "token (watchdog reclaim + re-claim, or the job is no "
+                        "longer running). Halting member-progress writes for the "
+                        "rest of this run (a re-claimed worker owns the heartbeat "
+                        "now); the stitch is authoritative and continues.",
+                        job.get("id"),
+                    )
+                else:
+                    # A clean write clears the consecutive-failure streak.
+                    progress_write_failures = 0
+            except asyncio.CancelledError:
+                raise  # never swallow cancellation — propagate to worker shutdown
+            except Exception as _prog_exc:  # noqa: BLE001
+                # Fail-open: the stitch is authoritative; a progress-write blip
+                # (DB hiccup, lost claim-token ownership) must never kill a
+                # multi-minute crawl. The next boundary write self-heals.
+                progress_write_failures += 1
+                if (
+                    progress_write_failures
+                    >= _MEMBER_PROGRESS_MAX_CONSECUTIVE_FAILURES
+                ):
+                    # SF-2b: a PERSISTENT outage — the heartbeat is frozen and the
+                    # stall channel may be blind to a live crawl. Escalate so it
+                    # surfaces (claim-token drift / permission regression / bad
+                    # deploy). Still fail-open: the stitch continues.
+                    logger.error(
+                        "run_stitch_composite_job: set_compute_job_progress write "
+                        "failed %d times CONSECUTIVELY for job %s — heartbeat is "
+                        "frozen (systemic write outage; the stall channel may be "
+                        "blind to a live crawl). Stitch continues (fail-open): %s",
+                        progress_write_failures, job.get("id"), _prog_exc,
+                    )
+                else:
+                    logger.warning(
+                        "run_stitch_composite_job: set_compute_job_progress write "
+                        "failed for job %s (progress is cosmetic; stitch continues): %s",
+                        job.get("id"), _prog_exc,
+                    )
+
+        # Initial all-'waiting' snapshot so the poller shows the full member
+        # roster before the first crawl starts.
+        await _write_member_progress()
+
         for m in members:
             seq = int(m["seq"])
+            # PROG-02: this member's crawl is starting — mark in_process and
+            # publish before the (slow) preflight + reconstruction begins.
+            progress_by_seq[seq]["status"] = "in_process"
+            await _write_member_progress()
             # M-1: thread the PARENT stitch job's id + claim_token into the member
             # preflight job. _allocator_key_preflight → _check_circuit_breaker →
             # _defer reads job["id"] / job.get("claim_token"); a member key with a
@@ -3151,25 +3508,121 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     )
                 return ctx
             venue = str(ctx.key_row["exchange"])
+            # PROG-02: back-fill exchange + label FIELD-BY-FIELD from the resolved
+            # api_keys row (never spread key_row — WIZ-01). This runs for BOTH the
+            # degrade and success terminal writes below.
+            progress_by_seq[seq]["exchange"] = venue
+            progress_by_seq[seq]["label"] = ctx.key_row.get("label")
+            if venue in _COMPOSITE_DEGRADE_VENUES:
+                # HARD-05 (Plan 93-04): try-reconstruct-then-degrade. ATTEMPT honest
+                # reconstruction of the ccxt (binance/okx/bybit) member through the
+                # SAME derive-path primitives the single-key broker path uses. On
+                # success the member joins the stitch exactly like a Deribit member
+                # (its guard flags union into merged_flags by the EXISTING per-member
+                # meta loop). On a STRUCTURAL failure it falls back to Plan 93-03's
+                # degrade channel with the additive reason `reconstruction_failed`
+                # (never a whole-job PERMANENT); a 429 / geo-block stays TRANSIENT
+                # (whole-job retry — a rate limit is not a member defect). The close
+                # discipline mirrors the deribit arm: `finally` closes the exchange on
+                # EVERY path (success, degrade-continue, transient-return), so there
+                # is no double-close.
+                try:
+                    returns, has_opt, member_meta = await _reconstruct_ccxt_member(
+                        ctx, venue
+                    )
+                except _CcxtMemberDegrade as deg:
+                    # FIX A / FIX B (Phase 93.1): the member reconstructed without a
+                    # structural ledger error but is not honestly representable
+                    # (insufficient_history / realized_stream_unavailable) → route to
+                    # the SAME degrade channel with the distinct fixed reason. Same
+                    # leak discipline as the structural arm (closed {seq, venue, reason}
+                    # set, fixed literal). MUST precede the bare `except Exception`
+                    # below so this typed signal is never swallowed by the geo/raise
+                    # arm. The `finally` still closes the exchange.
+                    degraded.append(
+                        {"seq": seq, "venue": venue, "reason": deg.reason}
+                    )
+                    venues.append(venue)
+                    progress_by_seq[seq]["status"] = "degraded"  # PROG-02
+                    await _write_member_progress()
+                    continue
+                except (NavReconstructionError, *_PERMANENT_LEDGER_ERRORS):
+                    # Structural: this MEMBER cannot be honestly reconstructed →
+                    # DEGRADE visibly (the composite still completes). Leak discipline
+                    # (T-93-04-01): the record stays the CLOSED {seq, venue, reason}
+                    # set with `reason` the FIXED literal — the scrubbed exception
+                    # text is DROPPED (never USD / NAV / raw error in the DQ flag).
+                    degraded.append(
+                        {
+                            "seq": seq,
+                            "venue": venue,
+                            "reason": "reconstruction_failed",
+                        }
+                    )
+                    venues.append(venue)
+                    progress_by_seq[seq]["status"] = "degraded"  # PROG-02
+                    await _write_member_progress()
+                    continue
+                except ccxt.RateLimitExceeded as exc:
+                    # Mirror the deribit arm EXACTLY: stamp the member key row so the
+                    # circuit breaker defers siblings during the cooldown, then yield
+                    # TRANSIENT (retryable — a 429 is not a member defect).
+                    await _stamp_429(ctx.supabase, ctx.key_row, exc)
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "run_stitch_composite_job: ccxt member crawl "
+                            "rate-limited (429) — "
+                            + str(scrub_freeform_string(str(exc)))
+                        ),
+                        error_kind="transient",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if is_geo_blocked(exc):
+                        # Worker-egress geo-restriction on a member crawl — RETRYABLE,
+                        # not a structural refusal (mirror the deribit arm).
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=(
+                                "run_stitch_composite_job: ccxt member crawl "
+                                "geo-blocked — "
+                                + str(scrub_freeform_string(str(exc)))
+                            ),
+                            error_kind="transient",
+                        )
+                    raise
+                finally:
+                    await aclose_exchange(ctx.exchange)
+                # Success: the reconstructed ccxt member joins the stitch. Cash-only
+                # (has_option_activity=False → mark_to_market_available gates MTM off
+                # for the non-native venue). Append `venue` so the #597 blend
+                # annualization keeps seeing the crypto venue.
+                clipped.append(
+                    (seq, clip_to_window(returns, m["window_start"], m.get("window_end")))
+                )
+                signals.append(
+                    MemberBasisSignal(seq=seq, venue=venue, has_option_activity=False)
+                )
+                venues.append(venue)
+                metas.append(member_meta)
+                progress_by_seq[seq]["status"] = "successful"  # PROG-02
+                await _write_member_progress()
+                continue
             if venue != "deribit":
-                # SCOPE (Phase 86): the composite ships the Deribit (Zavara-class)
-                # path first. A ccxt (binance/okx/bybit) member requires the derive
-                # path's full flow-valuation + DQ-02 retention-terminus machinery
-                # (job_worker.py:2363-2413) to reconstruct honestly; composing that
-                # here without it would ship a subtly-wrong series (silent
-                # divergence — no-invented-data). Fail LOUD PERMANENT with a clear
-                # message rather than a guessed number; ccxt composite support is a
-                # deliberate follow-up (tracked in the SUMMARY).
+                # A venue OUTSIDE _COMPOSITE_CRYPTO_VENUES is a truly UNKNOWN
+                # exchange — a structural configuration error, not a degradable
+                # member. Keep the fail-loud PERMANENT semantics (the degrade channel
+                # is deliberately scoped to the known ccxt crypto venues).
                 await aclose_exchange(ctx.exchange)
                 await _stamp_failed(
-                    f"Composite member on venue {venue!r} is not yet supported "
-                    "(Deribit-only this phase)."
+                    f"Composite member on venue {venue!r} is not a supported "
+                    "exchange."
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
-                        "run_stitch_composite_job: non-Deribit composite member "
-                        f"venue {venue!r} not yet supported"
+                        "run_stitch_composite_job: unsupported composite member "
+                        f"venue {venue!r}"
                     ),
                     error_kind="permanent",
                 )
@@ -3227,13 +3680,29 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             signals.append(MemberBasisSignal(seq=seq, venue=venue, has_option_activity=has_opt))
             venues.append(venue)
             metas.append(member_meta)
-        return clipped, signals, venues, metas
+            progress_by_seq[seq]["status"] = "successful"  # PROG-02
+            await _write_member_progress()
+        return clipped, signals, venues, metas, degraded
 
-    # 3. CASH_SETTLEMENT fan-out (always).
-    cash_result = await _reconstruct_all(cash_pnl_basis)
+    # 3. CASH_SETTLEMENT fan-out (always). PROG-02: report_progress=True ONLY on
+    # the cash pass — the MTM second pass (below) stays default False so it can
+    # never restart the per-member progress counter (Pitfall 1).
+    cash_result = await _reconstruct_all(cash_pnl_basis, report_progress=True)
     if isinstance(cash_result, DispatchResult):
         return cash_result
-    clipped_cash, member_signals, venues, member_metas = cash_result
+    clipped_cash, member_signals, venues, member_metas, degraded_members = cash_result
+
+    # HARD-05 honest floor: if NO member reconstructed (all members degraded or an
+    # all-ccxt composite), fail PERMANENT with a scrubbed terminal stamp rather than
+    # shipping an empty invented 'complete' track record. This preserves what the
+    # removed Deribit-only rejection guaranteed implicitly (zero-member floor).
+    if not clipped_cash:
+        await _stamp_failed("No composite member could be reconstructed.")
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message="run_stitch_composite_job: no reconstructable member",
+            error_kind="permanent",
+        )
 
     # 4. Fail-loud post-clip overlap + arithmetic stitch (T-86-11 second layer).
     try:
@@ -3269,7 +3738,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             error_kind="permanent",
         )
 
-    mask = coverage_mask(clipped_cash)
+    # HARD-05 per_key visibility: a degraded ccxt member is EXCLUDED from the stitch
+    # (never in clipped_cash), but it must still appear in the coverage mask's per_key
+    # with honest zero coverage (n_days 0) so the wizard table renders its ENTERED
+    # window via Plan 93-02's fallback. coverage_mask handles an empty per-member
+    # series cleanly (empty index → {seq, first_day: None, last_day: None, n_days: 0}),
+    # so feed each degraded member an empty series. The pure core (stitch_composite.py)
+    # is untouched; coverage_mask sorts per_key by seq internally.
+    _coverage_input = list(clipped_cash) + [
+        (int(d["seq"]), pd.Series(dtype="float64")) for d in degraded_members
+    ]
+    mask = coverage_mask(_coverage_input)
 
     # 5. #597 blend annualization: 365 if ANY member venue crypto else 252. For an
     # all-crypto composite this equals periods_per_year_for_asset_class('crypto')
@@ -3407,7 +3886,40 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # passes is caught on the NEXT derive (re-derives are authoritative). The
         # sub-derive-interval TOCTOU is accepted; re-checking `_mtm_signals` here
         # would only defer, not eliminate, the same infinitesimal race.
-        clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas = mtm_result
+        # HARD-05: the MTM pass re-runs the SAME member fan-out and produces its OWN
+        # degraded list (`_mtm_degraded`). The venue routing is basis-independent, so
+        # the two passes SHOULD degrade the same members — BUT each pass re-crawls
+        # every member LIVE, and `_reconstruct_ccxt_member` does live network reads, so
+        # a ccxt member that degraded in the cash pass could momentarily RECONSTRUCT in
+        # the MTM re-crawl (e.g. a same-UTC-day flow price now cached) or vice versa.
+        # If that happens the MTM basis would be computed over a DIFFERENT member set
+        # than the cash headline while the factsheet says "Key N excluded" — mismatched
+        # bases. So ENFORCE the invariant rather than assume it: compare the two
+        # degraded seq-sets and FAIL LOUD on divergence. We take the authoritative
+        # degraded list from the CASH pass (`degraded_members` above), mirroring how
+        # the MTM option-activity signals are discarded. NOTE: the MTM pass DOES run
+        # for a composite that contains a degraded ccxt member — that member is
+        # `continue`d before its signal is appended, so `member_signals` is
+        # Deribit-only and `mark_to_market_available` can return True on the perp-only
+        # Deribit remainder.
+        clipped_mtm, _mtm_signals, _mtm_venues, _mtm_metas, _mtm_degraded = mtm_result
+        _cash_degraded_seqs = {int(d["seq"]) for d in degraded_members}
+        _mtm_degraded_seqs = {int(d["seq"]) for d in _mtm_degraded}
+        if _mtm_degraded_seqs != _cash_degraded_seqs:
+            # TRANSIENT (retryable, NO terminal `_stamp_failed`): a re-run re-crawls
+            # BOTH passes and they re-converge; this is a live-read race, not a
+            # structural defect. Mirrors the 429 / geo-block transient returns above,
+            # which likewise skip the terminal stamp so the retry re-runs cleanly.
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: MTM pass degraded-member set "
+                    f"{sorted(_mtm_degraded_seqs)} diverges from the cash pass "
+                    f"{sorted(_cash_degraded_seqs)} — the two bases would be computed "
+                    "over different member sets; retry to re-crawl both consistently"
+                ),
+                error_kind="transient",
+            )
         try:
             mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)
         except CompositeOverlapError as exc:
@@ -3532,6 +4044,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             member_warn_flags["used_heuristic_capital"] = True
             member_warned = True
 
+    # HARD-05: a composite MISSING a member (a degraded ccxt member) IS warn-worthy —
+    # it rides the existing complete_with_warnings promotion. This is deliberate per
+    # research Pitfall 5 (unlike the pure-annotation insufficient_window, an excluded
+    # member changes the composite's coverage, so the status must reflect it). The
+    # degraded_members flag stays OUT of NAV_TWR_GUARD_KEYS (single-key blast radius
+    # stays zero); this is a direct promotion, not a guard-key registration.
+    if degraded_members:
+        member_warned = True
+
     def _read_existing_flags() -> dict[str, Any]:
         res = (
             supabase.table("strategy_analytics")
@@ -3561,6 +4082,39 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags["mtm_gated_reason"] = mtm_reason
     else:
         merged_flags.pop("mtm_gated_reason", None)
+    # HARD-04 (#67): lift the CAGR-site insufficient_window annotation, mirroring
+    # the mtm_gated_reason drop-stale pattern above — a composite that GROWS past
+    # MIN_ANNUALIZATION_DAYS heals (loses the flag) on the next re-stitch. Read
+    # from the CANONICAL cash headline result (`cash_metrics_result`, the ONE
+    # composite compute); the MTM second pass shares the same window by
+    # construction. Annotation only — it deliberately does NOT touch
+    # computation_status (not a NAV_TWR_GUARD_KEYS member).
+    if cash_metrics_result.insufficient_window:
+        merged_flags["insufficient_window"] = True
+    else:
+        merged_flags.pop("insufficient_window", None)
+    # HARD-05 (#): lift the degraded-member records (ccxt members excluded from the
+    # stitch this phase) so the user SEES the exclusion on both DQ surfaces. Drop-stale
+    # heals on re-stitch (mtm_gated_reason / insufficient_window mirror): an all-Deribit
+    # re-stitch, or one where a formerly-degraded member is later reconstructed (Plan
+    # 93-04), pops the key. The list carries a CLOSED key-set {seq, venue, reason} with
+    # `reason` a fixed enum literal — leak discipline (T-93-03-01), pinned by a test.
+    if degraded_members:
+        merged_flags["degraded_members"] = degraded_members
+    else:
+        merged_flags.pop("degraded_members", None)
+    # HARD-03 (#69 / Phase-90 LOW-2): freeze the RAW cumulation method the ONE
+    # canonical compute above actually used ("geometric"|"simple", decided at
+    # :3312-3317) into the DQ flags so the factsheet read-path can PREFER it over a
+    # live re-derive from strategies.returns_denominator_config — editing the config
+    # after publish without re-stitching can no longer flip the chart basis away
+    # from the frozen headline scalars. `cumulative_method` is always defined here,
+    # so a plain unconditional set is the correct drop-stale form (every re-stitch
+    # overwrites; no stale value survives). Persist the RAW worker string, NOT the
+    # resolved "arithmetic"/"geometric" read basis — the "simple"→"arithmetic" map
+    # lives in exactly ONE place (the read side), so persisted and live-fallback
+    # share one rule and cannot diverge (research Pitfall 1).
+    merged_flags["cumulative_method"] = cumulative_method
     # F-2: surface benchmark availability so the factsheet renders the "benchmark
     # unavailable" note instead of a silently-missing BTC family. DROP a stale flag
     # when the fetch succeeded this derive (the benchmark healed).

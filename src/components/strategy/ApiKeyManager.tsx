@@ -291,6 +291,11 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     binance: "B",
     okx: "O",
     bybit: "By",
+    // UX-01 (#30): keep labels in lockstep with the canonical EXCHANGE_TAGS map
+    // in AllocatorExchangeManager.tsx — DRB per DESIGN.md 3-letter, no-emoji tag
+    // convention. (The two maps can still drift; a shared-constant consolidation
+    // is out of scope per locked decision D5.)
+    deribit: "DRB",
   };
 
   return (

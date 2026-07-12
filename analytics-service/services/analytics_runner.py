@@ -181,6 +181,15 @@ class DataQualityFlags(TypedDict, total=False):
     negative_nav_guard: bool
     dust_nav_guard: bool
     flow_dominated_guard: bool
+    # Phase 92 (HARD-01): a single-day P&L dwarfed a small-but-above-dust prior
+    # NAV (the inverse-perpetual near-zero-equity blow-up: |pnl_t| >=
+    # PNL_DOM_RATIO * NAV_{t-1}). The honest core NaNs that day rather than
+    # emitting an un-interpretable ~10-100x/day return that would compound into
+    # a millions-of-% per-key contribution. The missing sibling of
+    # flow_dominated_guard; a BOOL only (no raw NAV/P&L magnitude, the
+    # account-size leak T-73-02); promotes computation_status to
+    # complete_with_warnings on the same NAV_TWR_GUARD_KEYS channel.
+    pnl_dominated_guard: bool
     # --- Phase 76 (v1.8 DQ-02): flow-coverage terminus. Fires when a broker
     # account's return window extends BEFORE the venue's deposit-history
     # retention (OKX 90d / Bybit 365d) so the pre-terminus flows are unfetchable;
@@ -210,6 +219,14 @@ class DataQualityFlags(TypedDict, total=False):
     # meta, not NavTWRMeta); promotes computation_status to complete_with_warnings
     # on the same channel. ---
     mandate_window_excluded_days: bool
+    # --- Phase 92 (HARD-04, #67): the annualization window (retained CAGR suffix
+    # for geometric / returns span for simple) is under MIN_ANNUALIZATION_DAYS
+    # calendar days, so annualizing CAGR over it (exponent 365/elapsed) is not
+    # statistically meaningful. A DQ ANNOTATION ONLY — deliberately NOT a
+    # NAV_TWR_GUARD_KEYS member and NEVER promotes computation_status: flagging
+    # every young account complete_with_warnings would be factsheet-wide blast
+    # radius (roadmap Pitfall #12). The CAGR value it annotates is unchanged. ---
+    insufficient_window: bool
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1814,6 +1831,15 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 data_quality_flags = data_quality_flags or {}
                 data_quality_flags[_guard_key] = True  # type: ignore[literal-required]
 
+        # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
+        # Present-only additive (a fresh dict per run — no drop-stale needed);
+        # deliberately NOT in NAV_TWR_GUARD_KEYS above, so it NEVER promotes
+        # computation_status (a young-but-clean account stays exact-string
+        # "complete"). Mirrors the metrics-derived additive flag style.
+        if metrics_result.insufficient_window:
+            data_quality_flags = data_quality_flags or {}
+            data_quality_flags["insufficient_window"] = True
+
         # Audit-2026-05-07 round-2 / P1994+P1995 follow-up: lift inner
         # `data_quality_flags` from reconstruct_positions (breakeven_positions,
         # positions_missing_realized_pnl, plus pre-existing fills_dropped_no_symbol
@@ -2334,6 +2360,14 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 data_quality_flags[_flag] = True  # type: ignore[literal-required]
                 _warned = True
         csv_status = "complete_with_warnings" if _warned else "complete"
+
+        # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
+        # Present-only additive; deliberately AFTER csv_status and NOT touching
+        # `_warned`, so it NEVER promotes computation_status (a young-but-clean
+        # CSV/MT5 account stays exact-string "complete" — not a NAV_TWR_GUARD_KEYS
+        # member). The CAGR value it annotates is unchanged.
+        if metrics_result.insufficient_window:
+            data_quality_flags["insufficient_window"] = True
 
         # Finding 5 (non-composite direction): a strategy that STOPS being a
         # composite (members removed → single-key path) — or ANY non-composite CSV

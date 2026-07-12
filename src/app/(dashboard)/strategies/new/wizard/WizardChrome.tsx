@@ -65,6 +65,19 @@ export interface WizardChromeProps {
    * across both branches.
    */
   source?: "api" | "csv";
+  /**
+   * Phase 94 / WIZ-04: fired when the user activates a navigable step cell
+   * (click or Enter). Absent ⇒ the stepper renders as inert `<div>` cells,
+   * byte-identical to the pre-WIZ-04 markup (CSV branch stays inert).
+   */
+  onStepSelect?: (key: WizardStepKey) => void;
+  /**
+   * Phase 94 / WIZ-04: per-step navigability predicate owned by WizardClient
+   * (it holds the completion state). A cell is rendered as a real `<button>`
+   * only when it is non-active, `onStepSelect` is provided, and this returns
+   * true. Absent ⇒ no cell is navigable.
+   */
+  stepNavigable?: (key: WizardStepKey) => boolean;
   children: React.ReactNode;
 }
 
@@ -85,6 +98,8 @@ export function WizardChrome({
   toastKey,
   steps,
   source,
+  onStepSelect,
+  stepNavigable,
   children,
 }: WizardChromeProps) {
   const activeSteps = steps ?? DEFAULT_STEPS;
@@ -140,32 +155,54 @@ export function WizardChrome({
             const isPast =
               activeSteps.findIndex((s) => s.key === step.key) <
               activeSteps.findIndex((s) => s.key === currentStep);
-            return (
-              <div
-                key={step.key}
-                className={`border-b-2 px-3 py-3 transition-colors ${
-                  isActive
-                    ? "border-accent"
-                    : isPast
-                      ? "border-border"
-                      : "border-transparent"
-                }`}
-                aria-current={isActive ? "step" : undefined}
-              >
+            // Phase 94 / WIZ-04: a cell is activatable only when it is not the
+            // active step, an onStepSelect seam is wired (API branch), and the
+            // WizardClient-owned predicate marks it navigable. Otherwise the
+            // cell stays an inert <div>, keeping the CSV branch byte-identical.
+            const navigable =
+              !isActive && !!onStepSelect && (stepNavigable?.(step.key) ?? false);
+            // Border/text token ladders are byte-identical across the <button>
+            // and <div> branches — no new visual language (DESIGN.md:241/:302).
+            const borderClass = isActive
+              ? "border-accent"
+              : isPast
+                ? "border-border"
+                : "border-transparent";
+            const labelClass = isActive
+              ? "text-text-primary"
+              : isPast
+                ? "text-text-secondary"
+                : "text-text-muted";
+            const inner = (
+              <>
                 <p className="font-metric text-micro uppercase tracking-wider tabular-nums text-text-muted">
                   {step.number} / {totalLabel}
                 </p>
-                <p
-                  className={`mt-0.5 text-caption font-medium ${
-                    isActive
-                      ? "text-text-primary"
-                      : isPast
-                        ? "text-text-secondary"
-                        : "text-text-muted"
-                  }`}
-                >
+                <p className={`mt-0.5 text-caption font-medium ${labelClass}`}>
                   {step.label}
                 </p>
+              </>
+            );
+            if (navigable) {
+              return (
+                <button
+                  key={step.key}
+                  type="button"
+                  onClick={() => onStepSelect?.(step.key)}
+                  data-testid={`wizard-step-${step.key}`}
+                  className={`w-full cursor-pointer border-b-2 px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:text-text-primary ${borderClass}`}
+                >
+                  {inner}
+                </button>
+              );
+            }
+            return (
+              <div
+                key={step.key}
+                className={`border-b-2 px-3 py-3 transition-colors ${borderClass}`}
+                aria-current={isActive ? "step" : undefined}
+              >
+                {inner}
               </div>
             );
           })}

@@ -12,6 +12,20 @@
 
 ---
 
+## v1.9.1 composite onboarding hardening — accepted known-limitations (from /ship specialist fan-out + Fable red team, 2026-07-12)
+
+### P3: in-flight `computing` stitch stale-attest window
+The RT-1 invalidation in `set_wizard_composite_members` resets `strategy_analytics.computation_status` only from `complete`/`complete_with_warnings` → `pending`. If a member set changes while a prior stitch is still `computing`, the reset is skipped and the inflight run can land `complete` over the OLD member set. Backstopped by finalize's `after()` re-enqueue (acknowledged). Fix if it ever bites: also invalidate/supersede an inflight `computing` run on a genuine member-set change.
+
+### P4 (LOW): cleanup sweep check-then-delete race (D-1)
+`cleanup_abandoned_wizard_drafts` evaluates its 3× `NOT EXISTS` anti-joins under READ COMMITTED, so a key attached to a fresh draft in the ms-window between the sweep's snapshot and its DELETE could be swept (recoverable — re-enter the key; published composites safe via the BEFORE DELETE guard; pre-existing class). Fix if picked up: run the sweep SERIALIZABLE or `SELECT … FOR UPDATE` the candidate keys.
+
+### P3: analytics `python` CI parallelization deferred (#610 absorption)
+Phase 97 absorbed #610's `pytest -n auto --dist loadgroup` but it FLAKES: the global-claim fence tests (`test_compute_jobs_fencing.py`) fail non-deterministically under xdist ordering even with every live-DB module pinned to one `shared_test_db` group — imperfect per-test `compute_jobs` cleanup pollutes a later global-`claim_compute_jobs_with_priority` assertion (tie-break picks a foreign row / `single()` → 0 rows / seeded row claimed out of the batch). The `python` job reverted to SERIAL (matches main, green); the `want_job_id` scoping + decoy regression + xdist_group infra all landed. To re-enable `-n auto`: give each global-claim fence test an isolated claim space (dedicated priority/kind partition, or a clean-table fixture, or a separate serial pytest invocation for the live-DB module with `--cov-append`).
+
+### P4 (LOW): correlation-id server-log uniformity residual (D-2)
+The composite error routes now log the inbound `X-Correlation-Id`; a fully uniform "every wizard-hit route logs the inbound id" pass is a broader cross-cutting task (sync-progress intentionally excluded — its only failure degrades to 200, so it never shows the user an id to match).
+
 ## v1.8 complete_with_warnings surfacing follow-ups (from /ship red-team + Fable specialist fan-out, 2026-07-07)
 
 ### P2: CI guard against fresh `computation_status === 'complete'` exact-matches
@@ -26,7 +40,7 @@ The founder-LP report withholds a warned month and fires a fail-loud alert with 
 ### P4: warned-strategy UI polish (cosmetic, not dead-ends)
 - `ApiKeyManager` doesn't pass `syncWarnings` to `SyncProgress`, so a warned resync shows the "Synced with warnings" pill without a "Show details" expander (the wizard path carries the text; the key-manager doesn't source it).
 - The v1 public strategy page renders warned metrics with NO warned badge, while v2 surfaces DQ chips via panel6 — inconsistent "surface with a badge" between v1/v2.
-- `ApiKeyManager.exchangeIcon` map lacks `deribit` → Deribit keys show a "?" icon (pre-existing, unrelated).
+- ~~`ApiKeyManager.exchangeIcon` map lacks `deribit` → Deribit keys show a "?" icon~~ **RESOLVED v1.9.1 Phase 96 (UX-01): DRB badge.**
 - Test-coverage nits (LOW): a `SyncProgress` test asserting the poll forwards `onStatusChange` for `complete_with_warnings` (the one untested link in the resync-deadlock chain), and a `csv-finalize` placeholder warned-skip case.
 
 ## v1.3 phase 45 nav follow-ups (deferred from /ship pre-landing review, 2026-06-27)
@@ -209,6 +223,45 @@ Possible fixes (try in order):
 
 When re-enabled, remove the three `@pytest.mark.skip` decorators in
 `test_compute_jobs_fencing.py`.
+
+**Re-justified 2026-07-12 (Phase 97 / v1.9.1 CI-02.1)**
+
+Deferral re-affirmed (roadmap CI-02 success criterion 2, "explicitly
+re-justified" arm) — the 3 tests stay collected-and-skipped through the
+v1.9.1 ship. The 2026-05-13 investigation above remains the evidence base;
+nothing in it was invalidated. New this round:
+
+- **(a) CI-01 does NOT resolve this.** Phase 97's per-run-`job_id` claim
+  scoping (CI-01, absorbing PR #610) fixed a *different* root cause —
+  foreign-row isolation under `pytest-xdist` parallelism, where a claim
+  could grab another test's row. That is orthogonal to the
+  `httpx.ReadTimeout @ ~120s` contention flake documented above, which is
+  driven by shared test-project latency (python + e2e CI jobs concurrent),
+  not row selection. So CI-01's fix leaves this timeout unaddressed.
+- **(b) Re-enable-behind-`_rpc_retry_timeout` was evaluated and declined
+  pre-ship.** The only venue that can demonstrate stabilization is live CI
+  (these fence tests execute solely against the shared test project), so the
+  first canary would be the milestone→main ship PR itself. Gambling the ship
+  PR's `python` check on an undemonstrable stabilization is not acceptable
+  this close to the release.
+- **(c) The fence contract stays independently pinned** regardless of the
+  skip: the mocked equivalents (`_is_serialization_failure` classifier,
+  `LATE_MARK_IGNORED` contract, `dispatch_tick` token threading), the
+  migration-117 self-verify DO block (runs on every prod + test-DB apply),
+  and the 9 other live fence tests all pass.
+- **(d) Concrete post-ship re-enable recipe:** remove the three
+  `@pytest.mark.skip` decorators and wrap the contention-prone RPCs
+  (`reset_stalled_compute_jobs` and the late
+  `mark_compute_job_done` / `mark_compute_job_failed` calls) in the existing
+  `_rpc_retry_timeout` guard — a genuine timeout becomes `pytest.skip` (a
+  `BaseException`, so the tests' `except Exception` cannot swallow it) while
+  the asserted `serialization_failure` re-raises immediately and still
+  reaches the assertion. Then canary on a **non-ship** PR's `python` check
+  before merging. This matches, in substance, the re-enable recipe now
+  recorded verbatim in the headline test's skip reason.
+- **(e) Isolation is NOT a blocker for the re-enable:** the 3 tests'
+  `_claim_one` sites are already own-`job_id` scoped (Phase 97 / 97-01), so
+  the future re-enable only has to solve the timeout, not isolation.
 
 ---
 

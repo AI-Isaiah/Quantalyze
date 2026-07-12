@@ -73,6 +73,13 @@ export type WizardErrorCode =
   // RECOVERABLE and the Retry affordance renders. Both the unified and legacy
   // finalize arms emit this same code so the client maps ONE consistent copy.
   | "COMPOSITE_MEMBERSHIP_UNKNOWN"
+  // Phase 94.1 / RT-FINDING-3 — the wizard connect step's on-mount rehydration
+  // GET (/api/strategies/composite/members) failed transiently. NEUTRAL copy:
+  // it fires for ANY api draft (the client can't yet know single-key vs
+  // composite), so it must NOT assert "composite" — a resumed SINGLE-KEY user's
+  // membership is definitionally empty and "composite" wording would confuse
+  // them. Recoverable: the draft is intact, Retry re-runs the load.
+  | "WIZARD_KEYS_LOAD_FAILED"
   // Fallback
   | "UNKNOWN";
 
@@ -615,6 +622,21 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     docsHref: "/security#sync-timing",
     // Recoverable transient fault: keep `clear_and_retry` so the Retry control
     // renders instead of falling through to the generic UNKNOWN envelope.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  WIZARD_KEYS_LOAD_FAILED: {
+    title: "We couldn't load this draft's saved keys.",
+    cause:
+      "A transient error stopped us from loading the API keys saved on this draft. Your draft is safe and nothing was submitted — this is on our side, not your keys.",
+    fix: [
+      "Wait a moment and try again — the load usually succeeds on retry.",
+      "If it keeps failing, contact security@quantalyze.com with your draft ID.",
+    ],
+    docsHref: "/security#sync-timing",
+    // Recoverable transient fault: keep `clear_and_retry` so the Retry control
+    // renders. NEUTRAL wording (RT-FINDING-3): no "composite" assertion, so it
+    // reads correctly for a resumed single-key draft too.
     actions: ["clear_and_retry", "request_call"],
   },
 

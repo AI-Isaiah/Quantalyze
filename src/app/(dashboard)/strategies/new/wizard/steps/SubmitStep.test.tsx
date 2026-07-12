@@ -251,4 +251,33 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
     expect(findWizardError()!.code).toBe("UNKNOWN");
   });
+
+  // UX-02 (#30) — the log-matching contract. Before the wizardFetch swap the
+  // finalize-wizard request sent NO correlation header, so the id the user
+  // copied out of the error envelope matched NOTHING the failing request logged.
+  // Now every wizard fetch carries `X-Correlation-Id: wizard:<uuid>`, and the id
+  // displayed in the envelope is THE SAME value — copy/paste joins client ↔
+  // server logs ↔ Sentry ↔ compute_jobs.metadata. FAILS if SubmitStep reverts to
+  // a bare fetch (header null → no /^wizard:/ match) or the displayed id ever
+  // diverges from the sent one.
+  it("sends X-Correlation-Id (wizard:) and the envelope shows the SAME id it sent", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        jsonResponse({ code: "TOTALLY_MADE_UP", error: "weird" }, 500),
+      );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+
+    // The header actually sent on the finalize-wizard request.
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const sentId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+
+    // The id rendered in the error-envelope diagnostics equals the sent header —
+    // the copy/paste log-matching contract.
+    expect(screen.getByText(sentId!)).toBeInTheDocument();
+  });
 });

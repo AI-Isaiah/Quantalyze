@@ -102,6 +102,15 @@ export const userActionLimiter = makeLimiter(5, "60 s");
 // red-team). 30/min comfortably covers a multi-strategy allocator's real syncs.
 export const keysSyncUserLimiter = makeLimiter(30, "60 s");
 
+// 60/minute per authenticated user — Phase 95 / PROG-02 stitch-progress poll.
+// GET /api/strategies/[id]/sync-progress is polled by the composite wizard up to
+// every 3s (~20/min) per strategy while a stitch runs; 60/min gives 2-tab
+// headroom without enabling enumeration at scale. Keyed per (user, strategy) so
+// a foreign id can only exhaust its own throwaway bucket, and the isUuid 400
+// (before the limiter) bounds the keyspace to real UUIDs. Read-appropriate:
+// higher than the write limiters since the projection read is cheap + idempotent.
+export const syncProgressLimiter = makeLimiter(60, "60 s");
+
 // 10/minute per IP — public GETs (PDF routes) exposed to crawlers and scrapers.
 export const publicIpLimiter = makeLimiter(10, "60 s");
 
