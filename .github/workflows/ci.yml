@@ -981,7 +981,14 @@ jobs:
       # Combined measured ~87% clears the 80 floor; exchange/internal/csv
       # routers (32/36/42%) are now inside the denominator so they can no
       # longer regress unseen. Keep byte-identical with Makefile `test:`.
-      - run: pytest --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
+      # `-n auto --dist loadgroup`: parallelize the ~3.6k offline tests across the
+      # runner's vCPUs. DB-touching tests are pinned to one worker via an
+      # xdist_group (tests/conftest.py) so they stay serialized — no intra-run
+      # race on the shared test project; the cross-run `concurrency: shared-test-db`
+      # group above still prevents two runs from contending. pytest-cov is
+      # xdist-aware and combines per-worker coverage before the --cov-fail-under
+      # gate. Keep byte-identical with Makefile `test:`.
+      - run: pytest -n auto --dist loadgroup --cov=services --cov=routers --cov=main_worker --cov-report=term-missing --cov-fail-under=80
         env:
           SUPABASE_TEST_URL: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_URL || '' }}
           SUPABASE_TEST_SERVICE_KEY: ${{ vars.E2E_TEST_DB_CONFIGURED == 'true' && secrets.TEST_SUPABASE_SERVICE_ROLE_KEY || '' }}

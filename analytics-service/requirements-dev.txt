@@ -35,5 +35,10 @@ pytest
 pytest-cov
 pytest-asyncio
 pytest-mock
+# pytest-xdist: parallelize the offline test bulk across worker processes
+# (`pytest -n auto`). DB-touching tests are pinned to one worker via an
+# xdist_group in tests/conftest.py so they stay serialized. Needs >=2.5 for
+# `--dist loadgroup`; unpinned resolves to 3.x, matching the surrounding style.
+pytest-xdist
 cryptography
 mypy==2.2.0
