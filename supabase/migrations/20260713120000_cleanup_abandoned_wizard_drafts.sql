@@ -60,7 +60,13 @@
 
 BEGIN;
 
-SET lock_timeout = '3s';
+-- SET LOCAL: the timeout applies to THIS transaction only and is reset at
+-- COMMIT, so a batch migration apply (one connection, sequential files) does
+-- NOT leak the 3s timeout into later migrations. DDL below still runs under
+-- the 3s cap (SET LOCAL takes effect for the remainder of the current tx).
+-- (The function's OWN `SET lock_timeout` proconfig on CREATE FUNCTION is a
+-- separate per-call setting and is intentionally left as-is.)
+SET LOCAL lock_timeout = '3s';
 
 -- ==========================================================================
 -- 1. cleanup_abandoned_wizard_drafts — atomic 7d draft DELETE (CLEAN-01) +
@@ -167,6 +173,10 @@ DECLARE
   v_sc uuid := gen_random_uuid();  -- published composite for key_c (guard superset)
   v_sd uuid := gen_random_uuid();  -- published single-key for key_d
   v_cnt integer;
+  -- Captured from the self-verify call purely to LOG (rolled back) the
+  -- magnitude the first REAL cron run would delete/sweep against prod rows.
+  v_deleted integer;
+  v_swept   integer;
 BEGIN
   -- Subtransaction (savepoint): every seed + the PERFORM's real deletions + the
   -- assertions below are undone when this block exits via the ZZ999 success
@@ -276,7 +286,16 @@ BEGIN
   VALUES (v_key_a, 'poll_allocator_positions', 'pending');
 
   -- ---- ONE sweep call against the synthetic seeds (rolled back below) ----
-  PERFORM public.cleanup_abandoned_wizard_drafts();
+  -- Capture the (rolled-back) counts purely for apply-time observability: this
+  -- logs the magnitude the first REAL cron run would delete/sweep. NOTE the
+  -- call runs against real prod rows AND this block's synthetic seeds in the
+  -- same subtransaction, so the logged counts INCLUDE the self-test seeds
+  -- (6 doomed drafts, keys A+F swept) atop any real stale rows — the NOTICE
+  -- says so to avoid over-reading the number as a pure prod count.
+  SELECT deleted_drafts, swept_keys
+    INTO v_deleted, v_swept
+    FROM public.cleanup_abandoned_wizard_drafts();
+  RAISE NOTICE 'cleanup self-verify: at-apply the first cron would delete % drafts / sweep % keys (rolled back; count INCLUDES this block''s synthetic self-test seeds atop real rows)', v_deleted, v_swept;
 
   -- All six doomed drafts gone; both spared drafts survive.
   SELECT count(*) INTO v_cnt FROM public.strategies
