@@ -357,7 +357,10 @@ function bundleFromScenario(p: FactsheetPayload) {
   return {
     dates: p.dates,
     strategyReturns: p.strategyReturns,
-    strategyEquity: p.strategyEquity,
+    // Phase 103 Finding C sentinel: an equity curve whose endpoint/base ratio the
+    // calm cash series can never produce. periodReturn(3Y/5Y) = last/eq[0]-1 =
+    // 6.54/1 - 1 = +554.00%. If the 3Y/5Y rows revert to cash equity → gone → RED.
+    strategyEquity: p.strategyEquity.map((_, i, arr) => (i === arr.length - 1 ? 6.54 : 1)),
     strategyDrawdowns: p.strategyDrawdowns,
     strategyRollingVol: p.strategyRollingVol,
     // Phase 103 Finding B sentinel: a constant rolling-Sharpe the calm cash series
@@ -497,5 +500,17 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     // MTM: the table now reads the bundle's rolling arrays (9.87 in every cell).
     // Neuter (RollingMetricsPanel → payload.strategyRolling*) → cash → RED.
     expect(rollingSection().textContent).toContain("9.87");
+  });
+
+  it("Finding C: the Cumulative-Returns 3Y/5Y rows follow the MTM equity curve", () => {
+    const { getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    const cumSection = () =>
+      getByText("Cumulative Return Metrics").closest("section") as HTMLElement;
+    // Cash: the sentinel 3Y/5Y return (+554.00%) is absent.
+    expect(cumSection().textContent).not.toContain("+554.00%");
+    fireEvent.click(getByText("Mark-to-market"));
+    // MTM: 3Y/5Y recompute from the bundle's equity curve.
+    // Neuter (CumulativeReturnsPanel eq → payload.strategyEquity) → cash → RED.
+    expect(cumSection().textContent).toContain("+554.00%");
   });
 });
