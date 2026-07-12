@@ -51,6 +51,19 @@ from services.broker_dailies import gap_fill_daily_returns
 from services.metrics import _drop_nonfinite, compute_all_metrics
 from services.stitch_composite import _consecutive_spans
 
+# The persist kind (Phase 103: MTM only). `strategy_analytics_series.kind` is
+# unconstrained TEXT by documented design ("Add a new kind = INSERT a new row; no
+# ALTER TABLE", migration 20260428120919) — cash joins here as a sibling kind when
+# the backbone adopts the helper (Phases 104-106). No DDL ships this phase.
+KIND_MTM_DAILY_RETURNS = "mtm_daily_returns"
+
+# The basis → kind map is where cash joins later (e.g. "cash_settlement": ...).
+_KIND_BY_BASIS: dict[str, str] = {"mark_to_market": KIND_MTM_DAILY_RETURNS}
+
+# JSONB payload schema version (bump if the row/gap_spans/conventions shape changes
+# so a reader can detect a stale-shape row).
+_PAYLOAD_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class BasisSeriesResult:
@@ -149,3 +162,54 @@ def derive_basis_series(
         gap_spans=gap_spans,
         conventions=conventions,
     )
+
+
+def persist_basis_series(
+    supabase: Any,
+    strategy_id: str,
+    *,
+    basis: str = "mark_to_market",
+    result: BasisSeriesResult | None,
+) -> None:
+    """Authoritatively upsert (or HEAL) the persisted series row for `basis`.
+
+    `result` present → upsert the `(strategy_id, kind)` row via the existing
+    service-role-only `upsert_strategy_analytics_series_batch` RPC. The PK
+    `(strategy_id, kind)` makes this a single-row authoritative replace — no span
+    reconcile needed (contrast the cash multi-row `_reconcile_full_delete`).
+
+    `result is None` → DELETE the row (the HEAL path for a degrade/gated/
+    not-attempted derive; Pitfall 5: a stale series must never outlive the scalars'
+    authoritative-NULL write).
+
+    Sync function — call sites wrap it in their existing `db_execute`/thread
+    patterns (Plan 02's concern).
+    """
+    kind = _KIND_BY_BASIS.get(basis)
+    if kind is None:
+        raise ValueError(
+            f"persist_basis_series: unknown basis {basis!r} "
+            f"(mapped: {sorted(_KIND_BY_BASIS)})."
+        )
+
+    if result is None:
+        (
+            supabase.table("strategy_analytics_series")
+            .delete()
+            .eq("strategy_id", strategy_id)
+            .eq("kind", kind)
+            .execute()
+        )
+        return
+
+    payload = {
+        "schema": _PAYLOAD_SCHEMA_VERSION,
+        "basis": basis,
+        "rows": result.series_rows,
+        "gap_spans": result.gap_spans,
+        "conventions": result.conventions,
+    }
+    supabase.rpc(
+        "upsert_strategy_analytics_series_batch",
+        {"p_strategy_id": strategy_id, "p_kinds": {kind: payload}},
+    ).execute()
