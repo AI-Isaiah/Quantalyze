@@ -309,12 +309,18 @@ function num(v: number | null | undefined): string {
  * how stable each rolling stat has been over the strategy's life.
  */
 function RollingMetricsPanel() {
-  const payload = usePayload();
-  const v = rollingStats(payload.strategyRollingVol);
-  const sh = rollingStats(payload.strategyRollingSharpe);
-  const so = rollingStats(payload.strategyRollingSortino);
+  // Phase 103 (MTM-04 follow-through, Finding B): read the rolling arrays from the
+  // basis view — the paired rolling CHARTS already render `view.strategyRolling*`
+  // (MTM under the toggle), and the bundle carries the MTM arrays, so the summary
+  // table must follow the same basis or it silently reports cash under an MTM chart.
+  // The window label rides `view.rollingWindow` so the table's label describes its
+  // own (basis-selected) arrays.
+  const view = useBasisSeriesView(usePayload());
+  const v = rollingStats(view.strategyRollingVol);
+  const sh = rollingStats(view.strategyRollingSharpe);
+  const so = rollingStats(view.strategyRollingSortino);
   return (
-    <Panel title={`Rolling Metrics (${payload.rollingWindow?.label ?? "6mo"})`}>
+    <Panel title={`Rolling Metrics (${view.rollingWindow?.label ?? "6mo"})`}>
       <table className="w-full text-fixed-12">
         <thead>
           <tr className="border-b border-border/60">
@@ -368,7 +374,12 @@ function RollingRow({
 function CumulativeReturnsPanel() {
   const payload = usePayload();
   const m = payload.strategyMetrics;
-  const eq = payload.strategyEquity;
+  // Phase 103 (MTM-04 follow-through, Finding C): the 3Y/5Y rows are computed from
+  // the equity curve — a pure dailies-derivable quantity — so they must ride the
+  // basis-selected equity (the equity CHART is already MTM under the toggle). The
+  // MTD/YTD/3M/6M/1Y/Inception/CAGR rows stay on the persisted `strategyMetrics`
+  // headline scalars (KpiStrip-owned, Phase 102 — no per-series recompute here).
+  const eq = useBasisSeriesView(payload).strategyEquity;
   const n = eq.length;
   const last = n > 0 ? eq[n - 1] : 1;
   const periodReturn = (lookbackDays: number): number | null => {

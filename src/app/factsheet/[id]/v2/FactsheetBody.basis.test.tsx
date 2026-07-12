@@ -360,7 +360,10 @@ function bundleFromScenario(p: FactsheetPayload) {
     strategyEquity: p.strategyEquity,
     strategyDrawdowns: p.strategyDrawdowns,
     strategyRollingVol: p.strategyRollingVol,
-    strategyRollingSharpe: p.strategyRollingSharpe,
+    // Phase 103 Finding B sentinel: a constant rolling-Sharpe the calm cash series
+    // can never produce (9.87 in every Now/Avg/Min/Max cell). If the rolling table
+    // reverts to cash under MTM, "9.87" vanishes → RED.
+    strategyRollingSharpe: p.strategyRollingSharpe.map(() => 9.87),
     strategyRollingSortino: p.strategyRollingSortino,
     rollingWindow: p.rollingWindow,
     rollingBetaWindow: p.rollingBetaWindow,
@@ -471,5 +474,28 @@ describe("FactsheetBody — Phase 103 MTM-04 per-basis SERIES (charts + panels f
     );
     expect(factsheetWrites).toEqual([]);
     expect(window.location.search).toBe(searchBefore);
+  });
+});
+
+/**
+ * Phase 103 (MTM-04 follow-through) — the dailies-derivable RAIL panels that read
+ * the persisted-cash scalars while their paired charts render MTM. Each assertion
+ * is falsifiable: the MTM sentinel (only reachable through the bundle) must appear
+ * under mark_to_market and vanish under cash. Reverting the panel to `payload.*`
+ * reddens the corresponding case.
+ */
+describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-through", () => {
+  it("Finding B: the Rolling Metrics summary TABLE follows MTM (matches its chart)", () => {
+    const { getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    // Scope to the "Rolling Metrics" summary panel — NOT the rolling charts (which
+    // already read the bundle), so this isolates the TABLE's basis follow-through.
+    const rollingSection = () =>
+      getByText(/Rolling Metrics/).closest("section") as HTMLElement;
+    // Cash: the sentinel rolling Sharpe (9.87) is absent from the table.
+    expect(rollingSection().textContent).not.toContain("9.87");
+    fireEvent.click(getByText("Mark-to-market"));
+    // MTM: the table now reads the bundle's rolling arrays (9.87 in every cell).
+    // Neuter (RollingMetricsPanel → payload.strategyRolling*) → cash → RED.
+    expect(rollingSection().textContent).toContain("9.87");
   });
 });
