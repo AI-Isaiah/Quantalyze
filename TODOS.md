@@ -12,6 +12,17 @@
 
 ---
 
+## v1.9.1 composite onboarding hardening — accepted known-limitations (from /ship specialist fan-out + Fable red team, 2026-07-12)
+
+### P3: in-flight `computing` stitch stale-attest window
+The RT-1 invalidation in `set_wizard_composite_members` resets `strategy_analytics.computation_status` only from `complete`/`complete_with_warnings` → `pending`. If a member set changes while a prior stitch is still `computing`, the reset is skipped and the inflight run can land `complete` over the OLD member set. Backstopped by finalize's `after()` re-enqueue (acknowledged). Fix if it ever bites: also invalidate/supersede an inflight `computing` run on a genuine member-set change.
+
+### P4 (LOW): cleanup sweep check-then-delete race (D-1)
+`cleanup_abandoned_wizard_drafts` evaluates its 3× `NOT EXISTS` anti-joins under READ COMMITTED, so a key attached to a fresh draft in the ms-window between the sweep's snapshot and its DELETE could be swept (recoverable — re-enter the key; published composites safe via the BEFORE DELETE guard; pre-existing class). Fix if picked up: run the sweep SERIALIZABLE or `SELECT … FOR UPDATE` the candidate keys.
+
+### P4 (LOW): correlation-id server-log uniformity residual (D-2)
+The composite error routes now log the inbound `X-Correlation-Id`; a fully uniform "every wizard-hit route logs the inbound id" pass is a broader cross-cutting task (sync-progress intentionally excluded — its only failure degrades to 200, so it never shows the user an id to match).
+
 ## v1.8 complete_with_warnings surfacing follow-ups (from /ship red-team + Fable specialist fan-out, 2026-07-07)
 
 ### P2: CI guard against fresh `computation_status === 'complete'` exact-matches
@@ -26,7 +37,7 @@ The founder-LP report withholds a warned month and fires a fail-loud alert with 
 ### P4: warned-strategy UI polish (cosmetic, not dead-ends)
 - `ApiKeyManager` doesn't pass `syncWarnings` to `SyncProgress`, so a warned resync shows the "Synced with warnings" pill without a "Show details" expander (the wizard path carries the text; the key-manager doesn't source it).
 - The v1 public strategy page renders warned metrics with NO warned badge, while v2 surfaces DQ chips via panel6 — inconsistent "surface with a badge" between v1/v2.
-- `ApiKeyManager.exchangeIcon` map lacks `deribit` → Deribit keys show a "?" icon (pre-existing, unrelated).
+- ~~`ApiKeyManager.exchangeIcon` map lacks `deribit` → Deribit keys show a "?" icon~~ **RESOLVED v1.9.1 Phase 96 (UX-01): DRB badge.**
 - Test-coverage nits (LOW): a `SyncProgress` test asserting the poll forwards `onStatusChange` for `complete_with_warnings` (the one untested link in the resync-deadlock chain), and a `csv-finalize` placeholder warned-skip case.
 
 ## v1.3 phase 45 nav follow-ups (deferred from /ship pre-landing review, 2026-06-27)
