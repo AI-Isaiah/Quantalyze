@@ -69,8 +69,10 @@ from services.deribit_ingest import (
 )
 from services.deribit_txn import LedgerValuationError
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
-from services.native_nav import NativeLedger
+from services.native_nav import InceptionReconciliationError, NativeLedger
+from services.nav_twr import NavReconstructionError
 from services.stitch_composite import (
+    MTM_REASON_ANCHOR_RACE,
     MTM_REASON_SERIES_UNCOMPUTABLE,
     MTM_REASON_SUMMARY_COVERAGE,
 )
@@ -395,6 +397,83 @@ async def test_transient_read_error_on_mtm_propagates() -> None:
     )):
         with pytest.raises(DeribitTransientReadError):
             await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+
+
+# ── Phase 102 (deferred anchor-race resolution) — label-only classification ──
+
+
+@pytest.mark.asyncio
+async def test_inception_reconciliation_on_mtm_stamps_anchor_race() -> None:
+    """RACE-1: an InceptionReconciliationError on the MTM (second) crawl — the
+    same-anchor race where a mid-crawl event lands in the MTM rows but not the
+    once-read anchor — DEGRADES with the DISTINCT transient reason
+    ``mtm_anchor_race`` (NOT the permanent-sounding coverage reason), writes an
+    authoritative SQL NULL for the by-basis object (stale-heal), and the CASH derive
+    still COMPLETES DONE (cash rows upserted + compute job enqueued). Neuter: revert
+    the isinstance branch to an unconditional MTM_REASON_SUMMARY_COVERAGE → RED."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        side_effects=[
+            None,
+            InceptionReconciliationError(
+                currencies=["BTC"], venue="deribit", breach_ratio=3.2,
+            ),
+        ],
+    )
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    )):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a mid-crawl anchor race must DEGRADE (cash ships), never retry-to-failed"
+    )
+    assert len(calls) == 2, "MTM pass must be ATTEMPTED before the race degrade"
+    # cash still ships: csv rows upserted + compute job enqueued
+    assert any(
+        name == "csv_daily_returns" and op == "upsert"
+        for op, name in capture["ops"]
+    )
+    assert any(rpc == "enqueue_compute_job" for rpc, _ in capture["rpc_calls"])
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    # the DISTINCT transient reason, NOT the coverage stamp
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == MTM_REASON_ANCHOR_RACE
+    assert MTM_REASON_ANCHOR_RACE != MTM_REASON_SUMMARY_COVERAGE
+    # authoritative SQL NULL for the by-basis object (stale-heal)
+    assert prestamp["metrics_json_by_basis"] is None
+
+
+@pytest.mark.asyncio
+async def test_non_inception_structural_mtm_failure_keeps_coverage_reason() -> None:
+    """RACE-2: a NON-inception structural failure (a plain NavReconstructionError,
+    the parent class) still stamps the coverage reason
+    ``mtm_summary_coverage_incomplete`` — the new anchor-race branch must NOT hijack
+    every structural family, only the InceptionReconciliationError subclass. Neuter:
+    drop the isinstance guard (classify ALL as anchor-race) → RED."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        side_effects=[
+            None,
+            NavReconstructionError("schema-drifted flow amount (not an inception breach)"),
+        ],
+    )
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    )):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 2
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SUMMARY_COVERAGE
+    ), "a non-inception structural failure must keep the coverage reason"
 
 
 def _find_prestamp(capture: dict) -> dict | None:

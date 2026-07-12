@@ -2064,8 +2064,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 PNL_BASIS_MARK_TO_MARKET,
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
+            from services.native_nav import InceptionReconciliationError
             from services.redact import scrub_freeform_string
             from services.stitch_composite import (
+                MTM_REASON_ANCHOR_RACE,
                 MTM_REASON_SECOND_PASS_TIMEOUT,
                 MTM_REASON_SUMMARY_COVERAGE,
             )
@@ -2394,8 +2396,24 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             # DeribitTransientReadError, ccxt network errors, and
                             # RateLimitExceeded likewise propagate. Structural ⇒
                             # degrade; transient ⇒ retry all.
+                            #
+                            # Phase 102 (deferred anchor-race resolution): the reason
+                            # is LABEL-ONLY inside this EXISTING catch — no re-raise,
+                            # no retry, no tuple change, degrade semantics untouched.
+                            # An InceptionReconciliationError here is the same-anchor
+                            # race (a mid-crawl event lands in the MTM rows but not the
+                            # once-read anchor → the §5 native roll no longer
+                            # reconciles), so it gets its OWN transient reason instead
+                            # of the permanent-sounding coverage stamp. A genuinely
+                            # PERSISTENT inception breach also lands here and STILL
+                            # degrades (cash ships) — never propagate-to-retry, which
+                            # would sink the healthy cash headline (deferred-items.md).
                             mtm_returns = None
-                            mtm_gated_reason = MTM_REASON_SUMMARY_COVERAGE
+                            mtm_gated_reason = (
+                                MTM_REASON_ANCHOR_RACE
+                                if isinstance(_mtm_exc, InceptionReconciliationError)
+                                else MTM_REASON_SUMMARY_COVERAGE
+                            )
                             logger.warning(
                                 "derive_broker_dailies: mark_to_market second pass "
                                 "degraded for strategy %s (structural reconstruction "
@@ -2979,8 +2997,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # SERIES-UNCOMPUTABLE math failure (compute rejected the series), NOT a
             # settlement-summary coverage hole — stamp its own reason so Phase 102's
             # disabled-with-reason UI does not show a coverage explanation for a
-            # non-coverage cause. The true crawl-level coverage-hole degrade
-            # (:2291-2313 catch) keeps MTM_REASON_SUMMARY_COVERAGE.
+            # non-coverage cause. The true crawl-level structural degrade (the MTM
+            # second-pass `as _mtm_exc` catch) stamps MTM_REASON_SUMMARY_COVERAGE for
+            # a non-inception structural failure, or MTM_REASON_ANCHOR_RACE when the
+            # failure is an InceptionReconciliationError (the Phase-102 same-anchor
+            # race classification).
             mtm_gated_reason = MTM_REASON_SERIES_UNCOMPUTABLE
             logger.warning(
                 "derive_broker_dailies: mark_to_market metrics compute rejected the "

@@ -126,6 +126,28 @@ MTM_REASON_SERIES_UNCOMPUTABLE = "mtm_series_uncomputable"
 # chain-break — LOUD and machine-distinct so a large-book timeout is diagnosable
 # and Phase 102's reason UI can explain it honestly.
 MTM_REASON_SECOND_PASS_TIMEOUT = "mtm_second_pass_timeout"
+# Phase 102 resolution of the Phase-101 deferred same-anchor MTM race. The single-
+# key mark_to_market second pass deliberately REUSES the cash pass's account_state
+# anchor (the SAME terminal NAV, so cash_settlement and mark_to_market value a
+# comparable base — pinned by test_options_book_runs_second_mtm_pass_same_anchor).
+# An event landing DURING the minutes-long cash crawl appears in the MTM rows but
+# not the once-read anchor → the §5 native roll no longer reconciles to a ~zero
+# pre-history balance → InceptionReconciliationError (native_nav.py:137). Because
+# that error subclasses NavReconstructionError it was previously caught by the MTM
+# structural-degrade tuple and stamped MTM_REASON_SUMMARY_COVERAGE — a permanent-
+# SOUNDING coverage explanation for what is usually a self-healing TRANSIENT race.
+# Classified as its OWN transient reason so the disabled-with-reason UI (plan
+# 102-01 maps it to "recomputed on the next data refresh" copy, amber tone) never
+# shows a coverage story for a race. This STILL DEGRADES — cash ships DONE — and is
+# LABEL-ONLY: the propagate-to-retry alternative was REJECTED because
+# InceptionReconciliationError is documented permanent/structural (native_nav.py
+# :594) and a genuinely PERSISTENT breach would then retry the whole derive to
+# failed_final, sinking the healthy cash headline (deferred-items.md option-2 risk).
+# Honest caveat: a genuinely persistent MTM-only reconciliation breach ALSO lands
+# here and re-stamps this same reason on every derive — the copy therefore promises
+# only re-computation, never recovery. Same vocabulary owner (this module) so the
+# single-key and composite reasons never fork.
+MTM_REASON_ANCHOR_RACE = "mtm_anchor_race"
 
 
 def windows_overlap(a: MemberWindow, b: MemberWindow) -> bool:
