@@ -8,6 +8,7 @@ import {
   BasisProvider,
   useBasis,
   useBasisMetrics,
+  useBasisSeriesView,
   mtmDisabledReasonCopy,
   mtmReasonTone,
 } from "./basis-context";
@@ -178,6 +179,84 @@ describe("basis-context", () => {
     expect(mtmReasonTone("some_unrecognized_reason")).toBe("steady");
     expect(mtmReasonTone(undefined)).toBe("steady");
     expect(mtmReasonTone()).toBe("steady");
+  });
+
+  // ---- Phase 103 (MTM-04): useBasisSeriesView — the per-basis series merge ----
+
+  // A payload carrying a DISTINGUISHABLE MTM series bundle. The bundle's dailies-
+  // derivable fields differ from the cash top-level so a swap is observable; the
+  // EXTERNAL fields (correlations/correlationMatrix) + strategyMetrics are NOT in
+  // the bundle, so the merge must pass them through as cash.
+  const CASH_DATES = ["2023-01-01", "2023-01-02", "2023-01-03"];
+  const MTM_DATES = ["2023-01-02", "2023-01-03"]; // shorter MTM span (distinct axis)
+  const CASH_QUANTILES = { p05: -0.05, p25: -0.01, p50: 0.0, p75: 0.01, p95: 0.05, min: -0.1, max: 0.1, mean: 0.0 };
+  const MTM_QUANTILES = { p05: -0.09, p25: -0.02, p50: 0.01, p75: 0.03, p95: 0.08, min: -0.2, max: 0.2, mean: 0.01 };
+  const CASH_CORRELATIONS = [{ name: "BTC", rho: 0.42 }];
+
+  function makeSeriesPayload(withBundle: boolean): FactsheetPayload {
+    const bundle = {
+      dates: MTM_DATES,
+      quantiles: MTM_QUANTILES,
+      calmarByYear: [{ year: "2023", ret: 0.2, max_dd: -0.05, calmar: 4, days: 250 }],
+    };
+    return {
+      ingestSource: "csv",
+      strategyMetrics: CASH_METRICS,
+      dates: CASH_DATES,
+      quantiles: CASH_QUANTILES,
+      correlations: CASH_CORRELATIONS,
+      calmarByYear: [{ year: "2023", ret: 0.1, max_dd: -0.02, calmar: 5, days: 250 }],
+      ...(withBundle ? { seriesByBasis: { mark_to_market: bundle } } : {}),
+    } as unknown as FactsheetPayload;
+  }
+
+  function useViewProbe(payload: FactsheetPayload) {
+    const ctx = useBasis();
+    const view = useBasisSeriesView(payload);
+    return { ctx, view };
+  }
+
+  it("Test 8 — cash returns the ORIGINAL payload by reference (GUARD-02 identity)", () => {
+    const payload = makeSeriesPayload(true);
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper });
+    expect(result.current.ctx.basis).toBe("cash_settlement");
+    expect(result.current.view).toBe(payload);
+  });
+
+  it("Test 9 — MTM WITH bundle merges dailies-derivable fields but passes external fields through as cash", () => {
+    const payload = makeSeriesPayload(true);
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("mark_to_market"));
+    const v = result.current.view;
+    // NOT the original object — a merged view.
+    expect(v).not.toBe(payload);
+    // Dailies-derivable fields come from the BUNDLE (MTM axis + MTM stats).
+    expect(v.dates).toEqual(MTM_DATES);
+    expect(v.quantiles).toEqual(MTM_QUANTILES);
+    expect(v.calmarByYear[0].ret).toBe(0.2);
+    // EXTERNAL fields + strategyMetrics pass through as CASH (never in the bundle).
+    expect(v.correlations).toBe(payload.correlations);
+    expect(v.strategyMetrics).toBe(payload.strategyMetrics);
+  });
+
+  it("Test 10 — MTM WITHOUT a bundle falls back to the ORIGINAL payload by reference", () => {
+    const payload = makeSeriesPayload(false);
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("mark_to_market"));
+    expect(result.current.view).toBe(payload);
+  });
+
+  it("Test 11 — the merged view is memo-stable across re-renders and identity restores on toggle back", () => {
+    const payload = makeSeriesPayload(true);
+    const { result, rerender } = renderHook(() => useViewProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("mark_to_market"));
+    const merged = result.current.view;
+    rerender();
+    // Same object reference across a re-render (useMemo stability).
+    expect(result.current.view).toBe(merged);
+    // Toggling back to cash restores the original payload reference.
+    act(() => result.current.ctx.setBasis("cash_settlement"));
+    expect(result.current.view).toBe(payload);
   });
 
   it("Test 7 — GUARD-04: source has no storage/URL/cookie/history access", () => {

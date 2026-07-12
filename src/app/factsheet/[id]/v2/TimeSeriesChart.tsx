@@ -3,6 +3,7 @@
 import { memo, useDeferredValue, useMemo, useRef, useState, useCallback, useEffect } from "react";
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { usePayload, useXRange, useActiveComparator, useRegimes } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
@@ -60,10 +61,18 @@ function firstIndexAfter(dates: readonly string[], target: string): number {
 export const TimeSeriesChart = memo(TimeSeriesChartInner);
 
 function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
-  const payload = usePayload();
+  // Phase 103 (MTM-04): every series/dates/marker/worst-10/comparator read goes
+  // through the active-basis view — under mark_to_market with a bundle it is the
+  // MTM merge ({...payload, ...seriesByBasis.mark_to_market}); under cash or an
+  // absent bundle it is the original payload by reference (byte-identical render).
+  const view = useBasisSeriesView(usePayload());
   const { xRange, setXRange, resetXRange } = useXRange();
   const regimes = useRegimes();
-  const { block: cmp, key: cmpKey } = useActiveComparator();
+  // The comparator KEY is picker state (frozen context); the comparator BLOCK
+  // must come from the VIEW so the MTM axis and the comparator arrays share ONE
+  // coherent date axis (Pitfall-1). Under cash view.comparators === cash top-level.
+  const { key: cmpKey } = useActiveComparator();
+  const cmp = view.comparators[cmpKey];
 
   const height = config.height ?? 280;
   const plotW = VB_W - PAD.left - PAD.right;
@@ -100,8 +109,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
 
   // Rebase-on-zoom requires xStart so resolveSeries can divide by series[xStart].
   const series = useMemo<ResolvedSeries[]>(
-    () => resolveSeries(config, payload, cmp, xRange[0]),
-    [config, payload, cmp, xRange],
+    () => resolveSeries(config, view, cmp, xRange[0]),
+    [config, view, cmp, xRange],
   );
 
   // Regime segmentation from the comparator's rolling Sharpe sign. Bull when
@@ -168,8 +177,16 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     return [lo - pad, hi + pad];
   }, [series, muted, scale, config.baseline, config.scalable, xRange, yOverride]);
 
-  const n = payload.dates.length;
-  const [xStart, xEnd] = xRange;
+  const n = view.dates.length;
+  // Defensive clamp (T-103-08): the frozen xRange is maintained in cash-index
+  // space (context length = cash dates). Under a SHORTER MTM axis the persisted
+  // window end can exceed the MTM series bounds for the render BEFORE the
+  // basis-change resetXRange effect (FactsheetView) settles — clamp so no chart
+  // geometry ever indexes past view.dates, and so the MTM series fills the plot
+  // width. A no-op under cash (xRange is already ≤ the cash length).
+  const maxIdx = Math.max(0, n - 1);
+  const xStart = Math.min(xRange[0], maxIdx);
+  const xEnd = Math.min(xRange[1], maxIdx);
   const xSpan = Math.max(1, xEnd - xStart);
   // X maps an index into the visible window onto plot pixels. Indices outside
   // [xStart, xEnd] still get computed (so paths clip naturally) but are off-plot.
@@ -234,11 +251,11 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // single-key / non-composite emits a byte-identical SVG (GUARD-02).
   const segmentMarkers = useMemo(() => {
     if (!config.segmentMarkers) return null;
-    const boundaries = payload.segmentBoundaries ?? [];
-    const gaps = payload.missingSegments ?? [];
+    const boundaries = view.segmentBoundaries ?? [];
+    const gaps = view.missingSegments ?? [];
     if (boundaries.length === 0 && gaps.length === 0) return null;
 
-    const dates = payload.dates;
+    const dates = view.dates;
     const plotRight = PAD.left + plotW;
     const plotBottom = PAD.top + plotH;
 
@@ -334,9 +351,9 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   }, [
     config.segmentMarkers,
     config.key,
-    payload.segmentBoundaries,
-    payload.missingSegments,
-    payload.dates,
+    view.segmentBoundaries,
+    view.missingSegments,
+    view.dates,
     xStart,
     xEnd,
     plotW,
@@ -349,8 +366,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     [yDomain, scale, config.scalable, config.valueFormat],
   );
   const xTicks = useMemo(
-    () => makeXTicks(payload.dates, xStart, xEnd),
-    [payload.dates, xStart, xEnd],
+    () => makeXTicks(view.dates, xStart, xEnd),
+    [view.dates, xStart, xEnd],
   );
 
   // Translate a mouse pixel offset into a fractional x-index in the visible window.
@@ -681,8 +698,8 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             config={config}
             svgRef={svgRef}
             series={series}
-            dates={payload.dates}
-            xRange={xRange}
+            dates={view.dates}
+            xRange={[xStart, xEnd] as const}
           />
         </div>
       </header>
@@ -724,7 +741,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         width={VB_W}
         height={height}
         role="img"
-        aria-label={ariaLabel(config, payload.strategyName, cmp.name, !!cmp.cumulative)}
+        aria-label={ariaLabel(config, view.strategyName, cmp.name, !!cmp.cumulative)}
         aria-describedby={`chart-help-${config.key}`}
         tabIndex={0}
         focusable="true"
@@ -826,7 +843,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
         ))}
 
         {/* Worst-N drawdown highlight bands — drawn behind the series line. */}
-        {config.ddHighlights && payload.strategyWorst10.map((p, i) => {
+        {config.ddHighlights && view.strategyWorst10.map((p, i) => {
           const x0 = Math.max(PAD.left, X(p.start));
           const x1 = Math.min(PAD.left + plotW, X(p.recover));
           const w = x1 - x0;
@@ -1019,7 +1036,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
               plotLeft={PAD.left}
               plotRight={PAD.left + plotW}
               plotTop={PAD.top}
-              date={payload.dates[crossIdx]}
+              date={view.dates[crossIdx]}
               crossIdx={crossIdx}
               series={series}
               muted={muted}

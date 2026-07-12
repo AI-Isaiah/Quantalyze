@@ -1066,6 +1066,18 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   // (`mtmGate.available`); otherwise disabled with the mapped closed-set reason
   // (D1). Default cash.
   const { basis, setBasis } = useBasis();
+  // Phase 103 (MTM-04): toggling basis swaps the whole chart date axis (cash and
+  // MTM have different spans/gaps), so a zoom window captured on one basis is
+  // meaningless on the other. Reset the visible range on every ACTUAL toggle
+  // (skip on mount) via the frozen context's own resetXRange API — factsheet-
+  // context.tsx is never edited. The per-chart defensive clamp
+  // (TimeSeriesChart) is the belt-and-suspenders against a same-render race.
+  const prevBasisRef = React.useRef(basis);
+  React.useEffect(() => {
+    if (prevBasisRef.current === basis) return;
+    prevBasisRef.current = basis;
+    resetXRange();
+  }, [basis, resetXRange]);
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);

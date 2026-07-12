@@ -94,6 +94,49 @@ export function useBasisMetrics(payload: FactsheetPayload): {
 }
 
 /**
+ * Phase 103 (MTM-04) — the client-side per-basis SERIES view-merge.
+ *
+ * Under `cash_settlement` (or whenever the payload carries no MTM series
+ * bundle — a stale cache, a not-yet-backfilled strategy, or a gated book) this
+ * returns the ORIGINAL payload object by REFERENCE: the GUARD-02 byte/render-
+ * stability contract holds and every consuming chart/panel renders exactly as
+ * it does today.
+ *
+ * Under `mark_to_market` WITH `payload.seriesByBasis.mark_to_market` present it
+ * returns a `useMemo`'d `{...payload, ...bundle}` merge. The bundle carries the
+ * MTM-basis clones of every dailies-derivable field (dates axis, the three
+ * chart tracks, rolling, worst-10, comparators, the two heatmaps, quantiles,
+ * streaks, calmarByYear, bootstrapCI, styleDrift, stressWindows + the per-basis
+ * `missingSegments` mask). EXTERNAL-DATA fields (`correlations`,
+ * `correlationMatrix`) and the KpiStrip's `strategyMetrics` are NOT in the
+ * bundle, so the spread passes them through as CASH with ZERO per-panel
+ * branching (103-03 established this elegance). `segmentBoundaries` is likewise
+ * NOT in the bundle, so the composite key-handoff seams inherit the shared
+ * basis-invariant top-level value.
+ *
+ * Pure context + memo — keeps the GUARD-04 no-storage discipline (this file
+ * never touches storage/URL/history; pinned by basis-context.test.tsx Test 7).
+ */
+export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload {
+  // Read the context directly (NOT via useBasis, which throws) so a chart or
+  // panel mounted WITHOUT a BasisProvider degrades to cash instead of crashing —
+  // the merge is a pure additive enhancement, and several isolated mounts/tests
+  // render the tree under FactsheetProvider only. Absent provider ⇒ cash ⇒ the
+  // original payload by reference (byte-identical render).
+  const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  return useMemo<FactsheetPayload>(() => {
+    const bundle = payload.seriesByBasis?.mark_to_market;
+    if (basis !== "mark_to_market" || !bundle) return payload;
+    // Narrow on the ingest discriminant before spreading: the bundle has no
+    // `ingestSource`, so spreading over the bare union would widen the
+    // discriminant and break FactsheetPayload assignability. Each arm's spread
+    // preserves its `"api"`/`"csv"` literal (bundle never touches it).
+    if (payload.ingestSource === "api") return { ...payload, ...bundle };
+    return { ...payload, ...bundle };
+  }, [basis, payload]);
+}
+
+/**
  * Closed-set MTM disabled-reason copy (CONTEXT D1 / UI-SPEC Copywriting),
  * character-exact. Server truth only — no client ledger predicate; a graceful
  * basis-agnostic default handles any un-enumerated reason (the TS union at
