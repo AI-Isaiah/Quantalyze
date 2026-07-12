@@ -35,8 +35,15 @@ Neuter-falsifiability (test → mutation it kills):
     persist, or adding a ``cash_settlement`` key.
   * ``test_degraded_mtm_persists_null_and_reason`` (Task 2) — kills dropping the
     SQL-NULL heal / the reason stamp on degrade.
-  * ``test_non_options_leaves_by_basis_untouched`` (Task 2) — kills writing the
-    by-basis column on a non-options derive.
+  * ``test_non_options_deribit_authoritatively_nulls_by_basis`` /
+    ``test_ccxt_venue_authoritatively_nulls_by_basis`` (Fable MED-HIGH) — kill
+    dropping the authoritative NULL, which would strand a stale by-basis object on
+    a single-key row.
+  * ``test_composite_to_single_conversion_nulls_stale_by_basis`` /
+    ``test_mtm_headline_flip_clears_stale_by_basis`` /
+    ``test_terminal_failure_clears_stale_by_basis`` (Fable MED-HIGH) — kill the
+    not-attempted / mtm-headline / failure-stamp arms leaving the column
+    unwritten.
   * ``test_benchmark_failure_never_gates_mtm`` (Task 2) — kills gating MTM on the
     BTC benchmark fetch.
   * ``test_sc4_cash_parity_mtm_on_vs_off`` / ``test_sc4_cash_parity_mtm_degraded``
@@ -405,6 +412,20 @@ def _find_prestamp(capture: dict) -> dict | None:
     return None
 
 
+def _find_failed_stamp(capture: dict) -> dict | None:
+    """The terminal 'failed' strategy_analytics upsert payload (the derive's
+    _stamp_deribit_analytics_failed / _mark_insufficient / _stamp_nav_failed
+    stamps), distinguished by computation_status == 'failed'."""
+    for name, payload, _conflict in capture["upserts"]:
+        if (
+            name == "strategy_analytics"
+            and isinstance(payload, dict)
+            and payload.get("computation_status") == "failed"
+        ):
+            return payload
+    return None
+
+
 _SEVEN_SCALARS = (
     "cumulative_return", "volatility", "max_drawdown",
     "cagr", "sharpe", "sortino", "calmar",
@@ -492,9 +513,12 @@ async def test_degraded_mtm_persists_null_and_reason() -> None:
 
 
 @pytest.mark.asyncio
-async def test_non_options_deribit_leaves_by_basis_untouched() -> None:
-    """Zero blast radius: a perp-only Deribit derive writes NO metrics_json_by_basis
-    key and NO mtm_gated_reason — byte-identical to the pre-Phase-101 payload."""
+async def test_non_options_deribit_authoritatively_nulls_by_basis() -> None:
+    """MED-HIGH (Fable): a perp-only Deribit derive is AUTHORITATIVE for the
+    single-key row — it writes metrics_json_by_basis = SQL NULL (present in the
+    payload, Python None) so no stale by-basis object can survive, and NO
+    mtm_gated_reason. (Pre-Fable this left the column UNTOUCHED, which stranded a
+    stale composite/MTM object — a wrong-money-number hazard for Phase 102.)"""
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=False)]
     ledger_mock, _calls = _recording_ledger(reports)
@@ -506,16 +530,18 @@ async def test_non_options_deribit_leaves_by_basis_untouched() -> None:
     assert result.outcome == DispatchOutcome.DONE
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
-    assert "metrics_json_by_basis" not in prestamp, (
-        "a non-options derive must leave the by-basis column UNTOUCHED"
+    assert "metrics_json_by_basis" in prestamp and prestamp["metrics_json_by_basis"] is None, (
+        "a non-options derive must AUTHORITATIVELY NULL the by-basis column, not "
+        "leave it untouched (a stale object would otherwise survive)"
     )
     assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
 
 
 @pytest.mark.asyncio
-async def test_ccxt_venue_leaves_by_basis_untouched() -> None:
-    """Zero blast radius: a ccxt (binance) strategy derive never attempts the MTM
-    pass — no metrics_json_by_basis key in the prestamp payload."""
+async def test_ccxt_venue_authoritatively_nulls_by_basis() -> None:
+    """MED-HIGH (Fable): a ccxt (binance) strategy derive never attempts the MTM
+    pass, yet still AUTHORITATIVELY NULLs metrics_json_by_basis so a stale object
+    from a prior composite era can't linger on the now-single-key ccxt row."""
     from tests.test_derive_broker_dailies_dualmode import (
         _build_ctx as _dm_ctx,
         _patches as _dm_patches,
@@ -534,8 +560,8 @@ async def test_ccxt_venue_leaves_by_basis_untouched() -> None:
     assert result.outcome == DispatchOutcome.DONE
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
-    assert "metrics_json_by_basis" not in prestamp, (
-        "a ccxt derive must never write the single-key by-basis column"
+    assert "metrics_json_by_basis" in prestamp and prestamp["metrics_json_by_basis"] is None, (
+        "a ccxt derive must AUTHORITATIVELY NULL the single-key by-basis column"
     )
     assert "mtm_gated_reason" not in prestamp["data_quality_flags"]
 
@@ -868,3 +894,120 @@ async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
         "crypto/Deribit book MUST annualize on √365 (#597), not the 252 default; "
         "asset_class was dropped from the single-key _load_strategy select"
     )
+
+
+# ── FABLE MED-HIGH: metrics_json_by_basis is AUTHORITATIVE on the broker route ──
+# A single-key broker-derive row's only legitimate by-basis content is the
+# mark_to_market key this path writes; every other terminal shape must clear the
+# column to SQL NULL so no stale composite-shaped or frozen MTM object survives
+# (Phase 102 would render it as a wrong money number).
+
+# An allocated-capital config whose HEADLINE basis is already mark_to_market — so
+# the additive second pass is SKIPPED (the pnl_basis == DEFAULT_PNL_BASIS gate is
+# False) even for an options book. mtm_attempted stays False.
+_MTM_HEADLINE_CONFIG = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "mark_to_market",
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+    "capital_schedule": [
+        {"effective_from": "2024-01-01", "capital_usd": 100000.0},
+    ],
+}
+
+
+def _one_day_series() -> pd.Series:
+    """A <2-interpretable-day series → the derive's insufficient-history short
+    circuit (_mark_insufficient stamps computation_status='failed')."""
+    return pd.Series(
+        [0.01],
+        index=pd.DatetimeIndex(["2024-05-01"]),
+        dtype="float64",
+    )
+
+
+@pytest.mark.asyncio
+async def test_composite_to_single_conversion_nulls_stale_by_basis() -> None:
+    """FABLE MED-HIGH regression (trigger a): a strategy reconfigured composite →
+    single-key broker (new key, perp-only Deribit) must AUTHORITATIVELY NULL
+    metrics_json_by_basis so the stale composite {cash_settlement, mark_to_market}
+    object cannot linger next to the fresh single-key headline. The prestamp must
+    write the column as SQL NULL (present, Python None) — NOT omit it (omission is
+    exactly what stranded the stale object). Neuter: revert the authoritative NULL
+    → the column is absent from the prestamp → `in` assert reddens."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=False)]  # perp-only → mtm_attempted=False
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert "metrics_json_by_basis" in prestamp, (
+        "the not-attempted arm must WRITE metrics_json_by_basis (authoritative "
+        "clear), not omit it — omission strands the stale composite object"
+    )
+    assert prestamp["metrics_json_by_basis"] is None
+
+
+@pytest.mark.asyncio
+async def test_mtm_headline_flip_clears_stale_by_basis() -> None:
+    """FABLE MED-HIGH regression (trigger b): an OPTIONS book whose
+    returns_denominator_config.pnl_basis is flipped to mark_to_market skips the
+    additive second pass (mtm_attempted=False), so a prior successful MTM object
+    would freeze forever. The derive must AUTHORITATIVELY NULL metrics_json_by_basis
+    so the frozen object is cleared. Neuter: revert → column omitted → reddens."""
+    ctx, capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _MTM_HEADLINE_CONFIG,
+        }
+    )
+    # Options book, but the MTM-headline gate skips the second pass → ONE ledger
+    # call, ONE combine. mtm_attempted=False.
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    # The second (MTM) pass must NOT have run (only the cash pass crawled).
+    assert len(_calls) == 1, "MTM-headline book must not attempt the additive pass"
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert "metrics_json_by_basis" in prestamp, (
+        "the mtm-headline (not-attempted) arm must WRITE the authoritative NULL"
+    )
+    assert prestamp["metrics_json_by_basis"] is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_clears_stale_by_basis() -> None:
+    """FABLE MED-HIGH regression (F-4): a terminal failure stamp (here the
+    insufficient-history short circuit) on a strategy row that may carry a prior
+    by-basis object must AUTHORITATIVELY NULL metrics_json_by_basis so a stale
+    object cannot render as a live-looking money number on a now-FAILED row.
+    Neuter: drop the metrics_json_by_basis=None from the failure stamp → the key
+    is absent → the `in` assert reddens."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=False)]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_one_day_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    # Insufficient-history is a terminal DONE-with-failed-status short circuit.
+    assert result.outcome == DispatchOutcome.DONE
+    failed = _find_failed_stamp(capture)
+    assert failed is not None, "expected a computation_status='failed' stamp"
+    assert "metrics_json_by_basis" in failed, (
+        "a terminal failure stamp must clear metrics_json_by_basis so a stale "
+        "object can't render on a FAILED row"
+    )
+    assert failed["metrics_json_by_basis"] is None

@@ -1994,6 +1994,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_warned": False,
                         "computation_error": stamp_detail + scrubbed,
                         "data_quality_flags": {"csv_source": True},
+                        # F-4 (Fable): authoritative-clear the by-basis column on a
+                        # terminal failure so a prior successful derive's object
+                        # (composite-era or single-key MTM) can't render as a
+                        # live-looking money number on a now-FAILED row.
+                        "metrics_json_by_basis": None,
                     },
                     on_conflict="strategy_id",
                 ).execute()
@@ -2071,6 +2076,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             "computation_warned": False,
                             "computation_error": scrubbed,
                             "data_quality_flags": {"csv_source": True},
+                            # F-4 (Fable): authoritative-clear the by-basis column so
+                            # a prior object can't render on a now-FAILED row.
+                            "metrics_json_by_basis": None,
                         },
                         on_conflict="strategy_id",
                     ).execute()
@@ -2694,6 +2702,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "activity required."
                     ),
                     "data_quality_flags": {"csv_source": True},
+                    # F-4 (Fable): authoritative-clear the by-basis column so a
+                    # prior object can't render on a now-FAILED (insufficient) row.
+                    "metrics_json_by_basis": None,
                 },
                 on_conflict="strategy_id",
             ).execute()
@@ -2953,19 +2964,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         "strategy_id": strategy_id,
         "data_quality_flags": _prestamp_flags,
     }
-    if mtm_attempted:
-        # An options-book, strategy-mode, cash-headline derive. Success → the
-        # additive object; degrade → SQL NULL (Python None, never JSON null — the
-        # Phase-85 CHECK) which HEALS a stale mark_to_market key left by a prior
-        # successful derive whose data later gated (composite Finding-5 drop-stale).
-        _prestamp_payload["metrics_json_by_basis"] = (
-            {"mark_to_market": mtm_metrics_json}
-            if mtm_metrics_json is not None
-            else None
-        )
-    # When the pass was NOT attempted (perp-only, ccxt, key-mode, MTM-configured
-    # headline) the metrics_json_by_basis column is left OUT of the payload — the
-    # column is UNTOUCHED and every non-options derive stays byte-identical (SC-4).
+    # MED-HIGH (Fable): metrics_json_by_basis is AUTHORITATIVE for a single-key
+    # broker-derive row — this seam ALWAYS writes the column so no stale object can
+    # survive. A fresh {"mark_to_market": …} object ONLY when the second pass
+    # SUCCEEDED; every other terminal-DONE shape → SQL NULL (Python None, never JSON
+    # null — the Phase-85 CHECK). This closes the whole stale-by-basis class on the
+    # broker route:
+    #   * mtm_attempted + success → the additive object;
+    #   * mtm_attempted + degrade (compute-reject / structural) → NULL, healing a
+    #     stale mark_to_market key from a prior successful derive whose data gated;
+    #   * NOT attempted (perp-only, ccxt, MTM-configured headline, or a strategy
+    #     RECONFIGURED from composite → single-key broker) → NULL, so a stale
+    #     composite-shaped {cash_settlement, mark_to_market} object or a frozen
+    #     prior MTM object can never linger next to the single-key headline.
+    # The finalizer's Finding-5 clear is DEAD on the broker route (its
+    # `_was_composite` reads the data_quality_flags THIS prestamp already replaced
+    # with {csv_source}), so this authoritative write is the single source of truth:
+    # the finalizer OMITS the column on the broker route and leaves this value
+    # intact (that is also how the success-path mark_to_market object survives). A
+    # single-key row's only legitimate by-basis content is the mark_to_market key
+    # this path owns — anything else is stale by definition. (Broker-derive only
+    # ever runs for single-key strategies; a genuine composite is authored by
+    # run_stitch_composite_job / :4341, never this derive.) Non-options derives are
+    # no longer byte-identical (they now write metrics_json_by_basis=NULL) — an
+    # accepted, deliberate change vs the prior column-untouched behavior, because a
+    # surviving stale object is a WRONG-MONEY-NUMBER hazard for Phase 102.
+    _prestamp_payload["metrics_json_by_basis"] = (
+        {"mark_to_market": mtm_metrics_json}
+        if (mtm_attempted and mtm_metrics_json is not None)
+        else None
+    )
 
     def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
         ctx.supabase.table("strategy_analytics").upsert(
