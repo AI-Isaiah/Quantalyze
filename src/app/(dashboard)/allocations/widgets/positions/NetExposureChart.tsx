@@ -159,6 +159,9 @@ export function NetExposureChart({
               name="Net"
               stroke={CHART_ACCENT}
               strokeWidth={1.5}
+              // dot={false} for the ≥2-point case; recharts (Dots.shouldRenderDots)
+              // still renders an ISOLATED single point so a one-asof (day-one /
+              // demo-hero) book is never a blank plot — guarded in the test.
               dot={false}
               connectNulls={false}
             />

@@ -106,6 +106,25 @@ describe("NetExposureChart — empty state", () => {
   });
 });
 
+// F-1 guard: recharts (Dots.shouldRenderDots) strokes no PATH across <2 points,
+// but DOES render an isolated single point as a dot even with dot={false}. These
+// lock that behavior so a one-asof (day-one / demo-hero) book is never a blank
+// plot — a recharts regression that dropped single-point dots would turn RED here.
+describe("NetExposureChart — F-1 single-asof book is not blank", () => {
+  it("renders a visible line dot for a one-point series (recharts strokes no path across <2 points)", () => {
+    const { container } = render(<NetExposureChart points={[pt("2026-01-01", 200, 400)]} gaps={[]} />);
+    // not the honest-empty card (that requires length 0)
+    expect(screen.queryByText("No exposure history yet.")).toBeNull();
+    // a real dot mark exists so the lone datapoint is visible, not an empty plot
+    expect(container.querySelectorAll("circle.recharts-line-dot").length).toBeGreaterThan(0);
+  });
+
+  it("keeps dots OFF for a multi-point series (the stroked line carries it)", () => {
+    const { container } = render(<NetExposureChart points={HEDGED_POINTS} gaps={HEDGED_GAP} />);
+    expect(container.querySelectorAll("circle.recharts-line-dot").length).toBe(0);
+  });
+});
+
 describe("NetExposureChart — a11y + header + legend", () => {
   it("carries role=img with the USD aria-label, the title, an as-of stamp, and Net/Gross chips", () => {
     render(<NetExposureChart points={HEDGED_POINTS} gaps={HEDGED_GAP} />);
