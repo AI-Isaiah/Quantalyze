@@ -32,7 +32,9 @@
  *   `weight = venueGrossUsd / asofTotalGrossUsd` per `asof` (GROSS denominators
  *   — signed values can divide by ~0 on a hedged book). An `asof` whose total
  *   gross is 0 cannot form honest weights: it is SKIPPED (emits no point) and
- *   thereby falls into a marked gap rather than producing NaN weights.
+ *   MARKED as a gap rather than producing NaN weights. The marking is
+ *   coverage-based (F-2), so a skipped asof at the series BOUNDARY (first/last)
+ *   is marked too — not only interior skips.
  *
  * D-P7 / honest-empty. `getLatestExposureSnapshot` returns `null` when the
  *   allocator has zero holdings (so "no data" is distinguishable from "zero
@@ -159,22 +161,94 @@ export function computeAsofGaps(sortedAsofDays: string[]): AsofGap[] {
 }
 
 /**
- * The ONE owner-scoped fetch: USER client + owner RLS, explicit allocator gate,
- * six-column secretless projection, 730-day cap, ascending by asof. Throws on a
- * PostgREST error (fail loud — an empty result and a query error are distinct
- * states; never collapse an error into `[]`).
+ * COVERAGE gap detector over the observed domain `[domainStart, domainEnd]`
+ * (inclusive): every calendar day in that span NOT present in `covered` becomes
+ * part of a `{ start, end, kind: "gap", days }` span (days inclusive both ends).
+ *
+ * F-2 (v1.10): unlike `computeAsofGaps` (which only sees calendar holes BETWEEN
+ * the anchors it is handed and therefore cannot mark a boundary skip), this
+ * marks skipped days at the BOUNDARY too. `getAllocationSeries` uses it so a
+ * zero-gross asof that is skipped (D-P3) is ALWAYS marked as a gap — interior
+ * AND leading/trailing — honouring the "skipped -> falls into a marked gap"
+ * contract at the series edges, where the prior `computeAsofGaps(points)` let a
+ * boundary skip vanish silently.
+ */
+export function computeCoverageGaps(
+  domainStart: string,
+  domainEnd: string,
+  covered: Set<string>,
+): AsofGap[] {
+  const gaps: AsofGap[] = [];
+  const endMs = utcMs(domainEnd);
+  let runStart: number | null = null;
+  let runEnd = 0;
+  for (let ms = utcMs(domainStart); ms <= endMs; ms += MS_PER_DAY) {
+    if (covered.has(toIsoDate(ms))) {
+      if (runStart !== null) {
+        gaps.push({
+          start: toIsoDate(runStart),
+          end: toIsoDate(runEnd),
+          kind: "gap",
+          days: Math.round((runEnd - runStart) / MS_PER_DAY) + 1,
+        });
+        runStart = null;
+      }
+    } else {
+      if (runStart === null) runStart = ms;
+      runEnd = ms;
+    }
+  }
+  if (runStart !== null) {
+    gaps.push({
+      start: toIsoDate(runStart),
+      end: toIsoDate(runEnd),
+      kind: "gap",
+      days: Math.round((runEnd - runStart) / MS_PER_DAY) + 1,
+    });
+  }
+  return gaps;
+}
+
+/** PostgREST caps every response at `max_rows` (supabase/config.toml:18 = 1000;
+ *  hosted default also 1000). Page under that cap and loop until a short page so
+ *  a >1000-row window is never silently truncated. */
+const HOLDINGS_PAGE_SIZE = 1000;
+
+/**
+ * The owner-scoped WINDOWED fetch used by the two TIME-SERIES reads
+ * (`getNetExposureSeries` / `getAllocationSeries`, which need EVERY row in the
+ * 730-day window): USER client + owner RLS, explicit allocator gate, six-column
+ * secretless projection, 730-day cap. Throws on a PostgREST error (fail loud —
+ * an empty result and a query error are distinct states; never collapse an
+ * error into `[]`).
+ *
+ * F-1 (v1.10): the prior single unbounded `.order("asof", ascending)` query was
+ * silently capped by PostgREST at `max_rows` (1000) — HTTP 200, `error: null`,
+ * PARTIAL body — and because the order was ASCENDING the dropped rows were the
+ * MOST RECENT, so the series ended early with no gap marker. Paginate with
+ * `.range()` until a short page so no row is dropped. The order is a TOTAL order
+ * (`asof`, then the `id` PK tiebreak) so `.range()` pages never skip or
+ * duplicate rows across a page boundary when many rows share an `asof`.
  */
 async function fetchHoldings(userId: string): Promise<HoldingRow[]> {
   const supabase = await createClient();
   const capIso = toIsoDate(Date.now() - BACKFILL_CAP_DAYS * MS_PER_DAY);
-  const { data, error } = await supabase
-    .from("allocator_holdings")
-    .select("asof, venue, symbol, holding_type, side, value_usd")
-    .eq("allocator_id", userId)
-    .gte("asof", capIso)
-    .order("asof", { ascending: true });
-  if (error) throw error;
-  return (data ?? []) as HoldingRow[];
+  const all: HoldingRow[] = [];
+  for (let from = 0; ; from += HOLDINGS_PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from("allocator_holdings")
+      .select("asof, venue, symbol, holding_type, side, value_usd")
+      .eq("allocator_id", userId)
+      .gte("asof", capIso)
+      .order("asof", { ascending: true })
+      .order("id", { ascending: true })
+      .range(from, from + HOLDINGS_PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = (data ?? []) as HoldingRow[];
+    all.push(...page);
+    if (page.length < HOLDINGS_PAGE_SIZE) break;
+  }
+  return all;
 }
 
 /** Distinct asof days in ascending order. */
@@ -186,18 +260,43 @@ function distinctSortedAsofs(rows: HoldingRow[]): string[] {
  * PI-01 — the allocator's LATEST exposure, aggregated at the
  * (holding_type, venue, symbol, side) grain with gross + signed net totals.
  * Returns `null` for an allocator with zero holdings (honest-empty).
+ *
+ * F-1 (v1.10): a TWO-STEP read rather than scanning the whole 730-day window.
+ * Step 1 reads the single most-recent `asof` (`order(asof desc).limit(1)`);
+ * step 2 reads only the holdings AT that exact asof. This is truncation-proof
+ * (a single day's holdings is far under PostgREST's 1000-row `max_rows` cap),
+ * correct, AND cheaper than the prior full-window scan — which, being ASCENDING
+ * and unbounded, was silently capped at 1000 and dropped the NEWEST rows,
+ * returning a stale snapshot labelled as current. The 730-day `.gte` cap stays
+ * on step 1 so a >730d-stale allocator reads honest-empty (header edge case W4).
  */
 export async function getLatestExposureSnapshot(
   userId: string,
 ): Promise<ExposureSnapshot | null> {
-  const rows = await fetchHoldings(userId);
-  if (rows.length === 0) return null;
+  const supabase = await createClient();
+  const capIso = toIsoDate(Date.now() - BACKFILL_CAP_DAYS * MS_PER_DAY);
 
-  const latestAsof = rows.reduce(
-    (max, r) => (r.asof > max ? r.asof : max),
-    rows[0].asof,
-  );
-  const latestRows = rows.filter((r) => r.asof === latestAsof);
+  // Step 1: the most-recent asof within the 730-day window (single row).
+  const { data: latestData, error: latestError } = await supabase
+    .from("allocator_holdings")
+    .select("asof")
+    .eq("allocator_id", userId)
+    .gte("asof", capIso)
+    .order("asof", { ascending: false })
+    .limit(1);
+  if (latestError) throw latestError;
+  const latestAsof = (latestData as { asof: string }[] | null)?.[0]?.asof;
+  if (!latestAsof) return null; // honest-empty (also >730d-stale, per W4)
+
+  // Step 2: the holdings AT that exact asof — six-column secretless projection.
+  const { data, error } = await supabase
+    .from("allocator_holdings")
+    .select("asof, venue, symbol, holding_type, side, value_usd")
+    .eq("allocator_id", userId)
+    .eq("asof", latestAsof);
+  if (error) throw error;
+  const latestRows = (data ?? []) as HoldingRow[];
+  if (latestRows.length === 0) return null;
 
   const byGrain = new Map<string, ExposureSlice>();
   for (const r of latestRows) {
@@ -252,8 +351,20 @@ export async function getNetExposureSeries(
 
 /**
  * PI-03 — per-venue allocation weights per `asof` (gross denominators). An asof
- * whose total gross is 0 is skipped (D-P3) and thereby falls into a marked gap;
- * gaps are computed over the asof days that actually produced points.
+ * whose total gross is 0 cannot form honest weights: it is SKIPPED (emits no
+ * point, D-P3) and MARKED as a gap.
+ *
+ * F-2 (v1.10): gaps are computed with `computeCoverageGaps` over the observed
+ * domain `[firstObserved, lastObserved]` minus the point-producing asofs —
+ * NOT `computeAsofGaps(points)`. The prior point-only detector could only mark
+ * INTERIOR holes, so a zero-gross asof at the series BOUNDARY (first/last)
+ * vanished with no marker — contradicting the "skipped -> marked gap" contract
+ * and silently dropping a day that `getNetExposureSeries` represents (as a
+ * `{ net: 0, gross: 0 }` point). CHOSEN option: mark every skipped zero-gross
+ * asof (interior AND boundary) as a gap, so the contract holds at the edges and
+ * neither series silently drops the day. (Weights genuinely cannot exist for a
+ * zero-gross day; a gap — not a fabricated 0-weight point — is the honest
+ * representation on the allocation axis.)
  */
 export async function getAllocationSeries(
   userId: string,
@@ -268,8 +379,9 @@ export async function getAllocationSeries(
     byAsof.set(r.asof, venueGross);
   }
 
+  const observed = distinctSortedAsofs(rows);
   const points: AllocationPoint[] = [];
-  for (const asof of distinctSortedAsofs(rows)) {
+  for (const asof of observed) {
     const venueGross = byAsof.get(asof)!;
     const total = Array.from(venueGross.values()).reduce((a, v) => a + v, 0);
     if (total <= 0) continue; // zero-gross asof — skip, becomes a marked gap
@@ -281,5 +393,11 @@ export async function getAllocationSeries(
     points.push({ asof, venues });
   }
 
-  return { points, gaps: computeAsofGaps(points.map((p) => p.asof)) };
+  const covered = new Set(points.map((p) => p.asof));
+  const gaps = computeCoverageGaps(
+    observed[0],
+    observed[observed.length - 1],
+    covered,
+  );
+  return { points, gaps };
 }

@@ -30,17 +30,48 @@ interface HoldingRow {
   value_usd: number;
 }
 
+// PostgREST silently caps every response at `max_rows` (supabase/config.toml:18
+// = 1000; hosted default also 1000). The mock SIMULATES that cap for any query
+// that applies neither `.range()` nor `.limit()` — this is what makes the F-1
+// regression genuinely RED against the old single unbounded `.order(asof asc)`
+// query (it drops the newest rows) and GREEN once the reads paginate / narrow.
+const POSTGREST_MAX_ROWS = 1000;
+
 const holdingsResolver = vi.hoisted(() => ({
   rows: [] as HoldingRow[],
   error: null as unknown,
   selectArg: "" as string,
   eqCalls: [] as [string, unknown][],
   gteCalls: [] as [string, unknown][],
+  orderCalls: [] as [string, boolean][],
+  limitCalls: [] as number[],
+  rangeCalls: [] as [number, number][],
 }));
+
+// Row columns the mock can actually filter on (allocator_id is NOT projected
+// onto the seeded HoldingRow, so an `.eq("allocator_id", …)` is a no-op filter
+// here — it is still captured in `eqCalls` for the owner-gate assertion).
+const FILTERABLE_COLS = new Set([
+  "asof",
+  "venue",
+  "symbol",
+  "holding_type",
+  "side",
+]);
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     from: () => {
+      // Per-query builder state so a two-step read (max-asof then eq-asof) and
+      // a paginated read (repeated `.range`) each resolve against their OWN
+      // filters, while global resolver arrays capture the query CONTRACT.
+      const local = {
+        eqs: [] as [string, unknown][],
+        orderedByAsof: false,
+        orderAsc: true,
+        limitN: null as number | null,
+        range: null as [number, number] | null,
+      };
       const chain: Record<string, unknown> = {};
       chain.select = (arg: string) => {
         holdingsResolver.selectArg = arg;
@@ -48,23 +79,65 @@ vi.mock("@/lib/supabase/server", () => ({
       };
       chain.eq = (col: string, val: unknown) => {
         holdingsResolver.eqCalls.push([col, val]);
+        local.eqs.push([col, val]);
         return chain;
       };
       chain.gte = (col: string, val: unknown) => {
         holdingsResolver.gteCalls.push([col, val]);
         return chain;
       };
-      chain.order = () => chain;
-      chain.limit = () => chain;
+      chain.order = (col: string, opts?: { ascending?: boolean }) => {
+        const asc = opts?.ascending ?? true;
+        holdingsResolver.orderCalls.push([col, asc]);
+        if (col === "asof") {
+          local.orderedByAsof = true;
+          local.orderAsc = asc;
+        }
+        return chain;
+      };
+      chain.limit = (n: number) => {
+        holdingsResolver.limitCalls.push(n);
+        local.limitN = n;
+        return chain;
+      };
+      chain.range = (from: number, to: number) => {
+        holdingsResolver.rangeCalls.push([from, to]);
+        local.range = [from, to];
+        return chain;
+      };
       // The read awaits the chain directly. Make it thenable so `await query`
-      // resolves to the seeded payload.
+      // resolves to the seeded payload, honouring this query's own filters.
       chain.then = (
         onFulfilled: (v: { data: unknown; error: unknown }) => unknown,
-      ) =>
-        Promise.resolve({
-          data: holdingsResolver.rows,
-          error: holdingsResolver.error,
-        }).then(onFulfilled);
+      ) => {
+        if (holdingsResolver.error) {
+          return Promise.resolve({
+            data: null,
+            error: holdingsResolver.error,
+          }).then(onFulfilled);
+        }
+        let data = holdingsResolver.rows.slice();
+        for (const [col, val] of local.eqs) {
+          if (FILTERABLE_COLS.has(col)) {
+            data = data.filter(
+              (r) => (r as unknown as Record<string, unknown>)[col] === val,
+            );
+          }
+        }
+        if (local.orderedByAsof) {
+          data.sort((a, b) => (a.asof < b.asof ? -1 : a.asof > b.asof ? 1 : 0));
+          if (!local.orderAsc) data.reverse();
+        }
+        if (local.range) {
+          data = data.slice(local.range[0], local.range[1] + 1);
+        } else if (local.limitN !== null) {
+          data = data.slice(0, local.limitN);
+        } else {
+          // No range, no limit → PostgREST silently truncates at max_rows.
+          data = data.slice(0, POSTGREST_MAX_ROWS);
+        }
+        return Promise.resolve({ data, error: null }).then(onFulfilled);
+      };
       return chain;
     },
   }),
@@ -105,6 +178,9 @@ beforeEach(() => {
   holdingsResolver.selectArg = "";
   holdingsResolver.eqCalls = [];
   holdingsResolver.gteCalls = [];
+  holdingsResolver.orderCalls = [];
+  holdingsResolver.limitCalls = [];
+  holdingsResolver.rangeCalls = [];
 });
 
 describe("computeAsofGaps — pure gap detection (missingSegments shape)", () => {
@@ -260,6 +336,112 @@ describe("getAllocationSeries", () => {
     ];
     const series = await getAllocationSeries(USER_ID);
     expect(series.points).toEqual([]);
+  });
+});
+
+// A row on the (2023-01-01 + i days) asof so an ascending sort places the
+// NEWEST asof strictly last — beyond the 1000-row PostgREST cap for i > 999.
+function seqRow(i: number): HoldingRow {
+  const asof = new Date(Date.UTC(2023, 0, 1) + i * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  return row({ asof, symbol: `S${i}`, value_usd: 100 });
+}
+
+describe("F-1 (v1.10): PostgREST 1000-row truncation must not drop newest holdings", () => {
+  it("getLatestExposureSnapshot uses the two-step max-asof-then-eq path (not a full-window scan)", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-01", symbol: "OLD", value_usd: 999 }),
+      row({ asof: "2026-07-05", symbol: "BTC", value_usd: 100 }),
+    ];
+    const snap = await getLatestExposureSnapshot(USER_ID);
+
+    // Step 1: a descending single-row read to find the latest asof.
+    expect(holdingsResolver.orderCalls).toContainEqual(["asof", false]);
+    expect(holdingsResolver.limitCalls).toContain(1);
+    // Step 2: fetch holdings AT that exact asof (eq, not a window scan).
+    expect(holdingsResolver.eqCalls).toContainEqual(["asof", "2026-07-05"]);
+    // The prior full-window scan ordered ascending only, with no limit.
+    expect(holdingsResolver.orderCalls).not.toContainEqual(["asof", true]);
+    expect(snap!.asof).toBe("2026-07-05");
+    expect(snap!.slices.map((s) => s.symbol)).toEqual(["BTC"]);
+  });
+
+  it("getNetExposureSeries paginates a >1000-row window and returns the COMPLETE series incl. the newest asof", async () => {
+    const big = Array.from({ length: 1500 }, (_, i) => seqRow(i));
+    const newestAsof = big[big.length - 1].asof;
+    holdingsResolver.rows = big;
+
+    const series = await getNetExposureSeries(USER_ID);
+
+    // Multiple `.range()` calls => it paginated rather than issuing one
+    // unbounded query that PostgREST would silently cap at 1000.
+    expect(holdingsResolver.rangeCalls.length).toBeGreaterThan(1);
+    // No row silently dropped — every asof, including the newest, is present.
+    expect(series.points).toHaveLength(1500);
+    expect(series.points.map((p) => p.asof)).toContain(newestAsof);
+    expect(series.points[series.points.length - 1].asof).toBe(newestAsof);
+  });
+
+  it("getAllocationSeries also paginates a >1000-row window (no dropped newest asof)", async () => {
+    const big = Array.from({ length: 1200 }, (_, i) => seqRow(i));
+    const newestAsof = big[big.length - 1].asof;
+    holdingsResolver.rows = big;
+
+    const series = await getAllocationSeries(USER_ID);
+
+    expect(holdingsResolver.rangeCalls.length).toBeGreaterThan(1);
+    expect(series.points).toHaveLength(1200);
+    expect(series.points.map((p) => p.asof)).toContain(newestAsof);
+  });
+});
+
+describe("F-2 (v1.10): a boundary zero-gross asof is MARKED as a gap, never silently dropped", () => {
+  it("leading AND trailing zero-gross asofs both become marked gaps", async () => {
+    holdingsResolver.rows = [
+      // Leading zero-gross day (skipped, was silently vanishing).
+      row({ asof: "2026-07-01", venue: "A", side: "flat", value_usd: 0 }),
+      row({ asof: "2026-07-01", venue: "B", side: "flat", value_usd: 0 }),
+      // Two real points.
+      row({ asof: "2026-07-02", venue: "A", value_usd: 300 }),
+      row({ asof: "2026-07-02", venue: "B", value_usd: 100 }),
+      row({ asof: "2026-07-03", venue: "A", value_usd: 200 }),
+      // Trailing zero-gross day (skipped, was silently vanishing).
+      row({ asof: "2026-07-04", venue: "A", side: "flat", value_usd: 0 }),
+      row({ asof: "2026-07-04", venue: "B", side: "flat", value_usd: 0 }),
+    ];
+
+    const series = await getAllocationSeries(USER_ID);
+
+    // Points only for the non-zero-gross asofs (unchanged behaviour).
+    expect(series.points.map((p) => p.asof)).toEqual([
+      "2026-07-02",
+      "2026-07-03",
+    ]);
+    // Both boundary skips are now marked as single-day gaps — the prior
+    // computeAsofGaps(points) produced [] (the two points are consecutive).
+    expect(series.gaps).toEqual([
+      { start: "2026-07-01", end: "2026-07-01", kind: "gap", days: 1 },
+      { start: "2026-07-04", end: "2026-07-04", kind: "gap", days: 1 },
+    ]);
+  });
+
+  it("an interior zero-gross asof is still marked (regression guard for the pre-existing interior case)", async () => {
+    holdingsResolver.rows = [
+      row({ asof: "2026-07-01", venue: "A", value_usd: 300 }),
+      row({ asof: "2026-07-02", venue: "A", side: "flat", value_usd: 0 }),
+      row({ asof: "2026-07-03", venue: "A", value_usd: 200 }),
+    ];
+
+    const series = await getAllocationSeries(USER_ID);
+
+    expect(series.points.map((p) => p.asof)).toEqual([
+      "2026-07-01",
+      "2026-07-03",
+    ]);
+    expect(series.gaps).toEqual([
+      { start: "2026-07-02", end: "2026-07-02", kind: "gap", days: 1 },
+    ]);
   });
 });
 
