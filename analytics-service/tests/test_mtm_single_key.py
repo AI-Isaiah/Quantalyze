@@ -63,7 +63,10 @@ from services.deribit_ingest import (
 from services.deribit_txn import LedgerValuationError
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
 from services.native_nav import NativeLedger
-from services.stitch_composite import MTM_REASON_SUMMARY_COVERAGE
+from services.stitch_composite import (
+    MTM_REASON_SERIES_UNCOMPUTABLE,
+    MTM_REASON_SUMMARY_COVERAGE,
+)
 
 _STRATEGY_ID = "strat-mtm-1"
 
@@ -715,10 +718,19 @@ async def test_mtm_object_uses_allocated_capital_conventions() -> None:
 
 @pytest.mark.asyncio
 async def test_mtm_compute_valueerror_degrades() -> None:
-    """A compute_all_metrics ValueError (e.g. a simple-basis interior chain-break)
-    on the MTM object DEGRADES: the derive still completes DONE, persists SQL NULL,
-    and stamps the reason — the cash headline is never failed by an MTM compute
-    rejection. Fails if the compute-level except is removed (job would raise)."""
+    """FINDING 2 regression: a compute_all_metrics ValueError (e.g. a simple-basis
+    interior chain-break) on the MTM object DEGRADES: the derive still completes
+    DONE, persists SQL NULL, and stamps the SERIES-UNCOMPUTABLE reason — the cash
+    headline is never failed by an MTM compute rejection. This is a math
+    chain-break, NOT a settlement-summary coverage hole, so it MUST stamp
+    ``mtm_series_uncomputable`` (distinct from the crawl-level coverage-hole
+    reason ``mtm_summary_coverage_incomplete``, asserted by
+    ``test_degraded_mtm_persists_null_and_reason``). Fails if the compute-level
+    except is removed (job would raise) OR if the branch mislabels the reason as
+    the coverage constant. Neuter: revert the stamp to MTM_REASON_SUMMARY_COVERAGE
+    → this assert reddens."""
+    # The two reasons are genuinely distinct machine constants.
+    assert MTM_REASON_SERIES_UNCOMPUTABLE != MTM_REASON_SUMMARY_COVERAGE
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
     ledger_mock, _calls = _recording_ledger(reports)
@@ -741,7 +753,10 @@ async def test_mtm_compute_valueerror_degrades() -> None:
     assert prestamp is not None
     assert prestamp["metrics_json_by_basis"] is None
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
-        MTM_REASON_SUMMARY_COVERAGE
+        MTM_REASON_SERIES_UNCOMPUTABLE
+    ), (
+        "the compute-degrade branch (math chain-break) must stamp the "
+        "SERIES-UNCOMPUTABLE reason, NOT the settlement coverage-hole reason"
     )
 
 

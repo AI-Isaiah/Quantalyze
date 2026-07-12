@@ -108,6 +108,15 @@ MTM_REASON_VENUE = "mtm_basis_unavailable_for_venue"
 # (composite gate semantics are Phase 102) — this is the single admissibility
 # vocabulary owner so the single-key and composite reasons never fork.
 MTM_REASON_SUMMARY_COVERAGE = "mtm_summary_coverage_incomplete"
+# Phase 101 (MTM-01) single-key derive gate: the mark_to_market RETURNS series
+# was reconstructed but compute_all_metrics REJECTED it as mathematically
+# uncomputable (e.g. an interior chain-break under cumulative_method='simple' —
+# metrics.py). This is a SERIES-UNCOMPUTABLE math failure, NOT a settlement-
+# summary coverage hole (MTM_REASON_SUMMARY_COVERAGE), so it carries its own
+# reason: Phase 102's disabled-with-reason UI must not show a coverage
+# explanation for a non-coverage cause. Same vocabulary owner (this module) so
+# the single-key and composite reasons never fork.
+MTM_REASON_SERIES_UNCOMPUTABLE = "mtm_series_uncomputable"
 
 
 def windows_overlap(a: MemberWindow, b: MemberWindow) -> bool:

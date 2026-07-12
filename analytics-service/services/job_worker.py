@@ -2841,6 +2841,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         periods_per_year_for_asset_class,
     )
     from services.allocated_capital import metrics_day_basis
+    from services.stitch_composite import MTM_REASON_SERIES_UNCOMPUTABLE
 
     mtm_metrics_json: dict[str, Any] | None = None
     if mtm_returns is not None:
@@ -2887,7 +2888,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # rejects. The cash headline is unaffected, so stamp the machine reason and
             # omit the key rather than fail the whole derive.
             mtm_metrics_json = None
-            mtm_gated_reason = MTM_REASON_SUMMARY_COVERAGE
+            # SERIES-UNCOMPUTABLE math failure (compute rejected the series), NOT a
+            # settlement-summary coverage hole — stamp its own reason so Phase 102's
+            # disabled-with-reason UI does not show a coverage explanation for a
+            # non-coverage cause. The true crawl-level coverage-hole degrade
+            # (:2291-2313 catch) keeps MTM_REASON_SUMMARY_COVERAGE.
+            mtm_gated_reason = MTM_REASON_SERIES_UNCOMPUTABLE
             logger.warning(
                 "derive_broker_dailies: mark_to_market metrics compute rejected the "
                 "series for strategy %s (interior chain-break) — degrading: %s",
