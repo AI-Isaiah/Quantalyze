@@ -310,7 +310,10 @@ const SPECS: Spec[] = [
   },
   {
     column: "user_notes.scope_kind",
-    ts: ["portfolio", "holding", "bridge_outcome", "strategy"],
+    // Phase 100 PI-04 added the 5th value 'dashboard' to the SQL CHECK
+    // (mig 20260715090000) AND to the runtime TS sets (ownership.ts ScopeKind +
+    // route.ts ALLOWED_KINDS). Keep this mirror in lockstep.
+    ts: ["portfolio", "holding", "bridge_outcome", "strategy", "dashboard"],
     tsNote: "notes/route.ts:35 ALLOWED_KINDS (route-local) / ownership.ts:30 ScopeKind",
     sql: () => resolveColumnCheck("user_notes", "scope_kind", "20260421060316_user_notes_multiscope.sql"),
   },
