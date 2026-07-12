@@ -21,14 +21,22 @@ import {
   type GapBand,
 } from "../lib/chart-gaps";
 
+/** Namespace prefix for venue-weight row keys. `venue` is unconstrained TEXT,
+ * so a venue literally named "asofMs" would otherwise clobber the x-coord in the
+ * shared row namespace. Prefixing the (unbounded) venue space keeps it disjoint
+ * from the single meta key `asofMs`. */
+const VENUE_KEY_PREFIX = "v:";
+const venueKey = (venue: string) => VENUE_KEY_PREFIX + venue;
+
 /**
- * One row of the stacked-area data: a numeric x plus one weight per venue. A
- * venue absent at an asof reads `0` (its true weight that day, D-P3); a gap
- * sentinel reads `null` for EVERY venue so recharts breaks the stack across it.
+ * One row of the stacked-area data: a numeric x plus one weight per venue,
+ * keyed `v:<venue>`. A venue absent at an asof reads `0` (its true weight that
+ * day, D-P3); a gap sentinel reads `null` for EVERY venue so recharts breaks the
+ * stack across it.
  */
 interface AllocationRow {
   asofMs: number;
-  [venue: string]: number | null;
+  [venueColumn: string]: number | null;
 }
 
 /**
@@ -75,10 +83,10 @@ export function buildAllocationChartData(
   const observed: AllocationRow[] = points.map((p) => {
     const asofMs = asofToUtcMs(p.asof);
     const row: AllocationRow = { asofMs };
-    for (const venue of venues) row[venue] = 0; // true-zero baseline
+    for (const venue of venues) row[venueKey(venue)] = 0; // true-zero baseline
     const usd: Record<string, number> = {};
     for (const v of p.venues) {
-      row[v.venue] = v.weight;
+      row[venueKey(v.venue)] = v.weight;
       usd[v.venue] = v.valueUsd;
     }
     usdByAsofMs.set(asofMs, usd);
@@ -87,7 +95,7 @@ export function buildAllocationChartData(
 
   const sentinels: AllocationRow[] = bands.map((b) => {
     const row: AllocationRow = { asofMs: b.midMs };
-    for (const venue of venues) row[venue] = null; // stack break across the gap
+    for (const venue of venues) row[venueKey(venue)] = null; // stack break across the gap
     return row;
   });
 
@@ -118,6 +126,22 @@ export function AllocationOverTime({
   const patternId = `gap${rawPatternId.replace(/:/g, "")}`;
 
   if (points.length === 0) {
+    // Snapshots EXIST but every observed asof had total gross 0, so per-venue
+    // weights (share of gross) are unformable — getAllocationSeries returns no
+    // points yet still marks those days as gaps. Showing "No history yet" here
+    // would lie (NetExposureChart plots real 0-lines for the same days), so use
+    // distinct honest copy whenever coverage gaps are present. Only the truly
+    // empty case (no points AND no gaps) keeps the no-history card.
+    if (gaps.length > 0) {
+      return (
+        <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center">
+          <p className="text-small text-text-muted">No non-zero-gross days in this window.</p>
+          <p className="text-caption text-text-muted">
+            Positions carried ~0 notional across the covered days, so per-venue weights can&apos;t be formed.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="rounded-lg border border-border bg-surface px-4 py-8 text-center">
         <p className="text-small text-text-muted">No allocation history yet.</p>
@@ -169,7 +193,8 @@ export function AllocationOverTime({
               <Area
                 key={venue}
                 type="monotone"
-                dataKey={venue}
+                dataKey={venueKey(venue)}
+                name={venue}
                 stackId="alloc"
                 fill={STRATEGY_PALETTE[i % STRATEGY_PALETTE.length]}
                 fillOpacity={0.85}
