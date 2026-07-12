@@ -935,6 +935,19 @@ async def cron_sync() -> dict[str, Any]:
                 )
                 return (pid, "failed", f"TimeoutError: exceeded {PORTFOLIO_RECOMPUTE_TIMEOUT}s")
             except HTTPException as http_exc:
+                # PI-07: `_compute_portfolio_analytics` raises 409 when the
+                # losing racer's `computing` INSERT hits the partial UNIQUE
+                # fence (portfolio_analytics_one_computing_per_portfolio) —
+                # another worker holds the sole computing slot. We neither
+                # computed nor crashed, so this is the EXISTING `in_flight`
+                # bucket, NOT a failure. Route it BEFORE the 400-skip check.
+                if http_exc.status_code == 409:
+                    logger.info(
+                        "cron_recompute: portfolio %s lost the computing-row "
+                        "race (PI-07 fence), in-flight elsewhere",
+                        pid,
+                    )
+                    return (pid, "in_flight", None)
                 # `_compute_portfolio_analytics` raises HTTP 400 for
                 # benign business states ("No strategies", "No returns
                 # data") — those are *skipped*, not failures. Anything

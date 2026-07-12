@@ -643,9 +643,38 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
     # writes a new row. Not a user-intent mutation — the user's
     # "compute my portfolio analytics" intent doesn't map 1:1 to this
     # row (the row is internal bookkeeping).
-    insert_result = supabase.table("portfolio_analytics").insert(
-        {"portfolio_id": portfolio_id, "computation_status": ComputationStatus.COMPUTING.value}
-    ).execute()
+    # PI-07: the partial UNIQUE index
+    # `portfolio_analytics_one_computing_per_portfolio` (migration 98-01)
+    # permits only one 'computing' row per portfolio. When two workers race,
+    # the loser's INSERT raises a PostgREST error carrying SQLSTATE 23505 —
+    # that is the fence WORKING, not a failure. Absorb it into the EXISTING
+    # in-flight 409 semantics (byte-identical detail to the pre-SELECT 409 in
+    # portfolio_analytics()). This is the single choke point that BOTH the
+    # public POST route and the cron recompute path funnel through.
+    try:
+        insert_result = supabase.table("portfolio_analytics").insert(
+            {"portfolio_id": portfolio_id, "computation_status": ComputationStatus.COMPUTING.value}
+        ).execute()
+    except Exception as exc:
+        # Reuse the repo's own 23505 detection (mirrors the rebalance_drift
+        # dedup guard below). supabase-py raises a PostgREST APIError exposing
+        # `.code`; some driver paths surface the SQLSTATE only in the message,
+        # so we also check the text. Narrow-swallow: anything that is NOT a
+        # unique violation (RLS / FK / connectivity) re-raises bare (fail-loud).
+        code = getattr(exc, "code", None)
+        msg = str(exc)
+        if code == "23505" or "23505" in msg or "duplicate key" in msg.lower():
+            logger.info(
+                "portfolio %s lost the computing-row race (PI-07 fence "
+                "portfolio_analytics_one_computing_per_portfolio); another "
+                "compute is already in-flight",
+                portfolio_id,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="Analytics computation already in progress for this portfolio",
+            ) from exc
+        raise
 
     if not insert_result.data:
         raise HTTPException(status_code=500, detail="Failed to create analytics row")
