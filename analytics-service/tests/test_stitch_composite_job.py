@@ -2600,3 +2600,73 @@ async def test_member_progress_single_blip_stays_warning(
     assert warnings, "expected a warning for the single transient failure"
     # … and did NOT escalate to error.
     assert not errors, "a single transient blip must not escalate to error-level"
+
+
+class _FenceFalseProgress(_FakeSupabase):
+    """A fake whose set_compute_job_progress RETURNS false (a fenced NO-OP: this
+    run lost its claim token — a watchdog reclaim + re-claim rotated/NULLed the
+    token) on EVERY call, and NEVER raises. Models mid-stitch preemption. All
+    other RPCs succeed (data=None) exactly like the base fake."""
+
+    def rpc(self, name: str, args: dict[str, Any]) -> SimpleNamespace:
+        self.rpc_calls.append((name, args))
+        if name == "set_compute_job_progress":
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=False))
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=None))
+
+
+@pytest.mark.asyncio
+async def test_member_progress_fence_false_latches_off_and_logs_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """SF-2b claim-token drift: set_compute_job_progress RETURNS false (fenced
+    no-op = this run lost its claim token). The worker must HONOUR the RPC's
+    documented 'false => stop writing' contract: (1) it does NOT treat the false
+    as a successful write and keep going, (2) it STOPS issuing further progress
+    writes for the rest of the run (a re-claimed worker owns the heartbeat), and
+    (3) it logs the preemption EXACTLY ONCE — WITHOUT escalating to the SF-2b
+    outage error (false is expected preemption, not a write outage). The stitch
+    stays authoritative and completes.
+
+    RED before the fix: the returned boolean was discarded, so a fenced false
+    counted as a clean write — the worker kept writing (many RPC calls) and
+    never logged the preemption."""
+    members = [
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ]
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    fake = _FenceFalseProgress(members=[dict(m) for m in members])
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
+        with _apply(_deribit_patches(
+            fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+        )):
+            result = await run_stitch_composite_job(dict(_PROG_JOB))
+
+    # Fail-open + authoritative: the stitch still completed.
+    assert result.outcome == DispatchOutcome.DONE
+    # (2) STOPPED after the first fenced write — the latch short-circuits every
+    # subsequent _write_member_progress. Without the fix the worker would keep
+    # writing (>= 5 cash-pass calls, as the happy-path sequence test shows).
+    prog_calls = _progress_calls(fake)
+    assert len(prog_calls) == 1, (
+        "a fenced false must latch OFF further progress writes; got "
+        f"{len(prog_calls)} calls"
+    )
+    jw_records = [
+        r for r in caplog.records if r.name == "quantalyze.analytics.job_worker"
+    ]
+    # (3) Logged the preemption EXACTLY ONCE, at info-level …
+    preemption_logs = [
+        r for r in jw_records
+        if r.levelno == logging.INFO and "returned false" in r.getMessage()
+    ]
+    assert len(preemption_logs) == 1, (
+        "expected exactly one info-level preemption log for the fenced false; "
+        f"got {len(preemption_logs)}"
+    )
+    # (1) … and did NOT escalate to the SF-2b outage error (expected preemption,
+    # not a write outage — the failure counter must not be driven by a false).
+    errors = [r for r in jw_records if r.levelno == logging.ERROR]
+    assert not errors, "a fenced false is preemption, not an outage — must not escalate"

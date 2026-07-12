@@ -3364,20 +3364,40 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # the heartbeat is systemically frozen (not a one-off blip) and escalates
         # to error-level so a write outage is not buried in per-boundary warnings.
         progress_write_failures = 0
+        # SF-2b latch — set once set_compute_job_progress RETURNS false (a fenced
+        # NO-OP: this run lost its claim token — a watchdog reclaim + re-claim
+        # rotated/NULLed it, or the row is no longer 'running'). The RPC's
+        # documented contract is "false => lost ownership, stop writing"; an
+        # explicit false is EXPECTED preemption, NOT a write outage, so we latch
+        # OFF further member-progress writes for the remainder of this run
+        # (a re-claimed worker owns the heartbeat now) rather than counting it
+        # toward the SF-2b escalation. Latched (not re-derived each call) so the
+        # preemption is logged EXACTLY ONCE.
+        progress_fenced_off = False
 
         async def _write_member_progress() -> None:
-            nonlocal progress_write_failures
-            # No-op off the cash pass (Pitfall 1) or when the job carries no id
-            # (unit harness / legacy call shape). Send a SNAPSHOT (dict copy per
-            # entry) so later mutations never rewrite an already-emitted payload.
-            if not report_progress or job.get("id") is None:
+            nonlocal progress_write_failures, progress_fenced_off
+            # No-op off the cash pass (Pitfall 1), when the job carries no id
+            # (unit harness / legacy call shape), or once this run has been
+            # FENCED OFF (a prior write returned false → lost claim-token
+            # ownership; a re-claimed worker owns the heartbeat now). Send a
+            # SNAPSHOT (dict copy per entry) so later mutations never rewrite an
+            # already-emitted payload.
+            if (
+                not report_progress
+                or job.get("id") is None
+                or progress_fenced_off
+            ):
                 return
             progress_list = [
                 dict(progress_by_seq[s]) for s in sorted(progress_by_seq)
             ]
 
-            def _rpc() -> None:
-                supabase.rpc(
+            def _rpc() -> APIResponse:
+                # supabase.rpc() is typed Any (stub gap); re-assert the runtime
+                # APIResponse (same boundary bridge as _cooldown_remaining) so the
+                # fence boolean surfaced on `.data` stays typed for the caller.
+                resp: APIResponse = supabase.rpc(
                     "set_compute_job_progress",
                     {
                         "p_job_id": job.get("id"),
@@ -3385,11 +3405,35 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                         "p_progress": progress_list,
                     },
                 ).execute()
+                return resp
 
             try:
-                await db_execute(_rpc)
-                # A clean write clears the consecutive-failure streak.
-                progress_write_failures = 0
+                resp = await db_execute(_rpc)
+                # set_compute_job_progress RETURNS BOOLEAN: true = the fenced
+                # merge WROTE; false = a fenced NO-OP (this run lost its claim
+                # token — reclaim rotated/NULLed it, or the row is no longer
+                # 'running'). An explicit false is EXPECTED preemption, NEVER a
+                # write outage: honour the RPC's "false => stop writing" contract
+                # by latching OFF further writes and logging ONCE, WITHOUT
+                # touching progress_write_failures (it is neither a success to
+                # reset nor an outage to escalate — escalating would let SF-2b
+                # fire on ordinary preemption). Anything else (true, or contract
+                # drift on .data) counts as a clean write and clears the streak,
+                # exactly as before.
+                if resp.data is False:
+                    progress_fenced_off = True
+                    logger.info(
+                        "run_stitch_composite_job: set_compute_job_progress "
+                        "returned false for job %s — this run lost its claim "
+                        "token (watchdog reclaim + re-claim, or the job is no "
+                        "longer running). Halting member-progress writes for the "
+                        "rest of this run (a re-claimed worker owns the heartbeat "
+                        "now); the stitch is authoritative and continues.",
+                        job.get("id"),
+                    )
+                else:
+                    # A clean write clears the consecutive-failure streak.
+                    progress_write_failures = 0
             except asyncio.CancelledError:
                 raise  # never swallow cancellation — propagate to worker shutdown
             except Exception as _prog_exc:  # noqa: BLE001
