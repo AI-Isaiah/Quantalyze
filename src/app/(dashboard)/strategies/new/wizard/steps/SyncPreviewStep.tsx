@@ -1674,11 +1674,11 @@ export function SyncPreviewStep({
           className="mt-4 rounded-md border border-warning/40 bg-warning/5 px-4 py-3"
         >
           <p className="text-body font-medium text-text-primary">
-            This sync appears to have been interrupted
+            This sync is taking longer than expected
           </p>
           <p className="mt-1 text-caption text-text-secondary">
-            This can happen if the worker restarted mid-run. You can retry
-            safely — a healthy run already in progress is unaffected.
+            You can retry safely — a healthy run already in progress is
+            unaffected.
           </p>
           <Button
             size="sm"

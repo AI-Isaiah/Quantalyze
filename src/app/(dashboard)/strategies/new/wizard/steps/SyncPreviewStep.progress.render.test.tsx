@@ -349,6 +349,26 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(statusPollCount).toBeGreaterThan(pollsBefore);
   });
 
+  // SF-2a — the interrupted/taking-longer state uses NEUTRAL, always-true copy.
+  it("renders neutral copy with no 'interrupted'/'worker restarted' assertion", async () => {
+    installWaitingMock("computing");
+    progressOutcome = {
+      kind: "json",
+      body: { jobStatus: "running", stalled: true, memberProgress: MEMBERS_3 },
+    };
+    await renderWaiting();
+
+    const banner = screen.getByTestId("wizard-sync-interrupted");
+    // Neutral, always-true statement — honest for an OOM, a healthy long crawl,
+    // AND a write-outage alike (the old copy falsely asserted a worker restart).
+    expect(
+      within(banner).getByText(/taking longer than expected/i),
+    ).toBeInTheDocument();
+    // The factually-false assertions must be gone.
+    expect(banner).not.toHaveTextContent(/worker restarted/i);
+    expect(banner).not.toHaveTextContent(/interrupted/i);
+  });
+
   // SF-3 — a degraded/empty read must NOT wipe a populated panel or flip stalled.
   it("keeps last-known progress when a degraded/empty read arrives mid-flight", async () => {
     installWaitingMock("computing");
