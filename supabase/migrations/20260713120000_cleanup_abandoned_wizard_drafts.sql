@@ -323,4 +323,24 @@ BEGIN
   END;
 END $$;
 
+-- ==========================================================================
+-- 3. ACL apply-time self-assert (mirrors 20260710160000:167-171). A future
+--    careless CREATE OR REPLACE that dropped the REVOKE would REDDEN this
+--    migration at apply, not silently expose a destructive global mutator to
+--    the API roles. Runs on the COMMITTED grants — unaffected by the
+--    rolled-back self-test above.
+-- ==========================================================================
+DO $$
+DECLARE
+  v_oid oid := 'public.cleanup_abandoned_wizard_drafts()'::regprocedure;
+BEGIN
+  IF has_function_privilege('anon', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'cleanup_abandoned_wizard_drafts: anon can EXECUTE the destructive cleanup fn (REVOKE missing)';
+  END IF;
+  IF has_function_privilege('authenticated', v_oid, 'EXECUTE') THEN
+    RAISE EXCEPTION 'cleanup_abandoned_wizard_drafts: authenticated can EXECUTE the destructive cleanup fn (REVOKE missing)';
+  END IF;
+  RAISE NOTICE 'cleanup_abandoned_wizard_drafts ACL self-check passed (service_role only).';
+END $$;
+
 COMMIT;
