@@ -47,6 +47,12 @@ honest combined series and owns four semantics:
      mark-to-market basis concept); an all-perp-only / USD-native native book is
      admissible ``(True, None)``. The reason string is carried in
      ``data_quality_flags.mtm_gated_reason`` for Phase 90's disabled-with-reason UI.
+     Phase 101 (MTM-01) reuses this vocabulary at the SINGLE-KEY derive level: the
+     broker derive stamps ``MTM_REASON_SUMMARY_COVERAGE`` when an option book's
+     ``mark_to_market`` reconstruction fails STRUCTURALLY (a pre-rollout straddle
+     with no boundary V₀ anchor / a mid-window summary hole — deribit_txn.py:636-650)
+     while its cash derive still ships. Per OQ-2 (planner decision) Phase 101 stamps
+     the MACHINE reason only; the human-facing copy is Phase-102 UI scope.
 
 Purity: pandas + stdlib + typing ONLY — no network, no I/O, no persistence, no
 credential handling (mirrors the ``nav_twr.py`` / ``ccxt_flows.py`` pure-module
@@ -94,6 +100,14 @@ _NATIVE_VENUE = "deribit"
 
 MTM_REASON_OPTIONS = "unsmoothed_options_book"
 MTM_REASON_VENUE = "mtm_basis_unavailable_for_venue"
+# Phase 101 (MTM-01) single-key derive gate: an option book whose mark_to_market
+# reconstruction fails STRUCTURALLY (pre-rollout straddle with no boundary V₀
+# anchor / mid-window summary hole — deribit_txn.py:636-650). Stamped by
+# run_derive_broker_dailies_job so the cash factsheet still ships (degrade-with-
+# reason, never crash, never fabricate). NOT consumed by mark_to_market_available
+# (composite gate semantics are Phase 102) — this is the single admissibility
+# vocabulary owner so the single-key and composite reasons never fork.
+MTM_REASON_SUMMARY_COVERAGE = "mtm_summary_coverage_incomplete"
 
 
 def windows_overlap(a: MemberWindow, b: MemberWindow) -> bool:

@@ -2005,6 +2005,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             error_kind="permanent",
         )
 
+    # MTM-01 (Phase 101): the additive single-key mark_to_market SECOND pass
+    # (Deribit options books only). Initialized at the branch-OUTER scope so the
+    # post-branch persist reads them unconditionally on EVERY path — ccxt venues,
+    # perp-only Deribit, and key-mode all leave them at these defaults (no second
+    # crawl, no metrics_json_by_basis write) so SC-4 holds by construction.
+    #   * mtm_returns    — the MTM daily-return Series (None ⇒ pass skipped/degraded)
+    #   * mtm_gated_reason — the machine reason stamped on a STRUCTURAL degrade
+    #   * mtm_attempted  — True iff the second pass ran (options/strategy/cash-basis);
+    #     the post-branch persist keys the by-basis write off THIS (never off
+    #     _completeness, which is undefined on the ccxt branch).
+    mtm_returns: pd.Series | None = None
+    mtm_gated_reason: str | None = None
+    mtm_attempted: bool = False
     try:
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -2027,9 +2040,14 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 exclude_spot_extraction_for,
                 parse_returns_denominator_config,
             )
-            from services.deribit_txn import DEFAULT_PNL_BASIS, LedgerValuationError
+            from services.deribit_txn import (
+                DEFAULT_PNL_BASIS,
+                LedgerValuationError,
+                PNL_BASIS_MARK_TO_MARKET,
+            )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.redact import scrub_freeform_string
+            from services.stitch_composite import MTM_REASON_SUMMARY_COVERAGE
 
             # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
             # (ledger-incomplete/unenumerable/scope, or material-equity-empty)
@@ -2223,6 +2241,83 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         f"{ccy}:{day}"
                         for ccy, day in _completeness.pre_coverage_option_days
                     ]
+                # ── MTM-01 (Phase 101): additive mark_to_market SECOND pass ──
+                # The single-key sibling of the composite dual-pass
+                # (_reconstruct_deribit, :3135-3148). Runs a SECOND ledger pass in
+                # mark_to_market basis and persists it ADDITIVELY into
+                # strategy_analytics.metrics_json_by_basis.mark_to_market (below).
+                # It NEVER reassigns the cash-pass objects (returns / meta /
+                # _completeness / native_ledger) — those are what SC-4 protects — so
+                # cash_settlement stays byte-identical by construction. ALL of these
+                # must hold before it runs:
+                #   * not is_key_mode          — key-mode owns no strategy_analytics
+                #     row to persist a by-basis object into (per-key reads = Phase 36);
+                #   * pnl_basis == DEFAULT_PNL_BASIS (cash_settlement) — if the
+                #     configured headline basis is ALREADY mark_to_market there is
+                #     nothing additive to compute (a dual write there is Phase-102);
+                #   * _completeness.has_option_activity — the RESEARCH Q1 single-key
+                #     gate signal; perp-only MTM ≡ cash (the Phase-82 amendment is
+                #     dark under a no-option book), so skipping avoids doubling every
+                #     Deribit crawl for zero information.
+                # Timeout envelope: derive_broker_dailies has a 15-min budget (:266);
+                # one extra crawl worst-cases ~120 s (the composite per-crawl ceiling,
+                # :2849) — comfortably inside. A future budget tune must account for
+                # this options-only second crawl.
+                if (
+                    not is_key_mode
+                    and pnl_basis == DEFAULT_PNL_BASIS
+                    and _completeness.has_option_activity
+                ):
+                    mtm_attempted = True
+                    try:
+                        _mtm_ledger, _mtm_completeness = (
+                            await build_deribit_native_ledger(
+                                ctx.exchange,
+                                account_state=account_state,
+                                pnl_basis=PNL_BASIS_MARK_TO_MARKET,
+                                exclude_spot_extraction=exclude_spot_extraction,
+                            )
+                        )
+                        assert_ledger_complete(_mtm_completeness)
+                        # Bind to MTM-only names — NEVER reassign returns/meta/
+                        # _completeness/native_ledger. The MTM meta guard flags are
+                        # DISCARDED (mirror the composite Finding-9 discard): the
+                        # cash-pass flags are authoritative.
+                        mtm_returns, _mtm_meta = combine_native_ledger(
+                            _mtm_ledger,
+                            _mtm_completeness.indexable_currencies,
+                            denominator_config=denominator_config,
+                        )
+                    except (
+                        LedgerValuationError,
+                        NavReconstructionError,
+                        LedgerCompletenessError,
+                        LedgerTruncatedError,
+                        CurrencyEnumerationError,
+                        ScopeAuthError,
+                    ) as _mtm_exc:
+                        # DELIBERATE ASYMMETRY vs the cash pass narrowing (:2249,
+                        # rationale :2256-2259): a STRUCTURAL mark_to_market failure
+                        # (a pre-rollout straddle with no boundary V₀ anchor, or a
+                        # mid-window summary hole — deribit_txn.py:636-650) DEGRADES —
+                        # the cash factsheet still ships and we stamp a FIXED machine
+                        # reason (no exception-text interpolation, T-74-03). We do NOT
+                        # catch bare ValueError / json.JSONDecodeError: a transient
+                        # network/parse ValueError escaping the second crawl must fall
+                        # through and stay transient-retryable (the outer :2414 arm /
+                        # dispatcher retries the WHOLE derive), NEVER be permanently
+                        # stamped as a coverage reason. DeribitTransientReadError,
+                        # ccxt network errors, and RateLimitExceeded likewise
+                        # propagate. Structural ⇒ degrade; transient ⇒ retry all.
+                        mtm_returns = None
+                        mtm_gated_reason = MTM_REASON_SUMMARY_COVERAGE
+                        logger.warning(
+                            "derive_broker_dailies: mark_to_market second pass "
+                            "degraded for strategy %s (structural reconstruction "
+                            "failure) — cash derive unaffected: %s",
+                            strategy_id,
+                            scrub_freeform_string(str(_mtm_exc)),
+                        )
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,
@@ -2764,6 +2859,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
         if meta.get(_flag):
             _prestamp_flags[_flag] = True
+    # MTM-01 (Phase 101): a STRUCTURAL mark_to_market degrade stamps the FIXED
+    # machine reason. Only on degrade — the prestamp REPLACES data_quality_flags
+    # wholesale (MED-3), so a stale reason self-heals on the next clean derive.
+    if mtm_attempted and mtm_gated_reason is not None:
+        _prestamp_flags["mtm_gated_reason"] = mtm_gated_reason
 
     def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
         ctx.supabase.table("strategy_analytics").upsert(
