@@ -6,6 +6,7 @@ import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
+import { mtmDisabledReasonCopy } from "./basis-context";
 
 /**
  * Phase 90 Wave-0 (90-02 Task 2) — TDD RED scaffold for the FS-03 cash/MTM
@@ -234,5 +235,103 @@ describe("FactsheetBody — Phase 90 single-key parity (GREEN today AND after)",
     // HeatmapPanels month-cell title ": no data" (colon form) is a DIFFERENT,
     // pre-existing string and is intentionally OUT of scope for this pin.
     expect(html).not.toContain("— no data");
+  });
+});
+
+/**
+ * Phase 102 (MTM-01 / MTM-03) — the SINGLE-KEY options MTM toggle. These fixtures
+ * discriminate purely on the server-truth `payload.mtmGate` (NEVER an api-key
+ * heuristic — Pitfall 1): a single-key options strategy carries an `mtmGate`; a
+ * non-options single-key strategy does not. All additive — every pre-existing
+ * assertion above stays byte-untouched.
+ */
+const LEVERAGE_INPUT_LABEL =
+  "Leverage multiplier (1× = unlevered; excludes borrow / funding cost)";
+
+// (e) single-key options, MTM AVAILABLE — carries ONLY mark_to_market (never a
+//     cash_settlement key — the SC-4 keystone). No dataQuality.composite.
+function fixtureSingleKeyMtmAvailable(): FactsheetPayload {
+  return {
+    ...base(),
+    metricsByBasis: { mark_to_market: MTM },
+    mtmGate: { available: true },
+  } as unknown as FactsheetPayload;
+}
+// (f) single-key options, MTM gated with an honest single-key reason.
+function fixtureSingleKeyMtmGated(): FactsheetPayload {
+  return {
+    ...base(),
+    mtmGate: { available: false, reason: "mtm_summary_coverage_incomplete" },
+  } as unknown as FactsheetPayload;
+}
+// (g) single-key options, MTM available AND leverageable (periodsPerYear present
+//     so the leverage input renders on the cash basis). Drives LEV-MTM-1.
+function fixtureSingleKeyMtmLeverage(): FactsheetPayload {
+  return {
+    ...base(),
+    metricsByBasis: { mark_to_market: MTM },
+    mtmGate: { available: true },
+    periodsPerYear: 365,
+  } as unknown as FactsheetPayload;
+}
+
+// Read the numeric value cell for a KPI label within a rendered container.
+function kpiValue(container: HTMLElement, label: string): string {
+  const labelEl = within(container).getAllByText(label)[0]!;
+  const cell = labelEl.parentElement as HTMLElement;
+  // The value <p> is the label's sibling inside the cell div.
+  const value = cell.querySelector("p:last-child");
+  return value?.textContent ?? "";
+}
+
+describe("FactsheetBody — Phase 102 single-key options MTM toggle", () => {
+  it("SK-TOGGLE-1: single-key options with an available mtmGate renders the toggle; activating MTM relabels the KPI scalars", () => {
+    const { container } = renderBody(fixtureSingleKeyMtmAvailable());
+    const group = container.querySelector(
+      '[role="group"][aria-label="Metrics basis"]',
+    );
+    expect(group, "the single-key options basis toggle group").not.toBeNull();
+    // Default cash active; activate mark_to_market.
+    fireEvent.click(within(container).getByText("Mark-to-market"));
+    // The seven mapped scalars relabel from the PERSISTED mark_to_market object
+    // (MTM.cumulative_return 0.5 → +50.0%; MTM.sharpe 1.2 → 1.20), never cash.
+    expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
+    expect(kpiValue(container, "Sharpe")).toBe("1.20");
+  });
+
+  it("SK-TOGGLE-2: single-key options gated → mark_to_market aria-disabled with the mapped reason copy inline", () => {
+    const { container } = renderBody(fixtureSingleKeyMtmGated());
+    const mtm = within(container).getByText("Mark-to-market");
+    expect(mtm.getAttribute("aria-disabled")).toBe("true");
+    // Copy-agnostic: assert the WIRING (the server reason flows to the mapped
+    // copy) — the exact string is pinned in Task 3's basis-context tests.
+    const expected = mtmDisabledReasonCopy("mtm_summary_coverage_incomplete");
+    expect(mtm.getAttribute("title")).toBe(expected);
+    // The inline disabled-reason paragraph mirrors the same mapped copy.
+    expect(within(container).getAllByText(expected).length).toBeGreaterThan(0);
+  });
+
+  it("SK-BYTE-1: a single-key payload with NO mtmGate renders NO SegmentedControl (byte-identity scope)", () => {
+    const { container, queryByText } = renderBody(fixtureSingleKey());
+    expect(
+      container.querySelector('[role="group"][aria-label="Metrics basis"]'),
+    ).toBeNull();
+    expect(queryByText("Mark-to-market")).toBeNull();
+  });
+
+  it("LEV-MTM-1 (no-fabrication guard): leverage=2 under MTM shows PERSISTED MTM scalars and NO MODELED eyebrow", () => {
+    const { container } = renderBody(fixtureSingleKeyMtmLeverage());
+    // On the cash basis the leverage input is visible — dial it to 2×.
+    const input = within(container).getByLabelText(LEVERAGE_INPUT_LABEL);
+    fireEvent.change(input, { target: { value: "2" } });
+    // Switch to mark_to_market: leverage models the CASH return path, so under an
+    // MTM label the hook MUST short-circuit to the persisted overlay (no recompute).
+    fireEvent.click(within(container).getByText("Mark-to-market"));
+    // KPI cells show the persisted MTM scalars (MTM.cum 0.5 → +50.0%), NOT a
+    // leverage-scaled cash number. Neuter check: remove the basis guard in
+    // useLeveragedMetrics → leveraged cash renders here + a MODELED eyebrow → RED.
+    expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
+    // No fabricated MODELED line under MTM.
+    expect(within(container).queryByText(/MODELED/)).toBeNull();
   });
 });
