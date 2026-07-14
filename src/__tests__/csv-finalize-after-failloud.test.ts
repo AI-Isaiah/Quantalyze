@@ -204,8 +204,10 @@ describe("D7 fail-loud: placeholder upsert error is alertable (path 1)", () => {
     const res = await POST(makeRequest(validBody()));
     expect(res.status).toBe(500); // CSV_PERSIST_FAIL
 
-    // The warn is KEPT (Vercel log parity).
-    expect(warnSpy).toHaveBeenCalled();
+    // The warn is KEPT (Vercel log parity) — assert THIS arm's warn, not any warn.
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("placeholder upsert failed (non-blocking)"),
+    );
     // ...and the failure is now alertable.
     const call = findCapture("placeholder-upsert");
     expect(call).toBeDefined();
@@ -230,7 +232,9 @@ describe("D7 fail-loud: placeholder upsert throw is alertable (path 2)", () => {
     const res = await POST(makeRequest(validBody()));
     expect(res.status).toBe(500);
 
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("placeholder upsert threw (non-blocking)"),
+    );
     const call = findCapture("placeholder-upsert-throw");
     expect(call).toBeDefined();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -253,7 +257,9 @@ describe("D7 fail-loud: enqueue RPC error is alertable (path 3)", () => {
 
     await runAfters();
 
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("enqueue_compute_analytics_from_csv failed (non-blocking)"),
+    );
     const call = findCapture("csv-analytics-enqueue");
     expect(call).toBeDefined();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -274,7 +280,9 @@ describe("D7 fail-loud: enqueue side-effect throw is alertable (path 4)", () => 
 
     await runAfters();
 
-    expect(warnSpy).toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("enqueue side-effect threw (non-blocking)"),
+    );
     const call = findCapture("csv-analytics-enqueue-throw");
     expect(call).toBeDefined();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
