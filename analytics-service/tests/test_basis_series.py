@@ -71,16 +71,44 @@ def _fixture_cash() -> pd.Series:
 
 
 def _roundtrip_recompute(r: BasisSeriesResult) -> dict:
-    """Rebuild the Series from the PERSISTED rows → gap_fill → compute_all_metrics
-    using the helper's OWN conventions echo. Any divergence between the persisted
-    scalar's convention and the echoed convention (the Phase-101 √252 class) makes
-    this recompute disagree with `r.metrics_json`."""
+    """Rebuild the Series from the PERSISTED rows → reconstruct the scalar input per
+    the `densify` echo → compute_all_metrics using the helper's OWN conventions echo.
+    Any divergence between the persisted scalar's convention and the echoed convention
+    (the Phase-101 √252 class) makes this recompute disagree with `r.metrics_json`.
+
+    D1 reconstruction per `r.conventions.get("densify")`:
+      * absent/None  → today's gap_fill(rebuilt) (MTM/default — byte-identical to the
+                       pre-D1 guard so the existing round-trip tests pass unmodified);
+      * "sparse"     → rebuilt VERBATIM (user-CSV: scalar computed on the sparse rows);
+      * "broker_nan" → rebuilt.reindex(date_range(min,max)) (every in-span absence was
+                       a NaN guard day);
+      * "zero_fill"  → gap_fill(rebuilt) THEN reinstate NaN at r.nan_dates, union-
+                       reindexing so a nan_date OUTSIDE [first_row,last_row] extends
+                       the span (composite guard-NaN — never 0.0-bridge the break)."""
     rebuilt = pd.Series(
         [row["return"] for row in r.series_rows],
         index=pd.DatetimeIndex([row["date"] for row in r.series_rows]).as_unit("us"),
         dtype="float64",
     )
-    redense = gap_fill_daily_returns(rebuilt)
+    densify = r.conventions.get("densify")
+    if densify is None:
+        redense = gap_fill_daily_returns(rebuilt)
+    elif densify == "sparse":
+        redense = rebuilt
+    elif densify == "broker_nan":
+        full = pd.date_range(
+            rebuilt.index.min(), rebuilt.index.max(), freq="D"
+        ).as_unit("us")
+        redense = rebuilt.reindex(full)
+    elif densify == "zero_fill":
+        nan_idx = pd.DatetimeIndex(r.nan_dates or []).as_unit("us")
+        span = rebuilt.index.union(nan_idx)  # union-reindex: an edge nan_date extends the span
+        full = pd.date_range(span.min(), span.max(), freq="D").as_unit("us")
+        redense = rebuilt.reindex(full, fill_value=0.0).astype("float64")
+        if len(nan_idx):
+            redense.loc[nan_idx] = float("nan")
+    else:  # pragma: no cover — derive_basis_series enforces the closed set
+        raise AssertionError(f"unhandled densify policy {densify!r}")
     return compute_all_metrics(
         redense,
         None,
