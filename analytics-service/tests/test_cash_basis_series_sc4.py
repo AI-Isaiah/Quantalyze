@@ -720,18 +720,21 @@ def test_no_reader_consumes_cash_settlement_series_row() -> None:
 
 
 def test_single_cash_settlement_persist_seam() -> None:
-    """A3 honest-absence: exactly ONE persist site writes basis="cash_settlement".
-    A second bootleg persist (e.g. someone adding one to run_compute_analytics_job —
-    the 106-slated dark-path re-entry point — or fabricating a fill for a legacy-tail
-    strategy) would give some strategies a fabricated series this phase instead of an
-    honest absence. Strip comment lines, then assert the literal appears once.
+    """A3 honest-absence: exactly TWO persist sites write basis="cash_settlement" —
+    the single-key broker-derive seam AND (as of Phase 105 collapse #1) the composite
+    finalize seam. Both are the DELIBERATE unified-backbone route: cash scalars are a
+    cache of a persisted cash series. A THIRD bootleg persist (e.g. someone adding one
+    to run_compute_analytics_job — the 106-slated dark-path re-entry point — or
+    fabricating a fill for a legacy-tail strategy) would give some strategies a
+    fabricated series this phase instead of an honest absence. Strip comment lines,
+    then assert the literal appears exactly twice.
 
-    Kills: any second basis="cash_settlement" persist added outside the single seam.
+    Kills: any THIRD basis="cash_settlement" persist added outside the two honest seams.
 
     Phase 105 (D3) adds heal-DELETE call(s) — persist_basis_series(..., result=None) —
-    at the terminal-failure arms. A heal DELETES a stale row (it never FABRICATES a
-    series), so it does not violate the A3 honest-absence guarantee. Count only the
-    NON-heal (result-bearing) cash persists: exactly ONE must exist."""
+    at each seam's terminal-failure arms. A heal DELETES a stale row (it never
+    FABRICATES a series), so it does not violate the A3 honest-absence guarantee. Count
+    only the NON-heal (result-bearing) cash persists: exactly TWO must exist."""
     worker = _repo_root() / "analytics-service" / "services" / "job_worker.py"
     code = "\n".join(
         ln for ln in worker.read_text().splitlines()
@@ -739,11 +742,11 @@ def test_single_cash_settlement_persist_seam() -> None:
     )
     total = code.count('basis="cash_settlement"')
     heals = code.count('basis="cash_settlement", result=None')
-    assert total - heals == 1, (
-        f"expected exactly ONE result-bearing basis=\"cash_settlement\" persist seam, "
-        f"found {total - heals} (total={total}, heals={heals}) — a second bootleg "
-        "persist site would fabricate a series where this phase mandates an honest "
-        "absence (A3); heal-deletes (result=None) are exempt"
+    assert total - heals == 2, (
+        f"expected exactly TWO result-bearing basis=\"cash_settlement\" persist seams "
+        f"(single-key + composite), found {total - heals} (total={total}, heals={heals}) "
+        "— a THIRD persist site would fabricate a series where this phase mandates an "
+        "honest absence (A3); heal-deletes (result=None) are exempt"
     )
 
 
