@@ -578,6 +578,151 @@ def test_insufficient_window_mirrors_metrics_result() -> None:
     assert r.insufficient_window == expected
 
 
+# ── Task 2 (D1): densify_policy-aware round-trip guard + the 3-policy fixtures ──
+
+
+def _fixture_broker_gapped() -> pd.Series:
+    """A broker-sourced finite series with a 2-day interior CALENDAR gap (07-04/05
+    ABSENT, not NaN). The broker scalar-input reindexes those in-span absences to NaN
+    guard days — the `broker_nan` policy."""
+    return _mk_series([
+        ("2024-07-01", 0.005),
+        ("2024-07-02", -0.003),
+        ("2024-07-03", 0.004),
+        # 2024-07-04, 2024-07-05 ABSENT (broker guard days → NaN in the scalar input)
+        ("2024-07-06", 0.002),
+        ("2024-07-07", -0.001),
+        ("2024-07-08", 0.006),
+    ])
+
+
+def _fixture_stitched_composite() -> pd.Series:
+    """A stitched-composite-shaped series: an inter-member ABSENT gap (07-13/14) AND
+    an INTERIOR in-index member-guard NaN (07-16). The composite scalar input is
+    `gap_fill(stitched)` — 0.0 at the inter-member gap, NaN PRESERVED at the guard."""
+    return _mk_series([
+        ("2024-07-10", 0.004),
+        ("2024-07-11", -0.002),
+        ("2024-07-12", 0.006),
+        # 2024-07-13, 2024-07-14 ABSENT (inter-member gap → 0.0 bridge)
+        ("2024-07-15", 0.003),
+        ("2024-07-16", float("nan")),  # in-index member-guard NaN (interior break)
+        ("2024-07-17", 0.005),
+        ("2024-07-18", -0.001),
+        ("2024-07-19", 0.002),
+    ])
+
+
+def _fixture_stitched_edge_nan() -> pd.Series:
+    """A stitched-composite series whose member-guard NaN sits at the TRAILING EDGE
+    (08-08). The nan_date falls OUTSIDE [first_row, last_row] (the honest rows end at
+    08-07), so the round-trip reconstruction must union-reindex to re-extend the span."""
+    return _mk_series([
+        ("2024-08-01", 0.004),
+        ("2024-08-02", -0.002),
+        # 2024-08-03, 2024-08-04 ABSENT (inter-member gap → 0.0 bridge)
+        ("2024-08-05", 0.006),
+        ("2024-08-06", 0.003),
+        ("2024-08-07", -0.001),
+        ("2024-08-08", float("nan")),  # TRAILING-edge member-guard NaN (union-reindex)
+    ])
+
+
+def test_sparse_policy_roundtrip() -> None:
+    """A weekend-gapped user-CSV sparse fixture derived with scalar_returns=sparse +
+    densify_policy="sparse" round-trips dict-equal: the guard reconstructs the scalar
+    as the rows VERBATIM (no gap_fill). Neuter (reconstruct with gap_fill) → RED."""
+    s = _fixture_sparse_gapped()
+    r = derive_basis_series(
+        s, None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=s, densify_policy="sparse",
+    )
+    assert _roundtrip_recompute(r) == r.metrics_json
+
+
+def test_broker_nan_policy_roundtrip() -> None:
+    """A broker guard-day fixture derived with scalar_returns=dense-reindexed-NaN +
+    densify_policy="broker_nan" round-trips dict-equal: the guard reconstructs every
+    in-span ABSENCE as a NaN guard day (reindex to the dense calendar). Neuter
+    (reconstruct with gap_fill so absences become 0.0) → RED."""
+    s = _fixture_broker_gapped()
+    dense_idx = pd.date_range("2024-07-01", "2024-07-08", freq="D").as_unit("us")
+    scalar = s.reindex(dense_idx)  # 07-04/05 → NaN guard days
+    r = derive_basis_series(
+        s, None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=scalar, densify_policy="broker_nan",
+    )
+    assert _roundtrip_recompute(r) == r.metrics_json
+
+
+def test_zero_fill_composite_guard_nan_roundtrip_flagship() -> None:
+    """D1 FLAGSHIP: a stitched-composite fixture (inter-member gap + interior
+    member-guard NaN) derived with scalar_returns=gap_fill(stitched) +
+    densify_policy="zero_fill" round-trips DICT-EQUAL — the guard 0.0-bridges the
+    inter-member gap but REINSTATES the member-guard NaN at nan_dates.
+
+    Neuter target (RED, pinned in-test): dropping nan_dates from the reconstruction
+    (plain gap_fill, i.e. the pre-D1 path) 0.0-bridges the guard day and does NOT
+    equal r.metrics_json — a 0.0 flat day yields different vol/Sharpe than a NaN
+    break, so a silently-dropped nan_dates can never pass."""
+    stitched = _fixture_stitched_composite()
+    scalar = gap_fill_daily_returns(stitched)  # 0.0 at 07-13/14, NaN preserved at 07-16
+    r = derive_basis_series(
+        stitched, None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=scalar, densify_policy="zero_fill",
+    )
+    assert r.nan_dates == ["2024-07-16"]
+    assert _roundtrip_recompute(r) == r.metrics_json
+
+    # neuter RED: the pre-D1 reconstruction (drop nan_dates → plain gap_fill) diverges
+    rebuilt = pd.Series(
+        [row["return"] for row in r.series_rows],
+        index=pd.DatetimeIndex([row["date"] for row in r.series_rows]).as_unit("us"),
+        dtype="float64",
+    )
+    naive = compute_all_metrics(
+        gap_fill_daily_returns(rebuilt), None,
+        periods_per_year=r.conventions["periods_per_year"],
+        cumulative_method=r.conventions["cumulative_method"],
+        day_basis=r.conventions["day_basis"],
+    ).metrics_json
+    assert naive != r.metrics_json
+
+
+def test_zero_fill_edge_guard_nan_roundtrip_union_reindex() -> None:
+    """D1 FLAGSHIP (edge case): a member-guard NaN at the TRAILING edge — the nan_date
+    lies OUTSIDE [first_row, last_row] — still round-trips dict-equal via the
+    union-reindex path (the reconstruction re-extends the span to cover the nan_date).
+    Neuter (reindex only to [first_row,last_row], dropping the edge nan_date) → RED."""
+    stitched = _fixture_stitched_edge_nan()
+    scalar = gap_fill_daily_returns(stitched)  # 0.0 at 08-03/04, NaN preserved at 08-08
+    r = derive_basis_series(
+        stitched, None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=scalar, densify_policy="zero_fill",
+    )
+    assert r.nan_dates == ["2024-08-08"]
+    # the guard NaN is beyond the last honest row (08-07)
+    assert r.series_rows[-1]["date"] == "2024-08-07"
+    assert _roundtrip_recompute(r) == r.metrics_json
+
+
+def test_simple_active_denominator_roundtrip() -> None:
+    """The guard mechanism holds under the MED-2 Zavara/ccxt-override convention pair
+    (cumulative_method="simple", day_basis="active") — a sparse fixture derived under
+    those conventions round-trips dict-equal (the seam WIRING test is Plan 03's)."""
+    s = _fixture_sparse_gapped()
+    r = derive_basis_series(
+        s, None,
+        periods_per_year=252, cumulative_method="simple", day_basis="active",
+        scalar_returns=s, densify_policy="sparse",
+    )
+    assert _roundtrip_recompute(r) == r.metrics_json
+
+
 def test_cash_persist_none_heals_via_delete() -> None:
     """result=None DELETES the (strategy_id, cash_settlement) row — the Pitfall-5
     heal so a stale cash series never outlives an authoritative-reject derive. Neuter
