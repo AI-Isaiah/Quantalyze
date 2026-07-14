@@ -308,13 +308,18 @@ export function FactsheetBody({
 }
 
 /**
- * Phase 90 (FS-03, D5) / Phase 103 (MTM-04 correction) — the right-rail
- * MetricsColumn now FOLLOWS the active basis for every dailies-derivable surface
- * (charts, correlations, §IV α/β/IR, extended distribution scalars, quantiles,
- * calmar-by-year, bootstrap, worst-10, style-drift). Only the §I/§II Main-Metrics
- * HEADLINE scalars stay cash here (the KpiStrip owns their MTM relabel, Phase 102).
- * So under MTM we surface a "BASIS · MARK-TO-MARKET" eyebrow atop the column that
- * honestly reads the ACTIVE basis (matching the KpiStrip eyebrow). Composite-only;
+ * Phase 90 (FS-03, D5) / Phase 103 (MTM-04 correction + root-cause flip + F3) — the
+ * right-rail MetricsColumn now FOLLOWS the active basis for EVERY surface, including
+ * the §I/§II Main-Metrics HEADLINE scalars: MetricsColumn reads `view.strategyMetrics`
+ * (the root-cause flip), and the F3 overlay in `useBasisSeriesView` rewrites its seven
+ * headline scalars from the PERSISTED `metrics_json_by_basis.mark_to_market`, so the
+ * rail's seven == the KpiStrip's seven by construction (both trace to the persisted
+ * dense-Python cache). The dailies-derivable surfaces (charts, correlations, §IV
+ * α/β/IR, extended distribution scalars, quantiles, calmar-by-year, bootstrap,
+ * worst-10, style-drift) follow the bundle; the extended/series-derived rail-only
+ * fields stay bundle-TS-derived (no cross-surface counterpart). So under MTM the whole
+ * rail is uniformly mark-to-market and we surface a "BASIS · MARK-TO-MARKET" eyebrow
+ * atop the column (gated on bundle presence, F4). Composite-only;
  * when the eyebrow is not shown (single-key OR composite-cash) this renders EXACTLY
  * the bare <MetricsColumn> — byte-identical to before (GUARD-02).
  */
