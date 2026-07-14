@@ -1412,12 +1412,26 @@ def _captured_metrics_snapshot(fake):
     return None
 
 
-def _run_sync_pipeline(client, fake, adapter, *, flow_type, source, matched=None):
+def _run_sync_pipeline(
+    client, fake, adapter, *, flow_type, source, matched=None, strategy_id=None
+):
     """POST /process-key through the sync pipeline with the standard patches
     (copied from test_process_key_teaser_injects_anchor_when_strategy_id_missing).
     Returns the FastAPI response; the caller reads captured RPC payloads off `fake`.
+
+    `strategy_id` is injected into context for flows that do NOT auto-inject the
+    teaser anchor (internal_report/csv require a real strategy_id, :614 guard).
     """
     import services.encryption as _enc_mod
+
+    context = {
+        "api_key": "k",
+        "api_secret": "s",
+        "email": "test@example.com",
+        "exchange": source,
+    }
+    if strategy_id is not None:
+        context["strategy_id"] = strategy_id
 
     with patch(
         "routers.process_key.is_unified_backbone_active",
@@ -1441,12 +1455,7 @@ def _run_sync_pipeline(client, fake, adapter, *, flow_type, source, matched=None
             json={
                 "flow_type": flow_type,
                 "source": source,
-                "context": {
-                    "api_key": "k",
-                    "api_secret": "s",
-                    "email": "test@example.com",
-                    "exchange": source,
-                },
+                "context": context,
             },
             headers=_auth_headers(),
         )
@@ -1711,7 +1720,8 @@ def test_derive_swap_is_flow_agnostic_internal_report(client):
     adapter = _make_sync_adapter(rows, _sentinel_snapshot())
 
     r = _run_sync_pipeline(
-        client, fake, adapter, flow_type="internal_report", source="binance"
+        client, fake, adapter, flow_type="internal_report", source="binance",
+        strategy_id="22222222-2222-4222-8222-222222222222",
     )
     assert r.status_code == 200, r.text
     snap = _captured_metrics_snapshot(fake)
