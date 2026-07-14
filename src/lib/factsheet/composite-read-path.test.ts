@@ -13,6 +13,7 @@ import {
   parseMtmSeriesPayload,
   readMtmSeries,
   shouldReadSingleKeyMtmSeries,
+  shouldReadCashSettlementSeries,
 } from "./composite-read-path";
 import type { ParsedMtmSeries } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
@@ -877,5 +878,39 @@ describe("MTM-04 shouldReadSingleKeyMtmSeries — cheap shared read gate", () =>
     expect(shouldReadSingleKeyMtmSeries({ mark_to_market: [MTM] }, "complete")).toBe(false);
     expect(shouldReadSingleKeyMtmSeries(null, "complete")).toBe(false);
     expect(shouldReadSingleKeyMtmSeries("garbage", "complete")).toBe(false);
+  });
+});
+
+/**
+ * MED-1 (D3) — shouldReadCashSettlementSeries: the cash twin of
+ * shouldReadSingleKeyMtmSeries. The single read-side status-gate that refuses a
+ * stale `cash_settlement` series row left behind by ANY terminal-failure arm.
+ * Truth-table mirrors the MTM block above (cash_settlement in place of
+ * mark_to_market). Neuter target: drop the DONE gate (return the object check
+ * alone) → RED on the failed/computing-status cases below.
+ */
+describe("MED-1 shouldReadCashSettlementSeries — read-side status-gate (D3 single choke point)", () => {
+  const CASH = { cumulative_return: 0.42, volatility: 0.11, max_drawdown: -0.06, cagr: 0.31, sharpe: 1.4, sortino: 1.9, calmar: 0.8 };
+
+  it("DONE + cash_settlement object → true (the only true rows)", () => {
+    expect(shouldReadCashSettlementSeries({ cash_settlement: CASH }, "complete")).toBe(true);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: CASH }, "complete_with_warnings")).toBe(true);
+  });
+
+  it("not terminal-success → false (a stale row after ANY failure arm is never trusted)", () => {
+    for (const s of ["failed", "computing", "pending", null, undefined, 0, "", "complete_x"]) {
+      expect(shouldReadCashSettlementSeries({ cash_settlement: CASH }, s)).toBe(false);
+    }
+  });
+
+  it("no cash_settlement object → false (malformed / wrong-shape jsonb)", () => {
+    expect(shouldReadCashSettlementSeries({}, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ mark_to_market: CASH }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: null }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: [CASH] }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: 0.42 }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries(null, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries([{ cash_settlement: CASH }], "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries("garbage", "complete")).toBe(false);
   });
 });

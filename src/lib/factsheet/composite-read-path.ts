@@ -416,6 +416,51 @@ export function shouldReadSingleKeyMtmSeries(
 }
 
 /**
+ * MED-1 (Phase 105, D3) — the cash twin of {@link shouldReadSingleKeyMtmSeries}
+ * and the SINGLE read-side choke point that decides whether a persisted
+ * `cash_settlement` series row may be trusted. It returns true ONLY when
+ * `computation_status ∈ {complete, complete_with_warnings}` (the exact
+ * terminal-success literals the runner writes) AND `metrics_json_by_basis`
+ * carries a non-null non-array `cash_settlement` OBJECT.
+ *
+ * Why this exists NOW with no production caller: a pre-seam terminal-failure arm
+ * nulls the scalars (`metrics_json_by_basis=None`, `computation_status='failed'`)
+ * and `return`s BEFORE the persist seam, so a stale `cash_settlement` series row
+ * can OUTLIVE its authoritative-NULL scalar — the `<2-interpretable-days` arm
+ * (`job_worker.py:2790-2821`), `_stamp_deribit_analytics_failed` (`:2096`), NAV-error
+ * arms, and a `BROKER_DAILIES_VIA_FUNDING=false` rollback orphan (LOW-3). A
+ * DONE-gate at the READ point is a single choke point that refuses EVERY such
+ * arm — including future ones — whereas arm-by-arm heal-deletes silently regress
+ * the instant a new arm is added and one is missed (the exact MED-1 bug class).
+ *
+ * Contract (locked in 105-FOLD-DECISION.md, D3 caveat a): the Phase-106 cash
+ * reader — the FIRST caller — MUST route through the `shouldReadCashSettlementSeries`
+ * predicate family (this fn + its MTM twin) before trusting a cash series row. No caller exists in Phase 105 by design (the
+ * predicate + status-gate is the guarantee; per LOW-4 the INERT-read grep
+ * tripwire is NOT — it misses a reader imported via a constant).
+ *
+ * Deliberately CHEAPER than the full `hasBasisHeadline` gate, mirroring the MTM
+ * twin: a degenerate cash_settlement object may pass here; the eventual reader
+ * still applies its own trust gate before surfacing a number.
+ */
+export function shouldReadCashSettlementSeries(
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): boolean {
+  const done = computationStatus === "complete" || computationStatus === "complete_with_warnings";
+  if (!done) return false;
+  if (
+    metricsJsonByBasis === null ||
+    typeof metricsJsonByBasis !== "object" ||
+    Array.isArray(metricsJsonByBasis)
+  ) {
+    return false;
+  }
+  const cash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
+  return cash !== null && typeof cash === "object" && !Array.isArray(cash);
+}
+
+/**
  * HARD-05 (Phase 93) — strict coercion of the server `degraded_members` DQ list
  * into the closed render shape `{ seq, venue }[]`. A degraded member is a composite
  * member EXCLUDED from the stitch (a ccxt venue not yet reconstructed). ONLY an
