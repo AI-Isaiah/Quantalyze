@@ -54,6 +54,17 @@ export function useBasis(): BasisContextValue {
 }
 
 /**
+ * Non-throwing active-basis read — degrades to `cash_settlement` outside a
+ * BasisProvider. Mirrors `useBasisSeriesView`'s graceful fallback so a panel that
+ * only wants an additive basis-aware NOTE (never core rendering) can mount in
+ * isolation (a standalone panel test) without a provider. Use `useBasis()` when the
+ * SETTER is needed or a missing provider is a real bug.
+ */
+export function useBasisOrCash(): Basis {
+  return useContext(BasisContext)?.basis ?? "cash_settlement";
+}
+
+/**
  * The display-side basis mapping hook. Takes the payload as an argument
  * (deliberate deviation from the PATTERNS colocation in `basis-metrics.ts`: the
  * hook needs React context, but `basis-metrics.ts` must stay React-free for the
