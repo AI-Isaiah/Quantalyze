@@ -707,6 +707,110 @@ async def test_mtm_series_persists_before_done_scalar_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cash_series_persists_before_done_scalar_write() -> None:
+    """SC-5 (D5) — the cash twin of the MTM ordering guard: the cash_settlement
+    daily-return SERIES row must be written BEFORE the DONE-bearing headline/by-basis
+    SCALAR upsert, so a worker death before the flip never leaves a complete scalar
+    without its series (MED-1's read gate un-trusts a scalar whose series is absent).
+    Falsifiable: move the cash persist AFTER the headline → series index > headline
+    index → RED."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {})],
+        has_option_activity=True,  # gate CLOSED → cash-only (cash series RPC written)
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    # Index of the cash series write (rpc upsert_strategy_analytics_series_batch whose
+    # p_kinds carries the cash_settlement kind — distinct from the sibling-metric RPC).
+    series_idx = next(
+        i for i, c in enumerate(fake.call_order)
+        if c[0] == "rpc"
+        and c[1] == "upsert_strategy_analytics_series_batch"
+        and "cash_settlement" in (c[2].get("p_kinds") or {})
+    )
+    headline_idx = next(
+        i for i, c in enumerate(fake.call_order)
+        if c[0] == "upsert"
+        and c[1] == "strategy_analytics"
+        and isinstance(c[2], dict)
+        and "metrics_json_by_basis" in c[2]
+    )
+    assert series_idx < headline_idx, (
+        "cash series must persist BEFORE the DONE-bearing scalar write "
+        f"(series@{series_idx} vs headline@{headline_idx})"
+    )
+    # The persisted cash payload carries the schema-2 shape + the D1/LOW-2 conventions.
+    cash_payload = fake.call_order[series_idx][2]["p_kinds"]["cash_settlement"]
+    assert cash_payload["schema"] == 2
+    assert cash_payload["conventions"]["densify"] == "zero_fill"
+    assert cash_payload["conventions"]["benchmark"] == "BTC"
+
+
+@pytest.mark.asyncio
+async def test_cash_series_persist_failure_aborts_before_any_done_headline() -> None:
+    """SC-5 (D5) KILL-POINT: a raising cash-series persist aborts the job BEFORE any
+    DONE-bearing headline write — the capture contains NO strategy_analytics upsert with
+    computation_status complete/complete_with_warnings, so the read gate can never see a
+    complete scalar without its series. A fresh re-run (no fault) completes cleanly,
+    proving idempotence via _reconcile_full_delete + single-row series upserts. Neuter
+    (swallow the persist failure, or write the headline first) → a complete headline
+    lands despite the failed series → RED."""
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+
+    # Fault run: the cash-series RPC raises. db_execute is fail-loud (re-raises), so the
+    # job aborts at the cash persist — BEFORE the headline flip.
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        raise_on_rpc="upsert_strategy_analytics_series_batch",
+    )
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        with pytest.raises(RuntimeError):
+            await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    # The abort happened AT the cash series persist (it was attempted)…
+    assert any(
+        name == "upsert_strategy_analytics_series_batch"
+        and "cash_settlement" in (args.get("p_kinds") or {})
+        for name, args in fake.rpc_calls
+    ), "the cash series persist must have been attempted"
+    # …and NO complete headline landed.
+    assert not any(
+        isinstance(p, dict)
+        and str(p.get("computation_status", "")).startswith("complete")
+        for _t, p, _c in fake.upserts
+    ), "no complete headline may land when the cash series persist failed"
+
+    # Re-run cleanly (fresh capture, no fault) → DONE with a complete headline.
+    fake2 = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    with _apply(_deribit_patches(
+        fake2, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert any(
+        isinstance(p, dict)
+        and str(p.get("computation_status", "")).startswith("complete")
+        for _t, p, _c in fake2.upserts
+    ), "a clean re-run must complete (idempotent heal)"
+
+
+@pytest.mark.asyncio
 async def test_mtm_degenerate_length_gets_dedicated_message_not_chain_break() -> None:
     """BACKEND FIX 3 — a gate-OPEN composite whose CASH pass has ≥2 days but whose
     MTM second pass stitches to < 2 interpretable days must fail with an ACCURATE

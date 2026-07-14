@@ -4711,6 +4711,34 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # can't survive a now-gated re-derive.
     headline_payload.update(cash_metrics_json)
 
+    # Phase 105 (SC-5 / D5): ORDERED-IDEMPOTENT finalize. BOTH basis series (cash +
+    # MTM below) land BEFORE the DONE-bearing headline/by-basis scalar flip — together
+    # with the reconcile-delete + dailies upserts above (:4520-4560). A worker death
+    # before the flip therefore leaves NO complete scalar without its series (MED-1's
+    # read gate un-trusts a scalar whose series is absent); the kill-point test pins
+    # this. Cash ALWAYS persists a real row here — a rejected cash derive already
+    # returned via the F-5 heal above, so `_cash_basis_result` is a genuine result.
+    #
+    # D5 HONEST BOUNDARY: ordered-idempotent = GATED EVENTUAL CONSISTENCY, not
+    # atomicity — supabase-py has no cross-.table() transaction. On a RE-derive of an
+    # already-complete strategy, a death between the dailies delete/upsert (:4520-4560,
+    # PRE-EXISTING) and the scalar flip leaves old-scalar + partial-dailies visible
+    # until the authoritative-re-derive retry heals it (_reconcile_full_delete
+    # idempotence + single-row series upserts). That transient chart/KPI mismatch
+    # window is PRE-EXISTING and UNCHANGED here — 105 makes nothing worse. Strict
+    # atomicity (a service-role SECDEF finalize RPC) is deliberately DEFERRED to ride
+    # 106's fold migration (which already carries DDL + test-project catch-up +
+    # migration review); do NOT make 105 prod-DDL-affecting for a window that exists.
+    def _persist_cash_series() -> None:
+        persist_basis_series(
+            supabase,
+            strategy_id,
+            basis="cash_settlement",
+            result=_cash_basis_result,
+        )
+
+    await db_execute(_persist_cash_series)
+
     # Phase 103 (MTM-04, BACKEND FIX 2): persist (or HEAL) the stitched
     # mark_to_market daily-return series row BEFORE the DONE-bearing headline/by-basis
     # scalar upsert below — matching the single-key route (:3112-3136), which lands
