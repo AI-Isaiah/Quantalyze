@@ -1964,6 +1964,123 @@ class TestDeriveBrokerDailies:
         )
 
     @pytest.mark.asyncio
+    async def test_series_persist_before_scalar_prestamp_then_enqueue(self) -> None:
+        """106-02 (D5 / carry-forward M2): the single-key broker-derive seam must
+        persist BOTH basis series (mark_to_market + cash_settlement) BEFORE the
+        DONE-gating ``metrics_json_by_basis`` scalar prestamp, and enqueue the CSV
+        analytics job AFTER the prestamp — mirroring the composite seam's
+        self-healing (fresh-series + stale-scalar) write order (job_worker.py
+        composite analog).
+
+        Mutation-honest / RED-before-swap: with the prestamp upsert landing FIRST
+        (the pre-106-02 scalar-first order), the scalar event index is < both series
+        indices → this reddens. Moving the whole prestamp block to AFTER both
+        ``persist_basis_series`` calls (and still BEFORE the enqueue RPC) makes it
+        pass. The invariant is a partial-write-window reversal: a worker death
+        between the writes must leave fresh-series + stale-scalar (benign,
+        self-healing on the next derive), never a fresh scalar over a stale/absent
+        series (the harmful mislabeled-read direction)."""
+        import datetime as _dt
+        from services.job_worker import run_derive_broker_dailies_job
+
+        now = _dt.datetime.now(_dt.timezone.utc)
+
+        def _rec(days_ago: int, pnl: float) -> dict:
+            d = (now - _dt.timedelta(days=days_ago)).date().isoformat()
+            return {
+                "exchange": "okx", "symbol": "PORTFOLIO",
+                "side": "buy" if pnl >= 0 else "sell", "price": abs(pnl),
+                "quantity": 1, "fee": 0, "fee_currency": "USDT",
+                "timestamp": f"{d}T00:00:00+00:00", "order_type": "daily_pnl",
+            }
+
+        # >=2 daily-return days so the seam reaches the terminal-DONE tail (both
+        # series persists + the scalar prestamp + the CSV enqueue all fire).
+        realized = [_rec(400, 100.0), _rec(380, 50.0), _rec(5, 10.0)]
+        mock_ctx, stack, _captured = self._flow_harness(
+            venue="okx", deposits=[], realized=realized,
+        )
+
+        # One ORDERED event log unifying the three write kinds we gate on:
+        # persist_basis_series calls, the by-basis scalar prestamp upsert, and the
+        # compute_analytics_from_csv enqueue RPC.
+        events: list[str] = []
+
+        def _ordering_table(name: str) -> MagicMock:
+            tbl = MagicMock()
+
+            def _upsert(payload, **_kw):
+                if (
+                    name == "strategy_analytics"
+                    and isinstance(payload, dict)
+                    and "metrics_json_by_basis" in payload
+                ):
+                    events.append("scalar_prestamp")
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=1)
+                return stub
+
+            sel = MagicMock()
+            sel.select.return_value = sel
+            sel.eq.return_value = sel
+            sel.single.return_value = sel
+            sel.maybe_single.return_value = sel
+            sel.order.return_value = sel
+            sel.range.return_value = sel
+            sel.execute.return_value = MagicMock(data={"data_quality_flags": {}})
+            tbl.select.return_value = sel
+            tbl.upsert.side_effect = _upsert
+            return tbl
+
+        mock_ctx.supabase.table.side_effect = _ordering_table
+
+        def _rpc(name, payload=None, *_a, **_k):
+            if name == "enqueue_compute_job":
+                events.append("enqueue")
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+
+        def _spy_persist(_supabase, _sid, *, basis, result):
+            events.append(f"series:{basis}")
+
+        # job_worker imports persist_basis_series FUNCTION-LOCALLY (:3007), so patch
+        # it at the SOURCE module — the local `from ... import` rebinds to this spy.
+        stack.enter_context(patch(
+            "services.basis_series.persist_basis_series", side_effect=_spy_persist,
+        ))
+
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "s-flow"}
+        with stack:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        assert events.count("scalar_prestamp") == 1, (
+            f"expected exactly one by-basis scalar prestamp; events={events}"
+        )
+        assert events.count("enqueue") == 1, (
+            f"expected exactly one compute_analytics_from_csv enqueue; events={events}"
+        )
+        assert "series:mark_to_market" in events, f"no MTM series persist; {events}"
+        assert "series:cash_settlement" in events, f"no cash series persist; {events}"
+
+        i_scalar = events.index("scalar_prestamp")
+        i_enqueue = events.index("enqueue")
+        i_mtm = events.index("series:mark_to_market")
+        i_cash = events.index("series:cash_settlement")
+
+        assert i_scalar > i_mtm and i_scalar > i_cash, (
+            "the DONE-gating scalar prestamp must land AFTER both basis series "
+            f"persists (series-first, self-healing direction); events={events}"
+        )
+        assert i_scalar < i_enqueue, (
+            "the scalar prestamp must still land BEFORE the CSV analytics enqueue "
+            f"(the finalizer runs downstream of the prestamp); events={events}"
+        )
+
+    @pytest.mark.asyncio
     async def test_pre_terminus_nav_guard_evidence_segments(self) -> None:
         """CRITICAL-1: a FLOW-LESS OKX account (no boundary-flow evidence) whose
         backward-rolled NAV goes <= 0 in the PRE-terminus region (a
