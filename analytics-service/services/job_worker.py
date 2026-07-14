@@ -4563,11 +4563,18 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # scalar upsert below — matching the single-key route (:3112-3136), which lands
     # the series before the DONE-gating headline the downstream csv-analytics job
     # writes. Ordering is load-bearing: the by-basis mark_to_market SCALAR is the F-4
-    # read gate. If the scalar landed FIRST and a transient series upsert then failed
-    # on a re-stitch, the gate would render fresh scalars over a stale/missing series.
-    # Persisting the series first means a series-write failure aborts the whole derive
-    # (fail-loud db_execute) BEFORE the gating scalar is written, so the read gate can
-    # never observe fresh-scalar + stale-series. Success (mtm_metrics_json is not
+    # read gate. This ordering does NOT ELIMINATE the partial-write window — it
+    # REVERSES it into the SELF-HEALING direction. If the scalar landed FIRST and a
+    # transient series upsert then failed on a re-stitch, the gate would render fresh
+    # scalars over a stale/missing series (the HARMFUL direction — a mislabeled read).
+    # Persisting the series first means the only remaining transient window is
+    # fresh-series + stale/missing-SCALAR (a scalar-upsert failure after a successful
+    # series write). That window is BENIGN: the scalar is the read gate, so the
+    # frontend keeps showing the prior consistent state until a matching scalar lands,
+    # and the next re-derive heals it. A series-write failure itself aborts the whole
+    # derive (fail-loud db_execute) BEFORE the gating scalar is written, so the read
+    # gate can never observe the harmful fresh-scalar + stale-series. Success
+    # (mtm_metrics_json is not
     # None) → the row; every other shape — gated (mtm_ok False) or any future degrade →
     # persist_basis_series(result=None) DELETES any stale row (Pitfall 5), so a
     # previously-successful strategy that re-derives gated loses its stale series.
