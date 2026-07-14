@@ -201,10 +201,24 @@ const FROZEN_ISLANDS: string[] = [
   // pin), GUARD-02 (FactsheetBody.scenario-mode.test.tsx, byte-identity), and
   // FactsheetView.kpistrip.test.tsx (the composite basis relabel). The other two
   // factsheet SVGs (HistogramChart/MasterBrush) STAY FROZEN below.
-  // The remaining EIGHT islands below STAY FROZEN — no RSC-ification / reshape
-  // of the FactsheetProvider, useBreakpoint, the MC worker, the chart-
-  // interactivity island (EquityChart/TouchTooltip/useTapPin), or the 3 SVGs.
-  "src/app/factsheet/[id]/v2/factsheet-context.tsx",
+  // The remaining islands below STAY FROZEN — no RSC-ification / reshape
+  // of useBreakpoint, the MC worker, the chart-interactivity island
+  // (EquityChart/TouchTooltip/useTapPin), or the 3 SVGs.
+  //
+  // v1.10 Phase 103 (MTM-follow, F2.3): `factsheet-context.tsx` is REMOVED from the
+  // frozen set. The freeze premise was that the FactsheetProvider is a byte-inert
+  // scenario-mode host — but the phase-103 red team found its xRange clamp/fullRange
+  // is sized to the CASH axis length (`payload.dates.length`), so under a
+  // mark_to_market axis LONGER than cash the recent MTM days are PERMANENTLY
+  // unreachable (the brush clamp clips every index past the cash length, and the
+  // frozen-spine diff-zero guard MASKED it). Widening ONLY the `setXRange` UPPER
+  // clamp to the longer of cash / MTM-bundle axis is a deliberate, reviewed ADDITIVE
+  // edit (same category as the scenario.ts / #597 compute.ts / Phase-90
+  // TimeSeriesChart.tsx / F1 HistogramChart+MasterBrush carve-outs above): it is a
+  // NO-OP under cash (a cash consumer never emits an index beyond the cash length,
+  // so the widened bound is never exercised; `fullRange` stays cash-sized), and it
+  // is pinned by MasterBrush.basis.test.tsx (the cash byte-identity + MTM-reachable
+  // neuter witnesses).
   "src/hooks/useBreakpoint.ts",
   "src/app/(dashboard)/allocations/lib/montecarlo.worker.ts",
   "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",

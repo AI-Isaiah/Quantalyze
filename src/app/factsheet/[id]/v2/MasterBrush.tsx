@@ -3,6 +3,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { usePayload, useXRange } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -40,7 +41,20 @@ const HANDLE_HIT_W = 28;
 const MIN_VISIBLE = 5;
 
 export function MasterBrush() {
-  const payload = usePayload();
+  // F2 (phase 103, MTM-follow): route the sparkline equity, the date axis, the
+  // window edge labels AND the emitted xRange indices through the basis view so
+  // the brush follows the active basis. Under cash (or an absent MTM bundle)
+  // `useBasisSeriesView` returns the payload BY REFERENCE, so the sparkline, the
+  // year ticks, the "Timeline start → end" labels and the drag index space are
+  // byte-identical to today (SC-4). Under mark_to_market it swaps in the bundle's
+  // MTM `strategyEquity`/`dates`, so (1) the sparkline is the MTM equity, (2) the
+  // window labels + emitted xRange ride the MTM axis (matching the MTM-following
+  // TimeSeriesChart — no more cash-index-on-MTM-axis mislabel), and (3) the drag
+  // math's `n` is the MTM axis length, so under an MTM axis LONGER than cash the
+  // recent MTM days are reachable (the factsheet-context setXRange clamp was
+  // widened to the longer axis to admit those indices). This is why MasterBrush
+  // is UNFROZEN in phase-52-frozen-spine-guards.test.ts.
+  const payload = useBasisSeriesView(usePayload());
   const { xRange, setXRange, resetXRange } = useXRange();
   const isMobile = useBreakpoint() === "mobile";
   // Desktop arms = today's literals (VB_H 60, year-tick fontSize 9). Mobile:
