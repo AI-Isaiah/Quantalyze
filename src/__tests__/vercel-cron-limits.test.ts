@@ -45,6 +45,13 @@ const SUB_DAILY_ALLOWLIST = new Set<string>([
   // .planning/phases/19-unified-backbone-conditional-on-day-2-gate-commit/
   //   19-CONTEXT.md L40 + 19-07-flag-monitor-cron-and-drain-PLAN.md.
   "/api/cron/flag-monitor",
+  // Phase 106 / D7 (BB-03) — stuck-computing janitor. Reaps
+  // strategy_analytics rows stranded at computation_status='computing' past a
+  // 60-min stale threshold (> the 40-min process_key_long watchdog ceiling).
+  // The */15 cadence matches flag-monitor's sub-daily precedent: a daily tick
+  // would leave a stuck strategy frozen for up to 24h. See
+  // .planning/phases/106-cutover-flip-delete-legacy-janitor/106-03-PLAN.md.
+  "/api/cron/janitor",
 ]);
 
 type CronEntry = { path: string; schedule: string };
@@ -267,7 +274,7 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
     expect(orphans).toEqual([]);
   });
 
-  it("expected set is exactly the eight production crons (pins the inventory)", () => {
+  it("expected set is exactly the nine production crons (pins the inventory)", () => {
     // Pins the current production cron inventory so adding/removing a handler
     // is a deliberate, test-visible change. If this list and the disk walk
     // ever disagree, the walk above is the source of truth and this literal is
@@ -279,6 +286,7 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
         "/api/cron/cleanup-wizard-drafts",
         "/api/cron/flag-monitor",
         "/api/cron/founder-lp-report",
+        "/api/cron/janitor",
         "/api/cron/phase19-error-rollup",
         "/api/cron/reconcile-strategies",
         "/api/cron/sync-funding",
