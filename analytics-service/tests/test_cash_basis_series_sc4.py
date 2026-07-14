@@ -34,6 +34,7 @@ single-key seam harness (``tests.test_mtm_single_key``); no MCP, no live DB.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -349,3 +350,116 @@ async def test_cash_conventions_traditional_clock_and_unconditional_benchmark() 
     # Legacy cash outputs still landed (the raising benchmark fetch only feeds the MTM
     # compute; it never gates the cash path).
     assert _csv_row_map(cap), "the legacy csv_daily_returns cash rows must still persist"
+
+
+# ── boundary guards (Task 2): SERIES-ONLY + INERT read + single seam ─────────
+
+
+def _repo_root() -> Path:
+    """The monorepo root — the first ancestor containing BOTH ``src/`` and
+    ``analytics-service/``. Resolved by walking up from this file so the scan works
+    from the ``analytics-service`` pytest cwd and in CI."""
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "src").is_dir() and (parent / "analytics-service").is_dir():
+            return parent
+    raise RuntimeError(
+        "could not locate the repo root (an ancestor with both src/ and "
+        "analytics-service/)"
+    )
+
+
+def _strip_comment(line: str, *, lang: str) -> bool:
+    """True when ``line`` is a pure comment for its language (grep-gate hygiene: a
+    docstring/comment mentioning a token must neither trip nor satisfy the gate)."""
+    stripped = line.lstrip()
+    if lang == "py":
+        return stripped.startswith("#")
+    return stripped.startswith("//") or stripped.startswith("*")
+
+
+def test_analytics_runner_series_only_boundary() -> None:
+    """SC-2: the authoritative cash SCALAR path (services/analytics_runner.py) is NOT
+    routed through the shared dailies derive this phase — routing cash scalars through
+    derive_basis_series before the NaN/gap-fill reconciliation would bridge broker
+    guard-day breaks and 0.0-fill user-CSV gaps (an SC-4 violation; that collapse is
+    Phase-105 scope). Strip comment lines, then assert ZERO references to
+    derive_basis_series / basis_series.
+
+    Kills: a premature Phase-105 cash-scalar reroute landing in analytics_runner.py."""
+    runner = _repo_root() / "analytics-service" / "services" / "analytics_runner.py"
+    code = "\n".join(
+        ln for ln in runner.read_text().splitlines()
+        if not _strip_comment(ln, lang="py")
+    )
+    assert "derive_basis_series" not in code, (
+        "analytics_runner.py references derive_basis_series — the cash SCALAR path "
+        "must not route through the shared derive until Phase 105 (SC-2 boundary)"
+    )
+    assert "basis_series" not in code, (
+        "analytics_runner.py references basis_series — the cash SCALAR path must not "
+        "adopt the shared series module until Phase 105 (SC-2 boundary)"
+    )
+
+
+def test_no_reader_consumes_cash_settlement_series_row() -> None:
+    """INERT read (SC-4 roadmap): the new cash_settlement series row has ZERO
+    consumers this phase. Scan src/**/*.ts{,x} (excluding *.test.*) plus
+    analytics-service/{services,routers}/*.py (excluding the two write-seam files
+    basis_series.py and job_worker.py) and assert NO non-comment line pairs the
+    substring ``cash_settlement`` with (``kind`` OR ``strategy_analytics_series``).
+
+    PHASE GUARD: Phase 105/106 lands the reader and DELETES this test deliberately.
+    Kills: any reader wired to the dark cash series before the scalar route collapses
+    (neuter-checked: adding `.eq("kind", "cash_settlement")` to a frontend reader
+    reddens this scan)."""
+    root = _repo_root()
+    scanned: list[tuple[str, Path]] = []
+    for ext in ("*.ts", "*.tsx"):
+        for f in (root / "src").rglob(ext):
+            if ".test." in f.name:
+                continue
+            scanned.append(("ts", f))
+    for sub in ("services", "routers"):
+        for f in sorted((root / "analytics-service" / sub).glob("*.py")):
+            if f.name in ("basis_series.py", "job_worker.py"):
+                continue
+            scanned.append(("py", f))
+
+    assert scanned, "the boundary scan found no files — path resolution is broken"
+
+    offenders: list[str] = []
+    for lang, f in scanned:
+        for i, line in enumerate(f.read_text().splitlines(), 1):
+            if _strip_comment(line, lang=lang):
+                continue
+            if "cash_settlement" in line and (
+                "kind" in line or "strategy_analytics_series" in line
+            ):
+                offenders.append(f"{f}:{i}: {line.strip()}")
+
+    assert not offenders, (
+        "a reader now consumes the DARK cash_settlement series row (INERT-read "
+        "boundary breached — if this is the Phase-105/106 reader landing, DELETE this "
+        "guard deliberately):\n" + "\n".join(offenders)
+    )
+
+
+def test_single_cash_settlement_persist_seam() -> None:
+    """A3 honest-absence: exactly ONE persist site writes basis="cash_settlement".
+    A second bootleg persist (e.g. someone adding one to run_compute_analytics_job —
+    the 106-slated dark-path re-entry point — or fabricating a fill for a legacy-tail
+    strategy) would give some strategies a fabricated series this phase instead of an
+    honest absence. Strip comment lines, then assert the literal appears once.
+
+    Kills: any second basis="cash_settlement" persist added outside the single seam."""
+    worker = _repo_root() / "analytics-service" / "services" / "job_worker.py"
+    code = "\n".join(
+        ln for ln in worker.read_text().splitlines()
+        if not _strip_comment(ln, lang="py")
+    )
+    count = code.count('basis="cash_settlement"')
+    assert count == 1, (
+        f"expected exactly ONE basis=\"cash_settlement\" persist seam, found {count} "
+        "— a second bootleg persist site would fabricate a series where this phase "
+        "mandates an honest absence (A3)"
+    )
