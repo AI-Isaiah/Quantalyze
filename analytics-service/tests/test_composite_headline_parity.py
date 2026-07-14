@@ -467,6 +467,82 @@ async def test_composite_headline_equals_by_basis_with_interior_guard_day() -> N
 
 
 @pytest.mark.asyncio
+async def test_composite_sc4_flagship_member_guard_nan_dual_run_dict_equal() -> None:
+    """SC-4 FLAGSHIP (collapse #1): on a composite whose stitch carries BOTH an
+    in-index member-guard NaN (Jan-02) AND an inter-member absent gap (Jan-04..09),
+    the new-route cash_settlement scalars are DICT-EQUAL to the legacy oracle computed
+    in-test — compute_all_metrics(gap_fill_daily_returns(stitch), None, same
+    conventions).metrics_json (the EXACT input the deleted closure fed). Byte-identity,
+    never a weakened tolerance. The captured cash BasisSeriesResult carries
+    densify='zero_fill', conventions.benchmark == 'BTC', and nan_dates == the guard
+    date. Neuters: omit scalar_returns → the guard-NaN scalar 0.0-bridges (the dropped
+    NaN day gap-fills to 0.0) → DICT-EQUAL RED; drop nan_dates emission → the round-
+    trip guard can't reinstate the break → the nan_dates assertion RED."""
+    import services.basis_series as _bs
+
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-04"),  # half-open: Jan-01..Jan-03
+        _member(2, "2024-01-10", None),
+    ])
+    fake.strategy_row["asset_class"] = "crypto"
+    # m1 carries an INTERIOR member-guard NaN (Jan-02); the members leave an
+    # inter-member gap Jan-04..Jan-09 — the two divergence shapes in one fixture.
+    m1 = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", float("nan")), ("2024-01-03", 0.01),
+    ])
+    m2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.05)])
+
+    _real_derive = _bs.derive_basis_series
+    _cash: dict[str, Any] = {}
+
+    def _derive_spy(*a: Any, **k: Any) -> Any:
+        r = _real_derive(*a, **k)
+        if "densify_policy" in k:  # the cash derive (carries the zero_fill bridge)
+            _cash["result"] = r
+        return r
+
+    with _apply(_patches(fake, combine_returns=[(m1, {}), (m2, {})])), patch(
+        "services.basis_series.derive_basis_series",
+        new=MagicMock(side_effect=_derive_spy),
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    headline = _headline_metrics(fake)
+    cash = _by_basis_cash(fake)
+
+    # Legacy oracle: the deleted closure's EXACT compute over the stitched cash series
+    # (gap_fill preserves the in-index guard NaN as a chain break, 0.0-fills the gap).
+    stitched = _returns([
+        ("2024-01-01", 0.02), ("2024-01-02", float("nan")), ("2024-01-03", 0.01),
+        ("2024-01-10", 0.03), ("2024-01-11", -0.05),
+    ])
+    oracle = compute_all_metrics(
+        gap_fill_daily_returns(stitched), None,
+        periods_per_year=PERIODS_PER_YEAR_CRYPTO,
+        cumulative_method="geometric",
+        day_basis="calendar",
+    ).metrics_json
+
+    # DICT-EQUAL byte-identity — the new-route cash scalars ARE the legacy oracle.
+    assert cash == oracle, (
+        "new-route cash scalars must be DICT-EQUAL to the legacy closure oracle "
+        "(gap_fill(stitch) → compute_all_metrics), never a weakened tolerance"
+    )
+    # headline == by-basis cash_settlement preserved (the SAME object spread).
+    assert headline["metrics_json"] == cash["metrics_json"]
+
+    # The captured cash BasisSeriesResult payload conventions (D1 + LOW-2).
+    _cash_result = _cash["result"]
+    assert _cash_result.conventions["densify"] == "zero_fill"
+    assert _cash_result.conventions["benchmark"] == "BTC"
+    assert _cash_result.nan_dates == ["2024-01-02"], (
+        "the in-index member-guard NaN must surface as nan_dates so the round-trip "
+        f"guard reinstates the break; got {_cash_result.nan_dates}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_traditional_asset_class_composite_fails_loud_mismatch_guard() -> None:
     """F-1b: the composite headline annualizes on the venue blend (deribit → √365),
     but every #597 asset-class surface recomputes from strategies.asset_class. A

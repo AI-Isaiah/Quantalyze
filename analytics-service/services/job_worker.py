@@ -3386,8 +3386,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     clipped series into ONE honest combined series, persists the stitched
     cash_settlement series to ``csv_daily_returns`` (gap/guarded days ABSENT —
     never 0.0 as performance, charting only), then computes the metrics ONCE from
-    the in-memory stitched series (``_metrics_result_for`` → ``compute_all_metrics``
-    with the venue-blend periods_per_year + the global BTC benchmark) and writes the
+    the in-memory stitched series via the ONE shared ``derive_basis_series`` helper
+    (asset_class periods_per_year + the global BTC benchmark) and writes the
     HEADLINE ``strategy_analytics`` row DIRECTLY in a single atomic upsert: the
     headline scalars ARE ``metrics_json_by_basis.cash_settlement`` (both bases when
     MTM is admissible) spread into the row, so headline == by-basis by construction
@@ -4318,49 +4318,62 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             strategy_id, exc,
         )
 
-    def _metrics_result_for(clipped_series: list[tuple[int, pd.Series]]) -> Any:
-        """Stitch → gap-fill dense-with-0.0 → compute_all_metrics with the composite
-        conventions + the global BTC benchmark → the full MetricsResult
-        (metrics_json + sibling_kinds).
+    # Phase 105 (collapse #1): BOTH composite bases now route through the ONE shared
+    # dailies-canonical helper (services/basis_series.py). Hoisted above the cash
+    # derive because cash now precedes the MTM gate on the same helper. Cash + MTM +
+    # the persist/heal all share this one import.
+    from services.basis_series import (
+        BasisSeriesResult,
+        derive_basis_series,
+        persist_basis_series,
+    )
 
-        CASH-ONLY as of Phase 103 (MTM-04): the mark_to_market basis routes through
-        services/basis_series.py (dailies-canonical) instead of this closure; the
-        backbone merge (Phases 104-106) later moves cash there too.
-
-        This is the ONE canonical composite compute. Its ``metrics_json`` is used
-        for BOTH the headline ``strategy_analytics`` scalars AND
-        ``metrics_json_by_basis.cash_settlement`` so the two can never diverge —
-        the root-cause fix that retires the divergent single-key recompute the
-        headline previously went through (``run_csv_strategy_analytics`` applied
-        ``periods_per_year_for_asset_class(asset_class)`` — √252 for the 'traditional'
-        default — and reinstated NaN/0.0 gap semantics that disagreed with this
-        in-memory series)."""
-        stitched = stitch_clipped_series(clipped_series)
-        dense = gap_fill_daily_returns(stitched)
-        return compute_all_metrics(
-            dense,
+    # Collapse #1 (SC-1): the composite cash basis routes through the SAME shared
+    # derive_basis_series as the single-key seam and the MTM arm — the bespoke
+    # composite cash closure is DELETED (grep-gate). `stitched_cash` exists (:4206).
+    try:
+        _cash_basis_result: BasisSeriesResult | None = derive_basis_series(
+            stitched_cash,
             benchmark_rets,
             periods_per_year=periods_per_year,
             cumulative_method=cumulative_method,
             day_basis=day_basis,
+            # LOW-2: carry the BTC benchmark IDENTITY into the payload conventions
+            # (payload-only; no reader consumes conventions.benchmark this phase).
+            benchmark_symbol="BTC",
+            # Collapse #1 (D1): the scalar input is `gap_fill_daily_returns(stitched_
+            # cash)` — the EXACT input the deleted closure fed compute_all_metrics
+            # (verbatim), so the cash scalar is byte-identical to the legacy oracle BY
+            # CONSTRUCTION. densify='zero_fill' echoes that the composite densifies
+            # absent inter-member days to 0.0 (flat) while an in-index member-guard NaN
+            # is surfaced as `nan_dates` so the round-trip guard reinstates the chain
+            # break rather than 0.0-bridging it.
+            scalar_returns=gap_fill_daily_returns(stitched_cash),
+            densify_policy="zero_fill",
         )
-
-    try:
-        cash_metrics_result = _metrics_result_for(clipped_cash)
     except ValueError as exc:
-        # F-5 (convergence red team): compute_all_metrics raises a BARE ValueError
-        # on a cumulative_method='simple' series with an interior NaN guard day (the
-        # arithmetic Σr cannot honour a chain-break). classify_exception buckets a
-        # bare ValueError as 'unknown' → retries BURN the attempt budget before the
-        # terminal gate (the <2-day hoist above only covered the length ValueError).
-        # Stamp PERMANENT so the wizard poller reaches a gate immediately. Honest
-        # today (the allocated path gap-fills 0.0, so this is defense-in-depth), just
-        # fail-fast-loud instead of slow-loud.
+        # F-5 (convergence red team), re-homed onto derive_basis_series's ValueError:
+        # the derive propagates compute_all_metrics's BARE ValueError on a
+        # cumulative_method='simple' series with an interior NaN guard day (arithmetic
+        # Σr cannot honour a chain-break) — AND raises its OWN <2-finite-rows
+        # ValueError. The hoisted _present_day_count guard (:4227) fires FIRST on the
+        # length case, so this arm's interior-chain-break message stays honest.
+        # classify_exception buckets a bare ValueError as 'unknown' → retries BURN the
+        # attempt budget before the terminal gate; stamp PERMANENT so the wizard poller
+        # reaches a gate immediately. HEAL any stale cash series row (Pitfall 5) so a
+        # rejected re-derive never leaves the old cash_settlement series behind.
         scrubbed = str(scrub_freeform_string(str(exc)))
         await _stamp_failed(
             "Composite metrics compute rejected the stitched series "
             "(interior chain-break under the arithmetic convention). " + scrubbed
         )
+
+        def _heal_cash_series() -> None:
+            persist_basis_series(
+                supabase, strategy_id, basis="cash_settlement", result=None,
+            )
+
+        await db_execute(_heal_cash_series)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
@@ -4368,22 +4381,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ),
             error_kind="permanent",
         )
-    cash_metrics_json = dict(cash_metrics_result.metrics_json)
+    cash_metrics_json = dict(_cash_basis_result.metrics_json)
 
     # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
     # member (research A2 — no single-pass dual-basis path); gated ⇒ omit the MTM
     # key and carry the reason for Phase 90.
-    # Phase 103 (MTM-04): the composite MTM basis routes through the SAME shared
-    # dailies-canonical helper as the single-key seam (services/basis_series.py) —
-    # NOT the bespoke _metrics_result_for compute (that path is what the backbone
-    # merge deletes). Initialize the derived result to None so the persist heal
-    # covers the gated (mtm_ok False) and any future degrade shape.
-    from services.basis_series import (
-        BasisSeriesResult,
-        derive_basis_series,
-        persist_basis_series,
-    )
-
+    # Phase 105 (collapse #1): BOTH the cash (above) and mark_to_market bases route
+    # through the ONE shared dailies-canonical helper (services/basis_series.py) — the
+    # bespoke composite compute is gone. Initialize the derived result to None so the
+    # persist heal covers the gated (mtm_ok False) and any future degrade shape.
     mtm_ok, mtm_reason = mark_to_market_available(member_signals)
     mtm_metrics_json: dict[str, Any] | None = None
     _mtm_basis_result: BasisSeriesResult | None = None
@@ -4440,7 +4446,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             )
         try:
             # Phase 103 (MTM-04): stitch → the ONE shared derive_basis_series (same
-            # convention variables the cash _metrics_result_for closure uses). The
+            # convention variables the cash derive above uses). The
             # stitch stays INSIDE this try so CompositeOverlapError handling below is
             # untouched; derive_basis_series propagates compute_all_metrics's
             # ValueError into the existing F-5 arm. The persisted MTM dailies are the
@@ -4473,6 +4479,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 periods_per_year=periods_per_year,
                 cumulative_method=cumulative_method,
                 day_basis=day_basis,
+                # LOW-2: benchmark identity carry (payload-only; conventions.benchmark
+                # is consumed by no reader this phase — byte-visible solely in the
+                # persisted MTM series payload, mirroring the cash derive above).
+                benchmark_symbol="BTC",
             )
             mtm_metrics_json = dict(_mtm_basis_result.metrics_json)
         except CompositeOverlapError as exc:
@@ -4638,11 +4648,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # HARD-04 (#67): lift the CAGR-site insufficient_window annotation, mirroring
     # the mtm_gated_reason drop-stale pattern above — a composite that GROWS past
     # MIN_ANNUALIZATION_DAYS heals (loses the flag) on the next re-stitch. Read
-    # from the CANONICAL cash headline result (`cash_metrics_result`, the ONE
+    # from the CANONICAL cash derive result (`_cash_basis_result`, the ONE shared
     # composite compute); the MTM second pass shares the same window by
     # construction. Annotation only — it deliberately does NOT touch
     # computation_status (not a NAV_TWR_GUARD_KEYS member).
-    if cash_metrics_result.insufficient_window:
+    if _cash_basis_result.insufficient_window:
         merged_flags["insufficient_window"] = True
     else:
         merged_flags.pop("insufficient_window", None)
@@ -4744,14 +4754,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # composite factsheet charts — computed from the SAME canonical cash compute so
     # they agree with the headline. Guarded exactly like run_csv_strategy_analytics:
     # a transient RPC blip is logged, never fails the (already-persisted) derive.
-    if cash_metrics_result.sibling_kinds:
+    if _cash_basis_result.sibling_kinds:
         try:
             def _upsert_siblings() -> None:
                 supabase.rpc(
                     "upsert_strategy_analytics_series_batch",
                     {
                         "p_strategy_id": strategy_id,
-                        "p_kinds": cash_metrics_result.sibling_kinds,
+                        "p_kinds": _cash_basis_result.sibling_kinds,
                     },
                 ).execute()
 

@@ -1921,12 +1921,14 @@ async def test_deferred_preflight_does_not_stamp_failed() -> None:
 
 @pytest.mark.asyncio
 async def test_simple_basis_interior_nan_guard_permanent_not_unclassified() -> None:
-    """F-5: under the allocated-capital ('simple') convention, an interior NaN guard
-    day makes compute_all_metrics raise a BARE ValueError (arithmetic Σr cannot
+    """F-5 (re-homed onto derive_basis_series, collapse #1): under the
+    allocated-capital ('simple') convention, an interior NaN guard day makes the
+    shared derive's compute_all_metrics raise a BARE ValueError (arithmetic Σr cannot
     honour a chain-break). classify_exception would bucket that 'unknown' → retries
-    burn the attempt budget before the terminal gate. The composite must catch it
-    and stamp PERMANENT failed. Neuter (drop the ValueError catch) → the ValueError
-    escapes uncaught → this reddens (the raise propagates out of the job)."""
+    burn the attempt budget before the terminal gate. The composite must catch it,
+    stamp PERMANENT failed, AND heal-delete any stale cash_settlement series row.
+    Neuter (drop the ValueError catch) → the ValueError escapes uncaught → reddens;
+    neuter (drop the heal) → the stale series delete vanishes → the heal assert RED."""
     # _FakeSupabase default strategy_row carries _TEST_CONFIG (simple / active_day).
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-01-05"),
@@ -1947,6 +1949,14 @@ async def test_simple_basis_interior_nan_guard_permanent_not_unclassified() -> N
         isinstance(p, dict) and p.get("computation_status") == "failed"
         for _t, p, _c in fake.upserts
     ), "simple-basis interior-NaN composite must stamp a terminal failed row"
+    # F-5 heal: the rejected derive DELETEs any stale cash_settlement series row so a
+    # failed re-derive never leaves the old series behind.
+    assert any(
+        table == "strategy_analytics_series"
+        and ("strategy_id", _STRATEGY_ID) in eqs
+        and ("kind", "cash_settlement") in eqs
+        for table, eqs in fake.deletes
+    ), "F-5 must heal-delete the stale cash_settlement series row"
 
 
 @pytest.mark.asyncio
@@ -2867,22 +2877,23 @@ async def test_member_progress_fence_false_latches_off_and_logs_once(
     assert not errors, "a fenced false is preemption, not an outage — must not escalate"
 
 
-# ── Phase 103 (MTM-04): composite MTM routes through the shared derive ───────
-# The composite mark_to_market basis now derives via the ONE shared
-# services.basis_series.derive_basis_series (Plan 103-01) — the bespoke
-# _metrics_result_for(clipped_mtm) compute is GONE (grep gate). _metrics_result_for
-# stays cash-only. These tests pin the wiring, the persist/heal matrix, scalar
-# parity with the untouched cash compute, and the inter-member gap mask.
+# ── Phase 105 (collapse #1): BOTH composite bases route through the shared derive ─
+# The composite mark_to_market basis derives via the ONE shared
+# services.basis_series.derive_basis_series (Plan 103-01), and as of Plan 105-05 the
+# composite CASH basis routes through the SAME helper too — the bespoke composite
+# closure is GONE (grep gate). These tests pin the MTM wiring, the persist/heal
+# matrix, scalar parity across the two bases, and the inter-member gap mask.
 
 
 @pytest.mark.asyncio
 async def test_composite_mtm_routes_through_shared_derive_and_persists() -> None:
     """WIRING: an MTM-admitted composite derives its mark_to_market scalars via
-    derive_basis_series — called ONCE (MTM only; cash keeps _metrics_result_for) with
-    the stitched MTM series, benchmark_rets=None, and the composite conventions
+    derive_basis_series (the MTM call — cash also routes through the helper now, so we
+    isolate the MTM call by the absence of the cash-only zero_fill bridge) with the
+    stitched MTM series, benchmark_rets=None, and the composite conventions
     (√365 blend / simple / active) — and persists the SAME BasisSeriesResult via
-    persist_basis_series(basis='mark_to_market'). Neuter (revert to
-    _metrics_result_for(clipped_mtm)) leaves derive_basis_series uncalled → reddens."""
+    persist_basis_series(basis='mark_to_market'). Neuter (revert MTM to a bespoke
+    compute) leaves the MTM derive uncalled → reddens."""
     import services.basis_series as _bs
 
     fake = _FakeSupabase(members=[
@@ -2915,16 +2926,26 @@ async def test_composite_mtm_routes_through_shared_derive_and_persists() -> None
             patch("services.basis_series.persist_basis_series", new=persist_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    derive_spy.assert_called_once()
-    _args, _kw = derive_spy.call_args
+    # Collapse #1: cash ALSO routes through derive_basis_series now, so the helper is
+    # called TWICE (cash then MTM). Isolate the MTM call — it's the one WITHOUT the
+    # cash-only densify_policy/scalar_returns zero_fill bridge.
+    mtm_derives = [
+        c for c in derive_spy.call_args_list if "densify_policy" not in c.kwargs
+    ]
+    assert len(mtm_derives) == 1, "MTM derive must be called exactly once"
+    _args, _kw = mtm_derives[0]
     assert isinstance(_args[0], pd.Series), "derive must receive the stitched MTM series"
     assert _args[1] is None, "benchmark_rets is None in this offline harness"
     assert _kw["periods_per_year"] == 365, "crypto/Deribit composite blends on √365"
     assert _kw["cumulative_method"] == "simple"
     assert _kw["day_basis"] == "active"
-    persist_spy.assert_called_once()
-    _pkw = persist_spy.call_args.kwargs
-    assert _pkw["basis"] == "mark_to_market"
+    # Isolate the mark_to_market persist among the (cash + MTM) series persists.
+    mtm_persists = [
+        c for c in persist_spy.call_args_list
+        if c.kwargs.get("basis") == "mark_to_market"
+    ]
+    assert len(mtm_persists) == 1
+    _pkw = mtm_persists[0].kwargs
     assert _pkw["result"] is _captured["result"], (
         "persist must receive the EXACT BasisSeriesResult derive produced — never a "
         "separately-computed object (that bypasses the anti-divergence guard)"
@@ -2933,10 +2954,10 @@ async def test_composite_mtm_routes_through_shared_derive_and_persists() -> None
 
 @pytest.mark.asyncio
 async def test_composite_mtm_scalar_parity_matches_cash_over_identical_inputs() -> None:
-    """SCALAR PARITY: over IDENTICAL NaN-free members for both passes, the rewired
-    MTM scalars (stitch → derive_basis_series) equal the cash scalars byte-for-byte
-    (cash → the untouched _metrics_result_for). Proves the shared helper reproduces
-    the old composite MTM compute for the common (clean-book) case."""
+    """SCALAR PARITY: over IDENTICAL NaN-free members for both passes, the MTM scalars
+    (stitch → derive_basis_series) equal the cash scalars byte-for-byte (cash → the
+    SAME shared derive_basis_series). Proves both bases resolve to one compute for the
+    common (clean-book) case."""
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-02-01"),
         _member(2, "2024-02-01", None),
@@ -2989,8 +3010,13 @@ async def test_composite_mtm_inter_member_gap_span() -> None:
             patch("services.basis_series.persist_basis_series", new=persist_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    persist_spy.assert_called_once()
-    _result = persist_spy.call_args.kwargs["result"]
+    # Isolate the mark_to_market persist among the (cash + MTM) series persists.
+    mtm_persists = [
+        c for c in persist_spy.call_args_list
+        if c.kwargs.get("basis") == "mark_to_market"
+    ]
+    assert len(mtm_persists) == 1
+    _result = mtm_persists[0].kwargs["result"]
     assert _result is not None, "an admitted composite must persist the MTM series row"
     assert _result.gap_spans == [{"start": "2024-01-03", "end": "2024-01-09"}], (
         f"inter-member hole must be one gap_span Jan-03..Jan-09; got {_result.gap_spans}"
@@ -3015,8 +3041,13 @@ async def test_composite_mtm_gated_heals_series_row() -> None:
     )), patch("services.basis_series.persist_basis_series", new=persist_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    persist_spy.assert_called_once()
-    assert persist_spy.call_args.kwargs["result"] is None, (
+    # Isolate the mark_to_market persist (cash also persists its series now).
+    mtm_persists = [
+        c for c in persist_spy.call_args_list
+        if c.kwargs.get("basis") == "mark_to_market"
+    ]
+    assert len(mtm_persists) == 1
+    assert mtm_persists[0].kwargs["result"] is None, (
         "a gated composite must HEAL the stale MTM series row (result=None)"
     )
 
@@ -3024,8 +3055,12 @@ async def test_composite_mtm_gated_heals_series_row() -> None:
 @pytest.mark.asyncio
 async def test_composite_mtm_helper_valueerror_permanent() -> None:
     """EXCEPTION PARITY: a ValueError from the shared helper still hits the EXISTING
-    MTM ValueError arm → permanent _stamp_failed (unchanged stamp/DispatchResult).
-    Neuter (drop the except ValueError arm) → the ValueError escapes → reddens."""
+    MTM ValueError arm → permanent _stamp_failed (unchanged stamp/DispatchResult). The
+    cash derive succeeds (it carries the zero_fill bridge); ONLY the MTM derive raises,
+    isolating the MTM arm now that cash also routes through the helper. Neuter (drop
+    the MTM except ValueError arm) → the ValueError escapes → reddens."""
+    import services.basis_series as _bs
+
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-02-01"),
         _member(2, "2024-02-01", None),
@@ -3036,6 +3071,14 @@ async def test_composite_mtm_helper_valueerror_permanent() -> None:
         total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
         has_option_activity=False,
     )))
+    _real_derive = _bs.derive_basis_series
+
+    def _derive_side(*a: Any, **k: Any) -> Any:
+        # Only the MTM call (no cash-only densify_policy bridge) raises.
+        if "densify_policy" not in k:
+            raise ValueError("interior chain-break")
+        return _real_derive(*a, **k)
+
     patches = _deribit_patches(
         fake, combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
         has_option_activity=False,
@@ -3044,7 +3087,7 @@ async def test_composite_mtm_helper_valueerror_permanent() -> None:
             patch("services.deribit_ingest.build_deribit_native_ledger", new=build_spy), \
             patch(
                 "services.basis_series.derive_basis_series",
-                new=MagicMock(side_effect=ValueError("interior chain-break")),
+                new=MagicMock(side_effect=_derive_side),
             ):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.FAILED
@@ -3058,9 +3101,10 @@ async def test_composite_mtm_helper_valueerror_permanent() -> None:
 @pytest.mark.asyncio
 async def test_composite_mtm_overlap_error_permanent() -> None:
     """EXCEPTION PARITY: a CompositeOverlapError from the MTM stitch_clipped_series
-    still hits the EXISTING CompositeOverlapError arm → permanent _stamp_failed. The
-    2-member flow makes the MTM stitch the 3rd stitch_clipped_series call (cash uses
-    two before the MTM pass); raise there. Neuter (drop the except arm) → reddens."""
+    still hits the EXISTING CompositeOverlapError arm → permanent _stamp_failed. As of
+    collapse #1 the cash derive no longer re-stitches (it reuses `stitched_cash`), so
+    cash consumes exactly ONE stitch call and the MTM stitch is the 2nd; raise there.
+    Neuter (drop the except arm) → reddens."""
     from services.stitch_composite import (
         CompositeOverlapError,
         stitch_clipped_series as _real_stitch,
@@ -3080,7 +3124,7 @@ async def test_composite_mtm_overlap_error_permanent() -> None:
 
     def _stitch_side(clipped: Any) -> Any:
         _n["i"] += 1
-        if _n["i"] >= 3:  # the MTM stitch (cash consumed calls 1 and 2)
+        if _n["i"] >= 2:  # the MTM stitch (cash consumed only call 1)
             raise CompositeOverlapError("MTM post-clip day collision")
         return _real_stitch(clipped)
 
