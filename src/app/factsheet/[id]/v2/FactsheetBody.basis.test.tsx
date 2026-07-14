@@ -703,6 +703,19 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(kpiValue(container, "IR vs BTC")).toBe("6.66");
   });
 
+  it("F8: the KpiStrip low-N caveat reflects the MTM observation count, not cash", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    const caveat =
+      "annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant";
+    // Cash: the 300-day series clears 252 → the KpiStrip caveat is ABSENT.
+    expect(container.textContent).not.toContain(caveat);
+    fireEvent.click(getByText("Mark-to-market"));
+    // MTM: the bundle's ~200-day series is < 252 → the caveat fires, reading the MTM
+    // observation count from the view. Neuter (revert to `m.n` = the cash 300) → no
+    // caveat under MTM → RED.
+    expect(container.textContent).toContain(caveat);
+  });
+
   it("STEP-3 PARITY (F3): the rail §I displays the PERSISTED seven, NOT the divergent bundle TS recompute (overlay wins — neuter → RED)", () => {
     const { container, getByText } = renderBody(fixtureSingleKeyMtmParity());
 

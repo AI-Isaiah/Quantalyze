@@ -917,7 +917,14 @@ function KpiStrip() {
           are statistically unreliable with fewer than 252 observations (~1y).
           Surface the same warning here at the hero strip so mobile users who
           never scroll to the MetricsColumn right-rail still see it. (NEW-C20-08) */}
-      {m.n < 252 && (
+      {/* F8 (phase 103): the observation count follows the ACTIVE basis via the
+          view (matching the MetricsColumn right-rail caveat, which already reads
+          view.strategyMetrics.n). Under MTM the reconstructed series can have a
+          DIFFERENT (usually shorter) length than cash, so the persisted-overlay
+          `m.n` (always cash) would understate the low-N risk under an MTM label.
+          Under cash the view returns the payload by reference, so this is
+          byte-identical to `m.n`. */}
+      {view.strategyMetrics.n < 252 && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
@@ -925,7 +932,7 @@ function KpiStrip() {
             color: "var(--color-warning, #B45309)",
           }}
         >
-          ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+          ⚠ Only {view.strategyMetrics.n} observation{view.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
       {/* HARD-04 (#67): server-truth short-window flag from
