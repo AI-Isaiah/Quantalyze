@@ -184,6 +184,18 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // basis-change resetXRange effect (FactsheetView) settles — clamp so no chart
   // geometry ever indexes past view.dates, and so the MTM series fills the plot
   // width. A no-op under cash (xRange is already ≤ the cash length).
+  //
+  // FIX E (IN — the MTM-LONGER-than-cash edge): the clamp only shrinks (Math.min).
+  // When the MTM axis is LONGER than the cash-index xRange (rare — MTM usually ≤
+  // cash), xEnd stays at the shorter cash-window end (< maxIdx), so this frame
+  // renders only the cash-length window and the MTM tail is briefly off-plot until
+  // the SAME resetXRange effect settles the basis change (identical one-frame
+  // transient to the shorter case). This is intentional and OOB-safe: xStart/xEnd
+  // are always in [0, maxIdx] and every series index is computed defensively (paths
+  // outside the window clip naturally), so no geometry ever indexes past view.dates
+  // regardless of which axis is longer. We deliberately do NOT widen the window here
+  // — distinguishing a stale cash-space range from a user zoom is the reset effect's
+  // job, not this render-time clamp's.
   const maxIdx = Math.max(0, n - 1);
   const xStart = Math.min(xRange[0], maxIdx);
   const xEnd = Math.min(xRange[1], maxIdx);

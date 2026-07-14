@@ -184,6 +184,15 @@ def persist_basis_series(
 
     Sync function — call sites wrap it in their existing `db_execute`/thread
     patterns (Plan 02's concern).
+
+    NOTE (density, both honest): the two callers persist series of DIFFERENT
+    density. The single-key broker-derive route (job_worker.py :3112) writes a
+    DENSE mark_to_market series — one row per interpretable day of the reconstructed
+    book. The composite stitch route (:4575-area) writes a SPARSE series — the
+    stitched members leave honest interior gaps (recorded in `gap_spans`) on days no
+    member covers. Both are correct: the reader's coverage mask (`gap_spans`) is what
+    the client `deriveSegmentMarkers` turns into FS-02 missing-segment annotations,
+    so a sparse composite series renders its gaps rather than fabricating flat days.
     """
     kind = _KIND_BY_BASIS.get(basis)
     if kind is None:
