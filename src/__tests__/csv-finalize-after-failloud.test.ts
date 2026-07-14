@@ -64,7 +64,9 @@ vi.mock("@/lib/supabase/server", () => ({
 
 // Admin client: `.rpc` is the enqueue_compute_job call; `.from` is the
 // strategy_analytics placeholder select/upsert.
-const adminRpcMock = vi.hoisted(() => vi.fn(async () => ({ error: null })));
+const adminRpcMock = vi.hoisted(() =>
+  vi.fn(async (): Promise<{ error: { message: string } | null }> => ({ error: null })),
+);
 const adminFromMock = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
