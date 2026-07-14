@@ -2030,9 +2030,13 @@ async def test_simple_basis_interior_nan_guard_permanent_not_unclassified() -> N
     shared derive's compute_all_metrics raise a BARE ValueError (arithmetic Σr cannot
     honour a chain-break). classify_exception would bucket that 'unknown' → retries
     burn the attempt budget before the terminal gate. The composite must catch it,
-    stamp PERMANENT failed, AND heal-delete any stale cash_settlement series row.
+    stamp PERMANENT failed, AND (M1, Fable red team) PRESERVE any existing
+    cash_settlement series row — because `_stamp_failed` preserves the paired scalars
+    (M-2: a live composite keeps rendering the published factsheet after a failed
+    re-derive), so deleting the series would leave scalar-live/series-absent.
     Neuter (drop the ValueError catch) → the ValueError escapes uncaught → reddens;
-    neuter (drop the heal) → the stale series delete vanishes → the heal assert RED."""
+    neuter (re-add the F-5 heal-delete) → a cash_settlement series delete appears →
+    the preserve assert RED."""
     # _FakeSupabase default strategy_row carries _TEST_CONFIG (simple / active_day).
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-01-05"),
@@ -2053,14 +2057,15 @@ async def test_simple_basis_interior_nan_guard_permanent_not_unclassified() -> N
         isinstance(p, dict) and p.get("computation_status") == "failed"
         for _t, p, _c in fake.upserts
     ), "simple-basis interior-NaN composite must stamp a terminal failed row"
-    # F-5 heal: the rejected derive DELETEs any stale cash_settlement series row so a
-    # failed re-derive never leaves the old series behind.
-    assert any(
+    # M1: the rejected derive must PRESERVE the cash_settlement series row (its paired
+    # scalars survive in metrics_json_by_basis via _stamp_failed's preserve-on-fail), so
+    # no cash_settlement delete may be issued on this path.
+    assert not any(
         table == "strategy_analytics_series"
         and ("strategy_id", _STRATEGY_ID) in eqs
         and ("kind", "cash_settlement") in eqs
         for table, eqs in fake.deletes
-    ), "F-5 must heal-delete the stale cash_settlement series row"
+    ), "F-5 must PRESERVE the paired cash_settlement series row (M1: no heal-delete)"
 
 
 @pytest.mark.asyncio

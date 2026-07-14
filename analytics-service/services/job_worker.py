@@ -4360,20 +4360,22 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # length case, so this arm's interior-chain-break message stays honest.
         # classify_exception buckets a bare ValueError as 'unknown' → retries BURN the
         # attempt budget before the terminal gate; stamp PERMANENT so the wizard poller
-        # reaches a gate immediately. HEAL any stale cash series row (Pitfall 5) so a
-        # rejected re-derive never leaves the old cash_settlement series behind.
+        # reaches a gate immediately.
+        # M1 (Fable red team, Phase 105): do NOT heal-delete the cash series row here.
+        # `_stamp_failed` deliberately PRESERVES metrics_json_by_basis (M-2: an owner-
+        # resync re-derive of an already-live composite keeps rendering the live
+        # factsheet from the surviving scalars). Deleting the paired cash_settlement
+        # series row while those scalars survive would leave scalar-live/series-absent —
+        # exactly the inconsistency MED-1's read gate distrusts. Every other composite
+        # terminal arm preserves; this arm does too. (A first-derive failure has no
+        # prior series row to leave behind, so preserve is a no-op there.) The single-
+        # key seam heals both rows because it carries NO live-preserve semantics —
+        # that asymmetry is intentional, not an oversight.
         scrubbed = str(scrub_freeform_string(str(exc)))
         await _stamp_failed(
             "Composite metrics compute rejected the stitched series "
             "(interior chain-break under the arithmetic convention). " + scrubbed
         )
-
-        def _heal_cash_series() -> None:
-            persist_basis_series(
-                supabase, strategy_id, basis="cash_settlement", result=None,
-            )
-
-        await db_execute(_heal_cash_series)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
@@ -4717,7 +4719,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # before the flip therefore leaves NO complete scalar without its series (MED-1's
     # read gate un-trusts a scalar whose series is absent); the kill-point test pins
     # this. Cash ALWAYS persists a real row here — a rejected cash derive already
-    # returned via the F-5 heal above, so `_cash_basis_result` is a genuine result.
+    # returned via the F-5 arm above, so `_cash_basis_result` is a genuine result.
     #
     # D5 HONEST BOUNDARY: ordered-idempotent = GATED EVENTUAL CONSISTENCY, not
     # atomicity — supabase-py has no cross-.table() transaction. On a RE-derive of an
