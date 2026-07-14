@@ -4302,13 +4302,28 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             # untouched; derive_basis_series propagates compute_all_metrics's
             # ValueError into the existing F-5 arm. The persisted MTM dailies are the
             # canonical source for Plans 03/04.
-            # Phase 103 (MTM-04): stitch → the ONE shared derive_basis_series (same
-            # convention variables the cash _metrics_result_for closure uses). The
-            # stitch stays INSIDE this try so CompositeOverlapError handling below is
-            # untouched; derive_basis_series propagates compute_all_metrics's
-            # ValueError into the existing F-5 arm. The persisted MTM dailies are the
-            # canonical source for Plans 03/04.
             stitched_mtm = stitch_clipped_series(clipped_mtm)
+            # Phase 103 (MTM-04, BACKEND FIX 3): a degenerate-length stitched MTM
+            # series (< 2 interpretable days) raises a bare ValueError from
+            # compute_all_metrics that the generic ValueError arm below would
+            # MISATTRIBUTE to an "interior chain-break under the arithmetic
+            # convention" (a distinct, structural cause). Detect the degenerate-length
+            # case explicitly and stamp an accurate, dedicated message. Guards ONLY the
+            # MTM second pass — cash behavior is unchanged (the cash compute has its
+            # own < 2 guards at :2756 / :3675 / :4090).
+            if int(stitched_mtm.notna().sum()) < 2:
+                await _stamp_failed(
+                    "Composite mark-to-market series has fewer than two interpretable "
+                    "days after stitching, so mark-to-market metrics cannot be computed."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: MTM series degenerate-length "
+                        "(< 2 interpretable days after stitching)"
+                    ),
+                    error_kind="permanent",
+                )
             _mtm_basis_result = derive_basis_series(
                 stitched_mtm,
                 benchmark_rets,

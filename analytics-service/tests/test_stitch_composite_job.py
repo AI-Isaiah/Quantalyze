@@ -614,6 +614,52 @@ async def test_mtm_series_persists_before_done_scalar_write() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mtm_degenerate_length_gets_dedicated_message_not_chain_break() -> None:
+    """BACKEND FIX 3 — a gate-OPEN composite whose CASH pass has ≥2 days but whose
+    MTM second pass stitches to < 2 interpretable days must fail with an ACCURATE
+    degenerate-length message, NOT the misattributed 'interior chain-break under the
+    arithmetic convention' the generic ValueError arm would stamp. Falsifiable: drop
+    the < 2 guard → compute_all_metrics raises → the chain-break wording is stamped."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    # Cash pass: 2 finite days per member → cash succeeds and we reach the MTM pass.
+    cash_m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    cash_m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # MTM pass: member 1 has ONE finite day; member 2 is a single NaN day, so the
+    # stitched MTM series carries < 2 interpretable days (degenerate length).
+    mtm_m1 = _returns([("2024-01-01", 0.10)])
+    mtm_m2 = pd.Series(
+        [float("nan")], index=pd.DatetimeIndex(["2024-02-01"]).as_unit("us"),
+        dtype="float64",
+    )
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(cash_m1, {}), (cash_m2, {}), (mtm_m1, {}), (mtm_m2, {})],
+        has_option_activity=False,  # gate OPEN → the MTM second pass runs
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert "degenerate-length" in (result.error_message or "")
+    # The accurate dedicated message is stamped, NOT the chain-break misattribution.
+    failed_msgs = [
+        payload.get("computation_error")
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics"
+        and isinstance(payload, dict)
+        and payload.get("computation_status") == "failed"
+    ]
+    assert any(
+        m and "fewer than two interpretable days" in m for m in failed_msgs
+    ), failed_msgs
+    assert not any(
+        m and "interior chain-break" in m for m in failed_msgs
+    ), "degenerate length must NOT be misattributed to a chain-break"
+
+
+@pytest.mark.asyncio
 async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
     """An option-active member gates MTM off; the reason is carried in
     data_quality_flags for Phase 90 (never JSON null in the by-basis object)."""
