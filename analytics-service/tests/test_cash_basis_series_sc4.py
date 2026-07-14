@@ -665,28 +665,15 @@ def _strip_comment(line: str, *, lang: str) -> bool:
     return stripped.startswith("//") or stripped.startswith("*")
 
 
-def test_analytics_runner_series_only_boundary() -> None:
-    """SC-2: the authoritative cash SCALAR path (services/analytics_runner.py) is NOT
-    routed through the shared dailies derive this phase — routing cash scalars through
-    derive_basis_series before the NaN/gap-fill reconciliation would bridge broker
-    guard-day breaks and 0.0-fill user-CSV gaps (an SC-4 violation; that collapse is
-    Phase-105 scope). Strip comment lines, then assert ZERO references to
-    derive_basis_series / basis_series.
-
-    Kills: a premature Phase-105 cash-scalar reroute landing in analytics_runner.py."""
-    runner = _repo_root() / "analytics-service" / "services" / "analytics_runner.py"
-    code = "\n".join(
-        ln for ln in runner.read_text().splitlines()
-        if not _strip_comment(ln, lang="py")
-    )
-    assert "derive_basis_series" not in code, (
-        "analytics_runner.py references derive_basis_series — the cash SCALAR path "
-        "must not route through the shared derive until Phase 105 (SC-2 boundary)"
-    )
-    assert "basis_series" not in code, (
-        "analytics_runner.py references basis_series — the cash SCALAR path must not "
-        "adopt the shared series module until Phase 105 (SC-2 boundary)"
-    )
+# Phase 105 (BB-02, collapse #2) DELETED the Phase-104 SC-2 boundary guard
+# (test_analytics_runner_series_only_boundary) that asserted analytics_runner.py had
+# ZERO references to derive_basis_series / basis_series. That guard existed ONLY to hold
+# the SERIES-ONLY line until this plan — its own docstring named "a premature Phase-105
+# cash-scalar reroute landing in analytics_runner.py" as the mutation it kills. Plan
+# 105-04 IS that reroute (the single-key cash SCALAR now routes through the ONE shared
+# derive), so the guard is retired here deliberately. The scalar's byte-identity is now
+# proven positively by the three dual-run SC-4 fixtures below (test_user_csv_weekend,
+# test_broker_guard_day, test_zavara_simple_active).
 
 
 def test_no_reader_consumes_cash_settlement_series_row() -> None:

@@ -5588,10 +5588,21 @@ async def test_csv_sibling_upsert_failure_keeps_complete_status():
 
     table_mock.upsert.side_effect = upsert_side_effect
 
-    # RPC blip: sibling upsert fails
-    rpc_mock = MagicMock()
-    rpc_mock.execute.side_effect = RuntimeError("simulated RPC blip (NEW-C02-06)")
-    sb.rpc.return_value = rpc_mock
+    # RPC blip: the SIBLING upsert fails. Phase 105 (BB-02) added a cash_settlement
+    # series persist that ALSO routes through sb.rpc BEFORE the scalar flip — that one
+    # must SUCCEED (a persist failure legitimately fails the whole run, D5 fail-loud), so
+    # distinguish by p_kinds: the sibling call (no cash_settlement kind) is the one that
+    # blips.
+    def _rpc(name, payload):
+        m = MagicMock()
+        if "cash_settlement" in payload.get("p_kinds", {}):
+            m.execute = MagicMock(return_value=MagicMock(data=[]))
+        else:
+            m.execute = MagicMock(
+                side_effect=RuntimeError("simulated RPC blip (NEW-C02-06)")
+            )
+        return m
+    sb.rpc.side_effect = _rpc
 
     # MetricsResult WITH sibling_kinds so the RPC path is exercised
     def _make_result_with_siblings():
@@ -5611,7 +5622,7 @@ async def test_csv_sibling_upsert_failure_keeps_complete_status():
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_result_with_siblings()):
         result = await run_csv_strategy_analytics("test-csv-c02-06")
 

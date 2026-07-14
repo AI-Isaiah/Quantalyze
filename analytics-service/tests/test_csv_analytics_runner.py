@@ -124,7 +124,7 @@ async def test_csv_analytics_happy_path() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(pd.Series([0.001] * 15), False))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("test-strategy-uuid")
 
@@ -195,7 +195,7 @@ async def test_csv_analytics_benchmark_unavailable() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(side_effect=Exception("benchmark down"))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("test-strategy-uuid")
 
@@ -243,7 +243,7 @@ async def test_mark_unrecoverable_preserves_pre_stamped_guard_flags() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(pd.Series([0.001] * 10), False))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("transient blip mid-compute")):
         with pytest.raises(HTTPException) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
@@ -316,7 +316,7 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
                side_effect=_side_effect_db_execute), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
         caplog.set_level(logging.WARNING, logger="quantalyze.analytics.runner")
         with pytest.raises(HTTPException) as exc_info:
@@ -369,7 +369,7 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
         with pytest.raises(HTTPException) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
@@ -534,7 +534,7 @@ async def test_csv_analytics_sparse_calendar_completes() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(pd.Series([0.0005] * 60), False))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("test-strategy-uuid")
 
@@ -942,7 +942,7 @@ async def test_broker_series_reinstates_interior_nan_suffix_only_headline() -> N
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=_spy_compute):
         await run_csv_strategy_analytics("broker-strategy-uuid")
 
@@ -1000,7 +1000,7 @@ async def test_user_csv_sparse_day_not_nan_filled() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=_spy_compute):
         await run_csv_strategy_analytics("user-csv-strategy-uuid")
 
@@ -1061,7 +1061,7 @@ async def test_csv_runner_threads_config_into_compute_all_metrics() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     assert spy.call_count == 1
@@ -1084,7 +1084,7 @@ async def test_csv_runner_config_none_broker_is_geometric_calendar_365() -> None
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     kwargs = spy.call_args.kwargs
@@ -1104,7 +1104,7 @@ async def test_csv_runner_no_api_key_is_252() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     kwargs = spy.call_args.kwargs
@@ -1127,7 +1127,7 @@ async def test_csv_runner_csv_crypto_is_365() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     assert spy.call_args.kwargs["periods_per_year"] == 365
@@ -1179,7 +1179,7 @@ async def test_csv_runner_bridges_mandate_window_excluded_days_warn() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("s")
 
@@ -1220,7 +1220,7 @@ async def test_noncomposite_rederive_nulls_stale_by_basis() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("was-composite-uuid")
 
@@ -1257,7 +1257,7 @@ async def test_pure_single_key_rederive_leaves_by_basis_untouched() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("pure-single-key-uuid")
 
@@ -1307,7 +1307,7 @@ async def test_mtm_gated_reason_survives_finalizer_single_key() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("single-key-mtm-degraded-uuid")
 
@@ -1345,7 +1345,7 @@ async def test_mtm_gated_reason_does_not_promote_status() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("single-key-mtm-nonpromote-uuid")
 
@@ -1388,7 +1388,7 @@ async def test_mtm_gated_reason_dropped_on_composite_to_single() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("was-composite-mtm-uuid")
 
@@ -1423,7 +1423,7 @@ async def test_mtm_gated_reason_absence_is_absence() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("single-key-no-mtm-uuid")
 
