@@ -184,9 +184,11 @@ describe("basis-context", () => {
   // ---- Phase 103 (MTM-04): useBasisSeriesView — the per-basis series merge ----
 
   // A payload carrying a DISTINGUISHABLE MTM series bundle. The bundle's dailies-
-  // derivable fields differ from the cash top-level so a swap is observable; the
-  // EXTERNAL fields (correlations/correlationMatrix) + strategyMetrics are NOT in
-  // the bundle, so the merge must pass them through as cash.
+  // derivable fields differ from the cash top-level so a swap is observable. This
+  // minimal bundle omits correlations, so those EXTERNAL fields pass through as cash.
+  // Phase 103 (F3): strategyMetrics is NO LONGER a pass-through — the merge overlays
+  // the SEVEN persisted headline scalars (`metricsByBasis.mark_to_market`) onto it so
+  // the rail's §I headline matches the KpiStrip by construction.
   const CASH_DATES = ["2023-01-01", "2023-01-02", "2023-01-03"];
   const MTM_DATES = ["2023-01-02", "2023-01-03"]; // shorter MTM span (distinct axis)
   const CASH_QUANTILES = { p05: -0.05, p25: -0.01, p50: 0.0, p75: 0.01, p95: 0.05, min: -0.1, max: 0.1, mean: 0.0 };
@@ -202,6 +204,7 @@ describe("basis-context", () => {
     return {
       ingestSource: "csv",
       strategyMetrics: CASH_METRICS,
+      metricsByBasis: { mark_to_market: MTM_SCALARS },
       dates: CASH_DATES,
       quantiles: CASH_QUANTILES,
       correlations: CASH_CORRELATIONS,
@@ -234,9 +237,16 @@ describe("basis-context", () => {
     expect(v.dates).toEqual(MTM_DATES);
     expect(v.quantiles).toEqual(MTM_QUANTILES);
     expect(v.calmarByYear[0].ret).toBe(0.2);
-    // EXTERNAL fields + strategyMetrics pass through as CASH (never in the bundle).
+    // EXTERNAL correlations pass through as CASH (this minimal bundle omits them).
     expect(v.correlations).toBe(payload.correlations);
-    expect(v.strategyMetrics).toBe(payload.strategyMetrics);
+    // F3: strategyMetrics is a NEW object with the seven mapped scalars overlaid from
+    // the persisted MTM object (0.9 / 0.25 / …), NOT the cash reference. The two
+    // UNMAPPED keys (alpha / information_ratio) survive from cash.
+    expect(v.strategyMetrics).not.toBe(payload.strategyMetrics);
+    expect(v.strategyMetrics.cum_ret).toBe(MTM_SCALARS.cumulative_return);
+    expect(v.strategyMetrics.sharpe).toBe(MTM_SCALARS.sharpe);
+    expect(v.strategyMetrics.calmar).toBe(MTM_SCALARS.calmar);
+    expect((v.strategyMetrics as unknown as { alpha: number }).alpha).toBe(0.42);
   });
 
   it("Test 10 — MTM WITHOUT a bundle falls back to the ORIGINAL payload by reference", () => {
