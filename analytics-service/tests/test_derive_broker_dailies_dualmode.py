@@ -991,7 +991,7 @@ class TestCashSettlementSeriesPersist:
         assert result.outcome == DispatchOutcome.DONE
         cash = _cash_series_payload(capture)
         assert cash is not None, "strategy-mode derive must persist a cash_settlement series"
-        assert cash["schema"] == 1
+        assert cash["schema"] == 2
         assert cash["basis"] == "cash_settlement"
 
         # rows == the finite csv_daily_returns rows (round-trip identity by construction)

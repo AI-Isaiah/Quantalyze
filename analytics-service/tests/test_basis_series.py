@@ -306,7 +306,7 @@ def test_persist_upserts_via_batch_rpc() -> None:
     assert set(args["p_kinds"]) == {KIND_MTM_DAILY_RETURNS}
     payload = args["p_kinds"][KIND_MTM_DAILY_RETURNS]
     assert payload == {
-        "schema": 1,
+        "schema": 2,
         "basis": "mark_to_market",
         "rows": r.series_rows,
         "gap_spans": r.gap_spans,
@@ -375,7 +375,7 @@ def test_cash_persist_roundtrips_via_batch_rpc() -> None:
     assert set(args["p_kinds"]) == {KIND_CASH_SETTLEMENT}
     payload = args["p_kinds"][KIND_CASH_SETTLEMENT]
     assert payload == {
-        "schema": 1,
+        "schema": 2,
         "basis": "cash_settlement",
         "rows": r.series_rows,
         "gap_spans": r.gap_spans,
@@ -396,6 +396,186 @@ def test_cash_persist_roundtrips_via_batch_rpc() -> None:
     # date_range freq — the round-trip guarantee is byte-exact VALUES + dates, not
     # the pandas freq attribute.
     pd.testing.assert_series_equal(rebuilt, expected, check_exact=True, check_freq=False)
+
+
+# ── Phase 105 (D1): scalar_returns + densify_policy + nan_dates + insufficient_window ──
+
+
+def _fixture_sparse_gapped() -> pd.Series:
+    """A user-CSV weekend-gapped sparse series (trading days only, all finite). Its
+    gap-filled form (0.0 weekend rows) computes DIFFERENT scalars than the sparse
+    form itself — so it distinguishes `scalar_returns=sparse` from the default
+    gap_fill(sparse) scalar."""
+    return _mk_series([
+        ("2024-03-01", 0.004),   # Fri
+        ("2024-03-04", -0.002),  # Mon (Sat/Sun 03-02/03 absent)
+        ("2024-03-05", 0.006),
+        ("2024-03-06", -0.001),
+        ("2024-03-07", 0.003),
+        ("2024-03-08", 0.005),   # Fri
+        ("2024-03-11", -0.004),  # Mon (weekend absent)
+        ("2024-03-12", 0.002),
+        ("2024-03-13", 0.001),
+    ])
+
+
+def _scalar_with_guard_nan() -> pd.Series:
+    """A 5-day series carrying a single in-index guard-day NaN (2024-06-04) — the
+    composite `zero_fill` scalar-input shape (0.0-bridged gaps but a preserved NaN
+    break)."""
+    return _mk_series([
+        ("2024-06-03", 0.010),
+        ("2024-06-04", float("nan")),  # in-index guard NaN
+        ("2024-06-05", -0.020),
+        ("2024-06-06", 0.030),
+        ("2024-06-07", 0.010),
+    ])
+
+
+def test_default_path_byte_invisible() -> None:
+    """Calling with NEITHER new kwarg is byte-identical to today: conventions has no
+    "densify" key, nan_dates is None, and the persist payload carries no "nan_dates".
+    Neuter (always emit the densify key / always set nan_dates) → RED."""
+    r = derive_basis_series(
+        _fixture_mtm(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+    )
+    assert "densify" not in r.conventions
+    assert r.nan_dates is None
+
+    fake = _StubSupabase()
+    persist_basis_series(fake, "s", basis="mark_to_market", result=r)
+    payload = fake.rpc_calls[0][1]["p_kinds"][KIND_MTM_DAILY_RETURNS]
+    assert "nan_dates" not in payload
+    assert payload["schema"] == 2  # the bump is reader-invisible (SC-4-safe)
+
+
+def test_scalar_returns_computes_on_exact_series() -> None:
+    """scalar_returns=S computes metrics_json on EXACTLY S (never gap_fill(sparse)),
+    while series_rows/gap_spans stay derived from _drop_nonfinite(returns). Neuter
+    (compute the scalar from gap_fill(sparse) despite scalar_returns) → RED (asserted
+    by the inequality against the gap-filled scalar)."""
+    s = _fixture_sparse_gapped()
+    r = derive_basis_series(
+        s, None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=s,
+    )
+    on_exact = compute_all_metrics(
+        s, None, periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json
+    on_gapfilled = compute_all_metrics(
+        gap_fill_daily_returns(_drop_nonfinite(s).sort_index()), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json
+    assert r.metrics_json == on_exact
+    assert r.metrics_json != on_gapfilled  # the weekend 0.0 fills DO move the scalar
+    # rows/gap_spans decoupled — still the honest sparse form of `returns`
+    sparse = _drop_nonfinite(s).sort_index()
+    assert [row["date"] for row in r.series_rows] == [
+        ts.date().isoformat() for ts in sparse.index
+    ]
+
+
+def test_densify_echo_present_when_supplied() -> None:
+    """densify_policy echoes into conventions["densify"] (the round-trip guard's
+    reconstruction selector), leaving the other convention keys untouched."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        densify_policy="sparse",
+    )
+    assert r.conventions["densify"] == "sparse"
+    assert set(r.conventions) == {
+        "periods_per_year", "cumulative_method", "day_basis", "densify",
+    }
+
+
+def test_densify_echo_omitted_by_default() -> None:
+    """The densify_policy kwarg is ADDITIVE: the default (None) OMITS the key (mirror
+    of test_conventions_echo_omits_benchmark_by_default). Neuter (always emit the
+    key) → RED."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    )
+    assert "densify" not in r.conventions
+
+
+def test_unknown_densify_policy_raises() -> None:
+    """An out-of-set densify_policy fails LOUD (V5) — ValueError naming the allowed
+    set {sparse, broker_nan, zero_fill}. Neuter (silently accept any string) → RED."""
+    with pytest.raises(ValueError, match="zero_fill"):
+        derive_basis_series(
+            _fixture_cash(), None,
+            periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+            densify_policy="bogus",
+        )
+
+
+def test_nan_dates_under_zero_fill() -> None:
+    """densify_policy="zero_fill" + a scalar_returns carrying in-index NaN → nan_dates
+    == the sorted ISO dates of those NaN positions (the additive composite key the
+    round-trip guard reinstates)."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=_scalar_with_guard_nan(), densify_policy="zero_fill",
+    )
+    assert r.nan_dates == ["2024-06-04"]
+
+
+def test_nan_dates_none_under_non_zero_fill_policy() -> None:
+    """nan_dates is emitted ONLY for zero_fill — a NaN-carrying scalar under any other
+    policy yields None. Neuter (emit nan_dates under a non-zero_fill policy) → RED."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=_scalar_with_guard_nan(), densify_policy="broker_nan",
+    )
+    assert r.nan_dates is None
+
+
+def test_nan_dates_none_when_no_scalar_returns() -> None:
+    """No scalar_returns → nan_dates is None regardless of policy (nothing to inspect
+    for NaN positions)."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        densify_policy="zero_fill",
+    )
+    assert r.nan_dates is None
+
+
+def test_payload_carries_nan_dates_only_when_present() -> None:
+    """The persist payload includes "nan_dates" ONLY when result.nan_dates is not
+    None; schema is always 2. Neuter (always/never emit the key) → RED."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        scalar_returns=_scalar_with_guard_nan(), densify_policy="zero_fill",
+    )
+    fake = _StubSupabase()
+    persist_basis_series(fake, "s", basis="cash_settlement", result=r)
+    payload = fake.rpc_calls[0][1]["p_kinds"][KIND_CASH_SETTLEMENT]
+    assert payload["nan_dates"] == ["2024-06-04"]
+    assert payload["schema"] == 2
+
+
+def test_insufficient_window_mirrors_metrics_result() -> None:
+    """BasisSeriesResult.insufficient_window is a pass-through of the MetricsResult DQ
+    flag (duck-compat for Plans 04/05). Neuter (hardcode False) → RED when the flag
+    is True."""
+    s = _fixture_cash()
+    r = derive_basis_series(
+        s, None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    )
+    expected = compute_all_metrics(
+        gap_fill_daily_returns(_drop_nonfinite(s).sort_index()), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    ).insufficient_window
+    assert r.insufficient_window == expected
 
 
 def test_cash_persist_none_heals_via_delete() -> None:
