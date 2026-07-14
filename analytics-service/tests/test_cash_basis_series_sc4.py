@@ -141,6 +141,31 @@ def _cash_series_payload(capture: dict) -> dict | None:
     return None
 
 
+def _trusted_cash_payload(capture: dict) -> dict | None:
+    """The cash_settlement payload — but ONLY when the derive reached terminal SUCCESS
+    (a csv_source PRESTAMP with no ``computation_status``). After a terminal-failure arm
+    (a ``computation_status='failed'`` stamp) the series is heal-DELETED, so trusting a
+    captured payload there would be a STALE read; return None (expect-absent). This
+    mirrors the MED-1 read gate (Plan 02, D3 caveat b): a reader trusts the series only
+    when its scalar row is complete. Deliberately independent of the heal-delete — the
+    gate holds even if a stale payload lingers (that is what the read gate protects)."""
+    if _find_failed_stamp(capture) is not None:
+        return None
+    if _find_prestamp(capture) is None:
+        return None
+    return _cash_series_payload(capture)
+
+
+def _series_deletes(capture: dict, kind: str) -> list[dict]:
+    """strategy_analytics_series DELETEs filtered on ``kind`` — the heal arm (a
+    persist_basis_series(result=None) call routes through the table delete chain)."""
+    return [
+        d for d in capture["deletes"]
+        if d["table"] == "strategy_analytics_series"
+        and d["filters"].get("eq:kind") == kind
+    ]
+
+
 def _noncash_track(capture: dict) -> dict:
     """EVERYTHING the seam writes EXCEPT the additive cash series RPC — the surface
     SC-4 protects. Includes the csv_daily_returns upserts + reconcile-delete filters,
@@ -318,6 +343,7 @@ async def test_cash_conventions_echo_zavara_override() -> None:
         "cumulative_method": "simple",  # from the override
         "day_basis": "active",     # metrics_day_basis("active_day")
         "benchmark": "BTC",        # unconditional identity carry
+        "densify": "broker_nan",   # Phase 105 (D1) seam densify tag
     }, f"cash conventions did not echo the Zavara override: {cash['conventions']!r}"
 
     cap_b = await _run_seam(strategy_row, has_option_activity=True, cash_noop=True)
@@ -361,6 +387,161 @@ async def test_cash_conventions_traditional_clock_and_unconditional_benchmark() 
     # Legacy cash outputs still landed (the raising benchmark fetch only feeds the MTM
     # compute; it never gates the cash path).
     assert _csv_row_map(cap), "the legacy csv_daily_returns cash rows must still persist"
+
+
+# ── Task 2: broker_nan densify-tag round-trip + terminal-arm heal-deletes ────
+
+
+@pytest.mark.asyncio
+async def test_cash_series_broker_nan_densify_tag_and_roundtrip() -> None:
+    """D1 (collapse #6): the seam cash derive passes scalar_returns=returns +
+    densify_policy="broker_nan", so the persisted payload carries schema==2 and
+    conventions["densify"]=="broker_nan", and the anti-divergence round-trip guard
+    reconstructs the exact scalar input from the sparse rows END-TO-END — the seam's
+    cash echo is now round-trip-complete. The persisted rows/gap_spans/conventions are
+    byte-identical to a direct derive_basis_series(scalar_returns=returns, broker_nan)
+    with the seam's conventions.
+
+    Kills: dropping densify_policy (the "densify" key is absent → KeyError reddens); or
+    passing a scalar_returns that disagrees with the rows (the round-trip guard reddens)."""
+    from services.basis_series import BasisSeriesResult, derive_basis_series
+    from tests.test_basis_series import _roundtrip_recompute
+
+    idx = pd.date_range("2024-05-01", periods=4, freq="D")
+    # interior guard-NaN at 2024-05-02, finite endpoints (span == finite span).
+    returns_with_gap = pd.Series(
+        [0.01, float("nan"), 0.03, 0.02], index=idx, dtype="float64",
+    )
+    cap = await _run_seam(
+        {"asset_class": "crypto"}, has_option_activity=False,
+        returns=returns_with_gap,
+    )
+
+    cash = _cash_series_payload(cap)
+    assert cash is not None
+    assert cash["schema"] == 2
+    assert cash["conventions"]["densify"] == "broker_nan", (
+        f"the seam must tag the cash echo broker_nan: {cash['conventions']!r}"
+    )
+
+    # The reference derive the seam runs (crypto → √365 geometric calendar, BTC,
+    # scalar_returns=returns, broker_nan). The persisted payload matches it exactly.
+    reference = derive_basis_series(
+        returns_with_gap, None,
+        periods_per_year=365, cumulative_method="geometric", day_basis="calendar",
+        benchmark_symbol="BTC",
+        scalar_returns=returns_with_gap, densify_policy="broker_nan",
+    )
+    assert cash["rows"] == reference.series_rows
+    assert cash["gap_spans"] == reference.gap_spans
+    assert cash["conventions"] == reference.conventions
+
+    # The round-trip guard covers the seam's cash echo end-to-end: reconstruct the
+    # scalar from the persisted rows per the broker_nan echo → the reference scalars.
+    reconstructed = BasisSeriesResult(
+        metrics_json={}, sibling_kinds={},
+        series_rows=cash["rows"], gap_spans=cash["gap_spans"],
+        conventions=cash["conventions"], nan_dates=cash.get("nan_dates"),
+    )
+    assert _roundtrip_recompute(reconstructed) == reference.metrics_json
+
+    # A clean derive is terminal-SUCCESS, so the gate-respecting harness trusts it.
+    assert _trusted_cash_payload(cap) is not None
+
+
+@pytest.mark.asyncio
+async def test_insufficient_history_arm_heals_both_series() -> None:
+    """D3 SECONDARY: the strategy-mode <2-interpretable-days terminal arm heal-DELETEs
+    BOTH series rows (cash_settlement AND mtm_daily_returns) — a stale row from a prior
+    longer-history derive must not outlive the now-authoritative 'failed' stamp. NO
+    series upsert fires, and the gate-respecting harness expects the cash payload ABSENT.
+
+    Neuter: remove the _heal_delete_basis_series() call from the <2 arm → the two DELETEs
+    vanish → reddens."""
+    one_day = pd.Series(
+        [0.01], index=pd.DatetimeIndex(["2024-05-01"]), dtype="float64",
+    )
+    cap = await _run_seam(
+        {"asset_class": "crypto"}, has_option_activity=False, returns=one_day,
+    )
+    assert len(_series_deletes(cap, _CASH_KIND)) == 1, (
+        f"the <2 arm must heal-delete the cash series; got {cap['deletes']!r}"
+    )
+    assert len(_series_deletes(cap, _bs.KIND_MTM_DAILY_RETURNS)) == 1, (
+        f"the <2 arm must heal-delete the MTM series; got {cap['deletes']!r}"
+    )
+    # NO series upsert on the terminal arm, and the gate expects-absent.
+    assert _cash_series_payload(cap) is None
+    assert _trusted_cash_payload(cap) is None
+    # The heal is scoped to this strategy (never a cross-strategy wipe).
+    assert _series_deletes(cap, _CASH_KIND)[0]["filters"].get("eq:strategy_id") == _STRATEGY_ID
+
+
+@pytest.mark.asyncio
+async def test_stamp_failed_heals_both_series() -> None:
+    """D3 SECONDARY (single choke point): a terminal _stamp_strategy_analytics_failed
+    (here a malformed-config PERMANENT failure on the ccxt path) heal-DELETEs BOTH series
+    rows via the ONE heal inside the stamp helper — covering every failure that routes
+    through it. The gate-respecting harness expects the cash payload ABSENT after the
+    terminal-failure stamp.
+
+    Neuter: remove the _heal_delete_basis_series() call from _stamp_strategy_analytics_failed
+    → the deletes vanish → reddens."""
+    strategy_row = {
+        "id": "strat-heal-stamp",
+        "user_id": "user-1",
+        "asset_class": "crypto",
+        "returns_denominator_config": _MALFORMED_CONFIG,
+    }
+    result, cap = await _run_ccxt_seam(strategy_row)
+    assert result.outcome == DispatchOutcome.FAILED
+    assert len(_series_deletes(cap, _CASH_KIND)) == 1, (
+        f"the stamp helper must heal-delete the cash series; got {cap['deletes']!r}"
+    )
+    assert len(_series_deletes(cap, _bs.KIND_MTM_DAILY_RETURNS)) == 1, (
+        f"the stamp helper must heal-delete the MTM series; got {cap['deletes']!r}"
+    )
+    assert _cash_series_payload(cap) is None
+    assert _trusted_cash_payload(cap) is None
+
+
+def test_trusted_cash_payload_respects_terminal_status_gate() -> None:
+    """D3 caveat b (harness gate-respect): _trusted_cash_payload trusts a captured cash
+    payload ONLY on terminal-SUCCESS. Given a synthetic capture that BOTH stamped a
+    terminal 'failed' AND (hypothetically) still carries a cash payload — the harness must
+    NOT trust it (the read gate is the guarantee; the heal-delete is defense-in-depth, so
+    the gate must hold even if a stale payload lingers).
+
+    Kills: making _trusted_cash_payload ignore the failed stamp (return the raw payload)
+    → this assert reddens; it is what keeps a gate-respecting test from reddening on a
+    legitimately-failed strategy."""
+    fake_capture = {
+        "upserts": [
+            (
+                "strategy_analytics",
+                {
+                    "computation_status": "failed",
+                    "computation_warned": False,
+                    "data_quality_flags": {"csv_source": True},
+                    "metrics_json_by_basis": None,
+                },
+                "strategy_id",
+            ),
+        ],
+        "deletes": [],
+        "rpc_calls": [
+            (
+                _SERIES_RPC,
+                {"p_strategy_id": "s", "p_kinds": {_CASH_KIND: {"schema": 2, "rows": []}}},
+            ),
+        ],
+    }
+    # A stale payload IS present in the capture …
+    assert _cash_series_payload(fake_capture) is not None
+    # … but the gate refuses to trust it after a terminal-failure stamp.
+    assert _trusted_cash_payload(fake_capture) is None, (
+        "the harness must NOT trust a cash payload once a terminal-failure stamp exists"
+    )
 
 
 # ── Task 1 (MED-2): the venue-agnostic parse — the 5th SC-4 fixture (ccxt) ────
@@ -423,6 +604,7 @@ async def test_cash_conventions_echo_ccxt_override() -> None:
         "cumulative_method": "simple",    # from the override (was geometric — MED-2)
         "day_basis": "active",            # metrics_day_basis("active_day") (was calendar)
         "benchmark": "BTC",               # unconditional identity carry
+        "densify": "broker_nan",          # Phase 105 (D1) seam densify tag
     }, f"ccxt cash conventions did not echo the override (MED-2): {cash['conventions']!r}"
 
 
@@ -557,15 +739,22 @@ def test_single_cash_settlement_persist_seam() -> None:
     strategy) would give some strategies a fabricated series this phase instead of an
     honest absence. Strip comment lines, then assert the literal appears once.
 
-    Kills: any second basis="cash_settlement" persist added outside the single seam."""
+    Kills: any second basis="cash_settlement" persist added outside the single seam.
+
+    Phase 105 (D3) adds heal-DELETE call(s) — persist_basis_series(..., result=None) —
+    at the terminal-failure arms. A heal DELETES a stale row (it never FABRICATES a
+    series), so it does not violate the A3 honest-absence guarantee. Count only the
+    NON-heal (result-bearing) cash persists: exactly ONE must exist."""
     worker = _repo_root() / "analytics-service" / "services" / "job_worker.py"
     code = "\n".join(
         ln for ln in worker.read_text().splitlines()
         if not _strip_comment(ln, lang="py")
     )
-    count = code.count('basis="cash_settlement"')
-    assert count == 1, (
-        f"expected exactly ONE basis=\"cash_settlement\" persist seam, found {count} "
-        "— a second bootleg persist site would fabricate a series where this phase "
-        "mandates an honest absence (A3)"
+    total = code.count('basis="cash_settlement"')
+    heals = code.count('basis="cash_settlement", result=None')
+    assert total - heals == 1, (
+        f"expected exactly ONE result-bearing basis=\"cash_settlement\" persist seam, "
+        f"found {total - heals} (total={total}, heals={heals}) — a second bootleg "
+        "persist site would fabricate a series where this phase mandates an honest "
+        "absence (A3); heal-deletes (result=None) are exempt"
     )

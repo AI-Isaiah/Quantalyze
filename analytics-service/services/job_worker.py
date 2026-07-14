@@ -2059,6 +2059,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         )
         from services.redact import scrub_freeform_string
 
+        # Phase 105 (BB-02, D3 SECONDARY): heal-DELETE both persisted series rows
+        # (cash_settlement + mtm_daily_returns) so a stale row never outlives an
+        # authoritative-NULL terminal write — mirroring the MTM heal idiom. This is
+        # DEFENSE-IN-DEPTH; the Plan-02 read gate is the primary guarantee. A heal
+        # failure must NEVER mask the terminal stamp that invoked it — swallow + warn.
+        # Strategy-mode only (key-mode owns no per-strategy series row).
+        async def _heal_delete_basis_series() -> None:
+            if is_key_mode:
+                return
+            from services.basis_series import persist_basis_series
+
+            def _delete_both() -> None:
+                persist_basis_series(
+                    ctx.supabase, strategy_id, basis="cash_settlement", result=None,
+                )
+                persist_basis_series(
+                    ctx.supabase, strategy_id, basis="mark_to_market", result=None,
+                )
+
+            try:
+                await db_execute(_delete_both)
+            except Exception as _heal_exc:  # noqa: BLE001
+                logger.warning(
+                    "derive_broker_dailies: series heal-delete failed for strategy "
+                    "%s (terminal stamp already applied): %s",
+                    strategy_id, _heal_exc,
+                )
+
         # P72 — fail-loud analytics stamp, now VENUE-NEUTRAL (hoisted out of the deribit
         # arm + renamed; the arm keeps calling this SAME helper for its other permanent
         # failures). A terminal-FAIL must leave the wizard's SyncPreviewStep poller a
@@ -2087,6 +2115,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 ).execute()
 
             await db_execute(_upsert)
+            # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
+            # through this helper (parse-malformed + the deribit arm's ledger/scope/
+            # valuation failures) heals both series rows.
+            await _heal_delete_basis_series()
 
         # Per-strategy returns-denominator override (Zavara-only allocated capital).
         # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
@@ -2826,6 +2858,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             ).execute()
 
         await db_execute(_mark_insufficient)
+        # D3 SECONDARY (Phase 105): this terminal insufficient-history arm exits BEFORE
+        # the cash/MTM series persists below, so a stale series row from a prior
+        # (longer-history) derive would outlive the now-authoritative 'failed'. Heal both
+        # rows (defense-in-depth; the Plan-02 read gate is the guarantee).
+        await _heal_delete_basis_series()
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
@@ -3162,37 +3199,40 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
     await db_execute(_persist_mtm_series)
 
-    # ── Phase 104 (BB-01): additive DARK cash_settlement SERIES persist ──────────
-    # SERIES-ONLY. Persist the cash daily-return SERIES as a new
-    # strategy_analytics_series kind ("cash_settlement") beside the MTM block above.
-    # This is a DARK additive write — NO reader until Phase 105/106 collapse the
-    # scalar route onto it. The AUTHORITATIVE cash SCALARS stay on the legacy
-    # run_csv_strategy_analytics path (analytics_runner.py); routing cash SCALARS
-    # through derive_basis_series before the NaN/gap-fill reconciliation would bridge
-    # broker guard-day NaN breaks and 0.0-fill sparse user-CSV gaps — an SC-4
-    # violation (104-RESEARCH Pitfall 1). Only the series (rows/gap_spans/conventions)
-    # is persisted here.
+    # ── Phase 104/105 (BB-01/BB-02): additive cash_settlement SERIES persist ─────
+    # Persist the cash daily-return SERIES as strategy_analytics_series kind
+    # ("cash_settlement") beside the MTM block above. Phase 105 (D1) makes this echo
+    # ROUND-TRIP-COMPLETE: the derive receives scalar_returns=returns (the exact
+    # legacy-conditioned series) + densify_policy="broker_nan", so the persisted
+    # conventions carry {"densify": "broker_nan"} and the round-trip guard / 106 reader
+    # can reconstruct the exact scalar input from the sparse rows. Collapse #6: the
+    # per-source conditioning (broker → broker_nan) lives HERE at the preparation seam,
+    # the derive stays branchless.
+    #
+    # STILL SERIES-ONLY for the AUTHORITATIVE scalars: persist_basis_series DISCARDS
+    # metrics_json (it persists rows/gap_spans/conventions only), and the authoritative
+    # single-key cash SCALARS still flip onto this route in Plan 04 (analytics_runner) —
+    # NOT here. This seam's metrics_json_by_basis carries ONLY mark_to_market; no cash
+    # scalar leaks into it. (Routing cash SCALARS through the shared derive before the
+    # 04 reconciliation would still be an SC-4 violation — 104-RESEARCH Pitfall 1.)
     #
     # `returns` is the SAME dense post-terminus series the csv_daily_returns rows were
-    # built from (:2842), so _drop_nonfinite inside the helper reproduces EXACTLY those
-    # finite rows — series round-trip identity by construction.
+    # built from (:2842) — so scalar_returns=returns is byte-identical to the legacy
+    # cash scalar input BY CONSTRUCTION, and _drop_nonfinite inside the helper reproduces
+    # EXACTLY those finite rows (series round-trip identity by construction).
     #
-    # benchmark_rets=None (positional): NO benchmark FETCH on the cash path — a returns
-    # fetch feeds ONLY compute_all_metrics→metrics_json, which persist_basis_series
-    # DISCARDS (it persists rows/gap_spans/conventions only). SC-5 needs ONLY the
-    # benchmark IDENTITY STRING, so benchmark_symbol="BTC" is passed UNCONDITIONALLY —
-    # every cash row carries the identity regardless of any MTM-side fetch outcome (a
-    # fetch-contingent identity would drop on a transient BTC-price outage and Phase 105
-    # could not reproduce α/β). Conventions are resolved with the SAME expressions as
-    # the MTM block (Pitfall 2) but computed separately (the MTM locals exist only when
-    # mtm_returns is not None).
+    # benchmark_rets=None (positional): NO benchmark FETCH on the cash path. SC-5 needs
+    # ONLY the benchmark IDENTITY STRING, so benchmark_symbol="BTC" is passed
+    # UNCONDITIONALLY — every cash row carries the identity regardless of any MTM-side
+    # fetch outcome. Conventions are resolved with the SAME expressions as the MTM block
+    # (Pitfall 2) but computed separately (the MTM locals exist only when mtm_returns is
+    # not None).
     #
     # A3 honesty: strategies whose sync_trades tail enqueues legacy compute_analytics
     # (BROKER_DAILIES_VIA_FUNDING off) never reach this seam → they get NO
-    # cash_settlement series row this phase — an HONEST ABSENCE (dark write, zero
-    # readers), never a fabricated fill. Do NOT add a persist to run_compute_analytics_job
-    # (a 106-slated dark-path re-entry point); unified coverage lands with the 105/106
-    # route collapse.
+    # cash_settlement series row this phase — an HONEST ABSENCE (dark write), never a
+    # fabricated fill. Do NOT add a persist to run_compute_analytics_job (a 106-slated
+    # dark-path re-entry point); unified coverage lands with the 105/106 route collapse.
     _cash_periods = periods_per_year_for_asset_class(
         ctx.strategy_row.get("asset_class")
         if isinstance(ctx.strategy_row, dict)
@@ -3212,6 +3252,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             cumulative_method=_cash_cumulative,
             day_basis=_cash_day_basis,
             benchmark_symbol="BTC",
+            # Collapse #6 (D1): the legacy-conditioned broker series IS `returns`
+            # (dense with interior guard-NaN), and its densification is broker_nan —
+            # so the scalar cache is byte-identical to the legacy cash scalar and the
+            # round-trip guard can rebuild it from the sparse rows.
+            scalar_returns=returns,
+            densify_policy="broker_nan",
         )
     except ValueError:
         # Heal arm (Pitfall 5): effectively unreachable given the <2-day early exit
