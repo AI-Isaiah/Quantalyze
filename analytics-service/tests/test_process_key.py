@@ -1737,6 +1737,47 @@ def test_derive_swap_is_flow_agnostic_internal_report(client):
     assert snap["max_drawdown"] == mj["max_drawdown"]
 
 
+def test_teaser_persists_no_series_row(client):
+    """Guard (D1 honesty condition b): a FULL successful teaser run — the derive
+    path actually executes (multi-day trades, not the degrade arm) — persists
+    NO strategy_analytics_series row. Zero upsert_strategy_analytics_series_batch
+    RPCs under ANY id (STRONGER than filtering by the archived 00000…0001 anchor:
+    the teaser persists no series row at all, so any such RPC is a regression).
+
+    Why persist-nothing is the correct contract (D1 / Option c): the shared
+    teaser anchor (TEASER_ANCHOR_STRATEGY_ID) is status='archived' and user-less,
+    so fetch_strategy_lazy_metrics (published-OR-owner) can never read a row keyed
+    to it — AND concurrent teasers would PK-collide on it. derive_basis_series is
+    compute-only; process_key.py never calls persist_basis_series.
+    """
+    from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
+
+    rows = _daily_pnl_dicts(_PNL_PROFILE)
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-guard")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    r = _run_sync_pipeline(
+        client, fake, adapter, flow_type="teaser", source="okx"
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "published"
+
+    # The derive path (not the degrade arm) actually ran — the four scalars are
+    # populated, confirming this is a MEANINGFUL persist-nothing assertion.
+    snap = _captured_metrics_snapshot(fake)
+    assert snap["sharpe"] is not None
+
+    rpc_calls = [c.args for c in fake.rpc.call_args_list]
+    series_calls = [
+        c for c in rpc_calls if c and c[0] == "upsert_strategy_analytics_series_batch"
+    ]
+    assert series_calls == [], (
+        "teaser must persist NO strategy_analytics_series row (D1 persist-nothing) "
+        f"— not even under the {TEASER_ANCHOR_STRATEGY_ID} anchor; "
+        f"got {len(series_calls)} series-persist RPC(s)"
+    )
+
+
 def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
     """API-3 regression: flow_type='csv', step='finalize' lands here without
     a strategy_id (the strategies row hasn't been created yet). Pre-fix this
