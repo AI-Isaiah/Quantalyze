@@ -3135,44 +3135,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         "strategy_id": strategy_id,
         "data_quality_flags": _prestamp_flags,
     }
-    # MED-HIGH (Fable): metrics_json_by_basis is AUTHORITATIVE for a single-key
-    # broker-derive row — this seam ALWAYS writes the column so no stale object can
-    # survive. A fresh {"mark_to_market": …} object ONLY when the second pass
-    # SUCCEEDED; every other terminal-DONE shape → SQL NULL (Python None, never JSON
-    # null — the Phase-85 CHECK). This closes the whole stale-by-basis class on the
-    # broker route:
-    #   * mtm_attempted + success → the additive object;
-    #   * mtm_attempted + degrade (compute-reject / structural) → NULL, healing a
-    #     stale mark_to_market key from a prior successful derive whose data gated;
-    #   * NOT attempted (perp-only, ccxt, MTM-configured headline, or a strategy
-    #     RECONFIGURED from composite → single-key broker) → NULL, so a stale
-    #     composite-shaped {cash_settlement, mark_to_market} object or a frozen
-    #     prior MTM object can never linger next to the single-key headline.
-    # The finalizer's Finding-5 clear is DEAD on the broker route (its
-    # `_was_composite` reads the data_quality_flags THIS prestamp already replaced
-    # with {csv_source}), so this authoritative write is the single source of truth:
-    # the finalizer OMITS the column on the broker route and leaves this value
-    # intact (that is also how the success-path mark_to_market object survives). A
-    # single-key row's only legitimate by-basis content is the mark_to_market key
-    # this path owns — anything else is stale by definition. (Broker-derive only
-    # ever runs for single-key strategies; a genuine composite is authored by
-    # run_stitch_composite_job / :4341, never this derive.) Non-options derives are
-    # no longer byte-identical (they now write metrics_json_by_basis=NULL) — an
-    # accepted, deliberate change vs the prior column-untouched behavior, because a
-    # surviving stale object is a WRONG-MONEY-NUMBER hazard for Phase 102.
-    _prestamp_payload["metrics_json_by_basis"] = (
-        {"mark_to_market": mtm_metrics_json}
-        if (mtm_attempted and mtm_metrics_json is not None)
-        else None
-    )
-
-    def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
-        ctx.supabase.table("strategy_analytics").upsert(
-            payload,
-            on_conflict="strategy_id",
-        ).execute()
-
-    await db_execute(_prestamp_dq_flags)
+    # 106-02 (D5 / M2): the by-basis scalar assignment + prestamp upsert are DEFERRED
+    # to AFTER both basis-series persists below (see the moved block just above the
+    # CSV enqueue). Only the side-effect-free dict INIT lives here; the DONE-gating
+    # write is series-first (self-healing partial-write window). `mtm_metrics_json`
+    # is captured by the later assignment — its value is fixed before this point.
 
     # Phase 103 (MTM-04): persist (or HEAL) the mark_to_market daily-return series
     # row from the SAME BasisSeriesResult the scalar cache above came from — the
@@ -3273,6 +3240,60 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         )
 
     await db_execute(_persist_cash_series)
+
+    # 106-02 (D5 / carry-forward M2): the DONE-gating by-basis SCALAR prestamp lands
+    # HERE — AFTER both basis series persist above — mirroring the composite seam
+    # (cash series → MTM series → DONE-bearing scalar LAST). Ordering is load-bearing:
+    # series-first REVERSES the partial-write window into the SELF-HEALING direction.
+    # If the scalar landed FIRST and a series persist then failed, the read gate would
+    # render fresh scalars over a stale/absent series (the HARMFUL mislabeled-read
+    # direction). Persisting the series first means the only remaining transient window
+    # is fresh-series + stale-SCALAR — benign (both rows are genuinely single-key; the
+    # headline numbers lag the chart by one derive, never mislabel a basis) and the
+    # next re-derive lands the matching scalar and heals it. A series-write failure
+    # itself aborts the whole derive (fail-loud db_execute) BEFORE this scalar is
+    # written, so the gate can never observe the harmful fresh-scalar + stale-series.
+    # The prestamp must still land BEFORE the CSV enqueue below (the finalizer OMITS
+    # metrics_json_by_basis on the broker route, so this authoritative write survives).
+    #
+    # MED-HIGH (Fable): metrics_json_by_basis is AUTHORITATIVE for a single-key
+    # broker-derive row — this seam ALWAYS writes the column so no stale object can
+    # survive. A fresh {"mark_to_market": …} object ONLY when the second pass
+    # SUCCEEDED; every other terminal-DONE shape → SQL NULL (Python None, never JSON
+    # null — the Phase-85 CHECK). This closes the whole stale-by-basis class on the
+    # broker route:
+    #   * mtm_attempted + success → the additive object;
+    #   * mtm_attempted + degrade (compute-reject / structural) → NULL, healing a
+    #     stale mark_to_market key from a prior successful derive whose data gated;
+    #   * NOT attempted (perp-only, ccxt, MTM-configured headline, or a strategy
+    #     RECONFIGURED from composite → single-key broker) → NULL, so a stale
+    #     composite-shaped {cash_settlement, mark_to_market} object or a frozen
+    #     prior MTM object can never linger next to the single-key headline.
+    # The finalizer's Finding-5 clear is DEAD on the broker route (its
+    # `_was_composite` reads the data_quality_flags THIS prestamp already replaced
+    # with {csv_source}), so this authoritative write is the single source of truth:
+    # the finalizer OMITS the column on the broker route and leaves this value
+    # intact (that is also how the success-path mark_to_market object survives). A
+    # single-key row's only legitimate by-basis content is the mark_to_market key
+    # this path owns — anything else is stale by definition. (Broker-derive only
+    # ever runs for single-key strategies; a genuine composite is authored by
+    # run_stitch_composite_job / :4341, never this derive.) Non-options derives are
+    # no longer byte-identical (they now write metrics_json_by_basis=NULL) — an
+    # accepted, deliberate change vs the prior column-untouched behavior, because a
+    # surviving stale object is a WRONG-MONEY-NUMBER hazard for Phase 102.
+    _prestamp_payload["metrics_json_by_basis"] = (
+        {"mark_to_market": mtm_metrics_json}
+        if (mtm_attempted and mtm_metrics_json is not None)
+        else None
+    )
+
+    def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
+        ctx.supabase.table("strategy_analytics").upsert(
+            payload,
+            on_conflict="strategy_id",
+        ).execute()
+
+    await db_execute(_prestamp_dq_flags)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:
