@@ -308,13 +308,15 @@ export function FactsheetBody({
 }
 
 /**
- * Phase 90 (FS-03, D5) — MetricsColumn stays pinned to CASH always (its
- * distributional stats have no persisted MTM counterpart, so it is never passed
- * the basis hook). When the KpiStrip has diverged to MTM we surface a static
- * "BASIS · CASH SETTLEMENT" eyebrow atop the column so the reader knows the
- * right-rail metrics did NOT follow the toggle. Composite-only; when the eyebrow
- * is not shown (single-key OR composite-cash) this renders EXACTLY the bare
- * <MetricsColumn> — byte-identical to before (GUARD-02).
+ * Phase 90 (FS-03, D5) / Phase 103 (MTM-04 correction) — the right-rail
+ * MetricsColumn now FOLLOWS the active basis for every dailies-derivable surface
+ * (charts, correlations, §IV α/β/IR, extended distribution scalars, quantiles,
+ * calmar-by-year, bootstrap, worst-10, style-drift). Only the §I/§II Main-Metrics
+ * HEADLINE scalars stay cash here (the KpiStrip owns their MTM relabel, Phase 102).
+ * So under MTM we surface a "BASIS · MARK-TO-MARKET" eyebrow atop the column that
+ * honestly reads the ACTIVE basis (matching the KpiStrip eyebrow). Composite-only;
+ * when the eyebrow is not shown (single-key OR composite-cash) this renders EXACTLY
+ * the bare <MetricsColumn> — byte-identical to before (GUARD-02).
  */
 function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const payload = usePayload();
@@ -329,47 +331,64 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // the KpiStrip already ran at L≠1.
   const { modeled } = useModeledLeverage(payload);
   const composite = payload.dataQuality?.composite === true;
-  // Non-composite at L=1: bare column, byte-identical to before (GUARD-02). Under
-  // a MODELED leverage (single-key only — the control is composite-hidden), the
-  // "BASE · 1× TRACK" eyebrow flags that the rail stayed on the base track
-  // (mirrors the composite MTM "BASIS · CASH SETTLEMENT" eyebrow below).
+  const onMtm = basis === "mark_to_market";
+  // A single-key options book that participates in the MTM basis story carries a
+  // gate; every other single-key strategy has none. Gating the basis eyebrow on
+  // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
+  const mtmParticipant = payload.mtmGate != null;
+  // Non-composite: bare column when neither a modeled leverage nor an MTM basis
+  // applies — byte-identical to before (GUARD-02). Phase 103 (MTM-04, root-cause
+  // flip): the rail now FOLLOWS the active basis (MetricsColumn reads
+  // view.strategyMetrics), so a single-key options book toggled to MTM earns an
+  // honest "BASIS · MARK-TO-MARKET" eyebrow — the SAME wording the composite
+  // branch shows below. It renders PERSISTENTLY (blank reserved line under cash,
+  // F4 zero-shift) only for MTM participants. The leverage "BASE · 1× TRACK"
+  // eyebrow is orthogonal (the rail stays on the un-levered base track while the
+  // KpiStrip models L≠1) and stacks above it when both apply.
   if (!composite) {
-    if (!modeled) return <MetricsColumn scenarioMode={scenarioMode} />;
+    if (!modeled && !mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
     return (
       <div className="flex flex-col gap-4 min-w-0">
-        <p
-          data-testid="metricscolumn-base-track-eyebrow"
-          className="text-micro uppercase tracking-wider text-text-muted"
-        >
-          BASE · 1× TRACK
-        </p>
+        {modeled && (
+          <p
+            data-testid="metricscolumn-base-track-eyebrow"
+            className="text-micro uppercase tracking-wider text-text-muted"
+          >
+            BASE · 1× TRACK
+          </p>
+        )}
+        {mtmParticipant && (
+          <p
+            aria-hidden={!onMtm}
+            className="text-micro uppercase tracking-wider text-text-muted"
+          >
+            {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
+          </p>
+        )}
         <MetricsColumn scenarioMode={scenarioMode} />
       </div>
     );
   }
   // F4 (UI-SPEC §4 zero-shift): render the eyebrow PERSISTENTLY (reserved line
   // height) so toggling cash↔MTM no longer pops it in/out and reflows the right
-  // rail. The eyebrow flags "the SUMMARY SCALAR metrics here stayed CASH" under
-  // MTM, and holds a blank line (nbsp) under cash.
+  // rail. It holds a blank line under cash and "BASIS · MARK-TO-MARKET" under MTM.
   //
-  // Phase 103 (MTM-04) SCOPE UPDATE (was "distributional stats are cash-ONLY"):
-  // the DAILIES-DERIVABLE rail panels — Calmar-by-year, Bootstrap CI, the Worst-10
-  // table, Style Drift, and the Extended-Metrics quantile rows (P5/P95/Median) —
-  // NOW follow the active basis (they have a per-basis bundle counterpart). What
-  // STAYS cash here is the strategyMetrics-derived SCALAR tables (Compound/Main/
-  // Returns/Risk/Extended-scalars/Benchmark α·β·IR — no persisted MTM counterpart;
-  // the KpiStrip owns MTM for the headline scalars, Phase 102). So the rail is
-  // MIXED under MTM and the blanket "BASIS · CASH SETTLEMENT" wording now
-  // under-describes it. Kept verbatim (composite-only; single-key options shows NO
-  // eyebrow) pending a design decision — FLAGGED in 103-04-SUMMARY / red team.
-  const onMtm = basis === "mark_to_market";
+  // Phase 103 (MTM-04, root-cause flip): the ENTIRE rail now follows the active
+  // basis — after MetricsColumn switched §I/§II + the Cumulative/EoY panels to
+  // view.strategyMetrics, the SCALAR tables (Compound/Main/Returns/Risk/Extended
+  // scalars/Benchmark α·β·IR) join the already-following dailies-derivable panels
+  // (Calmar-by-year, Bootstrap CI, Worst-10, Style Drift, quantile rows). So the
+  // rail is UNIFORMLY mark-to-market under MTM, and the eyebrow now honestly reads
+  // "BASIS · MARK-TO-MARKET" (the old "CASH SETTLEMENT" wording — which claimed
+  // the rail stayed cash — is retired). The single-key branch above carries the
+  // matching eyebrow for options books that toggle MTM.
   return (
     <div className="flex flex-col gap-4 min-w-0">
       <p
         aria-hidden={!onMtm}
         className="text-micro uppercase tracking-wider text-text-muted"
       >
-        {onMtm ? "BASIS · CASH SETTLEMENT" : " "}
+        {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
       </p>
       <MetricsColumn scenarioMode={scenarioMode} />
     </div>

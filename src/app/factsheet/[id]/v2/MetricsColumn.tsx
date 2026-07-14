@@ -25,20 +25,30 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // unchanged; only the composer passes scenarioMode={true}.
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
-  // Phase 103 (MTM-04, correction) — §IV joint metrics (α/β/corr/IR/treynor/…) all
-  // REGRESS the strategy leg, so under mark_to_market they must use the MTM strategy
-  // returns. The per-basis bundle already computes the comparator joint from the
+  // Phase 103 (MTM-04, root-cause flip) — every comparator-derived read on this rail
+  // (§I/§II benchmark columns `b`, and §IV joint α/β/corr/IR/treynor/…) comes from the
+  // VIEW's comparator, matching the strategy scalars `m` which also read the view
+  // below. So the WHOLE Main-Metrics/Benchmark surface sits on ONE coherent basis:
+  // strategy + benchmark BOTH follow the active basis (no mixed-basis panel). The
+  // per-basis bundle already computes the comparator summary + joint from the
   // basis-selected strat returns + the benchmark series (buildComparatorBlock →
-  // jointMetrics), so we read the joint from the VIEW here — no new math, no persisted
-  // overlay needed. Byte-identical under cash (the view returns payload by reference)
-  // and MTM-derived under mark_to_market. §I/§II benchmark columns deliberately stay
-  // on the cash `cmp` so they stay consistent with the cash-headline strategy column
-  // beside them (avoids a mixed-basis Main-Metrics table); §IV is a standalone
-  // strategy-relative section, self-consistent under either basis.
+  // compute/jointMetrics), so no new math and no persisted overlay is needed.
+  // Byte-identical under cash (the view returns payload by reference) and MTM-derived
+  // under mark_to_market. `cmp` (the cash comparator) is retained ONLY for the
+  // basis-invariant shortName label `bn` below.
   const view = useBasisSeriesView(payload);
   const jointCmp = view.comparators[cmpKey];
-  const m = payload.strategyMetrics;
-  const b = cmp.summary;
+  // Phase 103 (MTM-04, root-cause flip) — §I Performance/Main-Metrics + §II
+  // MaxDD/Best-Worst read the strategy scalars from the VIEW, so the whole rail
+  // follows the active basis (dissolving the double-display contradiction where
+  // ExtendedMetricsPanel already read view.strategyMetrics while §I/§II stayed
+  // cash). Under cash the view returns `payload` by reference, so `m` is
+  // byte-identical to the persisted cash overlay (SC-4 safe by construction);
+  // under mark_to_market it is the bundle's compute() on the MTM series. The
+  // bundle's strategyMetrics is the same ComputeSummary shape (compute() minus
+  // the eq/dd curves the rail never reads), so every consumed field is present.
+  const m = view.strategyMetrics;
+  const b = jointCmp.summary;
   // shortName is "—" when no comparator selected — Panel.benchHeader treats
   // any non-empty string as a real comparator and renders "vs —" in the
   // header. Pass undefined instead so the "vs" label disappears entirely
@@ -385,13 +395,14 @@ function RollingRow({
  */
 function CumulativeReturnsPanel() {
   const payload = usePayload();
-  const m = payload.strategyMetrics;
-  // Phase 103 (MTM-04 follow-through, Finding C): the 3Y/5Y rows are computed from
-  // the equity curve — a pure dailies-derivable quantity — so they must ride the
-  // basis-selected equity (the equity CHART is already MTM under the toggle). The
-  // MTD/YTD/3M/6M/1Y/Inception/CAGR rows stay on the persisted `strategyMetrics`
-  // headline scalars (KpiStrip-owned, Phase 102 — no per-series recompute here).
-  const eq = useBasisSeriesView(payload).strategyEquity;
+  // Phase 103 (MTM-04, root-cause flip): the WHOLE panel follows the active basis.
+  // MTD/YTD/3M/6M/1Y/CAGR read the VIEW's strategyMetrics (the bundle's compute()
+  // on the MTM series under mark_to_market; `payload` by reference under cash) and
+  // the 3Y/5Y rows ride the basis-selected equity curve below — one coherent basis
+  // for every row, matching the equity CHART already MTM under the toggle.
+  const view = useBasisSeriesView(payload);
+  const m = view.strategyMetrics;
+  const eq = view.strategyEquity;
   const n = eq.length;
   const last = n > 0 ? eq[n - 1] : 1;
   const periodReturn = (lookbackDays: number): number | null => {
@@ -580,15 +591,22 @@ function ymd(iso: string | undefined): string {
  * Falls back to a strategy-only single column when comparator = NONE.
  */
 function EoyReturnsPanel() {
-  const payload = usePayload();
-  const { block: cmp, key: cmpKey } = useActiveComparator();
-  const stratYearly = payload.strategyMetrics.yearly;
+  // Phase 103 (MTM-04, root-cause flip): the EOY table follows the active basis to
+  // match the rest of the rail (and the EOY bar chart in DistributionPanels). Both
+  // the strategy per-year (`view.strategyMetrics.yearly`) and the comparator daily
+  // series (`cmp.dailyReturns` compounded on the VIEW's own date axis) come from the
+  // view, so strategy + benchmark sit on ONE coherent basis. Under cash the view
+  // returns `payload` by reference (byte-identical).
+  const view = useBasisSeriesView(usePayload());
+  const { key: cmpKey } = useActiveComparator();
+  const cmp = view.comparators[cmpKey];
+  const stratYearly = view.strategyMetrics.yearly;
   const benchYearly: Record<string, number> = {};
   if (cmpKey !== "none" && Array.isArray(cmp.dailyReturns)) {
-    for (let i = 0; i < payload.dates.length; i++) {
+    for (let i = 0; i < view.dates.length; i++) {
       const r = cmp.dailyReturns[i];
       if (!Number.isFinite(r)) continue;
-      const yr = payload.dates[i].slice(0, 4);
+      const yr = view.dates[i].slice(0, 4);
       benchYearly[yr] = benchYearly[yr] == null ? r : (1 + benchYearly[yr]) * (1 + r) - 1;
     }
   }

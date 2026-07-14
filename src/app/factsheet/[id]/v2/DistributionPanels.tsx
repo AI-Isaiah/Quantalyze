@@ -27,26 +27,33 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 /* -------------------- EOY bars -------------------- */
 
 export function EndOfYearBarsPanel() {
-  const payload = usePayload();
-  const { block: cmp, key: cmpKey } = useActiveComparator();
+  // Phase 103 (MTM-04, root-cause flip): EoY follows the active basis. Both the
+  // strategy per-year (`view.strategyMetrics.yearly` — the bundle's compute() on
+  // the MTM series under mark_to_market) and the comparator daily-return series
+  // (`vcmp.dailyReturns`, aligned on the VIEW's own date axis) come from the view,
+  // so under MTM the bars ride the MTM strategy and the axis-matched benchmark.
+  // Under cash the view returns `payload` by reference (byte-identical).
+  const view = useBasisSeriesView(usePayload());
+  const { key: cmpKey } = useActiveComparator();
+  const vcmp = view.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
-  const hasBench = cmpKey !== "none" && Array.isArray(cmp.dailyReturns);
+  const hasBench = cmpKey !== "none" && Array.isArray(vcmp.dailyReturns);
 
-  // Strategy per-year compounded — already pre-aggregated server-side.
-  const stratByYear = payload.strategyMetrics.yearly;
-  // Comparator per-year — compound the aligned daily-return series client-side.
-  // Doing it here keeps the comparator picker reactive without a payload trip.
+  // Strategy per-year compounded — already pre-aggregated in the basis bundle.
+  const stratByYear = view.strategyMetrics.yearly;
+  // Comparator per-year — compound the aligned daily-return series client-side on
+  // the view's own axis. Doing it here keeps the comparator picker reactive.
   const benchByYear = useMemo(() => {
     const out: Record<string, number> = {};
-    if (!hasBench || !cmp.dailyReturns) return out;
-    for (let i = 0; i < payload.dates.length; i++) {
-      const r = cmp.dailyReturns[i];
+    if (!hasBench || !vcmp.dailyReturns) return out;
+    for (let i = 0; i < view.dates.length; i++) {
+      const r = vcmp.dailyReturns[i];
       if (!Number.isFinite(r)) continue;
-      const yr = payload.dates[i].slice(0, 4);
+      const yr = view.dates[i].slice(0, 4);
       out[yr] = out[yr] == null ? r : (1 + out[yr]) * (1 + r) - 1;
     }
     return out;
-  }, [hasBench, cmp.dailyReturns, payload.dates]);
+  }, [hasBench, vcmp.dailyReturns, view.dates]);
 
   const rows = useMemo(() => {
     const years = new Set<string>([...Object.keys(stratByYear), ...Object.keys(benchByYear)]);
@@ -87,30 +94,30 @@ export function EndOfYearBarsPanel() {
     <figure className="flex flex-col gap-2" style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H + 60}px` }}>
       <header>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
-          {hasBench ? `End-of-Year Returns vs ${cmp.shortName}` : "End-of-Year Returns"}
+          {hasBench ? `End-of-Year Returns vs ${vcmp.shortName}` : "End-of-Year Returns"}
         </h3>
         <p className="text-micro text-text-muted">
           compounded annual returns · scale ±{(maxAbs * 100).toFixed(0)}%
-          {hasBench ? ` · strategy in accent, ${cmp.shortName} in muted` : ""}
+          {hasBench ? ` · strategy in accent, ${vcmp.shortName} in muted` : ""}
         </p>
       </header>
       <ResponsiveChartFrame
         width={VB_W}
         height={VB_H}
         role="img"
-        aria-label={hasBench ? `End-of-year returns by calendar year, strategy vs ${cmp.shortName}` : "End-of-year returns by calendar year"}
+        aria-label={hasBench ? `End-of-year returns by calendar year, strategy vs ${vcmp.shortName}` : "End-of-year returns by calendar year"}
       >
         {/* Legend */}
         <g>
           <rect x={PAD.left} y={6} width={10} height={6} fill="var(--color-accent)" />
           <text x={PAD.left + 14} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
-            {payload.strategyName}
+            {view.strategyName}
           </text>
           {hasBench && (
             <>
               <rect x={PAD.left + 180} y={6} width={10} height={6} fill="var(--color-text-muted)" />
               <text x={PAD.left + 194} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
-                {cmp.name}
+                {vcmp.name}
               </text>
             </>
           )}
