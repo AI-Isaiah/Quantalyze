@@ -44,7 +44,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import services.basis_series as _bs
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
@@ -745,3 +745,253 @@ def test_single_cash_settlement_persist_seam() -> None:
         "persist site would fabricate a series where this phase mandates an honest "
         "absence (A3); heal-deletes (result=None) are exempt"
     )
+
+
+# ===========================================================================
+# Plan 105-04 — the three SINGLE-KEY RUNNER SC-4 dual-run fixtures. The inline
+# analytics_runner compute is GONE; run_csv_strategy_analytics now routes the cash
+# SCALAR through the ONE shared derive with scalar_returns = the exact legacy-
+# conditioned series. Each fixture runs the REAL run_csv_strategy_analytics (no
+# compute patch) against the runner supabase-mock harness and asserts the persisted
+# scalar metrics are DICT-EQUAL to an IN-TEST legacy recompute (compute_all_metrics on
+# the identical conditioned series — the legacy path is deleted, so the test IS the
+# oracle). NEVER a weakened tolerance; the JSON-serialized dicts must match byte-for-
+# byte (json.dumps handles NaN==NaN faithfully — both sides are the SAME computation).
+# ===========================================================================
+
+from services.allocated_capital import metrics_day_basis, parse_returns_denominator_config
+from services.broker_dailies import gap_fill_daily_returns
+from services.metrics import compute_all_metrics, periods_per_year_for_asset_class
+from tests.test_csv_analytics_runner import (
+    _ALLOC_CFG_SIMPLE_ACTIVE,
+    _make_broker_supabase_mock,
+)
+
+_RUNNER_BENCHMARK = patch(
+    "services.analytics_runner.get_benchmark_returns",
+    new=AsyncMock(return_value=(None, True)),
+)
+
+
+def _series_from_rows(rows: list[dict]) -> pd.Series:
+    """Rebuild the pd.Series exactly as run_csv_strategy_analytics does at the load
+    boundary (DatetimeIndex of the ISO dates, float daily_return, name="returns")."""
+    idx = pd.DatetimeIndex([r["date"] for r in rows])
+    vals = [float(r["daily_return"]) for r in rows]
+    return pd.Series(vals, index=idx, name="returns")
+
+
+async def _run_runner(sb: MagicMock, strategy_id: str = "s") -> None:
+    """Run the REAL run_csv_strategy_analytics against a runner supabase mock (no
+    compute patch — the whole point is exercising the actual shared-derive pipeline)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), _RUNNER_BENCHMARK:
+        await run_csv_strategy_analytics(strategy_id)
+
+
+def _runner_scalar_payload(sb: MagicMock) -> dict:
+    """The strategy_analytics scalar/status upsert payload whose status is terminal-
+    SUCCESS (the metrics_json spread lands here via _mark_complete)."""
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c.args[0] for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "the runner must write a terminal-success scalar upsert"
+    return completed[0]
+
+
+def _runner_cash_payload(sb: MagicMock) -> dict | None:
+    """The cash_settlement series JSONB payload from the persist RPC, or None."""
+    for c in sb.rpc.call_args_list:
+        if (
+            c.args[0] == _SERIES_RPC
+            and _CASH_KIND in c.args[1].get("p_kinds", {})
+        ):
+            return c.args[1]["p_kinds"][_CASH_KIND]
+    return None
+
+
+def _metrics_json_equal(scalar_payload: dict, oracle_metrics_json: dict) -> bool:
+    """Byte-identity of the scalar metrics vs the in-test legacy oracle. JSON-serialize
+    both (sort_keys, default allow_nan) so NaN==NaN holds and float bit-patterns compare
+    exactly — this is DICT-EQUAL, NOT a tolerance."""
+    import json
+
+    subset = {k: scalar_payload[k] for k in oracle_metrics_json}
+    return json.dumps(subset, sort_keys=True) == json.dumps(
+        oracle_metrics_json, sort_keys=True
+    )
+
+
+# 15 WEEKDAY-only returns spanning three Mon–Fri weeks (2024-01-01 is a Monday), so the
+# series skips two full weekends (Jan 6/7 + 13/14). Non-degenerate both-sign returns so
+# the std genuinely shifts once the 0.0 weekend fills land.
+_WEEKDAY_DATES = (
+    pd.bdate_range("2024-01-01", periods=15).strftime("%Y-%m-%d").tolist()
+)
+_WEEKDAY_VALS = [
+    0.010, -0.008, 0.012, -0.005, 0.007,
+    0.009, -0.011, 0.004, 0.013, -0.006,
+    0.008, -0.009, 0.011, -0.004, 0.006,
+]
+_USER_CSV_WEEKEND_ROWS = [
+    {"date": d, "daily_return": v} for d, v in zip(_WEEKDAY_DATES, _WEEKDAY_VALS)
+]
+
+
+@pytest.mark.asyncio
+async def test_user_csv_weekend() -> None:
+    """BROADEST SC-4 blast radius: a user CSV (api_key_id NULL) spanning weekends with
+    NO weekend rows. The new-route persisted scalar metrics are DICT-EQUAL to
+    compute_all_metrics(SPARSE series) AND explicitly UNEQUAL to
+    compute_all_metrics(gap_fill(SPARSE)) — the 0.0-weekend-fill divergence is REAL in
+    this fixture, so a silently-degenerate fixture cannot fake the proof.
+
+    Neuter: drop scalar_returns from the runner's derive call (or pass densify_policy
+    other than "sparse") → the scalar densifies over the weekends → the SPARSE equality
+    reddens and the fixture collapses onto the gap-filled branch."""
+    sb = _make_broker_supabase_mock(_USER_CSV_WEEKEND_ROWS, api_key_id=None)
+    await _run_runner(sb)
+
+    # user CSV → NO reindex: the conditioned series is the sparse weekday series verbatim.
+    sparse = _series_from_rows(_USER_CSV_WEEKEND_ROWS)
+    periods = periods_per_year_for_asset_class(None)  # user CSV, no asset_class
+    oracle_sparse = compute_all_metrics(
+        sparse, None,
+        periods_per_year=periods, cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json
+    oracle_filled = compute_all_metrics(
+        gap_fill_daily_returns(sparse), None,
+        periods_per_year=periods, cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json
+
+    scalar = _runner_scalar_payload(sb)
+    # DICT-EQUAL to the SPARSE legacy recompute (byte-identical by construction, D1).
+    assert _metrics_json_equal(scalar, oracle_sparse), (
+        "the new-route user-CSV scalar must be byte-identical to the sparse legacy "
+        "compute (no 0.0 weekend fill) — SC-4 breach"
+    )
+    # The divergence is REAL: the gap-filled recompute dilutes volatility, so the sparse
+    # scalar is explicitly NOT equal to it (a degenerate fixture would make these equal).
+    assert not _metrics_json_equal(scalar, oracle_filled), (
+        "the fixture is degenerate — sparse and gap-filled metrics coincide, so this "
+        "proof would pass even under a diluting 0.0-fill regression"
+    )
+    assert scalar["volatility"] != oracle_filled["volatility"], (
+        "weekend 0.0-fill must shift volatility (the blast-radius the D1 sparse pass "
+        f"kills): sparse={scalar['volatility']!r} filled={oracle_filled['volatility']!r}"
+    )
+    # The persisted series echoes the sparse conditioning tag.
+    cash = _runner_cash_payload(sb)
+    assert cash is not None and cash["conventions"]["densify"] == "sparse"
+
+
+# A broker series that WAS dense [01..05] but whose interior day 03 was a guarded NaN →
+# SKIPPED at write → ABSENT from the stored rows. Reinstated as NaN by the broker dense
+# reindex; the suffix after the break = {04, 05}.
+_BROKER_GUARD_DAY_ROWS = [
+    {"date": "2024-01-01", "daily_return": 0.10},
+    {"date": "2024-01-02", "daily_return": 0.10},
+    # 2024-01-03 ABSENT — the guarded/NaN interior day.
+    {"date": "2024-01-04", "daily_return": 0.20},
+    {"date": "2024-01-05", "daily_return": 0.20},
+]
+
+
+@pytest.mark.asyncio
+async def test_broker_guard_day() -> None:
+    """A BROKER-sourced series (api_key_id set) with an interior guard-NaN day: the
+    new-route scalar metrics are DICT-EQUAL to the legacy dense-reindex-with-NaN compute,
+    the persisted rows EXCLUDE the guard day, and conventions.densify == "broker_nan".
+
+    Neuter: pass densify_policy="sparse" (or drop the broker reindex upstream) → the
+    guard NaN is never reinstated → the headline bridges the break → the DICT-EQUAL vs
+    the dense-reindex oracle reddens."""
+    sb = _make_broker_supabase_mock(
+        _BROKER_GUARD_DAY_ROWS, api_key_id="key-guard", asset_class="crypto",
+    )
+    await _run_runner(sb)
+
+    # broker → reindex to the dense [min,max] calendar so the absent 01-03 becomes NaN
+    # (the EXACT :2272-2277 conditioning the runner applies before the derive).
+    sparse = _series_from_rows(_BROKER_GUARD_DAY_ROWS)
+    dense_idx = pd.date_range(sparse.index.min(), sparse.index.max(), freq="D")
+    conditioned = sparse.reindex(dense_idx)
+    conditioned.name = "returns"
+    periods = periods_per_year_for_asset_class("crypto")  # √365
+    oracle = compute_all_metrics(
+        conditioned, None,
+        periods_per_year=periods, cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json
+
+    scalar = _runner_scalar_payload(sb)
+    assert _metrics_json_equal(scalar, oracle), (
+        "the broker guard-day scalar must be byte-identical to the dense-reindex-with-"
+        "NaN legacy compute — SC-4 breach"
+    )
+    # The persisted sparse rows EXCLUDE the guarded day; densify tag echoes broker_nan.
+    cash = _runner_cash_payload(sb)
+    assert cash is not None
+    row_dates = [r["date"] for r in cash["rows"]]
+    assert "2024-01-03" not in row_dates, (
+        f"the guarded interior day must be ABSENT from the persisted rows: {row_dates!r}"
+    )
+    assert cash["conventions"]["densify"] == "broker_nan"
+
+
+# 15 consecutive daily rows (no gaps → the broker dense reindex is a no-op) so the
+# simple/active override conventions drive the ONLY delta from the geometric/calendar
+# default.
+_ZAVARA_ROWS = [
+    {"date": f"2025-08-{d:02d}", "daily_return": 0.001 if d % 2 else -0.0005}
+    for d in range(1, 16)
+]
+
+
+@pytest.mark.asyncio
+async def test_zavara_simple_active() -> None:
+    """A returns_denominator_config simple/active strategy: the new-route scalar metrics
+    are DICT-EQUAL to the legacy compute under cumulative_method="simple",
+    day_basis="active", and the persisted conventions echo them (plus the √365 crypto
+    clock and the unconditional benchmark identity).
+
+    Neuter: hardcode the derive to geometric/calendar (drop the override threading) →
+    the scalar recomputes under the wrong conventions → the DICT-EQUAL reddens."""
+    sb = _make_broker_supabase_mock(
+        _ZAVARA_ROWS, api_key_id="key-zavara", asset_class="crypto",
+        returns_denominator_config=_ALLOC_CFG_SIMPLE_ACTIVE,
+    )
+    await _run_runner(sb)
+
+    # broker consecutive series → dense reindex is a no-op; conditioned == the series.
+    conditioned = _series_from_rows(_ZAVARA_ROWS)
+    dense_idx = pd.date_range(conditioned.index.min(), conditioned.index.max(), freq="D")
+    conditioned = conditioned.reindex(dense_idx)
+    conditioned.name = "returns"
+    periods = periods_per_year_for_asset_class("crypto")  # √365
+    cfg = parse_returns_denominator_config(_ALLOC_CFG_SIMPLE_ACTIVE)
+    cumulative_method = cfg.cumulative_method            # "simple"
+    day_basis = metrics_day_basis(cfg.metrics_basis)     # "active"
+    oracle = compute_all_metrics(
+        conditioned, None,
+        periods_per_year=periods,
+        cumulative_method=cumulative_method, day_basis=day_basis,
+    ).metrics_json
+
+    scalar = _runner_scalar_payload(sb)
+    assert _metrics_json_equal(scalar, oracle), (
+        "the Zavara simple/active scalar must be byte-identical to the legacy compute "
+        "under the override conventions — SC-4 breach"
+    )
+    cash = _runner_cash_payload(sb)
+    assert cash is not None
+    assert cash["conventions"] == {
+        "periods_per_year": 365,
+        "cumulative_method": "simple",
+        "day_basis": "active",
+        "benchmark": "BTC",
+        "densify": "broker_nan",
+    }, f"the persisted conventions did not echo the Zavara override: {cash['conventions']!r}"
