@@ -13,8 +13,13 @@ four guarantees that keep that write honest:
     prestamp payload (incl. ``metrics_json_by_basis`` — NO ``cash_settlement`` key),
     and the ``enqueue_compute_job`` RPC are DICT-EQUAL — the ONLY delta is the
     additive ``cash_settlement`` entry in ``upsert_strategy_analytics_series_batch``.
-    Because 104-01 dropped the benchmark-fetch hoist, this dual-run captures the
-    ENTIRE Phase-104 production delta.
+    Scope note: both runs execute the new MTM-side ``benchmark_symbol="BTC"`` call, so
+    this dual-run captures the cash-PERSIST delta but is structurally BLIND to the
+    MTM-payload ``conventions.benchmark`` delta vs pre-104. That MTM delta is SC-4-safe
+    by inspection, not by this test: ``parseMtmSeriesPayload``
+    (``src/lib/factsheet/composite-read-path.ts``) consumes only ``rows``/``gap_spans``
+    and never ``conventions`` (no strict schema/version check), and no Python reader
+    consumes it — so the extra ``conventions`` key changes nothing a reader sees.
   * **SC-1 round-trip + coverage mask** (Test 2): the persisted sparse cash rows
     reproduce the FINITE (``pd.notna``) subset of the fixture returns bit-exactly
     (``assert_series_equal(check_exact=True)``); an interior NaN guard day is ABSENT
