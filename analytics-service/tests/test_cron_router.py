@@ -2691,3 +2691,239 @@ class TestCronSyncPsDataDirGuardRemoved:
             "L-1: _ps_collected must still be computed (without the dir() guard) "
             "so blast-radius logging still works"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 106 / D7 — recurring `computing`-row janitor (BB-03)
+# ---------------------------------------------------------------------------
+
+
+def _make_janitor_supabase(
+    *,
+    computing_rows: list[dict[str, Any]],
+    active_jobs: list[dict[str, Any]] | None = None,
+    update_side_effect: BaseException | None = None,
+) -> MagicMock:
+    """Build a MagicMock supabase client for `cron_janitor` tests.
+
+    Two tables are wired to independent chains so the stale-row SELECT, the
+    per-row active-job probe on `compute_jobs`, and the compare-and-set UPDATE
+    on `strategy_analytics` can each be asserted:
+
+      - strategy_analytics SELECT: `.select(...).eq(...).lt(...).execute()`
+        returns `computing_rows` (the stale candidates the janitor reaps).
+      - compute_jobs probe: `.select("id").eq("strategy_id", sid)
+        .in_("status", ...).limit(1).execute()` returns `active_jobs` — a
+        non-empty list means a live job so the row is skipped, not reaped.
+      - strategy_analytics UPDATE: `.update(payload).eq(...).eq(...).execute()`;
+        `update_side_effect` (if set) makes the UPDATE `.execute()` raise so the
+        per-row try/except can be exercised.
+
+    `active_jobs` is the SAME for every sid in a given test — the janitor tests
+    each drive a single candidate row (or two, for the batch-isolation test),
+    so per-sid dispatch is unnecessary.
+    """
+    if active_jobs is None:
+        active_jobs = []
+
+    mock = MagicMock()
+
+    sa_table = MagicMock()
+    sa_table.select.return_value.eq.return_value.lt.return_value.execute.return_value = MagicMock(
+        data=computing_rows
+    )
+    update_chain = MagicMock()
+    if update_side_effect is not None:
+        update_chain.eq.return_value.eq.return_value.execute.side_effect = (
+            update_side_effect
+        )
+    else:
+        update_chain.eq.return_value.eq.return_value.execute.return_value = MagicMock(
+            data=computing_rows
+        )
+    sa_table.update.return_value = update_chain
+
+    cj_table = MagicMock()
+    cj_table.select.return_value.eq.return_value.in_.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=active_jobs
+    )
+
+    def _table(name: str):
+        if name == "strategy_analytics":
+            return sa_table
+        if name == "compute_jobs":
+            return cj_table
+        return MagicMock()
+
+    mock.table.side_effect = _table
+    # Stash the sub-chains so tests can assert on the exact filter calls.
+    mock._sa_table = sa_table
+    mock._cj_table = cj_table
+    mock._update_chain = update_chain
+    return mock
+
+
+class TestCronJanitorReapsStaleComputingRows:
+    """D7 / BB-03: `POST /api/cron-janitor` promotes the one-time
+    `scripts/reset_stuck_computing_rows.py` sweep into a recurring tick that
+    reaps `strategy_analytics` rows stranded at computation_status='computing'.
+
+    Seeded verbatim from the reset script's three-step logic
+    (:56-102): stale-SELECT → active-job column probe → compare-and-set UPDATE.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reap_when_stale_and_no_active_job(self):
+        """A stale computing row with NO non-terminal compute_jobs row is
+        flipped to computation_status='failed' with a janitor-named error and
+        counted as reaped."""
+        mock_supabase = _make_janitor_supabase(
+            computing_rows=[{"strategy_id": "strat-A", "updated_at": "2020-01-01T00:00:00+00:00"}],
+            active_jobs=[],
+        )
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            response = await cron_mod.cron_janitor()
+
+        assert response == {"scanned": 1, "reaped": 1, "skipped_active": 0}
+        # The UPDATE payload flips to 'failed' and names the janitor so the
+        # operator (and the user retrying) can tell a reap apart from a genuine
+        # compute failure.
+        update_payload = mock_supabase._sa_table.update.call_args.args[0]
+        assert update_payload["computation_status"] == "failed"
+        assert "janitor" in update_payload["computation_error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_skip_when_active_job_matched_on_strategy_id_column(self):
+        """The live-onboarding guard. A stale computing row is SKIPPED (never
+        reaped) when a compute_jobs row with a non-terminal status
+        (pending/running/done_pending_children/failed_retry) exists for the
+        SAME strategy_id COLUMN.
+
+        WHY the column probe is sufficient: coherence CHECK
+        `20260710130000_stitch_composite_kind.sql:93` forces every
+        `process_key_long` row to carry a NON-NULL `strategy_id` column, so a
+        live onboarding always matches `.eq("strategy_id", sid)` and can never
+        be reaped mid-flight. The probe must stay a column probe — do NOT
+        extend it to metadata (the race is already closed at the column)."""
+        mock_supabase = _make_janitor_supabase(
+            computing_rows=[{"strategy_id": "strat-live", "updated_at": "2020-01-01T00:00:00+00:00"}],
+            active_jobs=[{"id": "job-1"}],  # a live process_key_long job
+        )
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            response = await cron_mod.cron_janitor()
+
+        assert response == {"scanned": 1, "reaped": 0, "skipped_active": 1}
+        # No reap UPDATE fired — the live job wins.
+        mock_supabase._sa_table.update.assert_not_called()
+        # The probe filtered on the non-terminal status set, matched on the
+        # strategy_id column.
+        in_call = mock_supabase._cj_table.select.return_value.eq.return_value.in_.call_args
+        assert in_call.args[0] == "status"
+        assert set(in_call.args[1]) == {
+            "pending",
+            "running",
+            "done_pending_children",
+            "failed_retry",
+        }
+        eq_call = mock_supabase._cj_table.select.return_value.eq.call_args
+        assert eq_call.args[0] == "strategy_id"
+
+    @pytest.mark.asyncio
+    async def test_reap_update_is_compare_and_set_on_computing_status(self):
+        """Idempotent CAS: the reap UPDATE carries BOTH `.eq("strategy_id", sid)`
+        AND `.eq("computation_status", "computing")`. The second filter means a
+        worker that flips the row to 'complete'/'failed' concurrently wins — the
+        janitor never stomps a row the worker just finished."""
+        mock_supabase = _make_janitor_supabase(
+            computing_rows=[{"strategy_id": "strat-A", "updated_at": "2020-01-01T00:00:00+00:00"}],
+            active_jobs=[],
+        )
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            await cron_mod.cron_janitor()
+
+        update_chain = mock_supabase._update_chain
+        first_eq = update_chain.eq.call_args
+        second_eq = update_chain.eq.return_value.eq.call_args
+        assert first_eq.args == ("strategy_id", "strat-A")
+        assert second_eq.args == ("computation_status", "computing"), (
+            "the reap UPDATE must be a compare-and-set on "
+            "computation_status='computing' so a concurrent worker flip is not "
+            "stomped"
+        )
+
+    @pytest.mark.asyncio
+    async def test_stale_threshold_exceeds_max_watchdog_ceiling(self):
+        """Fresh rows are never selected: the SELECT filters
+        `.lt("updated_at", threshold)` where the threshold is at least the
+        longest watchdog ceiling in the past. The max per-kind watchdog is
+        `process_key_long` = 40 min (`main_worker.py`
+        WATCHDOG_PER_KIND_OVERRIDES), so the threshold MUST be > 40 min ago —
+        otherwise the janitor could race a legitimately-slow in-flight job."""
+        from datetime import datetime, timezone
+
+        mock_supabase = _make_janitor_supabase(computing_rows=[], active_jobs=[])
+
+        before = datetime.now(timezone.utc)
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            response = await cron_mod.cron_janitor()
+
+        assert response == {"scanned": 0, "reaped": 0, "skipped_active": 0}
+        # The SELECT filtered on computation_status='computing' AND a stale
+        # updated_at threshold.
+        eq_call = mock_supabase._sa_table.select.return_value.eq.call_args
+        assert eq_call.args == ("computation_status", "computing")
+        lt_call = mock_supabase._sa_table.select.return_value.eq.return_value.lt.call_args
+        assert lt_call.args[0] == "updated_at"
+        threshold = datetime.fromisoformat(lt_call.args[1])
+        age_minutes = (before - threshold).total_seconds() / 60.0
+        assert age_minutes >= 40, (
+            f"stale threshold is only {age_minutes:.1f} min in the past; it must "
+            "exceed the 40-min process_key_long watchdog ceiling so the janitor "
+            "never reaps a legitimately-slow in-flight job"
+        )
+
+    @pytest.mark.asyncio
+    async def test_per_row_failure_does_not_abort_batch(self):
+        """Mirror the reset script's per-row try semantics: an UPDATE that
+        raises for one candidate is logged and the sweep continues to the next
+        row rather than aborting the whole batch."""
+        mock_supabase = _make_janitor_supabase(
+            computing_rows=[
+                {"strategy_id": "strat-A", "updated_at": "2020-01-01T00:00:00+00:00"},
+                {"strategy_id": "strat-B", "updated_at": "2020-01-01T00:00:00+00:00"},
+            ],
+            active_jobs=[],
+            update_side_effect=RuntimeError("postgres deadlock"),
+        )
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase):
+            with caplog_at_error():
+                response = await cron_mod.cron_janitor()
+
+        # Both rows were attempted; both UPDATEs raised, so nothing was reaped,
+        # but the endpoint still returned a clean summary (no propagation).
+        assert response["scanned"] == 2
+        assert response["reaped"] == 0
+        # Two UPDATE attempts fired (the loop did not abort after the first raise).
+        assert mock_supabase._sa_table.update.call_count == 2
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def caplog_at_error():
+    """Silence expected per-row exception logging in the batch-isolation test
+    (the janitor logs via `logger.exception`; we don't assert on it here)."""
+    import logging
+
+    logger = logging.getLogger("quantalyze.analytics")
+    prior = logger.level
+    logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logger.setLevel(prior)
