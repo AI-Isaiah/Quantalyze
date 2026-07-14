@@ -65,6 +65,25 @@ until Phase 105: routing cash SCALARS through this module before the NaN/gap-fil
 reconciliation would bridge broker guard-day NaN breaks and 0.0-fill sparse user-CSV
 gaps — an SC-4 violation (104-RESEARCH Pitfall 1). Only the series (rows + gap_spans +
 conventions echo, incl. the benchmark identity) is persisted for cash this phase.
+
+Phase 105.1 addendum (teaser preview-only exception, PERMANENT)
+---------------------------------------------------------------
+The sync onboarding pipeline (`routers/process_key.py` — teaser/csv/internal_report)
+DERIVES its preview scalars via `derive_basis_series` but persists NO series row. This
+is a documented PERMANENT exception to the persisted-series half of the invariant — it
+survives Phase 106 and is NOT an open bypass to be "re-discovered" later. The COMPUTE
+half of the LOCKED principle holds fully: the preview scalars are a cache of the
+just-derived series within the SAME call, so no second derivation path exists (this
+kills the second-derivation divergence class for onboarding). What is deliberately
+absent is a persisted series backing those scalars — because there is no series READER.
+Justification (D1, user 2026-07-14): the teaser landing card reads scalars + a
+precomputed cumulative curve, never a series row; and the teaser's shared sentinel
+anchor (`00000000-0000-0000-0000-000000000001`, `status='archived'`, user-less) makes
+any hypothetical persisted row unreadable BY CONSTRUCTION — `fetch_strategy_lazy_metrics`
+requires published-OR-owner, and the fixed `(strategy_id, kind)` PK is collision-prone
+across concurrent teasers. A SUBMITTER-keyed teaser series for lead capture is deferred
+scope (Phase 106 / a dedicated slice — USER 2026-07-14) and MUST NOT key on the archived
+sentinel; that is a separate future concern, not a gap in this invariant.
 """
 from __future__ import annotations
 
