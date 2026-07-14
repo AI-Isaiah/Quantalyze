@@ -44,6 +44,18 @@ export function parseMtmSeriesPayload(raw: unknown): ParsedMtmSeries | null {
     if (typeof ret !== "number" || !Number.isFinite(ret)) continue;
     dailyReturns.push({ date, value: ret });
   }
+  // FIX 4 (IN, mirrors deriveSegmentMarkers build-payload.ts:105-114): a present
+  // `rows` array whose entries partially dropped is a malformed persist (the
+  // Python writer always emits well-formed rows). Silently coercing loses the
+  // signal, so warn — the drop behavior itself is unchanged (recoverable: charts
+  // still render the surviving rows / degrade to cash).
+  if (dailyReturns.length < obj.rows.length) {
+    console.warn("[factsheet] parseMtmSeriesPayload — dropped malformed mtm_daily_returns rows", {
+      total: obj.rows.length,
+      kept: dailyReturns.length,
+      dropped: obj.rows.length - dailyReturns.length,
+    });
+  }
   // Fewer than 2 valid rows can't build a bundle (build-payload's own dedup<2
   // guard would return null anyway) — degrade to no-bundle here so the gate is
   // structural on the read side.
@@ -56,6 +68,15 @@ export function parseMtmSeriesPayload(raw: unknown): ParsedMtmSeries | null {
       const { start, end } = span as { start?: unknown; end?: unknown };
       if (typeof start !== "string" || typeof end !== "string") continue;
       gapSpans.push({ start, end });
+    }
+    // Same signal for a present-but-partially-dropped gap_spans array — a bad mask
+    // silently losing spans would under-report interior coverage gaps.
+    if (gapSpans.length < obj.gap_spans.length) {
+      console.warn("[factsheet] parseMtmSeriesPayload — dropped malformed gap_spans entries", {
+        total: obj.gap_spans.length,
+        kept: gapSpans.length,
+        dropped: obj.gap_spans.length - gapSpans.length,
+      });
     }
   }
   return { dailyReturns, gapSpans };

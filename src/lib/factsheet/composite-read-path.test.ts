@@ -651,6 +651,43 @@ describe("MTM-04 parseMtmSeriesPayload — strict coercion of the untrusted seri
       })!.gapSpans,
     ).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
   });
+
+  it("FIX 4: warns (recoverable) when a present rows/gap_spans array has entries dropped; silent when clean", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // (a) partially-dropped rows → one warn naming the row drop.
+      parseMtmSeriesPayload({
+        ...VALID,
+        rows: [
+          { date: "2025-08-01", return: 0.02 },
+          { date: "", return: 0.01 }, // dropped
+          { date: "2025-08-03", return: -0.04 },
+        ],
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("dropped malformed mtm_daily_returns rows");
+      expect(warn.mock.calls[0]![1]).toMatchObject({ total: 3, kept: 2, dropped: 1 });
+
+      // (b) partially-dropped gap_spans → one warn naming the gap drop.
+      warn.mockClear();
+      parseMtmSeriesPayload({
+        ...VALID,
+        gap_spans: [
+          { start: "2025-08-03", end: "2025-08-04" },
+          { start: 3, end: "x" }, // dropped
+        ],
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("dropped malformed gap_spans entries");
+
+      // (c) fully-clean payload → NO warn (drop behavior unchanged, no false signal).
+      warn.mockClear();
+      parseMtmSeriesPayload(VALID);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 /**
