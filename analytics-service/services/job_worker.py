@@ -4765,9 +4765,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     # Phase 103 (MTM-04, BACKEND FIX 2): persist (or HEAL) the stitched
     # mark_to_market daily-return series row BEFORE the DONE-bearing headline/by-basis
-    # scalar upsert below — matching the single-key route (:3112-3136), which lands
-    # the series before the DONE-gating headline the downstream csv-analytics job
-    # writes. Ordering is load-bearing: the by-basis mark_to_market SCALAR is the F-4
+    # scalar upsert below — matching the single-key broker-derive seam, which (as of
+    # 106-02 / D5) also lands both basis series before the DONE-gating by-basis scalar
+    # prestamp the downstream csv-analytics job then compiles into the factsheet.
+    # Ordering is load-bearing: the by-basis mark_to_market SCALAR is the F-4
     # read gate. This ordering does NOT ELIMINATE the partial-write window — it
     # REVERSES it into the SELF-HEALING direction. If the scalar landed FIRST and a
     # transient series upsert then failed on a re-stitch, the gate would render fresh
