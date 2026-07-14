@@ -977,10 +977,14 @@ async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
     ]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    assert seen_periods == [365], (
-        f"MTM compute_all_metrics received periods_per_year={seen_periods} — a "
-        "crypto/Deribit book MUST annualize on √365 (#597), not the 252 default; "
-        "asset_class was dropped from the single-key _load_strategy select"
+    # Phase 104 added an additive cash derive at the SAME seam that ALSO runs
+    # compute_all_metrics (crypto → √365), so the spy sees TWO entries: MTM (first)
+    # then cash (second). Both MUST be 365 — dropping asset_class → [252, 252] reddens.
+    assert seen_periods == [365, 365], (
+        f"compute_all_metrics received periods_per_year={seen_periods} — a "
+        "crypto/Deribit book MUST annualize both the MTM and cash series on √365 "
+        "(#597), not the 252 default; asset_class was dropped from the single-key "
+        "_load_strategy select"
     )
 
 
@@ -1167,11 +1171,11 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     _real_derive = _bs.derive_basis_series
-    _captured: dict[str, Any] = {}
+    _results: list[Any] = []
 
     def _derive_spy(*a: Any, **k: Any) -> Any:
         r = _real_derive(*a, **k)
-        _captured["result"] = r
+        _results.append(r)
         return r
 
     derive_spy = MagicMock(side_effect=_derive_spy)
@@ -1185,19 +1189,25 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
     ]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    derive_spy.assert_called_once()
-    _args, _kw = derive_spy.call_args
-    pd.testing.assert_series_equal(_args[0], _mtm_series())
-    assert _args[1] is None, "benchmark_rets must be None (patched fetch → (None, True))"
-    assert _kw["periods_per_year"] == 365, "crypto/Deribit MTM annualizes on √365"
-    assert _kw["cumulative_method"] == "geometric"
-    assert _kw["day_basis"] == "calendar"
-    # persist got the EXACT BasisSeriesResult the derive produced — never a
+    # Phase 104 added an additive cash_settlement derive+persist at the SAME seam, so
+    # the shared helper is now called TWICE — MTM (first) then cash (second). The MTM
+    # wiring this test pins is the FIRST call.
+    assert derive_spy.call_count == 2
+    _mtm_call = derive_spy.call_args_list[0]
+    pd.testing.assert_series_equal(_mtm_call.args[0], _mtm_series())
+    assert _mtm_call.args[1] is None, "benchmark_rets must be None (patched fetch → (None, True))"
+    assert _mtm_call.kwargs["periods_per_year"] == 365, "crypto/Deribit MTM annualizes on √365"
+    assert _mtm_call.kwargs["cumulative_method"] == "geometric"
+    assert _mtm_call.kwargs["day_basis"] == "calendar"
+    # persist got the EXACT BasisSeriesResult the MTM derive produced — never a
     # separately-computed object (that would bypass the anti-divergence guard).
-    persist_spy.assert_called_once()
-    _pkw = persist_spy.call_args.kwargs
-    assert _pkw["basis"] == "mark_to_market"
-    assert _pkw["result"] is _captured["result"]
+    assert persist_spy.call_count == 2
+    _mtm_persist = persist_spy.call_args_list[0]
+    assert _mtm_persist.kwargs["basis"] == "mark_to_market"
+    assert _mtm_persist.kwargs["result"] is _results[0]
+    # the SECOND persist is the additive Phase-104 cash series (SERIES-ONLY, dark).
+    _cash_persist = persist_spy.call_args_list[1]
+    assert _cash_persist.kwargs["basis"] == "cash_settlement"
 
 
 @pytest.mark.asyncio
@@ -1233,11 +1243,16 @@ async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SERIES_UNCOMPUTABLE
     )
-    persist_spy.assert_called_once()
-    assert persist_spy.call_args.kwargs["result"] is None, (
+    # The patched derive raises for BOTH the MTM and the additive Phase-104 cash
+    # call, so BOTH persist calls heal (result=None) — MTM (mark_to_market) and cash.
+    assert persist_spy.call_count == 2
+    assert all(c.kwargs["result"] is None for c in persist_spy.call_args_list), (
         "a degraded derive must HEAL the stale series row (result=None), never "
         "persist a stale object next to an authoritative-NULL scalar write"
     )
+    assert {c.kwargs["basis"] for c in persist_spy.call_args_list} == {
+        "mark_to_market", "cash_settlement",
+    }
 
 
 @pytest.mark.asyncio
@@ -1259,7 +1274,18 @@ async def test_single_key_not_attempted_heals_series_row() -> None:
     ]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    persist_spy.assert_called_once()
-    assert persist_spy.call_args.kwargs["result"] is None, (
-        "a not-attempted MTM derive must heal (delete) the series row"
+    # Two persists now fire at the seam: the not-attempted MTM heal (result=None) and
+    # the additive Phase-104 cash series (which DERIVES successfully → result present).
+    assert persist_spy.call_count == 2
+    _mtm_persist = next(
+        c for c in persist_spy.call_args_list if c.kwargs["basis"] == "mark_to_market"
+    )
+    assert _mtm_persist.kwargs["result"] is None, (
+        "a not-attempted MTM derive must heal (delete) the mark_to_market series row"
+    )
+    _cash_persist = next(
+        c for c in persist_spy.call_args_list if c.kwargs["basis"] == "cash_settlement"
+    )
+    assert _cash_persist.kwargs["result"] is not None, (
+        "the additive cash series persists its derived rows (not a heal) on a clean derive"
     )

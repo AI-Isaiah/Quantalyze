@@ -28,6 +28,7 @@ import pytest
 from services.broker_dailies import combine_realized_and_funding
 from services.deribit_txn import deribit_dated_external_flows_usd
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+from services.metrics import periods_per_year_for_asset_class
 from services.nav_twr import NavReconstructionError
 from tests.fixtures.deribit_flow_fixtures import (
     BTC_INDEX_2026_03_14,
@@ -927,3 +928,221 @@ class TestDerivePersistReconcilesAxis:
         assert "eq:strategy_id" not in filters
         assert filters.get("gte:date") == "2024-05-01"
         assert filters.get("lte:date") == "2024-05-03"
+
+
+# ── Phase 104 (BB-01): additive DARK cash_settlement SERIES persist at the seam ──
+# The single-key broker derive now ALSO persists the cash daily SERIES as a new
+# strategy_analytics_series kind ("cash_settlement") beside the Phase-103 MTM block —
+# SERIES-ONLY, additive, zero readers this phase. The authoritative cash SCALARS stay
+# on the legacy analytics_runner path (SC-4 protected). Every assertion is
+# mutation-falsifiable: drop the persist → the cash rpc/heal vanishes; make the
+# identity contingent on the MTM benchmark fetch → Test 2 reddens; leak a
+# cash_settlement key into the prestamp → Test 5 reddens.
+
+
+def _cash_series_payload(capture: dict) -> dict | None:
+    """The persisted cash_settlement series payload (schema/basis/rows/gap_spans/
+    conventions) from the upsert_strategy_analytics_series_batch RPC, or None if the
+    cash series was never upserted."""
+    for name, payload in capture["rpc_calls"]:
+        if name == "upsert_strategy_analytics_series_batch":
+            p_kinds = payload.get("p_kinds", {})
+            if "cash_settlement" in p_kinds:
+                return p_kinds["cash_settlement"]
+    return None
+
+
+def _series_deletes_for_kind(capture: dict, kind: str) -> list[dict]:
+    """strategy_analytics_series DELETEs filtered on the given kind (the heal arm)."""
+    return [
+        d for d in capture["deletes"]
+        if d["table"] == "strategy_analytics_series"
+        and d["filters"].get("eq:kind") == kind
+    ]
+
+
+def _interior_nan_returns() -> pd.Series:
+    """A 4-day dense series with a single INTERIOR guard-day NaN (2024-05-02) —
+    finite days 05-01, 05-03, 05-04, so the sparse cash series carries a clean
+    interior gap_span at 05-02."""
+    idx = pd.DatetimeIndex(["2024-05-01", "2024-05-02", "2024-05-03", "2024-05-04"])
+    return pd.Series([0.01, np.nan, -0.02, 0.03], index=idx, dtype="float64")
+
+
+class TestCashSettlementSeriesPersist:
+    """The additive dark cash-series persist seam."""
+
+    @pytest.mark.asyncio
+    async def test_strategy_mode_persists_cash_settlement_series(self) -> None:
+        """A clean strategy-mode derive fires the batch RPC with a cash_settlement
+        payload whose rows are EXACTLY the finite (pd.notna) csv_daily_returns rows
+        (round-trip identity by construction), whose gap_spans covers the interior
+        guard-day, and whose conventions echo carries the asset-class periods_per_year
+        + geometric/calendar + benchmark:'BTC' UNCONDITIONALLY."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-cash", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-cash", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-cash"}
+        patches = _patches(ctx, key_mode=False, returns=_interior_nan_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        cash = _cash_series_payload(capture)
+        assert cash is not None, "strategy-mode derive must persist a cash_settlement series"
+        assert cash["schema"] == 1
+        assert cash["basis"] == "cash_settlement"
+
+        # rows == the finite csv_daily_returns rows (round-trip identity by construction)
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _n, csv_payload, _oc = csv_upserts[0]
+        csv_rows = {r["date"]: r["daily_return"] for r in csv_payload}
+        cash_rows = {r["date"]: r["return"] for r in cash["rows"]}
+        assert cash_rows == csv_rows == {
+            "2024-05-01": 0.01, "2024-05-03": -0.02, "2024-05-04": 0.03,
+        }
+
+        # gap_spans covers the interior guard-day (2024-05-02).
+        assert cash["gap_spans"] == [{"start": "2024-05-02", "end": "2024-05-02"}]
+
+        # conventions echo: asset-class periods + geometric/calendar + UNCONDITIONAL
+        # benchmark identity (no denominator override on a plain strategy → geometric).
+        assert cash["conventions"]["periods_per_year"] == periods_per_year_for_asset_class(None)
+        assert cash["conventions"]["cumulative_method"] == "geometric"
+        assert cash["conventions"]["day_basis"] == "calendar"
+        assert cash["conventions"]["benchmark"] == "BTC"
+
+    @pytest.mark.asyncio
+    async def test_cash_identity_independent_of_mtm_benchmark_fetch(self) -> None:
+        """Even when the MTM-side get_benchmark_returns('BTC') RAISES, the cash persist
+        still fires AND its conventions echo benchmark=='BTC' — the cash derive passes
+        benchmark_rets=None + an UNCONDITIONAL identity string, never the fetch result.
+        Kills any mutation making the cash identity contingent on the MTM fetch.
+        (Needs the Deribit options path so the MTM benchmark fetch actually runs.)"""
+        from tests.test_mtm_single_key import (
+            _STRATEGY_ID,
+            _apply,
+            _base_patches,
+            _cash_series,
+            _ctx,
+            _mtm_series,
+            _patch_benchmark,
+            _recording_ledger,
+            _report,
+        )
+
+        ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+        reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+        ledger_mock, _calls = _recording_ledger(reports)
+        combine = MagicMock(side_effect=[
+            (_cash_series(), {"used_heuristic_capital": False}),
+            (_mtm_series(), {"used_heuristic_capital": False}),
+        ])
+        with _apply(_base_patches(
+            ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+        ) + [_patch_benchmark(raises=True)]):
+            result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+
+        assert result.outcome == DispatchOutcome.DONE
+        cash = _cash_series_payload(capture)
+        assert cash is not None, (
+            "cash_settlement series must persist even when the MTM benchmark fetch raises"
+        )
+        assert cash["conventions"]["benchmark"] == "BTC", (
+            "the cash identity is an unconditional string, never contingent on the fetch"
+        )
+
+    @pytest.mark.asyncio
+    async def test_derive_reject_heals_cash_series(self) -> None:
+        """When derive_basis_series raises ValueError, the cash persist runs the DELETE
+        (heal) arm (result=None) and the job still completes DONE — cash csv rows +
+        prestamp + enqueue unaffected."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-h", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-h", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-h"}
+        patches = _patches(ctx, key_mode=False, returns=_interior_nan_returns())
+        raise_derive = patch(
+            "services.basis_series.derive_basis_series",
+            new=MagicMock(side_effect=ValueError("cash derive reject")),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], raise_derive:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # cash heal: a DELETE on strategy_analytics_series filtered kind=cash_settlement
+        cash_heals = _series_deletes_for_kind(capture, "cash_settlement")
+        assert len(cash_heals) == 1, (
+            f"a rejected cash derive must HEAL (delete) the stale series row; "
+            f"got {capture['deletes']!r}"
+        )
+        assert cash_heals[0]["filters"].get("eq:strategy_id") == "strat-h"
+        assert _cash_series_payload(capture) is None  # heal never upserts a cash row
+        # cash neighbors unaffected: csv rows written + compute enqueued.
+        assert [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert [c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"]
+
+    @pytest.mark.asyncio
+    async def test_key_mode_writes_no_cash_series(self) -> None:
+        """A key-mode derive fires NO strategy_analytics_series write of any kind —
+        neither a cash upsert nor a heal delete (the early-return pin at :2925)."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-km", "exchange": "binance", "user_id": "alloc-1"},
+            strategy_row=None,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-km"}
+        patches = _patches(ctx, key_mode=True, returns=_two_day_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        assert _cash_series_payload(capture) is None
+        assert not any(
+            name == "upsert_strategy_analytics_series_batch"
+            for name, _ in capture["rpc_calls"]
+        )
+        assert [d for d in capture["deletes"] if d["table"] == "strategy_analytics_series"] == []
+
+    @pytest.mark.asyncio
+    async def test_cash_persist_leaves_prestamp_and_csv_byte_unchanged(self) -> None:
+        """The additive cash persist NEVER perturbs the cash neighbors: the strategy_
+        analytics prestamp still writes metrics_json_by_basis (NO cash_settlement key
+        ever) and the csv_daily_returns delete+upsert are the pre-change shape. The
+        cash series lands ONLY in strategy_analytics_series, never in strategy_analytics
+        or csv_daily_returns."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-b", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-b", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-b"}
+        patches = _patches(ctx, key_mode=False, returns=_two_day_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        # A cash series WAS persisted (sanity — the seam fired).
+        assert _cash_series_payload(capture) is not None
+
+        # Prestamp: metrics_json_by_basis is authoritatively NULL on this ccxt derive
+        # (unchanged) and carries NO cash_settlement key.
+        sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa_upserts) == 1
+        _n, prestamp, _oc = sa_upserts[0]
+        assert "metrics_json_by_basis" in prestamp
+        assert prestamp["metrics_json_by_basis"] is None, (
+            "the prestamp by-basis write must stay byte-unchanged (no cash_settlement scalar)"
+        )
+
+        # csv_daily_returns byte-unchanged: one span delete (strategy axis) + one
+        # upsert of the two clean days.
+        csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
+        assert len(csv_deletes) == 1
+        assert csv_deletes[0]["filters"].get("eq:strategy_id") == "strat-b"
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _n2, csv_payload, on_conflict = csv_upserts[0]
+        assert on_conflict == "strategy_id,date"
+        assert sorted(r["date"] for r in csv_payload) == ["2024-05-01", "2024-05-02"]

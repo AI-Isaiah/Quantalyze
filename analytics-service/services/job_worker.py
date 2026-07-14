@@ -49,7 +49,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -63,6 +63,13 @@ from fastapi import HTTPException
 from postgrest.base_request_builder import APIResponse
 from postgrest.types import CountMethod
 from supabase import Client
+
+if TYPE_CHECKING:
+    # Phase 104: the post-branch cash-series persist reads denominator_config
+    # UNCONDITIONALLY (initialized at the branch-outer scope like mtm_returns), so
+    # the outer-scope default needs the type name — imported type-only to avoid a
+    # runtime import (the value is still parsed function-locally in the deribit arm).
+    from services.allocated_capital import ReturnsDenominatorConfig
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -2036,6 +2043,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     mtm_returns: pd.Series | None = None
     mtm_gated_reason: str | None = None
     mtm_attempted: bool = False
+    # Phase 104 (BB-01): the returns-denominator override is parsed ONLY in the
+    # deribit arm (2149), but the post-branch cash-series persist resolves the cash
+    # conventions from it UNCONDITIONALLY on EVERY strategy-mode path (ccxt included,
+    # where no override exists → None → geometric/calendar). Initialize it here at
+    # the branch-outer scope so a ccxt derive never hits an unbound local.
+    denominator_config: "ReturnsDenominatorConfig | None" = None
     try:
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -3140,6 +3153,71 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         )
 
     await db_execute(_persist_mtm_series)
+
+    # ── Phase 104 (BB-01): additive DARK cash_settlement SERIES persist ──────────
+    # SERIES-ONLY. Persist the cash daily-return SERIES as a new
+    # strategy_analytics_series kind ("cash_settlement") beside the MTM block above.
+    # This is a DARK additive write — NO reader until Phase 105/106 collapse the
+    # scalar route onto it. The AUTHORITATIVE cash SCALARS stay on the legacy
+    # run_csv_strategy_analytics path (analytics_runner.py); routing cash SCALARS
+    # through derive_basis_series before the NaN/gap-fill reconciliation would bridge
+    # broker guard-day NaN breaks and 0.0-fill sparse user-CSV gaps — an SC-4
+    # violation (104-RESEARCH Pitfall 1). Only the series (rows/gap_spans/conventions)
+    # is persisted here.
+    #
+    # `returns` is the SAME dense post-terminus series the csv_daily_returns rows were
+    # built from (:2842), so _drop_nonfinite inside the helper reproduces EXACTLY those
+    # finite rows — series round-trip identity by construction.
+    #
+    # benchmark_rets=None (positional): NO benchmark FETCH on the cash path — a returns
+    # fetch feeds ONLY compute_all_metrics→metrics_json, which persist_basis_series
+    # DISCARDS (it persists rows/gap_spans/conventions only). SC-5 needs ONLY the
+    # benchmark IDENTITY STRING, so benchmark_symbol="BTC" is passed UNCONDITIONALLY —
+    # every cash row carries the identity regardless of any MTM-side fetch outcome (a
+    # fetch-contingent identity would drop on a transient BTC-price outage and Phase 105
+    # could not reproduce α/β). Conventions are resolved with the SAME expressions as
+    # the MTM block (Pitfall 2) but computed separately (the MTM locals exist only when
+    # mtm_returns is not None).
+    #
+    # A3 honesty: strategies whose sync_trades tail enqueues legacy compute_analytics
+    # (BROKER_DAILIES_VIA_FUNDING off) never reach this seam → they get NO
+    # cash_settlement series row this phase — an HONEST ABSENCE (dark write, zero
+    # readers), never a fabricated fill. Do NOT add a persist to run_compute_analytics_job
+    # (a 106-slated dark-path re-entry point); unified coverage lands with the 105/106
+    # route collapse.
+    _cash_periods = periods_per_year_for_asset_class(
+        ctx.strategy_row.get("asset_class")
+        if isinstance(ctx.strategy_row, dict)
+        else None
+    )
+    if denominator_config is not None:
+        _cash_cumulative = denominator_config.cumulative_method
+        _cash_day_basis = metrics_day_basis(denominator_config.metrics_basis)
+    else:
+        _cash_cumulative = "geometric"
+        _cash_day_basis = "calendar"
+    try:
+        _cash_basis_result: BasisSeriesResult | None = derive_basis_series(
+            returns,
+            None,
+            periods_per_year=_cash_periods,
+            cumulative_method=_cash_cumulative,
+            day_basis=_cash_day_basis,
+            benchmark_symbol="BTC",
+        )
+    except ValueError:
+        # Heal arm (Pitfall 5): effectively unreachable given the <2-day early exit
+        # above, kept for the discipline — a rejected derive DELETEs any stale row.
+        _cash_basis_result = None
+
+    def _persist_cash_series(
+        result: BasisSeriesResult | None = _cash_basis_result,
+    ) -> None:
+        persist_basis_series(
+            ctx.supabase, strategy_id, basis="cash_settlement", result=result,
+        )
+
+    await db_execute(_persist_cash_series)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
     def _enqueue_csv_analytics() -> None:
