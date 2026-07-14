@@ -163,20 +163,25 @@ function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
  * Phase 103 (MTM-04) — the ONE per-basis series derivation. Both the cash series
  * and the persisted MTM series flow through THIS function, so every dailies-
  * derivable panel (chart tracks + rolling + worst-10 + comparators + heatmaps +
- * quantiles / streaks / calmarByYear / bootstrapCI / styleDrift / stressWindows)
- * is a pure function of the basis-selected daily series — ONE derivation, never a
- * parallel implementation (the SC-4 snapshot pins that this factoring is
- * byte-neutral for cash).
+ * quantiles / streaks / calmarByYear / bootstrapCI / styleDrift / stressWindows +
+ * correlations / correlationMatrix) is a pure function of the basis-selected daily
+ * series — ONE derivation, never a parallel implementation (the SC-4 snapshot pins
+ * that this factoring is byte-neutral for cash).
  *
- * The function derives its OWN dates + benchmark alignments (btcRet/spxRet on the
- * bundle dates) so cash and MTM each get a COHERENT per-basis axis (Pitfall-1: an
+ * The function derives its OWN dates + benchmark alignments (btc/eth/spx/gld/ief on
+ * the bundle dates) so cash and MTM each get a COHERENT per-basis axis (Pitfall-1: an
  * MTM axis under cash-dated comparator arrays misaligns after a divergent gap).
  *
  * `comparatorAnnVol`: cash passes the OVERLAID `strategyMetrics.ann_vol` (so the
  * comparator volMatched stays byte-identical to the persisted cash overlay); MTM
  * omits it so the comparator uses the bundle's own computed vol (honest MTM).
- * EXTERNAL-DATA panels (correlations/correlationMatrix) are NOT derived here — they
- * need other-asset series with no MTM equivalent and stay cash top-level.
+ *
+ * Phase 103 (MTM-04, correction): correlations + correlationMatrix are derived
+ * HERE per basis too. They are NOT external — a correlation is
+ * corr(strategy_returns, asset_returns): the benchmark legs are fixed INPUT series,
+ * but the STRATEGY leg is the basis-selected dailies, so cash→MTM moves ρ. Nothing
+ * bypasses the backbone; the ONLY thing that stays cash top-level is the api-only
+ * synthesized allocator/signatures demo (basis-invariant by construction).
  */
 function deriveSeriesBundle(
   clipped: DailyReturn[],
@@ -184,11 +189,12 @@ function deriveSeriesBundle(
     periodsPerYear: number;
     isArithmetic: boolean;
     markets: string[];
+    strategyName: string;
     comparatorAnnVol?: number;
     missingSegments?: FactsheetCommon["missingSegments"];
   },
 ): BasisSeriesBundle {
-  const { periodsPerYear, isArithmetic, markets } = args;
+  const { periodsPerYear, isArithmetic, markets, strategyName } = args;
   const dates = clipped.map(d => d.date);
   const stratRet = clipped.map(d => d.value);
 
@@ -208,6 +214,38 @@ function deriveSeriesBundle(
   // Benchmark alignments on THIS bundle's own date axis.
   const btcRet = alignReturns(BTC_DAILY, dates);
   const spxRet = alignReturns(SPX_DAILY, dates);
+  const ethRet = alignReturns(ETH_DAILY, dates);
+  const gldRet = alignReturns(GLD_DAILY, dates);
+  const iefRet = alignReturns(IEF_DAILY, dates);
+
+  // Phase 103 (MTM-04, correction) — correlations + the pairwise matrix are
+  // derived HERE, per basis, NOT top-level cash. A correlation is
+  // corr(strategy_returns, asset_returns): the benchmark legs are fixed INPUT
+  // series, but the STRATEGY leg is the basis-selected dailies, so cash→MTM moves
+  // ρ. Nothing bypasses the backbone. Pearson is a standard stat (no valuation
+  // math). Under MTM the asset legs realign onto the MTM axis (Pitfall-1: same
+  // axis as the strategy leg), so every cell compares like-for-like windows.
+  const correlations: CorrelationRow[] = [
+    { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
+    { name: "ETH", rho: pearsonCorr(stratRet, ethRet) },
+    { name: "S&P 500", rho: pearsonCorr(stratRet, spxRet) },
+    { name: "Gold", rho: pearsonCorr(stratRet, gldRet) },
+    { name: "US 10Y (IEF)", rho: pearsonCorr(stratRet, iefRet) },
+  ];
+  // Full pairwise matrix — strategy short-name on the diagonal head so the matrix
+  // reads as a self-similarity heatmap with one corner for the strategy.
+  const matrixSeries: Array<{ name: string; rets: number[] }> = [
+    { name: strategyName.length > 12 ? strategyName.slice(0, 11) + "…" : strategyName, rets: stratRet },
+    { name: "BTC", rets: btcRet },
+    { name: "ETH", rets: ethRet },
+    { name: "SPX", rets: spxRet },
+    { name: "Gold", rets: gldRet },
+    { name: "IEF", rets: iefRet },
+  ];
+  const correlationLabels = matrixSeries.map(s => s.name);
+  const correlationMatrix: number[][] = matrixSeries.map((a, i) =>
+    matrixSeries.map((b, j) => (i === j ? 1 : pearsonCorr(a.rets, b.rets))),
+  );
 
   // Cash overrides with the persisted-overlay ann_vol; MTM uses its own.
   const annVol = args.comparatorAnnVol ?? fullMetrics.ann_vol;
@@ -255,6 +293,8 @@ function deriveSeriesBundle(
     styleDrift: computeStyleDrift(stratRet, dates),
     stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", markets),
     strategyMetrics: bundleMetrics,
+    correlations,
+    correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
   };
 }
 
@@ -363,36 +403,16 @@ export function buildFactsheetPayload(
   // (NEW-C20-01)
   const ingestSource: IngestSource = strategy.ingestSource ?? "csv";
 
-  const correlations: CorrelationRow[] = [
-    { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
-    { name: "ETH", rho: pearsonCorr(stratRet, ethRet) },
-    { name: "S&P 500", rho: pearsonCorr(stratRet, spxRet) },
-    { name: "Gold", rho: pearsonCorr(stratRet, gldRet) },
-    { name: "US 10Y (IEF)", rho: pearsonCorr(stratRet, iefRet) },
-  ];
-
-  // Full pairwise matrix — strategy short-name on the diagonal head so the
-  // matrix reads as a self-similarity heatmap with one corner for the strategy.
-  const matrixSeries: Array<{ name: string; rets: number[] }> = [
-    { name: strategy.name.length > 12 ? strategy.name.slice(0, 11) + "…" : strategy.name, rets: stratRet },
-    { name: "BTC", rets: btcRet },
-    { name: "ETH", rets: ethRet },
-    { name: "SPX", rets: spxRet },
-    { name: "Gold", rets: gldRet },
-    { name: "IEF", rets: iefRet },
-  ];
-  const labels = matrixSeries.map(s => s.name);
-  const matrix: number[][] = matrixSeries.map((a, i) =>
-    matrixSeries.map((b, j) => (i === j ? 1 : pearsonCorr(a.rets, b.rets))),
-  );
-
   // Phase 103 (MTM-04) — the cash series bundle. The comparator's volMatched rides
   // the OVERLAID strategyMetrics.ann_vol so it stays byte-identical to the persisted
   // cash overlay (SC-4). missingSegments stays the composite cash gap-spans opt.
+  // correlations/correlationMatrix now come FROM this bundle (per-basis, MTM-04
+  // correction) — the cash bundle reproduces the exact top-level values byte-for-byte.
   const cashBundle = deriveSeriesBundle(clipped, {
     periodsPerYear,
     isArithmetic,
     markets: strategy.markets,
+    strategyName: strategy.name,
     comparatorAnnVol: strategyMetrics.ann_vol,
     missingSegments: opts?.missingSegments,
   });
@@ -413,6 +433,7 @@ export function buildFactsheetPayload(
           periodsPerYear,
           isArithmetic,
           markets: strategy.markets,
+          strategyName: strategy.name,
           // comparatorAnnVol omitted → the MTM comparator uses the MTM series'
           // own computed vol (honest MTM; no persisted cash overlay applies).
           missingSegments: deriveSegmentMarkers({ gap_spans: opts.mtmSeries.gapSpans }).missingSegments,
@@ -423,9 +444,11 @@ export function buildFactsheetPayload(
 
   // Fields shared by both ingest arms. The discriminated FactsheetPayload (B6)
   // appends the synthesized api-only panels onto this for "api" strategies. The
-  // series-derived fields come from `cashBundle` (the ONE derivation cash + MTM
-  // share); EXTERNAL-DATA panels (correlations/correlationMatrix) + strategyMetrics
-  // stay top-level cash. Key ORDER is preserved verbatim so cash stays byte-identical.
+  // series-derived fields (INCLUDING correlations/correlationMatrix — MTM-04
+  // correction: the strategy leg follows the basis) come from `cashBundle`, the ONE
+  // derivation cash + MTM share; only strategyMetrics stays top-level cash (the
+  // KpiStrip's persisted-scalar overlay owns MTM there, Phase 102). Key ORDER is
+  // preserved verbatim so cash stays byte-identical.
   const common: FactsheetCommon = {
     strategyId: strategy.id,
     strategyName: strategy.name,
@@ -461,8 +484,8 @@ export function buildFactsheetPayload(
     bootstrapCI: cashBundle.bootstrapCI,
     monthlyReturns: cashBundle.monthlyReturns,
     dailyHeatmap: cashBundle.dailyHeatmap,
-    correlations,
-    correlationMatrix: { labels, matrix },
+    correlations: cashBundle.correlations,
+    correlationMatrix: cashBundle.correlationMatrix,
     stressWindows: cashBundle.stressWindows,
     quantiles: cashBundle.quantiles,
     // Phase 90 — composite marker/basis fields. Optional-absent when opts

@@ -391,15 +391,22 @@ export type RollWindowPick = {
  * + comparators (IN the bundle purely so the MTM axis and the comparator arrays
  * share ONE coherent date axis — Pitfall-1) + the two heatmap panels + EVERY
  * dailies-derivable statistics panel (quantiles, streaks, calmarByYear,
- * bootstrapCI, styleDrift, stressWindows).
+ * bootstrapCI, styleDrift, stressWindows) + correlations / correlationMatrix
+ * (MTM-04 correction: NOT external — a correlation regresses the basis-selected
+ * strategy leg against fixed benchmark INPUT series, so ρ follows the basis).
  *
- * EXCLUDES (stay top-level CASH by construction — the client merge passes them
- * through as cash with ZERO per-panel branching): correlations / correlationMatrix
- * (EXTERNAL-DATA — need BTC/ETH/SPX/Gold/IEF series with no MTM equivalent), and
- * strategyMetrics (the KpiStrip's persisted-scalar overlay owns MTM there, Phase
- * 102). stressWindows is the MIXED panel: its strategy columns follow MTM, its
- * BTC-benchmark column is basis-invariant BY CONSTRUCTION (the same BTC series
- * aligned to the MTM date axis — no new math, no cash-held-for-honesty).
+ * EXCLUDES (stays top-level CASH by construction — the client merge passes it
+ * through with ZERO per-panel branching): strategyMetrics (the KpiStrip's
+ * persisted-scalar overlay owns MTM there, Phase 102 — the extended-distribution
+ * scalars READ this bundle's own strategyMetrics via the view under MTM, but the
+ * KpiStrip's seven persisted headline scalars stay overlay-owned). stressWindows
+ * is the MIXED panel: its strategy columns follow MTM, its BTC-benchmark column is
+ * basis-invariant BY CONSTRUCTION (the same BTC series aligned to the MTM date axis
+ * — no new math, no cash-held-for-honesty). NOTE (carry-forward for the backbone
+ * arc 104-106): the benchmark-family scalars (α/β/correlation) are OUTSIDE the
+ * round-trip guarantee — re-deriving them from the persisted MTM rows ALONE needs
+ * the benchmark series too (the persist conventions do not capture benchmark
+ * identity).
  */
 export type BasisSeriesBundle = {
   dates: string[];
@@ -437,6 +444,13 @@ export type BasisSeriesBundle = {
    *  KpiStrip (Phase-102 persisted overlay); this is the series-recomputed cache the
    *  extended-metrics panel reads. */
   strategyMetrics: ComputeSummary;
+  /** Phase 103 (MTM-04, correction): strategy ρ vs each benchmark, derived per
+   *  basis. The benchmark legs are fixed INPUT series but the strategy leg is the
+   *  basis-selected dailies, so ρ follows cash→MTM (nothing bypasses the backbone). */
+  correlations: CorrelationRow[];
+  /** Phase 103 (MTM-04, correction): the full pairwise matrix, per basis (same
+   *  rationale — the strategy row/column follows the basis). */
+  correlationMatrix: CorrelationMatrixPayload;
 };
 
 /**

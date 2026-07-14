@@ -25,6 +25,18 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // unchanged; only the composer passes scenarioMode={true}.
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
+  // Phase 103 (MTM-04, correction) — §IV joint metrics (α/β/corr/IR/treynor/…) all
+  // REGRESS the strategy leg, so under mark_to_market they must use the MTM strategy
+  // returns. The per-basis bundle already computes the comparator joint from the
+  // basis-selected strat returns + the benchmark series (buildComparatorBlock →
+  // jointMetrics), so we read the joint from the VIEW here — no new math, no persisted
+  // overlay needed. Byte-identical under cash (the view returns payload by reference)
+  // and MTM-derived under mark_to_market. §I/§II benchmark columns deliberately stay
+  // on the cash `cmp` so they stay consistent with the cash-headline strategy column
+  // beside them (avoids a mixed-basis Main-Metrics table); §IV is a standalone
+  // strategy-relative section, self-consistent under either basis.
+  const view = useBasisSeriesView(payload);
+  const jointCmp = view.comparators[cmpKey];
   const m = payload.strategyMetrics;
   const b = cmp.summary;
   // shortName is "—" when no comparator selected — Panel.benchHeader treats
@@ -148,9 +160,9 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <TermsPanel />
       </EditorialSection>
 
-      {cmp.joint && (
+      {jointCmp.joint && (
         <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
-          <BenchmarkMetricsBody joint={cmp.joint} />
+          <BenchmarkMetricsBody joint={jointCmp.joint} />
         </EditorialSection>
       )}
     </aside>

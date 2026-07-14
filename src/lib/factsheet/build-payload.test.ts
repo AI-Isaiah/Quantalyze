@@ -155,10 +155,12 @@ describe("MTM-04 — seriesByBasis.mark_to_market bundle emission", () => {
     expect(bundle!.styleDrift).toBeDefined();
     expect(bundle!.stressWindows).toBeDefined();
 
-    // EXTERNAL-DATA panels are NOT in the bundle (stay cash top-level).
-    expect("correlations" in bundle!).toBe(false);
-    expect("correlationMatrix" in bundle!).toBe(false);
-    // …and they DO still exist on the cash top-level.
+    // Phase 103 (MTM-04 correction): correlations + correlationMatrix are NOW derived
+    // INTO the bundle (the strategy leg regresses the basis-selected dailies, so ρ
+    // follows the basis — nothing bypasses the backbone). They still exist on the cash
+    // top-level too (the cash bundle reproduces them for `common`).
+    expect(bundle!.correlations.length).toBeGreaterThan(0);
+    expect(bundle!.correlationMatrix.labels.length).toBeGreaterThan(0);
     expect(payload.correlations.length).toBeGreaterThan(0);
     expect(payload.correlationMatrix.labels.length).toBeGreaterThan(0);
   });
@@ -200,6 +202,10 @@ describe("MTM-04 — falsifiable: dailies-derivable panels FOLLOW the MTM basis"
     expect(JSON.stringify(bundle.calmarByYear)).not.toBe(JSON.stringify(payload.calmarByYear));
     expect(JSON.stringify(bundle.streaks)).not.toBe(JSON.stringify(payload.streaks));
     expect(JSON.stringify(bundle.styleDrift)).not.toBe(JSON.stringify(payload.styleDrift));
+    // Phase 103 (MTM-04 correction): correlations follow too — the MTM strategy leg
+    // regresses different dailies, so ρ vs each benchmark differs from cash top-level.
+    expect(JSON.stringify(bundle.correlations)).not.toBe(JSON.stringify(payload.correlations));
+    expect(JSON.stringify(bundle.correlationMatrix)).not.toBe(JSON.stringify(payload.correlationMatrix));
 
     // stressWindows: BOTH populate (same date span), but the strategy column
     // (stratReturn) is recomputed from the MTM returns → differs.

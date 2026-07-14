@@ -106,13 +106,14 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  * returns a `useMemo`'d `{...payload, ...bundle}` merge. The bundle carries the
  * MTM-basis clones of every dailies-derivable field (dates axis, the three
  * chart tracks, rolling, worst-10, comparators, the two heatmaps, quantiles,
- * streaks, calmarByYear, bootstrapCI, styleDrift, stressWindows + the per-basis
- * `missingSegments` mask). EXTERNAL-DATA fields (`correlations`,
- * `correlationMatrix`) and the KpiStrip's `strategyMetrics` are NOT in the
- * bundle, so the spread passes them through as CASH with ZERO per-panel
- * branching (103-03 established this elegance). `segmentBoundaries` is likewise
- * NOT in the bundle, so the composite key-handoff seams inherit the shared
- * basis-invariant top-level value.
+ * streaks, calmarByYear, bootstrapCI, styleDrift, stressWindows, correlations,
+ * correlationMatrix + the bundle's own `strategyMetrics` (extended scalars) + the
+ * per-basis `missingSegments` mask). MTM-04 correction: correlations /
+ * correlationMatrix are IN the bundle now (the strategy leg follows the basis), so
+ * the spread makes them follow MTM. The KpiStrip's persisted headline
+ * `strategyMetrics` overlay is the ONE thing the merge does NOT touch (Phase 102
+ * owns MTM there). `segmentBoundaries` is likewise NOT in the bundle, so the
+ * composite key-handoff seams inherit the shared basis-invariant top-level value.
  *
  * Pure context + memo — keeps the GUARD-04 no-storage discipline (this file
  * never touches storage/URL/history; pinned by basis-context.test.tsx Test 7).

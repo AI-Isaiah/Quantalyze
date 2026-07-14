@@ -330,10 +330,11 @@ function Kpi({ label, value, tone }: { label: string; value: string; tone: "mute
 /* -------------------- Correlation strip -------------------- */
 
 export function CorrelationStripPanel() {
-  // Phase 103 (MTM-04): correlations are EXTERNAL-DATA (need BTC/ETH/SPX/Gold/IEF
-  // series with no MTM equivalent) → NOT in the bundle, so the view-merge passes
-  // them through as CASH under BOTH bases with zero branching. No basis label is
-  // added (honesty by construction: the panel physically carries cash values).
+  // Phase 103 (MTM-04, correction): correlations FOLLOW the active basis. A
+  // correlation is corr(strategy_returns, benchmark_returns) — the benchmark legs
+  // are fixed INPUT series, but the STRATEGY leg is the basis-selected dailies, so
+  // ρ moves cash→MTM (nothing bypasses the backbone). The per-basis bundle carries
+  // correlations now, so this view-read follows MTM with zero panel branching.
   const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
   const rows = view.correlations.filter(r => Number.isFinite(r.rho));
@@ -444,8 +445,9 @@ export function CorrelationStripPanel() {
  * the matrix doubles as a small data table.
  */
 export function CorrelationsMatrixPanel() {
-  // Phase 103 (MTM-04): EXTERNAL-DATA (see CorrelationStripPanel) → passes through
-  // as CASH under both bases via the view-merge, no basis label.
+  // Phase 103 (MTM-04, correction): FOLLOWS the active basis (see
+  // CorrelationStripPanel) — the strategy row/column regresses the basis-selected
+  // dailies, so the view-merge makes it follow MTM.
   const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
   const { labels, matrix } = view.correlationMatrix;

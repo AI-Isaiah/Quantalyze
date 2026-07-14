@@ -341,17 +341,19 @@ describe("FactsheetBody — Phase 102 single-key options MTM toggle", () => {
 /**
  * Phase 103 (MTM-04) — the KEYSTONE falsifiable per-basis SERIES test. This is the
  * test that did NOT exist in Phase 102 (Nyquist): it proves the CHARTS and every
- * DAILIES-DERIVABLE panel read the MTM bundle under mark_to_market, while the
- * EXTERNAL-DATA panels (correlations) stay cash — falsifiable BOTH ways:
+ * DAILIES-DERIVABLE panel — INCLUDING correlations (MTM-04 correction: the strategy
+ * leg regresses the basis-selected dailies, so ρ follows the basis) — read the MTM
+ * bundle under mark_to_market. Falsifiable BOTH ways:
  *   - neuter the useBasisSeriesView merge (return payload always) → the charts +
  *     dailies-derivable panels stay cash under MTM → the MTM sentinels vanish → RED.
- *   - a wrongly-following external panel (correlations changing under MTM) → RED
- *     the other way (the SENTINEL correlation would no longer match cash).
+ *   - correlations NOT following (bundle omits them) → RED the other way (the MTM
+ *     sentinel correlation would be missing under MTM).
  *
  * The fixture's MTM bundle carries DISTINGUISHABLE sentinels the cash top-level
  * cannot produce: a shorter 200-day axis, a single MTM-only gap span
- * ("5d — no data"), a calmar-by-year row for the impossible year "1999", and a
- * P5 quantile of exactly -9.0% ("P5 -9.0%").
+ * ("5d — no data"), a calmar-by-year row for the impossible year "1999", a
+ * P5 quantile of exactly -9.0% ("P5 -9.0%"), and an MTM-only correlation
+ * ("SENTINEL_MTM_BTC") that REPLACES the cash "SENTINEL_BTC" under mark_to_market.
  */
 function bundleFromScenario(p: FactsheetPayload) {
   return {
@@ -394,13 +396,21 @@ function bundleFromScenario(p: FactsheetPayload) {
     bootstrapCI: { ...p.bootstrapCI, n: 180 },
     styleDrift: p.styleDrift,
     stressWindows: p.stressWindows,
+    // Phase 103 (MTM-04 correction) sentinel: correlations FOLLOW the basis (the
+    // strategy leg regresses the basis-selected dailies). The MTM-only ρ label
+    // ("SENTINEL_MTM_RHO") REPLACES the cash "SENTINEL_BTC" under mark_to_market;
+    // the matrix carries an MTM-only diagonal label ("MTMASSET"). If correlations
+    // wrongly stayed cash (bundle omits them) → these sentinels missing under MTM → RED.
+    correlations: [{ name: "SENTINEL_MTM_RHO", rho: -0.91 }],
+    correlationMatrix: { labels: ["S", "MTMASSET"], matrix: [[1, -0.91], [-0.91, 1]] },
   };
 }
 
 // (h) single-key options, MTM available WITH a full per-basis SERIES bundle whose
 //     values are distinguishable from the cash top-level (distinct axis + gap +
-//     sentinel calmar year + sentinel P5). Also injects a SENTINEL cash
-//     correlation (external-data — never in the bundle) to pin the passthrough.
+//     sentinel calmar year + sentinel P5). The cash top-level carries "SENTINEL_BTC"
+//     correlation; the MTM bundle carries "SENTINEL_MTM_RHO" — under mark_to_market
+//     the correlation strip must SWAP to the MTM sentinel (MTM-04 correction).
 function fixtureSingleKeyMtmBundle(): FactsheetPayload {
   const cash = base(); // 300 days
   const mtm = buildScenarioFactsheetPayload({
@@ -416,15 +426,57 @@ function fixtureSingleKeyMtmBundle(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// (i) §IV benchmark-joint fixture: an ACTIVE BTC comparator carrying a joint under
+//     BOTH bases. The cash comparator joint (alpha +11.00%) and the MTM bundle's
+//     comparator joint (alpha +420.00%, beta 3.33, IR 6.66) are distinguishable, so
+//     §IV must SWAP to the MTM joint under mark_to_market (it regresses the MTM
+//     strategy leg). Distinct sentinels avoid collision with the 9.87 rolling-Sharpe.
+const CASH_JOINT = {
+  alpha: 0.11, beta: 1.11, corr: 0.5, r2: 0.25, info_ratio: 0.22,
+  treynor: 0.1, tracking_error: 0.05, up_capture: 1.1, down_capture: 0.9,
+};
+const MTM_JOINT = {
+  alpha: 4.2, beta: 3.33, corr: -0.9, r2: 0.81, info_ratio: 6.66,
+  treynor: 0.5, tracking_error: 0.07, up_capture: 1.5, down_capture: 0.4,
+};
+function fixtureSingleKeyMtmJoint(): FactsheetPayload {
+  const cash = base();
+  const mtm = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(200, 0.004),
+    benchmark: null,
+  }) as unknown as FactsheetPayload;
+  const mtmBundle = bundleFromScenario(mtm);
+  return {
+    ...cash,
+    activeComparator: "btc",
+    comparators: {
+      ...cash.comparators,
+      btc: { ...cash.comparators.btc, joint: CASH_JOINT },
+    },
+    metricsByBasis: { mark_to_market: MTM },
+    mtmGate: { available: true },
+    seriesByBasis: {
+      mark_to_market: {
+        ...mtmBundle,
+        comparators: {
+          ...mtmBundle.comparators,
+          btc: { ...mtmBundle.comparators.btc, joint: MTM_JOINT },
+        },
+      },
+    },
+  } as unknown as FactsheetPayload;
+}
+
 describe("FactsheetBody — Phase 103 MTM-04 per-basis SERIES (charts + panels follow)", () => {
   it("KEYSTONE: charts + dailies-derivable panels follow the MTM bundle; external panels stay cash (falsifiable BOTH ways)", () => {
     const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
 
-    // Default cash: the MTM sentinels are ABSENT; the external correlation is present.
+    // Default cash: the MTM sentinels are ABSENT; the cash correlation is present.
     expect(container.textContent).not.toContain("5d — no data");
     expect(container.textContent).not.toContain("1999");
     expect(container.textContent).not.toContain("P5 -9.0%");
     expect(container.textContent).toContain("SENTINEL_BTC");
+    expect(container.textContent).not.toContain("SENTINEL_MTM_RHO");
 
     // Toggle to mark_to_market.
     fireEvent.click(getByText("Mark-to-market"));
@@ -440,10 +492,13 @@ describe("FactsheetBody — Phase 103 MTM-04 per-basis SERIES (charts + panels f
     expect(container.textContent).toContain("1999");
     expect(container.textContent).toContain("P5 -9.0%");
 
-    // (1c) EXTERNAL panel stays cash: correlations pass through UNCHANGED under MTM
-    //      (falsifiable the other way — a bundle wrongly carrying correlations
-    //      would drop the sentinel). No MTM-implying label is added to it.
-    expect(container.textContent).toContain("SENTINEL_BTC");
+    // (1c) CORRELATIONS FOLLOW MTM (MTM-04 correction): the correlation strip SWAPS
+    //      from the cash "SENTINEL_BTC" to the bundle's "SENTINEL_MTM_RHO", and the
+    //      matrix shows the MTM-only "MTMASSET" label. Falsifiable the other way — a
+    //      bundle omitting correlations (passthrough) would keep the cash sentinel.
+    expect(container.textContent).toContain("SENTINEL_MTM_RHO");
+    expect(container.textContent).toContain("MTMASSET");
+    expect(container.textContent).not.toContain("SENTINEL_BTC");
   });
 
   it("cash unchanged + toggling back restores cash (the MTM sentinels disappear)", () => {
@@ -549,5 +604,22 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(ext.textContent).toContain("-9.00%"); // P5 row
     expect(ext.textContent).toContain("+8.00%"); // P95 row
     expect(ext.textContent).toContain("0.89"); // Tail Ratio == |P95/|P5||
+  });
+
+  it("correction: §IV benchmark α/β/IR follow MTM (the joint regresses the MTM strategy leg)", () => {
+    const { getByText } = renderBody(fixtureSingleKeyMtmJoint());
+    const benchSection = () =>
+      getByText(/Benchmark —/).closest("section") as HTMLElement;
+    // Cash: §IV shows the cash joint sentinels (alpha +11.00%); the MTM ones absent.
+    expect(benchSection().textContent).toContain("+11.00%"); // cash alpha
+    expect(benchSection().textContent).not.toContain("+420.00%");
+    fireEvent.click(getByText("Mark-to-market"));
+    const s = benchSection();
+    // MTM: §IV reads view.comparators[cmp].joint (bundle-computed from MTM strat
+    // returns + benchmark). Neuter (§IV → cash payload.comparators joint) → cash → RED.
+    expect(s.textContent).toContain("+420.00%"); // MTM alpha (ann)
+    expect(s.textContent).toContain("3.33"); // MTM beta
+    expect(s.textContent).toContain("6.66"); // MTM information ratio
+    expect(s.textContent).not.toContain("+11.00%"); // cash alpha gone
   });
 });
