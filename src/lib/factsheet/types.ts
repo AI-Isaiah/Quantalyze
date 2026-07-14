@@ -602,9 +602,11 @@ export type FactsheetCommon = {
    * absent when no persisted MTM series feeds the build → the object serializes
    * away and the cash payload is BYTE-IDENTICAL (SC-4). Present only
    * `mark_to_market` in Phase 103; the client (Plan 04) picks the active-basis
-   * bundle via `useBasis()` and view-merges it over the cash top-level. External
-   * panels (correlations/correlationMatrix) are NOT in the bundle, so the merge
-   * passes them through as cash with zero per-panel branching.
+   * bundle via `useBasis()` and view-merges it over the cash top-level. The bundle
+   * carries EVERY dailies-derivable panel INCLUDING correlations / correlationMatrix
+   * (MTM-04 correction — the strategy leg regresses the basis-selected dailies, so ρ
+   * follows the basis; see {@link BasisSeriesBundle}). The KpiStrip's seven persisted
+   * headline scalars are the only surface the merge does NOT own (Phase 102).
    */
   seriesByBasis?: { mark_to_market?: BasisSeriesBundle };
 };

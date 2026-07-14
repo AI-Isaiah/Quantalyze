@@ -765,9 +765,12 @@ const LEVERAGE_CAVEAT =
 function KpiStrip() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
-  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE and only
-  // here. Cash returns strategyMetrics untouched → single-key is bit-identical
-  // (the existing kpistrip pins prove it). α/IR + MetricsColumn stay cash.
+  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE via the
+  // persisted overlay. Cash returns strategyMetrics untouched → single-key is
+  // bit-identical (the existing kpistrip pins prove it). Phase 103 (F3/F5) UPDATE:
+  // the earlier "α/IR + MetricsColumn stay cash" note is RETIRED — MetricsColumn now
+  // follows the active basis (view.strategyMetrics), and α/β/IR follow the view's
+  // comparator joint (below), consistent with §IV.
   // Phase 90.5 (LEV-01): the ONE consumer swap. useLeveragedMetrics returns the
   // basis metrics UNTOUCHED at L=1 (byte-identity; the frozen kpistrip pins prove
   // it) and a client recompute of the SAME scalars at L!=1. items[] read m.*
