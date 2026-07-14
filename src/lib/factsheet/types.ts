@@ -429,6 +429,14 @@ export type BasisSeriesBundle = {
   bootstrapCI: BootstrapCIPayload;
   styleDrift: StyleDriftPayload | null;
   stressWindows: StressWindowPayload;
+  /** Phase 103 (MTM-04 follow-through, Finding A): the full scalar summary computed
+   *  FROM this basis's daily series — the extended distribution scalars (skew /
+   *  kurtosis / VaR / CVaR / omega / profit-factor / pain / ulcer / …) are pure
+   *  functions of the dailies, so they follow the active basis via `view.
+   *  strategyMetrics`. The seven persisted HEADLINE scalars are still owned by the
+   *  KpiStrip (Phase-102 persisted overlay); this is the series-recomputed cache the
+   *  extended-metrics panel reads. */
+  strategyMetrics: ComputeSummary;
 };
 
 /**

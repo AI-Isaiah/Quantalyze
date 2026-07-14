@@ -378,7 +378,13 @@ function bundleFromScenario(p: FactsheetPayload) {
     // cumulative chart's gap seam is the falsifiable "charts followed" proof.
     missingSegments: [{ start: "2023-03-01", end: "2023-03-05", kind: "gap" as const, days: 5 }],
     // Sentinel quantiles: P5 = -9.0% is far outside the calm cash distribution.
+    // Tail Ratio (P95/|P5|) = |0.08 / -0.09| = 0.888… → "0.89" — a checkable
+    // arithmetic identity against the P5/P95 rows shown (Finding A).
     quantiles: { p05: -0.09, p25: -0.02, p50: 0.0234, p75: 0.03, p95: 0.08, min: -0.2, max: 0.2, mean: 0.01 },
+    // Phase 103 Finding A sentinel: an extended distribution scalar (skew = -7.77)
+    // the calm cash series can never produce, plus a profit-factor feeding the
+    // common-sense ratio. If ExtendedMetrics reverts to cash strategyMetrics → gone.
+    strategyMetrics: { ...p.strategyMetrics, skew: -7.77, profit_factor: 2 },
     streaks: p.streaks,
     // Sentinel year the cash series (all 2023) can never produce.
     calmarByYear: [{ year: "1999", ret: 0.42, max_dd: -0.1, calmar: 4.2, days: 250 }],
@@ -525,5 +531,23 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     // MTM: the bundle's bootstrap n=180 (<252) fires the reliability warning.
     // Neuter (BootstrapCIPanel lowN → view.strategyMetrics.n = cash 300) → RED.
     expect(container.textContent).toContain("drawn from 180 observations");
+  });
+
+  it("Finding A: extended distribution scalars + tail-ratio follow MTM (tail == P95/|P5| of the shown rows)", () => {
+    const { getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    const extSection = () =>
+      getByText("Extended Metrics").closest("section") as HTMLElement;
+    // Cash: the sentinel skew is absent.
+    expect(extSection().textContent).not.toContain("-7.77");
+    fireEvent.click(getByText("Mark-to-market"));
+    const ext = extSection();
+    // Extended scalars follow MTM (skew sentinel from the bundle's strategyMetrics).
+    // Neuter (strip strategyMetrics from the bundle) → cash skew → RED.
+    expect(ext.textContent).toContain("-7.77");
+    // The shown P5/P95 rows and the Tail Ratio are arithmetically consistent:
+    // Tail Ratio = |P95 / P5| = |0.08 / -0.09| = 0.89.
+    expect(ext.textContent).toContain("-9.00%"); // P5 row
+    expect(ext.textContent).toContain("+8.00%"); // P95 row
+    expect(ext.textContent).toContain("0.89"); // Tail Ratio == |P95/|P5||
   });
 });

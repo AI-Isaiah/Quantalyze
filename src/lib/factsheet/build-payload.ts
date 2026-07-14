@@ -215,6 +215,12 @@ function deriveSeriesBundle(
   const { wins, losses } = streakLengths(stratRet);
   const MAX_LEN = 14;
 
+  // Phase 103 (MTM-04 follow-through, Finding A): the full scalar summary for THIS
+  // basis's series. eq/dd are re-derived per-basis above (arithmetic vs geometric),
+  // so strip them to match the top-level ComputeSummary shape. The extended
+  // distribution scalars (skew/kurt/VaR/CVaR/omega/…) read off this via view.
+  const { eq: _bundleEq, dd: _bundleDd, ...bundleMetrics } = fullMetrics;
+
   return {
     dates,
     strategyReturns: stratRet,
@@ -248,6 +254,7 @@ function deriveSeriesBundle(
     bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
     styleDrift: computeStyleDrift(stratRet, dates),
     stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", markets),
+    strategyMetrics: bundleMetrics,
   };
 }
 

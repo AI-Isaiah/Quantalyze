@@ -412,15 +412,22 @@ function CumulativeReturnsPanel() {
  * one place: skew, kurtosis, VaR/CVaR, win/loss asymmetry, profit factor.
  */
 function ExtendedMetricsPanel() {
-  // Phase 103 (MTM-04): the quantile rows (P5/P95/Median daily) follow the active
-  // basis via `view.quantiles`; `strategyMetrics` is NOT in the bundle, so the
-  // skew/kurtosis/VaR/tail rows pass through as CASH (the KpiStrip owns MTM for
-  // headline scalars, Phase 102). NOTE: this panel is therefore MIXED-basis under
-  // MTM — the composite rail eyebrow (MetricsColumnWithBasis) discloses that the
-  // summary scalar metrics here stay cash. Flagged for design in 103-04-SUMMARY.
+  // Phase 103 (MTM-04 follow-through, Finding A): the quantile rows (P5/P95/Median)
+  // AND the extended distribution scalars (skew/kurtosis/VaR/CVaR/omega/profit-
+  // factor/pain/ulcer/…) are pure functions of the daily series, so they all follow
+  // the active basis — `view.strategyMetrics` is now the bundle's series-recomputed
+  // scalar cache under MTM (the seven persisted HEADLINE scalars stay KpiStrip-owned).
   const view = useBasisSeriesView(usePayload());
   const m = view.strategyMetrics;
   const q = view.quantiles;
+  // Tail Ratio is LABELLED "P95/|P5|", so it must equal exactly that ratio of the
+  // SAME (basis-selected) quantile rows shown below — deriving it from `q` closes the
+  // checkable arithmetic contradiction (the old `m.tail_ratio` used a floor-index
+  // percentile that disagreed with the interpolated P5/P95 rows). Common-sense ratio
+  // (tail × profit-factor) rides the same derived tail so the panel stays internally
+  // consistent under both bases.
+  const tailRatio = q.p05 < 0 ? Math.abs(q.p95 / q.p05) : null;
+  const commonSenseRatio = tailRatio != null ? tailRatio * m.profit_factor : null;
   return (
     <Panel title="Extended Metrics">
       <Kpm>
@@ -433,8 +440,8 @@ function ExtendedMetricsPanel() {
         <Row label="Median (daily)" value={pct(q.p50, true)} bench="" />
         <Row label="Profit Factor" value={num(m.profit_factor)} bench="" />
         <Row label="Omega (θ=0)" value={num(m.omega_ratio)} bench="" />
-        <Row label="Tail Ratio (P95/|P5|)" value={num(m.tail_ratio)} bench="" />
-        <Row label="Common-sense Ratio" value={num(m.common_sense_ratio)} bench="" />
+        <Row label="Tail Ratio (P95/|P5|)" value={num(tailRatio)} bench="" />
+        <Row label="Common-sense Ratio" value={num(commonSenseRatio)} bench="" />
         <Row label="Recovery Factor" value={num(m.recovery_factor)} bench="" accent={m.recovery_factor != null && m.recovery_factor >= 3} />
         <Row label="Pain Index" value={pct(m.pain_index)} bench="" />
         <Row label="Ulcer Index" value={pct(m.ulcer_index)} bench="" />
