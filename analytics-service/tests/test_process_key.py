@@ -1325,6 +1325,408 @@ def test_process_key_teaser_injects_anchor_when_strategy_id_missing(client):
     assert "matched_strategy_id" in body
 
 
+# ---------------------------------------------------------------------------
+# Phase 105.1-01 — sync-pipeline derive swap (compute-unified, persist-nothing).
+#
+# The teaser/csv/internal_report return-based scalars (twr/sharpe/ytd/
+# max_drawdown) are routed through derive_basis_series (the ONE backbone
+# compute path) instead of the off-backbone EquityCurveBuilder. Trade-level
+# stats (total_pnl/trade_count/win_rate) still come from the builder (D5).
+# Crypto venues annualize √365 (#597 / D2). NO series row is persisted (D1).
+# ---------------------------------------------------------------------------
+
+
+def _daily_pnl_dicts(pnls, start="2024-03-01"):
+    """Build plain daily_pnl trade dicts (the _trade_to_dict-identity shape,
+    process_key.py:261-271) spanning consecutive calendar days in ONE year.
+
+    Feeding fetch_raw these exact dicts makes the in-test
+    trades_to_daily_returns recompute byte-identical to production's `returns`
+    (C1): fetch_raw returns dicts, _trade_to_dict passes dicts through
+    unchanged, so production and the test derive the same series.
+    """
+    import datetime
+
+    base = datetime.date.fromisoformat(start)
+    out = []
+    for i, pnl in enumerate(pnls):
+        d = base + datetime.timedelta(days=i)
+        out.append(
+            {
+                "timestamp": f"{d.isoformat()}T00:00:00+00:00",
+                "order_type": "daily_pnl",
+                "side": "buy" if pnl >= 0 else "sell",
+                "price": abs(float(pnl)),
+            }
+        )
+    return out
+
+
+def _sentinel_snapshot():
+    """A REAL MetricsSnapshot with 9.9 sentinels in the four return-based
+    fields (so a passing wiring test PROVES the derive override replaced them,
+    not merely that the helper exists) + real trade-level values (D5)."""
+    from services.ingestion.adapter import MetricsSnapshot
+
+    return MetricsSnapshot(
+        sharpe=9.9,
+        twr=9.9,
+        ytd=9.9,
+        max_drawdown=9.9,
+        total_pnl=550.0,
+        trade_count=10,
+        win_rate=0.7,
+    )
+
+
+def _make_sync_adapter(fetch_rows, snapshot):
+    adapter = MagicMock()
+    from services.ingestion.adapter import ValidationResult
+
+    adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=True,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    adapter.fetch_raw = AsyncMock(return_value=fetch_rows)
+    adapter.compute_metrics = MagicMock(return_value=snapshot)
+    adapter.compute_fingerprint = MagicMock(
+        return_value=MagicMock(to_jsonb=MagicMock(return_value={}))
+    )
+    adapter.reconstruct_positions = AsyncMock(return_value=[])
+    return adapter
+
+
+def _captured_metrics_snapshot(fake):
+    """Return the metrics_snapshot dict from the metrics_captured transition."""
+    for c in fake.rpc.call_args_list:
+        if not c.args or c.args[0] != "transition_strategy_verification":
+            continue
+        payload = c.args[1]
+        if payload.get("p_new_status") == "metrics_captured":
+            return payload["p_metadata"]["metrics_snapshot"]
+    return None
+
+
+def _run_sync_pipeline(client, fake, adapter, *, flow_type, source, matched=None):
+    """POST /process-key through the sync pipeline with the standard patches
+    (copied from test_process_key_teaser_injects_anchor_when_strategy_id_missing).
+    Returns the FastAPI response; the caller reads captured RPC payloads off `fake`.
+    """
+    import services.encryption as _enc_mod
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=adapter,
+    ), patch(
+        "services.strategy_matching.find_matched_strategy",
+        return_value=matched,
+    ), patch.object(
+        _enc_mod, "get_kek", return_value=b"0" * 32,
+    ), patch.object(
+        _enc_mod, "encrypt_credentials", return_value={"ciphertext": "stub"},
+    ):
+        return client.post(
+            "/process-key",
+            json={
+                "flow_type": flow_type,
+                "source": source,
+                "context": {
+                    "api_key": "k",
+                    "api_secret": "s",
+                    "email": "test@example.com",
+                    "exchange": source,
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+
+# The pnl profile below has non-zero volatility, so √365 and √252 Sharpe
+# differ (W2), and mixes wins/losses so max_drawdown is non-trivial (C/golden).
+_PNL_PROFILE = [120.0, -80.0, 200.0, 150.0, -50.0, 300.0, -120.0, 90.0, 250.0, -60.0]
+
+
+def test_teaser_derive_wiring_equality_and_override(client):
+    """Test W (flagship): the persisted twr/sharpe/ytd/max_drawdown EQUAL
+    derive_basis_series(returns).metrics_json on the SAME series, and NONE of
+    them equals the 9.9 builder sentinel — proving the derive call site
+    actually overrides the off-backbone builder scalars (kills the
+    helper-exists-but-uninvoked neuter). Trade-level stats keep builder values.
+    """
+    import pandas as pd  # noqa: F401
+    from services.basis_series import derive_basis_series
+    from services.transforms import trades_to_daily_returns
+
+    rows = _daily_pnl_dicts(_PNL_PROFILE)
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-w")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    r = _run_sync_pipeline(
+        client, fake, adapter, flow_type="teaser", source="okx", matched=None
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "published"
+
+    snap = _captured_metrics_snapshot(fake)
+    assert snap is not None
+
+    # In-test recompute — C1: same dicts → _trade_to_dict-identity → same series.
+    returns = trades_to_daily_returns(rows, account_balance=None)
+    result = derive_basis_series(
+        returns,
+        None,
+        periods_per_year=365,  # okx → crypto → √365 (#597 / D2)
+        cumulative_method="geometric",
+        day_basis="calendar",
+    )
+    mj = result.metrics_json
+
+    assert snap["twr"] == mj["cumulative_return"]
+    assert snap["sharpe"] == mj["sharpe"]
+    # FLAG A: ytd is NESTED under metrics_json["metrics_json"], NOT top-level.
+    assert snap["ytd"] == mj["metrics_json"]["ytd"]
+    assert snap["max_drawdown"] == mj["max_drawdown"]
+
+    # Override proof: none of the four still carries the 9.9 builder sentinel.
+    for k in ("twr", "sharpe", "ytd", "max_drawdown"):
+        assert snap[k] != 9.9, f"{k} still holds the builder sentinel"
+
+    # D5: trade-level stats are still the builder values (not derived).
+    assert snap["total_pnl"] == 550.0
+    assert snap["trade_count"] == 10
+    assert snap["win_rate"] == 0.7
+
+
+def test_teaser_derive_crypto_uses_365_not_252(client):
+    """Test W2 (D2 / FLAG C): the persisted Sharpe equals the √365 derive and
+    is UNEQUAL to the √252 derive on the same series (crypto → √365 per #597)."""
+    from services.basis_series import derive_basis_series
+    from services.transforms import trades_to_daily_returns
+
+    rows = _daily_pnl_dicts(_PNL_PROFILE)
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-w2")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    r = _run_sync_pipeline(
+        client, fake, adapter, flow_type="teaser", source="okx"
+    )
+    assert r.status_code == 200, r.text
+    snap = _captured_metrics_snapshot(fake)
+
+    returns = trades_to_daily_returns(rows, account_balance=None)
+    sharpe_365 = derive_basis_series(
+        returns, None, periods_per_year=365,
+        cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json["sharpe"]
+    sharpe_252 = derive_basis_series(
+        returns, None, periods_per_year=252,
+        cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json["sharpe"]
+
+    assert snap["sharpe"] == sharpe_365
+    assert snap["sharpe"] != sharpe_252
+
+
+def test_teaser_equity_curve_from_derived_series(client):
+    """Test C (D1 honesty condition c): the persisted equity_curve is a cumprod
+    walk over the derive's series_rows ({"date","value"}), NOT the old raw
+    (1+returns).cumprod() with timestamp keys."""
+    from services.basis_series import derive_basis_series
+    from services.transforms import trades_to_daily_returns
+
+    rows = _daily_pnl_dicts(_PNL_PROFILE)
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-c")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    r = _run_sync_pipeline(
+        client, fake, adapter, flow_type="teaser", source="okx"
+    )
+    assert r.status_code == 200, r.text
+    snap = _captured_metrics_snapshot(fake)
+
+    returns = trades_to_daily_returns(rows, account_balance=None)
+    result = derive_basis_series(
+        returns, None, periods_per_year=365,
+        cumulative_method="geometric", day_basis="calendar",
+    )
+    expected = []
+    val = 1.0
+    for row in result.series_rows:
+        val *= 1 + row["return"]
+        expected.append({"date": row["date"], "value": float(val)})
+
+    assert snap["equity_curve"] == expected
+
+
+def test_derive_return_scalars_reads_nested_ytd():
+    """Test A (FLAG A pin, unit): _derive_return_scalars reads ytd from the
+    NESTED metrics_json["metrics_json"]["ytd"]; a top-level scalars["ytd"]
+    KeyErrors. If metrics.py ever flattens ytd, this reddens loudly."""
+    import pandas as pd
+    from routers.process_key import _derive_return_scalars
+    from services.basis_series import derive_basis_series
+
+    idx = pd.date_range("2024-01-05", periods=6, freq="D").as_unit("us")
+    series = pd.Series([0.01, -0.02, 0.03, 0.015, -0.01, 0.02], index=idx)
+
+    four, _curve = _derive_return_scalars(series, "crypto")
+    result = derive_basis_series(
+        series, None, periods_per_year=365,
+        cumulative_method="geometric", day_basis="calendar",
+    )
+    assert four["ytd"] == result.metrics_json["metrics_json"]["ytd"]
+    # ytd must NOT be a top-level metrics_json key (the nested-read pin).
+    assert "ytd" not in result.metrics_json
+
+
+def test_resolve_asset_class_venue_and_csv():
+    """Test R (FLAG C resolver, unit): crypto venues resolve WITHOUT touching
+    supabase; csv reads strategies.asset_class; a failed/empty lookup → None."""
+    from routers.process_key import _resolve_asset_class
+
+    for venue in ("okx", "binance", "bybit"):
+        fake = MagicMock()
+        assert _resolve_asset_class(venue, "s1", fake) == "crypto"
+        fake.table.assert_not_called()
+
+    # csv → SELECT asset_class FROM strategies WHERE id = strategy_id.
+    fake_csv = MagicMock()
+    chain = (
+        fake_csv.table.return_value.select.return_value.eq.return_value.maybe_single.return_value
+    )
+    chain.execute.return_value = MagicMock(data={"asset_class": "traditional"})
+    assert _resolve_asset_class("csv", "s1", fake_csv) == "traditional"
+    fake_csv.table.assert_called_with("strategies")
+
+    # Empty row → None (→ periods_per_year_for_asset_class(None) = 252).
+    fake_empty = MagicMock()
+    (
+        fake_empty.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value
+    ) = MagicMock(data=None)
+    assert _resolve_asset_class("csv", "s1", fake_empty) is None
+
+    # Raising lookup → None (fail-soft).
+    fake_raise = MagicMock()
+    (
+        fake_raise.table.return_value.select.return_value.eq.return_value.maybe_single.return_value.execute.side_effect
+    ) = Exception("boom")
+    assert _resolve_asset_class("csv", "s1", fake_raise) is None
+
+
+def test_derive_return_scalars_propagates_valueerror_on_lt2_finite():
+    """Test D(a) (D6, unit): a 2-row series with 1 NaN (<2 FINITE post-sanitize)
+    propagates derive's ValueError — the caller maps it to the degrade arm."""
+    import pandas as pd
+    from routers.process_key import _derive_return_scalars
+
+    idx = pd.date_range("2024-01-05", periods=2, freq="D").as_unit("us")
+    series = pd.Series([0.01, float("nan")], index=idx)
+    with pytest.raises(ValueError):
+        _derive_return_scalars(series, "crypto")
+
+
+def test_teaser_degrade_to_nulls_on_derive_valueerror(client):
+    """Test D(b) (D6, route): a derive ValueError lands on the degrade arm —
+    the four return-based scalars persist as None plus the five legacy null
+    keys, response still 200/published (never a 500)."""
+    rows = _daily_pnl_dicts(_PNL_PROFILE)
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-db")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    import services.encryption as _enc_mod
+
+    with patch(
+        "routers.process_key.is_unified_backbone_active",
+        new=AsyncMock(return_value=True),
+    ), patch(
+        "routers.process_key.get_supabase", return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter", return_value=adapter,
+    ), patch(
+        "routers.process_key._derive_return_scalars",
+        side_effect=ValueError("fewer than 2 finite daily returns"),
+    ), patch.object(
+        _enc_mod, "get_kek", return_value=b"0" * 32,
+    ), patch.object(
+        _enc_mod, "encrypt_credentials", return_value={"ciphertext": "stub"},
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "api_key": "k", "api_secret": "s",
+                    "email": "test@example.com", "exchange": "okx",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "published"
+    snap = _captured_metrics_snapshot(fake)
+    for k in ("twr", "sharpe", "ytd", "max_drawdown"):
+        assert snap[k] is None, f"{k} must degrade to None on derive ValueError"
+    for k in ("return_24h", "return_mtd", "return_ytd", "equity_curve", "matched_strategy_id"):
+        assert snap[k] is None
+
+
+def test_teaser_degrade_to_nulls_on_single_row(client):
+    """Test D(c) (D6, route): a single daily_pnl row (len<2 pre-check) also
+    yields the four return-based scalars as None."""
+    rows = _daily_pnl_dicts([120.0])
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-teaser-dc")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    r = _run_sync_pipeline(
+        client, fake, adapter, flow_type="teaser", source="okx"
+    )
+    assert r.status_code == 200, r.text
+    snap = _captured_metrics_snapshot(fake)
+    for k in ("twr", "sharpe", "ytd", "max_drawdown"):
+        assert snap[k] is None
+
+
+def test_derive_swap_is_flow_agnostic_internal_report(client):
+    """Test F (D4): flow_type=internal_report, source=binance drives the SAME
+    derived scalars (same wiring equality) — the swap serves the shared block,
+    not a teaser fork (anti-cosplay doctrine intact)."""
+    from services.basis_series import derive_basis_series
+    from services.transforms import trades_to_daily_returns
+
+    rows = _daily_pnl_dicts(_PNL_PROFILE)
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-ir-f")
+    adapter = _make_sync_adapter(rows, _sentinel_snapshot())
+
+    r = _run_sync_pipeline(
+        client, fake, adapter, flow_type="internal_report", source="binance"
+    )
+    assert r.status_code == 200, r.text
+    snap = _captured_metrics_snapshot(fake)
+
+    returns = trades_to_daily_returns(rows, account_balance=None)
+    mj = derive_basis_series(
+        returns, None, periods_per_year=365,  # binance → crypto → √365
+        cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json
+    assert snap["twr"] == mj["cumulative_return"]
+    assert snap["sharpe"] == mj["sharpe"]
+    assert snap["ytd"] == mj["metrics_json"]["ytd"]
+    assert snap["max_drawdown"] == mj["max_drawdown"]
+
+
 def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
     """API-3 regression: flow_type='csv', step='finalize' lands here without
     a strategy_id (the strategies row hasn't been created yet). Pre-fix this
