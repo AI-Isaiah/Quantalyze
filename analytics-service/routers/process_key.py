@@ -342,7 +342,16 @@ def _resolve_asset_class(
             data = getattr(resp, "data", None)
             if data:
                 return data.get("asset_class")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # Fail-soft to 252 (L2, Fable red team) — but log it: a transient
+            # lookup failure for a crypto CSV strategy silently understates the
+            # preview Sharpe by ~1.204× (√252 vs √365) vs finalize, with no
+            # other signal.
+            log.warning(
+                "process_key.resolve_asset_class_failed",
+                error=str(exc)[:200],
+                strategy_id=strategy_id,
+            )
             return None
     return None
 
@@ -1040,8 +1049,18 @@ async def process_key(
                     returns,
                     _resolve_asset_class(body.source, strategy_id, supabase),
                 )
-            except ValueError:
+            except ValueError as exc:
                 # D6: <2 FINITE returns after sanitize → same degrade arm as len<2.
+                # Fail-loud (M2, Fable red team): compute_all_metrics also raises
+                # ValueError on BUG-class conditions (non-monotonic index, unknown
+                # convention, a pandas/quantstats regression) — without this line a
+                # real bug would render every public teaser all-dashes with zero
+                # signal, indistinguishable from a genuine <2-day-history degrade.
+                log.warning(
+                    "process_key.derive_return_scalars_degraded",
+                    error=str(exc)[:200],
+                    verification_id=verification_id,
+                )
                 enriched_metrics_snapshot.update(_LEGACY_NULL_ENRICHMENT)
             else:
                 # Backbone-derived scalars FIRST (D5) so a later period-returns
