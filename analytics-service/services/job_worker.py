@@ -2043,13 +2043,77 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     mtm_returns: pd.Series | None = None
     mtm_gated_reason: str | None = None
     mtm_attempted: bool = False
-    # Phase 104 (BB-01): the returns-denominator override is parsed ONLY in the
-    # deribit arm (2149), but the post-branch cash-series persist resolves the cash
-    # conventions from it UNCONDITIONALLY on EVERY strategy-mode path (ccxt included,
-    # where no override exists → None → geometric/calendar). Initialize it here at
-    # the branch-outer scope so a ccxt derive never hits an unbound local.
-    denominator_config: "ReturnsDenominatorConfig | None" = None
     try:
+        # Phase 105 (BB-02, MED-2): resolve the returns-denominator override HERE at the
+        # branch-outer, VENUE-AGNOSTIC scope — mirroring run_csv_strategy_analytics
+        # (analytics_runner.py:2304-2316), which parses it for EVERY venue. In Phase 104
+        # this parse lived ONLY inside the deribit arm, so a ccxt strategy with a
+        # simple/active override echoed the geometric/calendar DEFAULT (MED-2) and a
+        # malformed ccxt config was silently ignored. Both the post-branch cash-series
+        # persist + MTM echo AND (on the deribit arm) pnl_basis / exclude_spot_extraction
+        # / combine_native_ledger read this SAME variable, so the derive path stays
+        # branchless (collapse #6). Strategy-mode only — key-mode owns no strategy row.
+        from services.allocated_capital import (
+            ReturnsDenominatorConfigError,
+            parse_returns_denominator_config,
+        )
+        from services.redact import scrub_freeform_string
+
+        # P72 — fail-loud analytics stamp, now VENUE-NEUTRAL (hoisted out of the deribit
+        # arm + renamed; the arm keeps calling this SAME helper for its other permanent
+        # failures). A terminal-FAIL must leave the wizard's SyncPreviewStep poller a
+        # TERMINAL 'failed' gate instead of an infinitely-pending 'complete'. Strategy-
+        # mode only: key-mode has no per-key strategy_analytics row (per-key reads land
+        # in Phase 36).
+        async def _stamp_strategy_analytics_failed(message: str) -> None:
+            if is_key_mode:
+                return
+            scrubbed = str(scrub_freeform_string(message))
+
+            def _upsert() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
+                        "computation_error": scrubbed,
+                        "data_quality_flags": {"csv_source": True},
+                        # F-4 (Fable): authoritative-clear the by-basis column so a
+                        # prior object can't render on a now-FAILED row.
+                        "metrics_json_by_basis": None,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_upsert)
+
+        # Per-strategy returns-denominator override (Zavara-only allocated capital).
+        # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
+        # path (byte-identical). A PRESENT-but-malformed config FAILS LOUD (permanent)
+        # on EITHER venue — never ship a factsheet on a guessed capital base. Its
+        # ``pnl_basis`` also drives the deribit native ledger's accrual basis
+        # (cash_settlement default).
+        denominator_config: "ReturnsDenominatorConfig | None" = None
+        try:
+            denominator_config = parse_returns_denominator_config(
+                ctx.strategy_row.get("returns_denominator_config")
+                if not is_key_mode and isinstance(ctx.strategy_row, dict)
+                else None
+            )
+        except ReturnsDenominatorConfigError as exc:
+            await _stamp_strategy_analytics_failed(
+                "Strategy returns_denominator_config is malformed."
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "derive_broker_dailies: "
+                    f"{scrub_freeform_string(str(exc))}"
+                ),
+                error_kind="permanent",
+            )
+
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
             # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
@@ -2066,11 +2130,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 build_deribit_native_ledger,
                 fetch_deribit_native_account_state,
             )
-            from services.allocated_capital import (
-                ReturnsDenominatorConfigError,
-                exclude_spot_extraction_for,
-                parse_returns_denominator_config,
-            )
+            from services.allocated_capital import exclude_spot_extraction_for
             from services.deribit_txn import (
                 DEFAULT_PNL_BASIS,
                 LedgerValuationError,
@@ -2078,43 +2138,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.native_nav import InceptionReconciliationError
-            from services.redact import scrub_freeform_string
             from services.stitch_composite import (
                 MTM_REASON_ANCHOR_RACE,
                 MTM_REASON_SECOND_PASS_TIMEOUT,
                 MTM_REASON_SUMMARY_COVERAGE,
             )
-
-            # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
-            # (ledger-incomplete/unenumerable/scope, or material-equity-empty)
-            # must leave the wizard's SyncPreviewStep poller a TERMINAL 'failed'
-            # gate instead of an infinitely-pending never-arriving 'complete' —
-            # mirroring the <2-days branch and run_csv_strategy_analytics. This
-            # is belt-and-suspenders vs the migration-038 status bridge; ship
-            # regardless. Strategy-mode only: key-mode has no per-key
-            # strategy_analytics row (per-key reads land in Phase 36).
-            async def _stamp_deribit_analytics_failed(message: str) -> None:
-                if is_key_mode:
-                    return
-                scrubbed = str(scrub_freeform_string(message))
-
-                def _upsert() -> None:
-                    ctx.supabase.table("strategy_analytics").upsert(
-                        {
-                            "strategy_id": strategy_id,
-                            "computation_status": "failed",
-                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                            "computation_warned": False,
-                            "computation_error": scrubbed,
-                            "data_quality_flags": {"csv_source": True},
-                            # F-4 (Fable): authoritative-clear the by-basis column so
-                            # a prior object can't render on a now-FAILED row.
-                            "metrics_json_by_basis": None,
-                        },
-                        on_conflict="strategy_id",
-                    ).execute()
-
-                await db_execute(_upsert)
 
             # 80-06 (HIGH-1+MEDIUM-1, one-read root-cause): read the Deribit anchor
             # ONCE for the WHOLE branch. fetch_deribit_native_account_state yields
@@ -2152,30 +2180,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             balance_error = account_state.balance_error
             open_unrealized_usd = account_state.collapsed_upnl_usd
             upnl_unreadable = account_state.upnl_unreadable
-            # Per-strategy returns-denominator override (Zavara-only allocated
-            # capital). ABSENT on every normal strategy (and in key-mode, which owns
-            # no strategy) → None → the unchanged NAV path (byte-identical). A
-            # PRESENT-but-malformed config FAILS LOUD (permanent) — never ship a
-            # factsheet on a guessed capital base. Its ``pnl_basis`` also drives the
-            # native ledger's accrual basis (cash_settlement default).
-            try:
-                denominator_config = parse_returns_denominator_config(
-                    ctx.strategy_row.get("returns_denominator_config")
-                    if not is_key_mode and isinstance(ctx.strategy_row, dict)
-                    else None
-                )
-            except ReturnsDenominatorConfigError as exc:
-                await _stamp_deribit_analytics_failed(
-                    "Strategy returns_denominator_config is malformed."
-                )
-                return DispatchResult(
-                    outcome=DispatchOutcome.FAILED,
-                    error_message=(
-                        "derive_broker_dailies: "
-                        f"{scrub_freeform_string(str(exc))}"
-                    ),
-                    error_kind="permanent",
-                )
+            # `denominator_config` was resolved VENUE-AGNOSTICALLY at the branch-outer
+            # scope (Phase 105 MED-2 hoist) — the deribit consumers below read that SAME
+            # value (byte-identical for deribit by construction). Its ``pnl_basis`` drives
+            # the native ledger's accrual basis (cash_settlement default).
             pnl_basis = (
                 denominator_config.pnl_basis
                 if denominator_config is not None
@@ -2220,7 +2228,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     and abs(equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
                     and _completeness.total_return_rows == 0
                 ):
-                    await _stamp_deribit_analytics_failed(
+                    await _stamp_strategy_analytics_failed(
                         "Deribit account holds equity but the ledger produced no "
                         "return-bearing activity in the window."
                     )
@@ -2444,7 +2452,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # premise (>1 funded subaccount → ScopeAuthError), or a truncated
                 # crawl all mean we cannot PROVE coverage → clean permanent FAILED,
                 # never a silently-partial track record.
-                await _stamp_deribit_analytics_failed(
+                await _stamp_strategy_analytics_failed(
                     "Deribit transaction history could not be verified as "
                     "complete. " + str(scrub_freeform_string(str(exc)))
                 )
@@ -2469,7 +2477,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # network ValueError/json.JSONDecodeError escaping the crawl falls
                 # through to the outer generic handler and stays transient-retryable.
                 scrubbed = str(scrub_freeform_string(str(exc)))
-                await _stamp_deribit_analytics_failed(
+                await _stamp_strategy_analytics_failed(
                     "Deribit ledger contained a transaction that could not be "
                     "processed (unvaluable coin cash, undatable, or schema drift). "
                     + scrubbed
@@ -2496,7 +2504,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # Caught in this SAME try as the crawl so a native refusal is never
                 # misclassified transient 'unknown' and retried forever (T-80-10).
                 scrubbed = str(scrub_freeform_string(str(exc)))
-                await _stamp_deribit_analytics_failed(
+                await _stamp_strategy_analytics_failed(
                     "Deribit native NAV reconstruction refused a structural input "
                     "(a value-bearing currency with no USD mark, or the "
                     "full-history roll did not reconcile to inception). " + scrubbed

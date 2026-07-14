@@ -55,6 +55,7 @@ from tests.test_mtm_single_key import (
     _base_patches,
     _cash_series,
     _ctx,
+    _find_failed_stamp,
     _find_prestamp,
     _mtm_series,
     _patch_benchmark,
@@ -64,6 +65,11 @@ from tests.test_mtm_single_key import (
 
 _SERIES_RPC = "upsert_strategy_analytics_series_batch"
 _CASH_KIND = "cash_settlement"
+
+# A malformed returns_denominator_config (denominator not in the valid set) — the
+# parse FAILS LOUD (ReturnsDenominatorConfigError → PERMANENT). Used to pin the MED-2
+# venue-wide fail-loud parity with analytics_runner's B2 disposition.
+_MALFORMED_CONFIG = {"denominator": "not_a_valid_capital_base"}
 
 
 # ── seam runner + capture extractors ────────────────────────────────────────
@@ -355,6 +361,101 @@ async def test_cash_conventions_traditional_clock_and_unconditional_benchmark() 
     # Legacy cash outputs still landed (the raising benchmark fetch only feeds the MTM
     # compute; it never gates the cash path).
     assert _csv_row_map(cap), "the legacy csv_daily_returns cash rows must still persist"
+
+
+# ── Task 1 (MED-2): the venue-agnostic parse — the 5th SC-4 fixture (ccxt) ────
+
+
+async def _run_ccxt_seam(
+    strategy_row: dict, *, returns: pd.Series | None = None,
+) -> tuple[Any, dict]:
+    """Run the strategy-mode CCXT (binance) broker-derive once against fully mocked
+    I/O and return (DispatchResult, capture). Reuses the dual-mode harness whose venue
+    is a ccxt exchange (``key_row['exchange']='binance'``), so
+    ``combine_realized_and_funding`` — NOT the deribit native ledger — feeds the single
+    cash derive at the seam. This is the venue that exercises the MED-2 hoist: pre-105
+    the ccxt arm NEVER parsed ``returns_denominator_config`` (it was deribit-arm-only),
+    so an override echoed the geometric/calendar default and a malformed config was
+    silently ignored."""
+    from tests.test_derive_broker_dailies_dualmode import (
+        _build_ctx as _dm_ctx,
+        _patches as _dm_patches,
+    )
+
+    _returns = _cash_series() if returns is None else returns
+    ctx, capture = _dm_ctx(
+        key_row={"id": "key-ccxt", "exchange": "binance", "user_id": "user-1"},
+        strategy_row=strategy_row,
+    )
+    patches = _dm_patches(ctx, key_mode=False, returns=_returns)
+    with _apply(list(patches)):
+        result = await run_derive_broker_dailies_job(
+            {"kind": "derive_broker_dailies", "strategy_id": strategy_row["id"]}
+        )
+    return result, capture
+
+
+@pytest.mark.asyncio
+async def test_cash_conventions_echo_ccxt_override() -> None:
+    """MED-2 (the 5th SC-4 fixture: ccxt-override): a CCXT (binance) strategy carrying a
+    Zavara-style returns_denominator_config override (cumulative_method="simple",
+    metrics_basis="active_day") now echoes {simple, active} in the persisted cash
+    conventions. Pre-105 the ccxt arm NEVER parsed the override (the parse lived only
+    inside ``if venue == "deribit"``), so it echoed the geometric/calendar DEFAULT — the
+    MED-2 bug. Proves the parse is hoisted VENUE-AGNOSTICALLY (analytics_runner.py:2304-2316
+    parity), feeding the SAME single derive with no venue branch inside the derive path.
+
+    Neuter: re-scope the parse back inside the ``if venue == "deribit"`` branch →
+    ``denominator_config`` stays None on the ccxt path → conventions echo
+    geometric/calendar → this assert reddens."""
+    strategy_row = {
+        "id": "strat-ccxt-ovr",
+        "user_id": "user-1",
+        "asset_class": "crypto",
+        "returns_denominator_config": _ALLOC_CONFIG,
+    }
+    result, capture = await _run_ccxt_seam(strategy_row)
+    assert result.outcome == DispatchOutcome.DONE
+    cash = _cash_series_payload(capture)
+    assert cash is not None, "a ccxt strategy derive must persist the cash_settlement series"
+    assert cash["conventions"] == {
+        "periods_per_year": 365,          # crypto asset_class → √365 (#597)
+        "cumulative_method": "simple",    # from the override (was geometric — MED-2)
+        "day_basis": "active",            # metrics_day_basis("active_day") (was calendar)
+        "benchmark": "BTC",               # unconditional identity carry
+    }, f"ccxt cash conventions did not echo the override (MED-2): {cash['conventions']!r}"
+
+
+@pytest.mark.asyncio
+async def test_ccxt_malformed_config_fails_permanent() -> None:
+    """MED-2 fail-loud parity: a CCXT strategy with a MALFORMED
+    returns_denominator_config now FAILS LOUD — a PERMANENT DispatchResult plus a
+    terminal ``computation_status='failed'`` strategy_analytics stamp (metrics_json_by_basis
+    authoritatively NULL) — matching run_csv_strategy_analytics' B2 disposition. Pre-105
+    the ccxt arm never parsed it, so a bad config was silently ignored and a factsheet
+    shipped on a guessed capital base.
+
+    Neuter: re-scope the parse inside the deribit arm → the ccxt path never parses → the
+    derive completes DONE → this assert reddens."""
+    strategy_row = {
+        "id": "strat-ccxt-bad",
+        "user_id": "user-1",
+        "asset_class": "crypto",
+        "returns_denominator_config": _MALFORMED_CONFIG,
+    }
+    result, capture = await _run_ccxt_seam(strategy_row)
+    assert result.outcome == DispatchOutcome.FAILED, (
+        "a malformed ccxt config must FAIL PERMANENT (parity with the runner's B2 "
+        f"disposition), got {result.outcome!r}"
+    )
+    assert result.error_kind == "permanent"
+    failed = _find_failed_stamp(capture)
+    assert failed is not None, "a malformed ccxt config must stamp a terminal 'failed'"
+    assert failed["computation_status"] == "failed"
+    assert failed["computation_warned"] is False
+    assert failed["metrics_json_by_basis"] is None
+    # No cash series is persisted on the terminal-failure path.
+    assert _cash_series_payload(capture) is None
 
 
 # ── boundary guards (Task 2): SERIES-ONLY + INERT read + single seam ─────────
