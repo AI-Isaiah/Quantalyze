@@ -128,12 +128,27 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
   return useMemo<FactsheetPayload>(() => {
     const bundle = payload.seriesByBasis?.mark_to_market;
     if (basis !== "mark_to_market" || !bundle) return payload;
+    // F3 (phase 103): overlay the SEVEN persisted headline scalars onto the merged
+    // `strategyMetrics` so the rail's §I headline == the KpiStrip BY CONSTRUCTION
+    // (both = the persisted-dense-Python cache), killing the sparse-vs-dense AND the
+    // arithmetic-vs-geometric (`cumulative_method:"simple"`) divergence for every
+    // cross-surface scalar. Mirrors `useBasisMetrics`: an absent MTM object → `{}`
+    // → the STRICT overlay renders all seven "—", never a bundle-TS recompute. Only
+    // the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
+    // series-derived metrics (skew/VaR/quantiles/best-week/…) STAY bundle-TS-derived
+    // (they have no cross-surface counterpart on the KpiStrip, exactly as the rail
+    // already works for cash: only the seven have a persisted authoritative cache).
+    const mtmScalars = payload.metricsByBasis?.mark_to_market ?? {};
     // Narrow on the ingest discriminant before spreading: the bundle has no
     // `ingestSource`, so spreading over the bare union would widen the
     // discriminant and break FactsheetPayload assignability. Each arm's spread
     // preserves its `"api"`/`"csv"` literal (bundle never touches it).
-    if (payload.ingestSource === "api") return { ...payload, ...bundle };
-    return { ...payload, ...bundle };
+    if (payload.ingestSource === "api") {
+      const merged = { ...payload, ...bundle };
+      return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
+    }
+    const merged = { ...payload, ...bundle };
+    return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
   }, [basis, payload]);
 }
 

@@ -467,16 +467,18 @@ function fixtureSingleKeyMtmJoint(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
-// (j) PARITY fixture (STEP-3): the persisted MTM headline scalars (KpiStrip source,
-//     via overlayBasisScalars(metricsByBasis.mark_to_market)) and the bundle's
-//     TS-computed strategyMetrics (rail §I source, via view.strategyMetrics after
-//     the root-cause flip) are ALIGNED to the SAME seven numbers. This is the
-//     metrics-parity PRECONDITION: a parity-compliant Python persist reproduces the
-//     TS compute() of the SAME mark_to_market series (the derive_basis_series
-//     cache-of-series design + the metrics-parity contract). Given that precondition
-//     the two surfaces MUST agree to display precision. The seven values are the
-//     round MTM sentinels, distinct from the cash 300-day scenario, so a neutered
-//     rail (reading cash payload.strategyMetrics) reddens the comparison.
+// (j) PARITY fixture (STEP-3, Phase-103 F3): the bundle's TS-recomputed seven
+//     headline scalars DELIBERATELY DIVERGE from the persisted MTM object. This is
+//     the REAL cross-runtime divergence the earlier FAKED keystone hid by forcing
+//     bundle == persisted: on a gappy composite the client TS compute() over the
+//     SPARSE rows (no gap-fill) yields Sharpe ≈ Python/√(N/D), and under
+//     `cumulative_method:"simple"` (Zavara allocated-capital) Python is arithmetic
+//     Σr while TS is geometric — so the bundle's own strategyMetrics can NOT equal
+//     the persisted seven. The F3 overlay in useBasisSeriesView must make the rail
+//     DISPLAY the PERSISTED seven (MTM.*, the KpiStrip source), NOT these divergent
+//     bundle values — that is what makes KpiStrip == rail BY CONSTRUCTION. The
+//     divergent numbers are the neuter witnesses: strip the overlay and the rail
+//     falls back to the bundle's +90.00% / 5.50 and the parity assertions RED.
 function fixtureSingleKeyMtmParity(): FactsheetPayload {
   const cash = base(); // 300-day calm cash series (rail cash cum ≠ +50%)
   const mtm = buildScenarioFactsheetPayload({
@@ -484,26 +486,26 @@ function fixtureSingleKeyMtmParity(): FactsheetPayload {
     benchmark: null,
   }) as unknown as FactsheetPayload;
   const bundle = bundleFromScenario(mtm);
-  // Force the bundle's seven headline scalars to the SAME values the persisted MTM
-  // object carries — simulating parity (TS compute() == the Python-persisted rows).
-  const alignedBundle = {
+  // The bundle's seven diverge from the persisted MTM (the sparse-TS /
+  // arithmetic-vs-geometric gap). The persisted MTM object is authoritative.
+  const divergentBundle = {
     ...bundle,
     strategyMetrics: {
       ...bundle.strategyMetrics,
-      cum_ret: MTM.cumulative_return,
-      ann_vol: MTM.volatility,
-      max_dd: MTM.max_drawdown,
-      cagr: MTM.cagr,
-      sharpe: MTM.sharpe,
-      sortino: MTM.sortino,
-      calmar: MTM.calmar,
+      cum_ret: 0.9, // persisted MTM.cumulative_return 0.5 → the rail must show +50%, not +90%
+      ann_vol: 0.99, // persisted MTM.volatility 0.11
+      max_dd: -0.5, // persisted MTM.max_drawdown -0.038
+      cagr: 0.88, // persisted MTM.cagr 0.26
+      sharpe: 5.5, // persisted MTM.sharpe 1.2 → the rail must show 1.20, not 5.50
+      sortino: 6.6, // persisted MTM.sortino 1.9
+      calmar: 7.7, // persisted MTM.calmar 2.7
     },
   };
   return {
     ...cash,
     metricsByBasis: { mark_to_market: MTM },
     mtmGate: { available: true },
-    seriesByBasis: { mark_to_market: alignedBundle },
+    seriesByBasis: { mark_to_market: divergentBundle },
   } as unknown as FactsheetPayload;
 }
 
@@ -680,7 +682,7 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(s.textContent).not.toContain("+11.00%"); // cash alpha gone
   });
 
-  it("STEP-3 PARITY: under MTM the seven KpiStrip headline scalars == the rail §I headline to display precision", () => {
+  it("STEP-3 PARITY (F3): the rail §I displays the PERSISTED seven, NOT the divergent bundle TS recompute (overlay wins — neuter → RED)", () => {
     const { container, getByText } = renderBody(fixtureSingleKeyMtmParity());
 
     // Pre-toggle sanity: the rail §I cash cum_ret is the 300-day scenario's own
@@ -690,8 +692,18 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
 
     fireEvent.click(getByText("Mark-to-market"));
 
-    // The three RATIO scalars format identically on both surfaces (2dp `num`), so
-    // assert EXACT string equality KpiStrip == rail.
+    // CORE OF F3: under MTM the rail displays the PERSISTED Python seven (MTM.*),
+    // even though the bundle's OWN strategyMetrics carries divergent TS values
+    // (cum 0.9 → +90.00%, sharpe 5.50). The F3 overlay in useBasisSeriesView makes
+    // view.strategyMetrics carry the persisted seven. NEUTER (remove the overlay) →
+    // the rail falls back to the bundle's +90.00% / 5.50 → every line below reddens.
+    expect(railValue(container, "Main Metrics", "Cumulative Return")).toBe("+50.00%");
+    expect(railValue(container, "Main Metrics", "Sharpe")).toBe("1.20");
+    expect(railValue(container, "Main Metrics", "Sortino")).toBe("1.90");
+    expect(railValue(container, "Main Metrics", "Calmar")).toBe("2.70");
+
+    // And KpiStrip == rail BY CONSTRUCTION — both now trace to the SAME persisted
+    // seven. The three RATIO scalars format identically (2dp `num`) on both surfaces.
     for (const [kpiLabel, railLabel] of [
       ["Sharpe", "Sharpe"],
       ["Sortino", "Sortino"],
@@ -705,8 +717,8 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     // The four PERCENTAGE scalars use DIFFERENT display precision by design — the
     // KpiStrip glances at 1dp (`pctSigned`/`pct`), the rail details at 2dp
     // (`pct(_, true)`/`pctNeg`). "== to display precision" therefore means the rail's
-    // 2dp value ROUNDED to the strip's 1dp equals the strip value. Given the parity
-    // precondition (persisted == TS compute), they trace to ONE number, so this holds.
+    // 2dp value ROUNDED to the strip's 1dp equals the strip value. Now that BOTH read
+    // the persisted seven, they trace to ONE number, so this holds by construction.
     const pctPairs: Array<[string, string, string]> = [
       ["Cum. Return", "Main Metrics", "Cumulative Return"],
       ["CAGR", "Main Metrics", "CAGR"],
@@ -719,12 +731,6 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
       // Rail (2dp) rounded to the strip's 1dp precision must equal the strip value.
       expect(Number(rail.toFixed(1))).toBe(kpi);
     }
-
-    // Falsifiable the OTHER way: the rail §I headline is the MTM-derived value
-    // (+50.00%), distinct from the cash scenario. Neuter the root-cause flip
-    // (MetricsColumn `m` → payload.strategyMetrics) → the rail shows cash under MTM
-    // while the KpiStrip shows +50.0% → the rounding equality above reddens.
-    expect(railValue(container, "Main Metrics", "Cumulative Return")).toBe("+50.00%");
     expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
   });
 
