@@ -160,8 +160,9 @@ const BASE = resolveBaselineRef();
 const CHANGED = changedFiles(BASE);
 
 /**
- * The frozen client islands as EIGHT file paths after the scenario.ts + #597
- * compute.ts + Phase-90 TimeSeriesChart.tsx reviewed-edit carve-outs (the chart-interactivity island =
+ * The frozen client islands as SIX file paths after the scenario.ts + #597
+ * compute.ts + Phase-90 TimeSeriesChart.tsx + Phase-103 HistogramChart.tsx/
+ * MasterBrush.tsx reviewed-edit carve-outs (the chart-interactivity island =
  * EquityChart + TouchTooltip + useTapPin). Every one is verified to exist on
  * disk at planning time. A diff to ANY of them during a v1.4 restyle is an
  * exit-gate violation — the visual layer is free, the locked spine is not.
@@ -214,8 +215,19 @@ const FROZEN_ISLANDS: string[] = [
   // golden re-baseline). The off-glob removes lint protection, so freeze them
   // here — otherwise a future raw-px / render edit to them is caught by NO gate
   // (lint off + goldens deferred). Zero-diff vs the baseline today.
-  "src/app/factsheet/[id]/v2/HistogramChart.tsx",
-  "src/app/factsheet/[id]/v2/MasterBrush.tsx",
+  //
+  // v1.10 Phase 103 (MTM-follow, F1/F2): `HistogramChart.tsx` and
+  // `MasterBrush.tsx` are REMOVED from the frozen set. The freeze premise was
+  // that these SVGs are data-inert restyle targets — but the phase-103 red team
+  // found they read `usePayload()` DIRECTLY (never the basis view), so under
+  // mark_to_market they rendered the CASH distribution / CASH sparkline+axis,
+  // violating the SC-4 invariant that nothing displays cash under an MTM label
+  // (the frozen-spine diff-zero guard MASKED this — the freeze was actively
+  // wrong). Routing them through `useBasisSeriesView` is a deliberate, reviewed
+  // ADDITIVE edit (same category as the scenario.ts / #597 compute.ts /
+  // Phase-90 TimeSeriesChart.tsx carve-outs above): under cash the view returns
+  // the payload by reference so the render stays byte-identical, and the fix is
+  // pinned by HistogramChart.basis.test.tsx / MasterBrush.basis.test.tsx.
 ];
 
 describe("Phase 52 frozen-spine exit-gate guards", () => {

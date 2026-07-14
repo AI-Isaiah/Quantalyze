@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WheelEvent as ReactWheelEvent } from "react";
 import { usePayload, useXRange, useActiveComparator } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -37,7 +38,15 @@ const STRAT_NATURAL_QUANTILE = 0.99;
  * outer bound so a zoomed-out histogram still shows the natural data extent.
  */
 export function HistogramChart() {
-  const payload = usePayload();
+  // F1 (phase 103, MTM-follow): route through the basis view so the strategy
+  // daily-returns distribution follows the active basis. Under cash (or an
+  // absent MTM bundle) `useBasisSeriesView` returns the payload BY REFERENCE,
+  // so the render stays byte-identical; under mark_to_market it swaps in the
+  // bundle's MTM `strategyReturns`/`dates`. This is why HistogramChart is
+  // UNFROZEN in phase-52-frozen-spine-guards.test.ts — the freeze premise (it
+  // is data-inert) is now wrong: it MUST track MTM to honor the SC-4 invariant
+  // that nothing displays cash under an MTM label.
+  const payload = useBasisSeriesView(usePayload());
   const { xRange } = useXRange();
   const { block: cmp } = useActiveComparator();
   const isMobile = useBreakpoint() === "mobile";
