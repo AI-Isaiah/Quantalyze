@@ -4543,6 +4543,29 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # can't survive a now-gated re-derive.
     headline_payload.update(cash_metrics_json)
 
+    # Phase 103 (MTM-04, BACKEND FIX 2): persist (or HEAL) the stitched
+    # mark_to_market daily-return series row BEFORE the DONE-bearing headline/by-basis
+    # scalar upsert below — matching the single-key route (:3112-3136), which lands
+    # the series before the DONE-gating headline the downstream csv-analytics job
+    # writes. Ordering is load-bearing: the by-basis mark_to_market SCALAR is the F-4
+    # read gate. If the scalar landed FIRST and a transient series upsert then failed
+    # on a re-stitch, the gate would render fresh scalars over a stale/missing series.
+    # Persisting the series first means a series-write failure aborts the whole derive
+    # (fail-loud db_execute) BEFORE the gating scalar is written, so the read gate can
+    # never observe fresh-scalar + stale-series. Success (mtm_metrics_json is not
+    # None) → the row; every other shape — gated (mtm_ok False) or any future degrade →
+    # persist_basis_series(result=None) DELETES any stale row (Pitfall 5), so a
+    # previously-successful strategy that re-derives gated loses its stale series.
+    def _persist_mtm_series() -> None:
+        persist_basis_series(
+            supabase,
+            strategy_id,
+            basis="mark_to_market",
+            result=_mtm_basis_result if mtm_metrics_json is not None else None,
+        )
+
+    await db_execute(_persist_mtm_series)
+
     def _write_headline_and_by_basis() -> None:
         supabase.table("strategy_analytics").upsert(
             headline_payload, on_conflict="strategy_id"
@@ -4571,24 +4594,6 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 "stitch_composite: sibling-series batch upsert failed for %s: %s",
                 strategy_id, str(sibling_exc),
             )
-
-    # Phase 103 (MTM-04): persist (or HEAL) the stitched mark_to_market daily-return
-    # series row through the SAME BasisSeriesResult the MTM scalars came from — the
-    # dailies-canonical route Plans 03/04 read. Lands HERE in the persist phase,
-    # AFTER the csv_daily_returns cash writes and the headline/by-basis upsert, so a
-    # failed stitch never half-persists. Success (mtm_metrics_json is not None) →
-    # the row; every other shape — gated (mtm_ok False) or any future degrade →
-    # persist_basis_series(result=None) DELETES any stale row (Pitfall 5), so a
-    # previously-successful strategy that re-derives gated loses its stale series.
-    def _persist_mtm_series() -> None:
-        persist_basis_series(
-            supabase,
-            strategy_id,
-            basis="mark_to_market",
-            result=_mtm_basis_result if mtm_metrics_json is not None else None,
-        )
-
-    await db_execute(_persist_mtm_series)
 
     logger.info(
         "stitch_composite: strategy %s stitched %d members (%d days, venues=%s, "

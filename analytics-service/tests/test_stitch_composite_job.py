@@ -147,6 +147,7 @@ class _FakeQuery:
     def execute(self) -> SimpleNamespace:
         if self._op == "upsert":
             self.fake.upserts.append((self.table, self._payload, self._conflict))
+            self.fake.call_order.append(("upsert", self.table, self._payload))
             return SimpleNamespace(data=self._payload)
         if self._op == "delete":
             self.fake.deletes.append((self.table, list(self._eqs)))
@@ -181,6 +182,11 @@ class _FakeSupabase:
         self.upserts: list[tuple[str, Any, str | None]] = []
         self.deletes: list[tuple[str, list[tuple[str, Any]]]] = []
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
+        # Unified, monotonically-ordered write log across BOTH upserts and rpc
+        # calls, so a test can assert cross-op ordering (e.g. the MTM series write
+        # precedes the DONE-bearing headline scalar upsert — BACKEND FIX 2). Each
+        # entry is ("upsert", table, payload) or ("rpc", name, args).
+        self.call_order: list[tuple[str, str, Any]] = []
         # PROG-02 fail-open harness: when set, .execute() on the named RPC raises
         # so a test can prove the progress side-channel never kills the stitch.
         self.raise_on_rpc = raise_on_rpc
@@ -190,6 +196,7 @@ class _FakeSupabase:
 
     def rpc(self, name: str, args: dict[str, Any]) -> SimpleNamespace:
         self.rpc_calls.append((name, args))
+        self.call_order.append(("rpc", name, args))
         if self.raise_on_rpc is not None and name == self.raise_on_rpc:
             def _boom() -> SimpleNamespace:
                 raise RuntimeError(f"simulated {name} failure")
@@ -560,6 +567,50 @@ async def test_mtm_admitted_perp_only_second_pass_writes_both_bases() -> None:
         if c.kwargs.get("pnl_basis") == "mark_to_market"
     ]
     assert mtm_calls, "MTM-admitted composite must run a mark_to_market ledger pass"
+
+
+@pytest.mark.asyncio
+async def test_mtm_series_persists_before_done_scalar_write() -> None:
+    """BACKEND FIX 2 — the mark_to_market daily-return SERIES row must be written
+    BEFORE the DONE-bearing headline/by-basis SCALAR upsert. The by-basis MTM scalar
+    is the F-4 read gate; if it landed first and a transient series upsert then failed
+    on a re-stitch, the gate would render fresh scalars over a stale/missing series.
+    Falsifiable: revert the persist order → series index > headline index → RED."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=False,  # gate OPEN → MTM series is actually written
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+
+    # Index of the MTM series write (rpc upsert_strategy_analytics_series_batch whose
+    # p_kinds carries the mtm_daily_returns kind — distinct from the cash sibling RPC).
+    series_idx = next(
+        i for i, c in enumerate(fake.call_order)
+        if c[0] == "rpc"
+        and c[1] == "upsert_strategy_analytics_series_batch"
+        and "mtm_daily_returns" in (c[2].get("p_kinds") or {})
+    )
+    # Index of the DONE-bearing headline/by-basis scalar upsert (carries
+    # metrics_json_by_basis — the F-4 read gate).
+    headline_idx = next(
+        i for i, c in enumerate(fake.call_order)
+        if c[0] == "upsert"
+        and c[1] == "strategy_analytics"
+        and isinstance(c[2], dict)
+        and "metrics_json_by_basis" in c[2]
+    )
+    assert series_idx < headline_idx, (
+        "MTM series must persist BEFORE the DONE-bearing scalar write "
+        f"(series@{series_idx} vs headline@{headline_idx})"
+    )
 
 
 @pytest.mark.asyncio
