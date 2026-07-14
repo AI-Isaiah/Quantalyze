@@ -6,6 +6,7 @@ import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { hasBasisHeadline } from "./basis-metrics";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
+import { isComputedAnalytics } from "@/lib/closed-sets";
 
 /** The parsed, defensively-coerced form of an `mtm_daily_returns` series row. */
 export type ParsedMtmSeries = {
@@ -365,7 +366,7 @@ export function singleKeyBasisOpts(
   if (mtm === undefined && reason === undefined) return {};
   // 4. F-4 DONE gate — exact runner terminal-success literals (no third success
   //    literal exists; verified against analytics_runner.py).
-  const done = computationStatus === "complete" || computationStatus === "complete_with_warnings";
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
   // 5. Available iff DONE and the MTM object carries a trustworthy headline. A
   //    degraded-MTM row still reports "complete" (Phase 101-02), so BOTH gates.
   const available = done && hasBasisHeadline(mtm);
@@ -402,7 +403,7 @@ export function shouldReadSingleKeyMtmSeries(
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
 ): boolean {
-  const done = computationStatus === "complete" || computationStatus === "complete_with_warnings";
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
   if (!done) return false;
   if (
     metricsJsonByBasis === null ||
@@ -447,7 +448,7 @@ export function shouldReadCashSettlementSeries(
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
 ): boolean {
-  const done = computationStatus === "complete" || computationStatus === "complete_with_warnings";
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
   if (!done) return false;
   if (
     metricsJsonByBasis === null ||
