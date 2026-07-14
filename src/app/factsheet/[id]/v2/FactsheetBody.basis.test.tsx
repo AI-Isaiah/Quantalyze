@@ -589,6 +589,11 @@ describe("FactsheetBody — Phase 103 MTM-04 per-basis SERIES (charts + panels f
     ).toBeTruthy();
     // The persisted MTM scalar overlay (Phase 102) still relabels the KpiStrip.
     expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
+    // F4: the rail eyebrow must NOT claim "BASIS · MARK-TO-MARKET" here — the series
+    // bundle is ABSENT so the rail's dailies panels render CASH. Gating the eyebrow
+    // on `basis` alone (the neuter) would mislabel that cash rail as MTM → this
+    // assertion reddens.
+    expect(container.textContent).not.toContain("BASIS · MARK-TO-MARKET");
   });
 
   it("NO-PERSISTENCE: toggling the bundle fixture writes NOTHING to localStorage or the URL", () => {

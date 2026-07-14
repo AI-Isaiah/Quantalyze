@@ -331,7 +331,15 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // the KpiStrip already ran at L≠1.
   const { modeled } = useModeledLeverage(payload);
   const composite = payload.dataQuality?.composite === true;
-  const onMtm = basis === "mark_to_market";
+  // F4 (phase 103): the eyebrow reads "BASIS · MARK-TO-MARKET" ONLY when the MTM
+  // SERIES BUNDLE is present — i.e. the rail's dailies-derivable panels actually
+  // followed MTM. On a bundle-absent read under MTM (pre-backfill / stale cache /
+  // degraded), `useBasisSeriesView` returns the payload by reference so the rail
+  // renders CASH; gating on `basis` alone would label that cash rail
+  // "MARK-TO-MARKET" (the mislabel). This mirrors the PerformanceCharts caption,
+  // which is already gated on the same bundle presence.
+  const onMtm =
+    basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null;
   // A single-key options book that participates in the MTM basis story carries a
   // gate; every other single-key strategy has none. Gating the basis eyebrow on
   // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
