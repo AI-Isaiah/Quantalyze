@@ -48,7 +48,16 @@ export function HistogramChart() {
   // that nothing displays cash under an MTM label.
   const payload = useBasisSeriesView(usePayload());
   const { xRange } = useXRange();
-  const { block: cmp } = useActiveComparator();
+  // MED-1 (phase 103): resolve the comparator block off the VIEW's comparators, not
+  // `useActiveComparator().block` (which is always the cash-axis-aligned
+  // `payload.comparators[...]`). The benchmark overlay reads `cmp.dailyReturns?.[i]`
+  // over the SAME xRange window as the strategy bars; under MTM the strategy bars
+  // ride the MTM axis, so the bench overlay must read the MTM-axis comparator or it
+  // windows a DIFFERENT calendar span (and reads undefined on the tail when
+  // mtmLen > cashLen). The KEY is basis-invariant; only the block follows the basis.
+  // Byte-identical under cash (the view returns the payload by reference).
+  const { key: cmpKey } = useActiveComparator();
+  const cmp = payload.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [zoom, setZoom] = useState<{ lo: number; hi: number } | null>(null);

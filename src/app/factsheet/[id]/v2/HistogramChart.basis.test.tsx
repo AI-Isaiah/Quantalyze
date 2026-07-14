@@ -83,6 +83,55 @@ function makePayloadWithMtmBundle(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+/**
+ * A payload whose BENCH (comparator) overlay is carried ONLY by the MTM bundle: the
+ * cash `btc` comparator has NO daily returns (bench overlay ABSENT under cash), while
+ * the MTM bundle's `btc` comparator carries a finite series (bench overlay PRESENT
+ * under MTM). This isolates MED-1: the overlay must resolve the comparator block off
+ * the VIEW's comparators, not the cash-aligned `useActiveComparator().block`. The
+ * header prints " · overlay: {name}" iff any finite bench value falls in the window.
+ */
+function makePayloadWithMtmComparator(): FactsheetPayload {
+  const base = makePayloadWithMtmBundle();
+  const inertBlock = (name: string, dailyReturns: Array<number | null> | null) => ({
+    name,
+    shortName: name,
+    summary: null,
+    joint: null,
+    cumulative: null,
+    cumVsBench: null,
+    dailyReturns,
+    rollingVol: null,
+    rollingSharpe: null,
+    rollingSortino: null,
+    volMatched: null,
+    volMatchedLabel: null,
+    rollingBeta: null,
+  });
+  // MTM comparator carries a finite btc series over its 120-day axis.
+  const mtmBtc = Array.from({ length: MTM_LEN }).map((_, i) => Math.cos(i / 5) * 0.03);
+  return {
+    ...base,
+    // Cash btc comparator: NO daily returns → no cash bench overlay.
+    activeComparator: "btc",
+    comparators: {
+      btc: inertBlock("BTC", null),
+      spx: inertBlock("SPX", null),
+      none: inertBlock("None", null),
+    },
+    seriesByBasis: {
+      mark_to_market: {
+        ...base.seriesByBasis!.mark_to_market,
+        comparators: {
+          btc: inertBlock("BTC", mtmBtc),
+          spx: inertBlock("SPX", null),
+          none: inertBlock("None", null),
+        },
+      },
+    },
+  } as unknown as FactsheetPayload;
+}
+
 function BasisSetter({ basis }: { basis: Basis }) {
   const { setBasis } = useBasis();
   useEffect(() => {
@@ -91,9 +140,9 @@ function BasisSetter({ basis }: { basis: Basis }) {
   return null;
 }
 
-function renderHistogram(basis: Basis) {
+function renderHistogram(basis: Basis, payload: FactsheetPayload = makePayloadWithMtmBundle()) {
   return render(
-    <FactsheetProvider payload={makePayloadWithMtmBundle()}>
+    <FactsheetProvider payload={payload}>
       <BasisProvider>
         <BasisSetter basis={basis} />
         <HistogramChart />
@@ -127,5 +176,18 @@ describe("[F1] HistogramChart follows the active basis", () => {
     // component reverts to reading usePayload() directly (it would report the
     // cash count under an MTM label, violating SC-4).
     expect(sampleCount(container.textContent)).not.toBe(cashCount);
+  });
+
+  it("MED-1: the bench overlay resolves the comparator off the VIEW (MTM axis), not the cash comparator (neuter → RED)", () => {
+    // Cash: the cash `btc` comparator carries no daily returns → no bench overlay.
+    const cash = renderHistogram("cash_settlement", makePayloadWithMtmComparator());
+    expect(cash.container.textContent).not.toContain("overlay:");
+
+    // MTM: the bench overlay must read the MTM bundle's comparator (finite series) →
+    // the overlay renders. Neuter (revert to `useActiveComparator().block` = the
+    // cash-aligned comparator, which has NO series here) → benchVals empty → no
+    // overlay under MTM → this reddens.
+    const mtm = renderHistogram("mark_to_market", makePayloadWithMtmComparator());
+    expect(mtm.container.textContent).toContain("overlay: BTC");
   });
 });
