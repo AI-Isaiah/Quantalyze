@@ -467,6 +467,63 @@ function fixtureSingleKeyMtmJoint(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// (j) PARITY fixture (STEP-3): the persisted MTM headline scalars (KpiStrip source,
+//     via overlayBasisScalars(metricsByBasis.mark_to_market)) and the bundle's
+//     TS-computed strategyMetrics (rail §I source, via view.strategyMetrics after
+//     the root-cause flip) are ALIGNED to the SAME seven numbers. This is the
+//     metrics-parity PRECONDITION: a parity-compliant Python persist reproduces the
+//     TS compute() of the SAME mark_to_market series (the derive_basis_series
+//     cache-of-series design + the metrics-parity contract). Given that precondition
+//     the two surfaces MUST agree to display precision. The seven values are the
+//     round MTM sentinels, distinct from the cash 300-day scenario, so a neutered
+//     rail (reading cash payload.strategyMetrics) reddens the comparison.
+function fixtureSingleKeyMtmParity(): FactsheetPayload {
+  const cash = base(); // 300-day calm cash series (rail cash cum ≠ +50%)
+  const mtm = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(200, 0.004),
+    benchmark: null,
+  }) as unknown as FactsheetPayload;
+  const bundle = bundleFromScenario(mtm);
+  // Force the bundle's seven headline scalars to the SAME values the persisted MTM
+  // object carries — simulating parity (TS compute() == the Python-persisted rows).
+  const alignedBundle = {
+    ...bundle,
+    strategyMetrics: {
+      ...bundle.strategyMetrics,
+      cum_ret: MTM.cumulative_return,
+      ann_vol: MTM.volatility,
+      max_dd: MTM.max_drawdown,
+      cagr: MTM.cagr,
+      sharpe: MTM.sharpe,
+      sortino: MTM.sortino,
+      calmar: MTM.calmar,
+    },
+  };
+  return {
+    ...cash,
+    metricsByBasis: { mark_to_market: MTM },
+    mtmGate: { available: true },
+    seriesByBasis: { mark_to_market: alignedBundle },
+  } as unknown as FactsheetPayload;
+}
+
+// Read a rail row's STRATEGY value cell, scoped to a specific Panel <section> by its
+// <h3> title so "Sharpe"/"Sortino" (which also label the Rolling Metrics table)
+// resolve unambiguously. Rail rows are <tr><td>label</td><td>strategy</td><td>bench</td>.
+function railValue(container: HTMLElement, panelTitle: string, rowLabel: string): string {
+  const heading = within(container)
+    .getAllByText(panelTitle)
+    .find((el) => el.tagName === "H3");
+  const section = heading?.closest("section") as HTMLElement;
+  const labelTd = Array.from(section.querySelectorAll("td")).find(
+    (td) => td.textContent === rowLabel,
+  );
+  return (labelTd?.nextElementSibling as HTMLElement | null)?.textContent ?? "";
+}
+
+// Strip +/% so "+50.0%", "-3.80%", "1.20" all parse to their numeric value.
+const numOf = (s: string): number => Number(s.replace(/[+%]/g, ""));
+
 describe("FactsheetBody — Phase 103 MTM-04 per-basis SERIES (charts + panels follow)", () => {
   it("KEYSTONE: charts + dailies-derivable panels follow the MTM bundle; external panels stay cash (falsifiable BOTH ways)", () => {
     const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
@@ -621,5 +678,71 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(s.textContent).toContain("3.33"); // MTM beta
     expect(s.textContent).toContain("6.66"); // MTM information ratio
     expect(s.textContent).not.toContain("+11.00%"); // cash alpha gone
+  });
+
+  it("STEP-3 PARITY: under MTM the seven KpiStrip headline scalars == the rail §I headline to display precision", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmParity());
+
+    // Pre-toggle sanity: the rail §I cash cum_ret is the 300-day scenario's own
+    // value, NOT the +50% MTM sentinel — so the post-toggle match is a real swap,
+    // not a fixture that already shows MTM under cash.
+    expect(railValue(container, "Main Metrics", "Cumulative Return")).not.toBe("+50.00%");
+
+    fireEvent.click(getByText("Mark-to-market"));
+
+    // The three RATIO scalars format identically on both surfaces (2dp `num`), so
+    // assert EXACT string equality KpiStrip == rail.
+    for (const [kpiLabel, railLabel] of [
+      ["Sharpe", "Sharpe"],
+      ["Sortino", "Sortino"],
+      ["Calmar", "Calmar"],
+    ] as const) {
+      expect(railValue(container, "Main Metrics", railLabel)).toBe(
+        kpiValue(container, kpiLabel),
+      );
+    }
+
+    // The four PERCENTAGE scalars use DIFFERENT display precision by design — the
+    // KpiStrip glances at 1dp (`pctSigned`/`pct`), the rail details at 2dp
+    // (`pct(_, true)`/`pctNeg`). "== to display precision" therefore means the rail's
+    // 2dp value ROUNDED to the strip's 1dp equals the strip value. Given the parity
+    // precondition (persisted == TS compute), they trace to ONE number, so this holds.
+    const pctPairs: Array<[string, string, string]> = [
+      ["Cum. Return", "Main Metrics", "Cumulative Return"],
+      ["CAGR", "Main Metrics", "CAGR"],
+      ["Ann. Vol", "Main Metrics", "Ann. Volatility"],
+      ["Max DD", "Max Drawdown", "Max Drawdown"],
+    ];
+    for (const [kpiLabel, panel, railLabel] of pctPairs) {
+      const kpi = numOf(kpiValue(container, kpiLabel));
+      const rail = numOf(railValue(container, panel, railLabel));
+      // Rail (2dp) rounded to the strip's 1dp precision must equal the strip value.
+      expect(Number(rail.toFixed(1))).toBe(kpi);
+    }
+
+    // Falsifiable the OTHER way: the rail §I headline is the MTM-derived value
+    // (+50.00%), distinct from the cash scenario. Neuter the root-cause flip
+    // (MetricsColumn `m` → payload.strategyMetrics) → the rail shows cash under MTM
+    // while the KpiStrip shows +50.0% → the rounding equality above reddens.
+    expect(railValue(container, "Main Metrics", "Cumulative Return")).toBe("+50.00%");
+    expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
+  });
+
+  it("STEP-4 double-display dissolved: a scalar duplicated across §I and the Extended panel shows the SAME MTM number", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmBundle());
+    const extSection = () =>
+      getByText("Extended Metrics").closest("section") as HTMLElement;
+
+    // Cash: §I Skew is the calm-scenario value, NOT the bundle's -7.77 sentinel.
+    expect(railValue(container, "Main Metrics", "Skew")).not.toBe("-7.77");
+
+    fireEvent.click(getByText("Mark-to-market"));
+
+    // Under MTM the §I Main-Metrics "Skew" row and the Extended-Metrics panel now
+    // read the SAME view.strategyMetrics — before the root-cause flip §I stayed cash
+    // while Extended followed MTM (the double-display contradiction). Both show the
+    // bundle sentinel -7.77. Neuter §I (`m` → payload) → §I reverts to cash → RED.
+    expect(railValue(container, "Main Metrics", "Skew")).toBe("-7.77");
+    expect(extSection().textContent).toContain("-7.77");
   });
 });
