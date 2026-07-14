@@ -162,6 +162,7 @@ AuditAction = Literal[
     "user_note.holding.update",
     "user_note.bridge_outcome.update",
     "user_note.strategy.update",
+    "user_note.dashboard.update",
     # --- Phase 23: persisted allocator scenario drafts (TS-only call sites) --
     # No Python emitter; kept here so the TS<->Python AuditAction parity test
     # (test_audit.py::test_action_literal_matches_ts_union) stays green.
