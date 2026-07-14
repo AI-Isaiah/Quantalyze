@@ -1439,3 +1439,157 @@ async def test_mtm_gated_reason_absence_is_absence() -> None:
         "no prestamped reason → the key must be ABSENT (not None-valued); "
         f"got {dq!r}"
     )
+
+
+# ===========================================================================
+# Phase 105 (BB-02, collapse #2) — the single-key cash SCALAR path joins the ONE
+# shared derive_basis_series route. Two seam guarantees:
+#   D5 ordering — the cash_settlement SERIES row persists BEFORE the scalar/status
+#     flip, so a `complete` scalar never exists without its series.
+#   D3 heal     — the unrecoverable terminal arm heal-DELETEs the cash series row
+#     so a stale row never outlives the authoritative `failed` stamp.
+# Both exercise the REAL run_csv_strategy_analytics against a recording mock; the
+# compute is stubbed at services.basis_series (the swap moved the compute INSIDE
+# the shared derive), never at services.analytics_runner.
+# ===========================================================================
+
+
+def _make_recording_supabase_mock(
+    daily_rows: list[dict],
+    *,
+    events: list[str] | None = None,
+    deletes: list[dict] | None = None,
+    api_key_id: str | None = None,
+) -> MagicMock:
+    """A per-name-memoized supabase mock that records the cash_settlement series
+    persist (via sb.rpc) and the strategy_analytics complete upsert onto ``events``
+    (ordered), and strategy_analytics_series DELETEs (heal arm) onto ``deletes``."""
+    sb = MagicMock()
+    _tables: dict[str, MagicMock] = {}
+
+    def _table(name: str) -> MagicMock:
+        if name in _tables:
+            return _tables[name]
+        tbl = MagicMock()
+        _tables[name] = tbl
+        if name == "strategies":
+            tbl.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+                data={"id": "s", "user_id": "u", "api_key_id": api_key_id,
+                      "asset_class": None}
+            )
+        elif name == "csv_daily_returns":
+            eq_chain = tbl.select.return_value.eq.return_value
+            eq_chain.order.return_value.range.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            eq_chain.order.return_value.execute.return_value = MagicMock(data=daily_rows)
+        elif name == "strategy_analytics":
+            tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+                data={"data_quality_flags": {}}
+            )
+
+            def _upsert(payload: object, **kw: object) -> MagicMock:
+                if (
+                    events is not None
+                    and isinstance(payload, dict)
+                    and str(payload.get("computation_status", "")).startswith("complete")
+                ):
+                    events.append("scalar_complete_upsert")
+                return MagicMock(execute=MagicMock())
+
+            tbl.upsert.side_effect = _upsert
+        elif name == "strategy_analytics_series":
+            def _delete() -> MagicMock:
+                rec: dict[str, dict] = {"filters": {}}
+                chain = MagicMock()
+
+                def _eq(col: str, val: object) -> MagicMock:
+                    rec["filters"][f"eq:{col}"] = val
+                    return chain
+
+                chain.eq.side_effect = _eq
+                chain.execute.return_value = MagicMock()
+                if deletes is not None:
+                    deletes.append(rec)
+                return chain
+
+            tbl.delete.side_effect = _delete
+        else:
+            tbl.upsert.return_value = MagicMock(execute=MagicMock())
+        return tbl
+
+    sb.table.side_effect = _table
+
+    def _rpc(name: str, payload: dict) -> MagicMock:
+        if (
+            events is not None
+            and name == "upsert_strategy_analytics_series_batch"
+            and "cash_settlement" in payload.get("p_kinds", {})
+        ):
+            events.append("cash_series_persist")
+        return MagicMock(execute=MagicMock())
+
+    sb.rpc.side_effect = _rpc
+    return sb
+
+
+@pytest.mark.asyncio
+async def test_cash_series_persists_before_complete_scalar_upsert() -> None:
+    """D5 ordering (105-04): the cash_settlement SERIES row is persisted BEFORE the
+    strategy_analytics scalar/status flip, so a `complete` scalar never exists without
+    its series (mirrors test_stitch_composite_job.test_mtm_series_persists_before_done_
+    scalar_write). Neuter: move the persist_basis_series call AFTER
+    db_execute(_mark_complete) in run_csv_strategy_analytics → the ordering assert
+    reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    events: list[str] = []
+    rows = [{"date": f"2024-01-0{d}", "daily_return": 0.01} for d in range(1, 6)]
+    sb = _make_recording_supabase_mock(rows, events=events, api_key_id=None)
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        result = await run_csv_strategy_analytics("s")
+
+    assert result["status"] == "complete"
+    assert "cash_series_persist" in events, (
+        "the cash_settlement series row must be persisted (D5)"
+    )
+    assert "scalar_complete_upsert" in events, "the scalar/status flip must fire"
+    assert events.index("cash_series_persist") < events.index("scalar_complete_upsert"), (
+        "D5: the cash series row must be persisted BEFORE the scalar/status flip; "
+        f"got order {events!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_heals_cash_series_row() -> None:
+    """D3 SECONDARY (105-04): when the CSV runner hits the unrecoverable catch-all
+    (the shared derive raises mid-compute), the terminal arm heal-DELETEs the
+    cash_settlement series row so a stale row from a prior longer-history derive never
+    outlives the authoritative 'failed' stamp. DEFENSE-IN-DEPTH (the Plan-02 read gate
+    is the primary guarantee). Neuter: remove the persist_basis_series(result=None)
+    heal from the catch-all → the strategy_analytics_series delete vanishes → reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    deletes: list[dict] = []
+    rows = [{"date": f"2024-01-0{d}", "daily_return": 0.01} for d in range(1, 6)]
+    sb = _make_recording_supabase_mock(rows, deletes=deletes, api_key_id=None)
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               side_effect=RuntimeError("transient blip mid-compute")):
+        with pytest.raises(HTTPException) as exc:
+            await run_csv_strategy_analytics("s")
+
+    assert exc.value.status_code == 500
+    assert len(deletes) == 1, (
+        f"the terminal arm must heal-delete the cash series exactly once; got {deletes!r}"
+    )
+    assert deletes[0]["filters"].get("eq:kind") == "cash_settlement"
+    assert deletes[0]["filters"].get("eq:strategy_id") == "s"
