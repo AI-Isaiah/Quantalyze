@@ -687,6 +687,22 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     expect(s.textContent).not.toContain("+11.00%"); // cash alpha gone
   });
 
+  it("F5: the KpiStrip α/IR cells follow MTM (consistent with §IV), no longer suppressed to '—'", () => {
+    const { container, getByText } = renderBody(fixtureSingleKeyMtmJoint());
+    // Cash: the strip renders the CASH joint α/IR (pctSigned(0.11,1) / num(0.22)).
+    expect(kpiValue(container, "α vs BTC")).toBe("+11.0%");
+    expect(kpiValue(container, "IR vs BTC")).toBe("0.22");
+
+    fireEvent.click(getByText("Mark-to-market"));
+
+    // MTM + bundle: the strip α/IR SWAP to the bundle's MTM joint (pctSigned(4.2,1)
+    // = +420.0%, num(6.66) = 6.66) — consistent with §IV, which shows the same joint.
+    // Neuter (revert suppressRelative to `basis === "mark_to_market" || modeled`) →
+    // both cells render "—" while §IV shows the MTM joint → these RED.
+    expect(kpiValue(container, "α vs BTC")).toBe("+420.0%");
+    expect(kpiValue(container, "IR vs BTC")).toBe("6.66");
+  });
+
   it("STEP-3 PARITY (F3): the rail §I displays the PERSISTED seven, NOT the divergent bundle TS recompute (overlay wins — neuter → RED)", () => {
     const { container, getByText } = renderBody(fixtureSingleKeyMtmParity());
 

@@ -774,8 +774,16 @@ function KpiStrip() {
   // unchanged.
   const { basis, m, modeled, appliedLeverage } = useLeveragedMetrics(payload);
   const composite = payload.dataQuality?.composite === true;
-  const j = cmp.joint;
+  // F5 (phase 103): α / β / IR FOLLOW the active basis via the VIEW's comparator
+  // joint — consistent with §IV, which reads view.comparators[cmpKey].joint. Under
+  // cash the view returns the payload by reference, so `j` is the cash joint
+  // (byte-identical to today); under MTM WITH a bundle it is the bundle's MTM joint
+  // (regressed on the MTM strategy leg). `cn` (shortName) is basis-invariant, so it
+  // still comes from the cash comparator block.
+  const view = useBasisSeriesView(payload);
+  const j = view.comparators[cmpKey].joint;
   const cn = cmp.shortName;
+  const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
   // α + IR slots collapse — render 7 cells instead of leaving empty space.
@@ -799,18 +807,18 @@ function KpiStrip() {
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
-    // F2 (no-invented-data): α / IR are series-derived and exist for the CASH
-    // basis only (D5 — they are never recomputed per-basis). Under the
-    // "BASIS · MARK-TO-MARKET" eyebrow a cash α/IR number would be mislabeled, so
-    // render "—" instead of inheriting the cash value.
-    // WR-01 — the SAME suppression applies under a MODELED leverage: the LEV-01
-    // lighter recompute levers only the seven headline scalars, NOT the
-    // benchmark-relative stats. α (r_strat = α + β·r_bench) transforms as α → L·α
-    // and β → L·β under r→L·r, but the strip pulls the UN-levered `j.alpha` /
-    // `j.info_ratio` from the payload — so beside a levered Sharpe/Vol they would
-    // be an internally-inconsistent mislabel. Render "—" instead (matching the
-    // MTM branch shape) rather than an unrescaled benchmark-relative number.
-    const suppressRelative = basis === "mark_to_market" || modeled;
+    // F5 (phase 103): α / β / IR now FOLLOW the active basis via the view's joint
+    // (above), matching §IV — under MTM WITH a bundle they are the MTM-regressed
+    // joint, no longer suppressed. Two cases still render "—":
+    //   - MODELED leverage (WR-01): the LEV-01 lighter recompute levers only the
+    //     seven headline scalars, NOT the benchmark-relative stats. α transforms as
+    //     α → L·α and β → L·β under r → L·r, but `j` is the UN-levered joint — beside
+    //     a levered Sharpe/Vol it would be an internally-inconsistent mislabel.
+    //   - MTM WITHOUT a bundle: a bundle-absent read (`useBasisSeriesView` returns
+    //     the payload by reference) yields the CASH joint; showing it under the MTM
+    //     story would mislabel cash (the SAME discipline as the F4 rail eyebrow,
+    //     which blanks when the bundle is absent).
+    const suppressRelative = modeled || (basis === "mark_to_market" && !mtmBundlePresent);
     items.push({
       label: `α vs ${cn}`,
       value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
