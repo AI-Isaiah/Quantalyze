@@ -101,6 +101,18 @@ STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
 
 
 # ---------------------------------------------------------------------------
+# Crypto exchange venues — the "annualize on the crypto (√365) clock" set (#597).
+# MD-01 (Fable code-review, Phase 105.1): single-sourced HERE precisely because it
+# was hand-copied — the composite blend (``job_worker._COMPOSITE_CRYPTO_VENUES``)
+# and the onboarding-teaser preview (``process_key._CRYPTO_VENUES``) held two
+# independent literals of the SAME #597 decision. A new venue admitted to one only
+# would drift the preview clock (√365) from the blend clock (√252) — the exact
+# silent re-widening / hand-copy failure mode this module exists to prevent. Both
+# now import from here. ``_COMPOSITE_DEGRADE_VENUES`` derives from it (minus deribit).
+CRYPTO_VENUES: frozenset[str] = frozenset({"deribit", "binance", "okx", "bybit"})
+
+
+# ---------------------------------------------------------------------------
 # Quote-currency derivation for the CCXT symbol format used during equity
 # replay. Single source for the two byte-identical inline derivations that
 # lived in ``_compute_daily_equity`` (the spot-balance loop and the perp

@@ -75,6 +75,7 @@ from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
+    CRYPTO_VENUES,
     PositionDirection as PositionDirection,
     Side as Side,
 )
@@ -3288,9 +3289,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 # the crypto (365) clock. The composite periods_per_year is 365 if ANY member
 # venue is crypto, else 252 — an explicit set so a future non-crypto venue flips
 # the blend to 252 without touching the rule.
-_COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
-    {"deribit", "binance", "okx", "bybit"}
-)
+# MD-01: single-sourced from services.closed_sets.CRYPTO_VENUES (imported above) so
+# the composite blend clock can never drift from the onboarding-teaser preview clock.
+_COMPOSITE_CRYPTO_VENUES: frozenset[str] = CRYPTO_VENUES
 
 # HARD-05 (Phase 93): the ccxt crypto venues a composite member can declare that
 # this phase does NOT yet reconstruct natively (Plan 93-04 attaches the honest

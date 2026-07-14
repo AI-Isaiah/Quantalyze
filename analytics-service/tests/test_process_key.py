@@ -1599,6 +1599,32 @@ def test_derive_return_scalars_reads_nested_ytd():
     assert "ytd" not in result.metrics_json
 
 
+def test_derive_return_scalars_traditional_uses_252_not_365():
+    """LW-03 (Fable code-review): _derive_return_scalars HONORS the asset_class arg
+    for the traditional (√252) clock — the crypto route test W2 only covers √365, so
+    a hard-wired periods_per_year=365 at the call site would otherwise pass the whole
+    suite. Traditional → Sharpe == √252 derive, != √365 derive on the same series."""
+    import pandas as pd
+    from routers.process_key import _derive_return_scalars
+    from services.basis_series import derive_basis_series
+
+    idx = pd.date_range("2024-01-05", periods=6, freq="D").as_unit("us")
+    series = pd.Series([0.01, -0.02, 0.03, 0.015, -0.01, 0.02], index=idx)
+
+    four, _curve = _derive_return_scalars(series, "traditional")
+    sharpe_252 = derive_basis_series(
+        series, None, periods_per_year=252,
+        cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json["sharpe"]
+    sharpe_365 = derive_basis_series(
+        series, None, periods_per_year=365,
+        cumulative_method="geometric", day_basis="calendar",
+    ).metrics_json["sharpe"]
+
+    assert four["sharpe"] == sharpe_252
+    assert four["sharpe"] != sharpe_365
+
+
 def test_resolve_asset_class_venue_and_csv():
     """Test R (FLAG C resolver, unit): crypto venues resolve WITHOUT touching
     supabase; csv reads strategies.asset_class; a failed/empty lookup → None."""

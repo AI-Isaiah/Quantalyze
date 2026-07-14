@@ -48,6 +48,7 @@ from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
+from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.metrics import periods_per_year_for_asset_class
 from services.rate_limit import limiter
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
@@ -292,7 +293,9 @@ def _trade_to_dict(t: Trade | dict[str, Any]) -> dict[str, Any]:
 # is included defensively so a future H-11 admission of it classifies here too.
 # A NEW sync-eligible venue MUST be classified in this set (grep the H-11
 # whitelist above when admitting one).
-_CRYPTO_VENUES = frozenset({"okx", "binance", "bybit", "deribit"})
+# MD-01: `_CRYPTO_VENUES` now aliases the canonical `services.metrics.CRYPTO_VENUES`
+# (imported above) so the teaser preview clock can never drift from the composite
+# blend clock. Do NOT redefine a local literal here.
 
 # D6 degrade contract: the five legacy landing-card enrichment keys null out
 # together on any insufficient-history path (len<2 pre-check OR derive's <2
@@ -1094,6 +1097,12 @@ async def process_key(
         # try/except around find_matched_strategy (portfolio.py:1052).
         # Post-pre-null this can no longer persist off-backbone builder
         # scalars — the four return-based keys are already None here.
+        # LW-01 (Fable code-review): the four scalars are applied BEFORE
+        # find_matched_strategy/compute_period_returns (D5 ordering), so a raise
+        # there would otherwise leave the 5 legacy keys ABSENT (a "scalars-present,
+        # curve-absent" card) instead of the explicit-dashes contract the two inner
+        # degrade arms uphold. Null them here too so every degrade path is uniform.
+        enriched_metrics_snapshot.update(_LEGACY_NULL_ENRICHMENT)
         log.warning(
             "process_key.enrichment_failed",
             error=str(exc)[:200],
