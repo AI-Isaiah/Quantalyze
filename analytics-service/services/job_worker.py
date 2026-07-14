@@ -2994,6 +2994,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 periods_per_year=_mtm_periods,
                 cumulative_method=_mtm_cumulative,
                 day_basis=_mtm_day_basis,
+                # Phase 104 (104-SC5): carry the benchmark IDENTITY STRING in the
+                # persisted MTM conventions echo so BOTH bases (cash + MTM) carry it
+                # uniformly. Additive-only: no reader consumes conventions.benchmark
+                # this phase (SC-4-safe), and the MTM benchmark RETURNS fetch above is
+                # unchanged — this is only the identity label alongside conventions.
+                benchmark_symbol="BTC",
             )
             mtm_metrics_json = dict(_mtm_basis_result.metrics_json)
         except ValueError as _mtm_compute_exc:

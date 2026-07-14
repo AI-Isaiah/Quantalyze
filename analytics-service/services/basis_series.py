@@ -39,6 +39,15 @@ calendar span CAGR sees) — same rationale.
 
 Cash paths are NOT routed through this module in Phase 103 (SC-4 cash byte-identity
 is untouched — Phase 103 routes ONLY the MTM basis here).
+
+Phase 104 addendum (BB-01, SERIES-ONLY): the single-key broker derive now ALSO
+persists the cash daily SERIES here via `basis="cash_settlement"` (KIND_CASH_SETTLEMENT)
+— an ADDITIVE, DARK write with NO reader yet (Phase 105/106 collapse the scalar route
+onto it). The AUTHORITATIVE cash SCALARS remain on the legacy `analytics_runner` path
+until Phase 105: routing cash SCALARS through this module before the NaN/gap-fill
+reconciliation would bridge broker guard-day NaN breaks and 0.0-fill sparse user-CSV
+gaps — an SC-4 violation (104-RESEARCH Pitfall 1). Only the series (rows + gap_spans +
+conventions echo, incl. the benchmark identity) is persisted for cash this phase.
 """
 from __future__ import annotations
 
@@ -57,8 +66,18 @@ from services.stitch_composite import _consecutive_spans
 # the backbone adopts the helper (Phases 104-106). No DDL ships this phase.
 KIND_MTM_DAILY_RETURNS = "mtm_daily_returns"
 
-# The basis → kind map is where cash joins later (e.g. "cash_settlement": ...).
-_KIND_BY_BASIS: dict[str, str] = {"mark_to_market": KIND_MTM_DAILY_RETURNS}
+# Phase 104 (BB-01): cash joins the route as its own persist kind. Still no DDL —
+# `strategy_analytics_series.kind` is unconstrained TEXT by documented design
+# (migration 20260428120919), so a new kind is a map entry + a constant, not an
+# ALTER. This is a SERIES-ONLY dark write (additive, zero readers this phase); the
+# authoritative cash SCALARS stay on the legacy analytics_runner path until 105.
+KIND_CASH_SETTLEMENT = "cash_settlement"
+
+# The basis → kind map. Cash joined here in Phase 104 (104-SC1).
+_KIND_BY_BASIS: dict[str, str] = {
+    "mark_to_market": KIND_MTM_DAILY_RETURNS,
+    "cash_settlement": KIND_CASH_SETTLEMENT,
+}
 
 # JSONB payload schema version (bump if the row/gap_spans/conventions shape changes
 # so a reader can detect a stale-shape row).
@@ -90,6 +109,9 @@ class BasisSeriesResult:
         `{"periods_per_year", "cumulative_method", "day_basis"}` echo — the
         divergence-guard anchor. The round-trip recomputes AGAINST this echo, so a
         scalar computed under a convention that disagrees with the echo reddens.
+        Phase 104 adds an OPTIONAL `benchmark` key — the benchmark identity STRING —
+        present ONLY when the deriving call site passed `benchmark_symbol` (both
+        Phase-104 call sites, cash AND MTM, pass "BTC"). Absent when omitted.
     """
 
     metrics_json: dict[str, Any]
@@ -106,6 +128,7 @@ def derive_basis_series(
     periods_per_year: int,
     cumulative_method: str,
     day_basis: str,
+    benchmark_symbol: str | None = None,
 ) -> BasisSeriesResult:
     """Derive the persisted form + scalar cache + coverage mask from an
     already-computed daily-return series (basis-agnostic; NO new math).
@@ -149,11 +172,19 @@ def derive_basis_series(
     absent_days = list(full_idx.difference(sparse.index))
     gap_spans = _consecutive_spans(absent_days)
 
-    conventions = {
+    conventions: dict[str, Any] = {
         "periods_per_year": periods_per_year,
         "cumulative_method": cumulative_method,
         "day_basis": day_basis,
     }
+    # Phase 104 (104-SC5): carry the benchmark IDENTITY STRING (not a returns fetch —
+    # `benchmark_rets` stays whatever the caller passed) so Phase 105's scalar route
+    # knows WHICH benchmark to re-derive α/β/corr against. ADDITIVE-ONLY: a caller
+    # that omits the kwarg (default None) gets the unchanged three-key conventions
+    # dict, so opting out is byte-invisible (SC-4-safe — no reader consumes
+    # `conventions.benchmark` this phase; 105's round-trip guard is its first).
+    if benchmark_symbol is not None:
+        conventions["benchmark"] = benchmark_symbol
 
     return BasisSeriesResult(
         metrics_json=metrics.metrics_json,

@@ -23,13 +23,15 @@ import pandas as pd
 import pytest
 
 from services.basis_series import (
+    KIND_CASH_SETTLEMENT,
     KIND_MTM_DAILY_RETURNS,
     BasisSeriesResult,
+    _KIND_BY_BASIS,
     derive_basis_series,
     persist_basis_series,
 )
 from services.broker_dailies import gap_fill_daily_returns
-from services.metrics import compute_all_metrics
+from services.metrics import _drop_nonfinite, compute_all_metrics
 
 
 def _mk_series(pairs: list[tuple[str, float]]) -> pd.Series:
@@ -186,6 +188,41 @@ def test_conventions_echo() -> None:
     }
 
 
+def test_conventions_echo_includes_benchmark_identity_when_supplied() -> None:
+    """Phase 104 (104-SC5): when the deriving call site passes the benchmark
+    IDENTITY STRING (`benchmark_symbol="BTC"`), conventions carries it as a fourth
+    `benchmark` key — an identity, NOT a returns fetch (benchmark_rets stays None).
+    Phase 105's scalar route re-derives α/β/corr itself but needs to know WHICH
+    benchmark, so the string travels alongside conventions. Neuter (drop the key /
+    hardcode) → RED."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        benchmark_symbol="BTC",
+    )
+    assert r.conventions["benchmark"] == "BTC"
+    assert r.conventions == {
+        "periods_per_year": 252,
+        "cumulative_method": "geometric",
+        "day_basis": "calendar",
+        "benchmark": "BTC",
+    }
+
+
+def test_conventions_echo_omits_benchmark_by_default() -> None:
+    """The `benchmark_symbol` kwarg is ADDITIVE: the default (None) OMITS the key,
+    so a caller that opts out is byte-unaffected (exactly the three convention
+    keys). This pins the additive-only property protecting SC-4 (a reader that does
+    not pass the identity sees an unchanged conventions shape). Neuter (always emit
+    the key) → RED."""
+    r = derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+    )
+    assert "benchmark" not in r.conventions
+    assert set(r.conventions) == {"periods_per_year", "cumulative_method", "day_basis"}
+
+
 def test_sibling_kinds_passthrough() -> None:
     """sibling_kinds passes through from the MetricsResult unchanged (future
     cash/backbone adoption reads it) — same object the inline compute produced."""
@@ -293,8 +330,83 @@ def test_persist_none_heals_via_delete() -> None:
 
 
 def test_persist_unknown_basis_raises() -> None:
-    """Only 'mark_to_market' is mapped in Phase 103 — an unknown basis raises
-    ValueError (the kind map is where cash joins later)."""
+    """An UNMAPPED basis raises ValueError (the kind map gates the write surface).
+    Phase 104 added 'cash_settlement' to the map, so the unmapped example here is a
+    string that is genuinely absent from `_KIND_BY_BASIS`."""
     fake = _StubSupabase()
     with pytest.raises(ValueError):
-        persist_basis_series(fake, "strat-1", basis="cash_settlement", result=_result())
+        persist_basis_series(fake, "strat-1", basis="not_a_real_basis", result=_result())
+
+
+# ── Phase 104 (BB-01): cash_settlement joins _KIND_BY_BASIS (SERIES-ONLY) ───────
+
+
+def test_cash_settlement_kind_mapping() -> None:
+    """Phase 104: cash joins the basis→kind map. `strategy_analytics_series.kind` is
+    unconstrained TEXT (no DDL), so adding a kind is a map entry + a module constant.
+    Neuter (drop the map entry / rename the constant) → RED."""
+    assert KIND_CASH_SETTLEMENT == "cash_settlement"
+    assert _KIND_BY_BASIS["cash_settlement"] == "cash_settlement"
+    assert _KIND_BY_BASIS["cash_settlement"] == KIND_CASH_SETTLEMENT
+
+
+def _cash_result() -> BasisSeriesResult:
+    """A cash-convention (√252) derived result carrying the benchmark identity."""
+    return derive_basis_series(
+        _fixture_cash(), None,
+        periods_per_year=252, cumulative_method="geometric", day_basis="calendar",
+        benchmark_symbol="BTC",
+    )
+
+
+def test_cash_persist_roundtrips_via_batch_rpc() -> None:
+    """A cash persist routes the payload through the SAME service-role-only batch RPC
+    keyed on the `cash_settlement` kind; rebuilding a Series from the persisted rows
+    reproduces the sparse input EXACTLY (byte-equal floats). Neuter the kind / drop a
+    payload field / round the floats → RED."""
+    fake = _StubSupabase()
+    r = _cash_result()
+    persist_basis_series(fake, "strat-cash", basis="cash_settlement", result=r)
+
+    assert len(fake.rpc_calls) == 1
+    name, args = fake.rpc_calls[0]
+    assert name == "upsert_strategy_analytics_series_batch"
+    assert args["p_strategy_id"] == "strat-cash"
+    assert set(args["p_kinds"]) == {KIND_CASH_SETTLEMENT}
+    payload = args["p_kinds"][KIND_CASH_SETTLEMENT]
+    assert payload == {
+        "schema": 1,
+        "basis": "cash_settlement",
+        "rows": r.series_rows,
+        "gap_spans": r.gap_spans,
+        "conventions": r.conventions,
+    }
+    # the benchmark identity travels in the persisted conventions echo (104-SC5)
+    assert payload["conventions"]["benchmark"] == "BTC"
+    assert fake.deletes == []  # upsert path never deletes
+
+    rebuilt = pd.Series(
+        [row["return"] for row in payload["rows"]],
+        index=pd.DatetimeIndex([row["date"] for row in payload["rows"]]).as_unit("us"),
+        dtype="float64",
+    )
+    expected = _drop_nonfinite(_fixture_cash()).sort_index()
+    # check_freq=False: the persisted rows carry no index frequency (a list of ISO
+    # dates), so a rebuilt series has freq=None while the source fixture retains its
+    # date_range freq — the round-trip guarantee is byte-exact VALUES + dates, not
+    # the pandas freq attribute.
+    pd.testing.assert_series_equal(rebuilt, expected, check_exact=True, check_freq=False)
+
+
+def test_cash_persist_none_heals_via_delete() -> None:
+    """result=None DELETES the (strategy_id, cash_settlement) row — the Pitfall-5
+    heal so a stale cash series never outlives an authoritative-reject derive. Neuter
+    (drop the kind filter / skip the delete) → RED."""
+    fake = _StubSupabase()
+    persist_basis_series(fake, "strat-cash", basis="cash_settlement", result=None)
+
+    assert fake.rpc_calls == []  # heal never upserts
+    assert fake.deletes == [
+        ("strategy_analytics_series",
+         [("strategy_id", "strat-cash"), ("kind", KIND_CASH_SETTLEMENT)]),
+    ]
