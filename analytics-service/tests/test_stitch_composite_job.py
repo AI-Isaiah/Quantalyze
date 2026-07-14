@@ -30,7 +30,13 @@ from services.deribit_ingest import (
 )
 from services.native_nav import NativeLedger
 from services.nav_twr import NavReconstructionError
+import services.job_worker as _jw
 from services.job_worker import DispatchOutcome, run_stitch_composite_job
+from services.metrics import (
+    DEFAULT_PERIODS_PER_YEAR,
+    PERIODS_PER_YEAR_CRYPTO,
+    periods_per_year_for_asset_class,
+)
 from services.stitch_composite import MTM_REASON_OPTIONS
 
 
@@ -408,6 +414,93 @@ def _by_basis(fake: _FakeSupabase) -> dict[str, Any] | None:
                 and "metrics_json_by_basis" in payload:
             return payload["metrics_json_by_basis"]
     return None
+
+
+# ---------------------------------------------------------------------------
+# Collapse #5 (D4) — asset_class is THE annualization clock selector; the #597
+# venue blend survives only as the retained fail-loud sanity cross-check.
+# ---------------------------------------------------------------------------
+
+
+def _venue_blend_periods(venues: list[str]) -> int:
+    """The legacy #597 venue-blend rule (365 if ANY member venue crypto else 252),
+    reconstructed here from the module's canonical crypto-venue set so the equality
+    assertion below pins THE rule the worker cross-checks, not a duplicate literal."""
+    return (
+        PERIODS_PER_YEAR_CRYPTO
+        if any(v in _jw._COMPOSITE_CRYPTO_VENUES for v in venues)
+        else DEFAULT_PERIODS_PER_YEAR
+    )
+
+
+@pytest.mark.parametrize(
+    "asset_class, venues",
+    [
+        # Every VALID composite fixture in this suite + the parity suite is a
+        # crypto-asset_class book over crypto venues (deribit and/or a ccxt member
+        # like bybit). Enumerate the venue shapes those fixtures exercise.
+        ("crypto", ["deribit"]),               # the dominant Deribit-only fixtures
+        ("crypto", ["deribit", "deribit"]),    # two-Deribit-member fixtures
+        ("crypto", ["deribit", "bybit"]),      # ccxt-member-joins-stitch fixtures
+        ("crypto", ["bybit", "deribit"]),
+    ],
+)
+def test_periods_per_year_two_rules_resolve_equal_across_valid_fixtures(
+    asset_class: str, venues: list[str]
+) -> None:
+    """#5 SAFETY ASSERTION (D4): across every VALID composite fixture shape in this
+    suite, the ONE selector — periods_per_year_for_asset_class(asset_class) — resolves
+    EQUAL to the legacy #597 venue blend. This is exactly why collapsing the selector
+    changes NO live scalar (no shipping composite ever carried a divergent clock: the
+    F-1 backstop landed in the SAME commit as composite GA). The DELIBERATE inequality
+    — a wrong-asset_class composite — is the retained fail-loud arm's job, pinned by
+    test_traditional_asset_class_composite_fails_loud_retained_check below."""
+    selector = periods_per_year_for_asset_class(asset_class)
+    assert selector == _venue_blend_periods(venues), (
+        "the asset_class selector and the #597 venue blend must agree on every "
+        "shipping composite fixture — otherwise the #5 collapse would move a live "
+        f"scalar (asset_class={asset_class!r} venues={venues})"
+    )
+
+
+@pytest.mark.asyncio
+async def test_traditional_asset_class_composite_fails_loud_retained_check() -> None:
+    """D4 retained fail-loud sanity assert: with asset_class now THE selector, a
+    composite left at asset_class='traditional' (√252) over a crypto venue (deribit →
+    venue blend √365) must STILL fail PERMANENT — the venue blend is the cross-check
+    and disagreement is a hard stop, never a silent √252 annualization. The compute
+    is NEVER reached (no csv_daily_returns write, no by-basis object). Neuter (delete
+    the retained cross-check arm) → the job proceeds to DONE with √252 scalars → RED."""
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={
+            "id": _STRATEGY_ID,
+            "asset_class": "traditional",  # √252 ≠ deribit venue blend √365
+            "returns_denominator_config": _TEST_CONFIG,
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    # Terminal 'failed' stamp so the wizard poller reaches a gate.
+    assert any(
+        isinstance(p, dict) and p.get("computation_status") == "failed"
+        for _t, p, _c in fake.upserts
+    ), "asset_class/venue-blend disagreement must stamp a terminal failed row"
+    # The compute path must NOT have been reached — fail-loud is BEFORE any persist.
+    assert not any(t == "csv_daily_returns" for t, _, _ in fake.upserts)
+    assert not any(
+        isinstance(p, dict) and "metrics_json_by_basis" in p
+        for _t, p, _c in fake.upserts
+    ), "no by-basis object may ship for a clock-disagreement composite"
 
 
 @pytest.mark.asyncio

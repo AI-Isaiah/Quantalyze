@@ -4247,39 +4247,44 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     ]
     mask = coverage_mask(_coverage_input)
 
-    # 5. #597 blend annualization: 365 if ANY member venue crypto else 252. For an
-    # all-crypto composite this equals periods_per_year_for_asset_class('crypto')
-    # so the headline (asset_class-driven) and the by-basis object AGREE.
-    periods_per_year = (
+    # 5. #5 collapse (D4): asset_class is THE annualization clock selector — the ONE
+    # rule, periods_per_year_for_asset_class(strategies.asset_class) (√365 crypto /
+    # √252 traditional). Every #597 asset-class surface (scenario blends, leg
+    # annualization, OG card, peer-rank via src/lib/closed-sets.ts) recomputes from
+    # this SAME strategies.asset_class, so the composite headline now agrees with them
+    # by construction. finalize-wizard force-derives asset_class='crypto' for a
+    # composite (F-1a); the strat_row was already loaded for the denominator config.
+    periods_per_year = periods_per_year_for_asset_class(
+        strat_row.get("asset_class") if isinstance(strat_row, dict) else None
+    )
+    # F-1 (retained fail-loud sanity assert, D4): the legacy #597 venue blend (365 if
+    # ANY member venue crypto else 252) survives ONLY as a CROSS-CHECK — asset_class is
+    # now the truth. finalize-wizard's asset_class='crypto' force-derive is
+    # NON-BLOCKING, so a composite left at the 'traditional' default over a crypto-venue
+    # book would silently annualize √252 while its factsheet / #597 surfaces expect
+    # √365. FAIL LOUD PERMANENT on disagreement rather than ship that divergence — do
+    # NOT silently annualize the wrong clock. _COMPOSITE_DEGRADE_VENUES stays the
+    # unknown-venue backstop (a truly unknown venue degrades its member before it can
+    # reach this blend). #5 is a provable no-op on live scalars: the F-1 backstop
+    # landed in 044bee50 — the SAME commit that introduced stitch_composite.py — so no
+    # live composite has EVER shipped with the two clocks disagreeing.
+    _venue_blend_periods = (
         PERIODS_PER_YEAR_CRYPTO
         if any(v in _COMPOSITE_CRYPTO_VENUES for v in venues)
         else DEFAULT_PERIODS_PER_YEAR
     )
-    # F-1 (convergence red team): the composite headline annualizes on the venue
-    # blend above, but every #597 asset-class surface (scenario blends, leg
-    # annualization, OG card, peer-rank via src/lib/closed-sets.ts) recomputes from
-    # strategies.asset_class. If asset_class's clock (√365 crypto / √252 traditional)
-    # disagrees with the venue blend, those surfaces silently diverge from THIS
-    # headline by ~√(365/252). finalize-wizard force-derives asset_class='crypto'
-    # for a composite (F-1a), but that write is non-blocking — so BACKSTOP it here:
-    # FAIL LOUD PERMANENT rather than ship a composite whose headline and
-    # asset-class surfaces annualize on different clocks. The strat_row was already
-    # loaded for the denominator config; its asset_class was previously ignored.
-    _asset_class_periods = periods_per_year_for_asset_class(
-        strat_row.get("asset_class") if isinstance(strat_row, dict) else None
-    )
-    if _asset_class_periods != periods_per_year:
+    if _venue_blend_periods != periods_per_year:
         await _stamp_failed(
             "Composite asset_class annualization clock "
-            f"({_asset_class_periods}/yr) disagrees with the venue blend "
-            f"({periods_per_year}/yr); the factsheet and #597 surfaces would "
+            f"({periods_per_year}/yr) disagrees with the venue blend "
+            f"({_venue_blend_periods}/yr); the factsheet and #597 surfaces would "
             "diverge. Re-derive asset_class (crypto for a crypto-venue composite)."
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
                 "run_stitch_composite_job: asset_class periods_per_year "
-                f"{_asset_class_periods} != venue-blend {periods_per_year}"
+                f"{periods_per_year} != venue-blend {_venue_blend_periods}"
             ),
             error_kind="permanent",
         )
