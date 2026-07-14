@@ -248,7 +248,13 @@ function buildFactsheetPayloadCached(
     // Bumped v4→v5 (Phase 90.5): payload carries optional periodsPerYear for the
     // client leverage recompute; stale v4 entries lack it -> leverage control
     // hidden (fail-closed) during the TTL drain, never a crash.
-    ["factsheet-v2-payload-v5", id],
+    // Bumped v5→v6 (Phase 103, F7): the low-N reliability warning now REQUIRES
+    // `bootstrapCI.n` (the resample count). A stale v5 entry missing that field
+    // deserializes with `n` undefined, so `n < 252` is false and the warning is
+    // wrongly SUPPRESSED (for cash too) during the 1h TTL drain. Busting the shape
+    // version forces a fresh build carrying `bootstrapCI.n` rather than silently
+    // hiding the caveat.
+    ["factsheet-v2-payload-v6", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
