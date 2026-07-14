@@ -14,10 +14,27 @@ emits:
   * the per-basis coverage `gap_spans` derived FROM the same sparse form.
 
 Phases 104-106 (the `process_key`/unified-backbone program) ADOPT this helper for
-CASH — routing the cash series through the SAME function without a signature
-change (the `sibling_kinds` passthrough + basis-agnostic conventions are there for
-that adoption). Do NOT fork; do NOT bolt derive logic onto the composite's bespoke
-`_metrics_result_for` path (that path is what the backbone merge deletes).
+CASH and COMPOSITE — routing both series through the SAME function via the additive
+`scalar_returns`/`densify_policy` params (Phase 105, D1), with NO fork and NO
+signature break (the `sibling_kinds` passthrough + basis-agnostic conventions are
+there for that adoption). The bespoke composite scalar path that once lived beside
+this route is DELETED in Phase 105-05; nothing bolts derive logic outside this
+helper.
+
+D1 rows-vs-scalar-input decoupling (Phase 105)
+----------------------------------------------
+The persisted sparse ROWS always derive from `_drop_nonfinite(returns)`, but the
+SCALAR cache may be computed from a caller-supplied `scalar_returns` (the exact
+legacy-conditioned series) instead of `gap_fill_daily_returns(sparse)`, so a cash /
+composite caller reproduces its legacy scalar byte-identically BY CONSTRUCTION.
+`densify_policy` echoes HOW that scalar input was conditioned
+({"sparse","broker_nan","zero_fill"}) so the round-trip guard can reconstruct it
+from the rows: `sparse` → rows verbatim; `broker_nan` → reindex to the dense
+calendar (every in-span absence is a guard NaN); `zero_fill` → `gap_fill(rows)` then
+reinstate NaN at the additive `nan_dates` payload key (so a member-guard NaN break is
+never silently 0.0-bridged). Default (both params None) is byte-invisible: today's
+`gap_fill(sparse)` scalar, NO `densify` echo, `nan_dates` None, payload unchanged
+except its reader-invisible `schema` version.
 
 Composition-only — NO new valuation math (LOCKED). The helper composes existing
 primitives: `_drop_nonfinite` (metrics), `gap_fill_daily_returns` (broker_dailies),
@@ -80,8 +97,14 @@ _KIND_BY_BASIS: dict[str, str] = {
 }
 
 # JSONB payload schema version (bump if the row/gap_spans/conventions shape changes
-# so a reader can detect a stale-shape row).
-_PAYLOAD_SCHEMA_VERSION = 1
+# so a reader can detect a stale-shape row). Phase 105 (D1): bumped 1 → 2 for the
+# additive `nan_dates` key. This is a JSONB-additive shape change, NOT a migration
+# (`strategy_analytics_series` DDL untouched); readers ignore unknown keys.
+_PAYLOAD_SCHEMA_VERSION = 2
+
+# The closed set of scalar-input conditioning policies a caller may echo (D1). Fail
+# loud on anything outside it — these are code-controlled constants, never user input.
+_ALLOWED_DENSIFY_POLICIES = ("sparse", "broker_nan", "zero_fill")
 
 
 @dataclass(frozen=True)
@@ -112,6 +135,19 @@ class BasisSeriesResult:
         Phase 104 adds an OPTIONAL `benchmark` key — the benchmark identity STRING —
         present ONLY when the deriving call site passed `benchmark_symbol` (both
         Phase-104 call sites, cash AND MTM, pass "BTC"). Absent when omitted.
+        Phase 105 adds an OPTIONAL `densify` key ∈ {"sparse","broker_nan","zero_fill"}
+        — HOW the caller conditioned `scalar_returns` — present ONLY when the caller
+        passed `densify_policy`. Absent (byte-invisible) by default.
+    nan_dates:
+        Composite `zero_fill` ONLY (else None): sorted ISO dates of the in-index NaN
+        positions of the caller's `scalar_returns`. Carried as an ADDITIVE JSONB
+        payload key so the round-trip guard reinstates a member-guard NaN break
+        rather than 0.0-bridging it. Never populated for any other policy.
+    insufficient_window:
+        Pass-through of the `MetricsResult.insufficient_window` DQ flag (NOT
+        persisted). Exposed so the composite/single-key runners can duck-swap onto
+        this helper without losing the annualization-window annotation (Plans 04/05,
+        consumed at job_worker.py:4586 / analytics_runner.py:2399).
     """
 
     metrics_json: dict[str, Any]
@@ -119,6 +155,8 @@ class BasisSeriesResult:
     series_rows: list[dict[str, Any]]
     gap_spans: list[dict[str, str]]
     conventions: dict[str, Any]
+    nan_dates: list[str] | None = None
+    insufficient_window: bool = False
 
 
 def derive_basis_series(
@@ -129,32 +167,54 @@ def derive_basis_series(
     cumulative_method: str,
     day_basis: str,
     benchmark_symbol: str | None = None,
+    scalar_returns: pd.Series | None = None,
+    densify_policy: str | None = None,
 ) -> BasisSeriesResult:
     """Derive the persisted form + scalar cache + coverage mask from an
     already-computed daily-return series (basis-agnostic; NO new math).
 
     Steps (composition of existing primitives only):
       1. `sparse = _drop_nonfinite(returns)` — drop NaN AND ±Inf. THIS is the
-         persisted truth.
-      2. scalars = `compute_all_metrics(gap_fill_daily_returns(sparse), ...)` — the
-         cache is computed FROM the sparse persisted form re-densified with 0.0, so
-         the round-trip guard holds by construction.
+         persisted truth (`series_rows` + `gap_spans` ALWAYS derive from it).
+      2. scalars = `compute_all_metrics(scalar_input, ...)`, where
+         `scalar_input = scalar_returns` when the caller supplies it (the exact
+         legacy-conditioned series → byte-identical legacy scalar BY CONSTRUCTION),
+         else today's `gap_fill_daily_returns(sparse)`. The ROWS and the scalar input
+         are DECOUPLED (D1) — the sparse rows never change with `scalar_returns`.
       3. `gap_spans` = `_consecutive_spans` over calendar days in
          `[sparse.min, sparse.max]` ABSENT from `sparse.index`.
       4. `series_rows` from `sparse` (`ts.date().isoformat()`, unrounded `float`).
 
-    Raises `ValueError` when fewer than 2 finite rows survive sanitize (mirrors the
-    `compute_all_metrics` contract — call sites keep their degrade/fail handling).
+    `densify_policy` (∈ {"sparse","broker_nan","zero_fill"}) echoes into
+    `conventions["densify"]` so the round-trip guard can reconstruct the scalar input
+    from the rows. Under `zero_fill` with a NaN-carrying `scalar_returns`, the in-index
+    NaN dates are surfaced as `nan_dates` (an additive payload key) so a member-guard
+    NaN break is reinstated rather than 0.0-bridged. Both params default None →
+    byte-invisible (today's behavior; no `densify` echo, `nan_dates` None).
+
+    Raises `ValueError` when `densify_policy` is outside the closed set, or when fewer
+    than 2 finite rows survive sanitize (mirrors the `compute_all_metrics` contract —
+    call sites keep their degrade/fail handling).
     """
+    if densify_policy is not None and densify_policy not in _ALLOWED_DENSIFY_POLICIES:
+        raise ValueError(
+            f"derive_basis_series: unknown densify_policy {densify_policy!r} "
+            f"(allowed: {set(_ALLOWED_DENSIFY_POLICIES)})."
+        )
+
     sparse = _drop_nonfinite(returns).sort_index()
     if len(sparse) < 2:
         raise ValueError(
             "derive_basis_series: fewer than 2 finite daily returns after sanitize."
         )
 
-    dense = gap_fill_daily_returns(sparse)
+    # D1: the scalar cache is computed from the caller's exact conditioned series when
+    # supplied (legacy byte-identity by construction), else today's gap_fill(sparse).
+    # The rows/gap_spans pipeline below stays on `sparse` untouched — rows and
+    # scalar-input are decoupled.
+    scalar_input = scalar_returns if scalar_returns is not None else gap_fill_daily_returns(sparse)
     metrics = compute_all_metrics(
-        dense,
+        scalar_input,
         benchmark_rets,
         periods_per_year=periods_per_year,
         cumulative_method=cumulative_method,
@@ -185,6 +245,21 @@ def derive_basis_series(
     # `conventions.benchmark` this phase; 105's round-trip guard is its first).
     if benchmark_symbol is not None:
         conventions["benchmark"] = benchmark_symbol
+    # Phase 105 (D1): echo HOW the scalar input was conditioned so the round-trip
+    # guard / 106 reader can reconstruct it from the rows. Same additive shape as
+    # `benchmark` — omitted (byte-invisible) when the caller passes no policy.
+    if densify_policy is not None:
+        conventions["densify"] = densify_policy
+
+    # Phase 105 (D1): under `zero_fill` ONLY, surface the in-index NaN dates of the
+    # caller's scalar input (a preserved member-guard NaN break) so the round-trip
+    # guard reinstates the NaN rather than 0.0-bridging it. Any other policy (or no
+    # scalar_returns) → None (byte-invisible).
+    nan_dates: list[str] | None = None
+    if densify_policy == "zero_fill" and scalar_returns is not None:
+        nan_dates = sorted(
+            ts.date().isoformat() for ts in scalar_returns.index[scalar_returns.isna()]
+        )
 
     return BasisSeriesResult(
         metrics_json=metrics.metrics_json,
@@ -192,6 +267,8 @@ def derive_basis_series(
         series_rows=series_rows,
         gap_spans=gap_spans,
         conventions=conventions,
+        nan_dates=nan_dates,
+        insufficient_window=metrics.insufficient_window,
     )
 
 
@@ -242,13 +319,18 @@ def persist_basis_series(
         )
         return
 
-    payload = {
+    payload: dict[str, Any] = {
         "schema": _PAYLOAD_SCHEMA_VERSION,
         "basis": basis,
         "rows": result.series_rows,
         "gap_spans": result.gap_spans,
         "conventions": result.conventions,
     }
+    # Phase 105 (D1): additive composite-only key (JSONB, no DDL) — emitted ONLY when
+    # the derive surfaced guard-NaN dates under `zero_fill`, so no other payload shape
+    # changes.
+    if result.nan_dates is not None:
+        payload["nan_dates"] = result.nan_dates
     supabase.rpc(
         "upsert_strategy_analytics_series_batch",
         {"p_strategy_id": strategy_id, "p_kinds": {kind: payload}},
