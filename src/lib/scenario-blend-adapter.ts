@@ -15,8 +15,12 @@
  *
  * USER DECISIONS honoured (108-CONTEXT):
  *   - Parity std: POPULATION std is canonical (backbone). The prior module used
- *     SAMPLE std (÷ n−1); the shift is sub-display-precision — an intentional
- *     convention unification (one rolling-std path), NOT a regression.
+ *     SAMPLE std (÷ n−1). The shift is sub-1px on the chart line; a ~0.2–0.8%
+ *     relative shift IS visible in the rolling vol/Sharpe HOVER TOOLTIPS
+ *     (2-decimal percent, e.g. 3M vol 25.00% → 24.80%) — accepted as the
+ *     canonical population-std value (user-confirmed), an intentional convention
+ *     unification (one rolling-std path), NOT a regression. (Do not claim it is
+ *     invisible at display precision — the tooltip is hover-visible.)
  *   - Adapter route: call the backbone PRIMITIVES with the caller's EXPLICIT
  *     rolling window (63/126/252) — this preserves the 3M/6M/12M toggle WITHOUT
  *     the heavy full backbone series-bundle entry per toggle press.
