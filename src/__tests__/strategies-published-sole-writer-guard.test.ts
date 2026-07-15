@@ -24,7 +24,7 @@ import { join, relative } from "node:path";
  *    proximity so it cannot be trivially evaded) ─────────────────────────────
  *
  * Scan A (TypeScript, src/**.ts[x] AND supabase/functions/**.ts[x] — the
- *    Deno edge functions, e.g. compute-trigger / notify-admin) — a file is an
+ *    Deno edge functions, e.g. notify-admin) — a file is an
  *    OFFENDER when it BOTH:
  *   (1) writes to the strategies table — `from("strategies")` AND a
  *       `.update(` / `.upsert(` call somewhere in the file; AND

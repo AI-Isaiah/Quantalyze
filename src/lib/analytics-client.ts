@@ -70,7 +70,7 @@ async function analyticsRequest(
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const method = options?.method ?? "POST";
   // Phase 16 / OBSERV-01: stamp X-Correlation-Id on every outbound fetch.
-  // Wrappers (validateKey, fetchTrades, ...) intentionally do NOT thread
+  // Wrappers (validateKey, encryptKey, ...) intentionally do NOT thread
   // this option through in this plan — Plan 7 wires the SSE endpoint to pass
   // it explicitly. Until then, every request still carries a UUID v4 so the
   // FastAPI side has a stable join key.
@@ -318,7 +318,7 @@ export async function evalMatch(params: {
 }
 
 // @internal — exposed for Phase 16 / OBSERV-01 unit tests only. Public
-// wrappers (validateKey, fetchTrades, ...) intentionally do NOT
+// wrappers (validateKey, encryptKey, ...) intentionally do NOT
 // expose `correlationId` per plan Task 1 Step B (minimize blast radius;
 // Plan 7 wires the SSE endpoint to pass it explicitly). Production code
 // MUST NOT import this — use the public wrappers above instead.

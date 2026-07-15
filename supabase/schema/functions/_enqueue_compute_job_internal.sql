@@ -2,26 +2,11 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260510180226_compute_jobs_audit_2026_05_07_g10b.sql
--- --------------------------------------------------------------------
--- P3 + P12: _enqueue_compute_job_internal
--- --------------------------------------------------------------------
--- Two changes:
---   1. (P3) Race-loser re-read no longer uses INTO STRICT. NULL means
---      "the winner has already advanced past in-flight statuses" — a
---      legitimate condition under sustained load. We raise a domain-
---      specific error with ERRCODE='serialization_failure' so the
---      caller (Postgres-level retry harness or app-layer error
---      handler) can distinguish race-loss from a real DB error.
---   2. (P12) When parent_job_ids is non-empty, the new row is inserted
---      with status='done_pending_children' instead of the default
---      'pending'. This wires up the fan-in substrate: rows with
---      unfulfilled parents wait for mark_compute_job_done(parent) to
---      flip them to pending via the check_fan_in_ready loop. Without
---      this, no row was ever in done_pending_children and the fan-in
---      machinery was unreachable.
---
--- Function signature, params, return type all preserved.
+-- source migration: 20260716090000_retire_compute_analytics_kind_rpc_guard.sql
+-- --------------------------------------------------------------------------
+-- 7-param overload — verbatim from 20260510180226:164 with ONLY the
+-- retired-kind guard inserted after the p_kind NULL guard.
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
@@ -50,6 +35,14 @@ BEGIN
 
   IF p_kind IS NULL THEN
     RAISE EXCEPTION '_enqueue_compute_job_internal: p_kind is required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Phase 106 D3: the compute_analytics kind is retired. The registry + CHECKs
+  -- still admit it (45 historical rows FK-reference it); this is an RPC-level
+  -- admission reject only — no enqueue path remains.
+  IF p_kind = 'compute_analytics' THEN
+    RAISE EXCEPTION '_enqueue_compute_job_internal: kind compute_analytics is retired (Phase 106) — no enqueue path remains'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
@@ -142,7 +135,11 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260420073003_allocator_holdings.sql
+-- source migration: 20260716090000_retire_compute_analytics_kind_rpc_guard.sql
+-- --------------------------------------------------------------------------
+-- 10-param overload — verbatim from 20260420073003:330 with ONLY the
+-- retired-kind guard inserted after the p_kind NULL guard.
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION _enqueue_compute_job_internal(
   p_strategy_id     UUID,
   p_portfolio_id    UUID,
@@ -180,6 +177,14 @@ BEGIN
 
   IF p_kind IS NULL THEN
     RAISE EXCEPTION '_enqueue_compute_job_internal: p_kind is required'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- Phase 106 D3: the compute_analytics kind is retired. The registry + CHECKs
+  -- still admit it (45 historical rows FK-reference it); this is an RPC-level
+  -- admission reject only — no enqueue path remains.
+  IF p_kind = 'compute_analytics' THEN
+    RAISE EXCEPTION '_enqueue_compute_job_internal: kind compute_analytics is retired (Phase 106) — no enqueue path remains'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 

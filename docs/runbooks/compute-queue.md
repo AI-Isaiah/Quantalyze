@@ -245,14 +245,28 @@ The wizard `SyncPreviewStep` shows "Computing..." and never advances.
 **There is no runtime rollback flag anymore.** Phase 106 deleted the legacy
 in-process `after()` path and the `USE_COMPUTE_JOBS_QUEUE` /
 `PROCESS_KEY_UNIFIED_BACKBONE` switches — the durable queue is the only
-compute path. To roll back a bad deploy, revert the code and redeploy:
+compute path. Rollback is code revert + redeploy.
+
+**Revert the CODE but KEEP the applied migrations.** A migration that already
+ran on prod is recorded in `schema_migrations`; deleting its file makes
+`supabase db push` fail with "remote migration versions not found in local",
+which reddens the `supabase-migrate` job on main — and Railway silently skips
+deploying red main, so the worker half of your rollback never lands, in the
+exact emergency you needed it. So exclude the migration + its regenerated
+function snapshot from the revert:
 
 ```bash
-git revert <merge-commit-sha>   # or the specific offending commit
-git push origin main            # Vercel + Railway auto-deploy the revert
+git revert -n <merge-commit-sha>                       # stage the revert, don't commit yet
+git checkout HEAD -- supabase/migrations/ supabase/schema/functions/   # KEEP applied migrations + snapshot
+npm run schema:functions                               # re-sync snapshot to the kept migration state
+git add supabase/schema/functions/
+git commit -m "revert: <what/why> (migrations retained — see compute-queue runbook)"
+git push origin main                                   # Vercel + Railway auto-deploy the revert
 ```
 
-Existing `compute_jobs` rows are unaffected by a revert; the worker keeps
+The 106-06 RPC guard staying applied is harmless: ratified prod never enqueues
+the retired `compute_analytics` kind, so the guard is dead weight, not a
+regression. Existing `compute_jobs` rows are unaffected; the worker keeps
 draining them. If the incident is worker/queue health (not a code deploy),
 use the worker restart + observability queries above, not a rollback.
 
