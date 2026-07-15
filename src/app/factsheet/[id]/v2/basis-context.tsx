@@ -202,18 +202,20 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // read-side coercion here is not actionable owner signal).
     const L = sanitizeLeverage(leverage, { signal: false });
     // SC-4: base view BY REFERENCE at unity — deriveSeriesBundle is NEVER called at L=1.
-    // This short-circuit MUST precede any deriveSeriesBundle call (byte-identity).
+    // This short-circuit MUST precede any deriveSeriesBundle call (byte-identity). It
+    // stays an EXPLICIT first guard even though `leverageApplies` below also excludes
+    // L===1: the by-reference return at unity is the load-bearing SC-4 keystone and
+    // must never be refactored behind a helper call.
     if (L === 1) return base;
-    // A2 backstop: leverage is a single-key GEOMETRIC what-if. Arithmetic is
-    // composite-only (verified: `cumulativeMethod` is set only in
-    // composite-read-path.ts:243-266), and composites also hide the slider.
-    if (payload.dataQuality?.composite === true) return base;
-    // Fail-closed when the annualization basis wasn't emitted (mirrors the old
-    // useLeveragedMetrics gate) — a levered re-derive has no honest periodsPerYear.
-    if (payload.periodsPerYear == null) return base;
-    // No-fabrication: an unresolved MTM basis falls back to cash data (bundle absent).
-    // Levering it would render levered-cash under an MTM label — the exact old failure.
-    if (basis === "mark_to_market" && !payload.seriesByBasis?.mark_to_market) return base;
+    // Guards 2-4 (single source of truth — IN-02): composite (leverage is single-key
+    // only), fail-closed on an absent periodsPerYear (no honest annualization basis for
+    // a re-derive), and no-fabrication on an unresolved MTM basis (levering the cash
+    // fallback under an MTM label was the exact old failure). `leverageApplies` folds
+    // all three — plus the redundant L≠1 check, already true here — into the ONE
+    // predicate the KpiStrip gate + ControlBar eligibility also consume, so the three
+    // sites can never drift (the WR-01 immediate-vs-deferred divergence is now
+    // structurally impossible).
+    if (!leverageApplies(payload, basis, L)) return base;
     // Lever only the STRATEGY dailies on the ACTIVE-basis series. The benchmark leg
     // stays un-levered (deriveSeriesBundle re-aligns BTC/SPX/… internally) — that is
     // what makes β→L·β / α→L·α honest via jointMetrics(leveredStrat, unleveredBench).
@@ -235,6 +237,57 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     }
     return { ...base, ...lb };
   }, [basis, leverage, payload]);
+}
+
+/**
+ * WR-01 (Phase 107 review) — the applied leverage the shared view ACTUALLY used.
+ *
+ * Reads the leverage through the SAME `useDeferredValue` debounce as
+ * `useBasisSeriesView` (107-03), so any consumer that gates a label/caption on
+ * "did the view lever?" reads the identical deferred value the displayed numbers
+ * were derived from. This is the fix for the honesty regression: before it, the
+ * KpiStrip gated its what-if caption on the IMMEDIATE `useLeverage()` value while
+ * the numbers lagged on the deferred one, so during the ~235ms re-derive window the
+ * caption could claim a levered projection the numbers had not yet applied. Reads the
+ * context directly (NOT `useLeverage`, which throws) so a panel mounted without the
+ * provider degrades to L=1. `signal: false` mirrors the hot-render read in the view
+ * (the ControlBar owns the interactive coercion signal).
+ */
+export function useAppliedLeverage(): number {
+  const raw = useContext(LeverageContext)?.leverage ?? 1;
+  return sanitizeLeverage(useDeferredValue(raw), { signal: false });
+}
+
+/**
+ * IN-02 (Phase 107 review) — the SINGLE source of truth for the leverage-structural
+ * guards (fail-closed): single-key (not composite), an annualization basis present,
+ * and a RESOLVED active basis (cash, or MTM WITH its series bundle). This is the
+ * "should the leverage cluster render at all" predicate — true even at L=1, since the
+ * ControlBar input must show so the user can engage leverage. `useBasisSeriesView`,
+ * the KpiStrip gate, and the ControlBar eligibility all derive from this one function
+ * (via `leverageApplies` for the two that also require L≠1), so a future guard change
+ * lands in exactly one place.
+ */
+export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
+  return (
+    payload.dataQuality?.composite !== true &&
+    payload.periodsPerYear != null &&
+    !(basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market == null)
+  );
+}
+
+/**
+ * IN-02 + WR-01 — "the view actually levers": the structural guards AND a non-unity
+ * applied leverage. Consumed by the view hook (guards 2-4), the KpiStrip gate, and the
+ * disclosure caption, ALL on the SAME deferred applied-leverage value, so caption /
+ * gate / numbers cannot diverge.
+ */
+export function leverageApplies(
+  payload: FactsheetPayload,
+  basis: Basis,
+  appliedLeverage: number,
+): boolean {
+  return appliedLeverage !== 1 && leverageEligibleFor(payload, basis);
 }
 
 /**

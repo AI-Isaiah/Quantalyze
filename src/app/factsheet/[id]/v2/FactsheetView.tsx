@@ -6,13 +6,13 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
 // leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
 import { LeverageProvider, useLeverage } from "./leverage-context";
-import { MAX_LEVERAGE, sanitizeLeverage } from "@/lib/leverage";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
@@ -754,18 +754,16 @@ function KpiStrip() {
   const composite = payload.dataQuality?.composite === true;
   const view = useBasisSeriesView(payload);
   const { m: basisM } = useBasisMetrics(payload);
-  const { leverage } = useLeverage();
   const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
-  // The applied multiplier + the EXACT mirror of the plan-01 view guards: the strip
-  // reads the levered re-derive ONLY when the view actually levered (SC-1), so the
-  // seven scalars + the disclosure caption can never claim a what-if the view did not
-  // apply. `signal: false` — the ControlBar owns the interactive coercion signal.
-  const appliedLeverage = sanitizeLeverage(leverage, { signal: false });
-  const leverageApplied =
-    appliedLeverage !== 1 &&
-    !composite &&
-    payload.periodsPerYear != null &&
-    !(basis === "mark_to_market" && !mtmBundlePresent);
+  // WR-01 / IN-02 (Phase 107 review): read the DEFERRED applied leverage — the SAME
+  // value `useBasisSeriesView` derived the displayed bundle from (107-03) — and gate
+  // on the ONE shared `leverageApplies` predicate. This is the EXACT mirror of the
+  // view's plan-01 guards BY CONSTRUCTION (one function, not a hand-duplicated copy),
+  // so the seven scalars, the α/β/IR joint, AND the disclosure caption all move with
+  // the view across the ~235ms re-derive window. The old immediate `useLeverage()`
+  // read let the caption claim a what-if the (deferred) numbers had not yet applied.
+  const appliedLeverage = useAppliedLeverage();
+  const leverageApplied = leverageApplies(payload, basis, appliedLeverage);
   const m = leverageApplied ? view.strategyMetrics : basisM;
   const j = view.comparators[cmpKey].joint;
   const cn = cmp.shortName;
@@ -1145,10 +1143,10 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   // displayed UNRESOLVED (no series bundle), mirroring the view's no-fabrication guard
   // — levering a cash-fallback series under an MTM label would fabricate an MTM track.
   // Leverage state is ephemeral — flipping basis away and back restores it.
-  const leverageEligible =
-    !composite &&
-    payload.periodsPerYear != null &&
-    !(basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market == null);
+  // IN-02 (Phase 107 review): the ONE shared structural-eligibility predicate (single
+  // source of truth with the view hook + KpiStrip gate). True even at L=1 — the input
+  // must render so the user can engage leverage.
+  const leverageEligible = leverageEligibleFor(payload, basis);
   const { leverage, setLeverage } = useLeverage();
   // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
   // channel does not exist on the factsheet). Interactive fail-loud contract
