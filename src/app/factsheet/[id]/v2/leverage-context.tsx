@@ -33,7 +33,7 @@ interface LeverageContextValue {
   setLeverage: (next: number) => void;
 }
 
-const LeverageContext = createContext<LeverageContextValue | null>(null);
+export const LeverageContext = createContext<LeverageContextValue | null>(null);
 
 /**
  * Ephemeral leverage state. Renders children only (no DOM element) so wrapping

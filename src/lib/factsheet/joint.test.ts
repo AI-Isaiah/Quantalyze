@@ -65,4 +65,36 @@ describe("jointMetrics", () => {
       expect(crypto.up_capture).toBe(trad.up_capture);
     });
   });
+
+  // Phase 107 (LEV-BB, SC-2) — the honesty algebra that makes "leverage as a
+  // dailies transform" safe. Under `rets → L·rets` with the benchmark leg
+  // UNCHANGED (deriveSeriesBundle levers only the strategy dailies, aligning an
+  // un-levered BTC/SPX leg): beta = cov/varB → L·cov/varB = L·beta;
+  // alpha = (m − beta·mb)·ppy → (L·m − L·beta·mb)·ppy = L·alpha; and
+  // corr = cov/(s·sb) → L·cov/(L·s·sb) = corr is INVARIANT. This is why the
+  // whole factsheet can re-derive from the levered series instead of analytically
+  // rescaling α/β — the algebra already carries the leverage honestly.
+  //
+  // Falsifiable: these assertions FAIL if a future change re-scales alpha/beta
+  // analytically instead of deriving them from the levered series (e.g. alpha·L²
+  // by double-multiplying, or beta left unchanged). tracking_error / info_ratio
+  // are deliberately NOT asserted — they are non-linear in L by design.
+  describe("LEV-BB leverage scaling (Phase 107 SC-2)", () => {
+    const strat = [0.012, -0.006, 0.008, 0.011, -0.004, 0.009];
+    const bench = [0.010, -0.005, 0.006, 0.009, -0.003, 0.007];
+    const L = 2.5;
+
+    it("β → L·β, α → L·α (strategy leg levered, bench leg not); corr invariant", () => {
+      const base = jointMetrics(strat, bench, 0, 252);
+      const levered = jointMetrics(
+        strat.map(r => L * r),
+        bench,
+        0,
+        252,
+      );
+      expect(levered.beta).toBeCloseTo(base.beta * L, 10);
+      expect(levered.alpha).toBeCloseTo(base.alpha * L, 10);
+      expect(levered.corr).toBeCloseTo(base.corr, 10);
+    });
+  });
 });

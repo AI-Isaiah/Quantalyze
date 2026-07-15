@@ -183,7 +183,7 @@ function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
  * bypasses the backbone; the ONLY thing that stays cash top-level is the api-only
  * synthesized allocator/signatures demo (basis-invariant by construction).
  */
-function deriveSeriesBundle(
+export function deriveSeriesBundle(
   clipped: DailyReturn[],
   args: {
     periodsPerYear: number;
