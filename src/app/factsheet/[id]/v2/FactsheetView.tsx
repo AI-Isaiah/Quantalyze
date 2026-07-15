@@ -11,7 +11,7 @@ import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSerie
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
 // leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
-import { LeverageProvider, useLeverage, useModeledLeverage } from "./leverage-context";
+import { LeverageProvider, useLeverage } from "./leverage-context";
 import { MAX_LEVERAGE, sanitizeLeverage } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -327,14 +327,6 @@ export function FactsheetBody({
 function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const payload = usePayload();
   const { basis } = useBasis();
-  // M-3 (round-2) — the single-key leverage recompute (LEV-01) levers ONLY the
-  // KpiStrip's headline scalars; the right-rail MetricsColumn duplicates
-  // Cum/CAGR/Vol/Sharpe/Sortino/MaxDD from the UN-levered payload. Surface a
-  // symmetric "BASE · 1× TRACK" eyebrow atop the rail while modeled, so a levered
-  // strip scalar is never read as un-bridged against the rail's base-track value.
-  // Round-3 perf — read the CHEAP `useModeledLeverage` predicate (no recompute) so
-  // the eyebrow never repeats the KpiStrip's L≠1 work. (Removed in Phase 107 Task 2.)
-  const { modeled } = useModeledLeverage(payload);
   const composite = payload.dataQuality?.composite === true;
   // F4 (phase 103): the eyebrow reads "BASIS · MARK-TO-MARKET" ONLY when the MTM
   // SERIES BUNDLE is present — i.e. the rail's dailies-derivable panels actually
@@ -349,35 +341,24 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // gate; every other single-key strategy has none. Gating the basis eyebrow on
   // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
   const mtmParticipant = payload.mtmGate != null;
-  // Non-composite: bare column when neither a modeled leverage nor an MTM basis
-  // applies — byte-identical to before (GUARD-02). Phase 103 (MTM-04, root-cause
-  // flip): the rail now FOLLOWS the active basis (MetricsColumn reads
-  // view.strategyMetrics), so a single-key options book toggled to MTM earns an
-  // honest "BASIS · MARK-TO-MARKET" eyebrow — the SAME wording the composite
-  // branch shows below. It renders PERSISTENTLY (blank reserved line under cash,
-  // F4 zero-shift) only for MTM participants. The leverage "BASE · 1× TRACK"
-  // eyebrow is orthogonal (the rail stays on the un-levered base track while the
-  // KpiStrip models L≠1) and stacks above it when both apply.
+  // Non-composite: bare column when no MTM-participant eyebrow applies — byte-identical
+  // to before (GUARD-02). Phase 103 (MTM-04, root-cause flip): the rail FOLLOWS the
+  // active basis (MetricsColumn reads view.strategyMetrics), so a single-key options
+  // book toggled to MTM earns an honest "BASIS · MARK-TO-MARKET" eyebrow. Phase 107
+  // (LEV-BB, D4): the old base-track leverage eyebrow is GONE — the rail now levers
+  // with everything else (the whole factsheet re-derives via useBasisSeriesView), so
+  // there is nothing to bridge against. A plain single-key non-MTM-participant strategy
+  // therefore returns the BARE <MetricsColumn> — no wrapper div, no empty eyebrow gap.
   if (!composite) {
-    if (!modeled && !mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
+    if (!mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
     return (
       <div className="flex flex-col gap-4 min-w-0">
-        {modeled && (
-          <p
-            data-testid="metricscolumn-base-track-eyebrow"
-            className="text-micro uppercase tracking-wider text-text-muted"
-          >
-            BASE · 1× TRACK
-          </p>
-        )}
-        {mtmParticipant && (
-          <p
-            aria-hidden={!onMtm}
-            className="text-micro uppercase tracking-wider text-text-muted"
-          >
-            {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
-          </p>
-        )}
+        <p
+          aria-hidden={!onMtm}
+          className="text-micro uppercase tracking-wider text-text-muted"
+        >
+          {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
+        </p>
         <MetricsColumn scenarioMode={scenarioMode} />
       </div>
     );
