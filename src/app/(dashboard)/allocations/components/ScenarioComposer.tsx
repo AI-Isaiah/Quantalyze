@@ -99,7 +99,7 @@ import type {
   ScenarioMandatePayload,
 } from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-import { buildBlendPanels } from "@/lib/scenario-blend-panels";
+import { deriveBlendPanels } from "@/lib/scenario-blend-adapter";
 import {
   computeDiversification,
   alignConstituentReturns,
@@ -2806,7 +2806,7 @@ export function ScenarioComposer({
 
   // GRAPH-02 / GRAPH-03 — derive every blend-graph series from the SAME
   // unrounded `portfolio_daily_returns` the benchmark / stress / MC sections
-  // read (never the rounded/downsampled `equity_curve`). `buildBlendPanels` is
+  // read (never the rounded/downsampled `equity_curve`). `deriveBlendPanels` is
   // the single pure-TS adapter (Plan 30-01); the host stays props-only. Both
   // memos key on the ENGINE output reference (`scenarioMetrics.portfolio_daily_returns`)
   // — NOT a `?? []` expression that allocates a fresh array each render and would
@@ -2818,7 +2818,7 @@ export function ScenarioComposer({
   const blendPanels = useMemo(
     // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
     // basis as the headline KPIs (√365 if any selected leg is crypto, else 252).
-    () => buildBlendPanels(portfolioDaily, rollingWindow, blendBasis),
+    () => deriveBlendPanels(portfolioDaily, rollingWindow, blendBasis),
     [portfolioDaily, rollingWindow, blendBasis],
   );
 

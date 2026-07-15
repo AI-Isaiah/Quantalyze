@@ -27,10 +27,10 @@
  * read-only. `correlation-math.ts::pearson` is used only as a defensive cross-
  * check inside the test, never in production output.
  *
- * Pattern precedent: src/lib/scenario-blend-panels.ts (pure-TS engine-output
- * adapter, reuses mean/stdDev, MIN_USABLE floor, degenerate→empty, golden-
- * tested). This file is the same shape. The engine (scenario.ts) is FROZEN and
- * is imported type-only — never called from this lib.
+ * Pattern precedent: src/lib/scenario-blend-adapter.ts (pure-TS engine-output
+ * adapter, MIN_USABLE floor, degenerate→empty, golden-tested). This file is the
+ * same shape. The engine (scenario.ts) is FROZEN and is imported type-only —
+ * never called from this lib.
  */
 import { mean, stdDev } from "@/lib/portfolio-math-utils";
 import {

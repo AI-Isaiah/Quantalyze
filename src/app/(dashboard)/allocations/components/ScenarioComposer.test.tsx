@@ -3495,7 +3495,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   it("WR-02 — distribution panel gates on the adapter's degenerate verdict, not a re-derived length<10: a ≥10-length series the adapter collapses shows the honest role=status banner, NOT a headed-but-empty body", () => {
     // The composer's distribution gate USED to read `portfolioDaily.length < 10`,
     // a heuristic that DIVERGES from the adapter's actual emptiness signal. The
-    // adapter (buildBlendPanels) collapses EVERY series — including
+    // adapter (deriveBlendPanels) collapses EVERY series — including
     // histogramSeries/quantiles — on the STRICTER `hasNonFinite || length <
     // MIN_USABLE || length < window`. So a series with length in [10, window)
     // makes the adapter return histogramSeries=[] / quantiles={} while the old
@@ -3504,7 +3504,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     // banner — the opposite of the honest-empty contract.
     //
     // 50 days clears the 10-point distribution floor but is BELOW the default
-    // 126-day (6M) rolling window, so buildBlendPanels collapses to []/{}. The
+    // 126-day (6M) rolling window, so deriveBlendPanels collapses to []/{}. The
     // distribution panel must still show the role=status banner (it keys off the
     // adapter), not a broken populated body. Falsifiable: revert the gate back to
     // `portfolioDaily.length < 10` and the populated branch renders (the
@@ -3550,7 +3550,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const source = readFileSync(join(here, "ScenarioComposer.tsx"), "utf8");
     // Positive control — prove the read is real (the file IS the composer).
-    expect(source).toMatch(/buildBlendPanels/);
+    expect(source).toMatch(/deriveBlendPanels/);
     expect(source).not.toMatch(
       /FactsheetBody|MetricsColumn|buildAllocatorPortfolioFactsheetPayload/,
     );
