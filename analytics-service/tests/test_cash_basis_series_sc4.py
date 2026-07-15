@@ -723,9 +723,9 @@ def test_single_cash_settlement_persist_seam() -> None:
     """A3 honest-absence: exactly TWO persist sites write basis="cash_settlement" —
     the single-key broker-derive seam AND (as of Phase 105 collapse #1) the composite
     finalize seam. Both are the DELIBERATE unified-backbone route: cash scalars are a
-    cache of a persisted cash series. A THIRD bootleg persist (e.g. someone adding one
-    to run_compute_analytics_job — the 106-slated dark-path re-entry point — or
-    fabricating a fill for a legacy-tail strategy) would give some strategies a
+    cache of a persisted cash series. A THIRD bootleg persist (e.g. fabricating a fill
+    for a legacy-tail strategy on the trades path — run_strategy_analytics, whose
+    re-entry points were retired in 106-08) would give some strategies a
     fabricated series this phase instead of an honest absence. Strip comment lines,
     then assert the literal appears exactly twice.
 

@@ -1,10 +1,11 @@
 """Shared strategy analytics runner.
 
-The HTTP endpoint (routers/analytics.py::compute_analytics) and the
-compute_jobs worker handler (services/job_worker.py::run_compute_analytics_job)
-both need to run the same "load trades → compute metrics → upsert
-strategy_analytics" sequence. Before Sprint 3 they would have duplicated
-the logic; this helper exists so both callers share one implementation.
+Historically the HTTP endpoint (routers/analytics.py::compute_analytics) and
+the compute_jobs worker handler (services/job_worker.py::run_compute_analytics_job)
+both ran the same "load trades → compute metrics → upsert strategy_analytics"
+sequence via this helper. Both re-entry points were retired in 106-08 —
+run_strategy_analytics now has zero live callers and the trades path is slated
+for deletion in 106-09.
 
 Contract
 --------

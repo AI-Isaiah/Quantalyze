@@ -24,7 +24,7 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
-from routers import analytics, cron, exchange, internal, match, optimizer, portfolio, simulator, csv
+from routers import cron, exchange, internal, match, optimizer, portfolio, simulator, csv
 from routers import process_key as process_key_router
 from routers.debug_key_flow import router as debug_key_flow_router
 
@@ -236,7 +236,6 @@ async def verify_service_key(request: Request, call_next):
     return await call_next(request)
 
 
-app.include_router(analytics.router)
 app.include_router(cron.router)
 app.include_router(exchange.router)
 app.include_router(match.router)

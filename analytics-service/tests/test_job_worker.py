@@ -10,7 +10,7 @@ pinned in:
    timeouts are transient; everything else is unknown. This table is a
    contract the DB relies on for retry-vs-final decisions.
 
-2. dispatch routing — kind='sync_trades'/'compute_analytics'/'compute_portfolio'
+2. dispatch routing — kind='sync_trades'/'compute_analytics_from_csv'/'compute_portfolio'
    each route to a dedicated handler. Handlers are mocked at
    services.job_worker.run_* so we verify the dispatcher is the routing
    surface, not the handlers themselves.
@@ -428,20 +428,6 @@ class TestDispatchRouting:
         assert result.trade_count == 42
 
     @pytest.mark.asyncio
-    async def test_dispatch_routes_compute_analytics(self) -> None:
-        job = {"id": "job-2", "kind": "compute_analytics", "strategy_id": "strat-2"}
-        with patch(
-            "services.job_worker.run_compute_analytics_job",
-            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
-        ) as mock_handler, patch(
-            "services.job_worker.sync_strategy_analytics_status",
-            new=AsyncMock(return_value=None),
-        ):
-            result = await dispatch(job)
-        mock_handler.assert_awaited_once_with(job)
-        assert result.outcome == DispatchOutcome.DONE
-
-    @pytest.mark.asyncio
     async def test_dispatch_routes_compute_portfolio(self) -> None:
         job = {"id": "job-3", "kind": "compute_portfolio", "portfolio_id": "port-1"}
         with patch(
@@ -494,31 +480,26 @@ class TestDispatchRouting:
     # --- H-0775: routing coverage for the remaining production kinds -----
     # dispatch_tick (main_worker) mocks `dispatch` wholesale, so handler
     # routing is ONLY exercised here. Prior to these tests, six live kinds
-    # had no routing assertion: a typo in the elif chain (e.g.
-    # `compute_analytics_from_csv` accidentally falling to the
-    # `compute_analytics` arm) would route jobs to the wrong handler with no
-    # test failure. These pin each kind → handler edge, including the three
-    # lazily-imported handlers which must be patched at their SOURCE module
-    # (dispatch does `from services.X import run_Y` inside the elif arm).
+    # had no routing assertion: a typo in the elif chain would route jobs to
+    # the wrong handler with no test failure. These pin each kind → handler
+    # edge, including the three lazily-imported handlers which must be patched
+    # at their SOURCE module (dispatch does `from services.X import run_Y`
+    # inside the elif arm).
 
     @pytest.mark.asyncio
     async def test_dispatch_routes_compute_analytics_from_csv(self) -> None:
         """Phase 19.1: compute_analytics_from_csv must route to its own
-        CSV handler, NOT the trades-based run_compute_analytics_job."""
+        CSV handler run_compute_analytics_from_csv_job."""
         job = {"id": "job-csv", "kind": "compute_analytics_from_csv", "strategy_id": "s-csv"}
         with patch(
             "services.job_worker.run_compute_analytics_from_csv_job",
             new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
         ) as mock_csv, patch(
-            "services.job_worker.run_compute_analytics_job",
-            new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
-        ) as mock_trades, patch(
             "services.job_worker.sync_strategy_analytics_status",
             new=AsyncMock(return_value=None),
         ):
             await dispatch(job)
         mock_csv.assert_awaited_once_with(job)
-        mock_trades.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_dispatch_routes_derive_broker_dailies(self) -> None:
@@ -710,9 +691,9 @@ class TestDispatchExceptionHandling:
         async def _fail(job: dict) -> DispatchResult:
             raise RuntimeError("mystery fault")
 
-        job = {"id": "job-9", "kind": "compute_analytics", "strategy_id": "strat-8"}
+        job = {"id": "job-9", "kind": "compute_analytics_from_csv", "strategy_id": "strat-8"}
         with patch(
-            "services.job_worker.run_compute_analytics_job",
+            "services.job_worker.run_compute_analytics_from_csv_job",
             new=_fail,
         ), patch(
             "services.job_worker.sync_strategy_analytics_status",
@@ -768,9 +749,9 @@ class TestDispatchStatusBridge:
         async def _fail(job: dict) -> DispatchResult:
             raise RuntimeError("boom")
 
-        job = {"id": "job-11", "kind": "compute_analytics", "strategy_id": "strat-11"}
+        job = {"id": "job-11", "kind": "compute_analytics_from_csv", "strategy_id": "strat-11"}
         with patch(
-            "services.job_worker.run_compute_analytics_job",
+            "services.job_worker.run_compute_analytics_from_csv_job",
             new=_fail,
         ), patch(
             "services.job_worker.sync_strategy_analytics_status",
@@ -1130,7 +1111,9 @@ class TestAdvanceSyncCursorFence:
 
 class TestSyncTradesEnqueuesComputeAnalytics:
     """Phase 18 regression: after a successful sync_trades run, the worker
-    must enqueue a follow-on `compute_analytics` job for the same strategy.
+    must enqueue a follow-on analytics job for the same strategy. The kind is
+    now `derive_broker_dailies` (the legacy `compute_analytics` follow-on was
+    retired in 106-08).
 
     Pre-fix history (root cause found 2026-05-05): /api/keys/sync only
     enqueued sync_trades. The chain compute_jobs → sync_trades →

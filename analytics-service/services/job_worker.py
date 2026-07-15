@@ -8,7 +8,6 @@ scoped jobs) updates the UI status bridge before returning.
 
 Supported kinds:
   sync_trades            -> run_sync_trades_job             (15-minute timeout)
-  compute_analytics      -> run_compute_analytics_job       (15-minute timeout)
   compute_portfolio      -> run_compute_portfolio_job       (10-minute timeout)
   poll_positions         -> run_poll_positions_job          (3-minute timeout)
   sync_funding           -> run_sync_funding_job            (3-minute timeout)
@@ -246,7 +245,6 @@ class DispatchResult:
 # watchdog while still running.
 TIMEOUT_PER_KIND: dict[str, float] = {
     "sync_trades": 15 * 60,      # 15 minutes (supports 90-day raw fill backfill)
-    "compute_analytics": 15 * 60,  # 15 minutes
     "compute_analytics_from_csv": 10 * 60,   # Phase 19.1 — pure math, no exchange I/O
     "compute_portfolio": 10 * 60,  # 10 minutes
     "poll_positions": 3 * 60,    # 3 minutes (services.positions.fetch_positions)
@@ -1572,27 +1570,6 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     )
 
 
-async def run_compute_analytics_job(job: dict[str, Any]) -> DispatchResult:
-    """Run the full strategy analytics pipeline. Delegates to
-    services.analytics_runner.run_strategy_analytics — the same helper the
-    HTTP /api/compute-analytics endpoint uses. See the module docstring on
-    analytics_runner.py for why this is a shared helper."""
-    strategy_id = job.get("strategy_id")
-    if not strategy_id:
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message="run_compute_analytics_job: strategy_id missing",
-            error_kind="permanent",
-        )
-
-    # Imported lazily to avoid circular import risk with analytics_runner,
-    # which itself imports from services.benchmark etc.
-    from services.analytics_runner import run_strategy_analytics
-
-    await run_strategy_analytics(strategy_id)
-    return DispatchResult(outcome=DispatchOutcome.DONE)
-
-
 async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 3. Worker
     handler for the compute_analytics_from_csv kind. Delegates to
@@ -1611,8 +1588,7 @@ async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchRes
             error_kind="permanent",
         )
 
-    # Lazy import (mirrors run_compute_analytics_job) to keep import-time
-    # cycles isolated.
+    # Lazy import to keep import-time cycles isolated.
     from services.analytics_runner import run_csv_strategy_analytics
 
     await run_csv_strategy_analytics(strategy_id)
@@ -5840,8 +5816,6 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
 
     if kind == "sync_trades":
         handler = run_sync_trades_job
-    elif kind == "compute_analytics":
-        handler = run_compute_analytics_job
     elif kind == "compute_analytics_from_csv":
         # Phase 19.1 — CSV-sourced analytics. Routes through the
         # csv_daily_returns table instead of the trades/fills chain.

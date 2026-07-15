@@ -11,9 +11,9 @@ Runs 3 interleaved asyncio loops on Railway (CMD override: python -m main_worker
      queued — see Phase 12 / METRICS-14.
 
   2. **Watchdog loop** (every 60s) — calls reset_stalled_compute_jobs with
-     per-kind thresholds so long-running compute_analytics (20 min ceiling)
-     coexists with faster sync_trades (10 min) without the watchdog
-     prematurely reclaiming slow-but-healthy jobs.
+     per-kind thresholds so long-running sync_trades (30 min ceiling)
+     coexists with faster kinds without the watchdog prematurely
+     reclaiming slow-but-healthy jobs.
 
   3. **Daily enqueue loop** (every 24h) — calls
      enqueue_poll_positions_for_all_strategies RPC once per day to seed
@@ -112,8 +112,8 @@ SHUTDOWN = asyncio.Event()
 # Matches the timeouts in services.job_worker.TIMEOUT_PER_KIND but with
 # headroom. The watchdog threshold must be GREATER than the handler timeout
 # so the handler has a chance to timeout-classify itself before the
-# watchdog yanks the row. Example: compute_analytics handler timeout is
-# 15 min, watchdog threshold is 20 min.
+# watchdog yanks the row. Example: compute_portfolio handler timeout is
+# 10 min, watchdog threshold is 15 min.
 # Each value MUST be greater than services.job_worker.TIMEOUT_PER_KIND[kind].
 # A watchdog threshold below the handler timeout requeues the job before the
 # handler can fail-classify itself, leaving callers (the wizard polls
@@ -137,7 +137,6 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # §Recommendation pairs the fence with this override:
     # `.planning/audit-2026-05-07/INVEST-P97.md`.
     "sync_trades": "30 minutes",       # handler timeout = 15 minutes (mig 117)
-    "compute_analytics": "20 minutes", # handler timeout = 15 minutes
     # Phase 19.1 — handler timeout = 10 minutes; watchdog must be
     # strictly greater (the test_every_kind_has_watchdog_headroom
     # invariant enforces). Mirrors compute_portfolio.
