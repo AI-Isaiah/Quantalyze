@@ -11,12 +11,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
-// NOTE: imports preserved for the unified handler below; suppress unused-import
-// lint while the unified branch is intentionally dormant (see API-2 comment).
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { getCorrelationId } from "@/lib/correlation-id";
-void isUnifiedBackboneActive;
-void getCorrelationId;
 
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";

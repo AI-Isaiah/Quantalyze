@@ -252,18 +252,24 @@ describe("/api/strategies/csv-validate", () => {
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
   });
 
-  it("happy path: validateCsv returns ok=true → 200 envelope verbatim", async () => {
-    validateCsvMock.mockResolvedValue({
+  it("happy path: unified validate returns ok=true → 200 envelope verbatim", async () => {
+    // Phase 106 Stage B: the route delegates unconditionally to the unified
+    // backbone (postProcessKey); its body is returned verbatim.
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockResolvedValue({
       ok: true,
-      preview: {
-        row_count: 5,
-        date_range: ["2026-01-01", "2026-01-05"],
-        columns_detected: ["date", "daily_return"],
-        first_rows: [],
-        last_rows: [],
+      body: {
+        ok: true,
+        preview: {
+          row_count: 5,
+          date_range: ["2026-01-01", "2026-01-05"],
+          columns_detected: ["date", "daily_return"],
+          first_rows: [],
+          last_rows: [],
+        },
+        errors: [],
+        correlation_id: null,
       },
-      errors: [],
-      correlation_id: null,
     });
     const file = new File(
       ["date,daily_return\n2026-01-01,0.01"],
@@ -280,14 +286,18 @@ describe("/api/strategies/csv-validate", () => {
     expect(json.correlation_id).toBeNull();
   });
 
-  it("soft-fail: validateCsv returns ok=false → 200 with errors populated", async () => {
-    validateCsvMock.mockResolvedValue({
-      ok: false,
-      preview: null,
-      errors: [
-        { rule: "monotonic_dates", row: 2, message: "..." },
-      ],
-      correlation_id: null,
+  it("soft-fail: unified validate returns ok=false → 200 with errors populated", async () => {
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      body: {
+        ok: false,
+        preview: null,
+        errors: [
+          { rule: "monotonic_dates", row: 2, message: "..." },
+        ],
+        correlation_id: null,
+      },
     });
     const file = new File(["bad"], "x.csv", { type: "text/csv" });
     const req = makeMultipartRequest(file, "daily_returns");
@@ -338,8 +348,9 @@ describe("/api/strategies/csv-validate", () => {
     expect(validateCsvMock).not.toHaveBeenCalled();
   });
 
-  it("validateCsv throws → 502 CSV_UPSTREAM_FAIL with original message in human_message", async () => {
-    validateCsvMock.mockRejectedValue(
+  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with original message in human_message", async () => {
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(
       new Error("ANALYTICS_SERVICE_URL not configured"),
     );
     const file = new File(["x"], "x.csv", { type: "text/csv" });
@@ -411,6 +422,10 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    // Phase 106 Stage B: the unified path runs the SHARED
+    // persist_csv_daily_returns RPC; default it to success so the success-path
+    // metadata tests reach the UPDATE. Validation (400) tests never hit it.
+    rpcMock.mockResolvedValue({ data: 0, error: null });
   });
 
   it("missing strategy_name → 400 CSV_INVALID_FORMAT", async () => {
@@ -458,10 +473,17 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("valid strategy_name + valid fmt + valid uuid → calls RPC with p_strategy_name", async () => {
-    rpcMock.mockResolvedValue({
-      data: "11111111-1111-4111-8111-111111111111",
-      error: null,
+  it("valid strategy_name + valid fmt + valid uuid → delegates to unified with the trimmed strategy_name in context", async () => {
+    // Phase 106 Stage B: finalize_csv_strategy now runs server-side inside the
+    // unified backbone; the route forwards the trimmed strategy_name in the
+    // /process-key context and returns the upstream strategy_id.
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      body: {
+        strategy_id: "11111111-1111-4111-8111-111111111111",
+        status: "pending_review",
+      },
     });
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
@@ -484,24 +506,16 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     expect(json.strategy_id).toBe("11111111-1111-4111-8111-111111111111");
     expect(json.status).toBe("pending_review");
 
-    // Cross-AI revision 2026-04-30: RPC was called with p_strategy_name (not p_placeholder_name).
-    // WR-04 (19.1-REVIEW): a non-empty daily_returns_series now triggers
-    // a second RPC call (persist_csv_daily_returns); find the
-    // finalize_csv_strategy call explicitly rather than asserting the
-    // total call count.
-    const finalizeCall = rpcMock.mock.calls.find(
-      ([n]) => n === "finalize_csv_strategy",
-    );
-    expect(finalizeCall).toBeDefined();
-    const [_name, args] = finalizeCall!;
-    expect(args).toMatchObject({
-      p_user_id: "00000000-0000-0000-0000-000000000abc",
-      p_wizard_session_id: VALID_SESSION,
-      p_fmt: "daily_returns",
-      p_strategy_name: "Aurora Capital — BTC vol carry",
-    });
-    // Make sure the trimmed name is forwarded verbatim (no leading/trailing whitespace).
-    expect((args as Record<string, unknown>).p_strategy_name).not.toMatch(/^\s|\s$/);
+    // Unified delegation: postProcessKey received the trimmed strategy_name in
+    // the forwarded context (finalize_csv_strategy runs upstream, not here).
+    const call = postProcessKeyMock.mock.calls[0][0] as {
+      context: { strategy_name?: string; wizard_session_id?: string; fmt?: string };
+    };
+    expect(call.context.strategy_name).toBe("Aurora Capital — BTC vol carry");
+    expect(call.context.wizard_session_id).toBe(VALID_SESSION);
+    expect(call.context.fmt).toBe("daily_returns");
+    // Trimmed name forwarded verbatim (no leading/trailing whitespace).
+    expect(call.context.strategy_name).not.toMatch(/^\s|\s$/);
   });
 
   // QA report 2026-05-21 ISSUE-010: classification metadata is now
@@ -511,9 +525,10 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
   // UPDATE payload and gates by user_id (defense-in-depth on top of RLS).
   describe("ISSUE-010 — csv_metadata UPDATE after RPC returns", () => {
     it("metadata in body → UPDATE strategies with the projected payload", async () => {
-      rpcMock.mockResolvedValue({
-        data: "22222222-2222-4222-8222-222222222222",
-        error: null,
+      process.env.INTERNAL_API_TOKEN = "test-token";
+      postProcessKeyMock.mockResolvedValue({
+        ok: true,
+        body: { strategy_id: "22222222-2222-4222-8222-222222222222", status: "pending_review" },
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -563,9 +578,10 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     });
 
     it("no metadata in body → RPC runs, no UPDATE (back-compat)", async () => {
-      rpcMock.mockResolvedValue({
-        data: "33333333-3333-4333-8333-333333333333",
-        error: null,
+      process.env.INTERNAL_API_TOKEN = "test-token";
+      postProcessKeyMock.mockResolvedValue({
+        ok: true,
+        body: { strategy_id: "33333333-3333-4333-8333-333333333333", status: "pending_review" },
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -590,9 +606,10 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       // them forwarded to the UPDATE — we only project known column
       // names so a future PUT-shaped client can't write arbitrary
       // columns through this route.
-      rpcMock.mockResolvedValue({
-        data: "44444444-4444-4444-8444-444444444444",
-        error: null,
+      process.env.INTERNAL_API_TOKEN = "test-token";
+      postProcessKeyMock.mockResolvedValue({
+        ok: true,
+        body: { strategy_id: "44444444-4444-4444-8444-444444444444", status: "pending_review" },
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -644,9 +661,8 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
 //   8.  Unified path explicit param — runtime + strict source-shape +
 //       arity-lock checks make closure capture detectable as a
 //       regression (T-19.1-10).
-//   9.  after() enqueue when USE_COMPUTE_JOBS_QUEUE=true → admin.rpc
+//   9.  after() enqueue (unconditional, Phase 106 Stage B) → admin.rpc
 //       receives compute_analytics_from_csv + the correct metadata.
-//   10. after() no-op when the flag is absent / "false" → no enqueue.
 //   11. after() failure logs but does NOT propagate — response stays 200
 //       and the warning surfaces in console.warn (T-19.1-11).
 // ---------------------------------------------------------------------
@@ -658,7 +674,16 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-    isUnifiedBackboneActiveMock.mockResolvedValue(false);
+    // Phase 106 Stage B: the route delegates unconditionally to the unified
+    // backbone. postProcessKey returns NEW_STRATEGY_ID (finalize_csv_strategy
+    // runs upstream); the SHARED persist + enqueue + placeholder helpers then
+    // run on the unified path. INTERNAL_API_TOKEN is required (503 otherwise).
+    isUnifiedBackboneActiveMock.mockResolvedValue(true);
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      body: { strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
+    });
     // Default behaviour: any rpcMock call resolves successfully.
     // Tests that need per-RPC behaviour override via mockImplementation.
     rpcMock.mockImplementation(async (name: string) => {
@@ -990,10 +1015,11 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     expect(src).toMatch(/unifiedCsvFinalizeHandler\(\{/);
   });
 
-  // ---- 9. after() enqueue when USE_COMPUTE_JOBS_QUEUE=true ------------------
+  // ---- 9. after() enqueue is unconditional (Phase 106 Stage B) --------------
 
-  it("Test 9: after() enqueue fires compute_analytics_from_csv when USE_COMPUTE_JOBS_QUEUE=true", async () => {
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+  it("Test 9: after() enqueue fires compute_analytics_from_csv unconditionally", async () => {
+    // Phase 106 Stage B: the former compute-jobs queue flag gate was deleted —
+    // the enqueue is now unconditional on the unified path.
     STATE.runAfterCallback = true;
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
@@ -1015,102 +1041,15 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
       p_kind: "compute_analytics_from_csv",
       p_metadata: { source: "csv-finalize", fmt: "daily_returns" },
     });
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 
-  // ---- 10. after() no-op when flag absent / "false" -------------------------
-
-  it("Test 10: after() does NOT enqueue when USE_COMPUTE_JOBS_QUEUE is absent", async () => {
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
-    STATE.runAfterCallback = true;
-    const req = makeJsonRequest({
-      wizard_session_id: VALID_SESSION,
-      fmt: "daily_returns",
-      strategy_name: "Enqueue flag off",
-      daily_returns_series: [{ date: "2024-04-01", daily_return: 0.002 }],
-    });
-    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
-    const res = await POST(req);
-    expect(res.status).toBe(200);
-    await flushAfter();
-    const enqueueCalls = adminRpcMock.mock.calls.filter(
-      ([name]) => name === "enqueue_compute_job",
-    );
-    expect(enqueueCalls).toHaveLength(0);
-  });
-
-  it("Test 10b: after() does NOT enqueue when USE_COMPUTE_JOBS_QUEUE='false'", async () => {
-    process.env.USE_COMPUTE_JOBS_QUEUE = "false";
-    STATE.runAfterCallback = true;
-    const req = makeJsonRequest({
-      wizard_session_id: VALID_SESSION,
-      fmt: "daily_returns",
-      strategy_name: "Enqueue flag literal false",
-      daily_returns_series: [{ date: "2024-05-01", daily_return: 0.003 }],
-    });
-    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
-    const res = await POST(req);
-    expect(res.status).toBe(200);
-    await flushAfter();
-    const enqueueCalls = adminRpcMock.mock.calls.filter(
-      ([name]) => name === "enqueue_compute_job",
-    );
-    expect(enqueueCalls).toHaveLength(0);
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
-  });
-
-  // ---- 10c. Flag-off path writes strategy_analytics placeholder (API M-1) ----
-
-  it("Test 10c: flag-off after() writes strategy_analytics placeholder to break wizard hang (API M-1)", async () => {
-    // Phase 19.1 red-team (2026-05-22): pre-fix, when
-    // USE_COMPUTE_JOBS_QUEUE != "true" the after() block early-
-    // returned WITHOUT writing any placeholder, leaving the wizard's
-    // SyncProgress poller to spin forever because no
-    // strategy_analytics row existed. Fix writes a `failed`
-    // placeholder so the poller breaks out with a meaningful failure.
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
-    STATE.runAfterCallback = true;
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-    const req = makeJsonRequest({
-      wizard_session_id: VALID_SESSION,
-      fmt: "daily_returns",
-      strategy_name: "Flag-off placeholder",
-      daily_returns_series: [{ date: "2024-10-01", daily_return: 0.001 }],
-    });
-    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
-    const res = await POST(req);
-    expect(res.status).toBe(200);
-    await flushAfter();
-
-    // No enqueue should have fired (flag is off)
-    const enqueueCalls = adminRpcMock.mock.calls.filter(
-      ([name]) => name === "enqueue_compute_job",
-    );
-    expect(enqueueCalls).toHaveLength(0);
-
-    // But the placeholder MUST have fired.
-    expect(adminUpsertMock).toHaveBeenCalledTimes(1);
-    const [table, payload, opts] = adminUpsertMock.mock.calls[0];
-    expect(table).toBe("strategy_analytics");
-    expect(payload).toMatchObject({
-      strategy_id: NEW_STRATEGY_ID,
-      computation_status: "failed",
-      data_quality_flags: { csv_source: true },
-    });
-    expect(payload.computation_error).toMatch(
-      /queue disabled.*support@quantalyze\.com/i,
-    );
-    expect(payload.computation_error).toContain(NEW_STRATEGY_ID);
-    expect(opts).toMatchObject({ onConflict: "strategy_id" });
-
-    warnSpy.mockRestore();
-  });
+  // Phase 106 Stage B: the flag-off no-enqueue cases (former Tests 10 / 10b)
+  // and the flag-off placeholder case (former Test 10c) were deleted with the
+  // queue-off arm they exercised — the enqueue is now unconditional.
 
   // ---- 11. after() failure logs but does NOT 500 (T-19.1-11) ----------------
 
   it("Test 11: after() throw logs non-blocking warning and keeps response 200 (T-19.1-11)", async () => {
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
     STATE.runAfterCallback = true;
     adminRpcMock.mockRejectedValue(new Error("transient queue outage"));
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1132,7 +1071,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     );
     expect(warnedNonBlocking).toBe(true);
     warnSpy.mockRestore();
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 
   // ---- 12. after() enqueue failure writes strategy_analytics placeholder (API W-2)
@@ -1144,7 +1082,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // polling state. Without this, a missing migration on a non-prod env
     // or a transient enqueue_compute_job 5xx leaves the user with 200
     // + persistent state but no compute job ever runs.
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
     STATE.runAfterCallback = true;
     adminRpcMock.mockResolvedValue({
       data: null,
@@ -1181,7 +1118,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     expect(opts).toMatchObject({ onConflict: "strategy_id" });
 
     warnSpy.mockRestore();
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 
   // ---- 12b. M-2 guard: worker-complete-already → placeholder SKIPPED -------
@@ -1195,7 +1131,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // unconditional upsert with onConflict='strategy_id' would stomp
     // `complete` with `failed`. Guard: SELECT first; if `complete`,
     // log + skip.
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
     STATE.runAfterCallback = true;
     adminRpcMock.mockResolvedValue({
       data: null,
@@ -1233,7 +1168,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     expect(skipLogged).toBe(true);
 
     warnSpy.mockRestore();
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 
   it("Test 12c: placeholder upsert PROCEEDS when worker has written non-terminal status (API M-2)", async () => {
@@ -1241,7 +1175,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // `complete` (e.g. stuck-`computing`, or a stale `failed`), the
     // route's placeholder write should still proceed — there is no
     // good outcome to preserve.
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
     STATE.runAfterCallback = true;
     adminRpcMock.mockResolvedValue({
       data: null,
@@ -1274,7 +1207,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     });
 
     warnSpy.mockRestore();
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
   });
 
   // ---- 13. unified backbone returns missing strategy_id → 502 (API H-1)

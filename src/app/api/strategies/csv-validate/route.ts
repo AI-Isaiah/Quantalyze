@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
-import { validateCsv } from "@/lib/analytics-client";
 import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
@@ -19,11 +17,12 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * missing — caught here and translated to a CSV_UPSTREAM_FAIL envelope
  * (no silent localhost fallback per cross-AI revision 2026-04-30).
  *
- * Phase 19 / BACKBONE-10
- * ----------------------
- * When `isUnifiedBackboneActive()` is true the route re-targets the
- * upstream from `/csv/validate` to `/process-key` with `flow_type=csv`.
- * The legacy `validateCsv()` call stays as the flag=off fallback.
+ * Phase 19 / BACKBONE-10 → Phase 106 Stage B
+ * -------------------------------------------
+ * The route re-targets the upstream unconditionally from `/csv/validate` to
+ * `/process-key` with `flow_type=csv`. The former flag=off legacy
+ * `validateCsv()` fallback was deleted in 106-07 (its
+ * `isUnifiedBackboneActive()===false` gate is dormant with the ratified pins).
  *
  * Error envelope shape (v0): { ok: false, code, human_message,
  * debug_context, correlation_id: null }. Phase 16 / OBSERV-06 will
@@ -151,25 +150,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
-  if (await isUnifiedBackboneActive()) {
-    return await unifiedCsvValidateHandler({
-      formData,
-      file,
-      fmt,
-      sessionId,
-      userId: user.id,
-    });
-  }
-
-  try {
-    const result = await validateCsv(formData);
-    return NextResponse.json(result, { headers: NO_STORE_HEADERS });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "CSV validation failed";
-    console.error("[strategies/csv-validate] threw:", message);
-    return csvErrorEnvelope("CSV_UPSTREAM_FAIL", message, {}, 502);
-  }
+  // Phase 106 Stage B (D2): the unified backbone is the sole validate path.
+  // The former flag-off legacy validateCsv arm was deleted —
+  // isUnifiedBackboneActive()===false is dormant with the ratified prod pins.
+  return await unifiedCsvValidateHandler({
+    formData,
+    file,
+    fmt,
+    sessionId,
+    userId: user.id,
+  });
 });
 
 /**

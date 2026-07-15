@@ -2,19 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import {
-  verifyStrategy,
-  AnalyticsUpstreamError,
-  AnalyticsTimeoutError,
-} from "@/lib/analytics-client";
-import { captureToSentry } from "@/lib/sentry-capture";
 import { SUPPORTED_EXCHANGES } from "@/lib/utils";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
-import { TEASER_ANCHOR_STRATEGY_ID } from "@/lib/phase-19-constants";
-
-const MAX_REQUESTS_PER_DAY = 5;
 
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -43,12 +33,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  const { email, exchange, api_key, api_secret, passphrase } = body as {
+  const { email, exchange, api_key, api_secret } = body as {
     email?: string;
     exchange?: string;
     api_key?: string;
     api_secret?: string;
-    passphrase?: string;
   };
 
   if (!email || !exchange || !api_key || !api_secret) {
@@ -69,20 +58,12 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
-  // Public-route protections (CSRF + IP rate-limit + payload validation)
-  // run BEFORE the flag check so unified delegation cannot bypass them.
-  if (await isUnifiedBackboneActive()) {
-    return await unifiedVerifyStrategyHandler(body);
-  }
-
-  return await legacyVerifyStrategyHandler({
-    email,
-    exchange,
-    api_key,
-    api_secret,
-    passphrase,
-  });
+  // Phase 106 Stage B (D2): the unified backbone is the sole verify path.
+  // Public-route protections (CSRF + IP rate-limit + payload validation) run
+  // above, before delegation. The former flag-off legacyVerifyStrategyHandler
+  // arm was deleted — isUnifiedBackboneActive()===false is dormant with the
+  // ratified prod pins.
+  return await unifiedVerifyStrategyHandler(body);
 }
 
 /**
@@ -282,217 +263,4 @@ async function unifiedVerifyStrategyHandler(
     responseBody.status = upstream.status;
   }
   return NextResponse.json(responseBody);
-}
-
-/**
- * Legacy path preserved verbatim from the pre-Phase-19 implementation.
- * Runs when `isUnifiedBackboneActive()` returns false. Will be removed in a
- * follow-up cleanup PR after the 7-day stability window passes.
- */
-// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
-async function legacyVerifyStrategyHandler(args: {
-  email: string;
-  exchange: string;
-  api_key: string;
-  api_secret: string;
-  passphrase?: string;
-}): Promise<NextResponse> {
-  const { email, exchange, api_key, api_secret, passphrase } = args;
-
-  // Rate limit: max 5 requests per email per 24h
-  const admin = createAdminClient();
-  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-  const { count, error: countError } = await admin
-    .from("verification_requests")
-    .select("id", { count: "exact", head: true })
-    .eq("email", email)
-    .gte("created_at", twentyFourHoursAgo);
-
-  if (countError) {
-    console.error("[verify-strategy] Rate limit check failed:", countError);
-    return NextResponse.json({ error: "Service unavailable" }, { status: 503 });
-  }
-
-  if ((count ?? 0) >= MAX_REQUESTS_PER_DAY) {
-    return NextResponse.json(
-      { error: "Rate limit exceeded. Maximum 5 verification requests per 24 hours." },
-      { status: 429 },
-    );
-  }
-
-  /**
-   * Python `/api/verify-strategy` response shape (post-PR-X2):
-   *   verification_id     — UUID generated locally by Python (uuid.uuid4())
-   *   results             — JSONB blob with twr/sharpe/equity_curve/etc.
-   *   matched_strategy_id — UUID of closest correlated published strategy, or null
-   *   plus top-level twr / sharpe / return_24h / return_mtd / return_ytd
-   *
-   * `VerifyStrategyResponseSchema` (`src/lib/analytics-schemas.ts`) declares
-   * `verification_id` as the only required field and uses `.passthrough()`,
-   * so the extra fields flow through this typed alias without runtime parse
-   * failure. PR-X4a needs `results` + `matched_strategy_id` to stamp
-   * metrics_snapshot onto the SV row below.
-   */
-  let analyticsResult: {
-    verification_id?: string;
-    results?: Record<string, unknown> | null;
-    matched_strategy_id?: string | null;
-  };
-  try {
-    analyticsResult = await verifyStrategy({
-      email,
-      exchange,
-      api_key,
-      api_secret,
-      ...(passphrase ? { passphrase } : {}),
-    });
-  } catch (err) {
-    // F5b (R8): forward the CURATED 4xx detail from the Python verifier
-    // (actionable user copy, e.g. "No trades found for this key") but never
-    // echo a raw 5xx traceback or contract-violation string. Mirrors the
-    // bridge / simulator 4xx-forward / 5xx-redact pattern F5a established.
-    if (
-      err instanceof AnalyticsUpstreamError &&
-      err.status >= 400 &&
-      err.status < 500
-    ) {
-      return NextResponse.json({ error: err.message }, { status: err.status });
-    }
-    if (err instanceof AnalyticsTimeoutError) {
-      return NextResponse.json(
-        { error: "Verification timed out. Please try again." },
-        { status: 504 },
-      );
-    }
-    console.error("[verify-strategy] Analytics service error:", err);
-    captureToSentry(err, { tags: { route: "api/verify-strategy" } });
-    return NextResponse.json(
-      { error: "Verification service unavailable. Please try again." },
-      { status: 502 },
-    );
-  }
-
-  const verificationId = analyticsResult.verification_id;
-  if (!verificationId) {
-    return NextResponse.json(
-      { error: "Verification service returned an invalid response" },
-      { status: 502 },
-    );
-  }
-
-  const publicToken = crypto.randomBytes(32).toString("hex");
-  const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-
-  // Phase 19 / BACKBONE-04 step (a) — `phase-19-shim-step-a` repoint.
-  //
-  // The legacy verification_requests UPDATE (public_token + expires_at) is
-  // re-pointed to strategy_verifications. C-5: strategy_verifications has 5
-  // NOT NULL columns + a strategy_id FK to strategies(id) ON DELETE CASCADE,
-  // so the upsert constructs a complete row. The teaser flow has no caller-
-  // owned strategies row by design (the user is probing keys against the
-  // universe of published strategies; no strategy exists yet).
-  //
-  // PR-X5 (2026-05-15) — the FK is resolved via the sentinel teaser-anchor
-  // strategy provisioned by migration 132 (owned by the all-zeros system
-  // pseudo-user; status='archived' so it never surfaces in marketplace /
-  // allocator queries). This replaces the pre-X5 "anchor on the most recent
-  // strategies row" hack that migration 107's DM-3 commentary flagged as a
-  // privacy leak (the SV row would inherit the random strategy's RLS
-  // user_id). The constant lives in src/lib/phase-19-constants.ts and
-  // mirrors analytics-service/services/teaser_anchor.py.
-  let strategyVerificationsUpserted = false;
-  try {
-    // PR-X4a — fix the pre-existing "metrics never reach SV" gap.
-    // Pre-fix the legacy path wrote `status='validated'` with no
-    // metrics_snapshot. The public-status route at
-    // verify-strategy/[id]/status/route.ts:107 only returns `results`
-    // when status is 'complete' (legacy VR shape) or 'published'
-    // (canonical SV terminal), so teaser users polling the public URL
-    // saw `{status:'validated'}` with no score — a bug present since
-    // BACKBONE-04 step (a) shipped. The upsert below now lands a
-    // terminal row in one shot: status='published' + metrics_snapshot
-    // built from the Python `results` blob (with `matched_strategy_id`
-    // folded in since it isn't a first-class column on
-    // strategy_verifications). PR-X5 wires the unified path
-    // (kill-switch ON) to write the same shape from inside
-    // /process-key; this code covers the legacy / kill-switch-OFF path
-    // which doubles as the auto-rollback target.
-    const metricsSnapshot = analyticsResult.results
-      ? {
-          ...analyticsResult.results,
-          matched_strategy_id: analyticsResult.matched_strategy_id ?? null,
-        }
-      : null;
-    // C-5: every NOT NULL column populated; FK satisfied via the sentinel.
-    // @audit-skip: unauthenticated public endpoint (no user session). The
-    // strategy_verifications row is the canonical write target post-PR-A
-    // for the landing-page teaser flow; the row carries no PII (only a
-    // public_token + status), and audit_log requires a user_id which the
-    // unauthenticated caller cannot provide. Follow-up landing-page-lead
-    // audit lands in PostHog per ADR-0023 §3, not audit_log.
-    const { error: upsertError } = await admin
-      .from("strategy_verifications")
-      .upsert(
-        {
-          id: verificationId,
-          strategy_id: TEASER_ANCHOR_STRATEGY_ID,
-          wizard_session_id: crypto.randomUUID(),
-          status: "published",
-          trust_tier: "self_reported",
-          flow_type: "teaser",
-          source: exchange,
-          public_token: publicToken,
-          expires_at: expiresAt,
-          metrics_snapshot: metricsSnapshot,
-        },
-        { onConflict: "id" },
-      );
-    if (upsertError) {
-      // Don't fail the request — the legacy UPDATE below preserves
-      // correctness. Surface to Sentry via console.error so the
-      // stability-log can spot trends.
-      console.error(
-        "[verify-strategy] phase-19-shim-step-a strategy_verifications upsert failed:",
-        upsertError,
-      );
-    } else {
-      strategyVerificationsUpserted = true;
-    }
-  } catch (svErr) {
-    console.error(
-      "[verify-strategy] phase-19-shim-step-a strategy_verifications upsert threw:",
-      svErr,
-    );
-  }
-
-  // Phase 19 stability-window dual-write: keep the legacy UPDATE alive
-  // until migration 107 ships (PR-D). After that, this UPDATE hits the
-  // VIEW + INSTEAD OF UPDATE trigger which raises a guard error — by
-  // then the upsert above is canonical. The pragma below is the same
-  // ADR-0023 §3 reasoning as the upsert above (unauthenticated teaser).
-  // @audit-skip: unauthenticated public endpoint (no user session). The
-  // verification_requests row is internal-state plumbing for the landing-
-  // page "verify my track record" flow; audit_log requires a user_id and
-  // this caller has none. Follow-up landing-page-lead audit lands in
-  // PostHog per ADR-0023 §3, not audit_log.
-  const { error: updateError } = await admin
-    .from("verification_requests")
-    .update({ public_token: publicToken, expires_at: expiresAt })
-    .eq("id", verificationId);
-
-  if (updateError && !strategyVerificationsUpserted) {
-    // Only fail if BOTH writes failed — the strategy_verifications upsert
-    // is the new canonical target; if it succeeded, the request is fine.
-    console.error("[verify-strategy] Failed to set public token:", updateError);
-    return NextResponse.json({ error: "Failed to finalize verification" }, { status: 500 });
-  }
-  if (updateError) {
-    console.warn(
-      "[verify-strategy] legacy verification_requests UPDATE failed (strategy_verifications upsert OK):",
-      updateError,
-    );
-  }
-
-  return NextResponse.json({ verification_id: verificationId, public_token: publicToken });
 }
