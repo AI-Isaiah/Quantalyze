@@ -47,7 +47,7 @@ export function CrossSignaturesSection() {
       {/* H-1 (Phase 107 Fable red team): cross-signature trajectories are server-side
           event aggregations not carried in the payload, so they cannot follow a client
           leverage what-if — they stay at base 1×. */}
-      <BaseLeverageNote payload={payload} label="Event signatures shown at base 1× leverage" />
+      <BaseLeverageNote payload={payload} label="Cross-signature trajectories shown at base 1× leverage" />
       <CrossHorizon
         title="Returns Cross Signatures for 7 Days Horizon"
         subtitle={`mean trajectory comparison · ±14d window · each panel overlays strategy-indexed mean (accent) vs ${cmp.shortName}-indexed mean (muted)`}
