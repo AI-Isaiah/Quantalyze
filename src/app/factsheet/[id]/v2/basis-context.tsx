@@ -171,6 +171,48 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  * basis-context.test.tsx Test 7). The only non-pure element is `useDeferredValue`
  * on the leverage read (LEV-BB perf, 107-03), which is scheduler-only — no I/O.
  */
+/**
+ * H-1 (Phase 107/108 Fable red team) — the SHARED levered-view cache.
+ *
+ * `useBasisSeriesView` memoizes PER hook instance, but it is called from ~22 consumer
+ * instances across 11 components that all mount on ONE factsheet page. At L≠1 each instance
+ * independently ran the expensive `deriveSeriesBundle` (bootstrapCI 2000 resamples + the
+ * 6×6 correlation matrix + stress windows — ~235ms median at 3000-day scale), so dragging
+ * leverage 1→2 cost ~22×235ms ≈ 5s of main-thread work before React could commit; the page
+ * sat on stale 1× numbers for seconds, repeating on every L change and basis flip.
+ * `useDeferredValue` (107-03) fixed input-BLOCKING but not the DUPLICATION.
+ *
+ * The levered view is a PURE function of `(payload, basis, appliedLeverage)`, so compute it
+ * ONCE and share the result object across every instance. The WeakMap keys on payload
+ * IDENTITY (entries GC with the payload, never collide across factsheets); the inner Map
+ * keys on `${basis}:${L}`. Returning the SAME reference is also a correctness-preserving win
+ * — it stabilizes downstream memoization. The L=1 / guard paths return `base` BY REFERENCE
+ * and NEVER consult this cache (SC-4 byte-identity stays first).
+ */
+const leveredViewCache = new WeakMap<FactsheetPayload, Map<string, FactsheetPayload>>();
+
+function readLeveredView(
+  payload: FactsheetPayload,
+  basis: Basis,
+  appliedLeverage: AppliedLeverage,
+): FactsheetPayload | undefined {
+  return leveredViewCache.get(payload)?.get(`${basis}:${appliedLeverage}`);
+}
+
+function writeLeveredView(
+  payload: FactsheetPayload,
+  basis: Basis,
+  appliedLeverage: AppliedLeverage,
+  view: FactsheetPayload,
+): void {
+  let byKey = leveredViewCache.get(payload);
+  if (!byKey) {
+    byKey = new Map();
+    leveredViewCache.set(payload, byKey);
+  }
+  byKey.set(`${basis}:${appliedLeverage}`, view);
+}
+
 export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload {
   const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
   const rawLeverage = useContext(LeverageContext)?.leverage ?? 1;
@@ -233,6 +275,12 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // sites can never drift (the WR-01 immediate-vs-deferred divergence is now
     // structurally impossible).
     if (!leverageApplies(payload, basis, L)) return base;
+    // H-1: the levered view is pure in (payload, basis, L) — reuse the shared cache so the
+    // ~235ms deriveSeriesBundle runs ONCE across all ~22 consumer instances (not per
+    // instance), and every consumer gets the SAME reference. Consulted AFTER the SC-4 /
+    // guard by-reference returns above so the cache never fronts the unity short-circuit.
+    const shared = readLeveredView(payload, basis, L);
+    if (shared) return shared;
     // Lever only the STRATEGY dailies on the ACTIVE-basis series. The benchmark leg
     // stays un-levered (deriveSeriesBundle re-aligns BTC/SPX/… internally) — that is
     // what makes β→L·β / α→L·α honest via jointMetrics(leveredStrat, unleveredBench).
@@ -308,10 +356,14 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
       return out as typeof lb.strategyMetrics;
     })();
     // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
-    if (base.ingestSource === "api") {
-      return { ...base, ...lb, strategyMetrics };
-    }
-    return { ...base, ...lb, strategyMetrics };
+    const view: FactsheetPayload =
+      base.ingestSource === "api"
+        ? { ...base, ...lb, strategyMetrics }
+        : { ...base, ...lb, strategyMetrics };
+    // H-1: publish to the shared cache so sibling instances (and later renders) reuse this
+    // exact object instead of re-running deriveSeriesBundle.
+    writeLeveredView(payload, basis, L, view);
+    return view;
   }, [basis, leverage, payload]);
 }
 
