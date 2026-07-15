@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
@@ -229,5 +231,41 @@ describe("useBasisSeriesView — leverage layer (Phase 107 LEV-BB)", () => {
     const { result } = renderHook(() => useBasisSeriesView(payload), { wrapper: basisOnly });
     // No leverage context ⇒ L defaults to 1 ⇒ base by reference, no throw.
     expect(result.current).toBe(payload);
+  });
+
+  it("Test H (perf debounce, 107-03) — the DERIVE reads a DEFERRED leverage; the input is never blocked", () => {
+    // The re-derive was measured at a ~235ms median at 3000d (≥100ms → debounce).
+    // The fix defers the leverage READ (useDeferredValue) so a rapid drag never
+    // blocks the input on deriveSeriesBundle. Two falsifiable pins:
+    //   (1) source-scan: the hook wires useDeferredValue on the leverage read (a
+    //       future removal — reverting to a synchronous read that blocks input on
+    //       the expensive derive — turns this red). Comment-stripped so the doc
+    //       block above it can't self-satisfy the grep.
+    const src = readFileSync(
+      join(process.cwd(), "src/app/factsheet/[id]/v2/basis-context.tsx"),
+      "utf8",
+    );
+    const code = src
+      .split("\n")
+      .filter(line => {
+        const t = line.trim();
+        return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
+      })
+      .join("\n");
+    expect(/useDeferredValue\(\s*rawLeverage\s*\)/.test(code)).toBe(true);
+
+    //   (2) behavioral: the INPUT value (leverage context state) updates immediately
+    //       to the set value — it is decoupled from and never gated behind the
+    //       derive — and the deferred derive still lands on the correct levered
+    //       bundle (the debounce delays, never drops, the input).
+    const payload = makePayload();
+    const { result } = renderHook(() => useViewProbe(payload), { wrapper: bothWrapper });
+    act(() => result.current.lev.setLeverage(3));
+    // Input is immediate (never blocked by the derive).
+    expect(result.current.lev.leverage).toBe(3);
+    // The derive honors the input (act flushes the deferred re-render): x3 levered.
+    for (let i = 0; i < N; i++) {
+      expect(result.current.view.strategyReturns[i]).toBeCloseTo(3 * payload.strategyReturns[i], 12);
+    }
   });
 });

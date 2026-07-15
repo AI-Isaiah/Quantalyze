@@ -3,6 +3,7 @@
 import {
   createContext,
   useContext,
+  useDeferredValue,
   useMemo,
   useState,
   type ReactNode,
@@ -151,12 +152,23 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  * chart/panel mounted WITHOUT the providers degrades to cash / L=1 instead of
  * crashing — the merge + leverage transform are pure additive enhancements.
  *
- * Pure context + memo — keeps the GUARD-04 no-storage discipline (this file never
- * touches storage/URL/history; pinned by basis-context.test.tsx Test 7).
+ * Context + a deferred leverage read + memo — keeps the GUARD-04 no-storage
+ * discipline (this file never touches storage/URL/history; pinned by
+ * basis-context.test.tsx Test 7). The only non-pure element is `useDeferredValue`
+ * on the leverage read (LEV-BB perf, 107-03), which is scheduler-only — no I/O.
  */
 export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload {
   const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
-  const leverage = useContext(LeverageContext)?.leverage ?? 1;
+  const rawLeverage = useContext(LeverageContext)?.leverage ?? 1;
+  // LEV-BB perf (107-03): the levered re-derive was MEASURED at a ~235ms median
+  // at 3000-day production scale (≥100ms decision rule → debounce). Defer the
+  // leverage READ so a rapid slider drag never blocks the input on the expensive
+  // deriveSeriesBundle: useDeferredValue keeps the last-good bundle rendered while
+  // React re-derives the new leverage in the background — the input value stays
+  // immediate (no keystroke/drag lag, no skeleton flash). The DERIVE is debounced,
+  // NOT the input. The unity/base short-circuits below read this deferred value, so
+  // dropping back to L=1 restores the by-reference base as soon as React catches up.
+  const leverage = useDeferredValue(rawLeverage);
   return useMemo<FactsheetPayload>(() => {
     // --- Layer 1: active-basis series merge (Phase 103, unchanged) ---
     const bundle = payload.seriesByBasis?.mark_to_market;
