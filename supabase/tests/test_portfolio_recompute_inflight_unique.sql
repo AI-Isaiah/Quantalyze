@@ -87,8 +87,13 @@ BEGIN
     VALUES (v_user, 'pi07-test') ON CONFLICT (id) DO NOTHING;
   INSERT INTO public.portfolios (user_id, name)
     VALUES (v_user, 'pi07-portfolio-1') RETURNING id INTO v_pf1;
-  INSERT INTO public.portfolios (user_id, name)
-    VALUES (v_user, 'pi07-portfolio-2') RETURNING id INTO v_pf2;
+  -- pf2 is a SECOND portfolio for the SAME user, needed only to prove the
+  -- computing fence is per-portfolio (control 4). The partial unique index
+  -- portfolios_one_real_per_user (mig 20260409202756) allows at most one
+  -- is_test=false portfolio per user, so pf2 must be is_test=true; the PI-07
+  -- fence is on portfolio_analytics.portfolio_id and is is_test-agnostic.
+  INSERT INTO public.portfolios (user_id, name, is_test)
+    VALUES (v_user, 'pi07-portfolio-2', true) RETURNING id INTO v_pf2;
 
   -- (1) First `computing` row for portfolio 1 — must succeed.
   INSERT INTO public.portfolio_analytics (portfolio_id, computation_status)
