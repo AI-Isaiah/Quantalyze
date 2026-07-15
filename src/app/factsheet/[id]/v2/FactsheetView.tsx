@@ -6,11 +6,12 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, useBasisSeriesView, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
-// Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
-// wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
-// L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
-import { LeverageProvider, useLeverage, useLeveragedMetrics, useModeledLeverage } from "./leverage-context";
+import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
+// Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
+// LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
+// ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
+// leverage-composed useBasisSeriesView (plan 01), so the derived metrics hooks are gone.
+import { LeverageProvider, useLeverage } from "./leverage-context";
 import { MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { ComparatorPicker } from "./ComparatorPicker";
@@ -326,15 +327,6 @@ export function FactsheetBody({
 function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const payload = usePayload();
   const { basis } = useBasis();
-  // M-3 (round-2) — the single-key leverage recompute (LEV-01) levers ONLY the
-  // KpiStrip's headline scalars; the right-rail MetricsColumn duplicates
-  // Cum/CAGR/Vol/Sharpe/Sortino/MaxDD from the UN-levered payload. Surface a
-  // symmetric "BASE · 1× TRACK" eyebrow atop the rail while modeled, so a levered
-  // strip scalar is never read as un-bridged against the rail's base-track value.
-  // Round-3 perf — read the CHEAP `useModeledLeverage` predicate (no compute()),
-  // NOT `useLeveragedMetrics`, so the eyebrow never re-runs the O(n) recompute
-  // the KpiStrip already ran at L≠1.
-  const { modeled } = useModeledLeverage(payload);
   const composite = payload.dataQuality?.composite === true;
   // F4 (phase 103): the eyebrow reads "BASIS · MARK-TO-MARKET" ONLY when the MTM
   // SERIES BUNDLE is present — i.e. the rail's dailies-derivable panels actually
@@ -349,35 +341,26 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // gate; every other single-key strategy has none. Gating the basis eyebrow on
   // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
   const mtmParticipant = payload.mtmGate != null;
-  // Non-composite: bare column when neither a modeled leverage nor an MTM basis
-  // applies — byte-identical to before (GUARD-02). Phase 103 (MTM-04, root-cause
-  // flip): the rail now FOLLOWS the active basis (MetricsColumn reads
-  // view.strategyMetrics), so a single-key options book toggled to MTM earns an
-  // honest "BASIS · MARK-TO-MARKET" eyebrow — the SAME wording the composite
-  // branch shows below. It renders PERSISTENTLY (blank reserved line under cash,
-  // F4 zero-shift) only for MTM participants. The leverage "BASE · 1× TRACK"
-  // eyebrow is orthogonal (the rail stays on the un-levered base track while the
-  // KpiStrip models L≠1) and stacks above it when both apply.
+  // Non-composite: bare column when no MTM-participant eyebrow applies — byte-identical
+  // to before (GUARD-02). Phase 103 (MTM-04, root-cause flip): the rail FOLLOWS the
+  // active basis (MetricsColumn reads view.strategyMetrics), so a single-key options
+  // book toggled to MTM earns an honest "BASIS · MARK-TO-MARKET" eyebrow. Phase 107
+  // (LEV-BB, D4): the old base-track leverage eyebrow is GONE — the rail now levers
+  // with the rest of the return-derived backbone (metrics/charts/rail re-derive via
+  // useBasisSeriesView; the pre-computed peer/allocator/event-study panels stay at
+  // base 1× and carry their own H-1 note), so there is nothing to bridge against here.
+  // A plain single-key non-MTM-participant strategy
+  // therefore returns the BARE <MetricsColumn> — no wrapper div, no empty eyebrow gap.
   if (!composite) {
-    if (!modeled && !mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
+    if (!mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
     return (
       <div className="flex flex-col gap-4 min-w-0">
-        {modeled && (
-          <p
-            data-testid="metricscolumn-base-track-eyebrow"
-            className="text-micro uppercase tracking-wider text-text-muted"
-          >
-            BASE · 1× TRACK
-          </p>
-        )}
-        {mtmParticipant && (
-          <p
-            aria-hidden={!onMtm}
-            className="text-micro uppercase tracking-wider text-text-muted"
-          >
-            {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
-          </p>
-        )}
+        <p
+          aria-hidden={!onMtm}
+          className="text-micro uppercase tracking-wider text-text-muted"
+        >
+          {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
+        </p>
         <MetricsColumn scenarioMode={scenarioMode} />
       </div>
     );
@@ -755,43 +738,37 @@ function CapacityChip({
   );
 }
 
-// Phase 90.5 (LEV-01, UI-SPEC copy contract) — the cost-free caveat, rendered
-// verbatim beneath the MODELED eyebrow at every L!=1 (persistent visible line,
-// NOT tooltip-only; AT-robust). Kept as a const so the apostrophe/arrow glyphs
-// don't trip JSX entity-escaping lint.
-// WR-01 — the caveat is scoped to what the LEV-01 lighter recompute actually
-// re-derives (the headline KPIs). The equity/drawdown chart, the rolling panels,
-// and the benchmark-relative stats (α, IR) below the strip stay on the base 1×
-// track, so the copy must NOT claim the charts scale (they don't) — an honest,
-// coherent statement of exactly which numbers are levered.
-const LEVERAGE_CAVEAT =
-  "Modeled leverage: daily returns scaled r → L·r; excludes borrow, funding, and liquidation cost. Volatility and drawdown scale with leverage in the headline KPIs above; Sharpe and Sortino are leverage-invariant (risk-free rate = 0). Everything else on this page — the equity and drawdown charts, the rolling panels, the benchmark-relative stats (α, IR), and the right-rail metrics — stays on the base 1× track. This is a modeled what-if — not the strategy's realized track record.";
-
 function KpiStrip() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
-  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE via the
-  // persisted overlay. Cash returns strategyMetrics untouched → single-key is
-  // bit-identical (the existing kpistrip pins prove it). Phase 103 (F3/F5) UPDATE:
-  // the earlier "α/IR + MetricsColumn stay cash" note is RETIRED — MetricsColumn now
-  // follows the active basis (view.strategyMetrics), and α/β/IR follow the view's
-  // comparator joint (below), consistent with §IV.
-  // Phase 90.5 (LEV-01): the ONE consumer swap. useLeveragedMetrics returns the
-  // basis metrics UNTOUCHED at L=1 (byte-identity; the frozen kpistrip pins prove
-  // it) and a client recompute of the SAME scalars at L!=1. items[] read m.*
-  // unchanged.
-  const { basis, m, modeled, appliedLeverage } = useLeveragedMetrics(payload);
+  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM via the persisted
+  // overlay (useBasisMetrics). Cash returns strategyMetrics untouched → single-key is
+  // bit-identical (the existing kpistrip pins prove it). Phase 103 (F3/F5): α/β/IR +
+  // MetricsColumn follow the active basis via the view's comparator joint (below),
+  // consistent with §IV.
+  //
+  // Phase 107 (LEV-BB): the strip now FOLLOWS LEVERAGE via the leverage-composed
+  // useBasisSeriesView (plan 01). When the view actually applied L (past the four
+  // plan-01 guards) the seven scalars read the re-derived LEVERED view; otherwise the
+  // persisted-basis overlay `basisM` (byte-identical to L=1 today — the SC-4 pin). The
+  // α/β/IR joint follows the SAME view honestly (β→L·β / α→L·α at L≠1).
+  const basis = useBasisOrCash();
   const composite = payload.dataQuality?.composite === true;
-  // F5 (phase 103): α / β / IR FOLLOW the active basis via the VIEW's comparator
-  // joint — consistent with §IV, which reads view.comparators[cmpKey].joint. Under
-  // cash the view returns the payload by reference, so `j` is the cash joint
-  // (byte-identical to today); under MTM WITH a bundle it is the bundle's MTM joint
-  // (regressed on the MTM strategy leg). `cn` (shortName) is basis-invariant, so it
-  // still comes from the cash comparator block.
   const view = useBasisSeriesView(payload);
+  const { m: basisM } = useBasisMetrics(payload);
+  const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
+  // WR-01 / IN-02 (Phase 107 review): read the DEFERRED applied leverage — the SAME
+  // value `useBasisSeriesView` derived the displayed bundle from (107-03) — and gate
+  // on the ONE shared `leverageApplies` predicate. This is the EXACT mirror of the
+  // view's plan-01 guards BY CONSTRUCTION (one function, not a hand-duplicated copy),
+  // so the seven scalars, the α/β/IR joint, AND the disclosure caption all move with
+  // the view across the ~235ms re-derive window. The old immediate `useLeverage()`
+  // read let the caption claim a what-if the (deferred) numbers had not yet applied.
+  const appliedLeverage = useAppliedLeverage();
+  const leverageApplied = leverageApplies(payload, basis, appliedLeverage);
+  const m = leverageApplied ? view.strategyMetrics : basisM;
   const j = view.comparators[cmpKey].joint;
   const cn = cmp.shortName;
-  const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
   // α + IR slots collapse — render 7 cells instead of leaving empty space.
@@ -815,18 +792,16 @@ function KpiStrip() {
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
-    // F5 (phase 103): α / β / IR now FOLLOW the active basis via the view's joint
-    // (above), matching §IV — under MTM WITH a bundle they are the MTM-regressed
-    // joint, no longer suppressed. Two cases still render "—":
-    //   - MODELED leverage (WR-01): the LEV-01 lighter recompute levers only the
-    //     seven headline scalars, NOT the benchmark-relative stats. α transforms as
-    //     α → L·α and β → L·β under r → L·r, but `j` is the UN-levered joint — beside
-    //     a levered Sharpe/Vol it would be an internally-inconsistent mislabel.
-    //   - MTM WITHOUT a bundle: a bundle-absent read (`useBasisSeriesView` returns
-    //     the payload by reference) yields the CASH joint; showing it under the MTM
-    //     story would mislabel cash (the SAME discipline as the F4 rail eyebrow,
-    //     which blanks when the bundle is absent).
-    const suppressRelative = modeled || (basis === "mark_to_market" && !mtmBundlePresent);
+    // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
+    // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives
+    // the joint on the levered strategy leg (β→L·β / α→L·α honestly, jointMetrics on
+    // the levered strat vs the un-levered benchmark), so the strip shows HONEST levered
+    // α/IR — the old leverage-driven suppression is gone. ONE case still renders "—":
+    //   - MTM WITHOUT a bundle: a bundle-absent read (`useBasisSeriesView` returns the
+    //     payload by reference) yields the CASH joint; showing it under the MTM story
+    //     would mislabel cash (the SAME discipline as the F4 rail eyebrow, which blanks
+    //     when the bundle is absent). This is an orthogonal basis concern, not leverage.
+    const suppressRelative = basis === "mark_to_market" && !mtmBundlePresent;
     items.push({
       label: `α vs ${cn}`,
       value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
@@ -866,24 +841,24 @@ function KpiStrip() {
           {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
         </p>
       )}
-      {/* Phase 90.5 (LEV-01, UI-SPEC): the MODELED amber eyebrow + cost-free
-          caveat are INSERTED only at L!=1 (never a reserved row) so L=1 stays
-          byte-identical (GUARD-02). Amber = "modeled/what-if, recoverable" — a
-          leveraged KPI is a projection, not the realized track, so it must be
-          unmistakable (not the BASIS eyebrow's neutral grey). The eyebrow is the
-          authoritative modeled-state live region. */}
-      {modeled && (
-        <>
-          <p
-            className="mt-6 text-micro font-mono uppercase tracking-wider"
-            style={{ color: "var(--color-warning, #B45309)" }}
-            role="status"
-            aria-live="polite"
-          >
-            MODELED · {appliedLeverage}×
-          </p>
-          <p className="mt-2 text-caption text-text-muted">{LEVERAGE_CAVEAT}</p>
-        </>
+      {/* Phase 107 (LEV-BB, UI-SPEC Copywriting + Color): the reworded what-if
+          disclosure. INSERTED only when the view actually applied leverage (never a
+          reserved row) so L=1 stays byte-identical (SC-4). MUTED neutral, NOT amber —
+          the levered numbers are the real re-derived levered track (honest, not a
+          fabricated rescale), so a persistent "excludes financing cost" disclosure is
+          steady-state information, not a recoverable warning (amber survives only on
+          the transient clamp message). `role="status" aria-live="polite"` announces
+          entering/leaving the what-if (replacing the deleted eyebrow's announcement).
+          The gate is the EXACT mirror of the plan-01 view guards → the caption can
+          never claim a what-if the view did not apply. */}
+      {leverageApplied && (
+        <p
+          className="mt-6 text-caption text-text-muted"
+          role="status"
+          aria-live="polite"
+        >
+          {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
+        </p>
       )}
       <section
         className="mt-6 overflow-hidden @container"
@@ -1161,18 +1136,19 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   // on the next derive); steady-state honest-empty reasons render muted. Amber on
   // a steady reason would falsely signal self-healing (RESEARCH Pitfall 4).
   const mtmReasonTransient = mtmReasonTone(payload.mtmGate?.reason) === "transient";
-  // Phase 90.5 (LEV-01, D1/D2/D5) + Phase 102: fail-closed eligibility — the
-  // leverage cluster renders IFF single-key (composite !== true) AND periodsPerYear
-  // present AND the CASH basis is active. Before Phase 102 the leverage cluster and
-  // the BASIS control could never coexist (composite-only toggle), so they shared
-  // the mr-auto slot freely. A single-key options strategy now shows BOTH controls
-  // (LEV-MTM-1): leverage models the CASH return path, so we hide the leverage input
-  // while MTM is displayed rather than let it recompute a leverage-scaled CASH
-  // number under an MTM label (no-invented-data). Leverage state is ephemeral —
-  // flipping back to cash restores it. Both mr-auto flex children wrap; the leverage
-  // input simply hides under MTM, so they never overlap.
-  const leverageEligible =
-    !composite && payload.periodsPerYear != null && basis === "cash_settlement";
+  // Phase 90.5 (LEV-01, D1/D2/D5) + Phase 107 (LEV-BB, CONTEXT scope): fail-closed
+  // eligibility — the leverage cluster renders IFF single-key (composite !== true) AND
+  // periodsPerYear present AND the active basis is RESOLVED. Phase 107 levers the
+  // ACTIVE resolved basis (cash, or MTM WITH a series bundle) — the old cash-only gate
+  // died with the bespoke recompute; leverage now flows through useBasisSeriesView,
+  // which re-derives whichever basis is displayed. The input hides ONLY when MTM is
+  // displayed UNRESOLVED (no series bundle), mirroring the view's no-fabrication guard
+  // — levering a cash-fallback series under an MTM label would fabricate an MTM track.
+  // Leverage state is ephemeral — flipping basis away and back restores it.
+  // IN-02 (Phase 107 review): the ONE shared structural-eligibility predicate (single
+  // source of truth with the view hook + KpiStrip gate). True even at L=1 — the input
+  // must render so the user can engage leverage.
+  const leverageEligible = leverageEligibleFor(payload, basis);
   const { leverage, setLeverage } = useLeverage();
   // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
   // channel does not exist on the factsheet). Interactive fail-loud contract
@@ -1188,10 +1164,10 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
     }
     if (raw < 0) {
       setLeverageMsg(
-        "Leverage can't be negative — shorting isn't modeled in this projection. Clamped to 0.",
+        "Leverage can't be negative — shorting isn't included in this what-if. Clamped to 0.",
       );
     } else if (raw > MAX_LEVERAGE) {
-      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum modeled leverage.`);
+      setLeverageMsg(`Leverage clamped to ${MAX_LEVERAGE}× — the maximum in this what-if projection.`);
     } else {
       setLeverageMsg(null);
     }
@@ -1234,9 +1210,9 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               onChange={(e) => {
                 // L-1 (round-2) — an emptied field (Number("") === 0) must NOT
-                // snap the strip to a flat 0× "MODELED · 0×" mid-edit while the
-                // user is retyping. Treat "" as keep-previous (like the
-                // non-finite branch in onLeverageChange), NOT an intentional 0.
+                // snap the strip to a flat 0× what-if mid-edit while the user is
+                // retyping. Treat "" as keep-previous (like the non-finite branch
+                // in onLeverageChange), NOT an intentional 0.
                 if (e.target.value.trim() === "") return;
                 onLeverageChange(Number(e.target.value));
               }}

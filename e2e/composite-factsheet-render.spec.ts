@@ -240,10 +240,12 @@ test.describe("Phase 91 — composite factsheet render + axe (QA-02/QA-03)", () 
     const leverageInput = page.locator("#leverage-factsheet");
     await expect(leverageInput).toBeVisible();
 
-    // Set a non-1 leverage to trigger the modeled-leverage KPI state (the amber
-    // "MODELED · N×" eyebrow, FactsheetView.tsx:807-816) before scanning.
+    // Set a non-1 leverage to trigger the levered re-derive state before
+    // scanning. Phase 107 deleted the amber "MODELED · N×" eyebrow; the levered
+    // state is now signalled by the reworded muted what-if caption
+    // ("What-if projection at N× leverage …", FactsheetView.tsx role=status).
     await leverageInput.fill("2");
-    await expect(page.getByText(/MODELED · 2×/)).toBeVisible();
+    await expect(page.getByText(/What-if projection at 2× leverage/)).toBeVisible();
 
     const results = await buildAxe(page).analyze();
     expect(results.violations).toEqual([]);

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { usePayload } from "./factsheet-context";
-import { useBasisOrCash, useBasisSeriesView } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, BaseLeverageNote } from "./basis-context";
 
 /**
  * Batch D analytical panels. Three pieces:
@@ -133,6 +133,10 @@ export function PeerPercentilePanel() {
           Peer rank is computed on the cash-settlement basis; the cohort is not recomputed per basis.
         </p>
       )}
+      {/* H-1 (Phase 107 Fable red team): the peer rank is a server-side rank against a
+          cohort distribution NOT carried in the payload, so it cannot follow a client
+          leverage what-if — it stays at base 1×. Honest per-panel note at L≠1. */}
+      <BaseLeverageNote payload={payload} label="Peer rank shown at base 1× leverage" />
     </section>
   );
 }
@@ -280,6 +284,10 @@ export function AllocatorSection() {
           Production will accept a CSV upload (<code className="font-mono text-micro">date,nav</code>) or pick
           from saved allocator portfolios.
         </p>
+        {/* H-1 (Phase 107 Fable red team): allocator sleeve sizing / tail co-movement is
+            a server-side model run, not re-derivable client-side under a leverage
+            what-if, so it stays at base 1×. Honest per-panel note at L≠1. */}
+        <BaseLeverageNote payload={payload} label="Allocator analysis shown at base 1× leverage" />
       </header>
 
       <div className="flex flex-wrap gap-2 mb-2">

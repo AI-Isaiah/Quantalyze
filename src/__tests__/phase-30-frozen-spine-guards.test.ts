@@ -2,8 +2,8 @@
  * Phase 30 (Factsheet Graphs on the Blend) — frozen-engine exit-gate guard.
  *
  * Phase 30 adds three factsheet-grade graph surfaces to the BLENDED portfolio
- * by assembling EXISTING leaf charts over ONE new pure-TS adapter
- * (`src/lib/scenario-blend-panels.ts`). The projection engine is NOT touched.
+ * by assembling EXISTING leaf charts over a pure-TS blend-panel adapter. The
+ * projection engine is NOT touched.
  * The defining exit gate (ROADMAP Phase 30 Exit Gates; 30-RESEARCH §User
  * Constraints "Frozen engine"; 30-02-PLAN SCENARIO-05) is:
  *

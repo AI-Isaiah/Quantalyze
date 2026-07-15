@@ -4,9 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
+import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
 import { mtmDisabledReasonCopy } from "./basis-context";
+import { pct } from "./format";
 
 /**
  * Phase 90 Wave-0 (90-02 Task 2) — TDD RED scaffold for the FS-03 cash/MTM
@@ -266,9 +268,29 @@ function fixtureSingleKeyMtmGated(): FactsheetPayload {
     mtmGate: { available: false, reason: "mtm_summary_coverage_incomplete" },
   } as unknown as FactsheetPayload;
 }
-// (g) single-key options, MTM available AND leverageable (periodsPerYear present
-//     so the leverage input renders on the cash basis). Drives LEV-MTM-1.
+// The persisted MTM SERIES bundle for fixture (g): derived at 365 from a distinct mtm
+// return series so the levered MTM re-derive is provably 2× its own derived vol.
+const MTM_SERIES = makeReturnsSeries(60, 0.0009);
+const MTM_BUNDLE = deriveSeriesBundle(
+  MTM_SERIES.map((p) => ({ date: p.date, value: p.value })),
+  { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Scenario" },
+);
+// (g) single-key options, MTM available AND leverageable (periodsPerYear present) WITH
+//     a resolved MTM series bundle. Phase 107 (LEV-BB): the leverage input now renders
+//     on the RESOLVED MTM basis too, and dialing L levers the MTM series honestly.
+//     Drives the rewritten LEV-MTM-1.
 function fixtureSingleKeyMtmLeverage(): FactsheetPayload {
+  return {
+    ...base(),
+    metricsByBasis: { mark_to_market: MTM },
+    seriesByBasis: { mark_to_market: MTM_BUNDLE },
+    mtmGate: { available: true },
+    periodsPerYear: 365,
+  } as unknown as FactsheetPayload;
+}
+// (g') single-key options, MTM available but UNRESOLVED (no series bundle) — the
+//      companion no-fabrication case: leverage cannot lever a cash-fallback MTM label.
+function fixtureSingleKeyMtmLeverageNoSeries(): FactsheetPayload {
   return {
     ...base(),
     metricsByBasis: { mark_to_market: MTM },
@@ -321,20 +343,56 @@ describe("FactsheetBody — Phase 102 single-key options MTM toggle", () => {
     expect(queryByText("Mark-to-market")).toBeNull();
   });
 
-  it("LEV-MTM-1 (no-fabrication guard): leverage=2 under MTM shows PERSISTED MTM scalars and NO MODELED eyebrow", () => {
+  it("LEV-MTM-1 (rewritten, LEV-BB): leverage=2 under MTM WITH a bundle shows the LEVERED MTM scalars + the what-if caption", () => {
     const { container } = renderBody(fixtureSingleKeyMtmLeverage());
-    // On the cash basis the leverage input is visible — dial it to 2×.
+    // Toggle to the RESOLVED MTM basis; the leverage input stays visible (eligibility
+    // widened to the active resolved basis) — dial it to 2×.
+    fireEvent.click(within(container).getByText("Mark-to-market"));
     const input = within(container).getByLabelText(LEVERAGE_INPUT_LABEL);
     fireEvent.change(input, { target: { value: "2" } });
-    // Switch to mark_to_market: leverage models the CASH return path, so under an
-    // MTM label the hook MUST short-circuit to the persisted overlay (no recompute).
-    fireEvent.click(within(container).getByText("Mark-to-market"));
-    // KPI cells show the persisted MTM scalars (MTM.cum 0.5 → +50.0%), NOT a
-    // leverage-scaled cash number. Neuter check: remove the basis guard in
-    // useLeveragedMetrics → leveraged cash renders here + a MODELED eyebrow → RED.
-    expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
-    // No fabricated MODELED line under MTM.
+    // The whole factsheet re-derives the LEVERED MTM series (r → 2·r on the MTM
+    // dailies): Ann. Vol is homogeneous deg-1 → exactly 2× the derived MTM vol. This is
+    // the honest re-derive that REPLACED the old no-fabrication suppression. Neuter
+    // check: revert the eligibility widen (hide the input under MTM) → cannot dial → RED.
+    expect(kpiValue(container, "Ann. Vol")).toBe(
+      pct(2 * MTM_BUNDLE.strategyMetrics.ann_vol, 1),
+    );
+    // The honest muted what-if caption renders (never the old amber MODELED eyebrow).
+    expect(
+      within(container).getByText(/What-if projection at 2× leverage/),
+    ).toBeTruthy();
     expect(within(container).queryByText(/MODELED/)).toBeNull();
+  });
+
+  it("LEV-MTM-1 companion (no-fabrication guard): leverage=2 under MTM WITHOUT a bundle stays the unlevered persisted-MTM overlay, no what-if caption", () => {
+    const { container } = renderBody(fixtureSingleKeyMtmLeverageNoSeries());
+    // Dial leverage on cash, then toggle to an UNRESOLVED MTM basis (no series bundle).
+    const input = within(container).getByLabelText(LEVERAGE_INPUT_LABEL);
+    fireEvent.change(input, { target: { value: "2" } });
+    fireEvent.click(within(container).getByText("Mark-to-market"));
+    // Levering a cash-fallback series under an MTM label is forbidden (D3): the strip
+    // stays the persisted MTM scalars (MTM.cum 0.5 → +50.0%), UNLEVERED, and no what-if
+    // caption renders. Neuter check: drop the MTM-bundle-absent guard → leveraged cash
+    // renders + a what-if caption appears under an MTM label → RED.
+    expect(kpiValue(container, "Cum. Return")).toBe("+50.0%");
+    expect(within(container).queryByText(/What-if projection/)).toBeNull();
+  });
+
+  it("D4 no-orphan: NO base-track rail eyebrow exists at any leverage on a plain single-key strategy", () => {
+    // Plain single-key cash (no mtmGate, no composite) with periodsPerYear so the
+    // leverage input renders. The rail levers with everything else — there is no
+    // BASE·1× eyebrow to bridge against, and no empty wrapper gap.
+    const payload = { ...base(), periodsPerYear: 365 } as unknown as FactsheetPayload;
+    const { container } = renderBody(payload);
+    const eyebrow = () =>
+      container.querySelector('[data-testid="metricscolumn-base-track-eyebrow"]');
+    expect(eyebrow()).toBeNull();
+    fireEvent.change(
+      within(container).getByLabelText(LEVERAGE_INPUT_LABEL),
+      { target: { value: "2" } },
+    );
+    // Still absent at L≠1 — the D4 eyebrow is deleted, not merely hidden.
+    expect(eyebrow()).toBeNull();
   });
 });
 

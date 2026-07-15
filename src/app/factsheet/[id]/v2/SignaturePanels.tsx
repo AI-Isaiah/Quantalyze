@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
+import { BaseLeverageNote } from "./basis-context";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
@@ -49,6 +50,10 @@ export function SignaturesSection() {
   if (!sigs) return null;
   return (
     <section className="flex flex-col gap-10">
+      {/* H-1 (Phase 107 Fable red team): event-study signatures are server-side
+          aggregations of per-event trajectories not carried in the payload, so their
+          magnitudes cannot follow a client leverage what-if — they stay at base 1×. */}
+      <BaseLeverageNote payload={payload} label="Event signatures shown at base 1× leverage" />
       <SignatureHorizon
         title={`Returns Signatures for 7 Days Horizon (${sigs.h7.winCount} wins · ${sigs.h7.lossCount} losses)`}
         subtitle="mean + median + 25/75 + 5/95 percentile bands of benchmark or accumulated-capital trajectory around strategy events · ±14d window"

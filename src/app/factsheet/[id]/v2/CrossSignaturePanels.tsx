@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
+import { BaseLeverageNote } from "./basis-context";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
@@ -43,6 +44,10 @@ export function CrossSignaturesSection() {
   if (!payload.eventSignatures || !payload.benchEventSignatures) return null;
   return (
     <section className="flex flex-col gap-10">
+      {/* H-1 (Phase 107 Fable red team): cross-signature trajectories are server-side
+          event aggregations not carried in the payload, so they cannot follow a client
+          leverage what-if — they stay at base 1×. */}
+      <BaseLeverageNote payload={payload} label="Cross-signature trajectories shown at base 1× leverage" />
       <CrossHorizon
         title="Returns Cross Signatures for 7 Days Horizon"
         subtitle={`mean trajectory comparison · ±14d window · each panel overlays strategy-indexed mean (accent) vs ${cmp.shortName}-indexed mean (muted)`}

@@ -3,12 +3,16 @@
 import {
   createContext,
   useContext,
+  useDeferredValue,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
-import { overlayBasisScalars } from "@/lib/factsheet/basis-metrics";
+import { overlayBasisScalars, BASIS_KPI_MAP } from "@/lib/factsheet/basis-metrics";
+import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { sanitizeLeverage } from "@/lib/leverage";
+import { LeverageContext } from "./leverage-context";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -27,6 +31,17 @@ import { overlayBasisScalars } from "@/lib/factsheet/basis-metrics";
  * `FactsheetBody.basis.test.tsx` (no-persistence-on-toggle).
  */
 export type Basis = "cash_settlement" | "mark_to_market";
+
+/**
+ * WR-01 hardening (Phase 107 review) — a BRANDED leverage value that has passed the
+ * `sanitizeLeverage` + `useDeferredValue` pipeline (the value the shared view actually
+ * derived its numbers from). `leverageApplies` requires this brand, so passing the RAW
+ * immediate `useLeverage().leverage` (a plain `number`) into the gate is now a COMPILE
+ * error — structurally closing the WR-01 immediate-vs-deferred divergence class rather
+ * than relying on a convention. The brand is minted at exactly two trusted derivation
+ * points: `useAppliedLeverage()` and the view's own sanitized+deferred `L`.
+ */
+export type AppliedLeverage = number & { readonly __applied: unique symbol };
 
 interface BasisContextValue {
   basis: Basis;
@@ -105,62 +120,360 @@ export function useBasisMetrics(payload: FactsheetPayload): {
 }
 
 /**
- * Phase 103 (MTM-04) — the client-side per-basis SERIES view-merge.
+ * Phase 103 (MTM-04) + Phase 107 (LEV-BB) — the ONE shared client view hook. It
+ * composes TWO layers in order: (1) the per-basis SERIES view-merge, then (2) the
+ * leverage-as-a-dailies-transform. Every one of the ~12 dailies-derivable panels
+ * reads this hook, so composing leverage HERE makes the ENTIRE factsheet follow L
+ * with zero per-consumer wiring — "nothing bypasses the backbone".
  *
- * Under `cash_settlement` (or whenever the payload carries no MTM series
- * bundle — a stale cache, a not-yet-backfilled strategy, or a gated book) this
- * returns the ORIGINAL payload object by REFERENCE: the GUARD-02 byte/render-
- * stability contract holds and every consuming chart/panel renders exactly as
- * it does today.
+ * Layer 1 (basis merge, Phase 103): Under `cash_settlement` (or whenever the
+ * payload carries no MTM series bundle — a stale cache, a not-yet-backfilled
+ * strategy, or a gated book) `base` is the ORIGINAL payload object by REFERENCE.
+ * Under `mark_to_market` WITH `payload.seriesByBasis.mark_to_market` present `base`
+ * is a `{...payload, ...bundle}` merge carrying the MTM-basis clones of every
+ * dailies-derivable field (dates axis, the three chart tracks, rolling, worst-10,
+ * comparators, the two heatmaps, quantiles, streaks, calmarByYear, bootstrapCI,
+ * styleDrift, stressWindows, correlations, correlationMatrix + the bundle's own
+ * `strategyMetrics` + the per-basis `missingSegments` mask). The KpiStrip's seven
+ * persisted headline scalars are overlaid onto the merged `strategyMetrics` (F3).
+ * `segmentBoundaries` is NOT in the bundle, so the composite key-handoff seams
+ * inherit the shared basis-invariant top-level value.
  *
- * Under `mark_to_market` WITH `payload.seriesByBasis.mark_to_market` present it
- * returns a `useMemo`'d `{...payload, ...bundle}` merge. The bundle carries the
- * MTM-basis clones of every dailies-derivable field (dates axis, the three
- * chart tracks, rolling, worst-10, comparators, the two heatmaps, quantiles,
- * streaks, calmarByYear, bootstrapCI, styleDrift, stressWindows, correlations,
- * correlationMatrix + the bundle's own `strategyMetrics` (extended scalars) + the
- * per-basis `missingSegments` mask). MTM-04 correction: correlations /
- * correlationMatrix are IN the bundle now (the strategy leg follows the basis), so
- * the spread makes them follow MTM. The KpiStrip's persisted headline
- * `strategyMetrics` overlay is the ONE thing the merge does NOT touch (Phase 102
- * owns MTM there). `segmentBoundaries` is likewise NOT in the bundle, so the
- * composite key-handoff seams inherit the shared basis-invariant top-level value.
+ * Layer 2 (leverage, Phase 107 LEV-BB): at `sanitizeLeverage(L) === 1` the hook
+ * returns `base` BY REFERENCE — `deriveSeriesBundle` is NEVER called at unity (SC-4;
+ * the load-bearing byte-identity mechanism, not float reasoning). At L≠1 (and past
+ * four fail-closed guards) it scales the ACTIVE-basis dailies `r → L·r` and RE-derives
+ * the whole bundle via the exported `deriveSeriesBundle` (SC-1). Only the strategy leg
+ * is levered — the benchmark legs are re-aligned un-levered inside deriveSeriesBundle,
+ * so `jointMetrics(leveredStrat, unleveredBench)` makes β→L·β / α→L·α / corr-invariant
+ * fall out honestly (SC-2, pinned in joint.test.ts). `comparatorAnnVol` is OMITTED so
+ * the levered comparator vol-matches its OWN levered vol (mirrors the MTM arm at
+ * build-payload.ts). `missingSegments` is passed through explicitly (the bundle spread
+ * would otherwise clobber the base mask with undefined).
  *
- * Pure context + memo — keeps the GUARD-04 no-storage discipline (this file
- * never touches storage/URL/history; pinned by basis-context.test.tsx Test 7).
+ * The four guards each return `base` BY REFERENCE (no re-derive, no fabrication):
+ *   1. L === 1                            — SC-4 unity short-circuit
+ *   2. dataQuality.composite === true     — A2: leverage is single-key only (arithmetic
+ *                                            is composite-only; composites also hide the slider)
+ *   3. periodsPerYear == null             — fail-closed (stale cache with no annualization basis)
+ *   4. MTM basis + no MTM bundle OR no     — no-fabrication: an unresolved MTM label falls back
+ *      persisted MTM scalar cache            to cash data (levering it renders levered-cash as
+ *                                            MTM); an absent persisted MTM scalar cache means the
+ *                                            L=1 KPIs are the strict-overlay "—", so a levered
+ *                                            re-derive would fabricate the withheld headline
+ *
+ * Both contexts are read directly (NOT via useBasis/useLeverage, which throw) so a
+ * chart/panel mounted WITHOUT the providers degrades to cash / L=1 instead of
+ * crashing — the merge + leverage transform are pure additive enhancements.
+ *
+ * Context + a deferred leverage read + memo — keeps the GUARD-04 no-storage
+ * discipline (this file never touches storage/URL/history; pinned by
+ * basis-context.test.tsx Test 7). The only non-pure element is `useDeferredValue`
+ * on the leverage read (LEV-BB perf, 107-03), which is scheduler-only — no I/O.
  */
+/**
+ * H-1 (Phase 107/108 Fable red team) — the SHARED levered-view cache.
+ *
+ * `useBasisSeriesView` memoizes PER hook instance, but it is called from ~22 consumer
+ * instances across 11 components that all mount on ONE factsheet page. At L≠1 each instance
+ * independently ran the expensive `deriveSeriesBundle` (bootstrapCI 2000 resamples + the
+ * 6×6 correlation matrix + stress windows — ~235ms median at 3000-day scale), so dragging
+ * leverage 1→2 cost ~22×235ms ≈ 5s of main-thread work before React could commit; the page
+ * sat on stale 1× numbers for seconds, repeating on every L change and basis flip.
+ * `useDeferredValue` (107-03) fixed input-BLOCKING but not the DUPLICATION.
+ *
+ * The levered view is a PURE function of `(payload, basis, appliedLeverage)`, so compute it
+ * ONCE and share the result object across every instance. The WeakMap keys on payload
+ * IDENTITY (entries GC with the payload, never collide across factsheets); the inner Map
+ * keys on `${basis}:${L}`. Returning the SAME reference is also a correctness-preserving win
+ * — it stabilizes downstream memoization. The L=1 / guard paths return `base` BY REFERENCE
+ * and NEVER consult this cache (SC-4 byte-identity stays first).
+ */
+const leveredViewCache = new WeakMap<FactsheetPayload, Map<string, FactsheetPayload>>();
+
+function readLeveredView(
+  payload: FactsheetPayload,
+  basis: Basis,
+  appliedLeverage: AppliedLeverage,
+): FactsheetPayload | undefined {
+  return leveredViewCache.get(payload)?.get(`${basis}:${appliedLeverage}`);
+}
+
+function writeLeveredView(
+  payload: FactsheetPayload,
+  basis: Basis,
+  appliedLeverage: AppliedLeverage,
+  view: FactsheetPayload,
+): void {
+  let byKey = leveredViewCache.get(payload);
+  if (!byKey) {
+    byKey = new Map();
+    leveredViewCache.set(payload, byKey);
+  }
+  byKey.set(`${basis}:${appliedLeverage}`, view);
+}
+
 export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload {
-  // Read the context directly (NOT via useBasis, which throws) so a chart or
-  // panel mounted WITHOUT a BasisProvider degrades to cash instead of crashing —
-  // the merge is a pure additive enhancement, and several isolated mounts/tests
-  // render the tree under FactsheetProvider only. Absent provider ⇒ cash ⇒ the
-  // original payload by reference (byte-identical render).
   const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  const rawLeverage = useContext(LeverageContext)?.leverage ?? 1;
+  // LEV-BB perf (107-03): the levered re-derive was MEASURED at a ~235ms median
+  // at 3000-day production scale (≥100ms decision rule → debounce). Defer the
+  // leverage READ so a rapid slider drag never blocks the input on the expensive
+  // deriveSeriesBundle: useDeferredValue keeps the last-good bundle rendered while
+  // React re-derives the new leverage in the background — the input value stays
+  // immediate (no keystroke/drag lag, no skeleton flash). The DERIVE is debounced,
+  // NOT the input. The unity/base short-circuits below read this deferred value, so
+  // dropping back to L=1 restores the by-reference base as soon as React catches up.
+  const leverage = useDeferredValue(rawLeverage);
   return useMemo<FactsheetPayload>(() => {
+    // --- Layer 1: active-basis series merge (Phase 103, unchanged) ---
     const bundle = payload.seriesByBasis?.mark_to_market;
-    if (basis !== "mark_to_market" || !bundle) return payload;
-    // F3 (phase 103): overlay the SEVEN persisted headline scalars onto the merged
-    // `strategyMetrics` so the rail's §I headline == the KpiStrip BY CONSTRUCTION
-    // (both = the persisted-dense-Python cache), killing the sparse-vs-dense AND the
-    // arithmetic-vs-geometric (`cumulative_method:"simple"`) divergence for every
-    // cross-surface scalar. Mirrors `useBasisMetrics`: an absent MTM object → `{}`
-    // → the STRICT overlay renders all seven "—", never a bundle-TS recompute. Only
-    // the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
-    // series-derived metrics (skew/VaR/quantiles/best-week/…) STAY bundle-TS-derived
-    // (they have no cross-surface counterpart on the KpiStrip, exactly as the rail
-    // already works for cash: only the seven have a persisted authoritative cache).
-    const mtmScalars = payload.metricsByBasis?.mark_to_market ?? {};
-    // Narrow on the ingest discriminant before spreading: the bundle has no
-    // `ingestSource`, so spreading over the bare union would widen the
-    // discriminant and break FactsheetPayload assignability. Each arm's spread
-    // preserves its `"api"`/`"csv"` literal (bundle never touches it).
-    if (payload.ingestSource === "api") {
+    const base: FactsheetPayload = ((): FactsheetPayload => {
+      if (basis !== "mark_to_market" || !bundle) return payload;
+      // F3 (phase 103): overlay the SEVEN persisted headline scalars onto the merged
+      // `strategyMetrics` so the rail's §I headline == the KpiStrip BY CONSTRUCTION
+      // (both = the persisted-dense-Python cache), killing the sparse-vs-dense AND the
+      // arithmetic-vs-geometric (`cumulative_method:"simple"`) divergence for every
+      // cross-surface scalar. Mirrors `useBasisMetrics`: an absent MTM object → `{}`
+      // → the STRICT overlay renders all seven "—", never a bundle-TS recompute. Only
+      // the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
+      // series-derived metrics (skew/VaR/quantiles/best-week/…) STAY bundle-TS-derived
+      // (they have no cross-surface counterpart on the KpiStrip, exactly as the rail
+      // already works for cash: only the seven have a persisted authoritative cache).
+      const mtmScalars = payload.metricsByBasis?.mark_to_market ?? {};
+      // Narrow on the ingest discriminant before spreading: the bundle has no
+      // `ingestSource`, so spreading over the bare union would widen the
+      // discriminant and break FactsheetPayload assignability. Each arm's spread
+      // preserves its `"api"`/`"csv"` literal (bundle never touches it).
+      if (payload.ingestSource === "api") {
+        const merged = { ...payload, ...bundle };
+        return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
+      }
       const merged = { ...payload, ...bundle };
       return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
-    }
-    const merged = { ...payload, ...bundle };
-    return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
-  }, [basis, payload]);
+    })();
+
+    // --- Layer 2: leverage-as-a-dailies-transform (Phase 107, LEV-BB) ---
+    // `signal: false` on the hot render path (LOW-1: the ControlBar pre-clamps, so a
+    // read-side coercion here is not actionable owner signal).
+    // Trusted mint point for the `AppliedLeverage` brand: `leverage` is already the
+    // deferred read (line above), so `L` is the exact value the displayed numbers derive
+    // from — the same brand `useAppliedLeverage()` produces for the gate/caption.
+    const L = sanitizeLeverage(leverage, { signal: false }) as AppliedLeverage;
+    // SC-4: base view BY REFERENCE at unity — deriveSeriesBundle is NEVER called at L=1.
+    // This short-circuit MUST precede any deriveSeriesBundle call (byte-identity). It
+    // stays an EXPLICIT first guard even though `leverageApplies` below also excludes
+    // L===1: the by-reference return at unity is the load-bearing SC-4 keystone and
+    // must never be refactored behind a helper call.
+    if (L === 1) return base;
+    // Guards 2-4 (single source of truth — IN-02): composite (leverage is single-key
+    // only), fail-closed on an absent periodsPerYear (no honest annualization basis for
+    // a re-derive), and no-fabrication on an unresolved MTM basis (levering the cash
+    // fallback under an MTM label was the exact old failure). `leverageApplies` folds
+    // all three — plus the redundant L≠1 check, already true here — into the ONE
+    // predicate the KpiStrip gate + ControlBar eligibility also consume, so the three
+    // sites can never drift (the WR-01 immediate-vs-deferred divergence is now
+    // structurally impossible).
+    if (!leverageApplies(payload, basis, L)) return base;
+    // H-1: the levered view is pure in (payload, basis, L) — reuse the shared cache so the
+    // ~235ms deriveSeriesBundle runs ONCE across all ~22 consumer instances (not per
+    // instance), and every consumer gets the SAME reference. Consulted AFTER the SC-4 /
+    // guard by-reference returns above so the cache never fronts the unity short-circuit.
+    const shared = readLeveredView(payload, basis, L);
+    if (shared) return shared;
+    // Lever only the STRATEGY dailies on the ACTIVE-basis series. The benchmark leg
+    // stays un-levered (deriveSeriesBundle re-aligns BTC/SPX/… internally) — that is
+    // what makes β→L·β / α→L·α honest via jointMetrics(leveredStrat, unleveredBench).
+    const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
+    const lb = deriveSeriesBundle(levered, {
+      periodsPerYear: base.periodsPerYear!,
+      isArithmetic: false,
+      markets: base.markets,
+      strategyName: base.strategyName,
+      // comparatorAnnVol OMITTED — the levered bundle vol-matches its OWN levered vol
+      // (mirrors the MTM arm at build-payload.ts:437-438; passing the persisted cash
+      // ann_vol would un-lever the comparator vol-match). missingSegments passed
+      // through so the bundle spread does not clobber the base mask with undefined.
+      missingSegments: base.missingSegments,
+    });
+    // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
+    // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
+    // MTM strip shows the PERSISTED dense-Python scalars (the F3 overlay that makes the
+    // rail == the strip), but this levered arm re-derives everything fresh from the
+    // client TS bundle with NO persisted overlay — so on an MTM book these two invariant
+    // metrics would JUMP from the persisted value to the client recompute PURELY by
+    // engaging leverage (the sparse-vs-dense / arithmetic-vs-geometric divergence F3
+    // exists to hide), the exact dishonesty Phase 107 removed. Re-pin ONLY the two
+    // provably-invariant scalars to the persisted authoritative MTM values so the
+    // L=1 ↔ L≠1 boundary is continuous for them. The HOMOGENEOUS scalars (cum_ret /
+    // cagr / ann_vol / max_dd) stay levered. Calmar is DELIBERATELY NOT pinned: it is
+    // `cagr/|maxDd|` off the GEOMETRICALLY-compounded equity curve (compute.ts:39,47-49),
+    // so it is genuinely leverage-VARIANT — its boundary change under leverage is honest,
+    // and pinning it to the unlevered persisted value would HIDE a real effect (see the
+    // Phase 107 review-fix note; the reviewer's suggested calmar pin was declined for
+    // this reason). Only MTM carries a persisted per-basis overlay; cash's `basisM`
+    // already equals the client recompute, so there is no cash jump to reconcile.
+    //
+    // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
+    // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
+    // the returns are all-zeros (r→0·r), so `mean·√P/sd` is 0/0 and the derive
+    // honestly yields sharpe=0 / sortino=0 / ann_vol=0 with flat charts. Pinning the
+    // persisted non-zero Sharpe/Sortino there would render e.g. "Sharpe 1.85" next to
+    // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
+    // pin only when L > 0; at L=0 let the honest derived zeros stand.
+    const strategyMetrics = ((): typeof lb.strategyMetrics => {
+      if (basis !== "mark_to_market" || L <= 0) return lb.strategyMetrics;
+      const persisted = payload.metricsByBasis?.mark_to_market as
+        | Record<string, unknown>
+        | undefined
+        | null;
+      if (!persisted) return lb.strategyMetrics;
+      const out: Record<string, unknown> = { ...lb.strategyMetrics };
+      for (const { tsKey, serverKey } of BASIS_KPI_MAP) {
+        const pv = persisted[serverKey];
+        const pvFinite = typeof pv === "number" && Number.isFinite(pv);
+        if (!pvFinite) {
+          // M-1 (Phase 107/108 Fable red team): the persisted MTM cache WITHHELD this
+          // scalar — a degenerate per-scalar `null` (`sortino:null` on a no-losing-day
+          // book, `calmar:null` on a zero-drawdown book, Python `_safe_float`). At L=1 the
+          // strict overlay renders it "—". At L≠1 the client re-derive would surface a
+          // fabricated value (compute()'s ddDev=0 → Sortino "0.00"), a scalar the
+          // authoritative cache deliberately declined — the SAME fabrication class FIX 1
+          // closed at cache granularity, now at PER-SCALAR granularity. Preserve the
+          // withhold: NaN → "—" via the formatters. (cum_ret is invariance-critical and
+          // always finite in an admitted cache, so it is never withheld in practice.)
+          out[tsKey] = NaN;
+        } else if (tsKey === "sharpe" || tsKey === "sortino") {
+          // WR-02: Sharpe/Sortino are leverage-invariant at rf=0 (r→L·r cancels in
+          // mean·√P/sd and mean·P/ddDev), so re-pin the FINITE persisted value → the
+          // L=1 ↔ L≠1 boundary is continuous for them.
+          out[tsKey] = pv;
+        }
+        // Homogeneous scalars (cum_ret/cagr/ann_vol/max_dd) with a FINITE persisted value
+        // STAY levered — the accepted N-1 boundary tradeoff (the WR-02 comment owns it):
+        // the client re-derive × L is the honest levered value.
+      }
+      return out as typeof lb.strategyMetrics;
+    })();
+    // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
+    const view: FactsheetPayload =
+      base.ingestSource === "api"
+        ? { ...base, ...lb, strategyMetrics }
+        : { ...base, ...lb, strategyMetrics };
+    // H-1: publish to the shared cache so sibling instances (and later renders) reuse this
+    // exact object instead of re-running deriveSeriesBundle.
+    writeLeveredView(payload, basis, L, view);
+    return view;
+  }, [basis, leverage, payload]);
+}
+
+/**
+ * WR-01 (Phase 107 review) — the applied leverage the shared view ACTUALLY used.
+ *
+ * Reads the leverage through the SAME `useDeferredValue` debounce as
+ * `useBasisSeriesView` (107-03), so any consumer that gates a label/caption on
+ * "did the view lever?" reads the identical deferred value the displayed numbers
+ * were derived from. This is the fix for the honesty regression: before it, the
+ * KpiStrip gated its what-if caption on the IMMEDIATE `useLeverage()` value while
+ * the numbers lagged on the deferred one, so during the ~235ms re-derive window the
+ * caption could claim a levered projection the numbers had not yet applied. Reads the
+ * context directly (NOT `useLeverage`, which throws) so a panel mounted without the
+ * provider degrades to L=1. `signal: false` mirrors the hot-render read in the view
+ * (the ControlBar owns the interactive coercion signal).
+ */
+export function useAppliedLeverage(): AppliedLeverage {
+  const raw = useContext(LeverageContext)?.leverage ?? 1;
+  // Trusted mint point: the value is sanitized + deferred exactly as the view derives it.
+  return sanitizeLeverage(useDeferredValue(raw), { signal: false }) as AppliedLeverage;
+}
+
+/**
+ * IN-02 (Phase 107 review) — the SINGLE source of truth for the leverage-structural
+ * guards (fail-closed): single-key (not composite), an annualization basis present,
+ * and a RESOLVED active basis (cash, or MTM WITH BOTH its series bundle AND its
+ * persisted scalar cache). This is the "should the leverage cluster render at all"
+ * predicate — true even at L=1, since the ControlBar input must show so the user can
+ * engage leverage. `useBasisSeriesView`, the KpiStrip gate, and the ControlBar
+ * eligibility all derive from this one function (via `leverageApplies` for the two that
+ * also require L≠1), so a future guard change lands in exactly one place.
+ *
+ * MEDIUM-honesty (Phase 107/108 review) — the MTM resolution requires the persisted scalar
+ * cache too (`metricsByBasis.mark_to_market`), not just the series bundle. This is a
+ * DEFENSIVE / belt-and-braces clause: the current server path CANNOT emit a
+ * bundle-without-scalars state — `composite-read-path.ts` threads `mtmSeries` and
+ * `metricsByBasis` under the SAME `available` gate, so a series bundle implies the scalar
+ * cache by construction (Fable red team confirmed the mid-backfill state is not reachable).
+ * The guard matters anyway: IF such a state ever arose (a future partial-write path, a
+ * hand-built payload), the L=1 arm renders the seven headline KPIs as "—" (the strict
+ * `useBasisMetrics` overlay, F2 no-invented-data), and without this second clause the
+ * levered arm would re-derive a full client-TS bundle with NO persisted overlay and
+ * FABRICATE the very MTM headline scalars the L=1 arm withholds. Requiring the scalar cache
+ * keeps MTM leverage-ineligible in that state → the view returns base by-reference → the
+ * KPIs stay "—" at every L, symmetric with guard 4. It also proves it can never disable a
+ * legitimately-leverable book (a real MTM basis always has both). Cash is unaffected — it
+ * carries no persisted-overlay-or-dash contract.
+ */
+export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
+  return (
+    payload.dataQuality?.composite !== true &&
+    payload.periodsPerYear != null &&
+    !(
+      basis === "mark_to_market" &&
+      (payload.seriesByBasis?.mark_to_market == null ||
+        payload.metricsByBasis?.mark_to_market == null)
+    )
+  );
+}
+
+/**
+ * IN-02 + WR-01 — "the view actually levers": the structural guards AND a non-unity
+ * applied leverage. Consumed by the view hook (guards 2-4), the KpiStrip gate, and the
+ * disclosure caption, ALL on the SAME deferred applied-leverage value, so caption /
+ * gate / numbers cannot diverge.
+ */
+export function leverageApplies(
+  payload: FactsheetPayload,
+  basis: Basis,
+  appliedLeverage: AppliedLeverage,
+): boolean {
+  return appliedLeverage !== 1 && leverageEligibleFor(payload, basis);
+}
+
+/**
+ * H-1 (Phase 107 Fable red team) — the per-panel "not levered" honesty annotation.
+ *
+ * A few factsheet panels — peer percentile, allocator portfolios, event signatures —
+ * are PRE-COMPUTED server-side aggregates ranked / modeled against external universes
+ * (a peer cohort distribution, the allocator model, per-event trajectories) that are
+ * NOT carried in the client payload. Unlike the dailies-derivable backbone, they cannot
+ * be re-derived under a client leverage what-if, so at L≠1 they still reflect the base
+ * 1× strategy — and the metrics they rank (peer Sharpe / Sortino / Max DD rank,
+ * allocator impact, event-trajectory magnitude) ARE leverage-variant. To avoid
+ * silently misleading (the strip shows a levered Max DD while the peer panel ranks the
+ * UNLEVERED one), each affected panel renders this small, SPECIFIC muted note whenever
+ * the rest of the page is levered. It is INSERTED only at L≠1 (never a reserved row) so
+ * L=1 stays byte-identical — a targeted per-panel annotation, NOT a resurrection of the
+ * deleted global BASE·1× eyebrow. Gated on the SAME `leverageApplies` predicate as the
+ * KpiStrip, so it appears exactly when the page is actually levered.
+ */
+export function BaseLeverageNote({
+  payload,
+  label,
+}: {
+  payload: FactsheetPayload;
+  label: string;
+}) {
+  const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  const appliedLeverage = useAppliedLeverage();
+  if (!leverageApplies(payload, basis, appliedLeverage)) return null;
+  return (
+    <p
+      className="mt-2 text-micro uppercase tracking-wider text-text-muted"
+      data-leverage-note
+    >
+      {label}
+    </p>
+  );
 }
 
 /**
