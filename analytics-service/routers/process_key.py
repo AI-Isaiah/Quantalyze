@@ -344,7 +344,8 @@ def _resolve_asset_class(
             )
             data = getattr(resp, "data", None)
             if data:
-                return data.get("asset_class")
+                asset_class = data.get("asset_class")
+                return asset_class if isinstance(asset_class, str) else None
         except Exception as exc:  # noqa: BLE001
             # Fail-soft to 252 (L2, Fable red team) — but log it: a transient
             # lookup failure for a crypto CSV strategy silently understates the

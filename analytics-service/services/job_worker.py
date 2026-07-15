@@ -4405,6 +4405,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ),
             error_kind="permanent",
         )
+    # The composite try above assigns _cash_basis_result the derive result; its
+    # `except ValueError` returns on failure, so control only reaches here when the
+    # derive succeeded. It is non-None from this point (initialised None at the top,
+    # never reassigned after) — assert so mypy --strict narrows the union for the
+    # four downstream reads (metrics_json / insufficient_window / sibling_kinds).
+    assert _cash_basis_result is not None
     cash_metrics_json = dict(_cash_basis_result.metrics_json)
 
     # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
