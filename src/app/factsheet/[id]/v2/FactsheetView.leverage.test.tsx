@@ -184,6 +184,33 @@ function fixtureMtmNoBundle(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// Single-key options, MTM series bundle PRESENT but the persisted MTM SCALAR cache
+// ABSENT (`metricsByBasis` omitted) — the real mid-backfill state. At L=1 the seven
+// headline KPIs are the strict-overlay "—" (F2 no-invented-data). MEDIUM-honesty guard:
+// dialing L≠1 must NOT fabricate them from a client-TS re-derive.
+function fixtureMtmBundleNoScalars(): FactsheetPayload {
+  const p = buildScenarioFactsheetPayload({
+    portfolioDaily: smallSeries(50, 0.0012),
+    benchmark: null,
+    periodsPerYear: 365,
+  });
+  const clipped = p.strategyReturns.map((r, i) => ({ date: p.dates[i], value: r }));
+  return {
+    ...p,
+    periodsPerYear: 365,
+    mtmGate: { available: true },
+    // NO metricsByBasis — the persisted MTM scalar cache is absent (mid-backfill).
+    seriesByBasis: {
+      mark_to_market: deriveSeriesBundle(clipped, {
+        periodsPerYear: 365,
+        isArithmetic: false,
+        markets: p.markets,
+        strategyName: p.strategyName,
+      }),
+    },
+  } as unknown as FactsheetPayload;
+}
+
 const KP_CASH = {
   cumulative_return: 0.6266,
   volatility: 0.12,
@@ -442,6 +469,41 @@ describe("FactsheetView — WR-02: leverage-invariant scalars stay pinned to the
 
     // The what-if caption is present — leverage genuinely applied on the MTM basis.
     expect(container.innerHTML).toContain(CAPTION_PREFIX);
+  });
+});
+
+describe("FactsheetView — MEDIUM honesty: MTM bundle present but persisted scalar cache absent stays '—' at L≠1", () => {
+  const HEADLINE = ["Cum. Return", "CAGR", "Sharpe", "Sortino", "Calmar", "Max DD", "Ann. Vol"];
+
+  it("at L=2 on the MTM basis the seven headline KPIs render '—' (strict overlay), NOT the client-TS recompute the L=1 arm withholds", () => {
+    const { container, getByText } = renderBody(fixtureMtmBundleNoScalars());
+
+    // Baseline: on the MTM basis at L=1 every headline scalar is the strict-overlay dash
+    // (persisted MTM scalar cache absent → F2 no-invented-data).
+    act(() => {
+      fireEvent.click(getByText("Mark-to-market"));
+    });
+    for (const label of HEADLINE) {
+      expect(readCell(container, label)).toBe("—");
+    }
+
+    // Dial leverage on cash (where the control stays visible), then re-assert on MTM. Pre-fix
+    // the MTM basis was leverage-eligible on the SERIES bundle alone, so the levered arm
+    // re-derived a full client-TS bundle with no persisted overlay and these rendered
+    // fabricated NUMBERS. The eligibility fix requires the persisted SCALAR cache too, so
+    // MTM is leverage-ineligible here → the view returns base by-reference → KPIs stay "—".
+    act(() => {
+      fireEvent.click(getByText("Cash settlement"));
+    });
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "2" } });
+    });
+    act(() => {
+      fireEvent.click(getByText("Mark-to-market"));
+    });
+    for (const label of HEADLINE) {
+      expect(readCell(container, label)).toBe("—");
+    }
   });
 });
 

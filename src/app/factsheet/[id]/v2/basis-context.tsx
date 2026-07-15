@@ -145,8 +145,11 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  *   2. dataQuality.composite === true     — A2: leverage is single-key only (arithmetic
  *                                            is composite-only; composites also hide the slider)
  *   3. periodsPerYear == null             — fail-closed (stale cache with no annualization basis)
- *   4. MTM basis + no MTM bundle          — no-fabrication: the MTM label falls back to cash
- *                                            data; levering it would render levered-cash as MTM
+ *   4. MTM basis + no MTM bundle OR no     — no-fabrication: an unresolved MTM label falls back
+ *      persisted MTM scalar cache            to cash data (levering it renders levered-cash as
+ *                                            MTM); an absent persisted MTM scalar cache means the
+ *                                            L=1 KPIs are the strict-overlay "—", so a levered
+ *                                            re-derive would fabricate the withheld headline
  *
  * Both contexts are read directly (NOT via useBasis/useLeverage, which throw) so a
  * chart/panel mounted WITHOUT the providers degrades to cash / L=1 instead of
@@ -299,18 +302,33 @@ export function useAppliedLeverage(): number {
 /**
  * IN-02 (Phase 107 review) — the SINGLE source of truth for the leverage-structural
  * guards (fail-closed): single-key (not composite), an annualization basis present,
- * and a RESOLVED active basis (cash, or MTM WITH its series bundle). This is the
- * "should the leverage cluster render at all" predicate — true even at L=1, since the
- * ControlBar input must show so the user can engage leverage. `useBasisSeriesView`,
- * the KpiStrip gate, and the ControlBar eligibility all derive from this one function
- * (via `leverageApplies` for the two that also require L≠1), so a future guard change
- * lands in exactly one place.
+ * and a RESOLVED active basis (cash, or MTM WITH BOTH its series bundle AND its
+ * persisted scalar cache). This is the "should the leverage cluster render at all"
+ * predicate — true even at L=1, since the ControlBar input must show so the user can
+ * engage leverage. `useBasisSeriesView`, the KpiStrip gate, and the ControlBar
+ * eligibility all derive from this one function (via `leverageApplies` for the two that
+ * also require L≠1), so a future guard change lands in exactly one place.
+ *
+ * MEDIUM-honesty (Phase 107/108 review) — the MTM resolution now requires the persisted
+ * scalar cache too (`metricsByBasis.mark_to_market`), not just the series bundle. In the
+ * real mid-backfill state where the MTM SERIES bundle exists but the persisted MTM SCALAR
+ * cache does not, the L=1 arm correctly renders the seven headline KPIs as "—" (the strict
+ * `useBasisMetrics` overlay, F2 no-invented-data). Without this second clause the levered
+ * arm re-derived a full client-TS bundle with NO persisted overlay, so dialing L≠1
+ * FABRICATED the very MTM headline scalars the L=1 arm withholds. Requiring the scalar
+ * cache makes MTM leverage-ineligible in that state → the view returns base by-reference →
+ * the KPIs stay "—" at every L, symmetric with the guard-4 no-fabrication rule (cash is
+ * unaffected — it carries no persisted-overlay-or-dash contract).
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
     payload.dataQuality?.composite !== true &&
     payload.periodsPerYear != null &&
-    !(basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market == null)
+    !(
+      basis === "mark_to_market" &&
+      (payload.seriesByBasis?.mark_to_market == null ||
+        payload.metricsByBasis?.mark_to_market == null)
+    )
   );
 }
 
