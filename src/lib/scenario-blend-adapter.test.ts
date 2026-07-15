@@ -207,3 +207,52 @@ describe("deriveBlendPanels — SC-4 population-std parity pins (63/126/252)", (
     expect(panels.quantiles.All[0]).toBe(Math.min(...vals));
   });
 });
+
+// ── H-2: crypto-√365 basis-scaling guard (restores the guard lost when the
+//    legacy scenario-blend-panels.test.ts was deleted; BLEND-01, ScenarioComposer
+//    passes `blendBasis` = 365 for a crypto blend, else 252) ──────────────────
+//
+// WHY THIS MATTERS (mutation-falsifiability, CLAUDE.md Rule 9): every SC-4 pin
+// above passes basis=252, which EQUALS the adapter's default third arg — so a
+// mutant that ignores or hardcodes `periodsPerYear` to 252 keeps the whole SC-4
+// suite green while silently breaking crypto-blend annualization. Only the third
+// (√N) annualization factor depends on the basis: `rollingVol = pstdev·√N` and
+// `rollingSharpe = m·√N/s`, both scale by EXACTLY √(365/252) from 252→365,
+// point-for-point at every index (pstdev/m/s are basis-invariant). A basis-
+// hardcode mutant collapses that ratio to 1 → these assertions fail loudly.
+describe("deriveBlendPanels — crypto √365 basis scaling (BLEND-01 guard)", () => {
+  const RATIO = Math.sqrt(365 / 252);
+  // Positive-drift deterministic fixture: mean > 0 and std > 0 in every window,
+  // so rollingSharpe is NON-ZERO (the ratio pin is not vacuous for Sharpe).
+  const DRIFT_320 = Array.from({ length: 320 }, (_, i) => ({
+    date: dateAt(i),
+    value: i % 2 === 0 ? 0.002 : 0.001,
+  }));
+
+  it("basis 365: even-window rollingVol equals the POPULATION closed-form A·√365 (absolute, non-circular)", () => {
+    // ALT_320 even-window population σ = A exactly → rollingVol = A·√365. A
+    // basis-hardcode-to-252 mutant yields A·√252 ≈ 0.11906, failing this @6dp.
+    const panels = deriveBlendPanels(ALT_320, 126, 365);
+    expect(panels.rollingVol[0].value).toBeCloseTo(A * Math.sqrt(365), 6);
+    expect(panels.rollingVol[0].value).not.toBeCloseTo(A * Math.sqrt(252), 6);
+  });
+
+  it("basis 365 scales rollingVol & rollingSharpe by exactly √(365/252) vs basis 252, point-for-point", () => {
+    const window = 126;
+    const at252 = deriveBlendPanels(DRIFT_320, window, 252);
+    const at365 = deriveBlendPanels(DRIFT_320, window, 365);
+    expect(at365.rollingVol.length).toBe(at252.rollingVol.length);
+    expect(at252.rollingVol.length).toBeGreaterThan(0);
+    for (let i = 0; i < at252.rollingVol.length; i++) {
+      // dates are basis-invariant
+      expect(at365.rollingVol[i].date).toBe(at252.rollingVol[i].date);
+      // vol scales point-for-point by √(365/252)
+      expect(at365.rollingVol[i].value).toBeCloseTo(at252.rollingVol[i].value * RATIO, 10);
+      // Sharpe is non-zero on the drift fixture and scales identically
+      const s252 = at252.rollingSharpe.sharpe_365d[i].value;
+      const s365 = at365.rollingSharpe.sharpe_365d[i].value;
+      expect(s252).not.toBe(0);
+      expect(s365).toBeCloseTo(s252 * RATIO, 10);
+    }
+  });
+});
