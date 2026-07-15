@@ -112,6 +112,23 @@ describe("deriveBlendPanels — public-shape + backbone-routing behaviour", () =
     expect(panels.rollingSortino).toEqual([]);
   });
 
+  it("Infinity value anywhere → usableN === 0 and every series collapses (poison, not just NaN)", () => {
+    // FIX 5: the degenerate guard keys on `!Number.isFinite`, so ±Infinity must poison the
+    // whole series exactly like NaN — an explicit non-NaN non-finite case (a divide-by-zero
+    // or overflow upstream would surface as Infinity, not NaN).
+    const poisoned = [
+      ...alternating(20, A),
+      { date: dateAt(20), value: Number.POSITIVE_INFINITY },
+    ];
+    const panels = deriveBlendPanels(poisoned, 63, 252);
+    expect(panels.usableN).toBe(0);
+    expect(panels.histogramSeries).toEqual([]);
+    expect(panels.quantiles).toEqual({});
+    expect(panels.rollingSharpe).toEqual({});
+    expect(panels.rollingVol).toEqual([]);
+    expect(panels.rollingSortino).toEqual([]);
+  });
+
   it("length 9 (< MIN_USABLE 10) → collapse, usableN === 9 (real count preserved)", () => {
     const short = alternating(9, A);
     const panels = deriveBlendPanels(short, 5, 252);
