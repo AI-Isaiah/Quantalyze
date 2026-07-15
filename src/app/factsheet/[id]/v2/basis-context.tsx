@@ -32,6 +32,17 @@ import { LeverageContext } from "./leverage-context";
  */
 export type Basis = "cash_settlement" | "mark_to_market";
 
+/**
+ * WR-01 hardening (Phase 107 review) — a BRANDED leverage value that has passed the
+ * `sanitizeLeverage` + `useDeferredValue` pipeline (the value the shared view actually
+ * derived its numbers from). `leverageApplies` requires this brand, so passing the RAW
+ * immediate `useLeverage().leverage` (a plain `number`) into the gate is now a COMPILE
+ * error — structurally closing the WR-01 immediate-vs-deferred divergence class rather
+ * than relying on a convention. The brand is minted at exactly two trusted derivation
+ * points: `useAppliedLeverage()` and the view's own sanitized+deferred `L`.
+ */
+export type AppliedLeverage = number & { readonly __applied: unique symbol };
+
 interface BasisContextValue {
   basis: Basis;
   setBasis: (next: Basis) => void;
@@ -203,7 +214,10 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // --- Layer 2: leverage-as-a-dailies-transform (Phase 107, LEV-BB) ---
     // `signal: false` on the hot render path (LOW-1: the ControlBar pre-clamps, so a
     // read-side coercion here is not actionable owner signal).
-    const L = sanitizeLeverage(leverage, { signal: false });
+    // Trusted mint point for the `AppliedLeverage` brand: `leverage` is already the
+    // deferred read (line above), so `L` is the exact value the displayed numbers derive
+    // from — the same brand `useAppliedLeverage()` produces for the gate/caption.
+    const L = sanitizeLeverage(leverage, { signal: false }) as AppliedLeverage;
     // SC-4: base view BY REFERENCE at unity — deriveSeriesBundle is NEVER called at L=1.
     // This short-circuit MUST precede any deriveSeriesBundle call (byte-identity). It
     // stays an EXPLICIT first guard even though `leverageApplies` below also excludes
@@ -294,9 +308,10 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
  * provider degrades to L=1. `signal: false` mirrors the hot-render read in the view
  * (the ControlBar owns the interactive coercion signal).
  */
-export function useAppliedLeverage(): number {
+export function useAppliedLeverage(): AppliedLeverage {
   const raw = useContext(LeverageContext)?.leverage ?? 1;
-  return sanitizeLeverage(useDeferredValue(raw), { signal: false });
+  // Trusted mint point: the value is sanitized + deferred exactly as the view derives it.
+  return sanitizeLeverage(useDeferredValue(raw), { signal: false }) as AppliedLeverage;
 }
 
 /**
@@ -341,7 +356,7 @@ export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): bo
 export function leverageApplies(
   payload: FactsheetPayload,
   basis: Basis,
-  appliedLeverage: number,
+  appliedLeverage: AppliedLeverage,
 ): boolean {
   return appliedLeverage !== 1 && leverageEligibleFor(payload, basis);
 }

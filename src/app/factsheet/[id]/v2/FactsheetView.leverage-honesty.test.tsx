@@ -7,6 +7,7 @@ import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import {
   leverageApplies,
   leverageEligibleFor,
+  type AppliedLeverage,
 } from "./basis-context";
 import { pct } from "./format";
 
@@ -227,13 +228,15 @@ describe("leverage predicate helpers — IN-02 single source of truth", () => {
   });
 
   it("leverageApplies: eligibility AND a non-unity applied leverage", () => {
-    expect(leverageApplies(cashPayload, "cash_settlement", 1)).toBe(false);
-    expect(leverageApplies(cashPayload, "cash_settlement", 2)).toBe(true);
+    // The 4(b) brand requires an AppliedLeverage; these casts mint it at the test
+    // boundary (passing a raw immediate `useLeverage().leverage` would be a compile error).
+    expect(leverageApplies(cashPayload, "cash_settlement", 1 as AppliedLeverage)).toBe(false);
+    expect(leverageApplies(cashPayload, "cash_settlement", 2 as AppliedLeverage)).toBe(true);
     expect(
       leverageApplies(
         { ...cashPayload, dataQuality: { composite: true } } as FactsheetPayload,
         "cash_settlement",
-        2,
+        2 as AppliedLeverage,
       ),
     ).toBe(false);
   });

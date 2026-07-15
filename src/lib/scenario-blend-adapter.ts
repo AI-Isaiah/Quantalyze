@@ -43,11 +43,22 @@ import { quantileSummary } from "@/lib/factsheet/quantiles";
 /** Below this many usable points every series collapses to []/{}. */
 const MIN_USABLE = 10;
 
+/**
+ * Five-number whisker summary for a quantile band: `[min, p25, p50, p75, max]`.
+ *
+ * A LABELED TUPLE (108-CONTEXT §Quantile whiskers) — NOT a bare `number[]` — so the
+ * USER DECISION that the tails are the ABSOLUTE min/max (not p05/p95) is compiler-locked
+ * at the type: the position of each element is fixed and named, and a producer that
+ * emitted a p05/p95 shape or a wrong-length array is a compile error. Runtime output is
+ * byte-identical to the prior `number[]` (a tuple IS a `number[]` to every consumer).
+ */
+export type QuantileWhiskers = [min: number, p25: number, p50: number, p75: number, max: number];
+
 export interface BlendPanelSeries {
   /** CUMULATIVE-wealth series for ReturnHistogram (it derives daily internally). [] if degenerate. */
   histogramSeries: { date: string; value: number }[];
   /** Record<periodLabel, [min,p25,p50,p75,max]> for ReturnQuantiles. {} if degenerate. */
-  quantiles: Record<string, number[]>;
+  quantiles: Record<string, QuantileWhiskers>;
   /** { sharpe_365d: series } so RollingMetrics resolves CHART_ACCENT. {} if degenerate. */
   rollingSharpe: Record<string, { date: string; value: number }[]>;
   /** population-std × √N (periodsPerYear, default 252), warmup dropped. [] if degenerate. */
@@ -130,7 +141,7 @@ export function deriveBlendPanels(
 
   // ── Quantiles — reshape backbone output to KEEP min/max whiskers ──────
   const q = quantileSummary(rets);
-  const quantiles: Record<string, number[]> = {
+  const quantiles: Record<string, QuantileWhiskers> = {
     All: [q.min, q.p25, q.p50, q.p75, q.max],
   };
 
