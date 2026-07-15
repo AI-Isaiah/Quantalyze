@@ -6,7 +6,6 @@ import { withAuth } from "@/lib/api/withAuth";
 import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
@@ -21,12 +20,13 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * row with status='pending_review' and trust_tier='csv_uploaded',
  * returning the new strategy_id.
  *
- * Phase 19 / BACKBONE-10
- * ----------------------
- * When `isUnifiedBackboneActive()` is true the route delegates to
- * `/process-key` with `flow_type=csv` (finalize step). The unified router
- * runs the same RPC server-side. The legacy direct-RPC path stays as the
- * flag=off fallback.
+ * Phase 19 / BACKBONE-10 → Phase 106 Stage B
+ * -------------------------------------------
+ * The route delegates unconditionally to `/process-key` with
+ * `flow_type=csv` (finalize step); the unified router runs the same RPC
+ * server-side. The former flag=off legacy direct-RPC fallback was deleted
+ * in 106-07 (its `isUnifiedBackboneActive()===false` gate is dormant with
+ * the ratified prod pins).
  *
  * Cross-AI revision 2026-04-30: the strategy NAME is provided by the
  * user (typed on the Upload step) and forwarded here in the request
@@ -686,26 +686,6 @@ function enqueueCsvAnalyticsAfter(
   opts: { logPrefix: string; correlationId: string },
 ): void {
   after(async () => {
-    // Phase 19.1 red-team / API M-1 (2026-05-22): flag-off path used
-    // to early-return BEFORE writing any placeholder. The strategy
-    // row was persisted, the daily-returns series was persisted, but
-    // no strategy_analytics row existed → SyncProgress poller hit
-    // `if (!data) return` early-out and never called onStatusChange,
-    // so the wizard spun forever. Write a `failed` placeholder
-    // matching the API W-2 shape so the poller surfaces a meaningful
-    // failure (with a support-recovery surface) instead of polling
-    // indefinitely.
-    if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
-      console.warn(
-        `${opts.logPrefix} USE_COMPUTE_JOBS_QUEUE != "true" — writing strategy_analytics placeholder to break wizard hang [correlation_id=${opts.correlationId}, strategy_id=${strategyId}]`,
-      );
-      await writeFailedStrategyAnalyticsPlaceholder(
-        strategyId,
-        `compute job queue disabled — contact support@quantalyze.com with strategy id ${strategyId}`,
-        { ...opts, subcontext: "flag-off" },
-      );
-      return;
-    }
     let enqueueFailed = false;
     let enqueueErrMessage = "";
     try {
@@ -1036,270 +1016,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
-  // QA ISSUE-010 follow-up (ship specialist review): the metadata UPDATE
-  // applied below the RPC also needs to fire on the unified path, or the
-  // first env that enables PROCESS_KEY_UNIFIED_BACKBONE silently re-
-  // introduces the discovery-invisible CSV strategy bug. The handler
-  // forwards metadataRaw + writes the same UPDATE after a successful
-  // /process-key dispatch.
-  if (await isUnifiedBackboneActive()) {
-    return await unifiedCsvFinalizeHandler({
-      wizard_session_id,
-      fmt,
-      strategy_name: trimmedName,
-      userId: user.id,
-      metadataRaw,
-      dailyReturnsSeries,
-      correlationId: correlation_id,
-    });
-  }
-
-  const supabase = await createClient();
-  // C-0155/C-0157: `finalize_csv_strategy` exists in DB (migration 093) but is
-  // missing from the generated database.types.ts Functions union. Cast through
-  // unknown to call it while we wait for the generated types to be regenerated.
-  const { data: newStrategyId, error } = await (
-    supabase.rpc as unknown as (
-      fn: "finalize_csv_strategy",
-      args: {
-        p_user_id: string;
-        p_wizard_session_id: string;
-        p_fmt: string;
-        p_strategy_name: string;
-      },
-    ) => Promise<{ data: string | null; error: { code?: string; message?: string } | null }>
-  )("finalize_csv_strategy", {
-    p_user_id: user.id,
-    p_wizard_session_id: wizard_session_id,
-    p_fmt: fmt,
-    p_strategy_name: trimmedName,
+  // Phase 106 Stage B (D2): the unified backbone is now the sole finalize
+  // path. Delegate unconditionally to /process-key with flow_type=csv; the
+  // handler forwards metadataRaw + writes the classification UPDATE after a
+  // successful dispatch. The former flag-off legacy direct-RPC arm below was
+  // deleted — isUnifiedBackboneActive()===false is dormant with the ratified
+  // prod pins.
+  return await unifiedCsvFinalizeHandler({
+    wizard_session_id,
+    fmt,
+    strategy_name: trimmedName,
+    userId: user.id,
+    metadataRaw,
+    dailyReturnsSeries,
+    correlationId: correlation_id,
   });
-
-  if (error) {
-    console.error(
-      "[strategies/csv-finalize] RPC error:",
-      error.code,
-      error.message,
-    );
-    if (error.code === "42501") {
-      return NextResponse.json(
-        {
-          ok: false,
-          code: "CSV_FORBIDDEN",
-          human_message: "Authentication mismatch — please sign in again.",
-          debug_context: {},
-          correlation_id,
-        },
-        { status: 401, headers: NO_STORE_HEADERS },
-      );
-    }
-    if (error.code === "22023") {
-      return NextResponse.json(
-        {
-          ok: false,
-          code: "CSV_INVALID_FORMAT",
-          human_message: error.message ?? "Invalid request.",
-          debug_context: { sqlstate: error.code },
-          correlation_id,
-        },
-        { status: 400, headers: NO_STORE_HEADERS },
-      );
-    }
-    // NEW-C14-01: migration 104 adds a UNIQUE INDEX on wizard_session_id
-    // with a comment declaring "route catches 23505 and returns existing
-    // strategy_id". Pre-fix: 23505 fell through to generic CSV_FINALIZE_FAIL
-    // 500. A double-submit/retry (wizard_session_id is stable in localStorage
-    // across retries) would mint an orphan strategy and the
-    // "click Submit again" copy was permanently broken. Return 409 with the
-    // existing strategy_id so the client can treat the response as success.
-    if (error.code === "23505") {
-      // Fetch the pre-existing strategy_id for this wizard_session_id so the
-      // caller can resume with the correct id. Use admin to bypass RLS —
-      // the session is already user-authenticated (withAuth wrapper).
-      try {
-        const { createAdminClient } = await import("@/lib/supabase/admin");
-        const admin = createAdminClient();
-        // strategy_verifications.wizard_session_id is the UNIQUE-indexed column
-        // (migration 104). strategy_id is the FK to strategies.id.
-        // FINDING-1: destructure error from admin SELECT so a PostgREST
-        // error (PGRST116, PGRST301, RLS misconfiguration, network 5xx) is
-        // logged and captured rather than silently falling through to the
-        // CSV_DUPLICATE_SESSION 409. Pre-fix: {data:null,error:{...}} was
-        // indistinguishable from a genuine "not found" result, so the user
-        // received ok:false instead of the correct idempotent ok:true, and
-        // the SELECT failure left zero trace in logs.
-        //
-        // RED-TEAM-H1: join through strategies!inner to verify the
-        // requesting user owns the pre-existing row. Without this check,
-        // a replayed wizard_session_id (leaked via log/network sniff) from
-        // a different user returns that user's strategy_id to the attacker.
-        // The admin client bypasses RLS so the query itself is the only
-        // ownership guard on this path.
-        const { data: verRow, error: verLookupErr } = await admin
-          .from("strategy_verifications")
-          .select("strategy_id, strategies!inner(user_id)")
-          .eq("wizard_session_id", wizard_session_id)
-          .eq("strategies.user_id", user.id)
-          .maybeSingle();
-        if (verLookupErr) {
-          console.error(
-            `[strategies/csv-finalize] 23505 idempotent-recovery SELECT failed [correlation_id=${correlation_id}]:`,
-            verLookupErr.message,
-          );
-          captureToSentry(verLookupErr, {
-            tags: { surface: "csv-finalize", step: "23505-recovery-lookup" },
-            extra: { correlation_id, wizard_session_id },
-          });
-        }
-        if (verRow?.strategy_id) {
-          return NextResponse.json(
-            {
-              ok: true,
-              strategy_id: verRow.strategy_id,
-              status: "pending_review",
-              idempotent: true,
-              correlation_id,
-            },
-            { status: 409, headers: NO_STORE_HEADERS },
-          );
-        }
-      } catch (lookupErr) {
-        console.error(
-          `[strategies/csv-finalize] 23505 idempotent-recovery lookup threw [correlation_id=${correlation_id}]:`,
-          lookupErr instanceof Error ? lookupErr.message : String(lookupErr),
-        );
-      }
-      // Fallback: 23505 but we couldn't fetch the existing id.
-      return NextResponse.json(
-        {
-          ok: false,
-          code: "CSV_DUPLICATE_SESSION",
-          human_message:
-            "A strategy with this upload session already exists. Refresh the page to see your submitted strategy.",
-          debug_context: {},
-          correlation_id,
-        },
-        { status: 409, headers: NO_STORE_HEADERS },
-      );
-    }
-    return NextResponse.json(
-      {
-        ok: false,
-        code: "CSV_FINALIZE_FAIL",
-        human_message:
-          "Your file validated cleanly, but saving the strategy hit an error. Click Submit strategy again to retry — your data is unchanged.",
-        debug_context: {},
-        correlation_id,
-      },
-      { status: 500, headers: NO_STORE_HEADERS },
-    );
-  }
-
-  // QA ISSUE-010: persist classification metadata after the SECURITY
-  // DEFINER RPC creates the row. Shared helper so the unified-backbone
-  // path uses the same code path (and we don't drift).
-  // NEW-C14-03/C14-04/C14-05: applyCsvMetadataUpdate now returns a 400
-  // NextResponse on present-but-invalid fields, and adds captureToSentry
-  // on UPDATE errors. The pre-create validation above already caught bad
-  // fields before the RPC — this second check handles defensive cases
-  // (concurrent middleware mutation, test clients bypassing pre-check).
-  if (newStrategyId) {
-    const metaErrResponse = await applyCsvMetadataUpdate(
-      supabase,
-      newStrategyId,
-      user.id,
-      metadataRaw,
-      { correlationId: correlation_id },
-    );
-    if (metaErrResponse) {
-      // RED-TEAM-M1: the post-RPC metadata parse failure (defensive case
-      // only — pre-create validation already runs above) leaves an orphan
-      // strategy row (status=pending_review, no metadata) while returning
-      // a 400 to the client. The client receives no strategy_id, so
-      // support cannot find and clean the orphan without a Sentry alert.
-      // Capture the orphan strategy_id explicitly so it is surfaced in
-      // Sentry and traceable via correlation_id.
-      captureToSentry(
-        new Error("Post-RPC metadata validation failed: orphan strategy row created"),
-        {
-          tags: { surface: "csv-finalize", step: "post-rpc-metadata-validation-orphan" },
-          extra: {
-            orphan_strategy_id: newStrategyId,
-            correlation_id,
-            wizard_session_id,
-          },
-        },
-      );
-      return metaErrResponse;
-    }
-  }
-
-  // Phase 19.1: persist the validated daily-return series via the
-  // SECURITY DEFINER `persist_csv_daily_returns` RPC. Hard-fail on
-  // error because:
-  //   (a) the strategies row IS already created at this point —
-  //       there is NO UNIQUE INDEX on wizard_session_id today
-  //       (deferred to BACKBONE-07 / R4 per CONTEXT.md), so a client
-  //       retry creates an additional orphan strategy rather than
-  //       recovering the original.
-  //   (b) without persisted series the worker permanently fails with
-  //       "Insufficient CSV history" and the user has no recovery
-  //       path.
-  // A 500 with CSV_PERSIST_FAIL surfaces the orphan strategy_id so
-  // support can clean it up. Until BACKBONE-07 lands, double-submits
-  // are best-effort prevented client-side by the wizard's submit
-  // button disable-on-click. Maintainability W-1 (specialist review
-  // 2026-05-22): both paths route through
-  // persistDailyReturnsOrErrorResponse so the cast-through-unknown is
-  // centralised in one place. Phase 19.1 red-team revision 2026-05-22
-  // / DOC C-1: rewrote the false "unique-claimed" rationale; see
-  // migration 20260501055202_strategy_verifications.sql:27 for the
-  // unique-index deferral.
-  if (newStrategyId) {
-    const persistFailResponse = await persistDailyReturnsOrErrorResponse(
-      supabase,
-      user.id,
-      newStrategyId,
-      dailyReturnsSeries,
-      {
-        logPrefix: "[strategies/csv-finalize]",
-        correlationId: correlation_id,
-      },
-    );
-    if (persistFailResponse) return persistFailResponse;
-  }
-
-  // Phase 19.1 / T-19.1-05 / PR #275: enqueue the analytics computation
-  // for the freshly persisted series, gated by USE_COMPUTE_JOBS_QUEUE so
-  // the legacy direct-compute path can keep working while the Python
-  // worker is deployed. Non-blocking — failure here logs a warning but
-  // never 500s the wizard. Mirrors finalize-wizard/route.ts:619-644.
-  // Maintainability W-2 (specialist review 2026-05-22): both paths route
-  // through enqueueCsvAnalyticsAfter so the after()-callback shape is
-  // centralised.
-  if (newStrategyId && dailyReturnsSeries.length > 0) {
-    enqueueCsvAnalyticsAfter(newStrategyId, fmt, {
-      logPrefix: "[strategies/csv-finalize]",
-      correlationId: correlation_id,
-    });
-  }
-
-  // API C-1 (specialist review 2026-05-22): emit `ok: true` discriminator
-  // on the success envelope so consumers can use `body.ok` to branch
-  // without status-code sniffing. Error envelopes already carry
-  // `ok: false`; this closes the asymmetry. API W-1: correlation_id is
-  // the UUID generated at request entry (see top of POST), now threaded
-  // through every envelope on this route.
-  return NextResponse.json(
-    {
-      ok: true,
-      strategy_id: newStrategyId,
-      status: "pending_review",
-      correlation_id,
-    },
-    { headers: NO_STORE_HEADERS },
-  );
 });
 
 /**

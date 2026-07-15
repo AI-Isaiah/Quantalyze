@@ -79,9 +79,20 @@ vi.mock("@/lib/feature-flags", () => ({
   isUnifiedBackboneActive: vi.fn(async () => false),
 }));
 
+// Phase 106 Stage B: the route delegates unconditionally to the unified
+// backbone. postProcessKey must succeed (returning NEW_ID) so control reaches
+// the SHARED persistDailyReturnsOrErrorResponse + enqueueCsvAnalyticsAfter
+// helpers these D7 fail-loud tests exercise. INTERNAL_API_TOKEN is required by
+// unifiedCsvFinalizeHandler (503 otherwise) — set below.
 vi.mock("@/lib/process-key-client", () => ({
-  postProcessKey: vi.fn(),
+  postProcessKey: vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    body: { strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+  })),
 }));
+
+process.env.INTERNAL_API_TOKEN = "test-internal-token";
 
 vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
@@ -177,7 +188,6 @@ beforeEach(() => {
     return { data: null, error: null };
   });
   adminRpcMock.mockResolvedValue({ error: null });
-  process.env.USE_COMPUTE_JOBS_QUEUE = "true";
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });

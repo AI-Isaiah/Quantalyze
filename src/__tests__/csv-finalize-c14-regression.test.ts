@@ -78,9 +78,19 @@ vi.mock("@/lib/feature-flags", () => ({
   isUnifiedBackboneActive: vi.fn(async () => false),
 }));
 
+// Phase 106 Stage B: the route delegates unconditionally to the unified
+// backbone, so postProcessKey must succeed by default (returning a valid
+// strategy_id) for the ok:true success-path assertions. INTERNAL_API_TOKEN is
+// required by unifiedCsvFinalizeHandler (503 otherwise) — set it below.
 vi.mock("@/lib/process-key-client", () => ({
-  postProcessKey: vi.fn(),
+  postProcessKey: vi.fn(async () => ({
+    ok: true,
+    status: 200,
+    body: { strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+  })),
 }));
+
+process.env.INTERNAL_API_TOKEN = "test-internal-token";
 
 vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: vi.fn(),
@@ -121,107 +131,6 @@ function validBody(overrides: Record<string, unknown> = {}): Record<string, unkn
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 import { parseDailyReturnsSeries } from "@/app/api/strategies/csv-finalize/route";
 import { parseCsvMetadata } from "@/app/api/strategies/csv-finalize/route";
-
-// ══════════════════════════════════════════════════════════════════════════
-
-// Helper: build the two-level .eq() chain the 23505-recovery admin SELECT
-// now requires after RED-TEAM-H1 added the ownership join.
-// .select(...).eq(col1, val1).eq(col2, val2).maybeSingle()
-function makeAdminFromOwnershipMock(result: { data: unknown; error: unknown }) {
-  return {
-    select: (_cols: string) => ({
-      eq: (_col1: string, _val1: unknown) => ({
-        eq: (_col2: string, _val2: unknown) => ({
-          maybeSingle: async () => result,
-        }),
-      }),
-    }),
-  } as any; // eslint-disable-line @typescript-eslint/no-explicit-any
-}
-
-describe("NEW-C14-01: 23505 → 409 idempotent response", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-  });
-
-  it("returns 409 with idempotent:true when finalize_csv_strategy raises 23505", async () => {
-    // Arrange: RPC returns 23505 conflict
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (rpcMock as any).mockResolvedValueOnce({
-      data: null,
-      error: { code: "23505", message: "duplicate key value violates unique constraint" },
-    });
-    // Admin lookup finds the pre-existing strategy_id (ownership verified via join)
-    const existingId = "cccccccc-cccc-cccc-cccc-cccccccccccc";
-    adminFromMock.mockReturnValueOnce(
-      makeAdminFromOwnershipMock({ data: { strategy_id: existingId }, error: null }),
-    );
-
-    const res = await POST(makeRequest(validBody()));
-    const body = await res.json();
-
-    // NEW-C14-01: must be 409 (not 500) with the existing strategy_id
-    expect(res.status).toBe(409);
-    expect(body.ok).toBe(true);
-    expect(body.strategy_id).toBe(existingId);
-    expect(body.idempotent).toBe(true);
-  });
-
-  it("returns 409 CSV_DUPLICATE_SESSION when 23505 fires but recovery lookup finds nothing", async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (rpcMock as any).mockResolvedValueOnce({
-      data: null,
-      error: { code: "23505", message: "duplicate key" },
-    });
-    // Admin lookup finds nothing (ownership join returns no row for this user)
-    adminFromMock.mockReturnValueOnce(
-      makeAdminFromOwnershipMock({ data: null, error: null }),
-    );
-
-    const res = await POST(makeRequest(validBody()));
-    const body = await res.json();
-
-    expect(res.status).toBe(409);
-    expect(body.ok).toBe(false);
-    expect(body.code).toBe("CSV_DUPLICATE_SESSION");
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════════════
-
-describe("RED-TEAM-H1: 23505 recovery ownership check", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-  });
-
-  it("returns CSV_DUPLICATE_SESSION (not the victim strategy_id) when ownership join finds no row for this user", async () => {
-    // Simulates: attacker replays victim's wizard_session_id.
-    // The admin lookup now joins through strategies!inner(user_id) and
-    // filters .eq("strategies.user_id", user.id). A different user's row
-    // does NOT match, so maybeSingle() returns null — same as "not found".
-    // Pre-fix: the lookup had no ownership filter and would return the
-    // victim's strategy_id to the attacker.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (rpcMock as any).mockResolvedValueOnce({
-      data: null,
-      error: { code: "23505", message: "duplicate key" },
-    });
-    // Ownership join returns no row (different user owns the session)
-    adminFromMock.mockReturnValueOnce(
-      makeAdminFromOwnershipMock({ data: null, error: null }),
-    );
-
-    const res = await POST(makeRequest(validBody()));
-    const body = await res.json();
-
-    // Must NOT return ok:true with a strategy_id from another user.
-    expect(body.ok).not.toBe(true);
-    expect(body.strategy_id).toBeUndefined();
-    expect(body.code).toBe("CSV_DUPLICATE_SESSION");
-  });
-});
 
 // ══════════════════════════════════════════════════════════════════════════
 
