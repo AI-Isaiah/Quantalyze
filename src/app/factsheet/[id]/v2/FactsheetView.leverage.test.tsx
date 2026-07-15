@@ -6,7 +6,7 @@ import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/wid
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
-import { pct, pctSigned } from "./format";
+import { pct, pctSigned, ratio as num } from "./format";
 
 /**
  * Phase 107 (LEV-BB, D1/D2 + UI-SPEC) — the factsheet leverage control surface,
@@ -397,6 +397,47 @@ describe("FactsheetView — LEV-BB honest α/IR: benchmark-relative stats follow
     });
     expect(readCell(container, "α vs BTC")).toBe("—");
     expect(readCell(container, "IR vs BTC")).toBe("—");
+  });
+});
+
+describe("FactsheetView — WR-02: leverage-invariant scalars stay pinned to the persisted MTM overlay at L≠1", () => {
+  it("engaging leverage on an MTM book does NOT move Sharpe/Sortino (leverage-invariant, rf=0) — they stay the persisted authoritative value, while Ann. Vol still scales", () => {
+    const { container, getByText } = renderBody(fixtureMtmWithBundle());
+    // Toggle to the RESOLVED mark-to-market basis.
+    act(() => {
+      fireEvent.click(getByText("Mark-to-market"));
+    });
+
+    // Baseline (L=1): the strip shows the persisted authoritative MTM scalars (F3
+    // overlay makes rail == strip). Sharpe = 1.20, Sortino = 1.90.
+    const sharpeAtL1 = readCell(container, "Sharpe");
+    const sortinoAtL1 = readCell(container, "Sortino");
+    const annVolAtL1 = readCell(container, "Ann. Vol");
+    expect(sharpeAtL1).toBe(num(MTM_SCALARS.sharpe));
+    expect(sortinoAtL1).toBe(num(MTM_SCALARS.sortino));
+
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "2" } });
+    });
+
+    // Sharpe & Sortino are leverage-invariant (r → L·r cancels in mean·√P/sd and
+    // mean·P/ddDev at rf=0), so engaging leverage must NOT change them. Before this
+    // fix the levered arm returned the client TS recompute of the levered dailies with
+    // NO persisted overlay, so these jumped from the persisted dense-Python value
+    // (1.20 / 1.90) to the recompute — a "leverage-invariant" metric changing value
+    // purely by engaging leverage. Now they stay pinned to the persisted authoritative
+    // value, making the L=1 ↔ L≠1 boundary continuous for the invariant scalars.
+    expect(readCell(container, "Sharpe")).toBe(sharpeAtL1);
+    expect(readCell(container, "Sortino")).toBe(sortinoAtL1);
+
+    // Ann. Vol is homogeneous degree-1 → it MUST scale (proves leverage still applied,
+    // i.e. the pin above is not just the L=1 short-circuit). Calmar is deliberately NOT
+    // pinned (cagr/|maxDd| off the geometric equity curve is genuinely leverage-variant),
+    // so it is not asserted here.
+    expect(readCell(container, "Ann. Vol")).not.toBe(annVolAtL1);
+
+    // The what-if caption is present — leverage genuinely applied on the MTM basis.
+    expect(container.innerHTML).toContain(CAPTION_PREFIX);
   });
 });
 

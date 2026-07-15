@@ -231,11 +231,41 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
       // through so the bundle spread does not clobber the base mask with undefined.
       missingSegments: base.missingSegments,
     });
+    // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
+    // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
+    // MTM strip shows the PERSISTED dense-Python scalars (the F3 overlay that makes the
+    // rail == the strip), but this levered arm re-derives everything fresh from the
+    // client TS bundle with NO persisted overlay — so on an MTM book these two invariant
+    // metrics would JUMP from the persisted value to the client recompute PURELY by
+    // engaging leverage (the sparse-vs-dense / arithmetic-vs-geometric divergence F3
+    // exists to hide), the exact dishonesty Phase 107 removed. Re-pin ONLY the two
+    // provably-invariant scalars to the persisted authoritative MTM values so the
+    // L=1 ↔ L≠1 boundary is continuous for them. The HOMOGENEOUS scalars (cum_ret /
+    // cagr / ann_vol / max_dd) stay levered. Calmar is DELIBERATELY NOT pinned: it is
+    // `cagr/|maxDd|` off the GEOMETRICALLY-compounded equity curve (compute.ts:39,47-49),
+    // so it is genuinely leverage-VARIANT — its boundary change under leverage is honest,
+    // and pinning it to the unlevered persisted value would HIDE a real effect (see the
+    // Phase 107 review-fix note; the reviewer's suggested calmar pin was declined for
+    // this reason). Only MTM carries a persisted per-basis overlay; cash's `basisM`
+    // already equals the client recompute, so there is no cash jump to reconcile.
+    const strategyMetrics = ((): typeof lb.strategyMetrics => {
+      if (basis !== "mark_to_market") return lb.strategyMetrics;
+      const persisted = payload.metricsByBasis?.mark_to_market;
+      if (!persisted) return lb.strategyMetrics;
+      const invariant: Partial<typeof lb.strategyMetrics> = {};
+      if (typeof persisted.sharpe === "number" && Number.isFinite(persisted.sharpe)) {
+        invariant.sharpe = persisted.sharpe;
+      }
+      if (typeof persisted.sortino === "number" && Number.isFinite(persisted.sortino)) {
+        invariant.sortino = persisted.sortino;
+      }
+      return { ...lb.strategyMetrics, ...invariant };
+    })();
     // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
     if (base.ingestSource === "api") {
-      return { ...base, ...lb };
+      return { ...base, ...lb, strategyMetrics };
     }
-    return { ...base, ...lb };
+    return { ...base, ...lb, strategyMetrics };
   }, [basis, leverage, payload]);
 }
 
