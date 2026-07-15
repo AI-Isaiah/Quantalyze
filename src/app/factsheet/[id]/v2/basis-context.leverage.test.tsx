@@ -13,8 +13,9 @@ import { LeverageProvider, useLeverage } from "./leverage-context";
  * `useBasisSeriesView`. The one shared view hook re-derives the whole bundle from
  * `r → L·r` active-basis dailies at L≠1 (SC-1) and is a by-reference no-op at L=1
  * (SC-4). β→L·β / α→L·α fall out honestly from the un-levered benchmark leg (SC-2
- * wiring). Four guards (L===1, composite, periodsPerYear absent, MTM-bundle-absent)
- * each return the base view BY REFERENCE — no fabricated basis.
+ * wiring). Four guards (L===1, composite, periodsPerYear absent, and an UNRESOLVED MTM
+ * basis — either no series bundle OR no persisted scalar cache) each return the base view
+ * BY REFERENCE — no fabricated basis.
  *
  * The fixture is a single-key GEOMETRIC payload with ≥40 days so rolling / quantiles
  * are non-degenerate and the levered re-derive exercises real sub-derivations.
@@ -96,6 +97,22 @@ function makePayload(o: PayloadOverrides = {}): FactsheetPayload {
           missingSegments,
         },
       ),
+    };
+    // A RESOLVED MTM basis carries BOTH the series bundle AND a persisted scalar cache.
+    // `leverageEligibleFor` requires both (MEDIUM-honesty fix): without the cache the L=1
+    // KPIs are the strict-overlay "—", so a levered re-derive would fabricate them. The
+    // exact scalar values are irrelevant to the dailies-transform assertions — a present,
+    // finite object is what unlocks MTM leverage eligibility.
+    p.metricsByBasis = {
+      mark_to_market: {
+        cumulative_return: 0.12,
+        volatility: 0.22,
+        max_drawdown: -0.05,
+        cagr: 0.1,
+        sharpe: 1.1,
+        sortino: 1.6,
+        calmar: 2.0,
+      },
     };
   }
   return p as unknown as FactsheetPayload;
