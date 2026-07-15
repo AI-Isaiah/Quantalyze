@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.43.0.0] - 2026-07-15
+### v1.10 Backbone Unification — Phases 107 + 108: leverage & scenario-planner onto the backbone
+Completes the v1.10 milestone tail. Two frontend refactors move the last two
+factsheet compute bypasses onto the one canonical backbone, deleting ~991 LOC
+of bespoke second-compute + disclosure code. Both are visually parity-preserving
+(SC-4: L=1 / pre-change byte-identical, proven by golden) with the single
+intended change being that numbers now derive from the canonical path.
+- **Leverage as a dailies transform (107):** leverage becomes an `r → L·r`
+  preparation transform composed into the one shared `useBasisSeriesView` hook,
+  so at L≠1 the ENTIRE factsheet re-derives levered (every chart + the rail +
+  honest α→L·α / β→L·β via `jointMetrics(leveredStrat, unleveredBench)`), not
+  just the 7 KpiStrip scalars. Deletes `useLeveragedMetrics`/`useModeledLeverage`
+  + the MODELED/CAVEAT/α-IR-blanking/BASE·1× disclosure (~780 LOC); keeps the
+  slider state. L=1 is byte-identical via a by-reference short-circuit ahead of
+  any derive. Leverage now applies on the active resolved basis (cash OR MTM
+  with a persisted scalar cache). Permanent SC-3/SC-5 source-scan gates.
+- **Scenario-planner onto the backbone (108):** deletes the bespoke second-Sharpe
+  TS compute `scenario-blend-panels.ts` (~211 LOC) + its 251-LOC test; the blend
+  panels now route through the canonical `factsheet/rolling.ts` population-std
+  primitives with an explicit 63/126/252 window (preserving the 3M/6M/12M toggle)
+  and min/max whiskers. `metrics-parity.test.ts` kept as the Python↔TS backbone
+  identity guard. Rolling vol/Sharpe adopt the canonical population std (÷n) — a
+  ~0.2–0.8% shift visible only in the hover tooltips (chart line moves <1px),
+  accepted as the canonical value. Permanent SC-2/SC-3 delete-gate.
+- **Review hardening (this ship):** honest-display fixes from a specialist
+  fan-out + a fresh-context adversarial red team — MTM headline scalars stay "—"
+  under leverage when the persisted cache is absent (whole-cache and per-scalar),
+  the caption/numbers cannot diverge across the `useDeferredValue` debounce, the
+  L=0 pin no longer fabricates a persisted Sharpe over a flat track, and the
+  levered `deriveSeriesBundle` computes once (shared memo) instead of ~22× per
+  leverage change. Branded `AppliedLeverage` + labeled-tuple quantiles compiler-
+  lock the two historical bug classes. Full suite 8170 green; no valuation math
+  changed; `scenario.ts`/`leverage.ts`/`joint.ts`/`metrics-parity.test.ts` frozen.
+
 ## [0.42.1.0] - 2026-07-15
 ### v1.10 Backbone Unification — Phase 106 Stage B: legacy/dark-path cutover
 Completes the "nothing bypasses the unified backbone" cutover. The durable
