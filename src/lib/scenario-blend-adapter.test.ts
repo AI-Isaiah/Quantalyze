@@ -179,6 +179,40 @@ describe("deriveBlendPanels — SC-4 population-std parity pins (63/126/252)", (
     }
   });
 
+  it("rolling Sortino divides downside RMS by the TOTAL window n, NOT the down-day count (÷down-day-count mutant fails)", () => {
+    // crit-6 (CLAUDE.md Rule 9): the deleted scenario-blend-panels.test.ts pinned that
+    // rolling Sortino divides the downside RMS by the FULL window n, not the count of
+    // down-days. The adapter now delegates to rolling.ts::rollingSortino
+    // (`Math.sqrt(downSq / window)`), but the other adapter Sortino pins are vacuous for
+    // the denominator: the L=1 pin has mean 0 (numerator 0) and the √(365/252) ratio pin
+    // cancels the denominator, so a mutant `downSq/window → downSq/downDayCount` survives
+    // the whole suite. This closed-form pin has a NON-ZERO mean and down-day count ≠ n, so
+    // the two denominators give materially different Sortinos.
+    //
+    // 10-pt window, 7 up-days at +0.02, 3 down-days at −0.01 → mean = 0.011, and only the
+    // 3 down-days contribute downSq = 3·0.01² = 3e-4. n = window = 10 → a single rolling
+    // point over the whole series.
+    const rets = [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02, -0.01, -0.01, -0.01];
+    const daily = rets.map((v, i) => ({ date: dateAt(i), value: v }));
+    const panels = deriveBlendPanels(daily, 10, 252);
+    expect(panels.rollingSortino).toHaveLength(1);
+    const got = panels.rollingSortino[0].value;
+
+    const sqrt252 = Math.sqrt(252);
+    const mean = 0.011;
+    const downSq = 3 * 0.01 * 0.01; // 3e-4
+    // Canonical (÷ window = 10): dd = √(downSq/10)·√252 ; sortino = mean·252 / dd
+    const ddWindow = Math.sqrt(downSq / 10) * sqrt252;
+    const expected = (mean * 252) / ddWindow;
+    expect(got).toBeCloseTo(expected, 6);
+
+    // Mutation guard: the ÷down-day-count value (÷ 3, not ÷ 10) must NOT match — this is
+    // the assertion that kills the `downSq/window → downSq/downDayCount` mutant.
+    const ddDownCount = Math.sqrt(downSq / 3) * sqrt252;
+    const downCountMutant = (mean * 252) / ddDownCount;
+    expect(got).not.toBeCloseTo(downCountMutant, 6);
+  });
+
   it("window-toggle contract: explicit window drives the compute (lengths n−w+1)", () => {
     const n = ALT_320.length;
     expect(deriveBlendPanels(ALT_320, 63, 252).rollingVol).toHaveLength(n - 63 + 1);
