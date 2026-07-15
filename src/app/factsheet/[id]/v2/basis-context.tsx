@@ -324,16 +324,21 @@ export function useAppliedLeverage(): AppliedLeverage {
  * eligibility all derive from this one function (via `leverageApplies` for the two that
  * also require L≠1), so a future guard change lands in exactly one place.
  *
- * MEDIUM-honesty (Phase 107/108 review) — the MTM resolution now requires the persisted
- * scalar cache too (`metricsByBasis.mark_to_market`), not just the series bundle. In the
- * real mid-backfill state where the MTM SERIES bundle exists but the persisted MTM SCALAR
- * cache does not, the L=1 arm correctly renders the seven headline KPIs as "—" (the strict
- * `useBasisMetrics` overlay, F2 no-invented-data). Without this second clause the levered
- * arm re-derived a full client-TS bundle with NO persisted overlay, so dialing L≠1
- * FABRICATED the very MTM headline scalars the L=1 arm withholds. Requiring the scalar
- * cache makes MTM leverage-ineligible in that state → the view returns base by-reference →
- * the KPIs stay "—" at every L, symmetric with the guard-4 no-fabrication rule (cash is
- * unaffected — it carries no persisted-overlay-or-dash contract).
+ * MEDIUM-honesty (Phase 107/108 review) — the MTM resolution requires the persisted scalar
+ * cache too (`metricsByBasis.mark_to_market`), not just the series bundle. This is a
+ * DEFENSIVE / belt-and-braces clause: the current server path CANNOT emit a
+ * bundle-without-scalars state — `composite-read-path.ts` threads `mtmSeries` and
+ * `metricsByBasis` under the SAME `available` gate, so a series bundle implies the scalar
+ * cache by construction (Fable red team confirmed the mid-backfill state is not reachable).
+ * The guard matters anyway: IF such a state ever arose (a future partial-write path, a
+ * hand-built payload), the L=1 arm renders the seven headline KPIs as "—" (the strict
+ * `useBasisMetrics` overlay, F2 no-invented-data), and without this second clause the
+ * levered arm would re-derive a full client-TS bundle with NO persisted overlay and
+ * FABRICATE the very MTM headline scalars the L=1 arm withholds. Requiring the scalar cache
+ * keeps MTM leverage-ineligible in that state → the view returns base by-reference → the
+ * KPIs stay "—" at every L, symmetric with guard 4. It also proves it can never disable a
+ * legitimately-leverable book (a real MTM basis always has both). Cash is unaffected — it
+ * carries no persisted-overlay-or-dash contract.
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
