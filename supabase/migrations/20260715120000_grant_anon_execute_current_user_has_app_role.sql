@@ -1,0 +1,34 @@
+-- Migration: grant anon EXECUTE on current_user_has_app_role(text[])
+--
+-- Bug (pre-existing, prod): anonymous visitors saw ZERO strategies on the
+-- public /browse/* discovery pages — the primary marketing CTA rendered empty
+-- for logged-out users, even though prod has 18+ published non-example
+-- strategies.
+--
+-- Root cause: `public.current_user_has_app_role(text[])` is STABLE SECURITY
+-- DEFINER and null-guards the anon case explicitly (`IF v_user_id IS NULL THEN
+-- RETURN FALSE`). Its defining migration (20260417031851_user_app_roles.sql:165)
+-- did `REVOKE ALL ON FUNCTION ... FROM PUBLIC, anon` as a hardening step, leaving
+-- EXECUTE with {authenticated, service_role} only. That revoke was over-broad:
+-- the function is called inside {public}-scoped admin RLS policies that ANON
+-- READS must evaluate, and the function null-guards anon (returns false) — so
+-- anon must be able to execute it, it just always gets false. The function is
+-- called inside {public}-scoped
+-- admin SELECT RLS policies on 9 tables (allocator_equity_snapshots,
+-- allocator_holdings, audit_log_cold, bridge_outcome_dismissals, bridge_outcomes,
+-- portfolios, strategy_verifications, user_app_roles, verification_requests_legacy).
+-- The public /browse query embeds `strategy_verifications` (its
+-- strategy_verifications_admin_select policy calls this function), so an anon
+-- read evaluates the policy, calls the function, and hits
+-- `42501: permission denied for function current_user_has_app_role`. That error
+-- propagates as the query error; getStrategiesByCategory catches it, logs it
+-- server-side, and returns [] — so anon sees 0 rows with a clean browser console.
+--
+-- Fix: grant anon EXECUTE, matching the function's designed intent. The admin
+-- policies then evaluate to FALSE for anon (as intended) and the other permissive
+-- policies (public read of published rows) grant the actual access. No data is
+-- exposed: the function only ever returns "is the CURRENT user an admin" and
+-- returns false for a null uid. This also un-breaks every other anon read that
+-- touches any of the 9 tables. Idempotent.
+
+GRANT EXECUTE ON FUNCTION public.current_user_has_app_role(text[]) TO anon;

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.42.0.1] - 2026-07-15
+### fix: anon can browse published strategies again (marketing CTA)
+Anonymous (logged-out) visitors saw ZERO strategies on the public `/browse/*`
+discovery pages — the homepage's primary conversion CTA rendered empty for
+logged-out users, despite prod having 18+ published non-example strategies.
+Root cause: the `SECURITY DEFINER` function `current_user_has_app_role(text[])`
+(which explicitly null-guards anon → returns false) had its EXECUTE grant
+revoked from anon in a prior hardening pass, but it is called inside
+`{public}`-scoped admin RLS policies on 9 tables including `strategy_verifications`,
+which the `/browse` strategy query embeds. Every anon read of those tables threw
+`42501: permission denied for function` → the SSR query caught it and returned
+`[]`, so anon saw 0 strategies with a clean browser console. Fix: grant anon
+EXECUTE (idempotent, additive) — the admin policies now evaluate to false for
+anon as designed, the public-read policies grant the real access, and no data is
+exposed. Pre-existing bug, unrelated to the v1.10 backbone work. Includes a
+regression test that hard-fails if the anon grant is ever revoked again.
+
 ## [0.42.0.0] - 2026-07-15
 ### v1.10 Backbone Unification — Phases 98–106 Stage A (partial-milestone ship)
 First prod ship of the v1.10 Demo-Hero Portfolio Intelligence + Options MTM +
