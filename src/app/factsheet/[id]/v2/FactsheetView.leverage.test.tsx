@@ -184,6 +184,43 @@ function fixtureMtmNoBundle(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// A no-loss / zero-drawdown MTM book: the persisted cache is ADMITTED (finite
+// cumulative_return + all seven keys present) but carries a degenerate per-scalar
+// `sortino: null` (Python `_safe_float` on a book with no losing day). At L=1 the strict
+// overlay renders Sortino "—"; M-1 requires it STAY "—" at L≠1 (not the client "0.00").
+const MTM_NO_LOSS_SCALARS = {
+  cumulative_return: 0.5,
+  volatility: 0.11,
+  max_drawdown: -0.038,
+  cagr: 0.26,
+  sharpe: 1.2,
+  sortino: null,
+  calmar: 2.7,
+};
+
+function fixtureMtmNoLossBook(): FactsheetPayload {
+  const p = buildScenarioFactsheetPayload({
+    portfolioDaily: smallSeries(50, 0.0012),
+    benchmark: null,
+    periodsPerYear: 365,
+  });
+  const clipped = p.strategyReturns.map((r, i) => ({ date: p.dates[i], value: r }));
+  return {
+    ...p,
+    periodsPerYear: 365,
+    mtmGate: { available: true },
+    metricsByBasis: { mark_to_market: MTM_NO_LOSS_SCALARS },
+    seriesByBasis: {
+      mark_to_market: deriveSeriesBundle(clipped, {
+        periodsPerYear: 365,
+        isArithmetic: false,
+        markets: p.markets,
+        strategyName: p.strategyName,
+      }),
+    },
+  } as unknown as FactsheetPayload;
+}
+
 // Single-key options, MTM series bundle PRESENT but the persisted MTM SCALAR cache
 // ABSENT (`metricsByBasis` omitted) — the real mid-backfill state. At L=1 the seven
 // headline KPIs are the strict-overlay "—" (F2 no-invented-data). MEDIUM-honesty guard:
@@ -504,6 +541,34 @@ describe("FactsheetView — MEDIUM honesty: MTM bundle present but persisted sca
     for (const label of HEADLINE) {
       expect(readCell(container, label)).toBe("—");
     }
+  });
+});
+
+describe("FactsheetView — M-1: a per-scalar null in the persisted MTM cache stays '—' at L≠1", () => {
+  it("no-loss MTM book (persisted sortino:null): Sortino renders '—' at L=1 AND stays '—' at L=2 (not the client '0.00' recompute)", () => {
+    const { container, getByText } = renderBody(fixtureMtmNoLossBook());
+    act(() => {
+      fireEvent.click(getByText("Mark-to-market"));
+    });
+
+    // L=1 baseline: the strict overlay renders the WITHHELD sortino as '—'. Sharpe is a
+    // FINITE persisted scalar → it shows its authoritative value (proves the cache is
+    // admitted, i.e. this is not the whole-cache-absent FIX-1 case).
+    expect(readCell(container, "Sortino")).toBe("—");
+    expect(readCell(container, "Sharpe")).toBe(num(MTM_NO_LOSS_SCALARS.sharpe));
+
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "2" } });
+    });
+
+    // M-1: the persisted cache withheld Sortino (null), so it must STAY '—' at L≠1 — NOT
+    // the client-derived recompute. Pre-fix the WR-02 pin skipped the null persisted value
+    // and the client Sortino surfaced (a scalar the authoritative cache declined).
+    expect(readCell(container, "Sortino")).toBe("—");
+    // Leverage genuinely applied: the FINITE persisted Sharpe stays pinned (WR-02), Ann.
+    // Vol scaled off L=1, and the what-if caption is present.
+    expect(readCell(container, "Sharpe")).toBe(num(MTM_NO_LOSS_SCALARS.sharpe));
+    expect(container.innerHTML).toContain(CAPTION_PREFIX);
   });
 });
 

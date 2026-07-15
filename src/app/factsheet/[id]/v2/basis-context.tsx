@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
-import { overlayBasisScalars } from "@/lib/factsheet/basis-metrics";
+import { overlayBasisScalars, BASIS_KPI_MAP } from "@/lib/factsheet/basis-metrics";
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { sanitizeLeverage } from "@/lib/leverage";
 import { LeverageContext } from "./leverage-context";
@@ -275,16 +275,37 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // pin only when L > 0; at L=0 let the honest derived zeros stand.
     const strategyMetrics = ((): typeof lb.strategyMetrics => {
       if (basis !== "mark_to_market" || L <= 0) return lb.strategyMetrics;
-      const persisted = payload.metricsByBasis?.mark_to_market;
+      const persisted = payload.metricsByBasis?.mark_to_market as
+        | Record<string, unknown>
+        | undefined
+        | null;
       if (!persisted) return lb.strategyMetrics;
-      const invariant: Partial<typeof lb.strategyMetrics> = {};
-      if (typeof persisted.sharpe === "number" && Number.isFinite(persisted.sharpe)) {
-        invariant.sharpe = persisted.sharpe;
+      const out: Record<string, unknown> = { ...lb.strategyMetrics };
+      for (const { tsKey, serverKey } of BASIS_KPI_MAP) {
+        const pv = persisted[serverKey];
+        const pvFinite = typeof pv === "number" && Number.isFinite(pv);
+        if (!pvFinite) {
+          // M-1 (Phase 107/108 Fable red team): the persisted MTM cache WITHHELD this
+          // scalar — a degenerate per-scalar `null` (`sortino:null` on a no-losing-day
+          // book, `calmar:null` on a zero-drawdown book, Python `_safe_float`). At L=1 the
+          // strict overlay renders it "—". At L≠1 the client re-derive would surface a
+          // fabricated value (compute()'s ddDev=0 → Sortino "0.00"), a scalar the
+          // authoritative cache deliberately declined — the SAME fabrication class FIX 1
+          // closed at cache granularity, now at PER-SCALAR granularity. Preserve the
+          // withhold: NaN → "—" via the formatters. (cum_ret is invariance-critical and
+          // always finite in an admitted cache, so it is never withheld in practice.)
+          out[tsKey] = NaN;
+        } else if (tsKey === "sharpe" || tsKey === "sortino") {
+          // WR-02: Sharpe/Sortino are leverage-invariant at rf=0 (r→L·r cancels in
+          // mean·√P/sd and mean·P/ddDev), so re-pin the FINITE persisted value → the
+          // L=1 ↔ L≠1 boundary is continuous for them.
+          out[tsKey] = pv;
+        }
+        // Homogeneous scalars (cum_ret/cagr/ann_vol/max_dd) with a FINITE persisted value
+        // STAY levered — the accepted N-1 boundary tradeoff (the WR-02 comment owns it):
+        // the client re-derive × L is the honest levered value.
       }
-      if (typeof persisted.sortino === "number" && Number.isFinite(persisted.sortino)) {
-        invariant.sortino = persisted.sortino;
-      }
-      return { ...lb.strategyMetrics, ...invariant };
+      return out as typeof lb.strategyMetrics;
     })();
     // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
     if (base.ingestSource === "api") {
