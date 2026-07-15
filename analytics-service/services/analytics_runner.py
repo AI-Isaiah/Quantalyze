@@ -1662,19 +1662,16 @@ async def run_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # METRICS-11/12: compute_all_metrics returns MetricsResult dataclass.
         # #597: annualize by the strategy's asset_class (crypto √365 / traditional
         # √252), read from the already-loaded strategy_row — NOT the api_key_id proxy
-        # (a CSV-uploaded crypto strategy is also √365). This legacy trades path is
-        # dark in prod behind BROKER_DAILIES_VIA_FUNDING but stays convention-
-        # consistent with the broker→CSV path. The allocated-capital simple/active
-        # override rides ONLY the CSV path, so cumulative_method/day_basis stay at the
-        # geometric/calendar defaults here.
+        # (a CSV-uploaded crypto strategy is also √365). This legacy trades path has
+        # ZERO live callers after 106-08 (its two re-entry points were retired) but
+        # stays convention-consistent with the broker→CSV path pending its deletion
+        # in 106-09. The allocated-capital simple/active override rides ONLY the CSV
+        # path, so cumulative_method/day_basis stay at the geometric/calendar
+        # defaults here.
         # Finding 5b (documented dark): this legacy trades path does NOT thread
-        # cumulative_method/day_basis. It is UNREACHABLE in prod (guarded by
-        # BROKER_DAILIES_VIA_FUNDING). If that kill-switch is ever flipped false
-        # (break-glass), an allocated-capital strategy routed here would revert to
-        # the geometric/calendar convention (NOT its simple/active mandate
-        # convention) — a KNOWN, ACCEPTABLE degradation for the break-glass path
-        # only; the shipped broker→CSV path (run_csv_strategy_analytics) carries the
-        # config-driven conventions.
+        # cumulative_method/day_basis. It is UNREACHABLE in prod (no callers remain
+        # after 106-08). The shipped broker→CSV path (run_csv_strategy_analytics)
+        # carries the config-driven conventions.
         metrics_result = compute_all_metrics(
             returns,
             benchmark_rets,

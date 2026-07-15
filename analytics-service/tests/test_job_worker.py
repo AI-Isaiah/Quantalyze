@@ -1148,12 +1148,11 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         self,
     ) -> None:
         """Successful run_sync_trades_job MUST call enqueue_compute_job for
-        the same strategy. Default (BROKER_DAILIES_VIA_FUNDING on) enqueues
-        the funding-inclusive CSV route via kind='derive_broker_dailies';
-        the legacy trades-only kind='compute_analytics' is covered by the
-        flag-off companion below. Asserted via the supabase.rpc call signature
-        so a future refactor that moves the enqueue elsewhere still has to land
-        the same RPC call."""
+        the same strategy with the funding-inclusive CSV route via
+        kind='derive_broker_dailies' (unconditional — the legacy trades-only
+        compute_analytics re-entry + its kill-switch were retired in 106-08).
+        Asserted via the supabase.rpc call signature so a future refactor that
+        moves the enqueue elsewhere still has to land the same RPC call."""
         from services.job_worker import run_sync_trades_job
 
         mock_exchange = AsyncMock()
@@ -1206,8 +1205,6 @@ class TestSyncTradesEnqueuesComputeAnalytics:
             new=AsyncMock(side_effect=lambda fn: fn()),
         ), patch(
             "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
-        ), patch(
-            "services.job_worker.BROKER_DAILIES_VIA_FUNDING", True,
         ):
             result = await run_sync_trades_job(job)
 
@@ -1228,70 +1225,10 @@ class TestSyncTradesEnqueuesComputeAnalytics:
         )
         payload = enqueue_calls[0]
         assert payload["p_strategy_id"] == "strat-phase-18"
-        # Default: funding-inclusive CSV route (derive_broker_dailies →
+        # Unconditional funding-inclusive CSV route (derive_broker_dailies →
         # compute_analytics_from_csv). Funding is the dominant return driver
-        # for perp strategies and the legacy compute_analytics excluded it.
+        # for perp strategies and the retired legacy compute_analytics excluded it.
         assert payload["p_kind"] == "derive_broker_dailies"
-
-    @pytest.mark.asyncio
-    async def test_sync_trades_enqueues_compute_analytics_when_flag_off(
-        self,
-    ) -> None:
-        """Kill-switch: BROKER_DAILIES_VIA_FUNDING off reverts the sync
-        epilogue to the legacy trades-only kind='compute_analytics'."""
-        from services.job_worker import run_sync_trades_job
-
-        mock_exchange = AsyncMock()
-        mock_exchange.close = AsyncMock()
-        mock_ctx = MagicMock()
-        mock_ctx.exchange = mock_exchange
-        mock_ctx.supabase = MagicMock()
-        mock_ctx.strategy_row = {"id": "strat-flag-off", "user_id": "user-1"}
-        mock_ctx.key_row = {
-            "id": "key-1", "exchange": "okx",
-            "last_sync_at": None, "user_id": "user-1",
-        }
-
-        rpc_calls: list[tuple[str, dict]] = []
-
-        def _rpc(name: str, payload: dict) -> MagicMock:
-            rpc_calls.append((name, payload))
-            stub = MagicMock()
-            stub.execute.return_value = MagicMock(data=5)
-            return stub
-
-        mock_ctx.supabase.rpc.side_effect = _rpc
-        mock_update = MagicMock()
-        mock_eq = MagicMock()
-        mock_eq.execute.return_value = MagicMock(data=[])
-        mock_update.eq.return_value = mock_eq
-        mock_ctx.supabase.table.return_value.update.return_value = mock_update
-
-        job = {"id": "job-flag-off", "kind": "sync_trades", "strategy_id": "strat-flag-off"}
-
-        with patch(
-            "services.job_worker._exchange_preflight",
-            new=AsyncMock(return_value=mock_ctx),
-        ), patch(
-            "services.job_worker.fetch_all_trades",
-            new=AsyncMock(return_value=[{"test": "trade"}]),
-        ), patch(
-            "services.job_worker.fetch_usdt_balance",
-            new=AsyncMock(return_value=10000.0),
-        ), patch(
-            "services.job_worker.db_execute",
-            new=AsyncMock(side_effect=lambda fn: fn()),
-        ), patch(
-            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
-        ), patch(
-            "services.job_worker.BROKER_DAILIES_VIA_FUNDING", False,
-        ):
-            result = await run_sync_trades_job(job)
-
-        assert result.outcome == DispatchOutcome.DONE
-        enqueue_calls = [p for (n, p) in rpc_calls if n == "enqueue_compute_job"]
-        assert len(enqueue_calls) == 1
-        assert enqueue_calls[0]["p_kind"] == "compute_analytics"
 
 
 class TestDeriveBrokerDailies:

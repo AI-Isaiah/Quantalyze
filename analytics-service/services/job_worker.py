@@ -173,19 +173,6 @@ WORKER_FENCE_V2: Final[bool] = (
     os.environ.get("WORKER_FENCE_V2", "true").lower() != "false"
 )
 
-# When a key's history sync completes, derive the strategy's daily-return
-# series from realized PnL + FUNDING (anchored to current equity) and compile
-# the factsheet via the standard CSV route, instead of the legacy trades-only
-# compute_analytics whose returns EXCLUDE funding (the dominant return driver
-# for perp strategies — see services.broker_dailies). Defaults ON. Set
-# BROKER_DAILIES_VIA_FUNDING=false in the Railway worker env as an instant
-# kill-switch to revert the sync epilogue to compute_analytics. Read once at
-# import (same rollout-window rationale as the flags above); tests flip it via
-# monkeypatch on this module attribute.
-BROKER_DAILIES_VIA_FUNDING: Final[bool] = (
-    os.environ.get("BROKER_DAILIES_VIA_FUNDING", "true").lower() != "false"
-)
-
 # C2 (P70 review): a Deribit account holding more than this USD equity but
 # producing ZERO return-bearing ledger rows is treated as a silently-empty ledger
 # (fail loud), not "insufficient history". Above dust, below any real balance.
@@ -1513,12 +1500,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # the user sees a real error instead of an indefinite spinner. The
     # daily cron will still re-enqueue and the next successful run will
     # upsert computation_status back to 'computing' / 'complete'.
-    # Follow-on analytics kind: the funding-inclusive CSV route by default
-    # (derive_broker_dailies → compute_analytics_from_csv), or the legacy
-    # trades-only compute_analytics when the kill-switch is off.
-    _follow_on_kind = (
-        "derive_broker_dailies" if BROKER_DAILIES_VIA_FUNDING else "compute_analytics"
-    )
+    # Follow-on analytics kind: the funding-inclusive CSV route
+    # (derive_broker_dailies → compute_analytics_from_csv). The legacy
+    # trades-only compute_analytics re-entry was retired in 106-08.
+    _follow_on_kind = "derive_broker_dailies"
     try:
         def _enqueue_follow_on() -> None:
             ctx.supabase.rpc(
@@ -1536,7 +1521,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # trace in Railway logs; previous WARNING-and-swallow hid the
         # underlying cause for up to 24h.
         logger.exception(
-            "sync_trades: failed to enqueue follow-on compute_analytics "
+            "sync_trades: failed to enqueue follow-on derive_broker_dailies "
             "for strategy %s — marking strategy_analytics as failed so "
             "the wizard surfaces an error envelope instead of hanging. "
             "Error: %s",
@@ -2591,10 +2576,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # branch uses (external_flows → combine_realized_and_funding →
             # reconstruct_nav_and_twr). Read-only keys DO enumerate transfers now
             # (76-01 promoted fetch), so a mid-window deposit no longer silently
-            # inflates the TWR (broker_dailies premise updated). The whole
-            # derive_broker_dailies path is already gated by the
-            # BROKER_DAILIES_VIA_FUNDING kill-switch upstream (:1501), so flows
-            # inherit it with no extra guard. Bound the flow lookback to the
+            # inflates the TWR (broker_dailies premise updated). The
+            # derive_broker_dailies path is now the unconditional follow-on
+            # (the funding kill-switch flag was retired in 106-08),
+            # so flows need no extra guard. Bound the flow lookback to the
             # venue's deposit-history retention (OKX 90d / Bybit 365d); Binance
             # (no cap → None) fetches full history. This never spins empty
             # pre-inception windows AND the DQ-02 terminus (below) segments any
@@ -3196,11 +3181,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # (Pitfall 2) but computed separately (the MTM locals exist only when mtm_returns is
     # not None).
     #
-    # A3 honesty: strategies whose sync_trades tail enqueues legacy compute_analytics
-    # (BROKER_DAILIES_VIA_FUNDING off) never reach this seam → they get NO
-    # cash_settlement series row this phase — an HONEST ABSENCE (dark write), never a
-    # fabricated fill. Do NOT add a persist to run_compute_analytics_job (a 106-slated
-    # dark-path re-entry point); unified coverage lands with the 105/106 route collapse.
+    # A3 honesty: the sync_trades tail now enqueues derive_broker_dailies
+    # unconditionally (the legacy compute_analytics re-entry + its funding
+    # kill-switch flag were retired in 106-08), so every onboarding strategy
+    # reaches this cash_settlement seam. Unified coverage lands with the
+    # 105/106 route collapse.
     _cash_periods = periods_per_year_for_asset_class(
         ctx.strategy_row.get("asset_class")
         if isinstance(ctx.strategy_row, dict)

@@ -418,12 +418,12 @@ async def _sync_single_key(
         #       their dashboard KPIs froze until a user-triggered recompute.
         #
         # The real recompute trigger is the compute_jobs queue: enqueue one
-        # `compute_analytics` job per strategy that got new trades — mirroring
+        # `derive_broker_dailies` job per strategy that got new trades — mirroring
         # the Phase-18 sync_trades follow-on at
         # services/job_worker.py::run_sync_trades_job. enqueue_compute_job is
         # dedup-safe (the partial unique index
         # compute_jobs_one_inflight_per_kind_strategy caps one in-flight
-        # compute_analytics per strategy) and runs here as the service role,
+        # job per kind per strategy) and runs here as the service role,
         # so _assert_owner inside the RPC bypasses cleanly (auth.uid() IS NULL).
         # Best-effort PER STRATEGY: a transient enqueue failure for one
         # strategy must not abort the others or fail the sync — trades are
@@ -439,17 +439,13 @@ async def _sync_single_key(
             sid for sid, stored in per_strategy_stored.items() if stored > 0
         ]
         recompute_enqueue_errors: dict[str, str] = {}
-        # Funding-inclusive CSV route by default (derive_broker_dailies ->
-        # compute_analytics_from_csv); legacy trades-only compute_analytics when
-        # the kill-switch is off. MUST mirror the sync_trades epilogue
+        # Funding-inclusive CSV route (derive_broker_dailies ->
+        # compute_analytics_from_csv). MUST mirror the sync_trades epilogue
         # (job_worker.run_sync_trades_job) — otherwise this periodic re-sync
         # would overwrite the funding-inclusive factsheet with funding-EXCLUDING
-        # returns on the next cron tick.
-        from services.job_worker import BROKER_DAILIES_VIA_FUNDING
-
-        _recompute_kind = (
-            "derive_broker_dailies" if BROKER_DAILIES_VIA_FUNDING else "compute_analytics"
-        )
+        # returns on the next cron tick. The legacy trades-only compute_analytics
+        # re-entry + its funding kill-switch flag were retired in 106-08.
+        _recompute_kind = "derive_broker_dailies"
         for sid in recompute_strategy_ids:
             try:
                 supabase.rpc(
@@ -462,7 +458,7 @@ async def _sync_single_key(
                 # not starve the rest, and record it for the result envelope.
                 recompute_enqueue_errors[sid] = f"{type(enq_exc).__name__}: {enq_exc}"
                 logger.exception(
-                    "cron_sync: failed to enqueue compute_analytics for "
+                    "cron_sync: failed to enqueue derive_broker_dailies for "
                     "strategy %s on key %s — analytics will lag until the daily "
                     "recompute cascade or a user-triggered recompute",
                     sid,

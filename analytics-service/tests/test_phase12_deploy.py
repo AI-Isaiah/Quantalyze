@@ -5,11 +5,6 @@ P2022 (SQL probe keyed parse + NaN/inf/negative reject):
     orchestrator runs the SAME analyze_metrics_size.sql once and forwards
     p999/count to the kill-switch via CLI args. The parsing has the same
     failure modes and must be just as strict.
-
-P2025 (backfill enqueue per-row exception capture):
-    `phase12_deploy.main`'s step-4 branch must surface a non-zero RC from
-    the backfill enqueuer as an INCOMPLETE marker rather than silently
-    declaring the deploy complete.
 """
 from __future__ import annotations
 
@@ -371,38 +366,16 @@ class TestTradeMixFlagLiteral:
         assert result in ("true", "false")
 
 
-# --- P2025: backfill failure → INCOMPLETE deploy --------------------------
+# --- kill-switch success → complete deploy --------------------------------
 
 
-class TestDeployIncompleteOnBackfillFail:
-    """If phase12_backfill_enqueue.main returns non-zero, the deploy must
-    print the INCOMPLETE marker rather than the 'complete' tail."""
-
-    @pytest.mark.asyncio
-    async def test_backfill_failure_prints_incomplete(self, monkeypatch, capsys) -> None:
-        # Stub the M-01 file plumbing so the test focuses on flow control.
-        monkeypatch.setattr(dep, "_read_trade_mix_flag_from_todos", lambda: "false")
-        monkeypatch.setattr(dep, "_write_env_test", lambda flag: None)
-        monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 1))
-        # Kill-switch path is OK (returns 0).
-        with patch(
-            "scripts.phase12_deploy.phase12_kill_switch.main",
-            new=AsyncMock(return_value=0),
-        ):
-            # Backfill returns 1 — emulating P2025 per-row failure rollup.
-            with patch(
-                "scripts.phase12_deploy.phase12_backfill_enqueue.main",
-                new=AsyncMock(return_value=1),
-            ):
-                rc = await dep.main()
-        captured = capsys.readouterr()
-        assert rc != 0
-        assert "INCOMPLETE" in captured.out
-        # Must NOT claim the deploy is complete when backfill failed.
-        assert "Phase 12 deploy: complete ===" not in captured.out
+class TestDeployCompleteOnKillSwitchSuccess:
+    """When the kill-switch returns zero, the deploy prints the 'complete'
+    tail (D4 106-08: the backfill enqueue step was retired — the kill-switch
+    is now the last step)."""
 
     @pytest.mark.asyncio
-    async def test_backfill_success_prints_complete(self, monkeypatch, capsys) -> None:
+    async def test_kill_switch_success_prints_complete(self, monkeypatch, capsys) -> None:
         monkeypatch.setattr(dep, "_read_trade_mix_flag_from_todos", lambda: "false")
         monkeypatch.setattr(dep, "_write_env_test", lambda flag: None)
         monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 1))
@@ -410,11 +383,7 @@ class TestDeployIncompleteOnBackfillFail:
             "scripts.phase12_deploy.phase12_kill_switch.main",
             new=AsyncMock(return_value=0),
         ):
-            with patch(
-                "scripts.phase12_deploy.phase12_backfill_enqueue.main",
-                new=AsyncMock(return_value=0),
-            ):
-                rc = await dep.main()
+            rc = await dep.main()
         captured = capsys.readouterr()
         assert rc == 0
         assert "Phase 12 deploy: complete" in captured.out
@@ -434,7 +403,7 @@ class TestDeployAbortStepWriteContract:
         never a stale/wrong value — so even though Step 1's write is not rolled
         back on a later-step abort, CI never sources a WRONG flag (the write
         only ever reflects the audited source-of-truth).
-      * Steps 3 (kill-switch) and 4 (backfill) are NOT reached on a probe abort.
+      * Step 3 (kill-switch) is NOT reached on a probe abort.
 
     If a future change makes .env.test contain something OTHER than the audited
     flag on abort, these tests fail — surfacing the "stale .env.test" bug class
@@ -461,14 +430,10 @@ class TestDeployAbortStepWriteContract:
 
         monkeypatch.setattr(dep, "_run_sql_probe", _failing_probe)
 
-        # Spy on Steps 3 + 4 to prove they are NOT reached after the abort.
+        # Spy on Step 3 to prove it is NOT reached after the abort.
         ks = AsyncMock(return_value=0)
-        bf = AsyncMock(return_value=0)
         with patch("scripts.phase12_deploy.phase12_kill_switch.main", new=ks):
-            with patch(
-                "scripts.phase12_deploy.phase12_backfill_enqueue.main", new=bf
-            ):
-                rc = await dep.main()
+            rc = await dep.main()
 
         # Abort: returns 1.
         assert rc == 1
@@ -483,17 +448,16 @@ class TestDeployAbortStepWriteContract:
         assert "TRADE_MIX_HAS_MAKER_TAKER=false" not in contents
         # os.environ mirrors the audited flag (Step 1 set it before the probe).
         assert os.environ.get("TRADE_MIX_HAS_MAKER_TAKER") == "true"
-        # Downstream steps must NOT run after a probe abort.
+        # Downstream step must NOT run after a probe abort.
         ks.assert_not_awaited()
-        bf.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_kill_switch_nonzero_aborts_before_backfill(
+    async def test_kill_switch_nonzero_propagates_rc(
         self, monkeypatch, tmp_path
     ) -> None:
         """The finding also calls out the kill-switch non-zero path (Step 3):
-        backfill (Step 4) must be skipped, but .env.test has already shipped
-        with the audited flag — same non-atomic-but-correct-value contract."""
+        its rc propagates, but .env.test has already shipped with the audited
+        flag — same non-atomic-but-correct-value contract."""
         todos = tmp_path / "TODOS.md"
         todos.write_text("TRADE_MIX_HAS_MAKER_TAKER = false\n")
         env_test = tmp_path / ".env.test"
@@ -502,18 +466,12 @@ class TestDeployAbortStepWriteContract:
         monkeypatch.delenv("TRADE_MIX_HAS_MAKER_TAKER", raising=False)
         monkeypatch.setattr(dep, "_run_sql_probe", lambda: (100.0, 1))
 
-        # Step 3 kill-switch returns non-zero → abort before Step 4.
+        # Step 3 kill-switch returns non-zero → rc propagates.
         ks = AsyncMock(return_value=2)
-        bf = AsyncMock(return_value=0)
         with patch("scripts.phase12_deploy.phase12_kill_switch.main", new=ks):
-            with patch(
-                "scripts.phase12_deploy.phase12_backfill_enqueue.main", new=bf
-            ):
-                rc = await dep.main()
+            rc = await dep.main()
 
         assert rc == 2  # kill-switch rc propagated
         assert env_test.read_text().strip().endswith("TRADE_MIX_HAS_MAKER_TAKER=false")
         assert os.environ.get("TRADE_MIX_HAS_MAKER_TAKER") == "false"
         ks.assert_awaited_once()
-        # Backfill (Step 4) must NOT run after a non-zero kill-switch.
-        bf.assert_not_awaited()
