@@ -9,6 +9,9 @@ import {
 } from "react";
 import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
 import { overlayBasisScalars } from "@/lib/factsheet/basis-metrics";
+import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { sanitizeLeverage } from "@/lib/leverage";
+import { LeverageContext } from "./leverage-context";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -105,62 +108,121 @@ export function useBasisMetrics(payload: FactsheetPayload): {
 }
 
 /**
- * Phase 103 (MTM-04) — the client-side per-basis SERIES view-merge.
+ * Phase 103 (MTM-04) + Phase 107 (LEV-BB) — the ONE shared client view hook. It
+ * composes TWO layers in order: (1) the per-basis SERIES view-merge, then (2) the
+ * leverage-as-a-dailies-transform. Every one of the ~12 dailies-derivable panels
+ * reads this hook, so composing leverage HERE makes the ENTIRE factsheet follow L
+ * with zero per-consumer wiring — "nothing bypasses the backbone".
  *
- * Under `cash_settlement` (or whenever the payload carries no MTM series
- * bundle — a stale cache, a not-yet-backfilled strategy, or a gated book) this
- * returns the ORIGINAL payload object by REFERENCE: the GUARD-02 byte/render-
- * stability contract holds and every consuming chart/panel renders exactly as
- * it does today.
+ * Layer 1 (basis merge, Phase 103): Under `cash_settlement` (or whenever the
+ * payload carries no MTM series bundle — a stale cache, a not-yet-backfilled
+ * strategy, or a gated book) `base` is the ORIGINAL payload object by REFERENCE.
+ * Under `mark_to_market` WITH `payload.seriesByBasis.mark_to_market` present `base`
+ * is a `{...payload, ...bundle}` merge carrying the MTM-basis clones of every
+ * dailies-derivable field (dates axis, the three chart tracks, rolling, worst-10,
+ * comparators, the two heatmaps, quantiles, streaks, calmarByYear, bootstrapCI,
+ * styleDrift, stressWindows, correlations, correlationMatrix + the bundle's own
+ * `strategyMetrics` + the per-basis `missingSegments` mask). The KpiStrip's seven
+ * persisted headline scalars are overlaid onto the merged `strategyMetrics` (F3).
+ * `segmentBoundaries` is NOT in the bundle, so the composite key-handoff seams
+ * inherit the shared basis-invariant top-level value.
  *
- * Under `mark_to_market` WITH `payload.seriesByBasis.mark_to_market` present it
- * returns a `useMemo`'d `{...payload, ...bundle}` merge. The bundle carries the
- * MTM-basis clones of every dailies-derivable field (dates axis, the three
- * chart tracks, rolling, worst-10, comparators, the two heatmaps, quantiles,
- * streaks, calmarByYear, bootstrapCI, styleDrift, stressWindows, correlations,
- * correlationMatrix + the bundle's own `strategyMetrics` (extended scalars) + the
- * per-basis `missingSegments` mask). MTM-04 correction: correlations /
- * correlationMatrix are IN the bundle now (the strategy leg follows the basis), so
- * the spread makes them follow MTM. The KpiStrip's persisted headline
- * `strategyMetrics` overlay is the ONE thing the merge does NOT touch (Phase 102
- * owns MTM there). `segmentBoundaries` is likewise NOT in the bundle, so the
- * composite key-handoff seams inherit the shared basis-invariant top-level value.
+ * Layer 2 (leverage, Phase 107 LEV-BB): at `sanitizeLeverage(L) === 1` the hook
+ * returns `base` BY REFERENCE — `deriveSeriesBundle` is NEVER called at unity (SC-4;
+ * the load-bearing byte-identity mechanism, not float reasoning). At L≠1 (and past
+ * four fail-closed guards) it scales the ACTIVE-basis dailies `r → L·r` and RE-derives
+ * the whole bundle via the exported `deriveSeriesBundle` (SC-1). Only the strategy leg
+ * is levered — the benchmark legs are re-aligned un-levered inside deriveSeriesBundle,
+ * so `jointMetrics(leveredStrat, unleveredBench)` makes β→L·β / α→L·α / corr-invariant
+ * fall out honestly (SC-2, pinned in joint.test.ts). `comparatorAnnVol` is OMITTED so
+ * the levered comparator vol-matches its OWN levered vol (mirrors the MTM arm at
+ * build-payload.ts). `missingSegments` is passed through explicitly (the bundle spread
+ * would otherwise clobber the base mask with undefined).
  *
- * Pure context + memo — keeps the GUARD-04 no-storage discipline (this file
- * never touches storage/URL/history; pinned by basis-context.test.tsx Test 7).
+ * The four guards each return `base` BY REFERENCE (no re-derive, no fabrication):
+ *   1. L === 1                            — SC-4 unity short-circuit
+ *   2. dataQuality.composite === true     — A2: leverage is single-key only (arithmetic
+ *                                            is composite-only; composites also hide the slider)
+ *   3. periodsPerYear == null             — fail-closed (stale cache with no annualization basis)
+ *   4. MTM basis + no MTM bundle          — no-fabrication: the MTM label falls back to cash
+ *                                            data; levering it would render levered-cash as MTM
+ *
+ * Both contexts are read directly (NOT via useBasis/useLeverage, which throw) so a
+ * chart/panel mounted WITHOUT the providers degrades to cash / L=1 instead of
+ * crashing — the merge + leverage transform are pure additive enhancements.
+ *
+ * Pure context + memo — keeps the GUARD-04 no-storage discipline (this file never
+ * touches storage/URL/history; pinned by basis-context.test.tsx Test 7).
  */
 export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload {
-  // Read the context directly (NOT via useBasis, which throws) so a chart or
-  // panel mounted WITHOUT a BasisProvider degrades to cash instead of crashing —
-  // the merge is a pure additive enhancement, and several isolated mounts/tests
-  // render the tree under FactsheetProvider only. Absent provider ⇒ cash ⇒ the
-  // original payload by reference (byte-identical render).
   const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  const leverage = useContext(LeverageContext)?.leverage ?? 1;
   return useMemo<FactsheetPayload>(() => {
+    // --- Layer 1: active-basis series merge (Phase 103, unchanged) ---
     const bundle = payload.seriesByBasis?.mark_to_market;
-    if (basis !== "mark_to_market" || !bundle) return payload;
-    // F3 (phase 103): overlay the SEVEN persisted headline scalars onto the merged
-    // `strategyMetrics` so the rail's §I headline == the KpiStrip BY CONSTRUCTION
-    // (both = the persisted-dense-Python cache), killing the sparse-vs-dense AND the
-    // arithmetic-vs-geometric (`cumulative_method:"simple"`) divergence for every
-    // cross-surface scalar. Mirrors `useBasisMetrics`: an absent MTM object → `{}`
-    // → the STRICT overlay renders all seven "—", never a bundle-TS recompute. Only
-    // the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
-    // series-derived metrics (skew/VaR/quantiles/best-week/…) STAY bundle-TS-derived
-    // (they have no cross-surface counterpart on the KpiStrip, exactly as the rail
-    // already works for cash: only the seven have a persisted authoritative cache).
-    const mtmScalars = payload.metricsByBasis?.mark_to_market ?? {};
-    // Narrow on the ingest discriminant before spreading: the bundle has no
-    // `ingestSource`, so spreading over the bare union would widen the
-    // discriminant and break FactsheetPayload assignability. Each arm's spread
-    // preserves its `"api"`/`"csv"` literal (bundle never touches it).
-    if (payload.ingestSource === "api") {
+    const base: FactsheetPayload = ((): FactsheetPayload => {
+      if (basis !== "mark_to_market" || !bundle) return payload;
+      // F3 (phase 103): overlay the SEVEN persisted headline scalars onto the merged
+      // `strategyMetrics` so the rail's §I headline == the KpiStrip BY CONSTRUCTION
+      // (both = the persisted-dense-Python cache), killing the sparse-vs-dense AND the
+      // arithmetic-vs-geometric (`cumulative_method:"simple"`) divergence for every
+      // cross-surface scalar. Mirrors `useBasisMetrics`: an absent MTM object → `{}`
+      // → the STRICT overlay renders all seven "—", never a bundle-TS recompute. Only
+      // the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
+      // series-derived metrics (skew/VaR/quantiles/best-week/…) STAY bundle-TS-derived
+      // (they have no cross-surface counterpart on the KpiStrip, exactly as the rail
+      // already works for cash: only the seven have a persisted authoritative cache).
+      const mtmScalars = payload.metricsByBasis?.mark_to_market ?? {};
+      // Narrow on the ingest discriminant before spreading: the bundle has no
+      // `ingestSource`, so spreading over the bare union would widen the
+      // discriminant and break FactsheetPayload assignability. Each arm's spread
+      // preserves its `"api"`/`"csv"` literal (bundle never touches it).
+      if (payload.ingestSource === "api") {
+        const merged = { ...payload, ...bundle };
+        return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
+      }
       const merged = { ...payload, ...bundle };
       return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
+    })();
+
+    // --- Layer 2: leverage-as-a-dailies-transform (Phase 107, LEV-BB) ---
+    // `signal: false` on the hot render path (LOW-1: the ControlBar pre-clamps, so a
+    // read-side coercion here is not actionable owner signal).
+    const L = sanitizeLeverage(leverage, { signal: false });
+    // SC-4: base view BY REFERENCE at unity — deriveSeriesBundle is NEVER called at L=1.
+    // This short-circuit MUST precede any deriveSeriesBundle call (byte-identity).
+    if (L === 1) return base;
+    // A2 backstop: leverage is a single-key GEOMETRIC what-if. Arithmetic is
+    // composite-only (verified: `cumulativeMethod` is set only in
+    // composite-read-path.ts:243-266), and composites also hide the slider.
+    if (payload.dataQuality?.composite === true) return base;
+    // Fail-closed when the annualization basis wasn't emitted (mirrors the old
+    // useLeveragedMetrics gate) — a levered re-derive has no honest periodsPerYear.
+    if (payload.periodsPerYear == null) return base;
+    // No-fabrication: an unresolved MTM basis falls back to cash data (bundle absent).
+    // Levering it would render levered-cash under an MTM label — the exact old failure.
+    if (basis === "mark_to_market" && !payload.seriesByBasis?.mark_to_market) return base;
+    // Lever only the STRATEGY dailies on the ACTIVE-basis series. The benchmark leg
+    // stays un-levered (deriveSeriesBundle re-aligns BTC/SPX/… internally) — that is
+    // what makes β→L·β / α→L·α honest via jointMetrics(leveredStrat, unleveredBench).
+    const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
+    const lb = deriveSeriesBundle(levered, {
+      periodsPerYear: base.periodsPerYear!,
+      isArithmetic: false,
+      markets: base.markets,
+      strategyName: base.strategyName,
+      // comparatorAnnVol OMITTED — the levered bundle vol-matches its OWN levered vol
+      // (mirrors the MTM arm at build-payload.ts:437-438; passing the persisted cash
+      // ann_vol would un-lever the comparator vol-match). missingSegments passed
+      // through so the bundle spread does not clobber the base mask with undefined.
+      missingSegments: base.missingSegments,
+    });
+    // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
+    if (base.ingestSource === "api") {
+      return { ...base, ...lb };
     }
-    const merged = { ...payload, ...bundle };
-    return { ...merged, strategyMetrics: overlayBasisScalars(merged.strategyMetrics, mtmScalars) };
-  }, [basis, payload]);
+    return { ...base, ...lb };
+  }, [basis, leverage, payload]);
 }
 
 /**
