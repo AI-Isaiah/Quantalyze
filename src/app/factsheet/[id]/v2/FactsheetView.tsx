@@ -346,8 +346,10 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // active basis (MetricsColumn reads view.strategyMetrics), so a single-key options
   // book toggled to MTM earns an honest "BASIS · MARK-TO-MARKET" eyebrow. Phase 107
   // (LEV-BB, D4): the old base-track leverage eyebrow is GONE — the rail now levers
-  // with everything else (the whole factsheet re-derives via useBasisSeriesView), so
-  // there is nothing to bridge against. A plain single-key non-MTM-participant strategy
+  // with the rest of the return-derived backbone (metrics/charts/rail re-derive via
+  // useBasisSeriesView; the pre-computed peer/allocator/event-study panels stay at
+  // base 1× and carry their own H-1 note), so there is nothing to bridge against here.
+  // A plain single-key non-MTM-participant strategy
   // therefore returns the BARE <MetricsColumn> — no wrapper div, no empty eyebrow gap.
   if (!composite) {
     if (!mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
@@ -855,7 +857,7 @@ function KpiStrip() {
           role="status"
           aria-live="polite"
         >
-          {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the whole factsheet re-derives. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
+          {`What-if projection at ${appliedLeverage}× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.`}
         </p>
       )}
       <section

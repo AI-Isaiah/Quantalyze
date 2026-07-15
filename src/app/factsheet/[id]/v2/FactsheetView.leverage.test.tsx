@@ -6,6 +6,10 @@ import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/wid
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
+import { PeerPercentilePanel } from "./BatchDPanels";
+import { BasisProvider } from "./basis-context";
+import { LeverageProvider, useLeverage } from "./leverage-context";
+import { useEffect } from "react";
 import { pct, pctSigned, ratio as num } from "./format";
 
 /**
@@ -230,7 +234,7 @@ function renderBody(payload: FactsheetPayload) {
 // The reworded what-if disclosure (UI-SPEC Copywriting Contract, verbatim). {L}=2.
 const CAPTION_PREFIX = "What-if projection at";
 const CAPTION_L2 =
-  "What-if projection at 2× leverage: daily returns are scaled r → L·r and the whole factsheet re-derives. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.";
+  "What-if projection at 2× leverage: daily returns are scaled r → L·r and the return-derived metrics, charts, and rail re-derive; peer, allocator, and event-study panels stay at base 1×. Excludes borrow, funding, and liquidation cost — not the strategy's realized track record.";
 // Clamp messages (UI-SPEC error copy, verbatim — MAX_LEVERAGE interpolated to 10).
 const CLAMP_MAX_MSG =
   "Leverage clamped to 10× — the maximum in this what-if projection.";
@@ -438,6 +442,93 @@ describe("FactsheetView — WR-02: leverage-invariant scalars stay pinned to the
 
     // The what-if caption is present — leverage genuinely applied on the MTM basis.
     expect(container.innerHTML).toContain(CAPTION_PREFIX);
+  });
+});
+
+describe("FactsheetView — B-1: the leverage-invariance pin does NOT apply at L=0 (0/0 is not invariant)", () => {
+  it("at L=0 on an MTM book, Sharpe/Sortino render the honest derived 0 — NOT the persisted overlay", () => {
+    const { container, getByText } = renderBody(fixtureMtmWithBundle());
+    act(() => {
+      fireEvent.click(getByText("Mark-to-market"));
+    });
+    // Baseline L=1: the persisted authoritative MTM Sharpe/Sortino.
+    expect(readCell(container, "Sharpe")).toBe(num(MTM_SCALARS.sharpe));
+    expect(readCell(container, "Sortino")).toBe(num(MTM_SCALARS.sortino));
+
+    act(() => {
+      fireEvent.change(levInput(container)!, { target: { value: "0" } });
+    });
+
+    // r → 0·r zeroes every daily return, so the client derive honestly yields sharpe=0,
+    // sortino=0, ann_vol=0 and flat charts. The invariance proof (mean·√P/sd) is 0/0 at
+    // L=0 and does NOT hold there, so the pin must NOT overwrite the derived zeros with
+    // the persisted non-zero value (else "Sharpe 1.20" would render next to "Ann. Vol
+    // 0.0%"). Pre-fix (unguarded pin) rendered the persisted 1.20/1.90 here.
+    expect(readCell(container, "Sharpe")).toBe(num(0));
+    expect(readCell(container, "Sortino")).toBe(num(0));
+    // Sanity: leverage genuinely applied (Ann. Vol collapsed to 0) — not the L=1 path.
+    expect(readCell(container, "Ann. Vol")).toBe(pct(0, 1));
+  });
+});
+
+// H-1 (Phase 107 Fable red team): the peer / allocator / event-study panels are
+// PRE-COMPUTED server-side aggregates that cannot follow a client leverage what-if, so
+// each renders an honest "shown at base 1× leverage" note (data-leverage-note) when the
+// rest of the page is levered. These tests prove the wiring on the real PeerPercentilePanel.
+function LeverageSetter({ value }: { value: number }) {
+  const { setLeverage } = useLeverage();
+  useEffect(() => {
+    setLeverage(value);
+  }, [value, setLeverage]);
+  return null;
+}
+
+function peerScenarioPayload(overrides: Partial<FactsheetPayload> = {}): FactsheetPayload {
+  const p = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(300),
+    benchmark: null,
+  });
+  return {
+    ...p,
+    periodsPerYear: 365,
+    scenarioPeer: { cohortSize: 50, sharpe: 62, sortino: 58, max_dd: 71 },
+    ...overrides,
+  } as unknown as FactsheetPayload;
+}
+
+function renderPeerAtLeverage(payload: FactsheetPayload, leverage: number) {
+  return render(
+    <FactsheetProvider payload={payload} persist={false}>
+      <BasisProvider>
+        <LeverageProvider>
+          <LeverageSetter value={leverage} />
+          <PeerPercentilePanel />
+        </LeverageProvider>
+      </BasisProvider>
+    </FactsheetProvider>,
+  );
+}
+
+describe("FactsheetView — H-1: leverage-variant server-side panels annotate 'base 1×' at L≠1", () => {
+  it("PeerPercentilePanel: no base-1× note at L=1; the honest note renders at L=2", () => {
+    const payload = peerScenarioPayload();
+
+    let out = renderPeerAtLeverage(payload, 1);
+    // The panel itself renders (scenarioPeer present) but NO leverage note at L=1 —
+    // byte-identical to pre-leverage (inserted, never reserved).
+    expect(out.container.querySelector("[data-leverage-note]")).toBeNull();
+
+    out = renderPeerAtLeverage(payload, 2);
+    expect(out.container.querySelector("[data-leverage-note]")).not.toBeNull();
+    expect(out.getByText("Peer rank shown at base 1× leverage")).toBeTruthy();
+  });
+
+  it("the note stays ABSENT when leverage is ineligible (composite) even at L=2", () => {
+    // A composite hides the leverage control entirely, so the rest of the page is NOT
+    // levered → no honest note should claim otherwise.
+    const payload = peerScenarioPayload({ dataQuality: { composite: true } } as Partial<FactsheetPayload>);
+    const out = renderPeerAtLeverage(payload, 2);
+    expect(out.container.querySelector("[data-leverage-note]")).toBeNull();
   });
 });
 

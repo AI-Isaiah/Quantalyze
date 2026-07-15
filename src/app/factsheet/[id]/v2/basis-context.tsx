@@ -248,8 +248,16 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // Phase 107 review-fix note; the reviewer's suggested calmar pin was declined for
     // this reason). Only MTM carries a persisted per-basis overlay; cash's `basisM`
     // already equals the client recompute, so there is no cash jump to reconcile.
+    //
+    // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
+    // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
+    // the returns are all-zeros (r→0·r), so `mean·√P/sd` is 0/0 and the derive
+    // honestly yields sharpe=0 / sortino=0 / ann_vol=0 with flat charts. Pinning the
+    // persisted non-zero Sharpe/Sortino there would render e.g. "Sharpe 1.85" next to
+    // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
+    // pin only when L > 0; at L=0 let the honest derived zeros stand.
     const strategyMetrics = ((): typeof lb.strategyMetrics => {
-      if (basis !== "mark_to_market") return lb.strategyMetrics;
+      if (basis !== "mark_to_market" || L <= 0) return lb.strategyMetrics;
       const persisted = payload.metricsByBasis?.mark_to_market;
       if (!persisted) return lb.strategyMetrics;
       const invariant: Partial<typeof lb.strategyMetrics> = {};
@@ -318,6 +326,43 @@ export function leverageApplies(
   appliedLeverage: number,
 ): boolean {
   return appliedLeverage !== 1 && leverageEligibleFor(payload, basis);
+}
+
+/**
+ * H-1 (Phase 107 Fable red team) — the per-panel "not levered" honesty annotation.
+ *
+ * A few factsheet panels — peer percentile, allocator portfolios, event signatures —
+ * are PRE-COMPUTED server-side aggregates ranked / modeled against external universes
+ * (a peer cohort distribution, the allocator model, per-event trajectories) that are
+ * NOT carried in the client payload. Unlike the dailies-derivable backbone, they cannot
+ * be re-derived under a client leverage what-if, so at L≠1 they still reflect the base
+ * 1× strategy — and the metrics they rank (peer Sharpe / Sortino / Max DD rank,
+ * allocator impact, event-trajectory magnitude) ARE leverage-variant. To avoid
+ * silently misleading (the strip shows a levered Max DD while the peer panel ranks the
+ * UNLEVERED one), each affected panel renders this small, SPECIFIC muted note whenever
+ * the rest of the page is levered. It is INSERTED only at L≠1 (never a reserved row) so
+ * L=1 stays byte-identical — a targeted per-panel annotation, NOT a resurrection of the
+ * deleted global BASE·1× eyebrow. Gated on the SAME `leverageApplies` predicate as the
+ * KpiStrip, so it appears exactly when the page is actually levered.
+ */
+export function BaseLeverageNote({
+  payload,
+  label,
+}: {
+  payload: FactsheetPayload;
+  label: string;
+}) {
+  const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  const appliedLeverage = useAppliedLeverage();
+  if (!leverageApplies(payload, basis, appliedLeverage)) return null;
+  return (
+    <p
+      className="mt-2 text-micro uppercase tracking-wider text-text-muted"
+      data-leverage-note
+    >
+      {label}
+    </p>
+  );
 }
 
 /**
