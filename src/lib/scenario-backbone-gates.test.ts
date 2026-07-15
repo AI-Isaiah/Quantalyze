@@ -42,12 +42,30 @@ function walkSource(dir: string, acc: string[] = []): string[] {
   return acc;
 }
 
-/** Drop comment lines so prose describing the deleted module never trips the grep. */
+/**
+ * Strip comments so ONLY live code references to a forbidden token can trip the
+ * gate. Three passes per line:
+ *   1. whole-line comments (trimmed start is //, *, or /*) → dropped (handles
+ *      block-comment interiors and multi-line JSDoc);
+ *   2. inline block spans `/* … *\/` on a code line → removed;
+ *   3. trailing `// …` line comments → removed.
+ * Without (2)/(3) an innocent END-OF-LINE mention (e.g.
+ * `import X from "./y"; // replaces scenario-blend-panels`) would FALSE-POSITIVE
+ * and trip SC-2 in CI. The on-disk existsSync absence checks remain the
+ * authoritative guard; this is CI-annoyance hardening only.
+ */
 function stripComments(src: string): string[] {
-  return src.split("\n").filter(line => {
+  const out: string[] = [];
+  for (const line of src.split("\n")) {
     const t = line.trim();
-    return !(t.startsWith("//") || t.startsWith("*") || t.startsWith("/*"));
-  });
+    if (t.startsWith("//") || t.startsWith("*") || t.startsWith("/*")) continue;
+    // Remove inline block spans, then any trailing line comment.
+    let code = line.replace(/\/\*.*?\*\//g, "");
+    const slash = code.indexOf("//");
+    if (slash !== -1) code = code.slice(0, slash);
+    if (code.trim().length > 0) out.push(code);
+  }
+  return out;
 }
 
 const ALL_FILES = walkSource(SRC_ROOT);
@@ -104,5 +122,18 @@ describe("Phase 108 SCEN-BB backbone gates", () => {
     const hit = FORBIDDEN.filter(tok => RETIRED_SAMPLE.includes(tok));
     expect(hit).toContain("scenario-blend-" + "panels");
     expect(hit).toContain("buildBlend" + "Panels");
+  });
+
+  it("stripComments hardening — a comment-only mention does NOT trip, a live code ref DOES", () => {
+    const tok = "scenario-blend-" + "panels";
+    // Trailing line comment + inline block span mentioning the token → stripped,
+    // so the token is absent from the scanned code (no false-positive CI trip).
+    const trailing = `import X from "./y"; // replaces ${tok}`;
+    const inlineBlock = `const z = 1; /* legacy ${tok} note */`;
+    expect(stripComments(trailing).join("\n").includes(tok)).toBe(false);
+    expect(stripComments(inlineBlock).join("\n").includes(tok)).toBe(false);
+    // A genuine code reference still survives the strip → the gate still fires.
+    const realCode = `import { a } from "@/lib/${tok}";`;
+    expect(stripComments(realCode).join("\n").includes(tok)).toBe(true);
   });
 });
