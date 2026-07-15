@@ -128,3 +128,82 @@ describe("deriveBlendPanels — public-shape + backbone-routing behaviour", () =
     expect(panels.rollingVol).toEqual([]);
   });
 });
+
+// ── SC-4 parity pins — POPULATION-std at each window (mutation-falsifiable) ──
+//
+// WHY THIS MATTERS (CLAUDE.md Rule 9; 108-CONTEXT §Parity std): the retired
+// legacy module used SAMPLE std (÷ n−1); the canonical backbone
+// (`factsheet/rolling.ts::pstdev`) uses POPULATION std (÷ n). USER DECISION:
+// the backbone (population-std) value is canonical — one rolling-std path — so
+// these pins encode the POPULATION value, an INTENTIONAL convention unification,
+// NOT a regression.
+//
+// Closed-form derivation (never call the primitive under test — no circular
+// oracle): an EVEN-length window of alternating ±A has mean 0 and population
+// σ = A EXACTLY (Σ(x−0)² = w·A², ÷ w = A²). An ODD window w has mean ±A/w and
+// population σ = A·√(1 − 1/w²) (Σx² = w·A², minus w·mean² = A²/w, ÷ w). A
+// SAMPLE-std source multiplies σ by √(w/(w−1)); for w=126 that moves the
+// annualized value from 0.0075·√252 ≈ 0.119059 to ≈ 0.119534 — a shift at the
+// 4th decimal that FAILS the 6-decimal assertion. Mutating the adapter's vol
+// path by √(w/(w−1)) turns these RED (falsifiability spot-check performed once
+// locally, then reverted).
+describe("deriveBlendPanels — SC-4 population-std parity pins (63/126/252)", () => {
+  const sqrt252 = Math.sqrt(252);
+  // Expected POPULATION-std annualized rolling vol per window.
+  const expectedVol = (w: number): number =>
+    w % 2 === 0
+      ? A * sqrt252 // even window: σ = A exactly
+      : A * Math.sqrt(1 - 1 / (w * w)) * sqrt252; // odd window: σ = A·√(1−1/w²)
+
+  for (const w of [63, 126, 252]) {
+    it(`rollingVol at window ${w} equals the POPULATION closed-form (sample-std bleed fails @6dp)`, () => {
+      const panels = deriveBlendPanels(ALT_320, w, 252);
+      const want = expectedVol(w);
+      // Fixture is perfectly alternating → EVERY window carries the same value.
+      expect(panels.rollingVol[0].value).toBeCloseTo(want, 6);
+      const mid = panels.rollingVol[Math.floor(panels.rollingVol.length / 2)];
+      expect(mid.value).toBeCloseTo(want, 6);
+      // Mutation guard: the SAMPLE-std value (× √(w/(w−1))) must NOT match @6dp.
+      const sampleBleed = want * Math.sqrt(w / (w - 1));
+      expect(panels.rollingVol[0].value).not.toBeCloseTo(sampleBleed, 6);
+    });
+  }
+
+  it("even-window Sharpe & Sortino are exactly 0 (mean 0) — closed-form spot pin", () => {
+    // Cheap closed-form pin (rolling.ts:99-137): for an even alternating ±A
+    // window mean = 0, so the numerator (m·N) is 0 → Sharpe = Sortino = 0.
+    for (const w of [126, 252]) {
+      const panels = deriveBlendPanels(ALT_320, w, 252);
+      expect(panels.rollingSharpe.sharpe_365d[0].value).toBeCloseTo(0, 12);
+      expect(panels.rollingSortino[0].value).toBeCloseTo(0, 12);
+    }
+  });
+
+  it("window-toggle contract: explicit window drives the compute (lengths n−w+1)", () => {
+    const n = ALT_320.length;
+    expect(deriveBlendPanels(ALT_320, 63, 252).rollingVol).toHaveLength(n - 63 + 1);
+    expect(deriveBlendPanels(ALT_320, 126, 252).rollingVol).toHaveLength(n - 126 + 1);
+    expect(deriveBlendPanels(ALT_320, 252, 252).rollingVol).toHaveLength(n - 252 + 1);
+  });
+
+  it("min/max whisker pin: top whisker is the absolute max (a p05/p95 bleed fails)", () => {
+    // USER DECISION §Quantile whiskers: tails are absolute min/max, NOT p05/p95.
+    // One +0.05 max outlier and one −0.04 min outlier among ~small returns — a
+    // p95 substitution produces a strictly SMALLER top whisker (~0.002) → fails.
+    const smalls = Array.from({ length: 98 }, (_, i) => ({
+      date: dateAt(i),
+      value: i % 2 === 0 ? 0.002 : -0.002,
+    }));
+    const outlierFix = [
+      { date: dateAt(98), value: 0.05 }, // absolute max
+      { date: dateAt(99), value: -0.04 }, // absolute min
+      ...smalls,
+    ];
+    const panels = deriveBlendPanels(outlierFix, 63, 252);
+    const vals = outlierFix.map((p) => p.value);
+    expect(panels.quantiles.All[4]).toBe(0.05); // absolute max, p95 cannot reach
+    expect(panels.quantiles.All[4]).toBe(Math.max(...vals));
+    expect(panels.quantiles.All[0]).toBe(-0.04); // absolute min, p05 cannot reach
+    expect(panels.quantiles.All[0]).toBe(Math.min(...vals));
+  });
+});
