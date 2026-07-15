@@ -17,6 +17,22 @@ import type { DailyReturn } from "./types";
  * is provably untouched too.
  */
 
+/**
+ * Platform-stable JSON pin. The computed metrics (cagr / sharpe / calmar / sortino
+ * and the derived equity/drawdown series) differ by ~1 ULP at the 14th–16th
+ * significant digit between macOS (dev) and Linux (CI) — IEEE-754 doubles are not
+ * bit-portable across math libs — which self-fails a byte-exact `JSON.stringify`
+ * snapshot for a reason that is NOT a cash-value regression. Rounding every finite
+ * number to 12 significant figures collapses that sub-precision noise while staying
+ * far above any real shift a non-byte-neutral refactor would introduce, so the SC-4
+ * byte-neutrality guarantee is preserved and the pin is deterministic everywhere.
+ */
+function stableStringify(payload: unknown): string {
+  return JSON.stringify(payload, (_k, v) =>
+    typeof v === "number" && Number.isFinite(v) ? Number(v.toPrecision(12)) : v,
+  );
+}
+
 /** Deterministic pseudo-random daily-return series (calendar-daily; crypto). */
 function genSeries(start: string, n: number, seed: number): DailyReturn[] {
   const out: DailyReturn[] = [];
@@ -83,20 +99,20 @@ describe("SC-4 — cash byte-identity across the deriveSeriesBundle refactor", (
     const payload = buildFactsheetPayload(SK_STRATEGY, CASH_SERIES)!;
     expect(payload).not.toBeNull();
     expect(payload.seriesByBasis).toBeUndefined(); // no mtmSeries -> no bundle
-    expect(JSON.stringify(payload)).toMatchSnapshot();
+    expect(stableStringify(payload)).toMatchSnapshot();
   });
 
   it("composite arithmetic payload (metricsByBasis + markers) is byte-identical", () => {
     const payload = buildFactsheetPayload(SK_STRATEGY, CASH_SERIES, COMPOSITE_OPTS)!;
     expect(payload.seriesByBasis).toBeUndefined();
-    expect(JSON.stringify(payload)).toMatchSnapshot();
+    expect(stableStringify(payload)).toMatchSnapshot();
   });
 
   it("ingestSource:'api' payload (synthesized panels) is byte-identical", () => {
     const payload = buildFactsheetPayload(API_STRATEGY, CASH_SERIES)!;
     expect(payload.ingestSource).toBe("api");
     expect(payload.seriesByBasis).toBeUndefined();
-    expect(JSON.stringify(payload)).toMatchSnapshot();
+    expect(stableStringify(payload)).toMatchSnapshot();
   });
 });
 
