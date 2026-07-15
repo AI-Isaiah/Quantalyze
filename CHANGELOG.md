@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.42.0.0] - 2026-07-15
+### v1.10 Backbone Unification — Phases 98–106 Stage A (partial-milestone ship)
+First prod ship of the v1.10 Demo-Hero Portfolio Intelligence + Options MTM +
+Backbone Unification work. Ships the portfolio-intelligence dashboard (98–100),
+the options mark-to-market toggle (101–102), and the dailies-canonical backbone
+unification (103–106 Stage A): composite + CSV + single-key + onboarding all
+compute through the one shared `derive_basis_series` route, with SC-4 factsheet
+byte-identity held on every surface. Stage A of the cutover is reversible —
+flag ratification (prod already on the unified path since 2026-05-25), the
+M2 series-before-scalar ordering fix, and after() fail-loud on csv-finalize.
+- **Store DDL:** 2 additive migrations — PI-07 portfolio in-flight UNIQUE fence
+  (`portfolio_analytics_one_computing_per_portfolio`, dedupe-first) and PI-04
+  `user_notes` `dashboard` scope_kind. Both migration-reviewer + rls-auditor clean.
+- **Deferred (still on the branch, gated):** 106 Stage B (dark-path deletion +
+  rollback-net removal — held for explicit go + the live E2E/empirical gate),
+  106.1 (series-store fold DDL + the computing-janitor, which needs a transition
+  timestamp), 106.2 (metrics_snapshot + lead-capture), 107 (leverage), 108 (scenario).
+
 ## [0.41.1.0] - 2026-07-12
 ### Composite Onboarding Hardening (milestone v1.9.1, #596 follow-up)
 Fixes the live SC-3 dogfooding cluster on the multi-key composite wizard and
