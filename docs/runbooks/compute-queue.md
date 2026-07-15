@@ -12,29 +12,35 @@ and [`adr-0008-cron-architecture`](../architecture/adr-0008-cron-architecture.md
 plus the queue migration
 `supabase/migrations/20260411144407_compute_jobs_queue.sql`.
 
-> **Status: the `compute_jobs` queue is the production path.** It has been
+> **Status: the `compute_jobs` queue is the ONLY production path.** It has been
 > live in prod for months — the Python worker, the `enqueue_compute_job`
 > RPC, the 10-minute watchdog reclaim, and the B5a/B5b claim-token fencing
-> all shipped. Under the Phase-19 unified backbone
-> (`PROCESS_KEY_UNIFIED_BACKBONE`), `analytics-service/routers/process_key.py`
-> is the primary dispatch. `USE_COMPUTE_JOBS_QUEUE` now selects between two
-> *legacy fallback* paths for older flows / the manual "Sync now" button:
-> `true` enqueues into `compute_jobs`, `false` uses the in-process
-> `after()` path. **Do NOT disable the queue as a first incident step** —
-> it powers all strategy analytics; treat flag-off as a last-resort
-> rollback (see "Rollback procedure"), not a default.
+> all shipped. `analytics-service/routers/process_key.py` is the dispatch.
+> **As of Phase 106 (v0.42.x) the unified backbone is mandatory and the
+> legacy in-process `after()` fallback is deleted.** The
+> `USE_COMPUTE_JOBS_QUEUE` and `PROCESS_KEY_UNIFIED_BACKBONE` flags are
+> **retired** — they are read nowhere; leaving them set (or flipping them)
+> does nothing. There is no runtime rollback switch anymore: **rollback is
+> `git revert` + redeploy** (see "Rollback procedure").
 
 ## What the queue is
 
-A Postgres-backed compute queue that runs async jobs durably across
-three kinds:
+A Postgres-backed compute queue that runs async jobs durably. The core
+strategy-analytics kinds:
 
 - `sync_trades` — fetch an exchange API key's trade history into
   `trades` (one job per exchange key)
-- `compute_analytics` — run quantstats metrics over a strategy's
-  `trades` (chained after sync_trades via fan-in)
+- `compute_analytics_from_csv` — run metrics over a strategy's daily
+  returns via the unified backbone (chained after sync_trades via fan-in).
+  (The old trades-based `compute_analytics` kind was retired in Phase 106 —
+  the `enqueue_compute_job` RPC now rejects it with `invalid_parameter_value`;
+  the 45 historical rows are preserved for audit, so the kind CHECK still
+  admits them.)
 - `compute_portfolio` — run portfolio-level metrics when any member
   strategy's analytics complete
+
+Plus cron/worker-seeded maintenance kinds (`sync_funding`,
+`reconcile_strategy`, `poll_positions`, `derive_broker_dailies`, …).
 
 Jobs survive Vercel function crashes, Railway cold starts, and
 double-submit races. Retries happen automatically with exponential
@@ -53,14 +59,12 @@ at any moment, enforced by partial unique indexes.
 - The Railway worker (`python -m main_worker`) running — it self-polls and
   drains the queue (30s dispatch loop + 60s watchdog). There is no external
   tick cron or HMAC secret anymore.
-- `USE_COMPUTE_JOBS_QUEUE` env var on Vercel — selects the *legacy fallback*
-  enqueue path; the Phase-19 `process_key` backbone is the primary dispatch:
-  - `false` = `/api/keys/sync` and `/api/strategies/finalize-wizard` use the
-    in-process `after()` path
-  - `true` = those endpoints enqueue `sync_trades` into `compute_jobs`
+- (`USE_COMPUTE_JOBS_QUEUE` is **retired** as of Phase 106 — `/api/keys/sync`
+  and `/api/strategies/finalize-wizard` now enqueue into `compute_jobs`
+  unconditionally; there is no in-process `after()` fallback to select.)
 
-Before flipping the flag on production, verify each prerequisite by
-running the three observability queries below against the staging DB.
+Verify each prerequisite by running the three observability queries below
+against the staging DB.
 
 ## Three observability queries (pin in Supabase Studio)
 
@@ -199,8 +203,8 @@ CMD `python -m main_worker`): a **30s dispatch loop**
    connectivity, exchange API). Diagnose via Query 2.
 4. If the worker is down: existing pending jobs stay safe in the table — no
    data loss. Users see "Queued" until the worker recovers and drains them.
-   Flipping `USE_COMPUTE_JOBS_QUEUE=false` only routes *new* enqueues to the
-   legacy `after()` path; it does not drain the existing backlog.
+   (There is no flag-flip fallback anymore — the queue is the only path.
+   Restart the Railway worker; do not attempt a runtime rollback.)
 
 ### Alert: "More than 5 jobs in failed_final (24h)"
 
@@ -232,20 +236,25 @@ The wizard `SyncPreviewStep` shows "Computing..." and never advances.
    `enqueue_compute_job` for `sync_trades`; failures Sentry-escalate
    via `captureToSentry` with tag `route=finalize-wizard`,
    `step=sync_trades_enqueue`). For a manual "Sync now" click, check
-   `/api/keys/sync`. Check `USE_COMPUTE_JOBS_QUEUE` env var. Fall back
-   to legacy by flipping the flag and having the user resubmit
+   `/api/keys/sync`. If the enqueue RPC itself is failing, that is the
+   incident — there is no legacy fallback to flip to; fix forward or
+   `git revert` the offending deploy.
 
 ## Rollback procedure
 
-**Flag off**: one env var flip. New requests fall back to the legacy
-`after()` path. Existing `compute_jobs` rows stay intact but aren't
-processed by the `after()` path. They sit until the flag flips back.
+**There is no runtime rollback flag anymore.** Phase 106 deleted the legacy
+in-process `after()` path and the `USE_COMPUTE_JOBS_QUEUE` /
+`PROCESS_KEY_UNIFIED_BACKBONE` switches — the durable queue is the only
+compute path. To roll back a bad deploy, revert the code and redeploy:
 
 ```bash
-vercel env rm USE_COMPUTE_JOBS_QUEUE production
-vercel env add USE_COMPUTE_JOBS_QUEUE production <<< "false"
-vercel --prod redeploy  # or wait for next auto-deploy
+git revert <merge-commit-sha>   # or the specific offending commit
+git push origin main            # Vercel + Railway auto-deploy the revert
 ```
+
+Existing `compute_jobs` rows are unaffected by a revert; the worker keeps
+draining them. If the incident is worker/queue health (not a code deploy),
+use the worker restart + observability queries above, not a rollback.
 
 **Full queue drain** (only if the table itself is causing issues):
 

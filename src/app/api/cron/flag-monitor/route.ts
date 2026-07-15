@@ -314,8 +314,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       await resend.emails.send({
         from: ALERT_FROM,
         to: founderEmail,
-        subject: `[WARN] Phase 19 error rate ${(errorRate * 100).toFixed(2)}% — below auto-rollback threshold`,
-        html: `<p>Error rate ${errorCount}/${total} = ${(errorRate * 100).toFixed(2)}% — below the ${(ALERT_THRESHOLD * 100).toFixed(2)}% auto-rollback threshold but worth a look.</p>`,
+        subject: `[WARN] Phase 19 error rate ${(errorRate * 100).toFixed(2)}% — below alert threshold`,
+        html: `<p>Error rate ${errorCount}/${total} = ${(errorRate * 100).toFixed(2)}% — below the ${(ALERT_THRESHOLD * 100).toFixed(2)}% alert threshold but worth a look.</p>`,
       });
     }
     return NextResponse.json({
