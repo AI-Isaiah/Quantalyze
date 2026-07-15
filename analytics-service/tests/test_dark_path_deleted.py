@@ -1,4 +1,4 @@
-"""Phase 106-09 (D4) — the PERMANENT dark-path deletion grep-gate.
+"""Phase 106-09/10 (D4/D1) — the PERMANENT dark-path deletion grep-gate.
 
 Stage B of the backbone unification retires the trades-based
 ``run_strategy_analytics`` chain and every re-entry point that reached it
@@ -6,6 +6,13 @@ Stage B of the backbone unification retires the trades-based
 worker handler, the ``BROKER_DAILIES_VIA_FUNDING`` funding-derive flag, and
 the TypeScript legacy keys-sync shim). Once deleted, nothing may silently
 resurrect a non-backbone strategy-compute path.
+
+106-10 (D1) extends the gate to the retired rollback net + cosmetic residue:
+the unified-backbone kill-switch readers (``isUnifiedBackboneActive`` /
+``is_unified_backbone_active``) are deleted, the flag-monitor no longer
+upserts the kill-switch row (``value: "off"``), and the cosmetic
+``compute_analytics`` JobKind residue (admin table + types) is gone. These
+must all stay dead too.
 
 This is a SOURCE-SCAN gate, mirroring the established style of
 ``tests/test_cash_basis_series_sc4.py:646-750`` (``_repo_root`` +
@@ -174,6 +181,49 @@ def test_ts_reentry_points_stay_dead() -> None:
             f"dark path re-entry survived deletion: {token} still referenced "
             f"(non-comment) in {path.name} — the TS legacy compute re-entry "
             "must stay dead"
+        )
+
+
+def test_stage_b_flag_machinery_and_cosmetic_residue_stay_dead() -> None:
+    """106-10 (D1): the retired rollback net + cosmetic residue stay deleted
+    (two-lang scan, ``lang="ts"``):
+
+      * the unified-backbone kill-switch readers are gone — ``feature-flags.ts``
+        stays absent (``isUnifiedBackboneActive`` count 0 by absence);
+      * the flag-monitor NEVER upserts the kill-switch row again — the literal
+        ``value: "off"`` count in its route is 0 (auto-rollback retired);
+      * the cosmetic ``compute_analytics`` JobKind residue is gone from the
+        admin table + shared types. The QUOTED literal ``"compute_analytics"``
+        is substring-safe — it does NOT match ``"compute_analytics_from_csv"``
+        (the KEPT CSV job)."""
+    src = _repo_root() / "src"
+    checks = [
+        # (path, token, human-readable reason)
+        (
+            src / "lib" / "feature-flags.ts",
+            "isUnifiedBackboneActive",
+            "the TS kill-switch reader must stay deleted",
+        ),
+        (
+            src / "app" / "api" / "cron" / "flag-monitor" / "route.ts",
+            'value: "off"',
+            "flag-monitor must never upsert the kill-switch row (auto-rollback retired)",
+        ),
+        (
+            src / "components" / "admin" / "ComputeJobsTable.tsx",
+            '"compute_analytics"',
+            "the compute_analytics KIND_OPTIONS residue must stay removed",
+        ),
+        (
+            src / "lib" / "types.ts",
+            '"compute_analytics"',
+            "the compute_analytics JobKind union member must stay removed",
+        ),
+    ]
+    for path, token, reason in checks:
+        assert _count(path, token, lang="ts") == 0, (
+            f"Stage-B residue survived: `{token}` still referenced (non-comment) "
+            f"in {path.name} — {reason} (106-10 D1)"
         )
 
 
