@@ -105,20 +105,13 @@ class TestWorkerLoadDrain:
 
         mock_dispatch = AsyncMock(side_effect=_dispatch_side_effect)
 
-        # H-0817: patch is_unified_backbone_active. The real implementation
-        # is awaited every tick to populate p_unified_backbone_active. Under
-        # the MagicMock supabase it would read .data.get('value') off a
-        # MagicMock (truthy garbage) and cache the result — making the load
-        # test depend on accidental mock behavior rather than a controlled
-        # flag, and masking a regression that makes the flag fetch raise per
-        # tick (it fail-softs to False, so throughput silently degrades with
-        # no test failure). Pin it to a real boolean and assert it's used.
+        # Phase 106: the unified-backbone flag is no longer read per tick —
+        # dispatch_tick passes a constant True as p_unified_backbone_active
+        # (the reader was deleted; the backbone is permanent-on). No flag
+        # patch is needed; we assert the constant propagates into the claim
+        # RPC params below.
         with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=mock_dispatch), \
-             patch(
-                 "main_worker.is_unified_backbone_active",
-                 new=AsyncMock(return_value=True),
-             ) as mock_flag:
+             patch("main_worker.dispatch", new=mock_dispatch):
             # Run dispatch_tick enough times to drain all 100 jobs
             # 100 jobs / 5 per batch = 20 ticks + 1 empty tick
             for _ in range(25):
@@ -135,15 +128,11 @@ class TestWorkerLoadDrain:
         # Verify unique job IDs — no duplicates
         assert len(set(done_ids)) == total_jobs
 
-        # --- H-0817: the unified-backbone flag is read every dispatch tick.
-        # 25 ticks → at least the 21 non-empty-then-empty ticks call it once
-        # each (the function itself caches, but dispatch_tick awaits it every
-        # tick). Assert it was actually exercised and that the claimed flag
-        # propagates into the claim RPC params.
-        assert mock_flag.await_count >= 21, (
-            f"is_unified_backbone_active must be read every tick; "
-            f"got {mock_flag.await_count} awaits across 25 ticks"
-        )
+        # --- Phase 106: the constant-True unified-backbone value flows into
+        # the claim RPC params on every non-empty tick. The former H-0817
+        # per-tick-read assertion is gone (the reader was deleted); this
+        # pins that the claim RPC still receives p_unified_backbone_active
+        # = True so migration 104's metadata stamp is byte-identical.
         claim_calls = [
             c for c in mock_supabase.rpc.call_args_list
             if c.args[0] == "claim_compute_jobs_with_priority"
@@ -151,7 +140,7 @@ class TestWorkerLoadDrain:
         assert claim_calls, "claim RPC never called"
         for c in claim_calls:
             assert c.args[1]["p_unified_backbone_active"] is True, (
-                "the per-tick flag value must flow into the claim RPC params"
+                "the constant-True flag value must flow into the claim RPC params"
             )
 
         # --- H-0818: in-flight concurrency characterization. dispatch_tick

@@ -11,7 +11,6 @@
     { "path": "/api/cron/reconcile-strategies", "schedule": "30 3 * * *" },
     { "path": "/api/cron/cleanup-ack-tokens", "schedule": "0 3 * * 0" },
     { "path": "/api/cron/founder-lp-report", "schedule": "15 9 1 * *" },
-    { "path": "/api/cron/flag-monitor", "schedule": "*/15 * * * *" },
-    { "path": "/api/cron/phase19-error-rollup", "schedule": "30 0 * * *" }
+    { "path": "/api/cron/flag-monitor", "schedule": "*/15 * * * *" }
   ]
 }

@@ -5,13 +5,14 @@
  *   1.  test_unauthorized_returns_401            — auth gate
  *   2.  test_below_threshold_no_action           — errorRate=0.1%, no flip, no email
  *   3.  test_warn_threshold_sends_warn_email     — errorRate=0.3%, no flip, WARN email
- *   4.  test_above_threshold_flips_kill_switch   — errorRate=1%, total>=20, flip + ALERT email
- *   5.  test_min_sample_guard                    — total<20, no flip even if errorRate=50%
- *   6.  test_sentry_unreachable_returns_warn     — Sentry 5xx, no flip
+ *   4.  test_above_threshold_alerts_only         — errorRate=1%, total>=20, ALERT
+ *                                                  email, NEVER flips (Phase 106)
+ *   5.  test_min_sample_guard                    — total<20, no alert even if errorRate=50%
+ *   6.  test_sentry_unreachable_returns_warn     — Sentry 5xx, no alert
  *   7.  test_environment_production_filter       — outbound query carries env filter (Pitfall 8)
  *   8.  test_zero_denominator_alert_after_3_windows  — H-2: streak=3 → SEV-2 email
  *   9.  test_zero_denominator_streak_resets      — H-2: total>0 resets streak
- *   10. test_postgrest_function_not_found_fallback   — D-3: PGRST error → SEV-2 alert + 500
+ *   10. (removed) D-3 kill-switch PGRST fallback — auto-rollback retired (Phase 106)
  *   11. test_sentry_environment_smoke_workflow_exists — H-6 CI smoke workflow file presence
  *
  * Mock strategy mirrors src/app/api/cron/founder-lp-report/route.test.ts:
@@ -51,15 +52,13 @@ function makeReq(headers: Record<string, string> = {}): NextRequest {
  *   - audit_log: select("id", {count:"exact", head:true}).eq(...).gte(...)
  *
  * `featureFlagsRows` is a dict keyed by flag_key. `auditLogTotal` controls
- * the denominator. `featureFlagsUpsertImpl` lets a test override the upsert
- * (e.g. throw a PGRST error for D-3).
+ * the denominator.
  */
 function makeAdminMock(opts: {
   featureFlagsRows?: Record<string, { value: string }>;
   auditLogTotal: number;
-  featureFlagsUpsertImpl?: (...args: unknown[]) => unknown;
 }) {
-  const { featureFlagsRows = {}, auditLogTotal, featureFlagsUpsertImpl } = opts;
+  const { featureFlagsRows = {}, auditLogTotal } = opts;
   const upsertCalls: Array<{ table: string; row: Record<string, unknown> }> = [];
 
   function fromTable(table: string) {
@@ -73,10 +72,6 @@ function makeAdminMock(opts: {
         }),
         upsert: (row: Record<string, unknown>, _opts?: unknown) => {
           upsertCalls.push({ table, row });
-          if (featureFlagsUpsertImpl) {
-            const ret = featureFlagsUpsertImpl(row);
-            return ret instanceof Promise ? ret : Promise.resolve(ret);
-          }
           return Promise.resolve({ data: null, error: null });
         },
       };
@@ -106,7 +101,6 @@ const ENV_KEYS = [
   "SENTRY_ORG_SLUG",
   "RESEND_API_KEY",
   "FOUNDER_LP_REPORT_TO",
-  "PHASE_19_STABILITY_CACHE_TTL_S",
 ] as const;
 
 describe("/api/cron/flag-monitor", () => {
@@ -215,7 +209,7 @@ describe("/api/cron/flag-monitor", () => {
   // -------------------------------------------------------------------------
   // 4. Above threshold — kill-switch flip + ALERT email
   // -------------------------------------------------------------------------
-  it("test_above_threshold_flips_kill_switch: errorRate=1% flips kill-switch", async () => {
+  it("test_above_threshold_alerts_only: errorRate=1% alerts but NEVER flips kill-switch (Phase 106)", async () => {
     mockSentry(10);
     const admin = makeAdminMock({ auditLogTotal: 1000 }); // 1%
     vi.doMock("@/lib/supabase/admin", () => ({
@@ -227,13 +221,12 @@ describe("/api/cron/flag-monitor", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.action).toBe("rolled_back");
+    // Phase 106: auto-rollback retired — the monitor alerts, never rolls back.
+    expect(body.action).toBe("alerted");
     const flips = admin.upsertCalls.filter(
       (c) => c.row.flag_key === "process_key_unified_backbone",
     );
-    expect(flips.length).toBe(1);
-    expect(flips[0].row.value).toBe("off");
-    expect(flips[0].row.updated_by).toBe("cron/flag-monitor");
+    expect(flips.length).toBe(0);
     expect(sendMock).toHaveBeenCalledTimes(1);
     const arg = sendMock.mock.calls[0][0] as { subject: string };
     expect(arg.subject).toMatch(/ALERT/);
@@ -366,45 +359,6 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 10. D-3 — PostgREST function-not-found fallback
-  // -------------------------------------------------------------------------
-  it("test_postgrest_function_not_found_fallback: PGRST error sends SEV-2 + 500", async () => {
-    mockSentry(10);
-    let killSwitchUpsertCalls = 0;
-    const admin = makeAdminMock({
-      auditLogTotal: 1000,
-      featureFlagsUpsertImpl: (...args: unknown[]) => {
-        const row = args[0] as Record<string, unknown>;
-        if (row.flag_key === "process_key_unified_backbone") {
-          killSwitchUpsertCalls += 1;
-          throw new Error(
-            "PGRST202 Could not find the function in the schema cache",
-          );
-        }
-        return { data: null, error: null };
-      },
-    });
-    vi.doMock("@/lib/supabase/admin", () => ({
-      createAdminClient: () => admin,
-    }));
-    const handler = await loadHandler();
-    const res = await handler(
-      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
-    );
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.reason).toBe("kill_switch_unreachable_d3");
-    expect(killSwitchUpsertCalls).toBe(1);
-    // SEV-2 email
-    expect(sendMock).toHaveBeenCalled();
-    const subjects = sendMock.mock.calls.map(
-      (c) => (c[0] as { subject: string }).subject,
-    );
-    expect(subjects.some((s) => /D-3/.test(s) && /SEV-2/.test(s))).toBe(true);
-  });
-
-  // -------------------------------------------------------------------------
   // I-T4 — Sentry-not-configured + Sentry-unreachable distinction.
   // -------------------------------------------------------------------------
   it("I-T4a: SENTRY_ORG_SLUG missing returns sentry_not_configured + no kill-switch flip", async () => {
@@ -465,17 +419,17 @@ describe("/api/cron/flag-monitor", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    // 0.005 is NOT > 0.005 (strict >), so no rollback. Above WARN_THRESHOLD
+    // 0.005 is NOT > 0.005 (strict >), so no ALERT. Above WARN_THRESHOLD
     // (0.0025) so action may be `warn_sent` — but critically NO kill-switch
-    // flip.
-    expect(body.action).not.toBe("rolled_back");
+    // flip (retired in Phase 106).
+    expect(body.action).not.toBe("alerted");
     const flips = admin.upsertCalls.filter(
       (c) => c.row.flag_key === "process_key_unified_backbone",
     );
     expect(flips.length).toBe(0);
   });
 
-  it("I-T5b: 1/20 (errorRate=5%, total=20) FLIPS — meets MIN_SAMPLE", async () => {
+  it("I-T5b: 1/20 (errorRate=5%, total=20) ALERTS — meets MIN_SAMPLE, never flips (Phase 106)", async () => {
     mockSentry(1);
     const admin = makeAdminMock({ auditLogTotal: 20 });
     vi.doMock("@/lib/supabase/admin", () => ({
@@ -486,11 +440,11 @@ describe("/api/cron/flag-monitor", () => {
       makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
     );
     const body = await res.json();
-    expect(body.action).toBe("rolled_back");
+    expect(body.action).toBe("alerted");
     const flips = admin.upsertCalls.filter(
       (c) => c.row.flag_key === "process_key_unified_backbone",
     );
-    expect(flips.length).toBe(1);
+    expect(flips.length).toBe(0);
   });
 
   it("I-T5c: 1/19 (total=19 < MIN_SAMPLE) does NOT flip — sample-size guard", async () => {
@@ -504,7 +458,7 @@ describe("/api/cron/flag-monitor", () => {
       makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
     );
     const body = await res.json();
-    expect(body.action).not.toBe("rolled_back");
+    expect(body.action).not.toBe("alerted");
     const flips = admin.upsertCalls.filter(
       (c) => c.row.flag_key === "process_key_unified_backbone",
     );
@@ -512,10 +466,10 @@ describe("/api/cron/flag-monitor", () => {
   });
 
   // -------------------------------------------------------------------------
-  // I-T6 — RESEND_API_KEY missing in ALERT path: kill-switch still flips,
-  // no send call, action='rolled_back'.
+  // I-T6 — RESEND_API_KEY missing in ALERT path: alert-only monitor never
+  // flips the (retired) kill-switch and skips the email, action='alerted'.
   // -------------------------------------------------------------------------
-  it("I-T6: missing RESEND_API_KEY still flips kill-switch but skips alert email", async () => {
+  it("I-T6: missing RESEND_API_KEY skips the alert email and NEVER flips the kill-switch (Phase 106)", async () => {
     delete process.env.RESEND_API_KEY;
     mockSentry(10);
     const admin = makeAdminMock({ auditLogTotal: 1000 }); // 1%
@@ -528,12 +482,11 @@ describe("/api/cron/flag-monitor", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.action).toBe("rolled_back");
+    expect(body.action).toBe("alerted");
     const flips = admin.upsertCalls.filter(
       (c) => c.row.flag_key === "process_key_unified_backbone",
     );
-    expect(flips.length).toBe(1);
-    expect(flips[0].row.value).toBe("off");
+    expect(flips.length).toBe(0);
     // Resend was never instantiated (resendKey absent), so send was never called.
     expect(sendMock).not.toHaveBeenCalled();
   });

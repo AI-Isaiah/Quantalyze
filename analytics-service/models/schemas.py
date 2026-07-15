@@ -6,10 +6,6 @@ from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 from typing import Any, Literal, Optional
 
 
-class ComputeRequest(BaseModel):
-    strategy_id: str
-
-
 class ValidateKeyRequest(BaseModel):
     exchange: str
     api_key: str

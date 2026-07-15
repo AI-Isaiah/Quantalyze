@@ -117,8 +117,6 @@ const STATE = vi.hoisted(() => ({
       level?: string;
     };
   }>,
-  // Phase B simplify — unified-backbone flag toggleable per test.
-  unifiedBackboneActive: false as boolean,
   // Phase B simplify — postProcessKey upstream body (drives the H-0327
   // guard fall-through test). null means use the legacy 200 default.
   processKeyResult: null as null | {
@@ -288,10 +286,6 @@ vi.mock("@/lib/sentry-capture", () => ({
   },
 }));
 
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: async () => STATE.unifiedBackboneActive,
-}));
-
 vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: async () =>
     STATE.processKeyResult ?? {
@@ -388,11 +382,9 @@ beforeEach(async () => {
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
   STATE.captureToSentryCalls = [];
-  STATE.unifiedBackboneActive = false;
   STATE.processKeyResult = null;
   STATE.runAfterCallback = false;
   STATE.afterPromise = null;
-  delete process.env.USE_COMPUTE_JOBS_QUEUE;
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
   process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
   // Resolve a real allowed name for the body.
@@ -425,6 +417,19 @@ function mockProbeReadOnly(): ReturnType<typeof vi.spyOn> {
       { status: 200, headers: { "content-type": "application/json" } },
     ),
   );
+}
+
+// Phase 106 Stage B: the flag-off single-key legacy dispatch was deleted, so
+// `runLegacyFinalize` (the finalize RPC + after() side-effect fan-out) is now
+// reachable ONLY via the composite hoist (api_key_id === null + >=1 members).
+// Tests that exercise the legacy RPC error mapping / founder email / enqueue
+// escalation route through it via this setup. The member re-probe uses the
+// read-only fetch mock the test installs (mockProbeReadOnly), so the hoist
+// proceeds to runLegacyFinalize.
+function routeThroughLegacyFinalize(): void {
+  STATE.strategyRow = { api_key_id: null };
+  STATE.strategyKeysCount = 1;
+  STATE.strategyKeysList = [{ api_key_id: MEMBER_KEY_1 }];
 }
 
 // next/server's after() mock stores the callback promise on
@@ -555,6 +560,9 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
         { status: 200, headers: { "content-type": "application/json" } },
       ),
     );
+    // Phase 106 Stage B: the finalize RPC (runLegacyFinalize) is reached via the
+    // composite hoist now that the flag-off single-key dispatch is deleted.
+    routeThroughLegacyFinalize();
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -572,6 +580,10 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
   });
 
   it("skips the live probe when the strategy has no api_key_id (CSV branch)", async () => {
+    // CSV branch: api_key_id null + zero members → the composite hoist finds no
+    // members and (Phase 106 Stage B) falls through to the unconditional unified
+    // path. The live scope-broadening probe is still skipped (no api_key to
+    // re-check), which is what this test pins.
     STATE.strategyRow = { api_key_id: null };
     const fetchSpy = vi.spyOn(globalThis, "fetch");
 
@@ -579,9 +591,8 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(
-      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeDefined();
+    const body = await res.json();
+    expect(body.ok).toBe(true);
     fetchSpy.mockRestore();
   });
 
@@ -719,110 +730,23 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
 });
 
 /**
- * P470 — RPC error-code → HTTP status mapping.
+ * Phase 106 Stage B — wizard finalize enqueue, post-cutover.
  *
- * route.ts:413-431 maps four Postgres SQLSTATE codes raised by
- * `finalize_wizard_strategy` (migration 031) onto stable HTTP statuses +
- * sanitized error bodies:
+ * The flag-off single-key legacy dispatch and the compute-jobs queue-off
+ * arms were deleted: `runLegacyFinalize` — and therefore the
+ * route-level enqueue side-effect — is now reachable ONLY via the composite
+ * hoist (api_key_id === null + >=1 members), which enqueues stitch_composite
+ * unconditionally. Single-key and CSV finalize delegate to the unified
+ * backbone, which enqueues process_key_long worker-side (NOT from this route).
  *
- *   P0002 (no_data_found)          -> 404 "Draft not found"
- *   02000 (no_data)                -> 404 "Draft not found"
- *   42501 (insufficient_privilege) -> 403 "This draft cannot be finalized"
- *   22023 (invalid_parameter_value)-> 403 "This draft cannot be finalized"
- *   anything else                  -> 500 "Could not finalize wizard draft"
- *
- * Pre-fix this mapping table had ZERO test coverage. A regression that
- * dropped one of the codes (e.g., removed the 42501 branch) would either
- * leak the raw Postgres message to the client (P445-style PII leak) or
- * return a misleading 500 on a legitimate "not your draft" attempt.
- *
- * Each test forces the scope-broadening probe to PASS (live perms stay
- * read-only) so control reaches the RPC, then makes the RPC reject with
- * the target code. We assert (i) the HTTP status, (ii) a stable error
- * code/text, and (iii) that the raw Postgres message does NOT leak.
+ * Comprehensive composite-hoist coverage (stitch enqueue, O-1 per-member
+ * re-probe, W-4/F5(b) fail-closed) lives in the "Phase 88 composite-first
+ * routing" block below. These two cases pin the route-level enqueue contract.
  */
-/**
- * audit-2026-05-07 H-0330 — wizard finalize MUST enqueue the
- * sync_trades compute job (gated by USE_COMPUTE_JOBS_QUEUE) so the
- * strategy advances past computation_status='pending' on Round 2
- * cutover. Pre-fix the only enqueue lived in /api/keys/sync behind a
- * manual "Sync now" button; removing that button would orphan every
- * new wizard submission.
- *
- * Tests assert:
- *   - With the flag ON + a linked api_key, the after() block calls
- *     enqueue_compute_job exactly once with p_kind='sync_trades'.
- *   - With the flag OFF (default), no enqueue runs.
- *   - With the flag ON but no api_key (CSV branch), no enqueue runs.
- */
-describe("POST /api/strategies/finalize-wizard — H-0330 enqueue_compute_job", () => {
-  it("enqueues sync_trades when USE_COMPUTE_JOBS_QUEUE=true and a key is linked", async () => {
+describe("POST /api/strategies/finalize-wizard — Phase 106 finalize enqueue", () => {
+  it("enqueues stitch_composite unconditionally for a composite (via the hoist)", async () => {
     const fetchSpy = mockProbeReadOnly();
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
-    STATE.runAfterCallback = true;
-
-    const POST = await importPost();
-    const res = await POST(makeReq(VALID_BODY));
-    expect(res.status).toBe(200);
-
-    await flushAfter();
-
-    const enqueueCall = STATE.adminRpcCalls.find(
-      (c) => c.name === "enqueue_compute_job",
-    );
-    expect(enqueueCall).toBeDefined();
-    expect(enqueueCall!.args.p_kind).toBe("sync_trades");
-    expect(enqueueCall!.args.p_strategy_id).toBe(STRATEGY_ID);
-
-    fetchSpy.mockRestore();
-  });
-
-  it("does NOT enqueue when USE_COMPUTE_JOBS_QUEUE is unset (legacy default)", async () => {
-    const fetchSpy = mockProbeReadOnly();
-    STATE.runAfterCallback = true;
-
-    const POST = await importPost();
-    await POST(makeReq(VALID_BODY));
-
-    await flushAfter();
-
-    const enqueueCall = STATE.adminRpcCalls.find(
-      (c) => c.name === "enqueue_compute_job",
-    );
-    expect(enqueueCall).toBeUndefined();
-
-    fetchSpy.mockRestore();
-  });
-
-  it("does NOT enqueue when the strategy has no linked api_key (CSV branch)", async () => {
-    STATE.strategyRow = { api_key_id: null };
-    STATE.adminApiKeyId = null;
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
-    STATE.runAfterCallback = true;
-
-    const POST = await importPost();
-    await POST(makeReq(VALID_BODY));
-
-    await flushAfter();
-
-    const enqueueCall = STATE.adminRpcCalls.find(
-      (c) => c.name === "enqueue_compute_job",
-    );
-    expect(enqueueCall).toBeUndefined();
-  });
-});
-
-/**
- * Phase 86 (COMP-02) — composite dispatch. A strategy with >=1 strategy_keys
- * members enqueues `stitch_composite`; zero members keeps the byte-identical
- * `sync_trades`. W-4: a strategy_keys count-query ERROR fails CLOSED — it must
- * NOT silently enqueue the single-key `sync_trades` on a possible composite.
- */
-describe("POST /api/strategies/finalize-wizard — Phase 86 composite dispatch", () => {
-  it("enqueues stitch_composite when the strategy has >=1 strategy_keys members", async () => {
-    const fetchSpy = mockProbeReadOnly();
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
-    STATE.strategyKeysCount = 3;
+    routeThroughLegacyFinalize();
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -839,121 +763,21 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 composite dispatch",
     fetchSpy.mockRestore();
   });
 
-  it("keeps sync_trades (byte-identical) when the strategy has zero members", async () => {
+  it("does NOT enqueue from the route on the single-key unified path (worker enqueues instead)", async () => {
     const fetchSpy = mockProbeReadOnly();
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.strategyKeysCount = 0;
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
-    await POST(makeReq(VALID_BODY));
-    await flushAfter();
-
-    const enqueueCall = STATE.adminRpcCalls.find(
-      (c) => c.name === "enqueue_compute_job",
-    );
-    expect(enqueueCall).toBeDefined();
-    expect(enqueueCall!.args.p_kind).toBe("sync_trades");
-    fetchSpy.mockRestore();
-  });
-
-  it("W-4: fails CLOSED on a strategy_keys count error — never enqueues sync_trades", async () => {
-    const fetchSpy = mockProbeReadOnly();
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
-    STATE.strategyKeysCountError = { message: "count boom" };
-    STATE.runAfterCallback = true;
-
-    const POST = await importPost();
-    const res = await POST(makeReq(VALID_BODY));
-    // The finalize itself still returns 200 (the enqueue is a non-blocking
-    // after() side effect); the count error is surfaced to Sentry, not enqueued.
-    expect(res.status).toBe(200);
-    await flushAfter();
-
-    // No enqueue_compute_job AT ALL — never a single-key kind on a possible composite.
-    const enqueueCall = STATE.adminRpcCalls.find(
-      (c) => c.name === "enqueue_compute_job",
-    );
-    expect(enqueueCall).toBeUndefined();
-    // The count error is escalated to Sentry (Promise.allSettled rejection).
-    const sentry = STATE.captureToSentryCalls.find(
-      (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
-    );
-    expect(sentry).toBeDefined();
-    // F3: AND the strategy is stamped terminal 'failed' so the wizard poller
-    // reaches a gate — the reconcile cron does NOT re-drive composites, so
-    // without this the row would spin in 'pending' forever.
-    const stamp = STATE.strategyAnalyticsUpserts.find(
-      (p) => p.computation_status === "failed",
-    );
-    expect(stamp).toBeDefined();
-    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
-    fetchSpy.mockRestore();
-  });
-
-  it("F5(b): fails CLOSED on a null count WITHOUT error — no sync_trades, terminal stamp", async () => {
-    const fetchSpy = mockProbeReadOnly();
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
-    // PostgREST can return count===null with NO error; `(count ?? 0) > 0` would
-    // fall OPEN to the single-key sync_trades path on a possible composite.
-    STATE.strategyKeysCount = null;
-    STATE.strategyKeysCountError = null;
-    STATE.runAfterCallback = true;
-
-    const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
     await flushAfter();
 
-    // Never a single-key enqueue on an unknown-membership strategy.
     const enqueueCall = STATE.adminRpcCalls.find(
       (c) => c.name === "enqueue_compute_job",
     );
     expect(enqueueCall).toBeUndefined();
-    // Terminal 'failed' stamp so the wizard surfaces a gate (no infinite spin).
-    const stamp = STATE.strategyAnalyticsUpserts.find(
-      (p) => p.computation_status === "failed",
-    );
-    expect(stamp).toBeDefined();
-    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
-    // Escalated to Sentry as well.
-    const sentry = STATE.captureToSentryCalls.find(
-      (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
-    );
-    expect(sentry).toBeDefined();
-    fetchSpy.mockRestore();
-  });
-
-  it("Finding 6: fails LOUD (stamp + Sentry, no enqueue) when a composite is finalized with USE_COMPUTE_JOBS_QUEUE off", async () => {
-    const fetchSpy = mockProbeReadOnly();
-    // Queue OFF — pre-fix the composite count probe sat BELOW the queue gate, so a
-    // composite created here was silently orphaned (no job, no failure). Post-fix
-    // detection runs regardless and fails loud (stitch_composite has no worker).
-    delete process.env.USE_COMPUTE_JOBS_QUEUE;
-    STATE.strategyKeysCount = 3;
-    STATE.runAfterCallback = true;
-
-    const POST = await importPost();
-    const res = await POST(makeReq(VALID_BODY));
-    expect(res.status).toBe(200); // finalize itself is non-blocking (after())
-    await flushAfter();
-
-    // No enqueue AT ALL — never a single-key sync_trades on a composite.
-    const enqueueCall = STATE.adminRpcCalls.find(
-      (c) => c.name === "enqueue_compute_job",
-    );
-    expect(enqueueCall).toBeUndefined();
-    // Terminal 'failed' stamp so the wizard poller reaches a gate.
-    const stamp = STATE.strategyAnalyticsUpserts.find(
-      (p) => p.computation_status === "failed",
-    );
-    expect(stamp).toBeDefined();
-    expect(stamp!.strategy_id).toBe(STRATEGY_ID);
-    // Escalated to Sentry (Promise.allSettled rejection of the side effect).
-    const sentry = STATE.captureToSentryCalls.find(
-      (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
-    );
-    expect(sentry).toBeDefined();
     fetchSpy.mockRestore();
   });
 });
@@ -967,7 +791,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 composite dispatch",
 describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone composite guard", () => {
   it("fails LOUD (409 + terminal stamp) when a composite reaches the unified path", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.strategyKeysCount = 2;
 
     const POST = await importPost();
@@ -993,7 +816,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone com
 
   it("passes a single-key strategy (0 members) through to the unified path (200)", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.strategyKeysCount = 0;
 
     const POST = await importPost();
@@ -1009,7 +831,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone com
 
   it("fails CLOSED (503 + Sentry + stamp) on an unknowable membership count in the unified path", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.strategyKeysCountError = { message: "count boom" };
 
     const POST = await importPost();
@@ -1040,6 +861,7 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone com
 describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonical name", () => {
   it("uses the DB-row name when it differs from the form input", async () => {
     const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize();
     STATE.adminStrategyName = "Sanitized DB Name";
     STATE.runAfterCallback = true;
 
@@ -1054,6 +876,7 @@ describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonica
 
   it("falls back to the form input when the DB-row name is missing", async () => {
     const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize();
     STATE.adminStrategyName = null;
     STATE.runAfterCallback = true;
 
@@ -1127,6 +950,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
   it("maps P0002 (no_data_found) to 404 + sanitized 'Draft not found'", async () => {
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
     STATE.rpcResult = {
       data: null,
       // Raw Postgres-style message; must NOT leak to the client.
@@ -1149,6 +973,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
   it("maps 02000 (no_data) to 404 + sanitized 'Draft not found'", async () => {
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
     STATE.rpcResult = {
       data: null,
       error: { code: "02000", message: "no data returned by the query" },
@@ -1169,6 +994,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
   it("maps 42501 (insufficient_privilege) to 403 + sanitized 'This draft cannot be finalized'", async () => {
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
     STATE.rpcResult = {
       data: null,
       error: {
@@ -1199,6 +1025,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     // client show a refresh nudge rather than a sign-out / no-access prompt.
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
     STATE.rpcResult = {
       data: null,
       error: {
@@ -1225,6 +1052,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     // A made-up unhandled code — must NOT silently 200, must NOT leak.
+    routeThroughLegacyFinalize();
     STATE.rpcResult = {
       data: null,
       error: { code: "XX001", message: "internal_error: oops at line 42" },
@@ -1299,6 +1127,7 @@ describe("POST /api/strategies/finalize-wizard — H-0322 Sentry escalation on k
     const consoleWarn = vi
       .spyOn(console, "warn")
       .mockImplementation(() => {});
+    routeThroughLegacyFinalize();
     STATE.adminStrategiesError = { message: "transient PG blip" };
     STATE.runAfterCallback = true;
 
@@ -1338,7 +1167,6 @@ describe("POST /api/strategies/finalize-wizard — H-0323 Sentry escalation on k
     const consoleWarn = vi
       .spyOn(console, "warn")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.adminApiKeysSelectError = { message: "stale snapshot" };
 
     const POST = await importPost();
@@ -1377,7 +1205,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: "yes", verification_id: "ver-1" },
@@ -1404,7 +1231,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { verification_id: "ver-1" },
@@ -1420,7 +1246,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
 
   it("returns 200 + translated envelope when upstream matches the onboard shape", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: true, verification_id: "ver-1" },
@@ -1446,7 +1271,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
   // routes the duplicate copy on the idempotent-resume path.
   it("returns 200 + WIZARD_DUPLICATE envelope when upstream queued=false", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: {
@@ -1480,7 +1304,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: {
@@ -1510,7 +1333,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: true },
@@ -1532,7 +1354,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: false, verification_id: "ver-1" },
@@ -1563,7 +1384,7 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escala
     const consoleWarn = vi
       .spyOn(console, "warn")
       .mockImplementation(() => {});
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
+    routeThroughLegacyFinalize();
     STATE.adminEnqueueError = { message: "duplicate key value" };
     STATE.runAfterCallback = true;
 
@@ -1593,10 +1414,10 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escala
  *
  * D-LOCKED (CONTEXT 2026-07-10, Option A): a strategy with >=1 strategy_keys
  * member (api_key_id NULL) ALWAYS enqueues stitch_composite via
- * runLegacyFinalize's after() arm, BEFORE and independent of
- * isUnifiedBackboneActive(). Prod runs the unified backbone (on since
- * 2026-05-25), whose arm 409s composites (COMPOSITE_UNSUPPORTED_UNIFIED) — the
- * hoist is what makes wizard composites reach prod at all.
+ * runLegacyFinalize's after() arm, BEFORE and independent of the unified
+ * single-key arm. The backbone is permanent-on (Phase 106), and its single-key
+ * arm 409s composites (COMPOSITE_UNSUPPORTED_UNIFIED) — the hoist is what makes
+ * wizard composites reach prod at all.
  *
  * The hoist engages only for api_key_id === null: composites have api_key_id
  * NULL by construction; an api_key_id-bearing strategy is definitively
@@ -1646,8 +1467,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
       { api_key_id: MEMBER_KEY_1 },
       { api_key_id: MEMBER_KEY_2 },
     ];
-    STATE.unifiedBackboneActive = true; // prod reality — the arm that 409s composites
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -1692,8 +1511,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
       { api_key_id: MEMBER_KEY_1 },
       { api_key_id: MEMBER_KEY_2 },
     ];
-    STATE.unifiedBackboneActive = true;
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -1728,8 +1545,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
       { api_key_id: MEMBER_KEY_1 },
       { api_key_id: MEMBER_KEY_2 },
     ];
-    STATE.unifiedBackboneActive = true;
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1753,8 +1568,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     STATE.strategyRow = { api_key_id: null };
     STATE.strategyKeysCount = 1;
     STATE.strategyKeysList = [{ api_key_id: MEMBER_KEY_1 }];
-    STATE.unifiedBackboneActive = true;
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1772,10 +1585,8 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     STATE.strategyRow = { api_key_id: null }; // possible composite
     STATE.strategyKeysCountError = { message: "count boom" };
-    // backbone OFF — proves the hoist blocks the single-key LEGACY dispatch (the
+    // The hoist blocks the single-key dispatch for a possible composite (the
     // path a count blip would silently route a possible composite through).
-    STATE.unifiedBackboneActive = false;
-    process.env.USE_COMPUTE_JOBS_QUEUE = "true";
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1811,7 +1622,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const fetchSpy = mockProbeReadOnly();
     STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.strategyKeysCount = 0;
-    STATE.unifiedBackboneActive = true;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1825,19 +1635,24 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     fetchSpy.mockRestore();
   });
 
-  it("neutrality: single-key (api_key_id set, 0 members) still uses the legacy path under backbone-OFF", async () => {
+  it("Phase 106 Stage B: single-key (api_key_id set, 0 members) always uses the unified path — the flag-off legacy dispatch is deleted", async () => {
     const fetchSpy = mockProbeReadOnly();
     STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.strategyKeysCount = 0;
-    STATE.unifiedBackboneActive = false;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
-    // Legacy finalize RPC fired (single-key path unchanged).
+    // The single-key legacy finalize RPC MUST NOT fire — dispatch is unified.
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeDefined();
+    ).toBeUndefined();
+    // No composite failed stamp on the single-key unified path.
+    expect(
+      STATE.strategyAnalyticsUpserts.find(
+        (p) => p.computation_status === "failed",
+      ),
+    ).toBeUndefined();
     fetchSpy.mockRestore();
   });
 });

@@ -67,10 +67,6 @@ vi.mock("@/lib/analytics-client", () => {
 const captureSpy = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
 
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: vi.fn().mockResolvedValue(false),
-}));
-
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from(table: string) {
@@ -165,79 +161,6 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(body.error).toContain("Unsupported exchange");
     expect(verifyStrategyMock).not.toHaveBeenCalled();
   });
-
-  it("returns 429 when the email has already hit MAX_REQUESTS_PER_DAY (5)", async () => {
-    // The legacy handler counts verification_requests for this email in
-    // the last 24h and refuses at >= 5.
-    verificationCount = 5;
-    const { POST } = await import("./route");
-    const res = await POST(postReq(VALID_BODY));
-    expect(res.status).toBe(429);
-    const body = await res.json();
-    expect(body.error).toContain("Rate limit exceeded");
-    // The daily cap short-circuits BEFORE the analytics delegate runs.
-    expect(verifyStrategyMock).not.toHaveBeenCalled();
-  });
-
-  it("admits a valid payload under the daily cap (count < 5) — delegate runs", async () => {
-    // Belt-and-braces so the 429 test above can't pass vacuously: a
-    // well-formed request under the cap must reach the delegate.
-    verificationCount = 4;
-    const { POST } = await import("./route");
-    const res = await POST(postReq(VALID_BODY));
-    expect(res.status).toBe(200);
-    expect(verifyStrategyMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("F5b (R8) — a 5xx/generic delegate error returns 502 STATIC (no leak) + Sentry", async () => {
-    // The thrown message mimics the raw Python traceback / contract-violation
-    // string the analytics client surfaces on a 5xx — exactly what must NOT
-    // reach the (semi-public) verification caller.
-    verificationCount = 0;
-    verifyStrategyMock.mockRejectedValue(
-      new Error("Traceback: simulator_scoring.py:188 KeyError 'sharpe'"),
-    );
-    const { POST } = await import("./route");
-    const res = await POST(postReq(VALID_BODY));
-    expect(res.status).toBe(502);
-    const body = await res.json();
-    expect(body.error).toBe("Verification service unavailable. Please try again.");
-    expect(body.error).not.toContain("Traceback");
-    expect(body.error).not.toContain("simulator_scoring");
-    expect(captureSpy).toHaveBeenCalledWith(
-      expect.any(Error),
-      expect.objectContaining({ tags: { route: "api/verify-strategy" } }),
-    );
-  });
-
-  it("F5b (R8) — a curated 4xx delegate error is forwarded with its status", async () => {
-    verificationCount = 0;
-    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
-    verifyStrategyMock.mockRejectedValue(
-      new AnalyticsUpstreamError("No trades found for this key in the last 90 days", 404),
-    );
-    const { POST } = await import("./route");
-    const res = await POST(postReq(VALID_BODY));
-    // Curated 4xx detail is user-actionable — it MUST still reach the caller.
-    expect(res.status).toBe(404);
-    const body = await res.json();
-    expect(body.error).toBe("No trades found for this key in the last 90 days");
-    expect(captureSpy).not.toHaveBeenCalled();
-  });
-
-  it("F5b (R8) — a delegate timeout returns 504 STATIC, no Sentry (timeout is upstream-expected)", async () => {
-    verificationCount = 0;
-    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
-    verifyStrategyMock.mockRejectedValue(
-      new AnalyticsTimeoutError("/api/verify-strategy", 30000),
-    );
-    const { POST } = await import("./route");
-    const res = await POST(postReq(VALID_BODY));
-    expect(res.status).toBe(504);
-    const body = await res.json();
-    expect(body.error).toBe("Verification timed out. Please try again.");
-    expect(captureSpy).not.toHaveBeenCalled();
-  });
 });
 
 /**
@@ -256,10 +179,6 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
   });
 
   it("update call includes trust_tier=self_reported, overriding upstream api_verified", async () => {
-    vi.doMock("@/lib/feature-flags", () => ({
-      isUnifiedBackboneActive: vi.fn().mockResolvedValue(true),
-    }));
-
     vi.doMock("@/lib/process-key-client", () => ({
       postProcessKey: vi.fn().mockResolvedValue({
         ok: true,
@@ -307,7 +226,7 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
  * `fingerprint`, and internal trust fields that must never reach an
  * unauthenticated browser.
  *
- * This test drives the unified handler (isUnifiedBackboneActive=true) and
+ * This test drives the unified handler (the only path since Phase 106) and
  * asserts that the response contains NONE of the sensitive upstream fields,
  * even when the upstream mock injects them.
  *
@@ -317,9 +236,6 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
  * (+ optional metrics_snapshot/status).
  */
 describe("NEW-C35-01 — unified path does not spread encrypted_credentials", () => {
-  // Drive the unified path
-  const isUnifiedMock = vi.fn().mockResolvedValue(true);
-
   beforeEach(() => {
     vi.clearAllMocks();
     verificationCount = 0;
@@ -330,10 +246,6 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
   });
 
   it("response body contains NO encrypted_credentials even when upstream injects them", async () => {
-    vi.doMock("@/lib/feature-flags", () => ({
-      isUnifiedBackboneActive: isUnifiedMock,
-    }));
-
     // Mock process-key-client to return a response that includes sensitive fields
     vi.doMock("@/lib/process-key-client", () => ({
       postProcessKey: vi.fn().mockResolvedValue({

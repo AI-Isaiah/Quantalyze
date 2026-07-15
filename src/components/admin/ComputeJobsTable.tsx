@@ -59,7 +59,6 @@ const STATUS_OPTIONS = [
 const KIND_OPTIONS = [
   { value: "", label: "All kinds" },
   { value: "sync_trades", label: "sync_trades" },
-  { value: "compute_analytics", label: "compute_analytics" },
   { value: "compute_portfolio", label: "compute_portfolio" },
   { value: "poll_positions", label: "poll_positions" },
 ];

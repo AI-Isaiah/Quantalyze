@@ -1579,7 +1579,7 @@ export interface VerificationRequest {
  * with the seeded rows and with `analytics-service/services/jobs.py`'s
  * dispatch table.
  */
-export type JobKind = "sync_trades" | "compute_analytics" | "compute_portfolio" | "poll_positions";
+export type JobKind = "sync_trades" | "compute_portfolio" | "poll_positions";
 
 /**
  * Compute queue job status. Mirrors the CHECK constraint on
@@ -1636,7 +1636,7 @@ export interface ComputeJob {
   last_error: string | null;
   error_kind: ErrorKind | null;
   idempotency_key: string | null;
-  /** sync_trades only; NULL for compute_analytics and compute_portfolio. */
+  /** sync_trades only; NULL for compute_portfolio. */
   exchange: SupportedExchange | null;
   /** Populated after a successful fetch_trades run, for observability. */
   trade_count: number | null;

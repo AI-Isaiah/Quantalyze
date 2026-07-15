@@ -11,9 +11,9 @@ Runs 3 interleaved asyncio loops on Railway (CMD override: python -m main_worker
      queued — see Phase 12 / METRICS-14.
 
   2. **Watchdog loop** (every 60s) — calls reset_stalled_compute_jobs with
-     per-kind thresholds so long-running compute_analytics (20 min ceiling)
-     coexists with faster sync_trades (10 min) without the watchdog
-     prematurely reclaiming slow-but-healthy jobs.
+     per-kind thresholds so long-running sync_trades (30 min ceiling)
+     coexists with faster kinds without the watchdog prematurely
+     reclaiming slow-but-healthy jobs.
 
   3. **Daily enqueue loop** (every 24h) — calls
      enqueue_poll_positions_for_all_strategies RPC once per day to seed
@@ -47,7 +47,6 @@ load_dotenv()
 
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
-from services.feature_flags import is_unified_backbone_active
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
@@ -112,8 +111,8 @@ SHUTDOWN = asyncio.Event()
 # Matches the timeouts in services.job_worker.TIMEOUT_PER_KIND but with
 # headroom. The watchdog threshold must be GREATER than the handler timeout
 # so the handler has a chance to timeout-classify itself before the
-# watchdog yanks the row. Example: compute_analytics handler timeout is
-# 15 min, watchdog threshold is 20 min.
+# watchdog yanks the row. Example: compute_portfolio handler timeout is
+# 10 min, watchdog threshold is 15 min.
 # Each value MUST be greater than services.job_worker.TIMEOUT_PER_KIND[kind].
 # A watchdog threshold below the handler timeout requeues the job before the
 # handler can fail-classify itself, leaving callers (the wizard polls
@@ -137,7 +136,6 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     # §Recommendation pairs the fence with this override:
     # `.planning/audit-2026-05-07/INVEST-P97.md`.
     "sync_trades": "30 minutes",       # handler timeout = 15 minutes (mig 117)
-    "compute_analytics": "20 minutes", # handler timeout = 15 minutes
     # Phase 19.1 — handler timeout = 10 minutes; watchdog must be
     # strictly greater (the test_every_kind_has_watchdog_headroom
     # invariant enforces). Mirrors compute_portfolio.
@@ -383,15 +381,14 @@ async def dispatch_tick(worker_id: str) -> None:
     # legacy claim_compute_jobs (migration 032), so two replicas claiming
     # in parallel still get disjoint result sets.
     #
-    # Phase 19 / BACKBONE-05 — drain semantics: read the unified-backbone
-    # flag once per tick and pass it as the third argument so migration
-    # 104's claim RPC stamps 'unified_backbone_at_claim' into
-    # compute_jobs.metadata at claim time. Workers later read that
-    # snapshot (NOT the live env var) to decide which code path to run,
-    # so a flag flip mid-tick doesn't split-brain in-flight jobs. The
-    # is_unified_backbone_active() call is cached for 30s in-process so
-    # this is effectively a free op on most ticks.
-    flag_active = await is_unified_backbone_active()
+    # Phase 106: backbone permanent-on; param retained — claim-RPC signature
+    # unchanged, NO DDL in 106-proper. The former per-tick unified-backbone
+    # flag read (whose value migration 104's claim RPC stamps into
+    # compute_jobs.metadata) is now a literal True: the kill-switch reader is
+    # deleted and the unified backbone is the only path. The RPC still receives
+    # p_unified_backbone_active — passed constant true — so its signature and
+    # the metadata stamp are byte-identical to prod's steady state.
+    flag_active = True
 
     def _claim_priority():
         return supabase.rpc(

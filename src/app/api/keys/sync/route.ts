@@ -1,12 +1,10 @@
-import { NextRequest, NextResponse, after } from "next/server";
-import { fetchTrades, computeAnalytics } from "@/lib/analytics-client";
+import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, keysSyncUserLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
@@ -17,42 +15,30 @@ import type { User } from "@supabase/supabase-js";
 /**
  * POST /api/keys/sync — kicks off trade sync + analytics computation.
  *
- * Phase 19 / BACKBONE-10: when `isUnifiedBackboneActive()` is true, the
- * route delegates to `${ANALYTICS_SERVICE_URL}/process-key` with
- * `flow_type=resync`. Otherwise the existing legacy code path runs (queue
- * via USE_COMPUTE_JOBS_QUEUE or the `after()` fire-and-forget).
+ * Phase 19 / BACKBONE-10: the route delegates to
+ * `${ANALYTICS_SERVICE_URL}/process-key` with `flow_type=resync` via the
+ * unified backbone. The legacy compute-jobs-queue / `after()`
+ * fire-and-forget paths were retired in Stage B (106-07) — the unified
+ * dispatch is now unconditional. The Python worker is the sole writer of
+ * strategy_analytics.computation_status (via the `sync_strategy_analytics_status`
+ * RPC, migration 038); this route never upserts computation_status directly.
  *
- * Two legacy execution paths controlled by USE_COMPUTE_JOBS_QUEUE:
- *
- *   Flag ON  → enqueue a `sync_trades` job into the compute_jobs queue via
- *              the `enqueue_compute_job` RPC (migration 032). The Python
- *              worker is the sole writer of strategy_analytics.computation_status
- *              on this path (via the `sync_strategy_analytics_status` RPC,
- *              migration 038). No direct upsert from this route.
- *
- *   Flag OFF → legacy `after()` fire-and-forget path. This route upserts
- *              computation_status='computing' directly, then runs fetchTrades
- *              + computeAnalytics in the background. This is the only
- *              non-worker writer of computation_status in the codebase.
- *
- * Response shape is identical on both legacy paths: 202 {accepted, strategy_id, status}.
+ * Response shape: 202 {ok, accepted, strategy_id, status:'syncing'}.
  *
  * Phase 89 / PREV-01 — composite-first kickoff. A member-bearing composite
  * (strategies.api_key_id === null AND a strategy_keys count > 0) enqueues the
- * SAME `stitch_composite` job finalize dispatches, HOISTED ahead of
- * isUnifiedBackboneActive() (prod runs unified='on', whose single-key arm
- * cannot honestly derive a NULL-api_key composite). This mirrors the Phase-88
- * finalize-wizard hoist and fails CLOSED on an unknowable membership count.
+ * SAME `stitch_composite` job finalize dispatches, HOISTED ahead of the unified
+ * dispatch (the unified single-key arm cannot honestly derive a NULL-api_key
+ * composite). This mirrors the Phase-88 finalize-wizard hoist and fails CLOSED
+ * on an unknowable membership count.
  *
  * ─── Direct-writes audit (D.10) ───────────────────────────────────────
  * Post-2.9 R2 writers of strategy_analytics.computation_status:
- *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — sole
- *       writer when USE_COMPUTE_JOBS_QUEUE=true.
- *   (b) Legacy after() path below (flag OFF only) — upserts 'computing' on
- *       entry and 'failed' on error. Will be removed when flag is retired.
+ *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — the
+ *       compute_jobs worker is the sole writer on the unified/queue path.
  *   (c) analytics_runner.py (Python /api/compute-analytics) — upserts
- *       'computing'/'complete'/'failed' during direct compute calls. Called
- *       by the worker internally; also reachable via the legacy after() path.
+ *       'computing'/'complete'/'failed' during compute, invoked by the
+ *       worker internally.
  *   (d) portfolio.py (Python /api/portfolio-analytics) — writes
  *       computation_status for portfolio_analytics rows only, not strategy.
  *   (e) Initial strategy creation: migration 001 DEFAULT 'pending' on INSERT.
@@ -146,8 +132,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // BEFORE finalize; a member-bearing composite must kick off the SAME
   // production `stitch_composite` job finalize enqueues — NOT sync_trades /
   // the unified single-key resync — so the stitched strategy_analytics row the
-  // preview reads actually exists. Placed AHEAD of isUnifiedBackboneActive()
-  // because prod runs process_key_unified_backbone='on' and the unified arm
+  // preview reads actually exists. Placed AHEAD of the unified single-key arm
+  // because the backbone is permanent-on (Phase 106) and the unified arm
   // cannot honestly derive a NULL-api_key composite (it would mis-route to a
   // single-key path). This MIRRORS the Phase-88 finalize-wizard hoist
   // (finalize-wizard/route.ts:517-621).
@@ -177,29 +163,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
 
     if (memberCount > 0) {
-      // stitch_composite is a compute_jobs kind — without the queue there is NO
-      // worker to derive it. Fail LOUD (terminal 'failed' stamp + 503) rather
-      // than orphan a composite that never derives. Mirrors finalize :889-906.
-      if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
-        await stampCompositeFailedUnlessComplete(
-          admin,
-          strategy_id,
-          {
-            computation_status: "failed",
-            computation_warned: false,
-            computation_error:
-              "Composite strategy requires the compute-jobs queue " +
-              "(USE_COMPUTE_JOBS_QUEUE) to derive; enable it and retry.",
-            data_quality_flags: { csv_source: true, composite: true },
-          },
-          "queue-off composite",
-        );
-        return NextResponse.json(
-          { error: "Could not start sync. Try again in a moment." },
-          { status: 503, headers: NO_STORE_HEADERS },
-        );
-      }
-
       // #597 / F-1 (UAT): a composite annualizes its headline on the venue blend
       // — every supported member venue is crypto, so √365 — but strategies.asset_class
       // carries the NOT NULL DEFAULT 'traditional' (√252) until finalize force-derives
@@ -288,37 +251,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // through to the existing unified/legacy split byte-unchanged.
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag.
-  if (await isUnifiedBackboneActive()) {
-    // API-8: resolve the actual exchange from strategies.api_key_id →
-    // api_keys.exchange so we don't hardcode `source: 'okx'`. Falls back to
-    // 'okx' when the strategy has no api_key (CSV-only resync, which the
-    // unified router will short-circuit).
-    let resolvedSource = "okx";
-    const { data: stratKey } = await supabase
-      .from("strategies")
-      .select("api_key_id")
-      .eq("id", strategy_id)
+  // Phase 19 / BACKBONE-10 — unified backbone is now the unconditional path
+  // (the legacy flag-off dispatch was retired in Stage B 106-07).
+  // API-8: resolve the actual exchange from strategies.api_key_id →
+  // api_keys.exchange so we don't hardcode `source: 'okx'`. Falls back to
+  // 'okx' when the strategy has no api_key (CSV-only resync, which the
+  // unified router will short-circuit).
+  let resolvedSource = "okx";
+  const { data: stratKey } = await supabase
+    .from("strategies")
+    .select("api_key_id")
+    .eq("id", strategy_id)
+    .single();
+  if (stratKey?.api_key_id) {
+    const admin = createAdminClient();
+    const { data: keyRow } = await admin
+      .from("api_keys")
+      .select("exchange")
+      .eq("id", stratKey.api_key_id)
       .single();
-    if (stratKey?.api_key_id) {
-      const admin = createAdminClient();
-      const { data: keyRow } = await admin
-        .from("api_keys")
-        .select("exchange")
-        .eq("id", stratKey.api_key_id)
-        .single();
-      if (keyRow?.exchange) {
-        resolvedSource = keyRow.exchange;
-      }
+    if (keyRow?.exchange) {
+      resolvedSource = keyRow.exchange;
     }
-    return await unifiedKeysSyncHandler({
-      strategy_id,
-      userId: user.id,
-      source: resolvedSource,
-    });
   }
-
-  return await legacyKeysSyncHandler({ supabase, strategy_id, userId: user.id });
+  return await unifiedKeysSyncHandler({
+    strategy_id,
+    userId: user.id,
+    source: resolvedSource,
+  });
 });
 
 /**
@@ -515,150 +475,4 @@ async function unifiedKeysSyncHandler(args: {
   // correct hardening (fail-loud-on-drift like finalize-wizard's unified
   // handler) is the B9 no-passthrough-on-ipc rule's domain, not F5's.
   return NextResponse.json(upstream, { headers: NO_STORE_HEADERS });
-}
-
-/**
- * Legacy path preserved verbatim from the pre-Phase-19 implementation.
- * Will be removed in a follow-up cleanup PR after the 7-day stability
- * window passes.
- */
-// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
-async function legacyKeysSyncHandler(args: {
-  supabase: Awaited<ReturnType<typeof createClient>>;
-  strategy_id: string;
-  userId: string;
-}): Promise<NextResponse> {
-  const { strategy_id } = args;
-
-  // ── Queue path (USE_COMPUTE_JOBS_QUEUE=true) ──────────────────────
-  if (process.env.USE_COMPUTE_JOBS_QUEUE === "true") {
-    const admin = createAdminClient();
-    // Phase 18 forensic patch (Day-2 Bug #1): thread the inbound
-    // correlation_id into compute_jobs.metadata so the SC-1 fifth layer
-    // is queryable end-to-end (Next.js → enqueue_compute_job RPC →
-    // compute_jobs row → worker dispatch → strategy_analytics bridge).
-    const correlation_id = await getCorrelationId();
-    const { data: rpcData, error: rpcError } = await admin.rpc(
-      "enqueue_compute_job",
-      {
-        p_strategy_id: strategy_id,
-        p_kind: "sync_trades",
-        p_metadata: { correlation_id },
-      },
-    );
-
-    if (rpcError) {
-      console.error(
-        `[keys/sync] enqueue_compute_job RPC failed for ${strategy_id}:`,
-        rpcError,
-      );
-      return NextResponse.json(
-        { error: "Could not start sync. Try again in a moment." },
-        { status: 503, headers: NO_STORE_HEADERS },
-      );
-    }
-
-    console.log(
-      `[keys/sync] enqueued sync_trades job=${rpcData} for strategy=${strategy_id}`,
-    );
-
-    logAuditEventAsUser(admin, args.userId, {
-      action: "sync.start",
-      entity_type: "sync",
-      entity_id: strategy_id,
-      metadata: { path: "queue" },
-    });
-
-    return NextResponse.json(
-      // Single-key/CSV legacy queue path — `composite: false` so the preview
-      // step's discriminator stays byte-neutral for non-composite strategies.
-      { ok: true, accepted: true, strategy_id, status: "syncing", composite: false },
-      { status: 202, headers: NO_STORE_HEADERS },
-    );
-  }
-
-  // ── Legacy path (flag OFF — default) ──────────────────────────────
-  const admin = createAdminClient();
-  // @audit-skip: compute-job state tracking. `strategy_analytics.computation_status`
-  // is an internal state machine for the Railway worker pipeline, not a
-  // user-visible state change. The user-facing action is "start a key
-  // sync" which dispatches via enqueue_compute_job (no direct mutation
-  // on this path).
-  const { error: upsertErr } = await admin
-    .from("strategy_analytics")
-    .upsert(
-      {
-        strategy_id,
-        computation_status: "computing",
-        computation_error: null,
-      },
-      { onConflict: "strategy_id" },
-    );
-  if (upsertErr) {
-    console.error(
-      `[keys/sync] strategy_analytics upsert failed for ${strategy_id}:`,
-      upsertErr,
-    );
-    return NextResponse.json(
-      { error: "Could not start sync. Try again in a moment." },
-      { status: 503, headers: NO_STORE_HEADERS },
-    );
-  }
-
-  logAuditEventAsUser(admin, args.userId, {
-    action: "sync.start",
-    entity_type: "sync",
-    entity_id: strategy_id,
-    metadata: { path: "legacy" },
-  });
-
-  after(async () => {
-    try {
-      await fetchTrades(strategy_id);
-      // Python compute-analytics writes the terminal status directly.
-      const result = await computeAnalytics(strategy_id);
-      console.log(
-        `[keys/sync] compute complete for strategy=${strategy_id} status=${result.status}`,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "Sync failed";
-      console.error(
-        `[keys/sync] async sync failed for strategy=${strategy_id}:`,
-        err,
-      );
-      try {
-        // @audit-skip: compute-job state tracking, failure branch.
-        // Internal state machine, not user-intent.
-        await admin
-          .from("strategy_analytics")
-          .upsert(
-            {
-              strategy_id,
-              computation_status: "failed",
-              // SI-02 (LOW-MEDIUM, v1.9): clear the runner-owned warned marker
-              // on the terminal 'failed' write, mirroring the Python fix
-              // (analytics_runner / job_worker). Without it a prior-warned
-              // strategy can be resurrected to `complete_with_warnings` by the
-              // status bridge OVER a genuine failure. Defensive: this legacy
-              // after() path is dormant in prod (unified backbone active +
-              // USE_COMPUTE_JOBS_QUEUE unset), but the clear is cheap correctness.
-              computation_warned: false,
-              computation_error: message,
-            },
-            { onConflict: "strategy_id" },
-          );
-      } catch (updateErr) {
-        console.error(
-          `[keys/sync] failed to write failed-status row for strategy=${strategy_id}:`,
-          updateErr,
-        );
-      }
-    }
-  });
-
-  return NextResponse.json(
-    // Single-key/CSV legacy after() path — `composite: false` (see above).
-    { ok: true, accepted: true, strategy_id, status: "syncing", composite: false },
-    { status: 202, headers: NO_STORE_HEADERS },
-  );
 }

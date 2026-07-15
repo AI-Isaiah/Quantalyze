@@ -282,19 +282,17 @@ class TestDispatchTick:
     @pytest.mark.asyncio
     async def test_dispatch_tick_priority_rpc_param_shape(self) -> None:
         """The priority-aware RPC is called with batch_size=5, the
-        worker_id passed through, and the BACKBONE-05 unified-backbone
-        flag (boolean, captured once per tick)."""
+        worker_id passed through, and p_unified_backbone_active as a
+        constant True (Phase 106: backbone permanent-on; the former
+        per-tick is_unified_backbone_active() read is now a literal True,
+        claim-RPC signature unchanged)."""
         mock_supabase = MagicMock()
         chain = MagicMock()
         chain.execute.return_value = MagicMock(data=[])
         mock_supabase.rpc.return_value = chain
 
         with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()), \
-             patch(
-                 "main_worker.is_unified_backbone_active",
-                 new=AsyncMock(return_value=True),
-             ):
+             patch("main_worker.dispatch", new=AsyncMock()):
             await dispatch_tick("worker-test-shape")
 
         priority_calls = [
@@ -308,36 +306,6 @@ class TestDispatchTick:
             "p_worker_id": "worker-test-shape",
             "p_unified_backbone_active": True,
         }
-
-    # Phase 19 / BACKBONE-05 — drain semantics: the dispatch loop must
-    # always pass the third arg (boolean), even when the flag is OFF, so
-    # migration 104 can stamp 'unified_backbone_at_claim' = 'false' for
-    # legacy claims. The handler-side drain check then refuses to
-    # process them through the unified path.
-    @pytest.mark.asyncio
-    async def test_dispatch_tick_passes_flag_off_when_disabled(self) -> None:
-        """When is_unified_backbone_active() returns False, the third
-        arg to claim_compute_jobs_with_priority is False (NOT omitted)."""
-        mock_supabase = MagicMock()
-        chain = MagicMock()
-        chain.execute.return_value = MagicMock(data=[])
-        mock_supabase.rpc.return_value = chain
-
-        with patch("main_worker.get_supabase", return_value=mock_supabase), \
-             patch("main_worker.dispatch", new=AsyncMock()), \
-             patch(
-                 "main_worker.is_unified_backbone_active",
-                 new=AsyncMock(return_value=False),
-             ):
-            await dispatch_tick("worker-test-flag-off")
-
-        priority_calls = [
-            c for c in mock_supabase.rpc.call_args_list
-            if c.args[0] == "claim_compute_jobs_with_priority"
-        ]
-        assert len(priority_calls) == 1
-        params = priority_calls[0].args[1]
-        assert params["p_unified_backbone_active"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -378,7 +346,6 @@ class TestWatchdogTick:
         # so OKX backfills (legitimately 12+ min) don't routinely trip the
         # watchdog and trigger Race A 2-worker overlap.
         assert overrides["sync_trades"] == "30 minutes"
-        assert overrides["compute_analytics"] == "20 minutes"
         assert overrides["poll_positions"] == "5 minutes"
         assert overrides["compute_portfolio"] == "15 minutes"
 
@@ -845,25 +812,24 @@ class TestClaimDedupe:
 
 # ---------------------------------------------------------------------------
 # Audit closure M-0739 — every dispatch_tick test uses kind='sync_trades'.
-# After the migration 086 RPC swap + phase12 backfill, dispatch_tick handles
-# compute_analytics-kind jobs (priority='low'). The PER-KIND HANDLER routing
-# (compute_analytics → run_compute_analytics_job) is already covered in
-# test_job_worker.py::test_dispatch_routes_compute_analytics. The gap THIS
-# test fills is at the dispatch_tick layer: dispatch_tick must forward a
-# compute_analytics-kind row to dispatch() UNCHANGED — it must not silently
-# filter/drop non-sync_trades kinds from the claim batch (which would no-op
-# the entire backfill while sync_trades tests stay green).
+# dispatch_tick also handles non-sync_trades kinds (e.g.
+# compute_analytics_from_csv). The PER-KIND HANDLER routing is covered in
+# test_job_worker.py::test_dispatch_routes_*. The gap THIS test fills is at
+# the dispatch_tick layer: dispatch_tick must forward a non-sync_trades row
+# to dispatch() UNCHANGED — it must not silently filter/drop non-sync_trades
+# kinds from the claim batch (which would no-op them while sync_trades tests
+# stay green).
 # ---------------------------------------------------------------------------
 
 
 class TestDispatchTickKindAgnostic:
     @pytest.mark.asyncio
     async def test_compute_analytics_job_is_forwarded_to_dispatch(self) -> None:
-        """A claimed compute_analytics-kind job reaches dispatch() with its
+        """A claimed non-sync_trades job reaches dispatch() with its
         kind intact — dispatch_tick is kind-agnostic and must not drop it."""
         job = {
             "id": "ca-job-1",
-            "kind": "compute_analytics",
+            "kind": "compute_analytics_from_csv",
             "strategy_id": "strat-backfill",
         }
         mock_supabase = MagicMock()
@@ -888,8 +854,8 @@ class TestDispatchTickKindAgnostic:
 
         mock_dispatch.assert_awaited_once()
         forwarded = mock_dispatch.await_args.args[0]
-        assert forwarded["kind"] == "compute_analytics", (
-            f"dispatch_tick mangled or dropped the compute_analytics kind: "
+        assert forwarded["kind"] == "compute_analytics_from_csv", (
+            f"dispatch_tick mangled or dropped the compute_analytics_from_csv kind: "
             f"{forwarded!r}"
         )
         assert forwarded["id"] == "ca-job-1"
@@ -979,7 +945,7 @@ class TestWatchdogInvariant:
 
     def test_every_kind_has_watchdog_headroom(self) -> None:
         """The override-only test above missed kinds that fall through to
-        the global default. PR #106's `compute_analytics` watchdog fix
+        the global default. The original per-kind watchdog fix (PR #106)
         only covered kinds with explicit overrides — `reconstruct_allocator_history`
         had a 30-minute handler timeout and inherited the 10-minute
         default, reproducing the wizard-hang for allocator equity
@@ -1455,7 +1421,7 @@ class TestClaimedJobContract:
         ClaimedJob fields by their contracted names."""
         job = {
             "id": "cj-contract-1",
-            "kind": "compute_analytics",
+            "kind": "compute_analytics_from_csv",
             "strategy_id": "strat-contract",
             "claim_token": "tok-contract-xyz",
         }
@@ -1503,7 +1469,7 @@ class TestClaimedJobContract:
         """
         job = {
             "id": "cj-c-pr5-02",
-            "kind": "compute_analytics",
+            "kind": "compute_analytics_from_csv",
             "strategy_id": "strat-c-pr5-02",
             "claim_token": "tok-must-thread",
         }

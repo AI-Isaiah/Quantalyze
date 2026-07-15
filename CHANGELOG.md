@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.42.1.0] - 2026-07-15
+### v1.10 Backbone Unification — Phase 106 Stage B: legacy/dark-path cutover
+Completes the "nothing bypasses the unified backbone" cutover. The durable
+compute-jobs queue is now the **only** compute path; the legacy in-process
+`after()` path, the dark trades-based analytics chain, its 4 re-entry points,
+and the entire unified-backbone rollback flag machinery are deleted. This is
+an **irreversible** cutover — post-Stage-B rollback is `git revert` + redeploy
+(keeping applied migrations), stated in `docs/runbooks/compute-queue.md`. Net
+~ -8000 LOC across TS + Python + SQL.
+- **RPC admission guard (106-06):** `_enqueue_compute_job_internal` (both the
+  7- and 10-param overloads) now rejects `kind='compute_analytics'` fail-loud
+  with `invalid_parameter_value`, re-based verbatim on the latest bodies. The
+  registry row + both CHECK constraints STAY (the 45 historical prod rows
+  FK-reference the kind — no data/schema drop); this is an RPC-level reject
+  only. Reversible migration, self-verifying DO block.
+- **TS re-entry deletion (106-07):** `legacyKeysSyncHandler` (re-entry #3), every
+  `USE_COMPUTE_JOBS_QUEUE` false-branch, and every `isUnifiedBackboneActive()===false`
+  arm deleted across the finalize/sync/verify/validate routes; unified arms are
+  unconditional. `runLegacyFinalize` KEPT (reachable on the composite true-path
+  for the founder-email / last_sync_at / sync_trades side-effect fan-out).
+- **Python re-entry deletion (106-08):** `BROKER_DAILIES_VIA_FUNDING` + both
+  funding ternaries, the phase12 backfill script, the HTTP `/api/compute-analytics`
+  route, and the worker dispatch arm / handler / timeout / watchdog entries for
+  the retired kind all removed. `run_strategy_analytics` reaches zero live callers.
+- **Dark chain deletion (106-09):** the `run_strategy_analytics` chain deleted,
+  guarded by a permanent source-scan test (`test_dark_path_deleted.py`) that
+  keeps every deletion dead across both runtimes. The live CSV/backbone path
+  (`run_csv_strategy_analytics` → `derive_basis_series` → `compute_all_metrics`)
+  and every shared helper are preserved (SC-3).
+- **Rollback-net removal (106-10):** `flag-monitor` is now alert-only (no
+  kill-switch upsert); the `phase19-error-rollup` cron is retired; the
+  `isUnifiedBackboneActive` / `is_unified_backbone_active` readers and the
+  `process_key.py` flag-off 503 arm are deleted (process-key unconditional).
+  The claim-RPC signature is UNTOUCHED — `main_worker` passes a constant `True`
+  with no DDL. The `feature_flags` kill-switch row is left inert (zero readers).
+- **Post-cutover cleanup:** orphaned analytics-client wrappers + schemas removed;
+  runbook/`.env.example` doc honesty swept (retired flags no longer described as
+  live rollback switches); a dead, undeployed `compute-trigger` edge function
+  (which still POSTed to the deleted `/api/compute-analytics`) deleted.
+
 ## [0.42.0.1] - 2026-07-15
 ### fix: anon can browse published strategies again (marketing CTA)
 Anonymous (logged-out) visitors saw ZERO strategies on the public `/browse/*`

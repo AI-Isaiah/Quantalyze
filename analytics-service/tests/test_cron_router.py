@@ -2242,7 +2242,7 @@ class TestC0197CronTriggersAnalyticsRecompute:
 
         assert result["status"] == "ok"
 
-        # Exactly one enqueue_compute_job(compute_analytics) per stored
+        # Exactly one enqueue_compute_job(derive_broker_dailies) per stored
         # strategy — this is the recompute trigger that replaced the
         # broken 'stale' marker. Without the fix this list is empty.
         enqueue_args = [
@@ -2251,8 +2251,9 @@ class TestC0197CronTriggersAnalyticsRecompute:
         assert sorted(a["p_strategy_id"] for a in enqueue_args) == ["strat-A", "strat-B"], (
             f"Expected one enqueue_compute_job per stored strategy; got {enqueue_args!r}"
         )
-        # Default (BROKER_DAILIES_VIA_FUNDING on): the funding-inclusive CSV
-        # route via derive_broker_dailies, mirroring the sync_trades epilogue.
+        # Unconditional funding-inclusive CSV route via derive_broker_dailies,
+        # mirroring the sync_trades epilogue (the legacy kill-switch was retired
+        # in 106-08).
         assert all(a["p_kind"] == "derive_broker_dailies" for a in enqueue_args), (
             f"Every recompute enqueue must be kind=derive_broker_dailies; got {enqueue_args!r}"
         )

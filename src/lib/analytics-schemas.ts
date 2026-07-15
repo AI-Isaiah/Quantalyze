@@ -65,18 +65,6 @@ export const EncryptKeyResponseSchema = z.object({
   kek_version: z.coerce.number().int().positive(),
 });
 
-// --- /api/fetch-trades ---
-export const FetchTradesResponseSchema = z.object({
-  trades_fetched: z.number(),
-  strategy_id: z.string().optional(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only trades_fetched is read, never spread into a write
-
-// --- /api/compute-analytics ---
-export const ComputeAnalyticsResponseSchema = z.object({
-  status: z.string(),
-  strategy_id: z.string().optional(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat status envelope; never spread into a write
-
 // --- /api/portfolio-analytics ---
 export const PortfolioAnalyticsResponseSchema = z.object({
   status: z.string(),
@@ -114,21 +102,6 @@ export const OptimizeWeightsResponseSchema = z.object({
   reason: z.string(),
 });
 export type OptimizeWeightsResponse = z.infer<typeof OptimizeWeightsResponseSchema>;
-
-// --- /api/verify-strategy ---
-// `results` + `matched_strategy_id` are CONSUMED by verify-strategy/route.ts:396
-// (`results` is spread into the strategy_verifications.metrics_snapshot JSONB
-// column; matched_strategy_id is folded in). Model them explicitly so the
-// write-fed shape is typed and the schema default-STRIPS the unconsumed
-// top-level twr/sharpe/return_* forward-compat fields instead of passing them
-// through — closing the boundary honestly (B9; corrects a prior `.passthrough()`
-// whose escape rationale wrongly claimed "never spread into a write": `results`
-// IS spread into a write, but into a JSONB sink so there was no PGRST204 break).
-export const VerifyStrategyResponseSchema = z.object({
-  verification_id: z.string(),
-  results: z.record(z.string(), z.unknown()).nullable().optional(),
-  matched_strategy_id: z.string().nullable().optional(),
-});
 
 // --- /api/match/recompute ---
 // Every branch carries a `status` discriminator so callers can switch on a
@@ -329,30 +302,6 @@ export type BridgeResponse = z.infer<typeof BridgeResponseSchema>;
 // real value rather than null). Strict `.strict()` here would force
 // every Phase 16 envelope expansion to bump the schema in lockstep.
 // ─────────────────────────────────────────────────────────────────────
-
-/** Phase 15 / CSV-01..CSV-02 — analytics-service /api/csv/validate response. */
-export const CsvValidateResponseSchema = z.object({
-  ok: z.boolean(),
-  preview: z
-    .object({
-      row_count: z.number(),
-      date_range: z.tuple([z.string(), z.string()]),
-      columns_detected: z.array(z.string()),
-      first_rows: z.array(z.record(z.string(), z.unknown())),
-      last_rows: z.array(z.record(z.string(), z.unknown())),
-    })
-    .nullable(),
-  errors: z.array(
-    z.object({
-      rule: z.string(),
-      row: z.number(),
-      message: z.string(),
-    }),
-  ),
-  correlation_id: z.string().nullable(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; Phase 16 envelope expansion (correlation_id), rendered only, never spread into a write
-
-export type CsvValidateResponse = z.infer<typeof CsvValidateResponseSchema>;
 
 /**
  * Phase 15 / CSV-01 — Next.js /api/strategies/csv-finalize response.

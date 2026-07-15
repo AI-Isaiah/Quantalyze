@@ -1,39 +1,32 @@
 /**
- * Phase 19 / BACKBONE-05 — auto-rollback cron.
+ * Phase 19 / BACKBONE-05 — error-rate monitor cron (ALERT-ONLY since Phase 106).
  *
  * Polls Sentry events API every 15 minutes for /api/process-key error events.
  * Computes error envelope rate (errors / total /process-key calls in same
- * tumbling window). Threshold: errorRate > 0.5% with total >= 20 → flips
- * Supabase feature_flags kill-switch row to 'off'. Sends Resend ALERT email
- * to founder. Sub-threshold (errorRate > 0.25%) sends WARN email per
- * .planning/phases/19-unified-backbone-conditional-on-day-2-gate-commit/19-CONTEXT.md L40
- * ("regardless of auto-rollback action").
+ * tumbling window). Threshold: errorRate > 0.5% with total >= 20 → sends a
+ * Resend [ALERT] email to the founder. Sub-threshold (errorRate > 0.25%) sends
+ * a WARN email.
  *
- * Manual rollback fallback (Supabase outage) documented in
- * .planning/phase-19/rollback-runbook.md.
- *
- * Theme 5 reminder: during the 7-day stability window after P5 PR-B flag flip,
- * cross-check this cron's error count against scripts/repro-key-flow.sh daily
- * cassette refresh output. Discrepancy = likely environment filter regression.
+ * Phase 106 (Stage B) RETIRED the auto-rollback. The unified backbone is now
+ * the only path — the feature_flags kill-switch row (`process_key_unified_backbone`)
+ * has zero readers and is inert. This cron NEVER writes it: flipping it would be
+ * an outage, not a rollback. Post-Stage-B rollback is `git revert + redeploy`
+ * (see the PR body). This monitor is purely an error-rate alerter now.
  *
  * Sentry events API shape verified by scripts/probe-sentry-events-api.sh
  * BEFORE deploy (Assumption A1). The handler parses BOTH `data[0]["count()"]`
  * and `data[0].count` for resilience to a third shape rotation.
  *
  * Pitfall 8: the outbound Sentry query MUST include `environment:production`
- * to prevent dev/preview events (e.g. CI cassette runs) from triggering
- * production rollback. The src/instrumentation.ts + analytics-service/
+ * to prevent dev/preview events (e.g. CI cassette runs) from firing spurious
+ * production alerts. The src/instrumentation.ts + analytics-service/
  * sentry_init.py inits both stamp environment from VERCEL_ENV — see
  * tests/integration/sentry-environment.test.ts (H-6).
  *
  * H-2: when audit_log denominator is 0 for >2 consecutive 15-min windows,
  * the cron is a silent no-op. Streak counter in feature_flags row
- * `flag_monitor_zero_denominator_streak` triggers a SEV-2 alert email on
- * the 3rd zero window so the founder sees it.
- *
- * D-3: when the kill-switch upsert raises a PostgREST schema/function-cache
- * error, send a SEV-2 alert and return 500. The auto-rollback path is broken
- * and the founder must use the manual rollback runbook.
+ * `flag_monitor_zero_denominator_streak` (a DIFFERENT row from the retired
+ * kill-switch) triggers a SEV-2 alert email on the 3rd zero window.
  */
 import { NextRequest, NextResponse } from "next/server";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -58,7 +51,6 @@ const WARN_THRESHOLD = 0.0025; // 0.25%
 const MIN_SAMPLE = 20;
 const ZERO_DENOMINATOR_ALERT_AFTER = 2; // alert when streak exceeds this (i.e. >=3)
 
-const KILL_SWITCH_KEY = "process_key_unified_backbone";
 const ZERO_DENOM_STREAK_KEY = "flag_monitor_zero_denominator_streak";
 
 // M-7: alert From: header. Hoisted near other constants so a domain-rename
@@ -80,11 +72,6 @@ function parseSentryCount(payload: unknown): number {
   const row = data[0] as Record<string, unknown>;
   const v = row?.["count()"] ?? row?.count ?? 0;
   return typeof v === "number" ? v : 0;
-}
-
-function isPostgrestResolutionError(err: unknown): boolean {
-  const s = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err);
-  return /PGRST/.test(s) || /function not found/i.test(s) || /schema cache/i.test(s);
 }
 
 /**
@@ -219,64 +206,33 @@ async function handleZeroDenominator(args: {
   });
 }
 
-async function triggerAutoRollback(args: {
-  admin: ReturnType<typeof createAdminClient>;
-  now: Date;
+async function sendErrorRateAlert(args: {
   resend: Resend | null;
   founderEmail: string | undefined;
   errorRate: number;
   errorCount: number;
   total: number;
 }): Promise<NextResponse> {
-  // D-3 — PostgREST resolution-error fallback.
-  try {
-    await args.admin.from("feature_flags").upsert(
-      {
-        flag_key: KILL_SWITCH_KEY,
-        value: "off",
-        updated_at: args.now.toISOString(),
-        updated_by: "cron/flag-monitor",
-      },
-      { onConflict: "flag_key" },
-    );
-  } catch (err: unknown) {
-    if (isPostgrestResolutionError(err)) {
-      console.error("[cron/flag-monitor] D-3 PostgREST resolution error:", err);
-      if (args.resend && args.founderEmail) {
-        await args.resend.emails.send({
-          from: ALERT_FROM,
-          to: args.founderEmail,
-          subject: `[D-3 SEV-2] Phase 19 kill-switch upsert failed (PGRST)`,
-          html: `<p>Auto-rollback failed because the Supabase kill-switch upsert raised a PostgREST resolution error. Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p><p>Error: <code>${String(err).replace(/</g, "&lt;")}</code></p><p>Error envelope rate <code>${(args.errorRate * 100).toFixed(2)}%</code> (${args.errorCount}/${args.total}) WAS observed but the kill-switch row could not be flipped.</p>`,
-        });
-      }
-      return NextResponse.json(
-        {
-          ok: false,
-          reason: "kill_switch_unreachable_d3",
-          error: String(err),
-        },
-        { status: 500 },
-      );
-    }
-    throw err;
-  }
-
+  // Phase 106 (Stage B): ALERT-ONLY. The auto-rollback was retired — this
+  // never writes the feature_flags kill-switch row (flipping it would be an
+  // outage, not a rollback: the unified backbone is the only path). The email
+  // directs the founder to investigate manually; rollback = git revert +
+  // redeploy.
   if (args.resend && args.founderEmail) {
     await args.resend.emails.send({
       from: ALERT_FROM,
       to: args.founderEmail,
-      subject: `[ALERT] Phase 19 backbone auto-rolled-back: ${(args.errorRate * 100).toFixed(2)}% error rate`,
-      html: `<p>Error envelope rate <code>${(args.errorRate * 100).toFixed(2)}%</code> exceeded ${(ALERT_THRESHOLD * 100).toFixed(2)}% threshold over the past 15 minutes (${args.errorCount}/${args.total}). Kill-switch row <code>${KILL_SWITCH_KEY}</code> has been flipped to <code>off</code>; new traffic falls back to legacy routes within the configured cache TTL (default 30s; <code>PHASE_19_STABILITY_CACHE_TTL_S</code> shortens this to 5s during the stability window).</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
+      subject: `[ALERT] Phase 19 backbone error rate ${(args.errorRate * 100).toFixed(2)}% — auto-rollback retired (Phase 106), investigate manually`,
+      html: `<p>Error envelope rate <code>${(args.errorRate * 100).toFixed(2)}%</code> exceeded ${(ALERT_THRESHOLD * 100).toFixed(2)}% threshold over the past 15 minutes (${args.errorCount}/${args.total}).</p><p><strong>Auto-rollback was retired in Phase 106.</strong> The unified backbone is the only path and the kill-switch row is inert — this alert is informational. Investigate the error source manually; post-Stage-B rollback is <code>git revert + redeploy</code>. Runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
     });
   }
 
   console.warn(
-    `[cron/flag-monitor] AUTO-ROLLBACK: errorRate=${args.errorRate} total=${args.total}`,
+    `[cron/flag-monitor] ERROR-RATE ALERT: errorRate=${args.errorRate} total=${args.total}`,
   );
   return NextResponse.json({
     ok: true,
-    action: "rolled_back",
+    action: "alerted",
     errorRate: args.errorRate,
     errorCount: args.errorCount,
     total: args.total,
@@ -341,11 +297,10 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   const errorRate = errorCount / total;
 
-  // 4) Threshold logic — order matters: ALERT first, then WARN.
+  // 4) Threshold logic — order matters: ALERT first, then WARN. Phase 106:
+  //    the ALERT branch alerts only — it never flips the (retired) kill-switch.
   if (errorRate > ALERT_THRESHOLD && total >= MIN_SAMPLE) {
-    return await triggerAutoRollback({
-      admin,
-      now,
+    return await sendErrorRateAlert({
       resend,
       founderEmail,
       errorRate,
@@ -359,8 +314,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       await resend.emails.send({
         from: ALERT_FROM,
         to: founderEmail,
-        subject: `[WARN] Phase 19 error rate ${(errorRate * 100).toFixed(2)}% — below auto-rollback threshold`,
-        html: `<p>Error rate ${errorCount}/${total} = ${(errorRate * 100).toFixed(2)}% — below the ${(ALERT_THRESHOLD * 100).toFixed(2)}% auto-rollback threshold but worth a look.</p>`,
+        subject: `[WARN] Phase 19 error rate ${(errorRate * 100).toFixed(2)}% — below alert threshold`,
+        html: `<p>Error rate ${errorCount}/${total} = ${(errorRate * 100).toFixed(2)}% — below the ${(ALERT_THRESHOLD * 100).toFixed(2)}% alert threshold but worth a look.</p>`,
       });
     }
     return NextResponse.json({

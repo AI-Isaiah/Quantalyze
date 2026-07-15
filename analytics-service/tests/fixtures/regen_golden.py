@@ -505,9 +505,9 @@ def main(argv: list[str] | None = None) -> None:
     # no `positions` list (only `trade_metrics_from_positions` aggregates),
     # so the helper returns 0/0 — matches the prior `long_volume_pct: 0.0
     # / short_volume_pct: 0.0` shape under `_compute_volume_metrics`'s
-    # legacy alias. Real strategies attribute via timestamp window in
-    # run_strategy_analytics; the fixture pipeline preserves the shape
-    # only.
+    # legacy alias. Real strategies attribute via timestamp window in the
+    # `_compute_position_side_volume_pcts` helper; the fixture pipeline
+    # preserves the shape only.
     position_side_pcts = _compute_position_side_volume_pcts(
         inp["fills"], []
     )

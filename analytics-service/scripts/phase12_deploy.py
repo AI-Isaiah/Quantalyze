@@ -11,11 +11,6 @@ Order of operations:
      probe (pg_column_size) is the only authoritative measurement.
   3. Pass (p999, count) to phase12_kill_switch.main(...) — auto-cuts over heavy
      keys from metrics_json → strategy_analytics_series when p99.9 ≥ 800kB.
-  4. M-02: phase12_backfill_enqueue.main() — pre-checks pending compute_analytics
-     jobs and skips when any are present (no duplicate-job pile-ups).
-
-The throttle in main_worker.dispatch_tick (Plan 07) guarantees backfill cannot
-starve sync_trades — the migration 086 RPC's ORDER BY + low-skip guard pace it.
 
 Usage:
     cd analytics-service
@@ -36,7 +31,7 @@ from urllib.parse import urlparse
 
 # Co-located scripts; importing via the package path mirrors how
 # `python -m scripts.phase12_deploy` resolves them.
-from scripts import phase12_backfill_enqueue, phase12_kill_switch
+from scripts import phase12_kill_switch
 
 # Resolve project root from this file's location: analytics-service/scripts/<file>
 # parents[0] = scripts/, parents[1] = analytics-service/, parents[2] = repo root.
@@ -335,24 +330,7 @@ async def main() -> int:
         print(f"phase12_deploy: kill-switch returned {rc} — aborting")
         return rc
 
-    # Step 4 (M-02): backfill enqueue with duplicate-job guard.
-    rc = await phase12_backfill_enqueue.main()
-    if rc != 0:
-        # P2025: surface a clear INCOMPLETE marker rather than letting the
-        # operator skim past a non-zero RC and assume "complete".
-        print(
-            f"phase12_deploy: backfill enqueue returned {rc} — backfill is partial"
-        )
-        print("=== Phase 12 deploy: INCOMPLETE ===")
-        return rc
-
     print("=== Phase 12 deploy: complete ===")
-    print("Monitor compute_analytics queue depth for the next ~10 min:")
-    print(
-        "  SELECT count(*) FROM compute_jobs "
-        "WHERE kind='compute_analytics' AND status='pending';"
-    )
-    print("Phase 12 SC#4: queue depth should never exceed 50 for >10 min.")
     return 0
 
 

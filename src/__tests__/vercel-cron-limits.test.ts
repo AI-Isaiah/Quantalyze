@@ -202,10 +202,10 @@ describe("vercel.json cron quota (Pro plan, soft bound)", () => {
 // vercel.json still leaves the route handler on disk, length stays <= 10, the
 // remaining schedules stay daily-or-allowlisted, and the allowlist-presence
 // check only guards flag-monitor. critical-regressions.test.ts only pins
-// warm-analytics + alert-digest. So six of the eight production crons could
+// warm-analytics + alert-digest. So five of the seven production crons could
 // vanish from the deployment with NO test failure — production goes dark on
 // funding sync / reconciliation / ack-token cleanup / draft cleanup /
-// founder report / error-rollup with no PR-time signal.
+// founder report with no PR-time signal.
 //
 // The fix derives the EXPECTED set from the filesystem (the route handlers
 // are the source of truth — a handler on disk that no Vercel schedule invokes
@@ -250,7 +250,7 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
     // A handler on disk that no schedule invokes = a production cron that
     // silently never runs. This is the exact H-1155 regression: dropping
     // `sync-funding` / `reconcile-strategies` / `cleanup-ack-tokens` /
-    // `cleanup-wizard-drafts` / `founder-lp-report` / `phase19-error-rollup`
+    // `cleanup-wizard-drafts` / `founder-lp-report`
     // (or flag-monitor) from vercel.json fails HERE.
     const unscheduled = expected.filter((p) => !scheduled.has(p));
     expect(unscheduled).toEqual([]);
@@ -279,7 +279,6 @@ describe("vercel.json crons cover every production cron handler (H-1155)", () =>
         "/api/cron/cleanup-wizard-drafts",
         "/api/cron/flag-monitor",
         "/api/cron/founder-lp-report",
-        "/api/cron/phase19-error-rollup",
         "/api/cron/reconcile-strategies",
         "/api/cron/sync-funding",
         "/api/cron/warm-analytics",

@@ -8,7 +8,6 @@ import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
-import { isUnifiedBackboneActive } from "@/lib/feature-flags";
 import { postProcessKey } from "@/lib/process-key-client";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { logAuditEventAsUser } from "@/lib/audit";
@@ -516,10 +515,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // ── Composite-first finalize routing ──────────────────────────────
-  // Phase 88 / ONB-01, D-LOCKED (CONTEXT 2026-07-10, Option A). Prod runs
-  // `process_key_unified_backbone = on` (since 2026-05-25), so
-  // isUnifiedBackboneActive() below is TRUE in prod and the unified arm
-  // REJECTS composites (COMPOSITE_UNSUPPORTED_UNIFIED, ~:1004). Without this
+  // Phase 88 / ONB-01, D-LOCKED (CONTEXT 2026-07-10, Option A). The backbone
+  // is permanent-on (Phase 106), so the unified single-key arm below always
+  // runs and REJECTS composites (COMPOSITE_UNSUPPORTED_UNIFIED, ~:1004). Without this
   // hoist every wizard composite dies at submit with a 409. Branch
   // composite-vs-single-key HERE, ahead of the flag: a strategy with >=1
   // strategy_keys member ALWAYS enqueues stitch_composite (via
@@ -613,83 +611,85 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         if (!probe.ok) return probe.response;
       }
       // Route to the legacy finalize whose after() block enqueues
-      // stitch_composite (memberCount re-count + USE_COMPUTE_JOBS_QUEUE
-      // fail-loud + enqueue, :776-811) — independent of the backbone flag.
+      // stitch_composite (memberCount re-count + enqueue) — independent of
+      // the backbone flag.
       return await runLegacyFinalize({ supabase, user, fields });
     }
     // compositeMemberCountN === 0 (CSV / no-member draft with api_key_id NULL)
     // → fall through to the existing unified-vs-legacy split byte-unchanged.
   }
 
-  // Phase 19 / BACKBONE-10 — gate behind unified-backbone flag. The
-  // force-refresh probe above ALREADY ran for both code paths.
-  if (await isUnifiedBackboneActive()) {
-    // API-8: resolve the actual exchange from the linked api_keys row so we
-    // don't hardcode `source: 'okx'` for non-OKX strategies. Falls back to
-    // 'okx' when the strategy has no api_key (CSV branch) — the unified
-    // router treats source as advisory in that case.
-    let resolvedSource = "okx";
-    if (apiKeyId) {
-      const admin = createAdminClient();
-      // audit-2026-05-07 H-0323 — capture the error so a transient admin
-      // lookup failure doesn't silently fall back to the 'okx' default
-      // and route a Binance/Bybit key through the wrong exchange-specific
+  // Phase 106 Stage B (D2): single-key finalize now delegates UNCONDITIONALLY
+  // to the unified backbone. The former flag-off legacy fall-through
+  // (`return await runLegacyFinalize(...)`) was deleted here; the kill-switch
+  // reader was deleted in 106-10 (backbone permanent-on).
+  // runLegacyFinalize itself STAYS: it is reachable on the composite path via the
+  // composite hoist above (:618), where every composite routes through it for
+  // the stitch_composite enqueue + founder-email / last_sync_at / sync_trades
+  // side-effect fan-out the unified arm does NOT replicate (see :1015 comment).
+  //
+  // API-8: resolve the actual exchange from the linked api_keys row so we
+  // don't hardcode `source: 'okx'` for non-OKX strategies. Falls back to
+  // 'okx' when the strategy has no api_key (CSV branch) — the unified
+  // router treats source as advisory in that case.
+  let resolvedSource = "okx";
+  if (apiKeyId) {
+    const admin = createAdminClient();
+    // audit-2026-05-07 H-0323 — capture the error so a transient admin
+    // lookup failure doesn't silently fall back to the 'okx' default
+    // and route a Binance/Bybit key through the wrong exchange-specific
+    // code path with no forensic trail.
+    const { data: keyRow, error: keyRowErr } = await admin
+      .from("api_keys")
+      .select("exchange")
+      .eq("id", apiKeyId)
+      .single();
+    if (keyRowErr) {
+      console.warn(
+        `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubInternalToken(keyRowErr.message)}`,
+      );
+      // Mirror the H-0322 escalation pattern: console.warn on Vercel is
+      // best-effort log capture, not alertable. Without Sentry a transient
+      // PG blip silently routes a Binance/Bybit key through the OKX-specific
       // code path with no forensic trail.
-      const { data: keyRow, error: keyRowErr } = await admin
-        .from("api_keys")
-        .select("exchange")
-        .eq("id", apiKeyId)
-        .single();
-      if (keyRowErr) {
-        console.warn(
-          `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubInternalToken(keyRowErr.message)}`,
-        );
-        // Mirror the H-0322 escalation pattern: console.warn on Vercel is
-        // best-effort log capture, not alertable. Without Sentry a transient
-        // PG blip silently routes a Binance/Bybit key through the OKX-specific
-        // code path with no forensic trail.
-        captureToSentry(keyRowErr, {
-          tags: {
-            surface: "finalize-wizard",
-            step: "unified-exchange-resolve",
-          },
-          extra: { strategy_id: fields.strategy_id, api_key_id: apiKeyId },
-        });
-      }
-      if (keyRow?.exchange) {
-        resolvedSource = keyRow.exchange;
-      }
+      captureToSentry(keyRowErr, {
+        tags: {
+          surface: "finalize-wizard",
+          step: "unified-exchange-resolve",
+        },
+        extra: { strategy_id: fields.strategy_id, api_key_id: apiKeyId },
+      });
     }
-    return await unifiedFinalizeWizardHandler({
-      strategy_id: fields.strategy_id,
-      userId: user.id,
-      // NEW-C14-06: forward the validated+normalized `fields` object instead
-      // of the raw body. Pre-fix: `payload: body as Record<string,unknown>`
-      // bypassed canonicalizeExchangeList + string→number coercion so the
-      // unified path persisted un-canonicalized exchanges and raw aum/max_capacity
-      // strings. The 400-gate still ran, but normalization drift persisted bad
-      // data. Forwarding `fields` ensures both paths (legacy + unified) persist
-      // identically.
-      payload: {
-        strategy_id: fields.strategy_id,
-        name: fields.name,
-        description: fields.description,
-        category_id: fields.category_id,
-        strategy_types: fields.strategy_types,
-        subtypes: fields.subtypes,
-        markets: fields.markets,
-        supported_exchanges: fields.supported_exchanges,
-        leverage_range: fields.leverage_range,
-        aum: fields.aumNum,
-        max_capacity: fields.maxCapacityNum,
-      },
-      apiKeyId,
-      source: resolvedSource,
-    });
+    if (keyRow?.exchange) {
+      resolvedSource = keyRow.exchange;
+    }
   }
-
-  // ── Legacy path ───────────────────────────────────────────────────
-  return await runLegacyFinalize({ supabase, user, fields });
+  return await unifiedFinalizeWizardHandler({
+    strategy_id: fields.strategy_id,
+    userId: user.id,
+    // NEW-C14-06: forward the validated+normalized `fields` object instead
+    // of the raw body. Pre-fix: `payload: body as Record<string,unknown>`
+    // bypassed canonicalizeExchangeList + string→number coercion so the
+    // unified path persisted un-canonicalized exchanges and raw aum/max_capacity
+    // strings. The 400-gate still ran, but normalization drift persisted bad
+    // data. Forwarding `fields` ensures both paths (legacy + unified) persist
+    // identically.
+    payload: {
+      strategy_id: fields.strategy_id,
+      name: fields.name,
+      description: fields.description,
+      category_id: fields.category_id,
+      strategy_types: fields.strategy_types,
+      subtypes: fields.subtypes,
+      markets: fields.markets,
+      supported_exchanges: fields.supported_exchanges,
+      leverage_range: fields.leverage_range,
+      aum: fields.aumNum,
+      max_capacity: fields.maxCapacityNum,
+    },
+    apiKeyId,
+    source: resolvedSource,
+  });
 });
 
 /**
@@ -852,17 +852,16 @@ async function runLegacyFinalize(args: {
         },
       },
       // audit-2026-05-07 H-0330 — enqueue the sync_trades compute job so
-      // the strategy advances past computation_status='pending' on Round 2
-      // cutover (USE_COMPUTE_JOBS_QUEUE=true). Pre-fix the wizard finalize
-      // path NEVER enqueued; the only enqueue lived in /api/keys/sync
-      // behind a manual "Sync now" button. Removing that button on cutover
-      // would orphan every new wizard submission.
+      // the strategy advances past computation_status='pending'. Pre-fix the
+      // wizard finalize path NEVER enqueued; the only enqueue lived in
+      // /api/keys/sync behind a manual "Sync now" button. Removing that
+      // button on cutover would orphan every new wizard submission.
       //
-      // Gated by the same env flag /api/keys/sync uses so the legacy path
-      // (button-driven sync) keeps working while the flag is off. The
-      // partial unique index on compute_jobs handles double-submit, and
-      // the after() Promise.allSettled wrapper means a failed enqueue
-      // does not block the 200 response or reverse the finalize.
+      // Phase 106 Stage B: the enqueue is now unconditional (the former
+      // compute-jobs queue flag gate was retired). The partial unique index
+      // on compute_jobs handles double-submit, and the after()
+      // Promise.allSettled wrapper means a failed enqueue does not block the
+      // 200 response or reverse the finalize.
       {
         label: "enqueue_sync_trades_job",
         run: async () => {
@@ -872,39 +871,21 @@ async function runLegacyFinalize(args: {
           // each key worker-side, clips + stitches). A strategy with zero members
           // is the legacy single-key path → `sync_trades`, byte-identical.
           //
-          // Finding 6: composite detection runs REGARDLESS of
-          // USE_COMPUTE_JOBS_QUEUE. Pre-fix the count probe sat BELOW the
-          // `USE_COMPUTE_JOBS_QUEUE !== "true"` early-return, so a composite
-          // created while the queue was off was silently orphaned (no job, no
-          // failure stamp). The route reads ONLY a count — it NEVER decrypts
+          // Finding 6: composite detection runs REGARDLESS of the (now
+          // retired) compute-jobs queue flag. Pre-fix the count probe sat
+          // BELOW the flag-off early-return, so a composite created while the
+          // queue was off was silently orphaned (no job, no failure stamp).
+          // The route reads ONLY a count — it NEVER decrypts
           // (worker-only decryption, LOCKED). resolvedId scoping is unchanged
           // (T-86-14). compositeMemberCount fails CLOSED (stamp + throw) on an
           // unknowable count (W-4 / F3 / F5(b)).
           const memberCount = await compositeMemberCount(admin, resolvedId);
           if (memberCount > 0) {
-            // stitch_composite is a compute_jobs kind — without the queue there
-            // is NO worker to derive it (the reconcile cron excludes deribit and
-            // never enqueues stitch_composite). Fail LOUD (stamp a terminal
-            // 'failed' + throw → Sentry) rather than orphan a composite that
-            // never derives.
-            if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") {
-              await admin.from("strategy_analytics").upsert(
-                {
-                  strategy_id: resolvedId,
-                  computation_status: "failed",
-                  computation_warned: false,
-                  computation_error:
-                    "Composite strategy requires the compute-jobs queue " +
-                    "(USE_COMPUTE_JOBS_QUEUE) to derive; enable it and re-submit.",
-                  data_quality_flags: { csv_source: true, composite: true },
-                },
-                { onConflict: "strategy_id" },
-              );
-              throw new Error(
-                "composite finalize requires USE_COMPUTE_JOBS_QUEUE=true " +
-                  "(no worker to derive stitch_composite otherwise)",
-              );
-            }
+            // Phase 106 Stage B (D2): the compute-jobs queue is now the sole
+            // path — the former flag-off arm (stamp 'failed' + throw when the
+            // queue flag was not "true") was deleted; that guard is dormant
+            // with the ratified prod pins. Enqueue stitch_composite
+            // unconditionally.
             const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
               p_strategy_id: resolvedId,
               p_kind: "stitch_composite",
@@ -928,10 +909,11 @@ async function runLegacyFinalize(args: {
             });
             return;
           }
-          // Legacy single-key path (zero strategy_keys members) — unchanged,
-          // gated by USE_COMPUTE_JOBS_QUEUE so the button-driven legacy sync keeps
-          // working while the flag is off.
-          if (process.env.USE_COMPUTE_JOBS_QUEUE !== "true") return;
+          // Single-key path (zero strategy_keys members). Phase 106 Stage B
+          // (D2): the former flag-off early-return (button-driven legacy sync
+          // fallback, when the queue flag was not "true") was deleted —
+          // dormant with the ratified prod pins. Enqueue sync_trades
+          // unconditionally.
           if (!keyLink?.api_key_id) return;
           const { error: enqueueErr } = await admin.rpc(
             "enqueue_compute_job",
@@ -1012,8 +994,9 @@ async function runLegacyFinalize(args: {
  * The Python unified backbone (analytics-service/routers/process_key.py)
  * only enqueues `process_key_long`. It does NOT fire the founder email,
  * does NOT touch `api_keys.last_sync_at`, and does NOT enqueue
- * `sync_trades`. Flipping `isUnifiedBackboneActive=true` in production
- * silently drops all three.
+ * `sync_trades`. Routing single-key resync through the unified backbone
+ * would silently drop all three — which is why the composite/single-key
+ * split above stays.
  *
  * This is an architectural decision (do these live in the Next route or
  * the Python worker?) and is OUT OF SCOPE for /simplify cleanup. The
