@@ -47,7 +47,6 @@ load_dotenv()
 
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
-from services.feature_flags import is_unified_backbone_active
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
@@ -382,15 +381,14 @@ async def dispatch_tick(worker_id: str) -> None:
     # legacy claim_compute_jobs (migration 032), so two replicas claiming
     # in parallel still get disjoint result sets.
     #
-    # Phase 19 / BACKBONE-05 — drain semantics: read the unified-backbone
-    # flag once per tick and pass it as the third argument so migration
-    # 104's claim RPC stamps 'unified_backbone_at_claim' into
-    # compute_jobs.metadata at claim time. Workers later read that
-    # snapshot (NOT the live env var) to decide which code path to run,
-    # so a flag flip mid-tick doesn't split-brain in-flight jobs. The
-    # is_unified_backbone_active() call is cached for 30s in-process so
-    # this is effectively a free op on most ticks.
-    flag_active = await is_unified_backbone_active()
+    # Phase 106: backbone permanent-on; param retained — claim-RPC signature
+    # unchanged, NO DDL in 106-proper. The former per-tick unified-backbone
+    # flag read (whose value migration 104's claim RPC stamps into
+    # compute_jobs.metadata) is now a literal True: the kill-switch reader is
+    # deleted and the unified backbone is the only path. The RPC still receives
+    # p_unified_backbone_active — passed constant true — so its signature and
+    # the metadata stamp are byte-identical to prod's steady state.
+    flag_active = True
 
     def _claim_priority():
         return supabase.rpc(

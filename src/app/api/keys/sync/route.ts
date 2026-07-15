@@ -132,8 +132,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // BEFORE finalize; a member-bearing composite must kick off the SAME
   // production `stitch_composite` job finalize enqueues — NOT sync_trades /
   // the unified single-key resync — so the stitched strategy_analytics row the
-  // preview reads actually exists. Placed AHEAD of isUnifiedBackboneActive()
-  // because prod runs process_key_unified_backbone='on' and the unified arm
+  // preview reads actually exists. Placed AHEAD of the unified single-key arm
+  // because the backbone is permanent-on (Phase 106) and the unified arm
   // cannot honestly derive a NULL-api_key composite (it would mis-route to a
   // single-key path). This MIRRORS the Phase-88 finalize-wizard hoist
   // (finalize-wizard/route.ts:517-621).

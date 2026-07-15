@@ -75,10 +75,6 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: vi.fn(async () => false),
-}));
-
 // Phase 106 Stage B: the route delegates unconditionally to the unified
 // backbone. postProcessKey must succeed (returning NEW_ID) so control reaches
 // the SHARED persistDailyReturnsOrErrorResponse + enqueueCsvAnalyticsAfter

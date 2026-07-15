@@ -74,10 +74,6 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: vi.fn(async () => false),
-}));
-
 // Phase 106 Stage B: the route delegates unconditionally to the unified
 // backbone, so postProcessKey must succeed by default (returning a valid
 // strategy_id) for the ok:true success-path assertions. INTERNAL_API_TOKEN is
@@ -478,9 +474,6 @@ describe("NEW-C14-07: ok:true not overwritten by upstream spread (unified path)"
     // for the duration of this test only.
     const originalToken = process.env.INTERNAL_API_TOKEN;
     process.env.INTERNAL_API_TOKEN = "test-token-c14-07";
-
-    const { isUnifiedBackboneActive } = await import("@/lib/feature-flags");
-    vi.mocked(isUnifiedBackboneActive).mockResolvedValueOnce(true);
 
     const { postProcessKey } = await import("@/lib/process-key-client");
     // Simulate upstream returning ok:false (e.g. a Python bug) alongside

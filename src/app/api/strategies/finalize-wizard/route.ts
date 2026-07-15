@@ -515,10 +515,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // ── Composite-first finalize routing ──────────────────────────────
-  // Phase 88 / ONB-01, D-LOCKED (CONTEXT 2026-07-10, Option A). Prod runs
-  // `process_key_unified_backbone = on` (since 2026-05-25), so
-  // isUnifiedBackboneActive() below is TRUE in prod and the unified arm
-  // REJECTS composites (COMPOSITE_UNSUPPORTED_UNIFIED, ~:1004). Without this
+  // Phase 88 / ONB-01, D-LOCKED (CONTEXT 2026-07-10, Option A). The backbone
+  // is permanent-on (Phase 106), so the unified single-key arm below always
+  // runs and REJECTS composites (COMPOSITE_UNSUPPORTED_UNIFIED, ~:1004). Without this
   // hoist every wizard composite dies at submit with a 409. Branch
   // composite-vs-single-key HERE, ahead of the flag: a strategy with >=1
   // strategy_keys member ALWAYS enqueues stitch_composite (via
@@ -622,9 +621,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   // Phase 106 Stage B (D2): single-key finalize now delegates UNCONDITIONALLY
   // to the unified backbone. The former flag-off legacy fall-through
-  // (`return await runLegacyFinalize(...)`) was deleted here —
-  // isUnifiedBackboneActive()===false is dormant with the ratified prod pins.
-  // runLegacyFinalize itself STAYS: it is reachable on the TRUE path via the
+  // (`return await runLegacyFinalize(...)`) was deleted here; the kill-switch
+  // reader was deleted in 106-10 (backbone permanent-on).
+  // runLegacyFinalize itself STAYS: it is reachable on the composite path via the
   // composite hoist above (:618), where every composite routes through it for
   // the stitch_composite enqueue + founder-email / last_sync_at / sync_trades
   // side-effect fan-out the unified arm does NOT replicate (see :1015 comment).
@@ -995,8 +994,9 @@ async function runLegacyFinalize(args: {
  * The Python unified backbone (analytics-service/routers/process_key.py)
  * only enqueues `process_key_long`. It does NOT fire the founder email,
  * does NOT touch `api_keys.last_sync_at`, and does NOT enqueue
- * `sync_trades`. Flipping `isUnifiedBackboneActive=true` in production
- * silently drops all three.
+ * `sync_trades`. Routing single-key resync through the unified backbone
+ * would silently drop all three — which is why the composite/single-key
+ * split above stays.
  *
  * This is an architectural decision (do these live in the Next route or
  * the Python worker?) and is OUT OF SCOPE for /simplify cleanup. The

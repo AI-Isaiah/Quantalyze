@@ -117,8 +117,6 @@ const STATE = vi.hoisted(() => ({
       level?: string;
     };
   }>,
-  // Phase B simplify — unified-backbone flag toggleable per test.
-  unifiedBackboneActive: false as boolean,
   // Phase B simplify — postProcessKey upstream body (drives the H-0327
   // guard fall-through test). null means use the legacy 200 default.
   processKeyResult: null as null | {
@@ -288,10 +286,6 @@ vi.mock("@/lib/sentry-capture", () => ({
   },
 }));
 
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: async () => STATE.unifiedBackboneActive,
-}));
-
 vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: async () =>
     STATE.processKeyResult ?? {
@@ -388,7 +382,6 @@ beforeEach(async () => {
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
   STATE.captureToSentryCalls = [];
-  STATE.unifiedBackboneActive = false;
   STATE.processKeyResult = null;
   STATE.runAfterCallback = false;
   STATE.afterPromise = null;
@@ -798,7 +791,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 106 finalize enqueue", 
 describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone composite guard", () => {
   it("fails LOUD (409 + terminal stamp) when a composite reaches the unified path", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.strategyKeysCount = 2;
 
     const POST = await importPost();
@@ -824,7 +816,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone com
 
   it("passes a single-key strategy (0 members) through to the unified path (200)", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.strategyKeysCount = 0;
 
     const POST = await importPost();
@@ -840,7 +831,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 86 unified-backbone com
 
   it("fails CLOSED (503 + Sentry + stamp) on an unknowable membership count in the unified path", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.strategyKeysCountError = { message: "count boom" };
 
     const POST = await importPost();
@@ -1177,7 +1167,6 @@ describe("POST /api/strategies/finalize-wizard — H-0323 Sentry escalation on k
     const consoleWarn = vi
       .spyOn(console, "warn")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.adminApiKeysSelectError = { message: "stale snapshot" };
 
     const POST = await importPost();
@@ -1216,7 +1205,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: "yes", verification_id: "ver-1" },
@@ -1243,7 +1231,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { verification_id: "ver-1" },
@@ -1259,7 +1246,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
 
   it("returns 200 + translated envelope when upstream matches the onboard shape", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: true, verification_id: "ver-1" },
@@ -1285,7 +1271,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
   // routes the duplicate copy on the idempotent-resume path.
   it("returns 200 + WIZARD_DUPLICATE envelope when upstream queued=false", async () => {
     const fetchSpy = mockProbeReadOnly();
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: {
@@ -1319,7 +1304,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: {
@@ -1349,7 +1333,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: true },
@@ -1371,7 +1354,6 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     const consoleErr = vi
       .spyOn(console, "error")
       .mockImplementation(() => {});
-    STATE.unifiedBackboneActive = true;
     STATE.processKeyResult = {
       ok: true,
       body: { queued: false, verification_id: "ver-1" },
@@ -1432,10 +1414,10 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escala
  *
  * D-LOCKED (CONTEXT 2026-07-10, Option A): a strategy with >=1 strategy_keys
  * member (api_key_id NULL) ALWAYS enqueues stitch_composite via
- * runLegacyFinalize's after() arm, BEFORE and independent of
- * isUnifiedBackboneActive(). Prod runs the unified backbone (on since
- * 2026-05-25), whose arm 409s composites (COMPOSITE_UNSUPPORTED_UNIFIED) — the
- * hoist is what makes wizard composites reach prod at all.
+ * runLegacyFinalize's after() arm, BEFORE and independent of the unified
+ * single-key arm. The backbone is permanent-on (Phase 106), and its single-key
+ * arm 409s composites (COMPOSITE_UNSUPPORTED_UNIFIED) — the hoist is what makes
+ * wizard composites reach prod at all.
  *
  * The hoist engages only for api_key_id === null: composites have api_key_id
  * NULL by construction; an api_key_id-bearing strategy is definitively
@@ -1485,7 +1467,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
       { api_key_id: MEMBER_KEY_1 },
       { api_key_id: MEMBER_KEY_2 },
     ];
-    STATE.unifiedBackboneActive = true; // prod reality — the arm that 409s composites
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -1530,7 +1511,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
       { api_key_id: MEMBER_KEY_1 },
       { api_key_id: MEMBER_KEY_2 },
     ];
-    STATE.unifiedBackboneActive = true;
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -1565,7 +1545,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
       { api_key_id: MEMBER_KEY_1 },
       { api_key_id: MEMBER_KEY_2 },
     ];
-    STATE.unifiedBackboneActive = true;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1589,7 +1568,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     STATE.strategyRow = { api_key_id: null };
     STATE.strategyKeysCount = 1;
     STATE.strategyKeysList = [{ api_key_id: MEMBER_KEY_1 }];
-    STATE.unifiedBackboneActive = true;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1607,9 +1585,8 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     STATE.strategyRow = { api_key_id: null }; // possible composite
     STATE.strategyKeysCountError = { message: "count boom" };
-    // backbone OFF — proves the hoist blocks the single-key LEGACY dispatch (the
+    // The hoist blocks the single-key dispatch for a possible composite (the
     // path a count blip would silently route a possible composite through).
-    STATE.unifiedBackboneActive = false;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1645,7 +1622,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const fetchSpy = mockProbeReadOnly();
     STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.strategyKeysCount = 0;
-    STATE.unifiedBackboneActive = true;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
@@ -1663,9 +1639,6 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const fetchSpy = mockProbeReadOnly();
     STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.strategyKeysCount = 0;
-    // The former isUnifiedBackboneActive() gate is gone; this mock value no
-    // longer diverts single-key finalize to runLegacyFinalize.
-    STATE.unifiedBackboneActive = false;
 
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));

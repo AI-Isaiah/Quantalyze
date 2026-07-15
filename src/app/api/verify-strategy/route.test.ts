@@ -67,10 +67,6 @@ vi.mock("@/lib/analytics-client", () => {
 const captureSpy = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
 
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: vi.fn().mockResolvedValue(false),
-}));
-
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
     from(table: string) {
@@ -183,10 +179,6 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
   });
 
   it("update call includes trust_tier=self_reported, overriding upstream api_verified", async () => {
-    vi.doMock("@/lib/feature-flags", () => ({
-      isUnifiedBackboneActive: vi.fn().mockResolvedValue(true),
-    }));
-
     vi.doMock("@/lib/process-key-client", () => ({
       postProcessKey: vi.fn().mockResolvedValue({
         ok: true,
@@ -234,7 +226,7 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
  * `fingerprint`, and internal trust fields that must never reach an
  * unauthenticated browser.
  *
- * This test drives the unified handler (isUnifiedBackboneActive=true) and
+ * This test drives the unified handler (the only path since Phase 106) and
  * asserts that the response contains NONE of the sensitive upstream fields,
  * even when the upstream mock injects them.
  *
@@ -244,9 +236,6 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
  * (+ optional metrics_snapshot/status).
  */
 describe("NEW-C35-01 — unified path does not spread encrypted_credentials", () => {
-  // Drive the unified path
-  const isUnifiedMock = vi.fn().mockResolvedValue(true);
-
   beforeEach(() => {
     vi.clearAllMocks();
     verificationCount = 0;
@@ -257,10 +246,6 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
   });
 
   it("response body contains NO encrypted_credentials even when upstream injects them", async () => {
-    vi.doMock("@/lib/feature-flags", () => ({
-      isUnifiedBackboneActive: isUnifiedMock,
-    }));
-
     // Mock process-key-client to return a response that includes sensitive fields
     vi.doMock("@/lib/process-key-client", () => ({
       postProcessKey: vi.fn().mockResolvedValue({

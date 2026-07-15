@@ -25,8 +25,8 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * The route delegates unconditionally to `/process-key` with
  * `flow_type=csv` (finalize step); the unified router runs the same RPC
  * server-side. The former flag=off legacy direct-RPC fallback was deleted
- * in 106-07 (its `isUnifiedBackboneActive()===false` gate is dormant with
- * the ratified prod pins).
+ * in 106-07; the kill-switch reader itself was deleted in 106-10 and the
+ * unified backbone is now the only path.
  *
  * Cross-AI revision 2026-04-30: the strategy NAME is provided by the
  * user (typed on the Upload step) and forwarded here in the request
@@ -1019,9 +1019,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Phase 106 Stage B (D2): the unified backbone is now the sole finalize
   // path. Delegate unconditionally to /process-key with flow_type=csv; the
   // handler forwards metadataRaw + writes the classification UPDATE after a
-  // successful dispatch. The former flag-off legacy direct-RPC arm below was
-  // deleted — isUnifiedBackboneActive()===false is dormant with the ratified
-  // prod pins.
+  // successful dispatch. The former flag-off legacy direct-RPC arm was
+  // deleted in 106-07; the kill-switch reader was deleted in 106-10 and the
+  // unified backbone is now the only path.
   return await unifiedCsvFinalizeHandler({
     wizard_session_id,
     fmt,

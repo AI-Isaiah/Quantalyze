@@ -3,8 +3,8 @@ for analytics-service/routers/process_key.py.
 
 Asserted invariants (mirrors PLAN.md task P4-2 behavior list):
   1. INTERNAL_API_TOKEN auth (missing env → 403; wrong bearer → 403).
-  2. Feature flag gate: is_unified_backbone_active() False → 503 with
-     UNIFIED_BACKBONE_DISABLED code.
+  2. (removed) The Phase 19 feature-flag 503 gate was deleted in Phase 106 —
+     the unified backbone is the only path; /process-key runs unconditionally.
   3. Pydantic body validation: invalid flow_type / source → 422.
   4. wizard_session_id idempotency (SELECT pre-check + 23505 catch).
   5. Sync vs queued dispatch (csv → 200 published; onboard → 202 queued).
@@ -60,7 +60,6 @@ for _stale in ("services.rate_limit", "routers.process_key"):
     sys.modules.pop(_stale, None)
 
 import routers.process_key as process_key_router  # noqa: E402
-from services import feature_flags  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +82,6 @@ def app(monkeypatch):
         "INTERNAL_API_TOKEN",
         "a" * 64,  # H-12: 64 chars, no newline.
     )
-    feature_flags._reset_cache_for_tests()
 
     app = FastAPI()
     app.state.limiter = process_key_router.limiter
@@ -214,41 +212,6 @@ def test_process_key_auth_wrong_token(client):
     )
     assert r.status_code == 403
     assert "Forbidden" in r.text
-
-
-# ---------------------------------------------------------------------------
-# Feature flag gate test
-# ---------------------------------------------------------------------------
-
-
-def test_process_key_flag_off_503(client):
-    """is_unified_backbone_active() False → 503 + UNIFIED_BACKBONE_DISABLED."""
-    with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=False),
-    ):
-        r = client.post(
-            "/process-key",
-            json={
-                "flow_type": "csv",
-                "source": "csv",
-                "context": {
-                    "strategy_id": "s1",
-                    "wizard_session_id": "wsid-1",
-                    "fmt": "trades",
-                    "raw_bytes_base64": "Y29sCjE=",
-                },
-            },
-            headers=_auth_headers(),
-        )
-    assert r.status_code == 503
-    body = r.json()
-    # API-6: Phase 17 DESIGN-05 envelope — top-level `code`, NOT nested
-    # under `detail`. The wizard's error renderer reads the body
-    # directly.
-    assert body["ok"] is False
-    assert body["code"] == "UNIFIED_BACKBONE_DISABLED"
-    assert "correlation_id" in body
 
 
 # ---------------------------------------------------------------------------
@@ -483,9 +446,6 @@ def test_process_key_idempotent_double_submit(client):
     }
     fake = _build_supabase_mock(existing_row=existing)
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ):
@@ -526,9 +486,6 @@ def test_process_key_unique_violation_returns_existing(client):
         insert_raises_then_existing=existing_after_race,
     )
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ):
@@ -565,9 +522,6 @@ def test_process_key_race_catch_zero_rows_reraises_original(client):
         ),
     )
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ):
@@ -630,9 +584,6 @@ def test_process_key_csv_sync_path(client):
     csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -713,9 +664,6 @@ def test_process_key_new_upload_maybe_single_none_does_not_500(client):
     csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -743,9 +691,6 @@ def test_process_key_onboard_queues(client):
     """flow_type=onboard, source=okx → enqueues process_key_long, returns 202-shape."""
     fake = _build_supabase_mock(existing_row=None, insert_id="ver-onboard")
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ):
@@ -792,9 +737,6 @@ def test_process_key_resync_no_credentials_queues(client):
     """
     fake = _build_supabase_mock(existing_row=None, insert_id="ver-resync")
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ):
@@ -858,9 +800,6 @@ def test_process_key_validate_failure_returns_envelope(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -917,9 +856,6 @@ def test_process_key_validate_only_csv_succeeds_without_strategy_id(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -998,9 +934,6 @@ def test_process_key_validate_only_csv_returns_preview_and_series(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1070,9 +1003,6 @@ def test_process_key_validate_only_emits_empty_series_not_omitted(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1123,9 +1053,6 @@ def test_process_key_validate_only_onboard_succeeds_without_strategy_id(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1171,9 +1098,6 @@ def test_process_key_missing_strategy_id_returns_422(client):
     fake = _build_supabase_mock(existing_row=None)
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ):
@@ -1249,9 +1173,6 @@ def test_process_key_teaser_injects_anchor_when_strategy_id_missing(client):
     import services.encryption as _enc_mod
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1434,9 +1355,6 @@ def _run_sync_pipeline(
         context["strategy_id"] = strategy_id
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1682,9 +1600,6 @@ def test_teaser_degrade_to_nulls_on_derive_valueerror(client):
     import services.encryption as _enc_mod
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase", return_value=fake,
     ), patch(
         "routers.process_key.get_adapter", return_value=adapter,
@@ -1824,9 +1739,6 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
     fake.rpc.return_value = MagicMock(execute=MagicMock(return_value=MagicMock(data={})))
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1886,9 +1798,6 @@ def test_process_key_csv_finalize_without_user_token_returns_401(client):
     """
     fake = _build_supabase_mock(existing_row=None)
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -1937,9 +1846,6 @@ def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -2006,9 +1912,6 @@ def test_process_key_writes_audit_row(client):
     csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -2128,9 +2031,6 @@ def test_process_key_sync_pipeline_rejects_write_capable_key(
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -2198,9 +2098,6 @@ def test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback(cl
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(
@@ -2260,9 +2157,6 @@ def test_process_key_sync_scope_rejection_survives_rpc_failure(client):
     )
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=rpc_fail_sb,
     ), patch(
@@ -2322,9 +2216,6 @@ def test_process_key_csv_read_only_none_not_rejected_sync(client):
     csv_adapter.reconstruct_positions = AsyncMock(return_value=[])
 
     with patch(
-        "routers.process_key.is_unified_backbone_active",
-        new=AsyncMock(return_value=True),
-    ), patch(
         "routers.process_key.get_supabase",
         return_value=fake,
     ), patch(

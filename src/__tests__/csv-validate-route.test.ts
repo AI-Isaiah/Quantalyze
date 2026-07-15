@@ -100,18 +100,15 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
 }));
 
-// Phase 19.1 — admin client + isUnifiedBackboneActive + process-key
-// client mocks for the persist + enqueue + unified-path tests. Hoisted
-// so vi.mock can pick them up; tests reset them in beforeEach.
+// Phase 19.1 — admin client + process-key client mocks for the persist +
+// enqueue + unified-path tests. Hoisted so vi.mock can pick them up; tests
+// reset them in beforeEach.
 const adminRpcMock = vi.hoisted(() => vi.fn());
 // API W-2 (specialist review 2026-05-22): on enqueue failure the route
 // writes a strategy_analytics placeholder via the admin client. Capture
 // the call so the regression test can assert the failure-recovery
 // shape without depending on console.warn ordering.
 const adminUpsertMock = vi.hoisted(() => vi.fn());
-const isUnifiedBackboneActiveMock = vi.hoisted(() =>
-  vi.fn(async () => false),
-);
 const postProcessKeyMock = vi.hoisted(() => vi.fn());
 
 // API M-2 (red-team 2026-05-22): the route now SELECTs current
@@ -159,10 +156,6 @@ vi.mock("@/lib/supabase/admin", () => ({
       }),
     }),
   }),
-}));
-
-vi.mock("@/lib/feature-flags", () => ({
-  isUnifiedBackboneActive: () => isUnifiedBackboneActiveMock(),
 }));
 
 vi.mock("@/lib/process-key-client", () => ({
@@ -678,7 +671,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // backbone. postProcessKey returns NEW_STRATEGY_ID (finalize_csv_strategy
     // runs upstream); the SHARED persist + enqueue + placeholder helpers then
     // run on the unified path. INTERNAL_API_TOKEN is required (503 otherwise).
-    isUnifiedBackboneActiveMock.mockResolvedValue(true);
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockResolvedValue({
       ok: true,
@@ -928,7 +920,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
   // ---- 8. unified-backbone path receives dailyReturnsSeries via explicit param
 
   it("Test 8a (runtime): unified path forwards dailyReturnsSeries via explicit args.dailyReturnsSeries", async () => {
-    isUnifiedBackboneActiveMock.mockResolvedValue(true);
     const unifiedStrategyId = "66666666-6666-4666-8666-666666666666";
     postProcessKeyMock.mockResolvedValue({
       ok: true,
@@ -1218,7 +1209,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // ok:true with a missing id — the wizard's SyncProgress poller
     // would hit `if (!data) return` early-out forever because no
     // strategy_analytics row exists for it to find.
-    isUnifiedBackboneActiveMock.mockResolvedValue(true);
     postProcessKeyMock.mockResolvedValue({
       ok: true,
       status: 200,
@@ -1260,7 +1250,6 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // returns `strategy_id: ""` or `strategy_id: "TBD"` would otherwise
     // slip through the old typeof-string-and-truthy check (the empty
     // string was already gated, but anything else passed).
-    isUnifiedBackboneActiveMock.mockResolvedValue(true);
     postProcessKeyMock.mockResolvedValue({
       ok: true,
       status: 200,

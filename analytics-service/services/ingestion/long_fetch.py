@@ -22,9 +22,10 @@ D-2 — Legacy claim handling
 
 Pitfall 3 — Drain semantics
     Read `flag_at_claim` from `job.metadata['unified_backbone_at_claim']`,
-    NOT from the live env var (`is_unified_backbone_active()`). The env var
-    can flip mid-run; the metadata snapshot was stamped atomically at claim
-    time by migration 104 and is the source-of-truth for this job's path.
+    the snapshot stamped atomically at claim time by migration 104 — the
+    source-of-truth for this job's path. (Phase 106: the live kill-switch
+    reader is deleted and the backbone is permanent-on, so the claim stamp
+    is now a constant True; the metadata read stays for stamp compatibility.)
 """
 from __future__ import annotations
 

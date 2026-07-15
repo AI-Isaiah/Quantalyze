@@ -21,8 +21,8 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * -------------------------------------------
  * The route re-targets the upstream unconditionally from `/csv/validate` to
  * `/process-key` with `flow_type=csv`. The former flag=off legacy
- * `validateCsv()` fallback was deleted in 106-07 (its
- * `isUnifiedBackboneActive()===false` gate is dormant with the ratified pins).
+ * `validateCsv()` fallback was deleted in 106-07; the kill-switch reader
+ * itself was deleted in 106-10 and the unified backbone is now the only path.
  *
  * Error envelope shape (v0): { ok: false, code, human_message,
  * debug_context, correlation_id: null }. Phase 16 / OBSERV-06 will
@@ -151,8 +151,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // Phase 106 Stage B (D2): the unified backbone is the sole validate path.
-  // The former flag-off legacy validateCsv arm was deleted —
-  // isUnifiedBackboneActive()===false is dormant with the ratified prod pins.
+  // The former flag-off legacy validateCsv arm was deleted in 106-07; the
+  // kill-switch reader was deleted in 106-10 (backbone permanent-on).
   return await unifiedCsvValidateHandler({
     formData,
     file,

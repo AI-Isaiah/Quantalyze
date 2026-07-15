@@ -61,8 +61,8 @@ export async function POST(req: NextRequest) {
   // Phase 106 Stage B (D2): the unified backbone is the sole verify path.
   // Public-route protections (CSRF + IP rate-limit + payload validation) run
   // above, before delegation. The former flag-off legacyVerifyStrategyHandler
-  // arm was deleted — isUnifiedBackboneActive()===false is dormant with the
-  // ratified prod pins.
+  // arm was deleted; the kill-switch reader was deleted in 106-10 (backbone
+  // permanent-on).
   return await unifiedVerifyStrategyHandler(body);
 }
 

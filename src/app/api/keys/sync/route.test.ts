@@ -6,7 +6,8 @@ import { SUPPORTED_EXCHANGES } from "@/lib/closed-sets";
  * Tests for POST /api/keys/sync.
  *
  * Stage B (106-07) retired the legacy compute-jobs-queue / after()
- * fire-and-forget handler and the isUnifiedBackboneActive() flag branch: the
+ * fire-and-forget handler and the unified-backbone flag branch (the
+ * kill-switch reader was deleted in 106-10): the
  * unified backbone (postProcessKey, flow_type=resync) is now the unconditional
  * single-key dispatch, and the composite-first `stitch_composite` kickoff is
  * hoisted ahead of it. These tests exercise that unified dispatch plus the

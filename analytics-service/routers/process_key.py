@@ -44,7 +44,6 @@ from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services.basis_series import derive_basis_series
 from services.db import get_supabase, get_user_scoped_supabase, one, rows
-from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
@@ -536,29 +535,11 @@ async def process_key(
             wizard_session_id=body.context.get("wizard_session_id"),
         )
 
-    # Feature flag gate (BACKBONE-04 / BACKBONE-05) BEFORE any Supabase work.
-    # H-3 — Supabase outage handling: is_unified_backbone_active() in
-    # services/feature_flags.py keeps the in-process cache live across
-    # transient Supabase failures so a brief upstream outage does NOT flip
-    # the synchronous /process-key path to 503. The kill-switch read fails
-    # open (env decides) and extends the in-process cache TTL across the
-    # outage; tested in test_feature_flags.py::test_supabase_outage_falls_back_to_env.
-    if not await is_unified_backbone_active():
-        log.info("process_key.flag_off")
-        # API-6 — Phase 17 DESIGN-05 envelope. Pre-fix used
-        # HTTPException(detail={code,...}) which serialized to
-        # {"detail": {"code": ...}} — incompatible with the wizard
-        # error renderer that reads top-level `code` / `human_message`.
-        return JSONResponse(
-            status_code=503,
-            content=_envelope_error(
-                "UNIFIED_BACKBONE_DISABLED",
-                "Unified backbone is disabled; legacy route should handle.",
-                correlation_id,
-                None,
-            ),
-        )
-
+    # Phase 106 (Stage B): the unified backbone is permanent-on. The former
+    # BACKBONE-04/05 feature-flag gate (503 UNIFIED_BACKBONE_DISABLED when the
+    # kill-switch read off) is deleted — the kill-switch row is inert and its
+    # reader is gone. The body below now runs unconditionally; a row-off state
+    # is unreachable by construction (there is no legacy route to fall back to).
     supabase = get_supabase()
 
     # H-2 — write audit row at entry (after the flag gate) so the
