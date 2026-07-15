@@ -3,7 +3,6 @@ import {
   ValidateKeyResponseSchema,
   EncryptKeyResponseSchema,
   FetchTradesResponseSchema,
-  ComputeAnalyticsResponseSchema,
   PortfolioAnalyticsResponseSchema,
   PortfolioOptimizerResponseSchema,
   VerifyStrategyResponseSchema,
@@ -75,7 +74,7 @@ async function analyticsRequest(
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const method = options?.method ?? "POST";
   // Phase 16 / OBSERV-01: stamp X-Correlation-Id on every outbound fetch.
-  // Wrappers (computeAnalytics, validateKey, ...) intentionally do NOT thread
+  // Wrappers (validateKey, fetchTrades, ...) intentionally do NOT thread
   // this option through in this plan — Plan 7 wires the SSE endpoint to pass
   // it explicitly. Until then, every request still carries a UUID v4 so the
   // FastAPI side has a stable join key.
@@ -157,11 +156,6 @@ function parseResponse<T>(
     );
   }
   return result.data;
-}
-
-export async function computeAnalytics(strategyId: string) {
-  const data = await analyticsRequest("/api/compute-analytics", { strategy_id: strategyId });
-  return parseResponse(ComputeAnalyticsResponseSchema, data, "/api/compute-analytics");
 }
 
 export async function fetchTrades(strategyId: string) {
@@ -409,7 +403,7 @@ export async function validateCsv(formData: FormData): Promise<CsvValidateRespon
 }
 
 // @internal — exposed for Phase 16 / OBSERV-01 unit tests only. Public
-// wrappers (computeAnalytics, validateKey, ...) intentionally do NOT
+// wrappers (validateKey, fetchTrades, ...) intentionally do NOT
 // expose `correlationId` per plan Task 1 Step B (minimize blast radius;
 // Plan 7 wires the SSE endpoint to pass it explicitly). Production code
 // MUST NOT import this — use the public wrappers above instead.
