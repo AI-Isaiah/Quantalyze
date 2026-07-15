@@ -2,6 +2,17 @@ import { Suspense } from "react";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getMyAllocationDashboard } from "@/lib/queries";
+import {
+  getLatestExposureSnapshot,
+  getNetExposureSeries,
+  getAllocationSeries,
+} from "@/lib/portfolio-exposure";
+import type { ExposureSectionData } from "./lib/exposure-props";
+import {
+  getFavoritesWithStrategies,
+  getOptimizerPrefetch,
+} from "./lib/watchlist-read";
+import { getDashboardNote } from "./lib/dashboard-note-read";
 import { AllocationsTabs } from "./AllocationsTabs";
 import { AllocationProvider } from "./AllocationContext";
 import { redirect } from "next/navigation";
@@ -38,7 +49,34 @@ export default async function MyAllocationPage() {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  const payload = await getMyAllocationDashboard(user.id);
+  // Phase 99 / 99-04 — fetch the polled dashboard payload AND the three
+  // exposure reads in ONE Promise.all with the AUTHENTICATED user.id
+  // (`supabase.auth.getUser()` above — never a client-supplied id; the
+  // rls-auditor carry-forward). The exposure reads are NOT folded into
+  // getMyAllocationDashboard (that payload has a client refresh/poll path; the
+  // exposure reads are a daily-grain 730-day paged scan that runs once per page
+  // load). No error-swallowing wrapper here: the read layer THROWS on PostgREST
+  // errors and that throw must reach `allocations/error.tsx` — an error and an
+  // empty book are distinct states; never collapse an error into empty-state copy.
+  //
+  // Phase 100 / 100-04 (PI-04 + PI-05) — SAME additive precedent: three more
+  // owner-scoped reads join the batch (the watchlist favorites, the optimizer
+  // prefetch, and the whole-book dashboard-note initial content). All take the
+  // AUTHENTICATED `supabase` USER client + `user.id` (never the admin client,
+  // never a client-supplied id). They are NEW Promise.all items threaded as NEW
+  // props — `getMyAllocationDashboard`'s polled payload and the `exposure`
+  // threading stay byte-untouched (SC-4). Same throw-to-error.tsx discipline.
+  const [payload, snapshot, netSeries, allocationSeries, favorites, optimizer, note] =
+    await Promise.all([
+      getMyAllocationDashboard(user.id),
+      getLatestExposureSnapshot(user.id),
+      getNetExposureSeries(user.id),
+      getAllocationSeries(user.id),
+      getFavoritesWithStrategies(supabase, user.id),
+      getOptimizerPrefetch(supabase, user.id),
+      getDashboardNote(supabase, user.id),
+    ]);
+  const exposure: ExposureSectionData = { snapshot, netSeries, allocationSeries };
 
   // Phase 11 / Plan 03 / D-13 — fire onboarding-funnel events (single-fire
   // via *_emitted_at sentinels on auth.users.raw_user_meta_data). All five
@@ -73,7 +111,13 @@ export default async function MyAllocationPage() {
             (mounted above this tree) read the count via the provider's
             cross-tree store. No new server query. */}
         <AllocationProvider value={{ flaggedCount: payload.flaggedHoldings.length }}>
-          <AllocationsTabs {...payload} />
+          <AllocationsTabs
+            {...payload}
+            exposure={exposure}
+            favorites={favorites}
+            optimizer={optimizer}
+            note={note}
+          />
         </AllocationProvider>
       </Suspense>
     </div>

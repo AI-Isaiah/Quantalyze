@@ -3,6 +3,7 @@
 import type React from "react";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import type { ComputedMetrics } from "@/lib/scenario";
+import { KpiPanel, type KpiPanelCell } from "@/components/kpi/KpiPanel";
 
 /**
  * Phase 09.1 / Plan 06 (D-09): designer-aligned KPI strip.
@@ -411,87 +412,60 @@ export function KpiStrip({
     !allKeysStale &&
     scenarioMetrics != null;
 
-  return (
-    // Phase 52-02 / TYPE-04 — the strip is its OWN container-query context
-    // (`@container`, inline-size) so it reflows on ITS width, not the viewport.
-    // The prime case: a KpiStrip dropped into the ~380px metrics rail must NOT
-    // think it is at desktop width. Column count steps up by CONTAINER width via
-    // `@`-prefixed variants (the StrategyTable @container idiom), replacing the
-    // old `sm:`/`lg:` viewport breakpoints. The `@container` HOST and the
-    // `@sm`/`@lg` grid variants must sit on SEPARATE elements — an element never
-    // queries its OWN container size (CSS containment spec), so the host wraps
-    // the grid rather than sharing its class list (a same-element host never
-    // reflows). Inline-size containment ONLY — the size-containment variant would
-    // collapse the strip's block size to 0 (Pitfall 1), so the bare `@container`
-    // host is deliberate. Every numeric value cell below keeps `font-mono …
-    // tabular-nums` so the fluid --text-* tier never raggeds a KPI column
-    // (Pitfall 2 / 52-01 tabular-nums contract).
-    <div className="@container">
-      <div
-        className="grid grid-cols-1 gap-3 @sm:grid-cols-2 @lg:grid-cols-4"
-        role="group"
-        aria-label="Portfolio KPIs"
-      >
-      {cells.map(({ label, raw, formatted, sub, metricKey }) => {
-        // Resolve scenario primary + delta for this cell when the gate
-        // is open AND the cell has a metricKey (all 4 return-form cells
-        // carry one since Phase 64 removed the metricKey-less AUM cell).
-        const scenVal: number | null =
-          scenarioActive && metricKey
-            ? // ComputedMetrics is a plain record of nullable numbers — index
-              // it by string key. The cast keeps TS happy without changing
-              // the runtime behavior.
-              ((scenarioMetrics as unknown as Record<string, number | null>)[
-                metricKey
-              ] ?? null)
-            : null;
-        const liveVal: number | null =
-          scenarioActive && metricKey && liveMetrics != null
-            ? ((liveMetrics as unknown as Record<string, number | null>)[
-                metricKey
-              ] ?? null)
-            : null;
-        const showScenarioPrimary = scenarioActive && metricKey != null;
-        const primaryFormatted = showScenarioPrimary
-          ? formatLiveValue(scenVal, metricKey!)
-          : formatted;
-        const primaryRaw = showScenarioPrimary ? scenVal : raw;
+  // Phase 100 / 100-03 (PI-06) — resolve each cell to a KpiPanel descriptor.
+  // ALL warmup / stale / scenario / delta logic stays HERE; the shared
+  // KpiPanel primitive renders the (render-tree-neutral) presentational shell.
+  // The delta pill + sub-copy are passed as `children` verbatim so the emitted
+  // DOM is byte-identical to the pre-extraction strip.
+  const panelCells: KpiPanelCell[] = cells.map(
+    ({ label, raw, formatted, sub, metricKey }) => {
+      // Resolve scenario primary + delta for this cell when the gate
+      // is open AND the cell has a metricKey (all 4 return-form cells
+      // carry one since Phase 64 removed the metricKey-less AUM cell).
+      const scenVal: number | null =
+        scenarioActive && metricKey
+          ? // ComputedMetrics is a plain record of nullable numbers — index
+            // it by string key. The cast keeps TS happy without changing
+            // the runtime behavior.
+            ((scenarioMetrics as unknown as Record<string, number | null>)[
+              metricKey
+            ] ?? null)
+          : null;
+      const liveVal: number | null =
+        scenarioActive && metricKey && liveMetrics != null
+          ? ((liveMetrics as unknown as Record<string, number | null>)[
+              metricKey
+            ] ?? null)
+          : null;
+      const showScenarioPrimary = scenarioActive && metricKey != null;
+      const primaryFormatted = showScenarioPrimary
+        ? formatLiveValue(scenVal, metricKey!)
+        : formatted;
+      const primaryRaw = showScenarioPrimary ? scenVal : raw;
 
-        // Delta pill renders only when both scenario AND live values are
-        // available — graceful degradation when liveMetrics is null.
-        const showDeltaPill =
-          showScenarioPrimary && liveMetrics != null && metricKey != null;
-        const delta =
-          showDeltaPill && scenVal != null && liveVal != null
-            ? scenVal - liveVal
-            : null;
-        const direction =
-          metricKey != null
-            ? (KPI_DIRECTION[metricKey] ?? "up-good")
-            : "up-good";
-        const noiseFloor =
-          metricKey != null ? (KPI_NOISE_FLOOR[metricKey] ?? 0.01) : 0.01;
-        const sign = deltaSign(delta, direction, noiseFloor);
+      // Delta pill renders only when both scenario AND live values are
+      // available — graceful degradation when liveMetrics is null.
+      const showDeltaPill =
+        showScenarioPrimary && liveMetrics != null && metricKey != null;
+      const delta =
+        showDeltaPill && scenVal != null && liveVal != null
+          ? scenVal - liveVal
+          : null;
+      const direction =
+        metricKey != null
+          ? (KPI_DIRECTION[metricKey] ?? "up-good")
+          : "up-good";
+      const noiseFloor =
+        metricKey != null ? (KPI_NOISE_FLOOR[metricKey] ?? 0.01) : 0.01;
+      const sign = deltaSign(delta, direction, noiseFloor);
 
-        return (
-          <div
-            key={label}
-            className="rounded-lg border border-border bg-surface p-4"
-          >
-            <div className="text-micro font-semibold uppercase tracking-wider text-text-muted">
-              {label}
-            </div>
-            {/* DESIGN.md: numeric data uses Geist Mono (font-mono) +
-                tabular-nums. Designer reference (app.jsx:417-422) confirms
-                this — the value is `font-mono tnum`, fontSize 18, weight 500.
-                We DELIBERATELY do not use the serif here even though the
-                plan literal suggested it; serif is reserved for display /
-                page titles per DESIGN.md typography section. */}
-            <div
-              className={`mt-1 font-mono text-lg font-medium tabular-nums ${valueColorClass(primaryRaw)}`}
-            >
-              {primaryFormatted}
-            </div>
+      return {
+        key: label,
+        label,
+        value: primaryFormatted,
+        valueClassName: valueColorClass(primaryRaw),
+        children: (
+          <>
             {/* Phase 10 / 10-04 D-13. Delta pill renders BELOW the primary
                 value when the scenario gate is open. Suppressed during
                 warmup (the gate is closed), preserving Phase 07 D-09
@@ -508,10 +482,11 @@ export function KpiStrip({
             {sub ? (
               <div className="mt-1 text-xs text-text-secondary">{sub}</div>
             ) : null}
-          </div>
-        );
-      })}
-      </div>
-    </div>
+          </>
+        ),
+      };
+    },
   );
+
+  return <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" />;
 }

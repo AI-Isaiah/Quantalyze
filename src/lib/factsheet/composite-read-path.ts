@@ -1,10 +1,118 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DailyReturn } from "./types";
+import { MTM_DAILY_RETURNS_SERIES_KIND } from "@/lib/types";
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { hasBasisHeadline } from "./basis-metrics";
 import { attributionBasisFromConfig } from "@/lib/composite/compositeAttribution";
+import { isComputedAnalytics } from "@/lib/closed-sets";
+
+/** The parsed, defensively-coerced form of an `mtm_daily_returns` series row. */
+export type ParsedMtmSeries = {
+  dailyReturns: DailyReturn[];
+  gapSpans: Array<{ start: string; end: string }>;
+};
+
+/**
+ * Phase 103 (MTM-04, T-103-05) — strict coercion of the untrusted
+ * `mtm_daily_returns` JSONB payload (DB → RSC trust boundary) into a
+ * {@link ParsedMtmSeries}, or `null` when the shape can't yield an MTM bundle.
+ *
+ * Mirrors the strict-coercion discipline of {@link singleKeyBasisOpts} /
+ * {@link parseDegradedMembers} / `deriveSegmentMarkers`: a malformed/failed
+ * series row degrades to "no MTM bundle → charts stay cash" (V5), NEVER a crash
+ * or fabricated data. Returns null for:
+ *   - a non-object / null / array payload,
+ *   - a missing / non-array `rows`,
+ *   - fewer than 2 VALID rows (mirrors the build-payload dedup<2 null guard —
+ *     the MTM bundle needs ≥2 dated observations, same as cash).
+ * Per-row: keep only `{date: string, return: finite number}`, mapping the
+ * persisted `return` key to the `DailyReturn.value` field; drop invalid rows.
+ * `gap_spans` is coerced defensively (non-array → [], junk entries dropped) — a
+ * bad mask never invents interior gaps.
+ */
+export function parseMtmSeriesPayload(raw: unknown): ParsedMtmSeries | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const obj = raw as Record<string, unknown>;
+  if (!Array.isArray(obj.rows)) return null;
+
+  const dailyReturns: DailyReturn[] = [];
+  for (const row of obj.rows) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+    const { date, return: ret } = row as { date?: unknown; return?: unknown };
+    if (typeof date !== "string" || date.length === 0) continue;
+    if (typeof ret !== "number" || !Number.isFinite(ret)) continue;
+    dailyReturns.push({ date, value: ret });
+  }
+  // FIX 4 (IN, mirrors deriveSegmentMarkers build-payload.ts:105-114): a present
+  // `rows` array whose entries partially dropped is a malformed persist (the
+  // Python writer always emits well-formed rows). Silently coercing loses the
+  // signal, so warn — the drop behavior itself is unchanged (recoverable: charts
+  // still render the surviving rows / degrade to cash).
+  if (dailyReturns.length < obj.rows.length) {
+    console.warn("[factsheet] parseMtmSeriesPayload — dropped malformed mtm_daily_returns rows", {
+      total: obj.rows.length,
+      kept: dailyReturns.length,
+      dropped: obj.rows.length - dailyReturns.length,
+    });
+  }
+  // Fewer than 2 valid rows can't build a bundle (build-payload's own dedup<2
+  // guard would return null anyway) — degrade to no-bundle here so the gate is
+  // structural on the read side.
+  if (dailyReturns.length < 2) return null;
+
+  const gapSpans: Array<{ start: string; end: string }> = [];
+  if (Array.isArray(obj.gap_spans)) {
+    for (const span of obj.gap_spans) {
+      if (span === null || typeof span !== "object" || Array.isArray(span)) continue;
+      const { start, end } = span as { start?: unknown; end?: unknown };
+      if (typeof start !== "string" || typeof end !== "string") continue;
+      gapSpans.push({ start, end });
+    }
+    // Same signal for a present-but-partially-dropped gap_spans array — a bad mask
+    // silently losing spans would under-report interior coverage gaps.
+    if (gapSpans.length < obj.gap_spans.length) {
+      console.warn("[factsheet] parseMtmSeriesPayload — dropped malformed gap_spans entries", {
+        total: obj.gap_spans.length,
+        kept: gapSpans.length,
+        dropped: obj.gap_spans.length - gapSpans.length,
+      });
+    }
+  }
+  return { dailyReturns, gapSpans };
+}
+
+/**
+ * Phase 103 (MTM-04, T-103-06) — read the persisted `mtm_daily_returns` series row
+ * for a strategy. `admin` MUST be the service-role handle: `strategy_analytics_series`
+ * is deny-all RLS (migration 20260428120919), so ONLY the admin handle reads it —
+ * the SAME visibility gate the scalar MTM object already rides (no widening; the
+ * caller owns the upstream published/owner gate, exactly as the `csv_daily_returns`
+ * read above). A read error or a missing/malformed row degrades to `null` (charts
+ * stay cash, V5) — NEVER a throw.
+ */
+export async function readMtmSeries(
+  admin: SupabaseClient,
+  strategyId: string,
+): Promise<ParsedMtmSeries | null> {
+  const { data, error } = await admin
+    .from("strategy_analytics_series")
+    .select("payload")
+    .eq("strategy_id", strategyId)
+    .eq("kind", MTM_DAILY_RETURNS_SERIES_KIND)
+    .maybeSingle();
+  if (error) {
+    // Degrade (never throw): a failed series read must yield "charts stay cash",
+    // not hide the whole published factsheet. Log at ERROR (→ Sentry).
+    console.error("[factsheet] readMtmSeries — mtm_daily_returns read failed", {
+      strategyId,
+      errorMessage: error.message,
+    });
+    return null;
+  }
+  return parseMtmSeriesPayload((data as { payload?: unknown } | null)?.payload);
+}
 
 /**
  * Round-2 H-2 — the ONE composite read-path (D6, the milestone's "one path"
@@ -145,6 +253,13 @@ export async function readCompositeFactsheet(
   );
   const markers = deriveSegmentMarkers(dqf);
 
+  // MTM-04 (Phase 103): read the persisted MTM daily series ONLY when the scalar
+  // MTM basis is available (skip the extra roundtrip for every non-MTM composite);
+  // thread it so buildFactsheetPayload emits the per-basis bundle. Gated exactly
+  // like the scalar MTM object — the series rides the SAME published/owner + F2/M-1
+  // gate, no visibility widening. A failed/malformed row degrades to no-bundle.
+  const mtmSeries = mtmAvailable ? await readMtmSeries(admin, strategyId) : null;
+
   return {
     dailyReturns,
     buildOpts: {
@@ -152,6 +267,7 @@ export async function readCompositeFactsheet(
       segmentBoundaries: markers.segmentBoundaries,
       missingSegments: markers.missingSegments,
       metricsByBasis,
+      ...(mtmSeries ? { mtmSeries } : {}),
       // HARD-04 (#67): server-truth short-window flag. Strict `=== true`
       // coercion so a malformed dqf value (string/object) can never render the
       // caveat (T-92-05).
@@ -196,6 +312,153 @@ export function singleKeyDataQuality(
   dqf: { insufficient_window?: unknown } | null | undefined,
 ): NonNullable<BuildFactsheetOpts["dataQuality"]> {
   return { composite: false, insufficientWindow: dqf?.insufficient_window === true };
+}
+
+/**
+ * Phase 102 (MTM-01) — the SINGLE-KEY counterpart of the composite `mtmGate`
+ * assembly built inline in {@link readCompositeFactsheet} (:167-170). A single-key
+ * options strategy persists its MTM basis into `metrics_json_by_basis.mark_to_market`
+ * (Phase 101) plus a surviving `data_quality_flags.mtm_gated_reason` on honest
+ * degrade, but — like the Finding-B `insufficient_window` flag — the single-key arm
+ * of both factsheet surfaces never threaded it. This is the ONE owner both surfaces
+ * (the `/factsheet/[id]/v2` route + the discovery detail page) delegate to, so they
+ * can't diverge (the "one path" lesson, this file's header).
+ *
+ * Two load-bearing invariants (falsifiable in composite-read-path.test.ts):
+ *   - F-4 (T-102-01): `available` is gated on `computationStatus ∈ {complete,
+ *     complete_with_warnings}` — the EXACT terminal-success literals the runner
+ *     writes (analytics_runner.py:1938-1940 stored-trades, :2392 CSV-broker; the
+ *     same pair the PDF route admits at pdf/route.ts:231-232). A failed/computing
+ *     row NEVER exposes a live-looking MTM object: `metricsByBasis` is threaded
+ *     ONLY when `available`, so the payload is structurally MTM-free otherwise.
+ *   - SC-4 (T-102-SC keystone): thread ONLY the `mark_to_market` key, NEVER the raw
+ *     `metrics_json_by_basis` column. A lingering `cash_settlement` key (a composite→
+ *     single stale window; 101-01 "Observed-but-out-of-scope #1") would activate the
+ *     build-payload.ts:243 cash overlay and perturb the byte-identical cash headline.
+ *
+ * Returns `{}` for every non-options single-key strategy (no MTM key AND no reason)
+ * so the toggle never renders and the payload stays byte-identical to today.
+ * Defensive on unknown jsonb, mirroring the strict-coercion style of this file.
+ */
+export function singleKeyBasisOpts(
+  dqf: { mtm_gated_reason?: unknown } | null | undefined,
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+  mtmSeries?: ParsedMtmSeries | null,
+): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries"> {
+  // 1. Extract the persisted mark_to_market object iff the raw jsonb is a non-null
+  //    non-array object AND its `mark_to_market` value is a non-null non-array object.
+  let mtm: Record<string, number> | undefined;
+  if (
+    metricsJsonByBasis !== null &&
+    typeof metricsJsonByBasis === "object" &&
+    !Array.isArray(metricsJsonByBasis)
+  ) {
+    const cand = (metricsJsonByBasis as Record<string, unknown>).mark_to_market;
+    if (cand !== null && typeof cand === "object" && !Array.isArray(cand)) {
+      mtm = cand as Record<string, number>;
+    }
+  }
+  // 2. Extract the reason iff a string (same server-truth coercion as :169).
+  const reason = typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined;
+  // 3. Neither present → {} : every non-options single-key strategy hits this,
+  //    renders no toggle, and is byte-identical to today.
+  if (mtm === undefined && reason === undefined) return {};
+  // 4. F-4 DONE gate — exact runner terminal-success literals (no third success
+  //    literal exists; verified against analytics_runner.py).
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  // 5. Available iff DONE and the MTM object carries a trustworthy headline. A
+  //    degraded-MTM row still reports "complete" (Phase 101-02), so BOTH gates.
+  const available = done && hasBasisHeadline(mtm);
+  // 6. Thread ONLY the mark_to_market key, and ONLY when available. This makes F-4
+  //    structural (a failed row's payload carries NO MTM object) and closes the
+  //    stale-cash_settlement-key hazard by construction (SC-4).
+  // 7. MTM-04 (Phase 103): thread the persisted MTM daily series ONLY when
+  //    `available` AND the reader returned a parsed series — so a gated/degraded
+  //    row stays structurally MTM-series-free (the series rides the SAME F-4 gate
+  //    as the scalar object). Omitted (not undefined) when absent so the SILENT-1
+  //    empty-result path stays byte-identical.
+  return {
+    metricsByBasis: available && mtm ? { mark_to_market: mtm } : undefined,
+    mtmGate: { available, reason },
+    ...(available && mtmSeries ? { mtmSeries } : {}),
+  };
+}
+
+/**
+ * Phase 103 (MTM-04) — the cheapest honest predicate deciding whether a single-key
+ * strategy should incur the `mtm_daily_returns` DB roundtrip. Mirrors
+ * {@link singleKeyBasisOpts}' F-4 gate: the raw `metrics_json_by_basis` carries a
+ * `mark_to_market` OBJECT AND `computation_status` is DONE. Both factsheet surfaces
+ * (the `/factsheet/[id]/v2` route + the discovery detail page) call THIS one
+ * predicate so they can't diverge on when to read (the "one path" lesson).
+ *
+ * It is deliberately CHEAPER than the full `hasBasisHeadline` gate: a degenerate
+ * mark_to_market object (present key, no finite headline) may pass here and waste
+ * ONE read — but `singleKeyBasisOpts` still applies the full `available` gate
+ * before threading, so a false-positive here NEVER leaks a bundle. This keeps the
+ * hot non-options path (no mark_to_market key, or not DONE) roundtrip-free.
+ */
+export function shouldReadSingleKeyMtmSeries(
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): boolean {
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  if (!done) return false;
+  if (
+    metricsJsonByBasis === null ||
+    typeof metricsJsonByBasis !== "object" ||
+    Array.isArray(metricsJsonByBasis)
+  ) {
+    return false;
+  }
+  const mtm = (metricsJsonByBasis as Record<string, unknown>).mark_to_market;
+  return mtm !== null && typeof mtm === "object" && !Array.isArray(mtm);
+}
+
+/**
+ * MED-1 (Phase 105, D3) — the cash twin of {@link shouldReadSingleKeyMtmSeries}
+ * and the SINGLE read-side choke point that decides whether a persisted
+ * `cash_settlement` series row may be trusted. It returns true ONLY when
+ * `computation_status ∈ {complete, complete_with_warnings}` (the exact
+ * terminal-success literals the runner writes) AND `metrics_json_by_basis`
+ * carries a non-null non-array `cash_settlement` OBJECT.
+ *
+ * Why this exists NOW with no production caller: a pre-seam terminal-failure arm
+ * nulls the scalars (`metrics_json_by_basis=None`, `computation_status='failed'`)
+ * and `return`s BEFORE the persist seam, so a stale `cash_settlement` series row
+ * can OUTLIVE its authoritative-NULL scalar — the `<2-interpretable-days` arm
+ * (`job_worker.py:2790-2821`), `_stamp_deribit_analytics_failed` (`:2096`), NAV-error
+ * arms, and a `BROKER_DAILIES_VIA_FUNDING=false` rollback orphan (LOW-3). A
+ * DONE-gate at the READ point is a single choke point that refuses EVERY such
+ * arm — including future ones — whereas arm-by-arm heal-deletes silently regress
+ * the instant a new arm is added and one is missed (the exact MED-1 bug class).
+ *
+ * Contract (locked in 105-FOLD-DECISION.md, D3 caveat a): the Phase-106 cash
+ * reader — the FIRST caller — MUST route through the `shouldReadCashSettlementSeries`
+ * predicate family (this fn + its MTM twin) before trusting a cash series row. No caller exists in Phase 105 by design (the
+ * predicate + status-gate is the guarantee; per LOW-4 the INERT-read grep
+ * tripwire is NOT — it misses a reader imported via a constant).
+ *
+ * Deliberately CHEAPER than the full `hasBasisHeadline` gate, mirroring the MTM
+ * twin: a degenerate cash_settlement object may pass here; the eventual reader
+ * still applies its own trust gate before surfacing a number.
+ */
+export function shouldReadCashSettlementSeries(
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): boolean {
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  if (!done) return false;
+  if (
+    metricsJsonByBasis === null ||
+    typeof metricsJsonByBasis !== "object" ||
+    Array.isArray(metricsJsonByBasis)
+  ) {
+    return false;
+  }
+  const cash = (metricsJsonByBasis as Record<string, unknown>).cash_settlement;
+  return cash !== null && typeof cash === "object" && !Array.isArray(cash);
 }
 
 /**

@@ -658,11 +658,25 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       console.warn(
         `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
       );
+      // D7 fail-loud (106-04): a silent placeholder-upsert failure leaves the
+      // strategy stuck computing with zero trace beyond the warn above. Pair
+      // with Sentry so it is alertable (copies the :620 precheck idiom).
+      captureToSentry(placeholderErr, {
+        tags: { surface: "csv-finalize", step: "placeholder-upsert" },
+        extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+      });
     }
   } catch (placeholderThrow) {
     console.warn(
       `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
     );
+    // D7 fail-loud (106-04): the placeholder write threw (admin-client
+    // construction / PostgREST fault) — surface it so the stuck-computing
+    // strategy is alertable, not just a console.warn.
+    captureToSentry(placeholderThrow, {
+      tags: { surface: "csv-finalize", step: "placeholder-upsert-throw" },
+      extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+    });
   }
 }
 
@@ -711,6 +725,13 @@ function enqueueCsvAnalyticsAfter(
         console.warn(
           `${opts.logPrefix} enqueue_compute_analytics_from_csv failed (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
         );
+        // D7 fail-loud (106-04): a silent enqueue failure means no compute job
+        // ever runs and the strategy is stuck — the placeholder below breaks
+        // the poller, but the enqueue failure itself must alert (copies :620).
+        captureToSentry(enqueueErr, {
+          tags: { surface: "csv-finalize", step: "csv-analytics-enqueue" },
+          extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+        });
       }
     } catch (err) {
       enqueueFailed = true;
@@ -718,6 +739,12 @@ function enqueueCsvAnalyticsAfter(
       console.warn(
         `${opts.logPrefix} enqueue side-effect threw (non-blocking) [correlation_id=${opts.correlationId}]: ${enqueueErrMessage}`,
       );
+      // D7 fail-loud (106-04): the enqueue side-effect threw — surface it so
+      // the resulting stuck-computing strategy is alertable, not silent.
+      captureToSentry(err, {
+        tags: { surface: "csv-finalize", step: "csv-analytics-enqueue-throw" },
+        extra: { strategy_id: strategyId, correlation_id: opts.correlationId },
+      });
     }
     // API W-2: enqueue failure → write strategy_analytics placeholder so
     // the wizard's SyncProgress poller breaks out with a meaningful

@@ -124,7 +124,7 @@ async def test_csv_analytics_happy_path() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(pd.Series([0.001] * 15), False))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("test-strategy-uuid")
 
@@ -195,7 +195,7 @@ async def test_csv_analytics_benchmark_unavailable() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(side_effect=Exception("benchmark down"))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("test-strategy-uuid")
 
@@ -243,7 +243,7 @@ async def test_mark_unrecoverable_preserves_pre_stamped_guard_flags() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(pd.Series([0.001] * 10), False))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("transient blip mid-compute")):
         with pytest.raises(HTTPException) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
@@ -316,7 +316,7 @@ async def test_mark_unrecoverable_logs_warning_before_reraise(
                side_effect=_side_effect_db_execute), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
         caplog.set_level(logging.WARNING, logger="quantalyze.analytics.runner")
         with pytest.raises(HTTPException) as exc_info:
@@ -369,7 +369,7 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=RuntimeError("compute_all_metrics blew up")):
         with pytest.raises(HTTPException) as exc_info:
             await run_csv_strategy_analytics("test-strategy-uuid")
@@ -534,7 +534,7 @@ async def test_csv_analytics_sparse_calendar_completes() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(pd.Series([0.0005] * 60), False))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("test-strategy-uuid")
 
@@ -942,7 +942,7 @@ async def test_broker_series_reinstates_interior_nan_suffix_only_headline() -> N
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=_spy_compute):
         await run_csv_strategy_analytics("broker-strategy-uuid")
 
@@ -1000,7 +1000,7 @@ async def test_user_csv_sparse_day_not_nan_filled() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                side_effect=_spy_compute):
         await run_csv_strategy_analytics("user-csv-strategy-uuid")
 
@@ -1061,7 +1061,7 @@ async def test_csv_runner_threads_config_into_compute_all_metrics() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     assert spy.call_count == 1
@@ -1084,7 +1084,7 @@ async def test_csv_runner_config_none_broker_is_geometric_calendar_365() -> None
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     kwargs = spy.call_args.kwargs
@@ -1104,7 +1104,7 @@ async def test_csv_runner_no_api_key_is_252() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     kwargs = spy.call_args.kwargs
@@ -1127,7 +1127,7 @@ async def test_csv_runner_csv_crypto_is_365() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics", spy):
+         patch("services.basis_series.compute_all_metrics", spy):
         await run_csv_strategy_analytics("s")
 
     assert spy.call_args.kwargs["periods_per_year"] == 365
@@ -1179,7 +1179,7 @@ async def test_csv_runner_bridges_mandate_window_excluded_days_warn() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         result = await run_csv_strategy_analytics("s")
 
@@ -1220,7 +1220,7 @@ async def test_noncomposite_rederive_nulls_stale_by_basis() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("was-composite-uuid")
 
@@ -1257,7 +1257,7 @@ async def test_pure_single_key_rederive_leaves_by_basis_untouched() -> None:
     with patch("services.analytics_runner.get_supabase", return_value=sb), \
          patch("services.analytics_runner.get_benchmark_returns",
                new=AsyncMock(return_value=(None, True))), \
-         patch("services.analytics_runner.compute_all_metrics",
+         patch("services.basis_series.compute_all_metrics",
                return_value=_make_metrics_result()):
         await run_csv_strategy_analytics("pure-single-key-uuid")
 
@@ -1271,3 +1271,325 @@ async def test_pure_single_key_rederive_leaves_by_basis_untouched() -> None:
     assert "metrics_json_by_basis" not in completed[0].args[0], (
         "a never-composite single-key recompute must not touch metrics_json_by_basis"
     )
+
+
+# ===========================================================================
+# Phase 101 Plan 02 (MTM-01) — the broker derive PRESTAMPS
+# data_quality_flags.mtm_gated_reason (job_worker._prestamp_dq_flags) when the
+# single-key mark_to_market pass structurally degrades, THEN enqueues this CSV
+# run. run_csv_strategy_analytics rebuilds data_quality_flags WHOLESALE, so an
+# unbridged reason is wiped seconds after being stamped and the Phase-102
+# disabled-with-reason UI would read nothing. The bridge carries it
+# PRESENT-ONLY + NON-PROMOTING, and EXCLUDES composite→single transitions so a
+# stale composite-era reason can't masquerade as a fresh single-key verdict.
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_mtm_gated_reason_survives_finalizer_single_key() -> None:
+    """WIRING (load-bearing): a single-key (never-composite) row whose broker
+    prestamp carries data_quality_flags.mtm_gated_reason='mtm_summary_coverage_incomplete'
+    must STILL carry that reason after the finalizer's wholesale flag rebuild.
+    Neuter (delete the present-only carry in run_csv_strategy_analytics) → the
+    reason is wiped → this reddens. The assertion pins the imported constant so a
+    rename of MTM_REASON_SUMMARY_COVERAGE cannot silently decouple the two sites."""
+    from services.analytics_runner import run_csv_strategy_analytics
+    from services.stitch_composite import MTM_REASON_SUMMARY_COVERAGE
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        # prestamp shape from a degraded single-key MTM derive (NOT composite).
+        existing_flags={
+            "csv_source": True,
+            "mtm_gated_reason": "mtm_summary_coverage_incomplete",
+        },
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("single-key-mtm-degraded-uuid")
+
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    dq = completed[0].args[0]["data_quality_flags"]
+    assert dq.get("mtm_gated_reason") == MTM_REASON_SUMMARY_COVERAGE, (
+        "the prestamped single-key mtm_gated_reason must SURVIVE the finalizer's "
+        "wholesale data_quality_flags rebuild (Phase-102 reads it); the wholesale "
+        f"rebuild wiped it — got {dq!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mtm_gated_reason_does_not_promote_status() -> None:
+    """NON-PROMOTING: the carried mtm_gated_reason is an availability annotation
+    (like insufficient_window / HARD-04), NOT a NAV_TWR_GUARD_KEYS warn flag, so
+    it must NEVER promote computation_status to complete_with_warnings nor set the
+    runner-owned computation_warned marker. Neuter (add mtm_gated_reason to the
+    guard-key promotion loop) → status becomes complete_with_warnings → reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={
+            "csv_source": True,
+            "mtm_gated_reason": "mtm_summary_coverage_incomplete",
+        },
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("single-key-mtm-nonpromote-uuid")
+
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    payload = completed[0].args[0]
+    assert payload["computation_status"] == "complete", (
+        "mtm_gated_reason must not promote status (exact-string 'complete', not "
+        f"'complete_with_warnings'); got {payload['computation_status']!r}"
+    )
+    assert payload["computation_warned"] is False, (
+        "mtm_gated_reason must not set the runner-owned computation_warned marker"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mtm_gated_reason_dropped_on_composite_to_single() -> None:
+    """DROP-STALE (exclusion is load-bearing): a row that WAS a composite carrying
+    a composite-era mtm_gated_reason must NOT carry it forward into the fresh
+    single-key headline — a stale composite verdict must never masquerade as a
+    fresh single-key one (mirrors the Finding-5 by-basis NULLing). Neuter (drop the
+    `and not _was_composite` exclusion) → the stale reason survives → this reddens.
+    metrics_json_by_basis is NULLed by the existing Finding-5 branch (unchanged)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={
+            "csv_source": True,
+            "composite": True,
+            # a composite-era reason (Phase-90 vocabulary) on the prior row.
+            "mtm_gated_reason": "unsmoothed_options_book",
+        },
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("was-composite-mtm-uuid")
+
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    payload = completed[0].args[0]
+    assert "mtm_gated_reason" not in payload["data_quality_flags"], (
+        "a composite-era mtm_gated_reason must NOT survive into the single-key "
+        f"headline; got {payload['data_quality_flags']!r}"
+    )
+    # the existing Finding-5 branch still NULLs the stale composite by-basis object.
+    assert payload.get("metrics_json_by_basis") is None
+
+
+@pytest.mark.asyncio
+async def test_mtm_gated_reason_absence_is_absence() -> None:
+    """ABSENCE-IS-ABSENCE: a single-key row with NO prestamped mtm_gated_reason
+    must produce fresh flags with NO mtm_gated_reason key (no fabricated reason,
+    no None-valued key). Guards against a bridge that unconditionally writes the
+    key (e.g. `dq['mtm_gated_reason'] = existing.get(...)` → a None value)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1",
+        existing_flags={"csv_source": True},  # no mtm_gated_reason prestamped
+    )
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        await run_csv_strategy_analytics("single-key-no-mtm-uuid")
+
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    dq = completed[0].args[0]["data_quality_flags"]
+    assert "mtm_gated_reason" not in dq, (
+        "no prestamped reason → the key must be ABSENT (not None-valued); "
+        f"got {dq!r}"
+    )
+
+
+# ===========================================================================
+# Phase 105 (BB-02, collapse #2) — the single-key cash SCALAR path joins the ONE
+# shared derive_basis_series route. Two seam guarantees:
+#   D5 ordering — the cash_settlement SERIES row persists BEFORE the scalar/status
+#     flip, so a `complete` scalar never exists without its series.
+#   D3 heal     — the unrecoverable terminal arm heal-DELETEs the cash series row
+#     so a stale row never outlives the authoritative `failed` stamp.
+# Both exercise the REAL run_csv_strategy_analytics against a recording mock; the
+# compute is stubbed at services.basis_series (the swap moved the compute INSIDE
+# the shared derive), never at services.analytics_runner.
+# ===========================================================================
+
+
+def _make_recording_supabase_mock(
+    daily_rows: list[dict],
+    *,
+    events: list[str] | None = None,
+    deletes: list[dict] | None = None,
+    api_key_id: str | None = None,
+) -> MagicMock:
+    """A per-name-memoized supabase mock that records the cash_settlement series
+    persist (via sb.rpc) and the strategy_analytics complete upsert onto ``events``
+    (ordered), and strategy_analytics_series DELETEs (heal arm) onto ``deletes``."""
+    sb = MagicMock()
+    _tables: dict[str, MagicMock] = {}
+
+    def _table(name: str) -> MagicMock:
+        if name in _tables:
+            return _tables[name]
+        tbl = MagicMock()
+        _tables[name] = tbl
+        if name == "strategies":
+            tbl.select.return_value.eq.return_value.single.return_value.execute.return_value = MagicMock(
+                data={"id": "s", "user_id": "u", "api_key_id": api_key_id,
+                      "asset_class": None}
+            )
+        elif name == "csv_daily_returns":
+            eq_chain = tbl.select.return_value.eq.return_value
+            eq_chain.order.return_value.range.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            eq_chain.order.return_value.execute.return_value = MagicMock(data=daily_rows)
+        elif name == "strategy_analytics":
+            tbl.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = MagicMock(
+                data={"data_quality_flags": {}}
+            )
+
+            def _upsert(payload: object, **kw: object) -> MagicMock:
+                if (
+                    events is not None
+                    and isinstance(payload, dict)
+                    and str(payload.get("computation_status", "")).startswith("complete")
+                ):
+                    events.append("scalar_complete_upsert")
+                return MagicMock(execute=MagicMock())
+
+            tbl.upsert.side_effect = _upsert
+        elif name == "strategy_analytics_series":
+            def _delete() -> MagicMock:
+                rec: dict[str, dict] = {"filters": {}}
+                chain = MagicMock()
+
+                def _eq(col: str, val: object) -> MagicMock:
+                    rec["filters"][f"eq:{col}"] = val
+                    return chain
+
+                chain.eq.side_effect = _eq
+                chain.execute.return_value = MagicMock()
+                if deletes is not None:
+                    deletes.append(rec)
+                return chain
+
+            tbl.delete.side_effect = _delete
+        else:
+            tbl.upsert.return_value = MagicMock(execute=MagicMock())
+        return tbl
+
+    sb.table.side_effect = _table
+
+    def _rpc(name: str, payload: dict) -> MagicMock:
+        if (
+            events is not None
+            and name == "upsert_strategy_analytics_series_batch"
+            and "cash_settlement" in payload.get("p_kinds", {})
+        ):
+            events.append("cash_series_persist")
+        return MagicMock(execute=MagicMock())
+
+    sb.rpc.side_effect = _rpc
+    return sb
+
+
+@pytest.mark.asyncio
+async def test_cash_series_persists_before_complete_scalar_upsert() -> None:
+    """D5 ordering (105-04): the cash_settlement SERIES row is persisted BEFORE the
+    strategy_analytics scalar/status flip, so a `complete` scalar never exists without
+    its series (mirrors test_stitch_composite_job.test_mtm_series_persists_before_done_
+    scalar_write). Neuter: move the persist_basis_series call AFTER
+    db_execute(_mark_complete) in run_csv_strategy_analytics → the ordering assert
+    reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    events: list[str] = []
+    rows = [{"date": f"2024-01-0{d}", "daily_return": 0.01} for d in range(1, 6)]
+    sb = _make_recording_supabase_mock(rows, events=events, api_key_id=None)
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()):
+        result = await run_csv_strategy_analytics("s")
+
+    assert result["status"] == "complete"
+    assert "cash_series_persist" in events, (
+        "the cash_settlement series row must be persisted (D5)"
+    )
+    assert "scalar_complete_upsert" in events, "the scalar/status flip must fire"
+    assert events.index("cash_series_persist") < events.index("scalar_complete_upsert"), (
+        "D5: the cash series row must be persisted BEFORE the scalar/status flip; "
+        f"got order {events!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_failure_heals_cash_series_row() -> None:
+    """D3 SECONDARY (105-04): when the CSV runner hits the unrecoverable catch-all
+    (the shared derive raises mid-compute), the terminal arm heal-DELETEs the
+    cash_settlement series row so a stale row from a prior longer-history derive never
+    outlives the authoritative 'failed' stamp. DEFENSE-IN-DEPTH (the Plan-02 read gate
+    is the primary guarantee). Neuter: remove the persist_basis_series(result=None)
+    heal from the catch-all → the strategy_analytics_series delete vanishes → reddens."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    deletes: list[dict] = []
+    rows = [{"date": f"2024-01-0{d}", "daily_return": 0.01} for d in range(1, 6)]
+    sb = _make_recording_supabase_mock(rows, deletes=deletes, api_key_id=None)
+
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.compute_all_metrics",
+               side_effect=RuntimeError("transient blip mid-compute")):
+        with pytest.raises(HTTPException) as exc:
+            await run_csv_strategy_analytics("s")
+
+    assert exc.value.status_code == 500
+    assert len(deletes) == 1, (
+        f"the terminal arm must heal-delete the cash series exactly once; got {deletes!r}"
+    )
+    assert deletes[0]["filters"].get("eq:kind") == "cash_settlement"
+    assert deletes[0]["filters"].get("eq:strategy_id") == "s"

@@ -114,10 +114,14 @@ vi.mock("./components/ScenarioComposer", () => ({
 
 import { AllocationsTabs } from "./AllocationsTabs";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
 
 // --- Stub props -------------------------------------------------------------
 
-const STUB_PROPS: MyAllocationDashboardPayload = {
+const STUB_PROPS: MyAllocationDashboardPayload & {
+  exposure: ExposureSectionData;
+} = {
+  exposure: EMPTY_EXPOSURE,
   portfolio: null,
   analytics: null,
   strategies: [],

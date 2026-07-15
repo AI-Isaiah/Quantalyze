@@ -219,12 +219,14 @@ function renderComposite(payload: FactsheetPayload) {
 
 describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED until 90-05)", () => {
   it("RED: toggling to Mark-to-market swaps Cum. Return to the MTM sentinel + 'BASIS · MARK-TO-MARKET' eyebrow; toggling back restores cash", () => {
-    const { getByText, container } = renderComposite(compositeKpiPayload());
+    const { getByText, getAllByText, container } = renderComposite(compositeKpiPayload());
 
     // Scope the VALUE assertions to the KPI strip grid: the equity chart's Y-axis
     // also renders a round "+50.0%" tick, so a body-scoped getByText("+50.0%")
-    // would match the axis label too. The eyebrow strings are unique in the body
-    // (the MetricsColumn eyebrow, when shown, reads CASH), so they stay body-scoped.
+    // would match the axis label too. Phase 103 (F4): this fixture carries NO series
+    // bundle, so under MTM the KpiStrip headline eyebrow reads MTM while the rail
+    // eyebrow stays blank (gated on bundle presence) — assert with getAllByText and a
+    // `>= 1` count (the KpiStrip eyebrow alone), tolerant of either eyebrow policy.
     const kpiGrid = () =>
       within(
         Array.from(container.querySelectorAll<HTMLElement>("div.grid")).find(
@@ -235,12 +237,34 @@ describe("FactsheetView KPI strip — Phase 90 basis relabel (composite) (RED un
     // No basis toggle exists yet → getByText throws (RED). After 90-05 this
     // drives the KpiStrip relabel.
     fireEvent.click(getByText("Mark-to-market"));
-    expect(getByText("BASIS · MARK-TO-MARKET")).toBeTruthy();
+    // The KpiStrip headline eyebrow reads "BASIS · MARK-TO-MARKET" under MTM (the rail
+    // eyebrow stays blank here — no series bundle, F4).
+    expect(getAllByText("BASIS · MARK-TO-MARKET").length).toBeGreaterThanOrEqual(1);
     expect(kpiGrid().getByText("+50.0%")).toBeTruthy(); // MTM cumulative_return sentinel
 
     fireEvent.click(getByText("Cash settlement"));
+    // Under cash the KpiStrip eyebrow reads CASH SETTLEMENT (unique — the rail eyebrow
+    // holds its blank reserved line under cash).
     expect(getByText("BASIS · CASH SETTLEMENT")).toBeTruthy();
     expect(kpiGrid().getByText("+62.7%")).toBeTruthy(); // cash cumulative_return sentinel
+  });
+
+  it("F4: with NO series bundle the rail eyebrow does NOT mislabel cash as MTM (only the KpiStrip headline reads MTM)", () => {
+    // `compositeKpiPayload()` carries the persisted MTM SCALARS but NO seriesByBasis
+    // BUNDLE — so under MTM the KpiStrip headline swaps (persisted overlay) while the
+    // rail's dailies panels FALL BACK to cash (see the sibling caption test). F4: the
+    // rail eyebrow is gated on bundle PRESENCE, so it must stay BLANK here — labelling
+    // the cash rail "BASIS · MARK-TO-MARKET" would be the mislabel this fix removes.
+    const { getByText, getAllByText, queryByText } = renderComposite(compositeKpiPayload());
+    // Cash default: neither eyebrow reads MTM; the rail eyebrow holds its blank line.
+    expect(queryByText("BASIS · MARK-TO-MARKET")).toBeNull();
+    fireEvent.click(getByText("Mark-to-market"));
+    // Under MTM only the KpiStrip headline eyebrow reads MTM (ONE match). The rail
+    // eyebrow stays blank because the bundle is absent — neuter F4 (gate on basis
+    // alone) → the rail eyebrow also flips → TWO matches → RED.
+    expect(getAllByText("BASIS · MARK-TO-MARKET").length).toBe(1);
+    // And it never emits the wrong "BASIS · CASH SETTLEMENT" warning under MTM.
+    expect(queryByText("BASIS · CASH SETTLEMENT")).toBeNull();
   });
 
   it("RED: under MTM, MetricsColumn stays cash-pinned (D5) and the cash-series chart caption is a role=status region", () => {

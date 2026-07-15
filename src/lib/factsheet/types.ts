@@ -155,6 +155,10 @@ export type BootstrapCIPayload = {
   max_dd: { point: number; lo: number; hi: number; hist: BootstrapMetricHist };
   n_resamples: number;
   block_len: number;
+  /** Phase 103 (MTM-04, Finding #6): the basis-selected observation count the
+   *  resamples were drawn FROM — the low-N reliability gate reads THIS so an MTM
+   *  bootstrap over a short MTM window warns even when cash clears 252. */
+  n: number;
 };
 
 /** Style-drift summary — strategy returns split 50/50 with KS test.
@@ -374,6 +378,82 @@ export type RollWindowPick = {
 };
 
 /**
+ * Phase 103 (MTM-04) — a per-basis series bundle. Every field is a STRUCTURAL
+ * CLONE of its {@link FactsheetCommon} sibling so a client view-merge
+ * `{...payload, ...bundle}` stays well-typed and each panel that is a pure
+ * function of the strategy's OWN daily-return series follows the active basis.
+ *
+ * Derived by `buildFactsheetPayload`'s internal `deriveSeriesBundle` from the
+ * basis-selected `DailyReturn[]` — its OWN date axis + OWN gap mask (MTM gaps ≠
+ * cash gaps: never overlay an MTM values array on the cash date axis, Pitfall-1).
+ *
+ * CARRIES: the three chart tracks (equity/drawdown/returns) + rolling + worst-10
+ * + comparators (IN the bundle purely so the MTM axis and the comparator arrays
+ * share ONE coherent date axis — Pitfall-1) + the two heatmap panels + EVERY
+ * dailies-derivable statistics panel (quantiles, streaks, calmarByYear,
+ * bootstrapCI, styleDrift, stressWindows) + correlations / correlationMatrix
+ * (MTM-04 correction: NOT external — a correlation regresses the basis-selected
+ * strategy leg against fixed benchmark INPUT series, so ρ follows the basis).
+ *
+ * EXCLUDES (stays top-level CASH by construction — the client merge passes it
+ * through with ZERO per-panel branching): strategyMetrics (the KpiStrip's
+ * persisted-scalar overlay owns MTM there, Phase 102 — the extended-distribution
+ * scalars READ this bundle's own strategyMetrics via the view under MTM, but the
+ * KpiStrip's seven persisted headline scalars stay overlay-owned). stressWindows
+ * is the MIXED panel: its strategy columns follow MTM, its BTC-benchmark column is
+ * basis-invariant BY CONSTRUCTION (the same BTC series aligned to the MTM date axis
+ * — no new math, no cash-held-for-honesty). NOTE (carry-forward for the backbone
+ * arc 104-106): the benchmark-family scalars (α/β/correlation) are OUTSIDE the
+ * round-trip guarantee — re-deriving them from the persisted MTM rows ALONE needs
+ * the benchmark series too (the persist conventions do not capture benchmark
+ * identity).
+ */
+export type BasisSeriesBundle = {
+  dates: string[];
+  strategyReturns: number[];
+  strategyEquity: number[];
+  strategyDrawdowns: number[];
+  strategyRollingVol: Array<number | null>;
+  strategyRollingSharpe: Array<number | null>;
+  strategyRollingSortino: Array<number | null>;
+  rollingWindow: RollWindowPick;
+  rollingBetaWindow: RollWindowPick;
+  strategyWorst10: Array<{ start: number; trough: number; recover: number; depth: number }>;
+  comparators: {
+    btc: ComparatorBlock;
+    spx: ComparatorBlock;
+    none: ComparatorBlock;
+  };
+  monthlyReturns: MonthlyReturnsRow[];
+  dailyHeatmap: DailyHeatmapYear[];
+  /** Per-basis coverage mask — for MTM, derived from the persisted `gap_spans`
+   *  (Python-owned, single implementation) via `deriveSegmentMarkers`. Optional
+   *  so an absent mask serializes away (byte-identity discipline). */
+  missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
+  quantiles: QuantilePayload;
+  streaks: StreakPayload;
+  calmarByYear: CalmarYearPayload[];
+  bootstrapCI: BootstrapCIPayload;
+  styleDrift: StyleDriftPayload | null;
+  stressWindows: StressWindowPayload;
+  /** Phase 103 (MTM-04 follow-through, Finding A): the full scalar summary computed
+   *  FROM this basis's daily series — the extended distribution scalars (skew /
+   *  kurtosis / VaR / CVaR / omega / profit-factor / pain / ulcer / …) are pure
+   *  functions of the dailies, so they follow the active basis via `view.
+   *  strategyMetrics`. The seven persisted HEADLINE scalars are still owned by the
+   *  KpiStrip (Phase-102 persisted overlay); this is the series-recomputed cache the
+   *  extended-metrics panel reads. */
+  strategyMetrics: ComputeSummary;
+  /** Phase 103 (MTM-04, correction): strategy ρ vs each benchmark, derived per
+   *  basis. The benchmark legs are fixed INPUT series but the strategy leg is the
+   *  basis-selected dailies, so ρ follows cash→MTM (nothing bypasses the backbone). */
+  correlations: CorrelationRow[];
+  /** Phase 103 (MTM-04, correction): the full pairwise matrix, per basis (same
+   *  rationale — the strategy row/column follows the basis). */
+  correlationMatrix: CorrelationMatrixPayload;
+};
+
+/**
  * Fields shared by every factsheet payload regardless of ingest source.
  * The discriminated {@link FactsheetPayload} adds `ingestSource` plus the
  * api-only synthesized panels on top of this base.
@@ -477,13 +557,16 @@ export type FactsheetCommon = {
    */
   missingSegments?: { start: string; end: string; kind: "gap"; days: number }[];
   /**
-   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` always
-   * present on a composite; `mark_to_market` OMITTED (never JSON null) when the
-   * venue/book can't produce an MTM basis. Drives the KpiStrip/MetricsColumn
-   * basis relabel (D5) and the D3 cash-scalar overlay onto `strategyMetrics`.
+   * FS-03 — persisted `metrics_json_by_basis`. `cash_settlement` is present on a
+   * COMPOSITE payload (drives the D3 cash-scalar overlay onto `strategyMetrics` at
+   * build-payload.ts:243) but ABSENT on a single-key options payload, which carries
+   * ONLY `mark_to_market` (Phase 101/102 decision — the SC-4 keystone: with no
+   * cash key the cash overlay is a no-op, so the cash headline stays byte-identical).
+   * `mark_to_market` is OMITTED (never JSON null) when the venue/book can't produce
+   * an MTM basis. Drives the KpiStrip/MetricsColumn basis relabel (D5).
    */
   metricsByBasis?: {
-    cash_settlement: Record<string, number>;
+    cash_settlement?: Record<string, number>;
     mark_to_market?: Record<string, number>;
   };
   /**
@@ -513,6 +596,19 @@ export type FactsheetCommon = {
   };
   /** Phase 90.5 (LEV-01/D2): #597 annualization basis (365 crypto / 252 traditional) — enables the client leverage recompute. Optional: absent (stale v4 cache drain) => leverage control hidden, fail-closed. */
   periodsPerYear?: number;
+  /**
+   * Phase 103 (MTM-04) — per-basis series bundles keyed by basis. The cash
+   * series stays TOP-LEVEL (the fields above), so this is ADDITIVE-ONLY:
+   * absent when no persisted MTM series feeds the build → the object serializes
+   * away and the cash payload is BYTE-IDENTICAL (SC-4). Present only
+   * `mark_to_market` in Phase 103; the client (Plan 04) picks the active-basis
+   * bundle via `useBasis()` and view-merges it over the cash top-level. The bundle
+   * carries EVERY dailies-derivable panel INCLUDING correlations / correlationMatrix
+   * (MTM-04 correction — the strategy leg regresses the basis-selected dailies, so ρ
+   * follows the basis; see {@link BasisSeriesBundle}). The KpiStrip's seven persisted
+   * headline scalars are the only surface the merge does NOT own (Phase 102).
+   */
+  seriesByBasis?: { mark_to_market?: BasisSeriesBundle };
 };
 
 /**

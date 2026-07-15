@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import { usePayload, useActiveComparator } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -26,26 +27,33 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 /* -------------------- EOY bars -------------------- */
 
 export function EndOfYearBarsPanel() {
-  const payload = usePayload();
-  const { block: cmp, key: cmpKey } = useActiveComparator();
+  // Phase 103 (MTM-04, root-cause flip): EoY follows the active basis. Both the
+  // strategy per-year (`view.strategyMetrics.yearly` — the bundle's compute() on
+  // the MTM series under mark_to_market) and the comparator daily-return series
+  // (`vcmp.dailyReturns`, aligned on the VIEW's own date axis) come from the view,
+  // so under MTM the bars ride the MTM strategy and the axis-matched benchmark.
+  // Under cash the view returns `payload` by reference (byte-identical).
+  const view = useBasisSeriesView(usePayload());
+  const { key: cmpKey } = useActiveComparator();
+  const vcmp = view.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
-  const hasBench = cmpKey !== "none" && Array.isArray(cmp.dailyReturns);
+  const hasBench = cmpKey !== "none" && Array.isArray(vcmp.dailyReturns);
 
-  // Strategy per-year compounded — already pre-aggregated server-side.
-  const stratByYear = payload.strategyMetrics.yearly;
-  // Comparator per-year — compound the aligned daily-return series client-side.
-  // Doing it here keeps the comparator picker reactive without a payload trip.
+  // Strategy per-year compounded — already pre-aggregated in the basis bundle.
+  const stratByYear = view.strategyMetrics.yearly;
+  // Comparator per-year — compound the aligned daily-return series client-side on
+  // the view's own axis. Doing it here keeps the comparator picker reactive.
   const benchByYear = useMemo(() => {
     const out: Record<string, number> = {};
-    if (!hasBench || !cmp.dailyReturns) return out;
-    for (let i = 0; i < payload.dates.length; i++) {
-      const r = cmp.dailyReturns[i];
+    if (!hasBench || !vcmp.dailyReturns) return out;
+    for (let i = 0; i < view.dates.length; i++) {
+      const r = vcmp.dailyReturns[i];
       if (!Number.isFinite(r)) continue;
-      const yr = payload.dates[i].slice(0, 4);
+      const yr = view.dates[i].slice(0, 4);
       out[yr] = out[yr] == null ? r : (1 + out[yr]) * (1 + r) - 1;
     }
     return out;
-  }, [hasBench, cmp.dailyReturns, payload.dates]);
+  }, [hasBench, vcmp.dailyReturns, view.dates]);
 
   const rows = useMemo(() => {
     const years = new Set<string>([...Object.keys(stratByYear), ...Object.keys(benchByYear)]);
@@ -86,30 +94,30 @@ export function EndOfYearBarsPanel() {
     <figure className="flex flex-col gap-2" style={{ contentVisibility: "auto", containIntrinsicSize: `auto ${VB_H + 60}px` }}>
       <header>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">
-          {hasBench ? `End-of-Year Returns vs ${cmp.shortName}` : "End-of-Year Returns"}
+          {hasBench ? `End-of-Year Returns vs ${vcmp.shortName}` : "End-of-Year Returns"}
         </h3>
         <p className="text-micro text-text-muted">
           compounded annual returns · scale ±{(maxAbs * 100).toFixed(0)}%
-          {hasBench ? ` · strategy in accent, ${cmp.shortName} in muted` : ""}
+          {hasBench ? ` · strategy in accent, ${vcmp.shortName} in muted` : ""}
         </p>
       </header>
       <ResponsiveChartFrame
         width={VB_W}
         height={VB_H}
         role="img"
-        aria-label={hasBench ? `End-of-year returns by calendar year, strategy vs ${cmp.shortName}` : "End-of-year returns by calendar year"}
+        aria-label={hasBench ? `End-of-year returns by calendar year, strategy vs ${vcmp.shortName}` : "End-of-year returns by calendar year"}
       >
         {/* Legend */}
         <g>
           <rect x={PAD.left} y={6} width={10} height={6} fill="var(--color-accent)" />
           <text x={PAD.left + 14} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
-            {payload.strategyName}
+            {view.strategyName}
           </text>
           {hasBench && (
             <>
               <rect x={PAD.left + 180} y={6} width={10} height={6} fill="var(--color-text-muted)" />
               <text x={PAD.left + 194} y={12} fontSize={legendFont} fontFamily="var(--font-mono)" fill="var(--color-text-2)">
-                {cmp.name}
+                {vcmp.name}
               </text>
             </>
           )}
@@ -198,9 +206,11 @@ export function EndOfYearBarsPanel() {
 /* -------------------- Quantile box plot -------------------- */
 
 export function QuantileBoxPlotPanel() {
-  const payload = usePayload();
+  // Phase 103 (MTM-04): the daily-return quantile box is a pure function of the
+  // strategy's own daily series → follows the active basis (cash === payload).
+  const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const q = payload.quantiles;
+  const q = view.quantiles;
   // Use min/max as the visible range; clamp at twice the P95-P05 IQR-ish so
   // a 50% tail-event day doesn't push the box into a tiny sliver.
   const span = Math.max(Math.abs(q.p95 - q.p05), 0.005);
@@ -327,9 +337,14 @@ function Kpi({ label, value, tone }: { label: string; value: string; tone: "mute
 /* -------------------- Correlation strip -------------------- */
 
 export function CorrelationStripPanel() {
-  const payload = usePayload();
+  // Phase 103 (MTM-04, correction): correlations FOLLOW the active basis. A
+  // correlation is corr(strategy_returns, benchmark_returns) — the benchmark legs
+  // are fixed INPUT series, but the STRATEGY leg is the basis-selected dailies, so
+  // ρ moves cash→MTM (nothing bypasses the backbone). The per-basis bundle carries
+  // correlations now, so this view-read follows MTM with zero panel branching.
+  const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const rows = payload.correlations.filter(r => Number.isFinite(r.rho));
+  const rows = view.correlations.filter(r => Number.isFinite(r.rho));
   if (rows.length === 0) return null;
   const VB_W = 880;
   // CHART-03 portrait: taller mobile rows; desktop ROW_H = today's literal (26).
@@ -437,9 +452,12 @@ export function CorrelationStripPanel() {
  * the matrix doubles as a small data table.
  */
 export function CorrelationsMatrixPanel() {
-  const payload = usePayload();
+  // Phase 103 (MTM-04, correction): FOLLOWS the active basis (see
+  // CorrelationStripPanel) — the strategy row/column regresses the basis-selected
+  // dailies, so the view-merge makes it follow MTM.
+  const view = useBasisSeriesView(usePayload());
   const isMobile = useBreakpoint() === "mobile";
-  const { labels, matrix } = payload.correlationMatrix;
+  const { labels, matrix } = view.correlationMatrix;
   if (labels.length === 0) return null;
 
   const N = labels.length;

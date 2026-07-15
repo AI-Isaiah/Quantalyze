@@ -1,6 +1,7 @@
 "use client";
 
 import { usePayload } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
@@ -29,8 +30,10 @@ const VB_H_MOBILE = 280;
 const HIST_PAD = { top: 14, right: 16, bottom: 26, left: 42 };
 
 export function StreakDistributionPanel() {
-  const payload = usePayload();
-  const s = payload.streaks;
+  // Phase 103 (MTM-04): consecutive-day streaks derive from the strategy's own
+  // daily-return signs → follow the active basis (cash view === payload).
+  const view = useBasisSeriesView(usePayload());
+  const s = view.streaks;
   return (
     <figure
       className="@container flex flex-col gap-2"
@@ -260,8 +263,10 @@ function niceCountTicks(lo: number, hi: number, count: number): { value: number;
 }
 
 export function CalmarByYearPanel() {
-  const payload = usePayload();
-  const rows = payload.calmarByYear;
+  // Phase 103 (MTM-04): per-year Calmar recomputes from the strategy's own daily
+  // series → follows the active basis (cash view === payload).
+  const view = useBasisSeriesView(usePayload());
+  const rows = view.calmarByYear;
   if (rows.length === 0) return null;
   // Flag any partial-year row — < 200 trading days means Calmar is annualised
   // from a stub and shouldn't be treated as comparable to a full-year value.
@@ -317,9 +322,15 @@ export function CalmarByYearPanel() {
 }
 
 export function BootstrapCIPanel() {
-  const payload = usePayload();
-  const b = payload.bootstrapCI;
-  const lowN = payload.strategyMetrics.n < 252;
+  // Phase 103 (MTM-04, Finding #6): the bootstrap CIs resample the strategy's own
+  // daily series → follow the active basis. The reliability (low-N) gate reads the
+  // resample count OFF the bootstrap payload itself (`b.n`, the basis-selected
+  // series length the resamples were drawn from), NOT the cash `strategyMetrics.n`.
+  // A genuinely short MTM window (MTM n<252 while cash n≥252) therefore fires the
+  // warning instead of silently inheriting the cash count and suppressing it.
+  const view = useBasisSeriesView(usePayload());
+  const b = view.bootstrapCI;
+  const lowN = b.n < 252;
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
@@ -327,7 +338,7 @@ export function BootstrapCIPanel() {
       </header>
       {lowN && (
         <p className="mb-2 text-micro italic" style={{ color: "var(--color-warning, #B45309)" }}>
-          ⚠ Bootstrap resamples are drawn from {payload.strategyMetrics.n} observations.
+          ⚠ Bootstrap resamples are drawn from {b.n} observations.
           CI width is wide and may understate true uncertainty below 252 days (1 year).
         </p>
       )}

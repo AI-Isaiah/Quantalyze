@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { usePayload, useToggles } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { resolvePalette } from "./palette";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
@@ -36,8 +37,10 @@ const MONTH_HEADERS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "
 /* -------------------- Monthly heatmap -------------------- */
 
 export function MonthlyReturnsHeatmap() {
-  const payload = usePayload();
-  const rows = payload.monthlyReturns;
+  // Phase 103 (MTM-04): the monthly grid is a pure function of the strategy's own
+  // daily series → follows the active basis. Cash view === payload (byte-identical).
+  const view = useBasisSeriesView(usePayload());
+  const rows = view.monthlyReturns;
   const maxAbs = useMemo(() => percentileOfAbs(rows), [rows]);
   const palette = useHeatmapBase();
   if (rows.length === 0) return null;
@@ -157,8 +160,9 @@ const DAY_LABELS = ["M", "T", "W", "T", "F", "S", "S"] as const;
 const SHOW_DAY_LABEL = [true, false, true, false, true, false, false] as const;
 
 export function DailyReturnsHeatmap() {
-  const payload = usePayload();
-  const years = payload.dailyHeatmap;
+  // Phase 103 (MTM-04): per-basis daily calendar (own daily series). Cash === payload.
+  const view = useBasisSeriesView(usePayload());
+  const years = view.dailyHeatmap;
   const palette = useHeatmapBase();
   const maxAbs = useMemo(() => {
     const vals: number[] = [];

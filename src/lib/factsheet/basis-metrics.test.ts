@@ -111,4 +111,17 @@ describe("H-1 overlayBasisScalars — STRICT: null/non-finite scalar → NaN, ne
     expect(out.sortino).toBe(2.1);
     expect(out.calmar).toBe(3.0);
   });
+
+  // Phase 102 (SC-4 keystone unit pin) — a single-key options payload carries a
+  // by-basis object with ONLY `mark_to_market` (never a cash key). The cash
+  // overlay at build-payload.ts:243 reads `metricsByBasis?.cash_settlement`, which
+  // is `undefined` here, so the overlay is a no-op → the cash headline stays
+  // byte-identical. This is the structural guarantee singleKeyBasisOpts preserves
+  // by threading ONLY the mark_to_market key (SC4-1 in composite-read-path.test.ts).
+  it("SC-4: a mark_to_market-only by-basis object leaves the cash overlay a no-op (base by reference)", () => {
+    const byBasis: { cash_settlement?: Record<string, number>; mark_to_market: Record<string, number> } = {
+      mark_to_market: { ...FULL },
+    };
+    expect(overlayBasisScalars(cashBase, byBasis.cash_settlement)).toBe(cashBase);
+  });
 });

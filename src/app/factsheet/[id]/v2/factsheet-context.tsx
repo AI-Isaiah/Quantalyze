@@ -207,9 +207,25 @@ export function FactsheetProvider({
   // setXRange fires 60+ times/sec during pan/zoom. Wrapping the write in a
   // transition lets React interrupt expensive chart-stack reconciliations
   // when a newer pan frame arrives — keeps dragging smooth on long pages.
+  // Phase 103 (MTM-follow, F2.3): the upper clamp sizes to the LONGER of the cash
+  // axis and any present mark_to_market series bundle. This provider sits ABOVE
+  // BasisProvider so it cannot read the active basis, but it does not need to: a
+  // cash consumer (MasterBrush/TimeSeriesChart) reads the cash `view.dates` and so
+  // never emits an index beyond `payload.dates.length - 1`, making the widened
+  // bound a NO-OP under cash (SC-4 byte-identity — the clamp is never exercised by
+  // a cash-space index). Only under an MTM axis LONGER than cash does a brush drag
+  // emit indices in `(cashLen-1, mtmLen-1]`; without this widening the old
+  // cash-sized clamp clipped them, leaving the recent MTM days PERMANENTLY
+  // unreachable (the reported harm). `fullRange` below deliberately STAYS
+  // cash-sized so the initial/reset window and the URL full-range sentinel are
+  // byte-identical under cash.
   const setXRange = useCallback(
     (next: readonly [number, number]) => {
-      const maxIdx = payload.dates.length - 1;
+      const maxIdx =
+        Math.max(
+          payload.dates.length,
+          payload.seriesByBasis?.mark_to_market?.dates.length ?? 0,
+        ) - 1;
       let [s, e] = next;
       if (s < 0) s = 0;
       if (e > maxIdx) e = maxIdx;
@@ -217,7 +233,7 @@ export function FactsheetProvider({
       if (e - s < MIN_VISIBLE_SAMPLES - 1) s = Math.max(0, e - MIN_VISIBLE_SAMPLES + 1);
       startTransition(() => setXRangeRaw([s, e]));
     },
-    [payload.dates.length],
+    [payload.dates.length, payload.seriesByBasis?.mark_to_market?.dates.length],
   );
 
   // resetXRange is low-volume (one click), so the eager update is preferable

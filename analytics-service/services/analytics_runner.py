@@ -227,6 +227,14 @@ class DataQualityFlags(TypedDict, total=False):
     # every young account complete_with_warnings would be factsheet-wide blast
     # radius (roadmap Pitfall #12). The CAGR value it annotates is unchanged. ---
     insufficient_window: bool
+    # --- Phase 101 (MTM-01): the machine reason stamped by the broker derive
+    # (job_worker._prestamp_dq_flags) when a single-key options book's
+    # mark_to_market pass structurally degrades. run_csv_strategy_analytics is now
+    # a PRODUCER of this key (it bridges the prestamped value through its wholesale
+    # data_quality_flags rebuild), so it must be enumerated here. An availability
+    # annotation ONLY — like insufficient_window it NEVER promotes
+    # computation_status. Read by Phase-102's disabled-with-reason toggle. ---
+    mtm_gated_reason: str
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -2182,6 +2190,12 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         ).execute()
     await db_execute(_mark_computing)
 
+    # Phase 105 (BB-02, collapse #2, D1): the single-key cash SCALAR path joins the ONE
+    # shared dailies-canonical derive route. Function-local import (matching the runner's
+    # local `import pandas` idiom) keeps the import-cycle risk low AND binds the names for
+    # BOTH the success persist and the terminal-arm heal-delete in the except block below.
+    from services.basis_series import derive_basis_series, persist_basis_series
+
     try:
         # Load persisted series.
         #
@@ -2280,6 +2294,14 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
         # factsheet so it matches the harness-validated path — NOT a geometric /
         # √252 / calendar recompute of the persisted returns.
+        #
+        # Phase 105 (BB-02, collapse #2): these three conventions now feed the ONE shared
+        # derive_basis_series route (the inline compute_all_metrics is GONE). The scalar
+        # stays BYTE-IDENTICAL to the pre-105 compute BY CONSTRUCTION (D1): `returns` is
+        # passed as `scalar_returns` (the exact legacy-conditioned series — the :2272
+        # broker dense-reindex-with-NaN fork already ran), so the derive's default
+        # 0.0-densify NEVER touches the scalar. `densify_policy` echoes HOW that scalar
+        # was conditioned so the persisted series is round-trip-complete.
         #   * periods_per_year — ASSET-CLASS driven (#597): strategies.asset_class
         #     ('crypto' √365 / 'traditional' √252), backfilled 'crypto' for every
         #     api_key-sourced row, so a CSV-uploaded crypto strategy is ALSO √365
@@ -2307,12 +2329,25 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             # PERMANENT by the except branch below (mirrors the derive path).
             _day_basis = metrics_day_basis(_denominator_config.metrics_basis)
 
-        metrics_result = compute_all_metrics(
+        # Phase 105 (BB-02, collapse #2): the single-key inline compute swaps for the
+        # shared derive. `returns` serves BOTH params by construction (D1): as `returns`
+        # it feeds `_drop_nonfinite` → the honest sparse rows/gap_spans; as
+        # `scalar_returns` it is the EXACT legacy compute input (the :2272 conditioning
+        # already ran), so the scalar is byte-identical to the pre-105 recompute. The
+        # densify echo is broker → "broker_nan" (in-span gaps are guard NaN), user CSV →
+        # "sparse" (verbatim — NEVER 0.0-weekend-filled: the broadest SC-4 blast radius).
+        # A ValueError (<2 finite rows) lands in the SAME error handling the legacy
+        # compute relied on. Downstream reads (.insufficient_window/.metrics_json/
+        # .sibling_kinds) are duck-compatible with the old MetricsResult.
+        metrics_result = derive_basis_series(
             returns,
             benchmark_rets,
             periods_per_year=_periods_per_year,
             cumulative_method=_cumulative_method,
             day_basis=_day_basis,
+            benchmark_symbol="BTC",
+            scalar_returns=returns,
+            densify_policy="broker_nan" if _is_broker_sourced else "sparse",
         )
 
         data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
@@ -2359,6 +2394,28 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             if existing_flags.get(_flag):
                 data_quality_flags[_flag] = True  # type: ignore[literal-required]
                 _warned = True
+
+        # Phase 101 (MTM-01): the broker derive PRESTAMPS `mtm_gated_reason` onto
+        # this row (job_worker._prestamp_dq_flags) BEFORE enqueuing this CSV run,
+        # when the single-key mark_to_market pass structurally degraded. This
+        # rebuild REBUILDS data_quality_flags WHOLESALE (the fresh dict above), so
+        # an unbridged reason is wiped seconds after being stamped — Phase 102's
+        # disabled-with-reason toggle would then read nothing. Carry it
+        # PRESENT-ONLY and NON-PROMOTING: it is an availability annotation (like
+        # insufficient_window / HARD-04), NOT a NAV/allocated warn flag, so it must
+        # NEVER touch `_warned` (the composite path likewise never promotes on this
+        # key). EXCLUDE composite→single transitions: a stale composite-era reason
+        # (e.g. `unsmoothed_options_book`) is meaningless for the NEW single-key
+        # headline and must not masquerade as a fresh single-key verdict — mirror
+        # the Finding-5 by-basis NULLing below (`_was_composite` is hoisted here
+        # from its original site so both this exclusion and `_clear_stale_by_basis`
+        # read the one lookup). The next broker derive re-evaluates and re-stamps
+        # honestly.
+        _was_composite = bool(existing_flags.get("composite"))
+        _mtm_reason = existing_flags.get("mtm_gated_reason")
+        if _mtm_reason and not _was_composite:
+            data_quality_flags["mtm_gated_reason"] = _mtm_reason
+
         csv_status = "complete_with_warnings" if _warned else "complete"
 
         # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
@@ -2382,8 +2439,8 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         # single-key strategy (never a composite) is byte-identical (no extra
         # column write). run_stitch_composite_job owns its OWN by-basis write and
         # never routes through this function, so any recompute HERE is genuinely
-        # single-key.
-        _was_composite = bool(existing_flags.get("composite"))
+        # single-key. (`_was_composite` is assigned above, hoisted so the Phase-101
+        # mtm_gated_reason exclusion shares the same lookup.)
         _clear_stale_by_basis = _was_composite
 
         def _mark_complete() -> None:
@@ -2408,6 +2465,19 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
             supabase.table("strategy_analytics").upsert(
                 payload, on_conflict="strategy_id"
             ).execute()
+
+        # Phase 105 (BB-02, D5 ordering): persist the cash_settlement SERIES row BEFORE
+        # the strategy_analytics scalar/status flip, so a `complete` scalar never exists
+        # without its series (mirrors the job_worker series-before-DONE discipline). A
+        # series-persist failure MUST abort BEFORE the scalar flip (fail-loud): it
+        # propagates to the catch-all, which stamps failed AND heal-deletes the
+        # (never-written) row. The single-key cash scalar is now a cache of this series.
+        def _persist_cash_series() -> None:
+            persist_basis_series(
+                supabase, strategy_id, basis="cash_settlement", result=metrics_result,
+            )
+        await db_execute(_persist_cash_series)
+
         await db_execute(_mark_complete)
 
         if metrics_result.sibling_kinds:
@@ -2591,4 +2661,24 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
                 strategy_id,
                 mark_exc,
             )
+
+        # Phase 105 (BB-02, D3 SECONDARY): heal-DELETE the cash_settlement series row so a
+        # stale row from a prior longer-history derive never outlives this authoritative
+        # 'failed' stamp. DEFENSE-IN-DEPTH — the Plan-02 read gate is the primary
+        # guarantee. A heal failure must NEVER mask the terminal stamp that invoked it:
+        # swallow + warn (mirrors job_worker._heal_delete_basis_series).
+        def _heal_delete_cash_series() -> None:
+            persist_basis_series(
+                supabase, strategy_id, basis="cash_settlement", result=None,
+            )
+        try:
+            await db_execute(_heal_delete_cash_series)
+        except Exception as heal_exc:  # noqa: BLE001
+            logger.warning(
+                "csv analytics: cash series heal-delete failed for %s "
+                "(terminal stamp already applied): %s",
+                strategy_id,
+                heal_exc,
+            )
+
         raise HTTPException(status_code=500, detail="CSV analytics computation failed")

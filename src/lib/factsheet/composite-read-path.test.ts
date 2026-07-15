@@ -6,7 +6,16 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { readCompositeFactsheet, singleKeyDataQuality } from "./composite-read-path";
+import {
+  readCompositeFactsheet,
+  singleKeyDataQuality,
+  singleKeyBasisOpts,
+  parseMtmSeriesPayload,
+  readMtmSeries,
+  shouldReadSingleKeyMtmSeries,
+  shouldReadCashSettlementSeries,
+} from "./composite-read-path";
+import type { ParsedMtmSeries } from "./composite-read-path";
 import { buildFactsheetPayload, deriveIngestSource } from "./build-payload";
 import type { DailyReturn } from "./types";
 
@@ -395,5 +404,513 @@ describe("Finding B — singleKeyDataQuality single-key DQ opt (one owner)", () 
       { dataQuality: singleKeyDataQuality({ insufficient_window: true }) },
     )!;
     expect(fixed.dataQuality).toEqual({ composite: false, insufficientWindow: true });
+  });
+});
+
+/**
+ * Phase 102 (MTM-01) — singleKeyBasisOpts: the ONE single-key MTM read helper.
+ * Mirrors the composite mtmGate assembly (readCompositeFactsheet :167-170) but for
+ * a single-key options strategy, colocated so BOTH factsheet surfaces (the
+ * `/factsheet/[id]/v2` route + the discovery detail page) consume one owner and
+ * can't diverge (the "one path" lesson). Two load-bearing invariants:
+ *   - F-4 (T-102-01): `mtmGate.available` is gated on `computation_status ∈
+ *     {complete, complete_with_warnings}` — a failed/computing row NEVER exposes a
+ *     live-looking MTM object (its payload carries NO metricsByBasis at all).
+ *   - SC-4 (T-102-SC keystone): the helper threads ONLY the `mark_to_market` key,
+ *     NEVER the raw `metrics_json_by_basis` column — a lingering `cash_settlement`
+ *     key (composite→single stale window) would activate the build-payload.ts:243
+ *     cash overlay and perturb the byte-identical cash headline.
+ */
+describe("MTM-01 singleKeyBasisOpts — F-4 gate + SC-4-safe single-key threading", () => {
+  const MTM_FULL = {
+    cumulative_return: 0.9,
+    volatility: 0.25,
+    max_drawdown: -0.18,
+    cagr: 0.7,
+    sharpe: 2.2,
+    sortino: 2.9,
+    calmar: 0.9,
+  };
+
+  it("F4-1 (F-4 gate): a non-DONE computation_status NEVER exposes a live-looking MTM object", () => {
+    // Neuter check: forcing the DONE gate always-true makes this RED (available
+    // true + metricsByBasis threaded on a failed/computing/undefined-status row).
+    for (const status of ["failed", "computing", undefined, null, "complete_with_warnings_x"]) {
+      const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, status);
+      expect(out.mtmGate?.available).toBe(false);
+      // Structural F-4: a non-DONE row's payload carries NO MTM object at all.
+      expect(out.metricsByBasis).toBeUndefined();
+    }
+  });
+
+  it("F4-2: computation_status complete / complete_with_warnings → available + threaded MTM object", () => {
+    for (const status of ["complete", "complete_with_warnings"]) {
+      const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, status);
+      expect(out.mtmGate?.available).toBe(true);
+      expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
+    }
+  });
+
+  it("SC4-1 (stale-key hazard): a lingering cash_settlement key is NEVER threaded — only mark_to_market", () => {
+    // The 101-01 "Observed-but-out-of-scope #1" composite→single stale window: the
+    // raw column may still carry a cash_settlement key. Neuter check: threading the
+    // raw column instead of {mark_to_market} makes this RED (a cash key survives →
+    // build-payload.ts:243 overlay fires → cash headline perturbed → SC-4 breach).
+    const STALE_CASH = {
+      cumulative_return: 0.05,
+      volatility: 0.99,
+      max_drawdown: -0.5,
+      cagr: 0.01,
+      sharpe: 0.1,
+      sortino: 0.1,
+      calmar: 0.1,
+    };
+    const out = singleKeyBasisOpts(
+      {},
+      { cash_settlement: STALE_CASH, mark_to_market: MTM_FULL },
+      "complete",
+    );
+    expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
+    expect(out.metricsByBasis && "cash_settlement" in out.metricsByBasis).toBe(false);
+  });
+
+  it("HONEST-1: no MTM key + an honest reason → disabled-with-reason, no MTM object", () => {
+    const out = singleKeyBasisOpts(
+      { mtm_gated_reason: "mtm_summary_coverage_incomplete" },
+      {}, // no mark_to_market key
+      "complete",
+    );
+    expect(out.mtmGate).toEqual({ available: false, reason: "mtm_summary_coverage_incomplete" });
+    expect(out.metricsByBasis).toBeUndefined();
+  });
+
+  it("SILENT-1: no MTM key AND no reason → EMPTY result (every non-options single-key; byte-identical)", () => {
+    const out = singleKeyBasisOpts({}, {}, "complete");
+    expect(out).toEqual({});
+    expect("mtmGate" in out).toBe(false);
+    expect("metricsByBasis" in out).toBe(false);
+  });
+
+  it("SILENT-1 (null/undefined jsonb): a null / absent metrics_json_by_basis with no reason → EMPTY", () => {
+    expect(singleKeyBasisOpts(null, null, "complete")).toEqual({});
+    expect(singleKeyBasisOpts(undefined, undefined, "complete")).toEqual({});
+    // A non-object jsonb (string / number / array) with no reason is also EMPTY.
+    expect(singleKeyBasisOpts({}, "garbage", "complete")).toEqual({});
+    expect(singleKeyBasisOpts({}, [MTM_FULL], "complete")).toEqual({});
+  });
+
+  it("DEGEN-1: a present-but-degenerate MTM object (fails hasBasisHeadline) with a DONE status → unavailable, no MTM object", () => {
+    // A non-finite headline (cumulative_return null) is a real data defect: DONE
+    // but not displayable → available false, and NO MTM object threaded.
+    const DEGEN = { ...MTM_FULL, cumulative_return: null as unknown as number };
+    const out = singleKeyBasisOpts({}, { mark_to_market: DEGEN }, "complete");
+    expect(out.mtmGate?.available).toBe(false);
+    expect(out.metricsByBasis).toBeUndefined();
+  });
+
+  it("a non-string mtm_gated_reason is coerced to undefined (server-truth, mirrors :169)", () => {
+    const out = singleKeyBasisOpts(
+      { mtm_gated_reason: 42 as unknown },
+      { mark_to_market: MTM_FULL },
+      "complete",
+    );
+    // Reason drops to undefined; the MTM object is still available (DONE + headline).
+    expect(out.mtmGate).toEqual({ available: true, reason: undefined });
+    expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL });
+  });
+
+  // ---- MTM-04 (Phase 103) — 4th-param MTM series threading ----
+  const SERIES: ParsedMtmSeries = {
+    dailyReturns: [
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+      { date: "2025-08-05", value: 0.03 },
+    ],
+    gapSpans: [{ start: "2025-08-03", end: "2025-08-04" }],
+  };
+
+  it("MTM-04: available (DONE + headline) + parsed series → threads buildOpts.mtmSeries", () => {
+    const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, "complete", SERIES);
+    expect(out.mtmGate?.available).toBe(true);
+    expect(out.mtmSeries).toBe(SERIES);
+  });
+
+  it("MTM-04 (structural F-4 gate): a non-DONE status NEVER threads the MTM series, even when a parsed series is supplied", () => {
+    // Neuter check: forcing the DONE gate true (or removing the `available &&`
+    // guard on the mtmSeries spread) makes this RED — a failed/computing row would
+    // leak a live-looking MTM SERIES bundle. The series rides the SAME F-4 gate as
+    // the scalar object.
+    for (const status of ["failed", "computing", undefined, null]) {
+      const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, status, SERIES);
+      expect(out.mtmGate?.available).toBe(false);
+      expect(out.mtmSeries).toBeUndefined();
+    }
+  });
+
+  it("MTM-04: available but the reader returned null (degraded/failed series read) → no mtmSeries key", () => {
+    const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL }, "complete", null);
+    expect(out.mtmGate?.available).toBe(true);
+    expect("mtmSeries" in out).toBe(false);
+  });
+
+  it("MTM-04 (SILENT-1): a non-options single-key strategy passing a series still returns EMPTY (no MTM key/reason → {})", () => {
+    // A stray series with no MTM scalar object + no reason must NOT resurrect a
+    // bundle — the early SILENT-1 return keeps the payload byte-identical.
+    const out = singleKeyBasisOpts({}, {}, "complete", SERIES);
+    expect(out).toEqual({});
+    expect("mtmSeries" in out).toBe(false);
+  });
+});
+
+/**
+ * Phase 103 (MTM-04) — parseMtmSeriesPayload: the DB-JSONB → RSC trust-boundary
+ * coercion (T-103-05). A malformed/failed series row must degrade to no-bundle
+ * (charts stay cash, V5), never crash or fabricate.
+ */
+describe("MTM-04 parseMtmSeriesPayload — strict coercion of the untrusted series row", () => {
+  const VALID = {
+    schema: 1,
+    basis: "mark_to_market",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+      { date: "2025-08-05", return: 0.03 },
+    ],
+    gap_spans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  it("valid payload → maps `return`→`value`, ascending rows + gapSpans", () => {
+    const out = parseMtmSeriesPayload(VALID);
+    expect(out).not.toBeNull();
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+      { date: "2025-08-05", value: 0.03 },
+    ]);
+    expect(out!.gapSpans).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
+  });
+
+  it("non-object / array / null payloads → null", () => {
+    for (const raw of [null, undefined, 42, "x", true, [VALID]]) {
+      expect(parseMtmSeriesPayload(raw as unknown)).toBeNull();
+    }
+  });
+
+  it("missing / non-array `rows` → null", () => {
+    expect(parseMtmSeriesPayload({ ...VALID, rows: undefined })).toBeNull();
+    expect(parseMtmSeriesPayload({ ...VALID, rows: "nope" })).toBeNull();
+    expect(parseMtmSeriesPayload({ ...VALID, rows: {} })).toBeNull();
+  });
+
+  it("fewer than 2 VALID rows → null (mirrors the build-payload dedup<2 guard)", () => {
+    expect(parseMtmSeriesPayload({ ...VALID, rows: [{ date: "2025-08-01", return: 0.02 }] })).toBeNull();
+    // 3 rows but only 1 valid (bad date, non-finite return) → <2 → null.
+    expect(
+      parseMtmSeriesPayload({
+        ...VALID,
+        rows: [
+          { date: "2025-08-01", return: 0.02 },
+          { date: 42, return: 0.01 },
+          { date: "2025-08-03", return: Infinity },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  it("drops invalid rows but keeps ≥2 valid ones (strict per-row coercion)", () => {
+    const out = parseMtmSeriesPayload({
+      ...VALID,
+      rows: [
+        { date: "2025-08-01", return: 0.02 },
+        { date: "", return: 0.01 }, // empty date — dropped
+        { date: "2025-08-02", return: NaN }, // non-finite — dropped
+        { date: "2025-08-03", return: -0.04 },
+        "junk", // not an object — dropped
+        { date: "2025-08-04", return: 0.05 },
+      ],
+    });
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-03", value: -0.04 },
+      { date: "2025-08-04", value: 0.05 },
+    ]);
+  });
+
+  it("gap_spans coerced defensively: non-array → [], junk entries dropped", () => {
+    expect(parseMtmSeriesPayload({ ...VALID, gap_spans: "nope" })!.gapSpans).toEqual([]);
+    expect(parseMtmSeriesPayload({ ...VALID, gap_spans: undefined })!.gapSpans).toEqual([]);
+    expect(
+      parseMtmSeriesPayload({
+        ...VALID,
+        gap_spans: [
+          { start: "2025-08-03", end: "2025-08-04" },
+          { start: 3, end: "x" }, // non-string start — dropped
+          "junk",
+          { start: "2025-08-10" }, // missing end — dropped
+        ],
+      })!.gapSpans,
+    ).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
+  });
+
+  it("FIX 4: warns (recoverable) when a present rows/gap_spans array has entries dropped; silent when clean", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // (a) partially-dropped rows → one warn naming the row drop.
+      parseMtmSeriesPayload({
+        ...VALID,
+        rows: [
+          { date: "2025-08-01", return: 0.02 },
+          { date: "", return: 0.01 }, // dropped
+          { date: "2025-08-03", return: -0.04 },
+        ],
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("dropped malformed mtm_daily_returns rows");
+      expect(warn.mock.calls[0]![1]).toMatchObject({ total: 3, kept: 2, dropped: 1 });
+
+      // (b) partially-dropped gap_spans → one warn naming the gap drop.
+      warn.mockClear();
+      parseMtmSeriesPayload({
+        ...VALID,
+        gap_spans: [
+          { start: "2025-08-03", end: "2025-08-04" },
+          { start: 3, end: "x" }, // dropped
+        ],
+      });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]![0]).toContain("dropped malformed gap_spans entries");
+
+      // (c) fully-clean payload → NO warn (drop behavior unchanged, no false signal).
+      warn.mockClear();
+      parseMtmSeriesPayload(VALID);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * Phase 103 (MTM-04, T-103-06) — readMtmSeries: service-role direct read of the
+ * `mtm_daily_returns` row, degrade-never-throw on error/absent/malformed.
+ */
+describe("MTM-04 readMtmSeries — service-role direct read + degrade", () => {
+  const VALID_PAYLOAD = {
+    schema: 1,
+    basis: "mark_to_market",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+    ],
+    gap_spans: [],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  function mockSeriesAdmin(
+    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+  ): SupabaseClient {
+    const chain = {
+      select: () => chain,
+      eq: () => chain,
+      maybeSingle: () => Promise.resolve(result),
+    };
+    return { from: () => chain } as unknown as SupabaseClient;
+  }
+
+  it("valid row → ParsedMtmSeries", async () => {
+    const out = await readMtmSeries(mockSeriesAdmin({ data: { payload: VALID_PAYLOAD }, error: null }), "s1");
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+    ]);
+  });
+
+  it("read error → null + console.error (degrade, never throw)", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const out = await readMtmSeries(mockSeriesAdmin({ data: null, error: { message: "boom" } }), "s1");
+    expect(out).toBeNull();
+    expect(err).toHaveBeenCalledOnce();
+    err.mockRestore();
+  });
+
+  it("missing row (maybeSingle null) → null", async () => {
+    const out = await readMtmSeries(mockSeriesAdmin({ data: null, error: null }), "s1");
+    expect(out).toBeNull();
+  });
+
+  it("malformed payload (garbage shape) → null (no throw)", async () => {
+    const out = await readMtmSeries(mockSeriesAdmin({ data: { payload: { rows: "x" } }, error: null }), "s1");
+    expect(out).toBeNull();
+  });
+});
+
+/**
+ * Phase 103 (MTM-04) — readCompositeFactsheet threads the persisted MTM series
+ * into buildOpts ONLY when the scalar MTM gate is available, and SKIPS the extra
+ * DB roundtrip entirely for a non-MTM composite.
+ */
+describe("MTM-04 readCompositeFactsheet — gated MTM series threading (one owner)", () => {
+  const MTM_HEADLINE = {
+    cumulative_return: 0.9,
+    volatility: 0.25,
+    max_drawdown: -0.18,
+    cagr: 0.7,
+    sharpe: 2.2,
+    sortino: 2.9,
+    calmar: 0.9,
+  };
+  const MTM_PAYLOAD = {
+    schema: 1,
+    basis: "mark_to_market",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+      { date: "2025-08-05", return: 0.03 },
+    ],
+    gap_spans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  function mockAdminMulti(opts: {
+    sparseRows?: { date: string; daily_return: number }[] | null;
+    mtmPayload?: unknown;
+    mtmError?: { message?: string } | null;
+    mtmRowNull?: boolean;
+  }): { admin: SupabaseClient; mtmReads: () => number } {
+    let mtmReadCount = 0;
+    const from = (table: string) => {
+      if (table === "strategy_analytics_series") {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          maybeSingle: () => {
+            mtmReadCount++;
+            return Promise.resolve({
+              data: opts.mtmRowNull ? null : { payload: opts.mtmPayload },
+              error: opts.mtmError ?? null,
+            });
+          },
+        };
+        return chain;
+      }
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        order: () => chain,
+        limit: () => Promise.resolve({ data: opts.sparseRows ?? SPARSE_ROWS, error: null }),
+      };
+      return chain;
+    };
+    return { admin: { from } as unknown as SupabaseClient, mtmReads: () => mtmReadCount };
+  }
+
+  it("mtmAvailable + valid MTM row → threads buildOpts.mtmSeries (mapped series + gapSpans)", async () => {
+    const { admin, mtmReads } = mockAdminMulti({ mtmPayload: MTM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH, mark_to_market: MTM_HEADLINE },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.mtmSeries).toEqual({
+      dailyReturns: [
+        { date: "2025-08-01", value: 0.02 },
+        { date: "2025-08-02", value: -0.01 },
+        { date: "2025-08-05", value: 0.03 },
+      ],
+      gapSpans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    });
+    expect(mtmReads()).toBe(1);
+  });
+
+  it("NOT mtmAvailable (no mark_to_market headline) → no mtmSeries AND no MTM roundtrip", async () => {
+    const { admin, mtmReads } = mockAdminMulti({ mtmPayload: MTM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH }, // no mark_to_market
+      returnsDenominatorConfig: null,
+    });
+    expect("mtmSeries" in out!.buildOpts).toBe(false);
+    // The extra DB read is SKIPPED for every non-MTM composite.
+    expect(mtmReads()).toBe(0);
+  });
+
+  it("mtmAvailable but the MTM series read errors → degrade to no mtmSeries (composite still renders)", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { admin } = mockAdminMulti({ mtmError: { message: "boom" } });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH, mark_to_market: MTM_HEADLINE },
+      returnsDenominatorConfig: null,
+    });
+    expect(out).not.toBeNull();
+    expect("mtmSeries" in out!.buildOpts).toBe(false);
+    err.mockRestore();
+  });
+});
+
+/**
+ * Phase 103 (MTM-04) — shouldReadSingleKeyMtmSeries: the cheap DONE + mark_to_market
+ * -object predicate both single-key surfaces share to skip the DB roundtrip for the
+ * hot non-options path.
+ */
+describe("MTM-04 shouldReadSingleKeyMtmSeries — cheap shared read gate", () => {
+  const MTM = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+
+  it("DONE + mark_to_market object → true", () => {
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: MTM }, "complete")).toBe(true);
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: MTM }, "complete_with_warnings")).toBe(true);
+  });
+
+  it("not DONE → false (no roundtrip for computing/failed)", () => {
+    for (const s of ["computing", "failed", undefined, null, "complete_x"]) {
+      expect(shouldReadSingleKeyMtmSeries({ mark_to_market: MTM }, s)).toBe(false);
+    }
+  });
+
+  it("no mark_to_market object → false (hot non-options path stays roundtrip-free)", () => {
+    expect(shouldReadSingleKeyMtmSeries({}, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({ cash_settlement: MTM }, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: null }, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries({ mark_to_market: [MTM] }, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries(null, "complete")).toBe(false);
+    expect(shouldReadSingleKeyMtmSeries("garbage", "complete")).toBe(false);
+  });
+});
+
+/**
+ * MED-1 (D3) — shouldReadCashSettlementSeries: the cash twin of
+ * shouldReadSingleKeyMtmSeries. The single read-side status-gate that refuses a
+ * stale `cash_settlement` series row left behind by ANY terminal-failure arm.
+ * Truth-table mirrors the MTM block above (cash_settlement in place of
+ * mark_to_market). Neuter target: drop the DONE gate (return the object check
+ * alone) → RED on the failed/computing-status cases below.
+ */
+describe("MED-1 shouldReadCashSettlementSeries — read-side status-gate (D3 single choke point)", () => {
+  const CASH = { cumulative_return: 0.42, volatility: 0.11, max_drawdown: -0.06, cagr: 0.31, sharpe: 1.4, sortino: 1.9, calmar: 0.8 };
+
+  it("DONE + cash_settlement object → true (the only true rows)", () => {
+    expect(shouldReadCashSettlementSeries({ cash_settlement: CASH }, "complete")).toBe(true);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: CASH }, "complete_with_warnings")).toBe(true);
+  });
+
+  it("not terminal-success → false (a stale row after ANY failure arm is never trusted)", () => {
+    for (const s of ["failed", "computing", "pending", null, undefined, 0, "", "complete_x"]) {
+      expect(shouldReadCashSettlementSeries({ cash_settlement: CASH }, s)).toBe(false);
+    }
+  });
+
+  it("no cash_settlement object → false (malformed / wrong-shape jsonb)", () => {
+    expect(shouldReadCashSettlementSeries({}, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ mark_to_market: CASH }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: null }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: [CASH] }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries({ cash_settlement: 0.42 }, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries(null, "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries([{ cash_settlement: CASH }], "complete")).toBe(false);
+    expect(shouldReadCashSettlementSeries("garbage", "complete")).toBe(false);
   });
 });

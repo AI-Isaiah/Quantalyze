@@ -6,7 +6,7 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, mtmDisabledReasonCopy, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisSeriesView, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2): ephemeral single-key leverage. LeverageProvider
 // wraps the body (transparent to GUARD-02); useLeveragedMetrics is the KpiStrip's
 // L=1-identity / L!=1-recompute consumer; useLeverage drives the ControlBar input.
@@ -308,13 +308,20 @@ export function FactsheetBody({
 }
 
 /**
- * Phase 90 (FS-03, D5) — MetricsColumn stays pinned to CASH always (its
- * distributional stats have no persisted MTM counterpart, so it is never passed
- * the basis hook). When the KpiStrip has diverged to MTM we surface a static
- * "BASIS · CASH SETTLEMENT" eyebrow atop the column so the reader knows the
- * right-rail metrics did NOT follow the toggle. Composite-only; when the eyebrow
- * is not shown (single-key OR composite-cash) this renders EXACTLY the bare
- * <MetricsColumn> — byte-identical to before (GUARD-02).
+ * Phase 90 (FS-03, D5) / Phase 103 (MTM-04 correction + root-cause flip + F3) — the
+ * right-rail MetricsColumn now FOLLOWS the active basis for EVERY surface, including
+ * the §I/§II Main-Metrics HEADLINE scalars: MetricsColumn reads `view.strategyMetrics`
+ * (the root-cause flip), and the F3 overlay in `useBasisSeriesView` rewrites its seven
+ * headline scalars from the PERSISTED `metrics_json_by_basis.mark_to_market`, so the
+ * rail's seven == the KpiStrip's seven by construction (both trace to the persisted
+ * dense-Python cache). The dailies-derivable surfaces (charts, correlations, §IV
+ * α/β/IR, extended distribution scalars, quantiles, calmar-by-year, bootstrap,
+ * worst-10, style-drift) follow the bundle; the extended/series-derived rail-only
+ * fields stay bundle-TS-derived (no cross-surface counterpart). So under MTM the whole
+ * rail is uniformly mark-to-market and we surface a "BASIS · MARK-TO-MARKET" eyebrow
+ * atop the column (gated on bundle presence, F4). Composite-only;
+ * when the eyebrow is not shown (single-key OR composite-cash) this renders EXACTLY
+ * the bare <MetricsColumn> — byte-identical to before (GUARD-02).
  */
 function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   const payload = usePayload();
@@ -329,41 +336,72 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // the KpiStrip already ran at L≠1.
   const { modeled } = useModeledLeverage(payload);
   const composite = payload.dataQuality?.composite === true;
-  // Non-composite at L=1: bare column, byte-identical to before (GUARD-02). Under
-  // a MODELED leverage (single-key only — the control is composite-hidden), the
-  // "BASE · 1× TRACK" eyebrow flags that the rail stayed on the base track
-  // (mirrors the composite MTM "BASIS · CASH SETTLEMENT" eyebrow below).
+  // F4 (phase 103): the eyebrow reads "BASIS · MARK-TO-MARKET" ONLY when the MTM
+  // SERIES BUNDLE is present — i.e. the rail's dailies-derivable panels actually
+  // followed MTM. On a bundle-absent read under MTM (pre-backfill / stale cache /
+  // degraded), `useBasisSeriesView` returns the payload by reference so the rail
+  // renders CASH; gating on `basis` alone would label that cash rail
+  // "MARK-TO-MARKET" (the mislabel). This mirrors the PerformanceCharts caption,
+  // which is already gated on the same bundle presence.
+  const onMtm =
+    basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null;
+  // A single-key options book that participates in the MTM basis story carries a
+  // gate; every other single-key strategy has none. Gating the basis eyebrow on
+  // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
+  const mtmParticipant = payload.mtmGate != null;
+  // Non-composite: bare column when neither a modeled leverage nor an MTM basis
+  // applies — byte-identical to before (GUARD-02). Phase 103 (MTM-04, root-cause
+  // flip): the rail now FOLLOWS the active basis (MetricsColumn reads
+  // view.strategyMetrics), so a single-key options book toggled to MTM earns an
+  // honest "BASIS · MARK-TO-MARKET" eyebrow — the SAME wording the composite
+  // branch shows below. It renders PERSISTENTLY (blank reserved line under cash,
+  // F4 zero-shift) only for MTM participants. The leverage "BASE · 1× TRACK"
+  // eyebrow is orthogonal (the rail stays on the un-levered base track while the
+  // KpiStrip models L≠1) and stacks above it when both apply.
   if (!composite) {
-    if (!modeled) return <MetricsColumn scenarioMode={scenarioMode} />;
+    if (!modeled && !mtmParticipant) return <MetricsColumn scenarioMode={scenarioMode} />;
     return (
       <div className="flex flex-col gap-4 min-w-0">
-        <p
-          data-testid="metricscolumn-base-track-eyebrow"
-          className="text-micro uppercase tracking-wider text-text-muted"
-        >
-          BASE · 1× TRACK
-        </p>
+        {modeled && (
+          <p
+            data-testid="metricscolumn-base-track-eyebrow"
+            className="text-micro uppercase tracking-wider text-text-muted"
+          >
+            BASE · 1× TRACK
+          </p>
+        )}
+        {mtmParticipant && (
+          <p
+            aria-hidden={!onMtm}
+            className="text-micro uppercase tracking-wider text-text-muted"
+          >
+            {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
+          </p>
+        )}
         <MetricsColumn scenarioMode={scenarioMode} />
       </div>
     );
   }
   // F4 (UI-SPEC §4 zero-shift): render the eyebrow PERSISTENTLY (reserved line
   // height) so toggling cash↔MTM no longer pops it in/out and reflows the right
-  // rail. NOTE (deviation from the finding's literal "swap CASH↔MTM text"): the
-  // MetricsColumn distributional stats are cash-ONLY (D5 — skew/VaR/win-rate have
-  // NO persisted MTM counterpart), so labeling the column "MARK-TO-MARKET" would
-  // be the exact no-invented-data violation this milestone forbids. Instead the
-  // eyebrow flags "these stayed CASH" under MTM, and holds a blank line (nbsp)
-  // under cash — reserving height without emitting a "BASIS ·" string that would
-  // duplicate the KpiStrip eyebrow or mislabel the column.
-  const onMtm = basis === "mark_to_market";
+  // rail. It holds a blank line under cash and "BASIS · MARK-TO-MARKET" under MTM.
+  //
+  // Phase 103 (MTM-04, root-cause flip): the ENTIRE rail now follows the active
+  // basis — after MetricsColumn switched §I/§II + the Cumulative/EoY panels to
+  // view.strategyMetrics, the SCALAR tables (Compound/Main/Returns/Risk/Extended
+  // scalars/Benchmark α·β·IR) join the already-following dailies-derivable panels
+  // (Calmar-by-year, Bootstrap CI, Worst-10, Style Drift, quantile rows). So the
+  // rail is UNIFORMLY mark-to-market under MTM, and the eyebrow now honestly reads
+  // "BASIS · MARK-TO-MARKET" (the old "CASH SETTLEMENT" wording — which claimed
+  // the rail stayed cash — is retired). The single-key branch above carries the
+  // matching eyebrow for options books that toggle MTM.
   return (
     <div className="flex flex-col gap-4 min-w-0">
       <p
         aria-hidden={!onMtm}
         className="text-micro uppercase tracking-wider text-text-muted"
       >
-        {onMtm ? "BASIS · CASH SETTLEMENT" : " "}
+        {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
       </p>
       <MetricsColumn scenarioMode={scenarioMode} />
     </div>
@@ -387,10 +425,20 @@ const ROLLING_CHART_KEYS = new Set(["rollingVol", "rollingSharpe", "rollingSorti
 function PerformanceCharts() {
   const payload = usePayload();
   const { key: cmpKey } = useActiveComparator();
-  // Phase 90 (FS-03): charts stay cash always; under MTM we caption that. Plus
-  // the FS-01/02 visually-hidden AT summary for the stitched track. Composite-only.
+  // Phase 103 (MTM-04): charts NOW follow the basis (each chart reads through
+  // useBasisSeriesView). This component owns the basis-aware caption + the FS-01/02
+  // AT gap summary — both keyed on the ACTIVE view so the a11y gap count matches
+  // exactly what the charts render.
   const { basis } = useBasis();
+  const view = useBasisSeriesView(payload);
   const composite = payload.dataQuality?.composite === true;
+  // The MTM toggle renders for a composite OR any single-key options strategy in
+  // the MTM basis story (mtmGate present) — the SAME predicate as the ControlBar
+  // SegmentedControl gate. The caption region pre-mounts on this (F5 discipline).
+  const mtmToggleAvailable = composite || payload.mtmGate != null;
+  // Bundle presence decides the honest three-state caption: absent (stale cache /
+  // not-yet-backfilled / gated) → charts fall back to cash + the "showing cash" copy.
+  const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
   // Defensive fallbacks: a cache entry created before the rollingWindow
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
@@ -448,9 +496,11 @@ function PerformanceCharts() {
         // F6 (IN-05): N boundaries ⇒ N+1 keys, but a 1-member composite has 0
         // boundaries and therefore NO handoffs — don't claim "1 keys" or "seam
         // markers at each key handoff". Pluralize and guard the handoff clause.
-        const nBoundaries = payload.segmentBoundaries?.length ?? 0;
+        const nBoundaries = view.segmentBoundaries?.length ?? 0;
         const nKeys = nBoundaries + 1;
-        const nGaps = payload.missingSegments?.length ?? 0;
+        // Count the ACTIVE view's gaps — MTM gaps ≠ cash gaps (an MTM axis carries
+        // its own coverage mask), so the AT summary matches the rendered charts.
+        const nGaps = view.missingSegments?.length ?? 0;
         return (
           <span className="sr-only">
             Stitched from {nKeys} key{nKeys === 1 ? "" : "s"}.
@@ -459,20 +509,27 @@ function PerformanceCharts() {
           </span>
         );
       })()}
-      {/* FS-03 (composite-only): charts never swap basis. F5 (IN-03): PRE-MOUNT
-          this role=status region (rendered for every composite, empty under cash)
-          so the caption text is a CONTENT change on an existing live region
-          rather than a mount-on-toggle region — several SRs do not reliably
-          announce a live region that appears at the same instant as its content.
-          role="status" carries an implicit aria-live="polite"; this is now the
-          SINGLE authoritative announcer for the basis switch (the KpiStrip
-          eyebrow's redundant aria-live was dropped to avoid a double
-          announcement). */}
-      {composite && (
+      {/* Phase 103 (MTM-04): charts NOW follow the toggle, so the caption is
+          basis-aware three-state (was the stale cash-only copy). F5 (IN-03):
+          PRE-MOUNT this role=status region whenever the MTM toggle can render
+          (composite OR single-key options) — empty under cash — so the caption is
+          a CONTENT change on an existing live region, never a mount-on-toggle
+          region (several SRs do not reliably announce a live region that appears at
+          the same instant as its content). role="status" carries an implicit
+          aria-live="polite"; it is the SINGLE authoritative announcer for the basis
+          switch (the KpiStrip eyebrow's redundant aria-live was dropped).
+          Three states:
+            - cash                     → "" (empty, unchanged idiom)
+            - MTM + bundle present     → charts DID follow → mark-to-market copy
+            - MTM + bundle ABSENT      → honest fallback (stale cache / not yet
+              re-derived/backfilled — Zavara pre-backfill) → cash charts + cash copy */}
+      {mtmToggleAvailable && (
         <p role="status" className="text-caption text-text-secondary">
-          {basis === "mark_to_market"
-            ? "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."
-            : ""}
+          {basis !== "mark_to_market"
+            ? ""
+            : mtmBundlePresent
+              ? "Charts show the mark-to-market series."
+              : "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."}
         </p>
       )}
       {!roll.enough && (
@@ -713,17 +770,28 @@ const LEVERAGE_CAVEAT =
 function KpiStrip() {
   const payload = usePayload();
   const { block: cmp, key: cmpKey } = useActiveComparator();
-  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE and only
-  // here. Cash returns strategyMetrics untouched → single-key is bit-identical
-  // (the existing kpistrip pins prove it). α/IR + MetricsColumn stay cash.
+  // Phase 90 (FS-03, D5): the SEVEN headline scalars swap cash↔MTM HERE via the
+  // persisted overlay. Cash returns strategyMetrics untouched → single-key is
+  // bit-identical (the existing kpistrip pins prove it). Phase 103 (F3/F5) UPDATE:
+  // the earlier "α/IR + MetricsColumn stay cash" note is RETIRED — MetricsColumn now
+  // follows the active basis (view.strategyMetrics), and α/β/IR follow the view's
+  // comparator joint (below), consistent with §IV.
   // Phase 90.5 (LEV-01): the ONE consumer swap. useLeveragedMetrics returns the
   // basis metrics UNTOUCHED at L=1 (byte-identity; the frozen kpistrip pins prove
   // it) and a client recompute of the SAME scalars at L!=1. items[] read m.*
   // unchanged.
   const { basis, m, modeled, appliedLeverage } = useLeveragedMetrics(payload);
   const composite = payload.dataQuality?.composite === true;
-  const j = cmp.joint;
+  // F5 (phase 103): α / β / IR FOLLOW the active basis via the VIEW's comparator
+  // joint — consistent with §IV, which reads view.comparators[cmpKey].joint. Under
+  // cash the view returns the payload by reference, so `j` is the cash joint
+  // (byte-identical to today); under MTM WITH a bundle it is the bundle's MTM joint
+  // (regressed on the MTM strategy leg). `cn` (shortName) is basis-invariant, so it
+  // still comes from the cash comparator block.
+  const view = useBasisSeriesView(payload);
+  const j = view.comparators[cmpKey].joint;
   const cn = cmp.shortName;
+  const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
 
   // 9 cells when a comparator is active (mockup contract). When NONE, the
   // α + IR slots collapse — render 7 cells instead of leaving empty space.
@@ -747,18 +815,18 @@ function KpiStrip() {
     { label: "Ann. Vol", value: pct(m.ann_vol, 1) },
   ];
   if (j && cmpKey !== "none") {
-    // F2 (no-invented-data): α / IR are series-derived and exist for the CASH
-    // basis only (D5 — they are never recomputed per-basis). Under the
-    // "BASIS · MARK-TO-MARKET" eyebrow a cash α/IR number would be mislabeled, so
-    // render "—" instead of inheriting the cash value.
-    // WR-01 — the SAME suppression applies under a MODELED leverage: the LEV-01
-    // lighter recompute levers only the seven headline scalars, NOT the
-    // benchmark-relative stats. α (r_strat = α + β·r_bench) transforms as α → L·α
-    // and β → L·β under r→L·r, but the strip pulls the UN-levered `j.alpha` /
-    // `j.info_ratio` from the payload — so beside a levered Sharpe/Vol they would
-    // be an internally-inconsistent mislabel. Render "—" instead (matching the
-    // MTM branch shape) rather than an unrescaled benchmark-relative number.
-    const suppressRelative = basis === "mark_to_market" || modeled;
+    // F5 (phase 103): α / β / IR now FOLLOW the active basis via the view's joint
+    // (above), matching §IV — under MTM WITH a bundle they are the MTM-regressed
+    // joint, no longer suppressed. Two cases still render "—":
+    //   - MODELED leverage (WR-01): the LEV-01 lighter recompute levers only the
+    //     seven headline scalars, NOT the benchmark-relative stats. α transforms as
+    //     α → L·α and β → L·β under r → L·r, but `j` is the UN-levered joint — beside
+    //     a levered Sharpe/Vol it would be an internally-inconsistent mislabel.
+    //   - MTM WITHOUT a bundle: a bundle-absent read (`useBasisSeriesView` returns
+    //     the payload by reference) yields the CASH joint; showing it under the MTM
+    //     story would mislabel cash (the SAME discipline as the F4 rail eyebrow,
+    //     which blanks when the bundle is absent).
+    const suppressRelative = modeled || (basis === "mark_to_market" && !mtmBundlePresent);
     items.push({
       label: `α vs ${cn}`,
       value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
@@ -857,7 +925,14 @@ function KpiStrip() {
           are statistically unreliable with fewer than 252 observations (~1y).
           Surface the same warning here at the hero strip so mobile users who
           never scroll to the MetricsColumn right-rail still see it. (NEW-C20-08) */}
-      {m.n < 252 && (
+      {/* F8 (phase 103): the observation count follows the ACTIVE basis via the
+          view (matching the MetricsColumn right-rail caveat, which already reads
+          view.strategyMetrics.n). Under MTM the reconstructed series can have a
+          DIFFERENT (usually shorter) length than cash, so the persisted-overlay
+          `m.n` (always cash) would understate the low-N risk under an MTM label.
+          Under cash the view returns the payload by reference, so this is
+          byte-identical to `m.n`. */}
+      {view.strategyMetrics.n < 252 && (
         <p
           className="px-3 sm:px-4 py-2 text-micro font-mono"
           style={{
@@ -865,7 +940,7 @@ function KpiStrip() {
             color: "var(--color-warning, #B45309)",
           }}
         >
-          ⚠ Only {m.n} observation{m.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+          ⚠ Only {view.strategyMetrics.n} observation{view.strategyMetrics.n !== 1 ? "s" : ""} — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
         </p>
       )}
       {/* HARD-04 (#67): server-truth short-window flag from
@@ -1059,19 +1134,45 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const { resetXRange } = useXRange();
   const { setComparator } = useComparator();
   const shareMode = useShareMode();
-  // Phase 90 (FS-03, D2/D5): composite-only cash↔MTM toggle. NEVER apiKeyId —
-  // the server-truth `dataQuality.composite` marker. MTM enabled iff the
-  // persisted `mark_to_market` basis exists (`mtmGate.available`); otherwise
-  // disabled with the mapped closed-set reason (D1). Default cash.
+  // Phase 90 (FS-03, D2/D5) + Phase 102 (MTM-01): cash↔MTM toggle. NEVER apiKeyId —
+  // the server-truth `dataQuality.composite` marker OR (Phase 102) a single-key
+  // options strategy that participates in the MTM basis story (`payload.mtmGate`
+  // present). MTM enabled iff the persisted `mark_to_market` basis exists
+  // (`mtmGate.available`); otherwise disabled with the mapped closed-set reason
+  // (D1). Default cash.
   const { basis, setBasis } = useBasis();
+  // Phase 103 (MTM-04): toggling basis swaps the whole chart date axis (cash and
+  // MTM have different spans/gaps), so a zoom window captured on one basis is
+  // meaningless on the other. Reset the visible range on every ACTUAL toggle
+  // (skip on mount) via the frozen context's own resetXRange API — factsheet-
+  // context.tsx is never edited. The per-chart defensive clamp
+  // (TimeSeriesChart) is the belt-and-suspenders against a same-render race.
+  const prevBasisRef = React.useRef(basis);
+  React.useEffect(() => {
+    if (prevBasisRef.current === basis) return;
+    prevBasisRef.current = basis;
+    resetXRange();
+  }, [basis, resetXRange]);
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
-  // Phase 90.5 (LEV-01, D1/D2/D5): fail-closed eligibility — the leverage cluster
-  // renders IFF single-key (composite !== true) AND periodsPerYear present. It
-  // occupies the SAME mr-auto slot as the composite BASIS control; the two never
-  // coexist (D1), so they never compete for the slot.
-  const leverageEligible = !composite && payload.periodsPerYear != null;
+  // Phase 102 (DESIGN.md tone split): amber --color-warning is reserved for
+  // transient/recoverable reasons (timeout, anchor-race — the system re-attempts
+  // on the next derive); steady-state honest-empty reasons render muted. Amber on
+  // a steady reason would falsely signal self-healing (RESEARCH Pitfall 4).
+  const mtmReasonTransient = mtmReasonTone(payload.mtmGate?.reason) === "transient";
+  // Phase 90.5 (LEV-01, D1/D2/D5) + Phase 102: fail-closed eligibility — the
+  // leverage cluster renders IFF single-key (composite !== true) AND periodsPerYear
+  // present AND the CASH basis is active. Before Phase 102 the leverage cluster and
+  // the BASIS control could never coexist (composite-only toggle), so they shared
+  // the mr-auto slot freely. A single-key options strategy now shows BOTH controls
+  // (LEV-MTM-1): leverage models the CASH return path, so we hide the leverage input
+  // while MTM is displayed rather than let it recompute a leverage-scaled CASH
+  // number under an MTM label (no-invented-data). Leverage state is ephemeral —
+  // flipping back to cash restores it. Both mr-auto flex children wrap; the leverage
+  // input simply hides under MTM, so they never overlap.
+  const leverageEligible =
+    !composite && payload.periodsPerYear != null && basis === "cash_settlement";
   const { leverage, setLeverage } = useLeverage();
   // Local ephemeral clamp message (NOT setCommitError — that mandate-commit
   // channel does not exist on the factsheet). Interactive fail-loud contract
@@ -1167,7 +1268,7 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
           )}
         </div>
       )}
-      {composite && (
+      {(composite || payload.mtmGate != null) && (
         <div className="mr-auto flex flex-col items-start gap-1">
           <SegmentedControl
             ariaLabel="Metrics basis"
@@ -1183,14 +1284,19 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               },
             ]}
           />
-          {!mtmAvailable && (
-            <p
-              className="text-caption"
-              style={{ color: "var(--color-warning, #B45309)" }}
-            >
-              {mtmReason}
-            </p>
-          )}
+          {!mtmAvailable &&
+            (mtmReasonTransient ? (
+              // Transient/recoverable → amber (system re-attempts on next derive).
+              <p
+                className="text-caption"
+                style={{ color: "var(--color-warning, #B45309)" }}
+              >
+                {mtmReason}
+              </p>
+            ) : (
+              // Steady-state honest-empty → muted (#64748B, WCAG-AA 4.85:1 on white).
+              <p className="text-caption text-text-muted">{mtmReason}</p>
+            ))}
         </div>
       )}
       <DisplayMenu />

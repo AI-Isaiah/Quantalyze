@@ -1,4 +1,4 @@
-import type { CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, TrustTierKind, IngestSource } from "./types";
+import type { CorrelationRow, DailyReturn, FactsheetPayload, FactsheetCommon, BasisSeriesBundle, TrustTierKind, IngestSource } from "./types";
 import { alignReturns } from "./align";
 import { compute, cumEq, worstDrawdowns, arithmeticEquity, arithmeticUnderwater } from "./compute";
 import { overlayBasisScalars } from "./basis-metrics";
@@ -61,6 +61,21 @@ export type BuildFactsheetOpts = {
   metricsByBasis?: FactsheetCommon["metricsByBasis"];
   dataQuality?: FactsheetCommon["dataQuality"];
   mtmGate?: FactsheetCommon["mtmGate"];
+  /**
+   * Phase 103 (MTM-04) — the persisted MTM daily series (read from the
+   * `mtm_daily_returns` `strategy_analytics_series` row via
+   * `composite-read-path.ts readMtmSeries`). When present with ≥2 valid rows,
+   * `buildFactsheetPayload` emits `payload.seriesByBasis.mark_to_market` derived
+   * by the SAME `deriveSeriesBundle` as cash (own axis + own mask from
+   * `gapSpans`). Threaded ONLY when the scalar MTM gate is `available` (the F-4
+   * DONE + hasBasisHeadline gate), so a non-options / gated strategy passes
+   * `undefined` and the cash payload stays byte-identical (SC-4). `gapSpans` is
+   * the Python-derived coverage mask — reused, never re-derived client-side.
+   */
+  mtmSeries?: {
+    dailyReturns: DailyReturn[];
+    gapSpans: Array<{ start: string; end: string }>;
+  };
 };
 
 /**
@@ -125,6 +140,165 @@ function inclusiveDayCount(start: string, end: string): number {
 }
 
 /**
+ * Sort ascending by date, drop malformed rows (non-string date / non-finite
+ * value), and dedupe by date (keeping the first occurrence). The ONE normalize
+ * both the cash series and the Phase-103 MTM series pass through, so they share
+ * the exact same sanitize (no second implementation to drift).
+ */
+function normalizeDailyReturns(rows: DailyReturn[]): DailyReturn[] {
+  const sorted = [...rows]
+    .filter(d => d && typeof d.date === "string" && Number.isFinite(d.value))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const dedup: DailyReturn[] = [];
+  let lastDate: string | null = null;
+  for (const d of sorted) {
+    if (d.date === lastDate) continue;
+    dedup.push(d);
+    lastDate = d.date;
+  }
+  return dedup;
+}
+
+/**
+ * Phase 103 (MTM-04) — the ONE per-basis series derivation. Both the cash series
+ * and the persisted MTM series flow through THIS function, so every dailies-
+ * derivable panel (chart tracks + rolling + worst-10 + comparators + heatmaps +
+ * quantiles / streaks / calmarByYear / bootstrapCI / styleDrift / stressWindows +
+ * correlations / correlationMatrix) is a pure function of the basis-selected daily
+ * series — ONE derivation, never a parallel implementation (the SC-4 snapshot pins
+ * that this factoring is byte-neutral for cash).
+ *
+ * The function derives its OWN dates + benchmark alignments (btc/eth/spx/gld/ief on
+ * the bundle dates) so cash and MTM each get a COHERENT per-basis axis (Pitfall-1: an
+ * MTM axis under cash-dated comparator arrays misaligns after a divergent gap).
+ *
+ * `comparatorAnnVol`: cash passes the OVERLAID `strategyMetrics.ann_vol` (so the
+ * comparator volMatched stays byte-identical to the persisted cash overlay); MTM
+ * omits it so the comparator uses the bundle's own computed vol (honest MTM).
+ *
+ * Phase 103 (MTM-04, correction): correlations + correlationMatrix are derived
+ * HERE per basis too. They are NOT external — a correlation is
+ * corr(strategy_returns, asset_returns): the benchmark legs are fixed INPUT series,
+ * but the STRATEGY leg is the basis-selected dailies, so cash→MTM moves ρ. Nothing
+ * bypasses the backbone; the ONLY thing that stays cash top-level is the api-only
+ * synthesized allocator/signatures demo (basis-invariant by construction).
+ */
+function deriveSeriesBundle(
+  clipped: DailyReturn[],
+  args: {
+    periodsPerYear: number;
+    isArithmetic: boolean;
+    markets: string[];
+    strategyName: string;
+    comparatorAnnVol?: number;
+    missingSegments?: FactsheetCommon["missingSegments"];
+  },
+): BasisSeriesBundle {
+  const { periodsPerYear, isArithmetic, markets, strategyName } = args;
+  const dates = clipped.map(d => d.date);
+  const stratRet = clipped.map(d => d.value);
+
+  // Series shorter than ROLL_WINDOW_6MO + 5 falls back to 30d (pickRollingWindow);
+  // rolling β has its own 90d → 30d ladder. Both windows ride along on the bundle.
+  const rollWindow = pickRollingWindow(stratRet.length);
+  const rollBetaWindow = pickRollingWindow(stratRet.length, [
+    { window: ROLL_WINDOW_90D, label: "90d" },
+    { window: ROLL_WINDOW_30D, label: "30d" },
+  ]);
+
+  const fullMetrics = compute(stratRet, dates, 0, periodsPerYear);
+  // Arithmetic (composite) vs geometric — all THREE curve fields move together.
+  const stratEquity = isArithmetic ? arithmeticEquity(stratRet) : cumEq(stratRet);
+  const stratDd = isArithmetic ? arithmeticUnderwater(stratRet) : fullMetrics.dd;
+
+  // Benchmark alignments on THIS bundle's own date axis.
+  const btcRet = alignReturns(BTC_DAILY, dates);
+  const spxRet = alignReturns(SPX_DAILY, dates);
+  const ethRet = alignReturns(ETH_DAILY, dates);
+  const gldRet = alignReturns(GLD_DAILY, dates);
+  const iefRet = alignReturns(IEF_DAILY, dates);
+
+  // Phase 103 (MTM-04, correction) — correlations + the pairwise matrix are
+  // derived HERE, per basis, NOT top-level cash. A correlation is
+  // corr(strategy_returns, asset_returns): the benchmark legs are fixed INPUT
+  // series, but the STRATEGY leg is the basis-selected dailies, so cash→MTM moves
+  // ρ. Nothing bypasses the backbone. Pearson is a standard stat (no valuation
+  // math). Under MTM the asset legs realign onto the MTM axis (Pitfall-1: same
+  // axis as the strategy leg), so every cell compares like-for-like windows.
+  const correlations: CorrelationRow[] = [
+    { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
+    { name: "ETH", rho: pearsonCorr(stratRet, ethRet) },
+    { name: "S&P 500", rho: pearsonCorr(stratRet, spxRet) },
+    { name: "Gold", rho: pearsonCorr(stratRet, gldRet) },
+    { name: "US 10Y (IEF)", rho: pearsonCorr(stratRet, iefRet) },
+  ];
+  // Full pairwise matrix — strategy short-name on the diagonal head so the matrix
+  // reads as a self-similarity heatmap with one corner for the strategy.
+  const matrixSeries: Array<{ name: string; rets: number[] }> = [
+    { name: strategyName.length > 12 ? strategyName.slice(0, 11) + "…" : strategyName, rets: stratRet },
+    { name: "BTC", rets: btcRet },
+    { name: "ETH", rets: ethRet },
+    { name: "SPX", rets: spxRet },
+    { name: "Gold", rets: gldRet },
+    { name: "IEF", rets: iefRet },
+  ];
+  const correlationLabels = matrixSeries.map(s => s.name);
+  const correlationMatrix: number[][] = matrixSeries.map((a, i) =>
+    matrixSeries.map((b, j) => (i === j ? 1 : pearsonCorr(a.rets, b.rets))),
+  );
+
+  // Cash overrides with the persisted-overlay ann_vol; MTM uses its own.
+  const annVol = args.comparatorAnnVol ?? fullMetrics.ann_vol;
+
+  const { wins, losses } = streakLengths(stratRet);
+  const MAX_LEN = 14;
+
+  // Phase 103 (MTM-04 follow-through, Finding A): the full scalar summary for THIS
+  // basis's series. eq/dd are re-derived per-basis above (arithmetic vs geometric),
+  // so strip them to match the top-level ComputeSummary shape. The extended
+  // distribution scalars (skew/kurt/VaR/CVaR/omega/…) read off this via view.
+  const { eq: _bundleEq, dd: _bundleDd, ...bundleMetrics } = fullMetrics;
+
+  return {
+    dates,
+    strategyReturns: stratRet,
+    strategyEquity: stratEquity,
+    strategyDrawdowns: stratDd,
+    strategyRollingVol: rollingVol(stratRet, rollWindow.window, periodsPerYear),
+    strategyRollingSharpe: rollingSharpe(stratRet, rollWindow.window, periodsPerYear),
+    strategyRollingSortino: rollingSortino(stratRet, rollWindow.window, periodsPerYear),
+    rollingWindow: rollWindow,
+    rollingBetaWindow: rollBetaWindow,
+    strategyWorst10: worstDrawdowns(stratDd, 10),
+    comparators: {
+      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
+      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, annVol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
+      none: noneComparatorBlock,
+    },
+    monthlyReturns: monthlyReturnsMatrix(stratRet, dates),
+    dailyHeatmap: dailyReturnsByYear(stratRet, dates),
+    missingSegments: args.missingSegments,
+    quantiles: quantileSummary(stratRet),
+    streaks: {
+      winsByLength: streakHistogram(wins, MAX_LEN),
+      lossesByLength: streakHistogram(losses, MAX_LEN),
+      totalWins: wins.length,
+      totalLosses: losses.length,
+      longestWin: wins.length > 0 ? Math.max(...wins) : 0,
+      longestLoss: losses.length > 0 ? Math.max(...losses) : 0,
+      maxLen: MAX_LEN,
+    },
+    calmarByYear: calmarByYear(stratRet, dates),
+    bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
+    styleDrift: computeStyleDrift(stratRet, dates),
+    stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", markets),
+    strategyMetrics: bundleMetrics,
+    correlations,
+    correlationMatrix: { labels: correlationLabels, matrix: correlationMatrix },
+  };
+}
+
+/**
  * Build the full FactsheetPayload from a strategy's daily-return rows.
  *
  * Behavior:
@@ -167,17 +341,7 @@ export function buildFactsheetPayload(
 ): FactsheetPayload | null {
   if (!dailyReturns.length) return null;
 
-  const sorted = [...dailyReturns]
-    .filter(d => d && typeof d.date === "string" && Number.isFinite(d.value))
-    .sort((a, b) => a.date.localeCompare(b.date));
-
-  const dedup: DailyReturn[] = [];
-  let lastDate: string | null = null;
-  for (const d of sorted) {
-    if (d.date === lastDate) continue;
-    dedup.push(d);
-    lastDate = d.date;
-  }
+  const dedup = normalizeDailyReturns(dailyReturns);
 
   // The strategy series is the source of truth. Benchmark fixtures
   // (BTC/SPX/etc.) carry a fixed date range; `alignReturns` forward-fills
@@ -203,34 +367,18 @@ export function buildFactsheetPayload(
   const dates = clipped.map(d => d.date);
   const stratRet = clipped.map(d => d.value);
 
-  // Series shorter than ROLL_WINDOW_6MO + 5 can't fill the preferred 6-month
-  // rolling window — pickRollingWindow falls back to 30d so the chart isn't
-  // pure warmup band. Rolling β has its own (smaller) preferred window with
-  // a 90d → 30d → not-enough-data ladder. Both windows ride along on the
-  // payload so chart titles and the MetricsColumn header reflect reality.
-  const rollWindow = pickRollingWindow(stratRet.length);
-  const rollBetaWindow = pickRollingWindow(stratRet.length, [
-    { window: ROLL_WINDOW_90D, label: "90d" },
-    { window: ROLL_WINDOW_30D, label: "30d" },
-  ]);
-
   // #597 — annualization basis for this strategy's KPIs (√365 crypto / √252
   // traditional). One value threaded into every single-strategy KPI surface
   // below so the whole factsheet renders on ONE coherent basis.
   const periodsPerYear = annualizationPeriods(strategy.assetClass);
-  const fullMetrics = compute(stratRet, dates, 0, periodsPerYear);
-  // Strip eq/dd before serialization — already shipped as strategyEquity / strategyDrawdowns
-  // at the top level; carrying them twice burns ~16 KB on a 1049-day series.
-  const { eq: _eq, dd: geoDd, ...computedMetrics } = fullMetrics;
+  // computedMetrics feeds the cash-scalar overlay (strategyMetrics — top-level
+  // cash-only; the KpiStrip's persisted-scalar path owns MTM there, Phase 102).
+  // eq/dd are re-derived per basis inside deriveSeriesBundle, not carried here.
+  const { eq: _eq, dd: _dd, ...computedMetrics } = compute(stratRet, dates, 0, periodsPerYear);
 
-  // Phase 90 (D3) — arithmetic curve set for COMPOSITES. When
-  // opts.cumulativeMethod==="arithmetic", all THREE curve fields move together
-  // (RESEARCH §Resolved-1): the underwaterAcc chart + Worst-DD bands must agree
-  // with the equity curve or they'd render on a different basis. Single-key
-  // (geometric) path untouched → byte-identical.
+  // Phase 90 (D3) — arithmetic (composite) vs geometric curve basis; threaded
+  // into deriveSeriesBundle so all THREE curve fields move together per basis.
   const isArithmetic = opts?.cumulativeMethod === "arithmetic";
-  const stratEquity = isArithmetic ? arithmeticEquity(stratRet) : cumEq(stratRet);
-  const stratDd = isArithmetic ? arithmeticUnderwater(stratRet) : geoDd;
 
   // Phase 90 (D3) — cash-scalar overlay. The KpiStrip's seven headline scalars
   // read the PERSISTED `cash_settlement` basis so they agree with discovery /
@@ -248,7 +396,6 @@ export function buildFactsheetPayload(
   const gldRet = alignReturns(GLD_DAILY, dates);
   const iefRet = alignReturns(IEF_DAILY, dates);
 
-  const styleDrift = computeStyleDrift(stratRet, dates);
   // Default to "csv" (conservative) when the caller doesn't specify — avoids
   // exposing non-derivable panels for strategies whose source isn't explicitly
   // known. The synthesized demo panels (peer cohort, allocator portfolios,
@@ -256,33 +403,52 @@ export function buildFactsheetPayload(
   // (NEW-C20-01)
   const ingestSource: IngestSource = strategy.ingestSource ?? "csv";
 
-  const correlations: CorrelationRow[] = [
-    { name: "BTC", rho: pearsonCorr(stratRet, btcRet) },
-    { name: "ETH", rho: pearsonCorr(stratRet, ethRet) },
-    { name: "S&P 500", rho: pearsonCorr(stratRet, spxRet) },
-    { name: "Gold", rho: pearsonCorr(stratRet, gldRet) },
-    { name: "US 10Y (IEF)", rho: pearsonCorr(stratRet, iefRet) },
-  ];
+  // Phase 103 (MTM-04) — the cash series bundle. The comparator's volMatched rides
+  // the OVERLAID strategyMetrics.ann_vol so it stays byte-identical to the persisted
+  // cash overlay (SC-4). missingSegments stays the composite cash gap-spans opt.
+  // correlations/correlationMatrix now come FROM this bundle (per-basis, MTM-04
+  // correction) — the cash bundle reproduces the exact top-level values byte-for-byte.
+  const cashBundle = deriveSeriesBundle(clipped, {
+    periodsPerYear,
+    isArithmetic,
+    markets: strategy.markets,
+    strategyName: strategy.name,
+    comparatorAnnVol: strategyMetrics.ann_vol,
+    missingSegments: opts?.missingSegments,
+  });
 
-  // Full pairwise matrix — strategy short-name on the diagonal head so the
-  // matrix reads as a self-similarity heatmap with one corner for the strategy.
-  const matrixSeries: Array<{ name: string; rets: number[] }> = [
-    { name: strategy.name.length > 12 ? strategy.name.slice(0, 11) + "…" : strategy.name, rets: stratRet },
-    { name: "BTC", rets: btcRet },
-    { name: "ETH", rets: ethRet },
-    { name: "SPX", rets: spxRet },
-    { name: "Gold", rets: gldRet },
-    { name: "IEF", rets: iefRet },
-  ];
-  const labels = matrixSeries.map(s => s.name);
-  const matrix: number[][] = matrixSeries.map((a, i) =>
-    matrixSeries.map((b, j) => (i === j ? 1 : pearsonCorr(a.rets, b.rets))),
-  );
-
-  const quantiles = quantileSummary(stratRet);
+  // Phase 103 (MTM-04) — the MTM per-basis bundle, derived by the SAME function
+  // from the persisted MTM series under the SAME conventions (the persisted MTM
+  // scalars were computed under one cumulative_method per strategy). Own axis (MTM
+  // gaps ≠ cash gaps) + own mask from the PERSISTED Python-derived gap_spans (never
+  // a client re-derivation). Additive-only: absent → the cash payload is
+  // byte-identical (SC-4). segmentBoundaries (composite key handoffs) are
+  // basis-invariant and stay top-level; the client view-merge inherits them.
+  let seriesByBasis: FactsheetCommon["seriesByBasis"];
+  if (opts?.mtmSeries) {
+    const mtmClipped = normalizeDailyReturns(opts.mtmSeries.dailyReturns);
+    if (mtmClipped.length >= 2) {
+      seriesByBasis = {
+        mark_to_market: deriveSeriesBundle(mtmClipped, {
+          periodsPerYear,
+          isArithmetic,
+          markets: strategy.markets,
+          strategyName: strategy.name,
+          // comparatorAnnVol omitted → the MTM comparator uses the MTM series'
+          // own computed vol (honest MTM; no persisted cash overlay applies).
+          missingSegments: deriveSegmentMarkers({ gap_spans: opts.mtmSeries.gapSpans }).missingSegments,
+        }),
+      };
+    }
+  }
 
   // Fields shared by both ingest arms. The discriminated FactsheetPayload (B6)
-  // appends the synthesized api-only panels onto this for "api" strategies.
+  // appends the synthesized api-only panels onto this for "api" strategies. The
+  // series-derived fields (INCLUDING correlations/correlationMatrix — MTM-04
+  // correction: the strategy leg follows the basis) come from `cashBundle`, the ONE
+  // derivation cash + MTM share; only strategyMetrics stays top-level cash (the
+  // KpiStrip's persisted-scalar overlay owns MTM there, Phase 102). Key ORDER is
+  // preserved verbatim so cash stays byte-identical.
   const common: FactsheetCommon = {
     strategyId: strategy.id,
     strategyName: strategy.name,
@@ -299,45 +465,29 @@ export function buildFactsheetPayload(
     avgDailyTurnover: strategy.avgDailyTurnover ?? null,
     startDate: strategy.startDate ?? null,
     benchmark: strategy.benchmark ?? null,
-    dates,
-    strategyReturns: stratRet,
-    strategyEquity: stratEquity,
-    strategyRollingVol: rollingVol(stratRet, rollWindow.window, periodsPerYear),
-    strategyRollingSharpe: rollingSharpe(stratRet, rollWindow.window, periodsPerYear),
-    strategyRollingSortino: rollingSortino(stratRet, rollWindow.window, periodsPerYear),
-    rollingWindow: rollWindow,
-    rollingBetaWindow: rollBetaWindow,
-    strategyDrawdowns: stratDd,
-    strategyWorst10: worstDrawdowns(stratDd, 10),
+    dates: cashBundle.dates,
+    strategyReturns: cashBundle.strategyReturns,
+    strategyEquity: cashBundle.strategyEquity,
+    strategyRollingVol: cashBundle.strategyRollingVol,
+    strategyRollingSharpe: cashBundle.strategyRollingSharpe,
+    strategyRollingSortino: cashBundle.strategyRollingSortino,
+    rollingWindow: cashBundle.rollingWindow,
+    rollingBetaWindow: cashBundle.rollingBetaWindow,
+    strategyDrawdowns: cashBundle.strategyDrawdowns,
+    strategyWorst10: cashBundle.strategyWorst10,
     strategyMetrics,
     activeComparator: "btc",
-    comparators: {
-      btc: buildComparatorBlock("BTC-USD", "BTC", btcRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
-      spx: buildComparatorBlock("S&P 500", "SPX", spxRet, stratRet, stratEquity, dates, strategyMetrics.ann_vol, rollWindow.window, rollBetaWindow.window, periodsPerYear),
-      none: noneComparatorBlock,
-    },
-    styleDrift,
-    streaks: (() => {
-      const { wins, losses } = streakLengths(stratRet);
-      const MAX_LEN = 14;
-      return {
-        winsByLength: streakHistogram(wins, MAX_LEN),
-        lossesByLength: streakHistogram(losses, MAX_LEN),
-        totalWins: wins.length,
-        totalLosses: losses.length,
-        longestWin: wins.length > 0 ? Math.max(...wins) : 0,
-        longestLoss: losses.length > 0 ? Math.max(...losses) : 0,
-        maxLen: MAX_LEN,
-      };
-    })(),
-    calmarByYear: calmarByYear(stratRet, dates),
-    bootstrapCI: bootstrapCI(stratRet, 2000, 5, 42, periodsPerYear),
-    monthlyReturns: monthlyReturnsMatrix(stratRet, dates),
-    dailyHeatmap: dailyReturnsByYear(stratRet, dates),
-    correlations,
-    correlationMatrix: { labels, matrix },
-    stressWindows: computeStressWindows(dates, stratRet, btcRet, "BTC", strategy.markets),
-    quantiles,
+    comparators: cashBundle.comparators,
+    styleDrift: cashBundle.styleDrift,
+    streaks: cashBundle.streaks,
+    calmarByYear: cashBundle.calmarByYear,
+    bootstrapCI: cashBundle.bootstrapCI,
+    monthlyReturns: cashBundle.monthlyReturns,
+    dailyHeatmap: cashBundle.dailyHeatmap,
+    correlations: cashBundle.correlations,
+    correlationMatrix: cashBundle.correlationMatrix,
+    stressWindows: cashBundle.stressWindows,
+    quantiles: cashBundle.quantiles,
     // Phase 90 — composite marker/basis fields. Optional-absent when opts
     // omitted (undefined values are dropped from the serialized RSC blob), so
     // single-key payloads stay byte-identical.
@@ -346,11 +496,13 @@ export function buildFactsheetPayload(
     metricsByBasis: opts?.metricsByBasis,
     mtmGate: opts?.mtmGate,
     dataQuality: opts?.dataQuality,
-    // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis derived at
-    // :220 so the client leverage recompute annualizes on the SAME basis the
-    // server did. Additive-optional: single-key payloads carry a number here,
-    // stale v4 cache entries lack it (leverage control hidden, fail-closed).
+    // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis so the client
+    // leverage recompute annualizes on the SAME basis the server did. Additive-
+    // optional: single-key payloads carry a number here, stale caches lack it.
     periodsPerYear,
+    // Phase 103 (MTM-04) — additive per-basis bundle; undefined (dropped from the
+    // serialized blob) when no persisted MTM series feeds the build (SC-4).
+    seriesByBasis,
   };
 
   // No-invented-data contract (NEW-C20-01, RED-TEAM-M2/M3, B6): the synthesized
@@ -420,7 +572,7 @@ export function buildFactsheetPayload(
           ),
         },
       ],
-      eventSignatures: computeEventSignatures(stratRet, btcRet, stratEquity),
+      eventSignatures: computeEventSignatures(stratRet, btcRet, cashBundle.strategyEquity),
       benchEventSignatures: computeEventSignatures(btcRet, btcRet, cumEq(btcRet)),
     };
   }

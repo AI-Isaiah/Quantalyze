@@ -49,7 +49,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -64,10 +64,18 @@ from postgrest.base_request_builder import APIResponse
 from postgrest.types import CountMethod
 from supabase import Client
 
+if TYPE_CHECKING:
+    # Phase 104: the post-branch cash-series persist reads denominator_config
+    # UNCONDITIONALLY (initialized at the branch-outer scope like mtm_returns), so
+    # the outer-scope default needs the type name — imported type-only to avoid a
+    # runtime import (the value is still parsed function-locally in the deribit arm).
+    from services.allocated_capital import ReturnsDenominatorConfig
+
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
+    CRYPTO_VENUES,
     PositionDirection as PositionDirection,
     Side as Side,
 )
@@ -267,6 +275,16 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
 }
 
+# FIX-2 (Fable): the single-key MTM SECOND pass is a FULL-HISTORY crawl that runs
+# INSIDE the same derive_broker_dailies budget as the cash pass. Bound it to a
+# fraction of the REMAINING budget (never a blind global ceiling bump, which would
+# also relax perp-only/ccxt derives and mask real hangs) so it can never push the
+# whole derive past the outer wait_for into a silent transient→failed_final — which
+# would ALSO sink the healthy cash headline. If too little budget remains to
+# plausibly finish, the pass is skipped and DEGRADED loudly. Options books only.
+_MTM_SECOND_PASS_BUDGET_FRACTION = 0.7
+_MTM_SECOND_PASS_MIN_SECONDS = 60.0
+
 
 # ---------------------------------------------------------------------------
 # Error classification
@@ -438,7 +456,7 @@ async def _load_strategy_and_key(
     def _load_strategy() -> dict[str, Any] | None:
         res = (
             supabase.table("strategies")
-            .select("id, user_id, api_key_id, returns_denominator_config")
+            .select("id, user_id, api_key_id, asset_class, returns_denominator_config")
             .eq("id", strategy_id)
             .maybe_single()
             .execute()
@@ -1917,6 +1935,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     exchange. On 429, stamps last_429_at.
     """
     is_key_mode = bool(job.get("api_key_id"))
+    # FIX-2 (Fable): stamp the derive start on the event-loop monotonic clock so
+    # the additive MTM second pass can bound itself to the REMAINING budget.
+    _derive_start = asyncio.get_running_loop().time()
     if is_key_mode:
         ctx = await _allocator_key_preflight(job, "run_derive_broker_dailies_job")
     else:
@@ -1994,6 +2015,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "computation_warned": False,
                         "computation_error": stamp_detail + scrubbed,
                         "data_quality_flags": {"csv_source": True},
+                        # F-4 (Fable): authoritative-clear the by-basis column on a
+                        # terminal failure so a prior successful derive's object
+                        # (composite-era or single-key MTM) can't render as a
+                        # live-looking money number on a now-FAILED row.
+                        "metrics_json_by_basis": None,
                     },
                     on_conflict="strategy_id",
                 ).execute()
@@ -2005,7 +2031,122 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             error_kind="permanent",
         )
 
+    # MTM-01 (Phase 101): the additive single-key mark_to_market SECOND pass
+    # (Deribit options books only). Initialized at the branch-OUTER scope so the
+    # post-branch persist reads them unconditionally on EVERY path — ccxt venues,
+    # perp-only Deribit, and key-mode all leave them at these defaults (no second
+    # crawl, no metrics_json_by_basis write) so SC-4 holds by construction.
+    #   * mtm_returns    — the MTM daily-return Series (None ⇒ pass skipped/degraded)
+    #   * mtm_gated_reason — the machine reason stamped on a STRUCTURAL degrade
+    #   * mtm_attempted  — True iff the second pass ran (options/strategy/cash-basis);
+    #     the post-branch persist keys the by-basis write off THIS (never off
+    #     _completeness, which is undefined on the ccxt branch).
+    mtm_returns: pd.Series | None = None
+    mtm_gated_reason: str | None = None
+    mtm_attempted: bool = False
     try:
+        # Phase 105 (BB-02, MED-2): resolve the returns-denominator override HERE at the
+        # branch-outer, VENUE-AGNOSTIC scope — mirroring run_csv_strategy_analytics
+        # (analytics_runner.py:2304-2316), which parses it for EVERY venue. In Phase 104
+        # this parse lived ONLY inside the deribit arm, so a ccxt strategy with a
+        # simple/active override echoed the geometric/calendar DEFAULT (MED-2) and a
+        # malformed ccxt config was silently ignored. Both the post-branch cash-series
+        # persist + MTM echo AND (on the deribit arm) pnl_basis / exclude_spot_extraction
+        # / combine_native_ledger read this SAME variable, so the derive path stays
+        # branchless (collapse #6). Strategy-mode only — key-mode owns no strategy row.
+        from services.allocated_capital import (
+            ReturnsDenominatorConfigError,
+            parse_returns_denominator_config,
+        )
+        from services.redact import scrub_freeform_string
+
+        # Phase 105 (BB-02, D3 SECONDARY): heal-DELETE both persisted series rows
+        # (cash_settlement + mtm_daily_returns) so a stale row never outlives an
+        # authoritative-NULL terminal write — mirroring the MTM heal idiom. This is
+        # DEFENSE-IN-DEPTH; the Plan-02 read gate is the primary guarantee. A heal
+        # failure must NEVER mask the terminal stamp that invoked it — swallow + warn.
+        # Strategy-mode only (key-mode owns no per-strategy series row).
+        async def _heal_delete_basis_series() -> None:
+            if is_key_mode:
+                return
+            from services.basis_series import persist_basis_series
+
+            def _delete_both() -> None:
+                persist_basis_series(
+                    ctx.supabase, strategy_id, basis="cash_settlement", result=None,
+                )
+                persist_basis_series(
+                    ctx.supabase, strategy_id, basis="mark_to_market", result=None,
+                )
+
+            try:
+                await db_execute(_delete_both)
+            except Exception as _heal_exc:  # noqa: BLE001
+                logger.warning(
+                    "derive_broker_dailies: series heal-delete failed for strategy "
+                    "%s (terminal stamp already applied): %s",
+                    strategy_id, _heal_exc,
+                )
+
+        # P72 — fail-loud analytics stamp, now VENUE-NEUTRAL (hoisted out of the deribit
+        # arm + renamed; the arm keeps calling this SAME helper for its other permanent
+        # failures). A terminal-FAIL must leave the wizard's SyncPreviewStep poller a
+        # TERMINAL 'failed' gate instead of an infinitely-pending 'complete'. Strategy-
+        # mode only: key-mode has no per-key strategy_analytics row (per-key reads land
+        # in Phase 36).
+        async def _stamp_strategy_analytics_failed(message: str) -> None:
+            if is_key_mode:
+                return
+            scrubbed = str(scrub_freeform_string(message))
+
+            def _upsert() -> None:
+                ctx.supabase.table("strategy_analytics").upsert(
+                    {
+                        "strategy_id": strategy_id,
+                        "computation_status": "failed",
+                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                        "computation_warned": False,
+                        "computation_error": scrubbed,
+                        "data_quality_flags": {"csv_source": True},
+                        # F-4 (Fable): authoritative-clear the by-basis column so a
+                        # prior object can't render on a now-FAILED row.
+                        "metrics_json_by_basis": None,
+                    },
+                    on_conflict="strategy_id",
+                ).execute()
+
+            await db_execute(_upsert)
+            # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
+            # through this helper (parse-malformed + the deribit arm's ledger/scope/
+            # valuation failures) heals both series rows.
+            await _heal_delete_basis_series()
+
+        # Per-strategy returns-denominator override (Zavara-only allocated capital).
+        # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
+        # path (byte-identical). A PRESENT-but-malformed config FAILS LOUD (permanent)
+        # on EITHER venue — never ship a factsheet on a guessed capital base. Its
+        # ``pnl_basis`` also drives the deribit native ledger's accrual basis
+        # (cash_settlement default).
+        denominator_config: "ReturnsDenominatorConfig | None" = None
+        try:
+            denominator_config = parse_returns_denominator_config(
+                ctx.strategy_row.get("returns_denominator_config")
+                if not is_key_mode and isinstance(ctx.strategy_row, dict)
+                else None
+            )
+        except ReturnsDenominatorConfigError as exc:
+            await _stamp_strategy_analytics_failed(
+                "Strategy returns_denominator_config is malformed."
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "derive_broker_dailies: "
+                    f"{scrub_freeform_string(str(exc))}"
+                ),
+                error_kind="permanent",
+            )
+
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
             # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
@@ -2022,42 +2163,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 build_deribit_native_ledger,
                 fetch_deribit_native_account_state,
             )
-            from services.allocated_capital import (
-                ReturnsDenominatorConfigError,
-                exclude_spot_extraction_for,
-                parse_returns_denominator_config,
+            from services.allocated_capital import exclude_spot_extraction_for
+            from services.deribit_txn import (
+                DEFAULT_PNL_BASIS,
+                LedgerValuationError,
+                PNL_BASIS_MARK_TO_MARKET,
             )
-            from services.deribit_txn import DEFAULT_PNL_BASIS, LedgerValuationError
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
-            from services.redact import scrub_freeform_string
-
-            # P72 — fail-loud analytics stamp. A deribit permanent-FAIL below
-            # (ledger-incomplete/unenumerable/scope, or material-equity-empty)
-            # must leave the wizard's SyncPreviewStep poller a TERMINAL 'failed'
-            # gate instead of an infinitely-pending never-arriving 'complete' —
-            # mirroring the <2-days branch and run_csv_strategy_analytics. This
-            # is belt-and-suspenders vs the migration-038 status bridge; ship
-            # regardless. Strategy-mode only: key-mode has no per-key
-            # strategy_analytics row (per-key reads land in Phase 36).
-            async def _stamp_deribit_analytics_failed(message: str) -> None:
-                if is_key_mode:
-                    return
-                scrubbed = str(scrub_freeform_string(message))
-
-                def _upsert() -> None:
-                    ctx.supabase.table("strategy_analytics").upsert(
-                        {
-                            "strategy_id": strategy_id,
-                            "computation_status": "failed",
-                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                            "computation_warned": False,
-                            "computation_error": scrubbed,
-                            "data_quality_flags": {"csv_source": True},
-                        },
-                        on_conflict="strategy_id",
-                    ).execute()
-
-                await db_execute(_upsert)
+            from services.native_nav import InceptionReconciliationError
+            from services.stitch_composite import (
+                MTM_REASON_ANCHOR_RACE,
+                MTM_REASON_SECOND_PASS_TIMEOUT,
+                MTM_REASON_SUMMARY_COVERAGE,
+            )
 
             # 80-06 (HIGH-1+MEDIUM-1, one-read root-cause): read the Deribit anchor
             # ONCE for the WHOLE branch. fetch_deribit_native_account_state yields
@@ -2095,30 +2213,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             balance_error = account_state.balance_error
             open_unrealized_usd = account_state.collapsed_upnl_usd
             upnl_unreadable = account_state.upnl_unreadable
-            # Per-strategy returns-denominator override (Zavara-only allocated
-            # capital). ABSENT on every normal strategy (and in key-mode, which owns
-            # no strategy) → None → the unchanged NAV path (byte-identical). A
-            # PRESENT-but-malformed config FAILS LOUD (permanent) — never ship a
-            # factsheet on a guessed capital base. Its ``pnl_basis`` also drives the
-            # native ledger's accrual basis (cash_settlement default).
-            try:
-                denominator_config = parse_returns_denominator_config(
-                    ctx.strategy_row.get("returns_denominator_config")
-                    if not is_key_mode and isinstance(ctx.strategy_row, dict)
-                    else None
-                )
-            except ReturnsDenominatorConfigError as exc:
-                await _stamp_deribit_analytics_failed(
-                    "Strategy returns_denominator_config is malformed."
-                )
-                return DispatchResult(
-                    outcome=DispatchOutcome.FAILED,
-                    error_message=(
-                        "derive_broker_dailies: "
-                        f"{scrub_freeform_string(str(exc))}"
-                    ),
-                    error_kind="permanent",
-                )
+            # `denominator_config` was resolved VENUE-AGNOSTICALLY at the branch-outer
+            # scope (Phase 105 MED-2 hoist) — the deribit consumers below read that SAME
+            # value (byte-identical for deribit by construction). Its ``pnl_basis`` drives
+            # the native ledger's accrual basis (cash_settlement default).
             pnl_basis = (
                 denominator_config.pnl_basis
                 if denominator_config is not None
@@ -2163,7 +2261,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     and abs(equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
                     and _completeness.total_return_rows == 0
                 ):
-                    await _stamp_deribit_analytics_failed(
+                    await _stamp_strategy_analytics_failed(
                         "Deribit account holds equity but the ledger produced no "
                         "return-bearing activity in the window."
                     )
@@ -2223,6 +2321,160 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         f"{ccy}:{day}"
                         for ccy, day in _completeness.pre_coverage_option_days
                     ]
+                # ── MTM-01 (Phase 101): additive mark_to_market SECOND pass ──
+                # The single-key sibling of the composite dual-pass
+                # (_reconstruct_deribit, :3135-3148). Runs a SECOND ledger pass in
+                # mark_to_market basis and persists it ADDITIVELY into
+                # strategy_analytics.metrics_json_by_basis.mark_to_market (below).
+                # It NEVER reassigns the cash-pass objects (returns / meta /
+                # _completeness / native_ledger) — those are what SC-4 protects — so
+                # cash_settlement stays byte-identical by construction. ALL of these
+                # must hold before it runs:
+                #   * not is_key_mode          — key-mode owns no strategy_analytics
+                #     row to persist a by-basis object into (per-key reads = Phase 36);
+                #   * pnl_basis == DEFAULT_PNL_BASIS (cash_settlement) — if the
+                #     configured headline basis is ALREADY mark_to_market there is
+                #     nothing additive to compute (a dual write there is Phase-102);
+                #   * _completeness.has_option_activity — the RESEARCH Q1 single-key
+                #     gate signal; perp-only MTM ≡ cash (the Phase-82 amendment is
+                #     dark under a no-option book), so skipping avoids doubling every
+                #     Deribit crawl for zero information.
+                # Timeout envelope (FIX-2, Fable — corrected): derive_broker_dailies
+                # has a FIXED 15-min budget (:266) and this second pass is a FULL
+                # -HISTORY crawl (since_ms=None) — the ENTIRE txn-log re-crawl PLUS a
+                # second dense-marks index fetch, NOT a bounded ~90-day backfill. The
+                # earlier "~120 s (composite per-crawl ceiling)" justification was
+                # unsound: _COMPOSITE_PER_CRAWL_SECONDS is a ~90-day backfill ceiling,
+                # whereas here BOTH crawls are full-history and share the one 15-min
+                # budget. A large book whose single crawl already nears the budget
+                # would, unbounded, push the whole derive past the outer wait_for →
+                # asyncio.TimeoutError → classified transient → 3 attempts →
+                # failed_final, SILENTLY, taking the healthy cash headline down with
+                # it. Mitigation (options books only, no dispatch refactor / no blind
+                # global ceiling bump): BOUND the second pass to a fraction of the
+                # REMAINING budget so the cash pass always keeps its headroom, and on
+                # timeout DEGRADE LOUDLY with a distinct machine reason. Residual: if
+                # the CASH pass ALONE already nears the 15-min budget, the outer
+                # wait_for can still fire during the cash pass — that is a cash-pass
+                # sizing limit, not introduced by the second pass, and is out of scope
+                # here (a true full-book budget tune is Phase-102 follow-up).
+                if (
+                    not is_key_mode
+                    and pnl_basis == DEFAULT_PNL_BASIS
+                    and _completeness.has_option_activity
+                ):
+                    mtm_attempted = True
+                    _derive_budget = float(
+                        TIMEOUT_PER_KIND.get("derive_broker_dailies", 15 * 60)
+                    )
+                    _mtm_remaining = _derive_budget - (
+                        asyncio.get_running_loop().time() - _derive_start
+                    )
+                    _mtm_pass_timeout = (
+                        _mtm_remaining * _MTM_SECOND_PASS_BUDGET_FRACTION
+                    )
+                    if _mtm_pass_timeout < _MTM_SECOND_PASS_MIN_SECONDS:
+                        # The cash pass already consumed most of the budget — do NOT
+                        # start a second full-history crawl that cannot plausibly
+                        # finish (it would only risk sinking the derive). DEGRADE
+                        # LOUD with the distinct timeout reason; the cash headline
+                        # ships unaffected. (mtm_returns stays None → the persist
+                        # writes an authoritative SQL NULL for the by-basis object.)
+                        mtm_returns = None
+                        mtm_gated_reason = MTM_REASON_SECOND_PASS_TIMEOUT
+                        logger.warning(
+                            "derive_broker_dailies: skipping mark_to_market second "
+                            "pass for strategy %s — only %.0fs of the %.0fs derive "
+                            "budget remained (below the %.0fs floor); degrading the "
+                            "additive object, cash derive unaffected",
+                            strategy_id, _mtm_remaining, _derive_budget,
+                            _MTM_SECOND_PASS_MIN_SECONDS,
+                        )
+                    else:
+                        try:
+                            # Bound the full-history second crawl to the remaining
+                            # budget so it can never sink the whole derive (FIX-2).
+                            _mtm_ledger, _mtm_completeness = await asyncio.wait_for(
+                                build_deribit_native_ledger(
+                                    ctx.exchange,
+                                    account_state=account_state,
+                                    pnl_basis=PNL_BASIS_MARK_TO_MARKET,
+                                    exclude_spot_extraction=exclude_spot_extraction,
+                                ),
+                                timeout=_mtm_pass_timeout,
+                            )
+                            assert_ledger_complete(_mtm_completeness)
+                            # Bind to MTM-only names — NEVER reassign returns/meta/
+                            # _completeness/native_ledger. The MTM meta guard flags
+                            # are DISCARDED (mirror the composite Finding-9 discard):
+                            # the cash-pass flags are authoritative.
+                            mtm_returns, _mtm_meta = combine_native_ledger(
+                                _mtm_ledger,
+                                _mtm_completeness.indexable_currencies,
+                                denominator_config=denominator_config,
+                            )
+                        except asyncio.TimeoutError:
+                            # FIX-2: the bounded second crawl overran its slice of
+                            # the remaining budget. DEGRADE LOUD with the distinct
+                            # reason (never let it escape as a transient that retries
+                            # the WHOLE derive to failed_final and sinks the cash
+                            # headline).
+                            mtm_returns = None
+                            mtm_gated_reason = MTM_REASON_SECOND_PASS_TIMEOUT
+                            logger.warning(
+                                "derive_broker_dailies: mark_to_market second pass "
+                                "exceeded its bounded %.0fs budget for strategy %s "
+                                "— degrading the additive object, cash unaffected",
+                                _mtm_pass_timeout, strategy_id,
+                            )
+                        except (
+                            LedgerValuationError,
+                            NavReconstructionError,
+                            LedgerCompletenessError,
+                            LedgerTruncatedError,
+                            CurrencyEnumerationError,
+                            ScopeAuthError,
+                        ) as _mtm_exc:
+                            # DELIBERATE ASYMMETRY vs the cash pass narrowing (:2249,
+                            # rationale :2256-2259): a STRUCTURAL mark_to_market
+                            # failure (a pre-rollout straddle with no boundary V₀
+                            # anchor, or a mid-window summary hole —
+                            # deribit_txn.py:636-650) DEGRADES — the cash factsheet
+                            # still ships and we stamp a FIXED machine reason (no
+                            # exception-text interpolation, T-74-03). We do NOT catch
+                            # bare ValueError / json.JSONDecodeError: a transient
+                            # network/parse ValueError escaping the second crawl must
+                            # fall through and stay transient-retryable (the outer
+                            # :2414 arm / dispatcher retries the WHOLE derive), NEVER
+                            # be permanently stamped as a coverage reason.
+                            # DeribitTransientReadError, ccxt network errors, and
+                            # RateLimitExceeded likewise propagate. Structural ⇒
+                            # degrade; transient ⇒ retry all.
+                            #
+                            # Phase 102 (deferred anchor-race resolution): the reason
+                            # is LABEL-ONLY inside this EXISTING catch — no re-raise,
+                            # no retry, no tuple change, degrade semantics untouched.
+                            # An InceptionReconciliationError here is the same-anchor
+                            # race (a mid-crawl event lands in the MTM rows but not the
+                            # once-read anchor → the §5 native roll no longer
+                            # reconciles), so it gets its OWN transient reason instead
+                            # of the permanent-sounding coverage stamp. A genuinely
+                            # PERSISTENT inception breach also lands here and STILL
+                            # degrades (cash ships) — never propagate-to-retry, which
+                            # would sink the healthy cash headline (deferred-items.md).
+                            mtm_returns = None
+                            mtm_gated_reason = (
+                                MTM_REASON_ANCHOR_RACE
+                                if isinstance(_mtm_exc, InceptionReconciliationError)
+                                else MTM_REASON_SUMMARY_COVERAGE
+                            )
+                            logger.warning(
+                                "derive_broker_dailies: mark_to_market second pass "
+                                "degraded for strategy %s (structural reconstruction "
+                                "failure) — cash derive unaffected: %s",
+                                strategy_id,
+                                scrub_freeform_string(str(_mtm_exc)),
+                            )
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,
@@ -2233,7 +2485,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # premise (>1 funded subaccount → ScopeAuthError), or a truncated
                 # crawl all mean we cannot PROVE coverage → clean permanent FAILED,
                 # never a silently-partial track record.
-                await _stamp_deribit_analytics_failed(
+                await _stamp_strategy_analytics_failed(
                     "Deribit transaction history could not be verified as "
                     "complete. " + str(scrub_freeform_string(str(exc)))
                 )
@@ -2258,7 +2510,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # network ValueError/json.JSONDecodeError escaping the crawl falls
                 # through to the outer generic handler and stays transient-retryable.
                 scrubbed = str(scrub_freeform_string(str(exc)))
-                await _stamp_deribit_analytics_failed(
+                await _stamp_strategy_analytics_failed(
                     "Deribit ledger contained a transaction that could not be "
                     "processed (unvaluable coin cash, undatable, or schema drift). "
                     + scrubbed
@@ -2285,7 +2537,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # Caught in this SAME try as the crawl so a native refusal is never
                 # misclassified transient 'unknown' and retried forever (T-80-10).
                 scrubbed = str(scrub_freeform_string(str(exc)))
-                await _stamp_deribit_analytics_failed(
+                await _stamp_strategy_analytics_failed(
                     "Deribit native NAV reconstruction refused a structural input "
                     "(a value-bearing currency with no USD mark, or the "
                     "full-history roll did not reconcile to inception). " + scrubbed
@@ -2599,11 +2851,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         "activity required."
                     ),
                     "data_quality_flags": {"csv_source": True},
+                    # F-4 (Fable): authoritative-clear the by-basis column so a
+                    # prior object can't render on a now-FAILED (insufficient) row.
+                    "metrics_json_by_basis": None,
                 },
                 on_conflict="strategy_id",
             ).execute()
 
         await db_execute(_mark_insufficient)
+        # D3 SECONDARY (Phase 105): this terminal insufficient-history arm exits BEFORE
+        # the cash/MTM series persists below, so a stale series row from a prior
+        # (longer-history) derive would outlive the now-authoritative 'failed'. Heal both
+        # rows (defense-in-depth; the Plan-02 read gate is the guarantee).
+        await _heal_delete_basis_series()
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
@@ -2730,6 +2990,98 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         meta.get("used_heuristic_capital"),
     )
 
+    # ── MTM-01 (Phase 101): compute the additive mark_to_market metrics object ──
+    # STRATEGY-mode only (key-mode returned above). When the second pass produced a
+    # series (mtm_returns is not None) compute its seven-scalar headline object with
+    # the SAME conventions run_csv_strategy_analytics threads for the cash headline
+    # (analytics_runner.py:2291-2316) so the MTM object is convention-comparable:
+    # asset-class annualization clock (#597 √365 crypto / √252 traditional) + the
+    # allocated-capital cumulative_method/day_basis (geometric+calendar when no
+    # override). This is the single-key sibling of the composite MTM compute
+    # (:3834-3840, 4018-4020) MINUS the cash key — the headline IS the cash truth
+    # for single-key, and the strict basis-metrics.ts overlay stays byte-identical
+    # only when cash_settlement is ABSENT from the by-basis object.
+    from services.metrics import periods_per_year_for_asset_class
+    from services.allocated_capital import metrics_day_basis
+    from services.stitch_composite import MTM_REASON_SERIES_UNCOMPUTABLE
+    from services.basis_series import (
+        BasisSeriesResult,
+        derive_basis_series,
+        persist_basis_series,
+    )
+
+    mtm_metrics_json: dict[str, Any] | None = None
+    _mtm_basis_result: BasisSeriesResult | None = None
+    if mtm_returns is not None:
+        _mtm_periods = periods_per_year_for_asset_class(
+            ctx.strategy_row.get("asset_class")
+            if isinstance(ctx.strategy_row, dict)
+            else None
+        )
+        if denominator_config is not None:
+            _mtm_cumulative = denominator_config.cumulative_method
+            _mtm_day_basis = metrics_day_basis(denominator_config.metrics_basis)
+        else:
+            _mtm_cumulative = "geometric"
+            _mtm_day_basis = "calendar"
+        # Benchmark: guarded exactly like the composite (:3808-3817). The seven
+        # guaranteed scalars are benchmark-INVARIANT, so a BTC benchmark blip must
+        # NEVER gate MTM — on failure log a warning and compute benchmark_rets=None.
+        from services.benchmark import get_benchmark_returns
+
+        _mtm_benchmark_rets: pd.Series | None = None
+        try:
+            _mtm_benchmark_rets, _ = await get_benchmark_returns("BTC")
+        except Exception as _bench_exc:  # noqa: BLE001
+            logger.warning(
+                "derive_broker_dailies: MTM benchmark fetch failed for strategy "
+                "%s (computing mark_to_market without the benchmark family): %s",
+                strategy_id, _bench_exc,
+            )
+        try:
+            # Phase 103 (MTM-04): series + scalars from the ONE shared
+            # derive_basis_series — the dailies-canonical route the backbone merge
+            # extends. Scalars remain a derived cache (round-trip guard in
+            # test_basis_series.py). dict(result.metrics_json) is the SAME
+            # already-JSON-safe object the composite persists (degenerate scalars are
+            # JSON null via _safe_float; postgrest rejects NaN, so never hand-build).
+            # The helper propagates compute_all_metrics's ValueError by design, so the
+            # surrounding degrade arm is untouched.
+            _mtm_basis_result = derive_basis_series(
+                mtm_returns,
+                _mtm_benchmark_rets,
+                periods_per_year=_mtm_periods,
+                cumulative_method=_mtm_cumulative,
+                day_basis=_mtm_day_basis,
+                # Phase 104 (104-SC5): carry the benchmark IDENTITY STRING in the
+                # persisted MTM conventions echo so BOTH bases (cash + MTM) carry it
+                # uniformly. Additive-only: no reader consumes conventions.benchmark
+                # this phase (SC-4-safe), and the MTM benchmark RETURNS fetch above is
+                # unchanged — this is only the identity label alongside conventions.
+                benchmark_symbol="BTC",
+            )
+            mtm_metrics_json = dict(_mtm_basis_result.metrics_json)
+        except ValueError as _mtm_compute_exc:
+            # Mirror the composite F-5 guard (:3844) but DEGRADE instead of failing
+            # the job: a cumulative_method='simple' series with an interior chain-break
+            # rejects. The cash headline is unaffected, so stamp the machine reason and
+            # omit the key rather than fail the whole derive.
+            mtm_metrics_json = None
+            # SERIES-UNCOMPUTABLE math failure (compute rejected the series), NOT a
+            # settlement-summary coverage hole — stamp its own reason so Phase 102's
+            # disabled-with-reason UI does not show a coverage explanation for a
+            # non-coverage cause. The true crawl-level structural degrade (the MTM
+            # second-pass `as _mtm_exc` catch) stamps MTM_REASON_SUMMARY_COVERAGE for
+            # a non-inception structural failure, or MTM_REASON_ANCHOR_RACE when the
+            # failure is an InceptionReconciliationError (the Phase-102 same-anchor
+            # race classification).
+            mtm_gated_reason = MTM_REASON_SERIES_UNCOMPUTABLE
+            logger.warning(
+                "derive_broker_dailies: mark_to_market metrics compute rejected the "
+                "series for strategy %s (interior chain-break) — degrading: %s",
+                strategy_id, scrub_freeform_string(str(_mtm_compute_exc)),
+            )
+
     # DQ-02 + DQ-01 (v1.8): PRE-STAMP the coverage terminus flag AND the DQ-01
     # NAV-denominator guard flags (negative_nav_guard / dust_nav_guard /
     # flow_dominated_guard) onto strategy_analytics so the CSV analytics run
@@ -2764,13 +3116,180 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
         if meta.get(_flag):
             _prestamp_flags[_flag] = True
+    # MTM-01 (Phase 101): a STRUCTURAL mark_to_market degrade stamps the FIXED
+    # machine reason. Only on degrade — the prestamp REPLACES data_quality_flags
+    # wholesale (MED-3), so a stale reason self-heals on the next clean derive.
+    if mtm_attempted and mtm_gated_reason is not None:
+        _prestamp_flags["mtm_gated_reason"] = mtm_gated_reason
 
-    def _prestamp_dq_flags(flags: dict[str, Any] = _prestamp_flags) -> None:
+    # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
+    # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete
+    # upsert OMITS metrics_json_by_basis for never-composite rows (Finding 5 gates on
+    # the prior `composite` flag), so a prestamped mark_to_market key SURVIVES the
+    # finalizer. This mirrors the composite persist (:4016-4020) MINUS the cash key:
+    # the headline IS the cash truth for single-key, and the strict basis-metrics.ts
+    # overlay stays byte-identical only when cash_settlement is ABSENT from the
+    # by-basis object (writing a cash key would activate a recomputed cash overlay
+    # and risk SC-4 divergence).
+    _prestamp_payload: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "data_quality_flags": _prestamp_flags,
+    }
+    # 106-02 (D5 / M2): the by-basis scalar assignment + prestamp upsert are DEFERRED
+    # to AFTER both basis-series persists below (see the moved block just above the
+    # CSV enqueue). Only the side-effect-free dict INIT lives here; the DONE-gating
+    # write is series-first (self-healing partial-write window). `mtm_metrics_json`
+    # is captured by the later assignment — its value is fixed before this point.
+
+    # Phase 103 (MTM-04): persist (or HEAL) the mark_to_market daily-return series
+    # row from the SAME BasisSeriesResult the scalar cache above came from — the
+    # dailies-canonical route Plans 03/04 read. The success matrix MIRRORS the
+    # authoritative metrics_json_by_basis write: a fresh series row ONLY when the
+    # second pass SUCCEEDED (mtm_attempted and mtm_metrics_json is not None); every
+    # other terminal-DONE shape (degrade / compute-reject / not-attempted) → DELETE
+    # any stale row (Pitfall 5 heal, mirroring the by-basis SQL NULL) so a stale
+    # series can never outlive an authoritative-NULL scalar write. Sync helper
+    # wrapped in db_execute exactly like the prestamp above; fail-loud on the same
+    # idiom (a persist failure retries the whole derive — cash rows already landed
+    # above and re-derive idempotently).
+    _persist_mtm_series_result = (
+        _mtm_basis_result
+        if (mtm_attempted and mtm_metrics_json is not None)
+        else None
+    )
+
+    def _persist_mtm_series(
+        result: BasisSeriesResult | None = _persist_mtm_series_result,
+    ) -> None:
+        persist_basis_series(
+            ctx.supabase, strategy_id, basis="mark_to_market", result=result,
+        )
+
+    await db_execute(_persist_mtm_series)
+
+    # ── Phase 104/105 (BB-01/BB-02): additive cash_settlement SERIES persist ─────
+    # Persist the cash daily-return SERIES as strategy_analytics_series kind
+    # ("cash_settlement") beside the MTM block above. Phase 105 (D1) makes this echo
+    # ROUND-TRIP-COMPLETE: the derive receives scalar_returns=returns (the exact
+    # legacy-conditioned series) + densify_policy="broker_nan", so the persisted
+    # conventions carry {"densify": "broker_nan"} and the round-trip guard / 106 reader
+    # can reconstruct the exact scalar input from the sparse rows. Collapse #6: the
+    # per-source conditioning (broker → broker_nan) lives HERE at the preparation seam,
+    # the derive stays branchless.
+    #
+    # STILL SERIES-ONLY for the AUTHORITATIVE scalars: persist_basis_series DISCARDS
+    # metrics_json (it persists rows/gap_spans/conventions only), and the authoritative
+    # single-key cash SCALARS still flip onto this route in Plan 04 (analytics_runner) —
+    # NOT here. This seam's metrics_json_by_basis carries ONLY mark_to_market; no cash
+    # scalar leaks into it. (Routing cash SCALARS through the shared derive before the
+    # 04 reconciliation would still be an SC-4 violation — 104-RESEARCH Pitfall 1.)
+    #
+    # `returns` is the SAME dense post-terminus series the csv_daily_returns rows were
+    # built from (:2842) — so scalar_returns=returns is byte-identical to the legacy
+    # cash scalar input BY CONSTRUCTION, and _drop_nonfinite inside the helper reproduces
+    # EXACTLY those finite rows (series round-trip identity by construction).
+    #
+    # benchmark_rets=None (positional): NO benchmark FETCH on the cash path. SC-5 needs
+    # ONLY the benchmark IDENTITY STRING, so benchmark_symbol="BTC" is passed
+    # UNCONDITIONALLY — every cash row carries the identity regardless of any MTM-side
+    # fetch outcome. Conventions are resolved with the SAME expressions as the MTM block
+    # (Pitfall 2) but computed separately (the MTM locals exist only when mtm_returns is
+    # not None).
+    #
+    # A3 honesty: strategies whose sync_trades tail enqueues legacy compute_analytics
+    # (BROKER_DAILIES_VIA_FUNDING off) never reach this seam → they get NO
+    # cash_settlement series row this phase — an HONEST ABSENCE (dark write), never a
+    # fabricated fill. Do NOT add a persist to run_compute_analytics_job (a 106-slated
+    # dark-path re-entry point); unified coverage lands with the 105/106 route collapse.
+    _cash_periods = periods_per_year_for_asset_class(
+        ctx.strategy_row.get("asset_class")
+        if isinstance(ctx.strategy_row, dict)
+        else None
+    )
+    if denominator_config is not None:
+        _cash_cumulative = denominator_config.cumulative_method
+        _cash_day_basis = metrics_day_basis(denominator_config.metrics_basis)
+    else:
+        _cash_cumulative = "geometric"
+        _cash_day_basis = "calendar"
+    try:
+        _cash_basis_result: BasisSeriesResult | None = derive_basis_series(
+            returns,
+            None,
+            periods_per_year=_cash_periods,
+            cumulative_method=_cash_cumulative,
+            day_basis=_cash_day_basis,
+            benchmark_symbol="BTC",
+            # Collapse #6 (D1): the legacy-conditioned broker series IS `returns`
+            # (dense with interior guard-NaN), and its densification is broker_nan —
+            # so the scalar cache is byte-identical to the legacy cash scalar and the
+            # round-trip guard can rebuild it from the sparse rows.
+            scalar_returns=returns,
+            densify_policy="broker_nan",
+        )
+    except ValueError:
+        # Heal arm (Pitfall 5): effectively unreachable given the <2-day early exit
+        # above, kept for the discipline — a rejected derive DELETEs any stale row.
+        _cash_basis_result = None
+
+    def _persist_cash_series(
+        result: BasisSeriesResult | None = _cash_basis_result,
+    ) -> None:
+        persist_basis_series(
+            ctx.supabase, strategy_id, basis="cash_settlement", result=result,
+        )
+
+    await db_execute(_persist_cash_series)
+
+    # 106-02 (D5 / carry-forward M2): the DONE-gating by-basis SCALAR prestamp lands
+    # HERE — AFTER both basis series persist above — mirroring the composite seam
+    # (cash series → MTM series → DONE-bearing scalar LAST). Ordering is load-bearing:
+    # series-first REVERSES the partial-write window into the SELF-HEALING direction.
+    # If the scalar landed FIRST and a series persist then failed, the read gate would
+    # render fresh scalars over a stale/absent series (the HARMFUL mislabeled-read
+    # direction). Persisting the series first means the only remaining transient window
+    # is fresh-series + stale-SCALAR — benign (both rows are genuinely single-key; the
+    # headline numbers lag the chart by one derive, never mislabel a basis) and the
+    # next re-derive lands the matching scalar and heals it. A series-write failure
+    # itself aborts the whole derive (fail-loud db_execute) BEFORE this scalar is
+    # written, so the gate can never observe the harmful fresh-scalar + stale-series.
+    # The prestamp must still land BEFORE the CSV enqueue below (the finalizer OMITS
+    # metrics_json_by_basis on the broker route, so this authoritative write survives).
+    #
+    # MED-HIGH (Fable): metrics_json_by_basis is AUTHORITATIVE for a single-key
+    # broker-derive row — this seam ALWAYS writes the column so no stale object can
+    # survive. A fresh {"mark_to_market": …} object ONLY when the second pass
+    # SUCCEEDED; every other terminal-DONE shape → SQL NULL (Python None, never JSON
+    # null — the Phase-85 CHECK). This closes the whole stale-by-basis class on the
+    # broker route:
+    #   * mtm_attempted + success → the additive object;
+    #   * mtm_attempted + degrade (compute-reject / structural) → NULL, healing a
+    #     stale mark_to_market key from a prior successful derive whose data gated;
+    #   * NOT attempted (perp-only, ccxt, MTM-configured headline, or a strategy
+    #     RECONFIGURED from composite → single-key broker) → NULL, so a stale
+    #     composite-shaped {cash_settlement, mark_to_market} object or a frozen
+    #     prior MTM object can never linger next to the single-key headline.
+    # The finalizer's Finding-5 clear is DEAD on the broker route (its
+    # `_was_composite` reads the data_quality_flags THIS prestamp already replaced
+    # with {csv_source}), so this authoritative write is the single source of truth:
+    # the finalizer OMITS the column on the broker route and leaves this value
+    # intact (that is also how the success-path mark_to_market object survives). A
+    # single-key row's only legitimate by-basis content is the mark_to_market key
+    # this path owns — anything else is stale by definition. (Broker-derive only
+    # ever runs for single-key strategies; a genuine composite is authored by
+    # run_stitch_composite_job / :4341, never this derive.) Non-options derives are
+    # no longer byte-identical (they now write metrics_json_by_basis=NULL) — an
+    # accepted, deliberate change vs the prior column-untouched behavior, because a
+    # surviving stale object is a WRONG-MONEY-NUMBER hazard for Phase 102.
+    _prestamp_payload["metrics_json_by_basis"] = (
+        {"mark_to_market": mtm_metrics_json}
+        if (mtm_attempted and mtm_metrics_json is not None)
+        else None
+    )
+
+    def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
         ctx.supabase.table("strategy_analytics").upsert(
-            {
-                "strategy_id": strategy_id,
-                "data_quality_flags": flags,
-            },
+            payload,
             on_conflict="strategy_id",
         ).execute()
 
@@ -2791,9 +3310,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 # the crypto (365) clock. The composite periods_per_year is 365 if ANY member
 # venue is crypto, else 252 — an explicit set so a future non-crypto venue flips
 # the blend to 252 without touching the rule.
-_COMPOSITE_CRYPTO_VENUES: frozenset[str] = frozenset(
-    {"deribit", "binance", "okx", "bybit"}
-)
+# MD-01: single-sourced from services.closed_sets.CRYPTO_VENUES (imported above) so
+# the composite blend clock can never drift from the onboarding-teaser preview clock.
+_COMPOSITE_CRYPTO_VENUES: frozenset[str] = CRYPTO_VENUES
 
 # HARD-05 (Phase 93): the ccxt crypto venues a composite member can declare that
 # this phase does NOT yet reconstruct natively (Plan 93-04 attaches the honest
@@ -2889,8 +3408,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     clipped series into ONE honest combined series, persists the stitched
     cash_settlement series to ``csv_daily_returns`` (gap/guarded days ABSENT —
     never 0.0 as performance, charting only), then computes the metrics ONCE from
-    the in-memory stitched series (``_metrics_result_for`` → ``compute_all_metrics``
-    with the venue-blend periods_per_year + the global BTC benchmark) and writes the
+    the in-memory stitched series via the ONE shared ``derive_basis_series`` helper
+    (asset_class periods_per_year + the global BTC benchmark) and writes the
     HEADLINE ``strategy_analytics`` row DIRECTLY in a single atomic upsert: the
     headline scalars ARE ``metrics_json_by_basis.cash_settlement`` (both bases when
     MTM is admissible) spread into the row, so headline == by-basis by construction
@@ -3750,39 +4269,44 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     ]
     mask = coverage_mask(_coverage_input)
 
-    # 5. #597 blend annualization: 365 if ANY member venue crypto else 252. For an
-    # all-crypto composite this equals periods_per_year_for_asset_class('crypto')
-    # so the headline (asset_class-driven) and the by-basis object AGREE.
-    periods_per_year = (
+    # 5. #5 collapse (D4): asset_class is THE annualization clock selector — the ONE
+    # rule, periods_per_year_for_asset_class(strategies.asset_class) (√365 crypto /
+    # √252 traditional). Every #597 asset-class surface (scenario blends, leg
+    # annualization, OG card, peer-rank via src/lib/closed-sets.ts) recomputes from
+    # this SAME strategies.asset_class, so the composite headline now agrees with them
+    # by construction. finalize-wizard force-derives asset_class='crypto' for a
+    # composite (F-1a); the strat_row was already loaded for the denominator config.
+    periods_per_year = periods_per_year_for_asset_class(
+        strat_row.get("asset_class") if isinstance(strat_row, dict) else None
+    )
+    # F-1 (retained fail-loud sanity assert, D4): the legacy #597 venue blend (365 if
+    # ANY member venue crypto else 252) survives ONLY as a CROSS-CHECK — asset_class is
+    # now the truth. finalize-wizard's asset_class='crypto' force-derive is
+    # NON-BLOCKING, so a composite left at the 'traditional' default over a crypto-venue
+    # book would silently annualize √252 while its factsheet / #597 surfaces expect
+    # √365. FAIL LOUD PERMANENT on disagreement rather than ship that divergence — do
+    # NOT silently annualize the wrong clock. _COMPOSITE_DEGRADE_VENUES stays the
+    # unknown-venue backstop (a truly unknown venue degrades its member before it can
+    # reach this blend). #5 is a provable no-op on live scalars: the F-1 backstop
+    # landed in 044bee50 — the SAME commit that introduced stitch_composite.py — so no
+    # live composite has EVER shipped with the two clocks disagreeing.
+    _venue_blend_periods = (
         PERIODS_PER_YEAR_CRYPTO
         if any(v in _COMPOSITE_CRYPTO_VENUES for v in venues)
         else DEFAULT_PERIODS_PER_YEAR
     )
-    # F-1 (convergence red team): the composite headline annualizes on the venue
-    # blend above, but every #597 asset-class surface (scenario blends, leg
-    # annualization, OG card, peer-rank via src/lib/closed-sets.ts) recomputes from
-    # strategies.asset_class. If asset_class's clock (√365 crypto / √252 traditional)
-    # disagrees with the venue blend, those surfaces silently diverge from THIS
-    # headline by ~√(365/252). finalize-wizard force-derives asset_class='crypto'
-    # for a composite (F-1a), but that write is non-blocking — so BACKSTOP it here:
-    # FAIL LOUD PERMANENT rather than ship a composite whose headline and
-    # asset-class surfaces annualize on different clocks. The strat_row was already
-    # loaded for the denominator config; its asset_class was previously ignored.
-    _asset_class_periods = periods_per_year_for_asset_class(
-        strat_row.get("asset_class") if isinstance(strat_row, dict) else None
-    )
-    if _asset_class_periods != periods_per_year:
+    if _venue_blend_periods != periods_per_year:
         await _stamp_failed(
             "Composite asset_class annualization clock "
-            f"({_asset_class_periods}/yr) disagrees with the venue blend "
-            f"({periods_per_year}/yr); the factsheet and #597 surfaces would "
+            f"({periods_per_year}/yr) disagrees with the venue blend "
+            f"({_venue_blend_periods}/yr); the factsheet and #597 surfaces would "
             "diverge. Re-derive asset_class (crypto for a crypto-venue composite)."
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
                 "run_stitch_composite_job: asset_class periods_per_year "
-                f"{_asset_class_periods} != venue-blend {periods_per_year}"
+                f"{periods_per_year} != venue-blend {_venue_blend_periods}"
             ),
             error_kind="permanent",
         )
@@ -3816,40 +4340,59 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             strategy_id, exc,
         )
 
-    def _metrics_result_for(clipped_series: list[tuple[int, pd.Series]]) -> Any:
-        """Stitch → gap-fill dense-with-0.0 → compute_all_metrics with the composite
-        conventions + the global BTC benchmark → the full MetricsResult
-        (metrics_json + sibling_kinds).
+    # Phase 105 (collapse #1): BOTH composite bases now route through the ONE shared
+    # dailies-canonical helper (services/basis_series.py). Hoisted above the cash
+    # derive because cash now precedes the MTM gate on the same helper. Cash + MTM +
+    # the persist/heal all share this one import.
+    from services.basis_series import (
+        BasisSeriesResult,
+        derive_basis_series,
+        persist_basis_series,
+    )
 
-        This is the ONE canonical composite compute. Its ``metrics_json`` is used
-        for BOTH the headline ``strategy_analytics`` scalars AND
-        ``metrics_json_by_basis.cash_settlement`` so the two can never diverge —
-        the root-cause fix that retires the divergent single-key recompute the
-        headline previously went through (``run_csv_strategy_analytics`` applied
-        ``periods_per_year_for_asset_class(asset_class)`` — √252 for the 'traditional'
-        default — and reinstated NaN/0.0 gap semantics that disagreed with this
-        in-memory series)."""
-        stitched = stitch_clipped_series(clipped_series)
-        dense = gap_fill_daily_returns(stitched)
-        return compute_all_metrics(
-            dense,
+    # Collapse #1 (SC-1): the composite cash basis routes through the SAME shared
+    # derive_basis_series as the single-key seam and the MTM arm — the bespoke
+    # composite cash closure is DELETED (grep-gate). `stitched_cash` exists (:4206).
+    try:
+        _cash_basis_result: BasisSeriesResult | None = derive_basis_series(
+            stitched_cash,
             benchmark_rets,
             periods_per_year=periods_per_year,
             cumulative_method=cumulative_method,
             day_basis=day_basis,
+            # LOW-2: carry the BTC benchmark IDENTITY into the payload conventions
+            # (payload-only; no reader consumes conventions.benchmark this phase).
+            benchmark_symbol="BTC",
+            # Collapse #1 (D1): the scalar input is `gap_fill_daily_returns(stitched_
+            # cash)` — the EXACT input the deleted closure fed compute_all_metrics
+            # (verbatim), so the cash scalar is byte-identical to the legacy oracle BY
+            # CONSTRUCTION. densify='zero_fill' echoes that the composite densifies
+            # absent inter-member days to 0.0 (flat) while an in-index member-guard NaN
+            # is surfaced as `nan_dates` so the round-trip guard reinstates the chain
+            # break rather than 0.0-bridging it.
+            scalar_returns=gap_fill_daily_returns(stitched_cash),
+            densify_policy="zero_fill",
         )
-
-    try:
-        cash_metrics_result = _metrics_result_for(clipped_cash)
     except ValueError as exc:
-        # F-5 (convergence red team): compute_all_metrics raises a BARE ValueError
-        # on a cumulative_method='simple' series with an interior NaN guard day (the
-        # arithmetic Σr cannot honour a chain-break). classify_exception buckets a
-        # bare ValueError as 'unknown' → retries BURN the attempt budget before the
-        # terminal gate (the <2-day hoist above only covered the length ValueError).
-        # Stamp PERMANENT so the wizard poller reaches a gate immediately. Honest
-        # today (the allocated path gap-fills 0.0, so this is defense-in-depth), just
-        # fail-fast-loud instead of slow-loud.
+        # F-5 (convergence red team), re-homed onto derive_basis_series's ValueError:
+        # the derive propagates compute_all_metrics's BARE ValueError on a
+        # cumulative_method='simple' series with an interior NaN guard day (arithmetic
+        # Σr cannot honour a chain-break) — AND raises its OWN <2-finite-rows
+        # ValueError. The hoisted _present_day_count guard (:4227) fires FIRST on the
+        # length case, so this arm's interior-chain-break message stays honest.
+        # classify_exception buckets a bare ValueError as 'unknown' → retries BURN the
+        # attempt budget before the terminal gate; stamp PERMANENT so the wizard poller
+        # reaches a gate immediately.
+        # M1 (Fable red team, Phase 105): do NOT heal-delete the cash series row here.
+        # `_stamp_failed` deliberately PRESERVES metrics_json_by_basis (M-2: an owner-
+        # resync re-derive of an already-live composite keeps rendering the live
+        # factsheet from the surviving scalars). Deleting the paired cash_settlement
+        # series row while those scalars survive would leave scalar-live/series-absent —
+        # exactly the inconsistency MED-1's read gate distrusts. Every other composite
+        # terminal arm preserves; this arm does too. (A first-derive failure has no
+        # prior series row to leave behind, so preserve is a no-op there.) The single-
+        # key seam heals both rows because it carries NO live-preserve semantics —
+        # that asymmetry is intentional, not an oversight.
         scrubbed = str(scrub_freeform_string(str(exc)))
         await _stamp_failed(
             "Composite metrics compute rejected the stitched series "
@@ -3862,13 +4405,24 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ),
             error_kind="permanent",
         )
-    cash_metrics_json = dict(cash_metrics_result.metrics_json)
+    # The composite try above assigns _cash_basis_result the derive result; its
+    # `except ValueError` returns on failure, so control only reaches here when the
+    # derive succeeded. It is non-None from this point (initialised None at the top,
+    # never reassigned after) — assert so mypy --strict narrows the union for the
+    # four downstream reads (metrics_json / insufficient_window / sibling_kinds).
+    assert _cash_basis_result is not None
+    cash_metrics_json = dict(_cash_basis_result.metrics_json)
 
     # 6. MTM honesty gate (OQ-1). Admissible ⇒ a SECOND ledger pass per Deribit
     # member (research A2 — no single-pass dual-basis path); gated ⇒ omit the MTM
     # key and carry the reason for Phase 90.
+    # Phase 105 (collapse #1): BOTH the cash (above) and mark_to_market bases route
+    # through the ONE shared dailies-canonical helper (services/basis_series.py) — the
+    # bespoke composite compute is gone. Initialize the derived result to None so the
+    # persist heal covers the gated (mtm_ok False) and any future degrade shape.
     mtm_ok, mtm_reason = mark_to_market_available(member_signals)
     mtm_metrics_json: dict[str, Any] | None = None
+    _mtm_basis_result: BasisSeriesResult | None = None
     if mtm_ok:
         mtm_result = await _reconstruct_all(PNL_BASIS_MARK_TO_MARKET)
         if isinstance(mtm_result, DispatchResult):
@@ -3921,7 +4475,46 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 error_kind="transient",
             )
         try:
-            mtm_metrics_json = dict(_metrics_result_for(clipped_mtm).metrics_json)
+            # Phase 103 (MTM-04): stitch → the ONE shared derive_basis_series (same
+            # convention variables the cash derive above uses). The
+            # stitch stays INSIDE this try so CompositeOverlapError handling below is
+            # untouched; derive_basis_series propagates compute_all_metrics's
+            # ValueError into the existing F-5 arm. The persisted MTM dailies are the
+            # canonical source for Plans 03/04.
+            stitched_mtm = stitch_clipped_series(clipped_mtm)
+            # Phase 103 (MTM-04, BACKEND FIX 3): a degenerate-length stitched MTM
+            # series (< 2 interpretable days) raises a bare ValueError from
+            # compute_all_metrics that the generic ValueError arm below would
+            # MISATTRIBUTE to an "interior chain-break under the arithmetic
+            # convention" (a distinct, structural cause). Detect the degenerate-length
+            # case explicitly and stamp an accurate, dedicated message. Guards ONLY the
+            # MTM second pass — cash behavior is unchanged (the cash compute has its
+            # own < 2 guards at :2756 / :3675 / :4090).
+            if int(stitched_mtm.notna().sum()) < 2:
+                await _stamp_failed(
+                    "Composite mark-to-market series has fewer than two interpretable "
+                    "days after stitching, so mark-to-market metrics cannot be computed."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: MTM series degenerate-length "
+                        "(< 2 interpretable days after stitching)"
+                    ),
+                    error_kind="permanent",
+                )
+            _mtm_basis_result = derive_basis_series(
+                stitched_mtm,
+                benchmark_rets,
+                periods_per_year=periods_per_year,
+                cumulative_method=cumulative_method,
+                day_basis=day_basis,
+                # LOW-2: benchmark identity carry (payload-only; conventions.benchmark
+                # is consumed by no reader this phase — byte-visible solely in the
+                # persisted MTM series payload, mirroring the cash derive above).
+                benchmark_symbol="BTC",
+            )
+            mtm_metrics_json = dict(_mtm_basis_result.metrics_json)
         except CompositeOverlapError as exc:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
@@ -4085,11 +4678,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # HARD-04 (#67): lift the CAGR-site insufficient_window annotation, mirroring
     # the mtm_gated_reason drop-stale pattern above — a composite that GROWS past
     # MIN_ANNUALIZATION_DAYS heals (loses the flag) on the next re-stitch. Read
-    # from the CANONICAL cash headline result (`cash_metrics_result`, the ONE
+    # from the CANONICAL cash derive result (`_cash_basis_result`, the ONE shared
     # composite compute); the MTM second pass shares the same window by
     # construction. Annotation only — it deliberately does NOT touch
     # computation_status (not a NAV_TWR_GUARD_KEYS member).
-    if cash_metrics_result.insufficient_window:
+    if _cash_basis_result.insufficient_window:
         merged_flags["insufficient_window"] = True
     else:
         merged_flags.pop("insufficient_window", None)
@@ -4148,6 +4741,67 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # can't survive a now-gated re-derive.
     headline_payload.update(cash_metrics_json)
 
+    # Phase 105 (SC-5 / D5): ORDERED-IDEMPOTENT finalize. BOTH basis series (cash +
+    # MTM below) land BEFORE the DONE-bearing headline/by-basis scalar flip — together
+    # with the reconcile-delete + dailies upserts above (:4520-4560). A worker death
+    # before the flip therefore leaves NO complete scalar without its series (MED-1's
+    # read gate un-trusts a scalar whose series is absent); the kill-point test pins
+    # this. Cash ALWAYS persists a real row here — a rejected cash derive already
+    # returned via the F-5 arm above, so `_cash_basis_result` is a genuine result.
+    #
+    # D5 HONEST BOUNDARY: ordered-idempotent = GATED EVENTUAL CONSISTENCY, not
+    # atomicity — supabase-py has no cross-.table() transaction. On a RE-derive of an
+    # already-complete strategy, a death between the dailies delete/upsert (:4520-4560,
+    # PRE-EXISTING) and the scalar flip leaves old-scalar + partial-dailies visible
+    # until the authoritative-re-derive retry heals it (_reconcile_full_delete
+    # idempotence + single-row series upserts). That transient chart/KPI mismatch
+    # window is PRE-EXISTING and UNCHANGED here — 105 makes nothing worse. Strict
+    # atomicity (a service-role SECDEF finalize RPC) is deliberately DEFERRED to ride
+    # 106's fold migration (which already carries DDL + test-project catch-up +
+    # migration review); do NOT make 105 prod-DDL-affecting for a window that exists.
+    def _persist_cash_series() -> None:
+        persist_basis_series(
+            supabase,
+            strategy_id,
+            basis="cash_settlement",
+            result=_cash_basis_result,
+        )
+
+    await db_execute(_persist_cash_series)
+
+    # Phase 103 (MTM-04, BACKEND FIX 2): persist (or HEAL) the stitched
+    # mark_to_market daily-return series row BEFORE the DONE-bearing headline/by-basis
+    # scalar upsert below — matching the single-key broker-derive seam, which (as of
+    # 106-02 / D5) also lands both basis series before the DONE-gating by-basis scalar
+    # prestamp the downstream csv-analytics job then compiles into the factsheet.
+    # Ordering is load-bearing: the by-basis mark_to_market SCALAR is the F-4
+    # read gate. This ordering does NOT ELIMINATE the partial-write window — it
+    # REVERSES it into the SELF-HEALING direction. If the scalar landed FIRST and a
+    # transient series upsert then failed on a re-stitch, the gate would render fresh
+    # scalars over a stale/missing series (the HARMFUL direction — a mislabeled read).
+    # Persisting the series first means the only remaining transient window is
+    # fresh-series + stale-SCALAR (a scalar-upsert failure after a successful series
+    # write on a re-stitch). That window is BENIGN: both rows are genuinely MTM (never
+    # cash), so the read is a mixed stale-MTM-scalar + fresh-MTM-series — the headline
+    # numbers lag the chart by one derive, never mislabel a basis — and the next
+    # re-derive lands the matching scalar and heals it. A series-write failure itself
+    # aborts the whole
+    # derive (fail-loud db_execute) BEFORE the gating scalar is written, so the read
+    # gate can never observe the harmful fresh-scalar + stale-series. Success
+    # (mtm_metrics_json is not
+    # None) → the row; every other shape — gated (mtm_ok False) or any future degrade →
+    # persist_basis_series(result=None) DELETES any stale row (Pitfall 5), so a
+    # previously-successful strategy that re-derives gated loses its stale series.
+    def _persist_mtm_series() -> None:
+        persist_basis_series(
+            supabase,
+            strategy_id,
+            basis="mark_to_market",
+            result=_mtm_basis_result if mtm_metrics_json is not None else None,
+        )
+
+    await db_execute(_persist_mtm_series)
+
     def _write_headline_and_by_basis() -> None:
         supabase.table("strategy_analytics").upsert(
             headline_payload, on_conflict="strategy_id"
@@ -4159,14 +4813,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # composite factsheet charts — computed from the SAME canonical cash compute so
     # they agree with the headline. Guarded exactly like run_csv_strategy_analytics:
     # a transient RPC blip is logged, never fails the (already-persisted) derive.
-    if cash_metrics_result.sibling_kinds:
+    if _cash_basis_result.sibling_kinds:
         try:
             def _upsert_siblings() -> None:
                 supabase.rpc(
                     "upsert_strategy_analytics_series_batch",
                     {
                         "p_strategy_id": strategy_id,
-                        "p_kinds": cash_metrics_result.sibling_kinds,
+                        "p_kinds": _cash_basis_result.sibling_kinds,
                     },
                 ).execute()
 

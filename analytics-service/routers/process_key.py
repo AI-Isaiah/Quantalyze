@@ -33,7 +33,7 @@ import os
 import secrets
 import time
 import uuid
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import hashlib
 
@@ -42,13 +42,19 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
+from services.basis_series import derive_basis_series
 from services.db import get_supabase, get_user_scoped_supabase, one, rows
 from services.feature_flags import is_unified_backbone_active
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
+from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
+from services.metrics import periods_per_year_for_asset_class
 from services.rate_limit import limiter
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 router = APIRouter(prefix="/process-key", tags=["process-key"])
 log = structlog.get_logger("quantalyze.analytics.process_key")
@@ -269,6 +275,135 @@ def _trade_to_dict(t: Trade | dict[str, Any]) -> dict[str, Any]:
     if isinstance(t, dict):
         return t
     return dataclasses.asdict(t)
+
+
+# Phase 105.1-01 (D1/D2/D4/D5/D6) — the sync-pipeline derive swap.
+#
+# The teaser/csv/internal_report return-based scalars used to come off the
+# backbone (EquityCurveBuilder on a synthetic 100k-NAV curve at √252). They now
+# route through derive_basis_series — the ONE backbone compute path — annualized
+# by asset_class (#597 / D2). NOTHING is persisted (D1): derive is compute-only
+# (basis_series.py:181 — persist_basis_series is a SEPARATE function this module
+# NEVER calls; the archived `00000…0001` teaser anchor makes any series row
+# unreadable + PK-colliding by construction).
+
+# venue → asset_class is a property of the VENUE, not the flow: an api_key
+# sourced from a crypto exchange is crypto regardless of flow_type. Only
+# okx/binance/bybit are sync-eligible today (H-11 whitelist, :137-143); deribit
+# is included defensively so a future H-11 admission of it classifies here too.
+# A NEW sync-eligible venue MUST be classified in this set (grep the H-11
+# whitelist above when admitting one).
+# MD-01: `_CRYPTO_VENUES` now aliases the canonical `services.metrics.CRYPTO_VENUES`
+# (imported above) so the teaser preview clock can never drift from the composite
+# blend clock. Do NOT redefine a local literal here.
+
+# D6 degrade contract: the five legacy landing-card enrichment keys null out
+# together on any insufficient-history path (len<2 pre-check OR derive's <2
+# FINITE-rows ValueError). Single literal so both arms emit an identical shape.
+# The FOUR return-based snapshot keys (twr/sharpe/ytd/max_drawdown) are
+# separately pre-nulled at the call site (see the swap block) — the builder's
+# off-backbone values for them must NEVER persist (D1).
+_LEGACY_NULL_ENRICHMENT: dict[str, Any] = {
+    "return_24h": None,
+    "return_mtd": None,
+    "return_ytd": None,
+    "equity_curve": None,
+    "matched_strategy_id": None,
+}
+
+
+def _resolve_asset_class(
+    source: str, strategy_id: str, supabase: Any
+) -> str | None:
+    """FLAG C — resolve the annualization asset_class for the sync derive.
+
+    Branches on `source` (the axis H-11 already keys on — NOT flow_type, so the
+    anti-cosplay doctrine at :470-473 stays intact):
+      - a crypto exchange venue (okx/binance/bybit, deribit defensively) ⇒
+        "crypto" WITHOUT a DB read — matches the #597 backfill convention that
+        api_key-sourced rows are crypto.
+      - source == "csv" ⇒ read `strategies.asset_class` for the REAL strategy_id
+        present in every sync csv run (the :614 guard returns early when it is
+        missing). This is the SAME signal finalize reads
+        (analytics_runner.py:2313-2314), keeping preview and finalize
+        annualization on one clock.
+    A missing/None row or any lookup failure ⇒ None (fail-soft to
+    periods_per_year_for_asset_class(None) = 252, the DB column's own DEFAULT
+    'traditional'). Reads ONLY asset_class; no value is echoed to the caller.
+    """
+    if source in _CRYPTO_VENUES:
+        return "crypto"
+    if source == "csv":
+        try:
+            resp = (
+                supabase.table("strategies")
+                .select("asset_class")
+                .eq("id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            data = getattr(resp, "data", None)
+            if data:
+                asset_class = data.get("asset_class")
+                return asset_class if isinstance(asset_class, str) else None
+        except Exception as exc:  # noqa: BLE001
+            # Fail-soft to 252 (L2, Fable red team) — but log it: a transient
+            # lookup failure for a crypto CSV strategy silently understates the
+            # preview Sharpe by ~1.204× (√252 vs √365) vs finalize, with no
+            # other signal.
+            log.warning(
+                "process_key.resolve_asset_class_failed",
+                error=str(exc)[:200],
+                strategy_id=strategy_id,
+            )
+            return None
+    return None
+
+
+def _derive_return_scalars(
+    returns: "pd.Series", asset_class: str | None
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Derive the four return-based teaser scalars + equity_curve on the ONE
+    backbone compute path (D1). Returns `(four_key_dict, equity_curve)`.
+
+    Single `derive_basis_series` call, annualized by asset_class (#597 / D2 —
+    crypto √365 / traditional √252). geometric + calendar are the analytics
+    seam defaults (analytics_runner.py:2316-2317); the teaser has no
+    denominator_config and passes no scalar_returns/densify_policy (no
+    byte-identity machinery — Pitfall 4).
+
+    FLAG A: `ytd` lives in the NESTED result.metrics_json["metrics_json"]["ytd"]
+    (metrics.py:846) — a top-level scalars["ytd"] KeyErrors. The other three are
+    top-level (cumulative_return/sharpe/max_drawdown, metrics.py:1178-1189).
+
+    equity_curve is a running geometric cumprod over the derive's series_rows
+    (the persisted-truth sparse form) — coherent with cumulative_return by
+    construction (absent gap days are the multiplicative identity).
+
+    Raises `ValueError` when <2 finite rows survive sanitize
+    (basis_series.py:225-228); the caller maps it onto the degrade arm (D6).
+    """
+    result = derive_basis_series(
+        returns,
+        None,
+        periods_per_year=periods_per_year_for_asset_class(asset_class),
+        cumulative_method="geometric",
+        day_basis="calendar",
+    )
+    scalars = dict(result.metrics_json)
+    four_keys = {
+        "twr": scalars["cumulative_return"],
+        "sharpe": scalars["sharpe"],
+        # FLAG A: nested ytd — NOT scalars["ytd"] (that KeyErrors).
+        "ytd": scalars["metrics_json"]["ytd"],
+        "max_drawdown": scalars["max_drawdown"],
+    }
+    equity_curve: list[dict[str, Any]] = []
+    value = 1.0
+    for row in result.series_rows:
+        value *= 1 + row["return"]
+        equity_curve.append({"date": row["date"], "value": float(value)})
+    return four_keys, equity_curve
 
 
 def _is_long_fetch(body: _ProcessKeyBody) -> bool:
@@ -886,6 +1021,17 @@ async def process_key(
     # quo. Wiring real balance is a follow-up that touches the adapter
     # Protocol.
     enriched_metrics_snapshot: dict[str, Any] = _metrics_to_jsonb(metrics)
+    # Phase 105.1-01 (D1): the EquityCurveBuilder's return-based scalars
+    # (twr/sharpe/ytd/max_drawdown) are DEAD — computed off the backbone, they
+    # must NEVER persist. Pre-null them here so EVERY path below (success,
+    # derive ValueError, len<2, or the best-effort generic except) leaves them
+    # None unless the derive-backed override sets them. The builder now serves
+    # ONLY trade-level stats (total_pnl/trade_count/win_rate — D5) and the
+    # compute_fingerprint(trades, metrics) call at :973 (so `metrics` itself is
+    # left intact).
+    enriched_metrics_snapshot.update(
+        {"twr": None, "sharpe": None, "ytd": None, "max_drawdown": None}
+    )
     matched_strategy_id: str | None = None
     try:
         from services.portfolio_metrics import compute_period_returns
@@ -896,42 +1042,68 @@ async def process_key(
         returns = trades_to_daily_returns(
             trades_as_dicts, account_balance=None
         )
+        # The len<2 pre-check guards None/empty PRE-sanitize; derive's ValueError
+        # guards <2 FINITE rows POST-sanitize (basis_series.py:225-228) — two
+        # different boundaries that share the ONE degrade-to-nulls arm (D6). The
+        # four return-based snapshot keys are already pre-nulled above, so the
+        # degrade path only needs to null the five legacy landing-card keys.
         if returns is not None and len(returns) >= 2:
-            period_returns = compute_period_returns(returns)
-            cumulative = (1 + returns).cumprod()
-            equity_curve = [
-                {"date": d.isoformat(), "value": float(v)}
-                for d, v in cumulative.items()
-            ]
-            matched_strategy_id = find_matched_strategy(returns, supabase)
-            enriched_metrics_snapshot.update(
-                {
-                    "return_24h": period_returns.get("return_24h"),
-                    "return_mtd": period_returns.get("return_mtd"),
-                    "return_ytd": period_returns.get("return_ytd"),
-                    "equity_curve": equity_curve,
-                    "matched_strategy_id": matched_strategy_id,
-                }
-            )
+            try:
+                four_keys, equity_curve = _derive_return_scalars(
+                    returns,
+                    _resolve_asset_class(body.source, strategy_id, supabase),
+                )
+            except ValueError as exc:
+                # D6: <2 FINITE returns after sanitize → same degrade arm as len<2.
+                # Fail-loud (M2, Fable red team): compute_all_metrics also raises
+                # ValueError on BUG-class conditions (non-monotonic index, unknown
+                # convention, a pandas/quantstats regression) — without this line a
+                # real bug would render every public teaser all-dashes with zero
+                # signal, indistinguishable from a genuine <2-day-history degrade.
+                log.warning(
+                    "process_key.derive_return_scalars_degraded",
+                    error=str(exc)[:200],
+                    verification_id=verification_id,
+                )
+                enriched_metrics_snapshot.update(_LEGACY_NULL_ENRICHMENT)
+            else:
+                # Backbone-derived scalars FIRST (D5) so a later period-returns
+                # or matching exception can never strand the builder values —
+                # the four keys stay pre-nulled if this update never ran.
+                enriched_metrics_snapshot.update(four_keys)
+                period_returns = compute_period_returns(returns)
+                matched_strategy_id = find_matched_strategy(returns, supabase)
+                enriched_metrics_snapshot.update(
+                    {
+                        "return_24h": period_returns.get("return_24h"),
+                        "return_mtd": period_returns.get("return_mtd"),
+                        "return_ytd": period_returns.get("return_ytd"),
+                        # equity_curve re-sourced from the SAME derived series
+                        # the scalars derive from (D1 honesty condition c).
+                        "equity_curve": equity_curve,
+                        "matched_strategy_id": matched_strategy_id,
+                    }
+                )
         else:
-            # Insufficient trade history — null out the legacy-shape
-            # fields so the landing-page card explicitly renders dashes
-            # rather than silently omitting the keys.
-            enriched_metrics_snapshot.update(
-                {
-                    "return_24h": None,
-                    "return_mtd": None,
-                    "return_ytd": None,
-                    "equity_curve": None,
-                    "matched_strategy_id": None,
-                }
-            )
+            # Insufficient trade history — null out the legacy-shape fields so
+            # the landing-page card explicitly renders dashes rather than
+            # silently omitting the keys (the four snapshot keys are already
+            # pre-nulled above).
+            enriched_metrics_snapshot.update(_LEGACY_NULL_ENRICHMENT)
     except Exception as exc:  # noqa: BLE001
         # Enrichment is best-effort. If the pandas math or the matching
         # SELECT raises, persist the base MetricsSnapshot shape and let
         # the user see partial data rather than failing the entire
         # verification. Same precedent as the legacy verify_strategy's
         # try/except around find_matched_strategy (portfolio.py:1052).
+        # Post-pre-null this can no longer persist off-backbone builder
+        # scalars — the four return-based keys are already None here.
+        # LW-01 (Fable code-review): the four scalars are applied BEFORE
+        # find_matched_strategy/compute_period_returns (D5 ordering), so a raise
+        # there would otherwise leave the 5 legacy keys ABSENT (a "scalars-present,
+        # curve-absent" card) instead of the explicit-dashes contract the two inner
+        # degrade arms uphold. Null them here too so every degrade path is uniform.
+        enriched_metrics_snapshot.update(_LEGACY_NULL_ENRICHMENT)
         log.warning(
             "process_key.enrichment_failed",
             error=str(exc)[:200],

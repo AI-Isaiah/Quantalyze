@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WheelEvent as ReactWheelEvent } from "react";
 import { usePayload, useXRange, useActiveComparator } from "./factsheet-context";
+import { useBasisSeriesView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -37,9 +38,26 @@ const STRAT_NATURAL_QUANTILE = 0.99;
  * outer bound so a zoomed-out histogram still shows the natural data extent.
  */
 export function HistogramChart() {
-  const payload = usePayload();
+  // F1 (phase 103, MTM-follow): route through the basis view so the strategy
+  // daily-returns distribution follows the active basis. Under cash (or an
+  // absent MTM bundle) `useBasisSeriesView` returns the payload BY REFERENCE,
+  // so the render stays byte-identical; under mark_to_market it swaps in the
+  // bundle's MTM `strategyReturns`/`dates`. This is why HistogramChart is
+  // UNFROZEN in phase-52-frozen-spine-guards.test.ts — the freeze premise (it
+  // is data-inert) is now wrong: it MUST track MTM to honor the SC-4 invariant
+  // that nothing displays cash under an MTM label.
+  const payload = useBasisSeriesView(usePayload());
   const { xRange } = useXRange();
-  const { block: cmp } = useActiveComparator();
+  // MED-1 (phase 103): resolve the comparator block off the VIEW's comparators, not
+  // `useActiveComparator().block` (which is always the cash-axis-aligned
+  // `payload.comparators[...]`). The benchmark overlay reads `cmp.dailyReturns?.[i]`
+  // over the SAME xRange window as the strategy bars; under MTM the strategy bars
+  // ride the MTM axis, so the bench overlay must read the MTM-axis comparator or it
+  // windows a DIFFERENT calendar span (and reads undefined on the tail when
+  // mtmLen > cashLen). The KEY is basis-invariant; only the block follows the basis.
+  // Byte-identical under cash (the view returns the payload by reference).
+  const { key: cmpKey } = useActiveComparator();
+  const cmp = payload.comparators[cmpKey];
   const isMobile = useBreakpoint() === "mobile";
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [zoom, setZoom] = useState<{ lo: number; hi: number } | null>(null);

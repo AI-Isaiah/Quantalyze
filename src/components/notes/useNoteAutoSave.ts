@@ -35,7 +35,12 @@ export interface UseNoteAutoSaveReturn {
   save: (content: string) => Promise<void>;
 }
 
-type ScopeKind = "portfolio" | "holding" | "bridge_outcome" | "strategy";
+type ScopeKind =
+  | "portfolio"
+  | "holding"
+  | "bridge_outcome"
+  | "strategy"
+  | "dashboard";
 
 // Contract: NO unmount flush. Consumers rely on blur or explicit save() to persist.
 export function useNoteAutoSave(

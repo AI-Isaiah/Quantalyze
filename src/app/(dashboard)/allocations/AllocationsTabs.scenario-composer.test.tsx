@@ -169,12 +169,16 @@ vi.mock("./components/ScenarioComparePanel", () => ({
 import { AllocationsTabs } from "./AllocationsTabs";
 import { ScenarioComposer } from "./components/ScenarioComposer";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import { EMPTY_EXPOSURE, type ExposureSectionData } from "./lib/exposure-props";
 
 // --- Stub props ------------------------------------------------------------
 
 const ALLOCATOR_ID = "00000000-1111-2222-3333-444444444444";
 
-const STUB_PROPS: MyAllocationDashboardPayload = {
+const STUB_PROPS: MyAllocationDashboardPayload & {
+  exposure: ExposureSectionData;
+} = {
+  exposure: EMPTY_EXPOSURE,
   portfolio: null,
   analytics: null,
   strategies: [],

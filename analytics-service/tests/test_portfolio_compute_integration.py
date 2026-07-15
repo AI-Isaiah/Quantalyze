@@ -25,9 +25,10 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from routers import portfolio as portfolio_mod
 
@@ -693,3 +694,185 @@ class TestAuditSkipAnnotations:
                 "Either remove the stale marker or restore the mutation it "
                 "documents."
             )
+
+
+# ---------------------------------------------------------------------------
+# PI-07 — losing-racer 23505 on the computing-row INSERT maps to the EXISTING
+# 409 (public route) / in_flight (cron) semantics — never a 500 / failed.
+#
+# Co-requisite of migration plan 98-01, which adds the partial UNIQUE index
+# `portfolio_analytics_one_computing_per_portfolio`. Once that index exists the
+# losing racer's `computing` INSERT raises a PostgREST error carrying
+# code == "23505"; this code must absorb it into the pre-existing in-flight
+# semantics rather than surfacing an unhandled 500.
+# ---------------------------------------------------------------------------
+
+
+class _StubApiError(Exception):
+    """Mirror the supabase-py / PostgREST APIError shape the router detects:
+    a plain exception exposing a `.code` attribute plus a message. Research
+    Pitfall 4: supabase-py raises an APIError with `.code`, NOT a psycopg
+    error — so we do NOT import psycopg here to build it."""
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+_PI07_409_DETAIL = "Analytics computation already in progress for this portfolio"
+
+
+class TestPi07LosingRacer23505:
+    """PI-07: the `computing`-row INSERT inside _compute_portfolio_analytics
+    is the single choke point both the public route and cron route through.
+    A 23505 there means another racer already holds the sole `computing`
+    slot — surface it as the EXISTING in-flight 409, byte-identical detail."""
+
+    def _supabase_where_insert_raises(self, exc: Exception):
+        # portfolio_strategies / analytics_rows are irrelevant: the exception
+        # fires at the very first call (the computing-row INSERT), so compute
+        # never proceeds past it.
+        sb, tables = _make_supabase_for_compute(
+            portfolio_strategies=[],
+            analytics_rows=[],
+        )
+        tables["portfolio_analytics"].insert.return_value.execute.side_effect = exc
+        return sb
+
+    @pytest.mark.asyncio
+    async def test_23505_code_attr_maps_to_409(self):
+        """Test A: exception with `.code == "23505"` (postgrest APIError
+        shape) at the INSERT -> HTTPException 409 with the byte-identical
+        in-flight detail string. Without the fix the raw APIError propagates
+        (RED)."""
+        exc = _StubApiError(
+            'duplicate key value violates unique constraint '
+            '"portfolio_analytics_one_computing_per_portfolio"',
+            code="23505",
+        )
+        sb = self._supabase_where_insert_raises(exc)
+        with patch("routers.portfolio.get_supabase", return_value=sb):
+            with pytest.raises(HTTPException) as ei:
+                await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+        assert ei.value.status_code == 409
+        assert ei.value.detail == _PI07_409_DETAIL
+
+    @pytest.mark.asyncio
+    async def test_23505_message_fallback_maps_to_409(self):
+        """Test B: `.code is None` but the message carries "duplicate key" —
+        the message-only fallback in the repo's detection pattern must also
+        map to 409 (some driver paths surface the SQLSTATE only in the text).
+        RED without the fix."""
+        exc = _StubApiError(
+            'duplicate key value violates unique constraint '
+            '"portfolio_analytics_one_computing_per_portfolio"',
+            code=None,
+        )
+        sb = self._supabase_where_insert_raises(exc)
+        with patch("routers.portfolio.get_supabase", return_value=sb):
+            with pytest.raises(HTTPException) as ei:
+                await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+        assert ei.value.status_code == 409
+        assert ei.value.detail == _PI07_409_DETAIL
+
+    @pytest.mark.asyncio
+    async def test_non_23505_insert_error_propagates_unchanged(self):
+        """Test C (narrow-swallow contract): a NON-23505 insert failure
+        (e.g. RLS 42501) must propagate unchanged — NOT converted to 409,
+        NOT swallowed. This test passes on the pre-fix baseline (no handling
+        at all) AND after the fix (bare re-raise), pinning that the fix does
+        not broaden the swallow (Rule 12 fail-loud)."""
+        exc = _StubApiError(
+            "new row violates row-level security policy for table "
+            '"portfolio_analytics"',
+            code="42501",
+        )
+        sb = self._supabase_where_insert_raises(exc)
+        with patch("routers.portfolio.get_supabase", return_value=sb):
+            with pytest.raises(_StubApiError) as ei:
+                await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+        # Same object, unconverted — never an HTTPException.
+        assert ei.value.code == "42501"
+        assert not isinstance(ei.value, HTTPException)
+
+
+class TestPi07CronLosingRacerInFlightBucket:
+    """PI-07 cron side: when _compute_portfolio_analytics raises the 409
+    (losing racer), _guarded_recompute must classify it into the EXISTING
+    `in_flight` outcome bucket — never `failed`. Exercised end-to-end through
+    cron_sync(), mirroring TestRecomputeHttp400IsSkipped in test_cron_router.
+
+    Uses the lazy-import pattern the cron tests use (routers.portfolio is
+    unloaded/reloaded by sibling tests; pin it before patching)."""
+
+    @pytest.mark.asyncio
+    async def test_cron_409_lands_in_in_flight_not_failed(self):
+        import routers.portfolio as _portfolio_mod
+        sys.modules["routers.portfolio"] = _portfolio_mod
+
+        from routers import cron as cron_mod
+        from tests.test_cron_router import (
+            _make_mock_supabase_for_cron_sync,
+            _stub_validation,
+        )
+
+        mock_supabase = _make_mock_supabase_for_cron_sync(
+            keys_data=[
+                {
+                    "id": "key-1",
+                    "exchange": "binance",
+                    "last_sync_at": None,
+                    "strategies": [{"id": "strat-A", "status": "published"}],
+                }
+            ],
+            ps_data=[{"portfolio_id": "p1"}, {"portfolio_id": "p2"}],
+            # pa_data defaults to [] => in-flight pre-SELECT returns empty, so
+            # compute IS invoked and raises the 409 we route on (not the
+            # pre-SELECT in_flight short-circuit).
+        )
+
+        mock_exchange = AsyncMock()
+        mock_exchange.close = AsyncMock()
+
+        async def _compute(pid: str):
+            if pid == "p1":
+                raise cron_mod.HTTPException(
+                    status_code=409, detail=_PI07_409_DETAIL
+                )
+            return {"analytics_id": f"a-{pid}"}
+
+        with patch.object(cron_mod, "get_kek", return_value=b"x" * 32), \
+             patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", return_value=("k", "s", None)), \
+             patch.object(cron_mod, "create_exchange", return_value=mock_exchange), \
+             patch.object(
+                 cron_mod,
+                 "validate_key_permissions",
+                 AsyncMock(return_value=_stub_validation(valid=True)),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_all_trades",
+                 AsyncMock(return_value=[{"id": "t1"}]),
+             ), \
+             patch.object(
+                 cron_mod,
+                 "fetch_usdt_balance",
+                 AsyncMock(return_value=None),
+             ), \
+             patch.object(cron_mod, "parse_since_ms", return_value=None), \
+             patch.object(
+                 _portfolio_mod,
+                 "_compute_portfolio_analytics",
+                 AsyncMock(side_effect=_compute),
+             ):
+            response = await cron_mod.cron_sync()
+
+        pr = response["portfolio_recomputes"]
+        assert pr["attempted"] == 2
+        # p1 -> 409 -> in_flight bucket; p2 -> ok
+        assert pr["in_flight"] == 1
+        assert pr["ok"] == 1
+        assert pr["failed"] == 0
+        assert pr["skipped"] == 0
+        assert pr["failures"] == []

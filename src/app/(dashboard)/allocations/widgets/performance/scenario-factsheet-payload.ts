@@ -231,6 +231,9 @@ function emptyBootstrapCI(): FactsheetCsvPayload["bootstrapCI"] {
     max_dd: { point: 0, lo: 0, hi: 0, hist: { lo: 0, hi: 0, bins: [] } },
     n_resamples: 0,
     block_len: 0,
+    // Phase 103 (MTM-04, Finding #6): degenerate-path default — zero
+    // observations backing the (empty) resample block.
+    n: 0,
   };
 }
 

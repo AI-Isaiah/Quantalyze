@@ -47,6 +47,12 @@ honest combined series and owns four semantics:
      mark-to-market basis concept); an all-perp-only / USD-native native book is
      admissible ``(True, None)``. The reason string is carried in
      ``data_quality_flags.mtm_gated_reason`` for Phase 90's disabled-with-reason UI.
+     Phase 101 (MTM-01) reuses this vocabulary at the SINGLE-KEY derive level: the
+     broker derive stamps ``MTM_REASON_SUMMARY_COVERAGE`` when an option book's
+     ``mark_to_market`` reconstruction fails STRUCTURALLY (a pre-rollout straddle
+     with no boundary V₀ anchor / a mid-window summary hole — deribit_txn.py:636-650)
+     while its cash derive still ships. Per OQ-2 (planner decision) Phase 101 stamps
+     the MACHINE reason only; the human-facing copy is Phase-102 UI scope.
 
 Purity: pandas + stdlib + typing ONLY — no network, no I/O, no persistence, no
 credential handling (mirrors the ``nav_twr.py`` / ``ccxt_flows.py`` pure-module
@@ -94,6 +100,54 @@ _NATIVE_VENUE = "deribit"
 
 MTM_REASON_OPTIONS = "unsmoothed_options_book"
 MTM_REASON_VENUE = "mtm_basis_unavailable_for_venue"
+# Phase 101 (MTM-01) single-key derive gate: an option book whose mark_to_market
+# reconstruction fails STRUCTURALLY (pre-rollout straddle with no boundary V₀
+# anchor / mid-window summary hole — deribit_txn.py:636-650). Stamped by
+# run_derive_broker_dailies_job so the cash factsheet still ships (degrade-with-
+# reason, never crash, never fabricate). NOT consumed by mark_to_market_available
+# (composite gate semantics are Phase 102) — this is the single admissibility
+# vocabulary owner so the single-key and composite reasons never fork.
+MTM_REASON_SUMMARY_COVERAGE = "mtm_summary_coverage_incomplete"
+# Phase 101 (MTM-01) single-key derive gate: the mark_to_market RETURNS series
+# was reconstructed but compute_all_metrics REJECTED it as mathematically
+# uncomputable (e.g. an interior chain-break under cumulative_method='simple' —
+# metrics.py). This is a SERIES-UNCOMPUTABLE math failure, NOT a settlement-
+# summary coverage hole (MTM_REASON_SUMMARY_COVERAGE), so it carries its own
+# reason: Phase 102's disabled-with-reason UI must not show a coverage
+# explanation for a non-coverage cause. Same vocabulary owner (this module) so
+# the single-key and composite reasons never fork.
+MTM_REASON_SERIES_UNCOMPUTABLE = "mtm_series_uncomputable"
+# Phase 101 (MTM-01) single-key derive gate: the additive mark_to_market SECOND
+# crawl (a FULL-HISTORY txn-log + dense-marks pass) was BOUNDED to the remaining
+# derive budget and did not finish in time, so it was DEGRADED rather than allowed
+# to silently push the whole derive past the outer wait_for into a
+# transient→failed_final (which would ALSO sink the healthy cash headline). This
+# is a RESOURCE/timeout degrade — distinct from a coverage hole or a math
+# chain-break — LOUD and machine-distinct so a large-book timeout is diagnosable
+# and Phase 102's reason UI can explain it honestly.
+MTM_REASON_SECOND_PASS_TIMEOUT = "mtm_second_pass_timeout"
+# Phase 102 resolution of the Phase-101 deferred same-anchor MTM race. The single-
+# key mark_to_market second pass deliberately REUSES the cash pass's account_state
+# anchor (the SAME terminal NAV, so cash_settlement and mark_to_market value a
+# comparable base — pinned by test_options_book_runs_second_mtm_pass_same_anchor).
+# An event landing DURING the minutes-long cash crawl appears in the MTM rows but
+# not the once-read anchor → the §5 native roll no longer reconciles to a ~zero
+# pre-history balance → InceptionReconciliationError (native_nav.py:137). Because
+# that error subclasses NavReconstructionError it was previously caught by the MTM
+# structural-degrade tuple and stamped MTM_REASON_SUMMARY_COVERAGE — a permanent-
+# SOUNDING coverage explanation for what is usually a self-healing TRANSIENT race.
+# Classified as its OWN transient reason so the disabled-with-reason UI (plan
+# 102-01 maps it to "recomputed on the next data refresh" copy, amber tone) never
+# shows a coverage story for a race. This STILL DEGRADES — cash ships DONE — and is
+# LABEL-ONLY: the propagate-to-retry alternative was REJECTED because
+# InceptionReconciliationError is documented permanent/structural (native_nav.py
+# :594) and a genuinely PERSISTENT breach would then retry the whole derive to
+# failed_final, sinking the healthy cash headline (deferred-items.md option-2 risk).
+# Honest caveat: a genuinely persistent MTM-only reconciliation breach ALSO lands
+# here and re-stamps this same reason on every derive — the copy therefore promises
+# only re-computation, never recovery. Same vocabulary owner (this module) so the
+# single-key and composite reasons never fork.
+MTM_REASON_ANCHOR_RACE = "mtm_anchor_race"
 
 
 def windows_overlap(a: MemberWindow, b: MemberWindow) -> bool:

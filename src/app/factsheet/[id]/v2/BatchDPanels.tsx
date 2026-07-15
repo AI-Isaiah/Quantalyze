@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { usePayload } from "./factsheet-context";
+import { useBasisOrCash, useBasisSeriesView } from "./basis-context";
 
 /**
  * Batch D analytical panels. Three pieces:
@@ -15,8 +16,10 @@ import { usePayload } from "./factsheet-context";
  */
 
 export function StyleDriftPanel() {
-  const payload = usePayload();
-  const sd = payload.styleDrift;
+  // Phase 103 (MTM-04): the 50/50 half-vs-half KS drift is a pure function of the
+  // strategy's own daily series → follows the active basis (cash view === payload).
+  const view = useBasisSeriesView(usePayload());
+  const sd = view.styleDrift;
   if (!sd) return null;
   const { h1, h2, ksD, ksP } = sd;
   const ksSignificant = ksP < 0.05;
@@ -77,6 +80,7 @@ export function StyleDriftPanel() {
 
 export function PeerPercentilePanel() {
   const payload = usePayload();
+  const basis = useBasisOrCash();
   // Dual-read (Phase 42, PEER-01, ADR-0025): the peer rank lives on the api arm
   // (`peerPercentile`, demo cohort) OR — for the scenario BLEND — on the csv arm
   // (`scenarioPeer`, ranked vs the REAL verified universe). The explicit
@@ -116,6 +120,17 @@ export function PeerPercentilePanel() {
       ) : (
         <p className="mt-2 text-micro italic text-text-muted">
           Synthesized peer cohort (deterministic seed). Production: replace with platform strategy DB.
+        </p>
+      )}
+      {/* F6 (phase 103, no-invented-data): this is a CROSS-STRATEGY panel — the
+          rank compares this book against a peer cohort computed on the
+          cash-settlement basis. The cohort is NOT recomputed per basis (there is no
+          mark-to-market peer universe to rank against), so under MTM we surface an
+          HONEST note rather than fabricate an MTM cohort. Cash renders nothing
+          extra (byte-identical). */}
+      {basis === "mark_to_market" && (
+        <p className="mt-1 text-micro text-text-muted">
+          Peer rank is computed on the cash-settlement basis; the cohort is not recomputed per basis.
         </p>
       )}
     </section>

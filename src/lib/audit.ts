@@ -389,6 +389,7 @@ export type AuditAction =
   | "user_note.holding.update"
   | "user_note.bridge_outcome.update"
   | "user_note.strategy.update"
+  | "user_note.dashboard.update"
   // --- Phase 23: persisted allocator scenario drafts (scenario.*) ----------
   // Self-owned, RLS-scoped saved ScenarioDraft config (the allocator's own
   // named what-if). Mirrors the user_note.* family (self-owned content that
@@ -601,6 +602,7 @@ export const AUDIT_ACTION_ENTITY_TYPE_MAP = {
   "user_note.holding.update": "user_note",
   "user_note.bridge_outcome.update": "user_note",
   "user_note.strategy.update": "user_note",
+  "user_note.dashboard.update": "user_note",
   // Phase 23: persisted allocator scenario drafts — entity_id = scenarios.id.
   "scenario.save": "scenario",
   "scenario.rename": "scenario",

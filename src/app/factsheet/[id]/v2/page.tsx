@@ -8,7 +8,7 @@ import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -41,7 +41,7 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
        description, subtypes, supported_exchanges, leverage_range, aum,
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        returns_denominator_config,
-       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis )`,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status )`,
       )
       .eq("id", id),
   )
@@ -116,7 +116,35 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     // despite the server truth. Thread it through the ONE shared owner
     // (`singleKeyDataQuality`) so this route and the discovery detail page can't
     // diverge on the DQ opt (the composite "one path" lesson).
-    buildOpts = { ...(buildOpts ?? {}), dataQuality: singleKeyDataQuality(dqf) };
+    //
+    // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
+    // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason,
+    // read through the SAME shared owner (`singleKeyBasisOpts`) both surfaces use.
+    // The F-4 `computation_status`-DONE gate rides the `${id}::${computedAt}` cache
+    // key (:344) because a re-derive stamps a fresh computed_at; status is
+    // public-safe on a published row (unchanged RLS boundary — the outer
+    // request-scoped signature probe stays the auth gate). singleKeyBasisOpts
+    // returns `{}` for every non-options single-key strategy → byte-identical.
+    //
+    // MTM-04 (Phase 103): additionally read the persisted `mtm_daily_returns`
+    // series so charts follow the toggle. Gated by the SHARED cheap predicate
+    // (`shouldReadSingleKeyMtmSeries`) so the hot non-options path stays
+    // roundtrip-free and both surfaces read identically; the series is read via
+    // the SAME service-role admin `supabase` handle (deny-all RLS on
+    // strategy_analytics_series — no visibility widening, same gate as the scalar
+    // MTM object) and threaded as the 4th arg. A failed/malformed row degrades to
+    // no-bundle (charts stay cash).
+    const mtmSeries = shouldReadSingleKeyMtmSeries(
+      analytics?.metrics_json_by_basis,
+      analytics?.computation_status,
+    )
+      ? await readMtmSeries(supabase, id)
+      : null;
+    buildOpts = {
+      ...(buildOpts ?? {}),
+      dataQuality: singleKeyDataQuality(dqf),
+      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status, mtmSeries),
+    };
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API
   // indicator) are populated — ambiguous provenance may mis-classify an
@@ -220,7 +248,13 @@ function buildFactsheetPayloadCached(
     // Bumped v4→v5 (Phase 90.5): payload carries optional periodsPerYear for the
     // client leverage recompute; stale v4 entries lack it -> leverage control
     // hidden (fail-closed) during the TTL drain, never a crash.
-    ["factsheet-v2-payload-v5", id],
+    // Bumped v5→v6 (Phase 103, F7): the low-N reliability warning now REQUIRES
+    // `bootstrapCI.n` (the resample count). A stale v5 entry missing that field
+    // deserializes with `n` undefined, so `n < 252` is false and the warning is
+    // wrongly SUPPRESSED (for cash too) during the 1h TTL drain. Busting the shape
+    // version forces a fresh build carrying `bootstrapCI.n` rather than silently
+    // hiding the caveat.
+    ["factsheet-v2-payload-v6", id],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
