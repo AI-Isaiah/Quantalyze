@@ -28,7 +28,10 @@ type Resp = { data: unknown; error: { message: string } | null };
  * pre-canned response, and — for array responses — HONOURS `.order()` /
  * `.limit()` so ordering-dependent assertions are real, not delegated away.
  */
-function makeClient(config: Record<string, Resp>): SupabaseClient<Database> {
+function makeClient(
+  config: Record<string, Resp>,
+  captures?: { selects: string[] },
+): SupabaseClient<Database> {
   function from(table: string) {
     const resp = config[table];
     if (!resp) throw new Error(`unexpected table read: ${table}`);
@@ -55,7 +58,11 @@ function makeClient(config: Record<string, Resp>): SupabaseClient<Database> {
     }
 
     const builder = {
-      select: () => builder,
+      select: (projection?: string) => {
+        if (captures && typeof projection === "string")
+          captures.selects.push(projection);
+        return builder;
+      },
       eq: () => builder,
       order: (col: string, opts?: { ascending?: boolean }) => {
         state.orderCol = col;
@@ -93,7 +100,6 @@ function favoriteRow(overrides: {
   strategy_id: string;
   created_at: string;
   name: string;
-  slug: string;
   verifications?: { trust_tier: string; status: string; created_at: string }[];
 }) {
   return {
@@ -101,7 +107,6 @@ function favoriteRow(overrides: {
     created_at: overrides.created_at,
     strategies: {
       name: overrides.name,
-      slug: overrides.slug,
       strategy_verifications: overrides.verifications ?? [],
     },
   };
@@ -130,7 +135,6 @@ describe("getFavoritesWithStrategies", () => {
             strategy_id: "s-1",
             created_at: "2026-06-01T00:00:00Z",
             name: "Alpha",
-            slug: "alpha",
             verifications: [
               {
                 trust_tier: "self_reported",
@@ -153,11 +157,32 @@ describe("getFavoritesWithStrategies", () => {
       {
         strategy_id: "s-1",
         name: "Alpha",
-        slug: "alpha",
         trust_tier: "api_verified",
         created_at: "2026-06-01T00:00:00Z",
       },
     ]);
+  });
+
+  // Regression (v1.10 e2e-seeded): the embedded `strategies` projection MUST
+  // reference only columns that EXIST on public.strategies. A prior revision
+  // selected a phantom `strategies.slug`, which PostgREST rejects with 42703 at
+  // runtime — crashing the whole /allocations page (this read is in page.tsx's
+  // Promise.all) into error.tsx. The mocked-DB tests above ignore the
+  // projection string, so they stayed green over it; this test captures the
+  // actual select and fails loud if a nonexistent strategies column returns.
+  it("projects only real strategies columns (no phantom slug — 42703 guard)", async () => {
+    const captures = { selects: [] as string[] };
+    const client = makeClient(
+      { user_favorites: { data: [], error: null } },
+      captures,
+    );
+    await getFavoritesWithStrategies(client, USER);
+    const strategiesEmbed = captures.selects.find((s) =>
+      s.includes("strategies"),
+    );
+    expect(strategiesEmbed).toBeDefined();
+    // `slug` is NOT a column on public.strategies (id / name / codename …).
+    expect(strategiesEmbed).not.toMatch(/\bslug\b/);
   });
 
   it("yields trust_tier null when a strategy has no verification rows", async () => {
@@ -168,7 +193,6 @@ describe("getFavoritesWithStrategies", () => {
             strategy_id: "s-2",
             created_at: "2026-06-02T00:00:00Z",
             name: "Beta",
-            slug: "beta",
             verifications: [],
           }),
         ],

@@ -25,6 +25,15 @@
  * the default portfolio is the most-recently-CREATED one and the contract
  * surfaces the real `created_at`. "Most recently updated" ⇒ "most recently
  * created" for the default pick.
+ *
+ * DEVIATION (Rule 3 — same class): the plan named a `strategies.slug` field for
+ * the favorite, but `public.strategies` has NO `slug` column (only `id` /
+ * `name` / `codename` …). Selecting it made PostgREST throw 42703 at runtime —
+ * crashing the WHOLE /allocations page into error.tsx (this read is in
+ * page.tsx's Promise.all). The mocked unit tests pinned the phantom column and
+ * stayed green over it. The WatchlistPanel links by `strategy_id`
+ * (`/factsheet/${strategy_id}`) and displays `name`, so `slug` was never
+ * rendered — it is dropped from the projection and contract entirely.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -41,7 +50,6 @@ type SupabaseUserClient = SupabaseClient<Database>;
 export interface FavoriteRow {
   strategy_id: string;
   name: string;
-  slug: string;
   /** Latest verification tier, or null if the strategy is unverified. */
   trust_tier: TrustTier | null;
   /** When the allocator favorited it (user_favorites.created_at). */
@@ -69,7 +77,6 @@ interface FavoriteJoinRow {
   created_at: string;
   strategies: {
     name: string;
-    slug: string;
     strategy_verifications:
       | { trust_tier: string; status: string; created_at: string }[]
       | null;
@@ -90,7 +97,7 @@ export async function getFavoritesWithStrategies(
   const { data, error } = await supabase
     .from("user_favorites")
     .select(
-      `strategy_id, created_at, strategies!inner (name, slug, strategy_verifications (trust_tier, status, created_at))`,
+      `strategy_id, created_at, strategies!inner (name, strategy_verifications (trust_tier, status, created_at))`,
     )
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
@@ -110,7 +117,6 @@ export async function getFavoritesWithStrategies(
       return {
         strategy_id: r.strategy_id,
         name: r.strategies.name,
-        slug: r.strategies.slug,
         trust_tier: (latest?.trust_tier ?? null) as TrustTier | null,
         created_at: r.created_at,
       };

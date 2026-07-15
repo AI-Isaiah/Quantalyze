@@ -25,21 +25,18 @@ const FAVORITES: FavoriteRow[] = [
   {
     strategy_id: "aaaaaaaa-0000-0000-0000-000000000001",
     name: "Zephyr Momentum",
-    slug: "zephyr-momentum",
     trust_tier: "api_verified",
     created_at: "2026-06-10T00:00:00Z",
   },
   {
     strategy_id: "bbbbbbbb-0000-0000-0000-000000000002",
     name: "Aurora Carry",
-    slug: "aurora-carry",
     trust_tier: "self_reported",
     created_at: "2026-06-05T00:00:00Z",
   },
   {
     strategy_id: "cccccccc-0000-0000-0000-000000000003",
     name: "Meridian Vol",
-    slug: "meridian-vol",
     trust_tier: null,
     created_at: "2026-06-01T00:00:00Z",
   },
