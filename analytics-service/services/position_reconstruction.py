@@ -163,8 +163,9 @@ class ExposureMetrics(TypedDict, total=False):
     dicts — it NEVER returns None. The consumer's `... or {}` guard and the
     `isinstance(exposure_metrics, dict)` check are therefore defensive
     against a hypothetical future regression, not a current None path; the
-    honest return type is `ExposureMetrics` (non-optional). See the consumer
-    annotation note in analytics_runner.run_strategy_analytics.
+    honest return type is `ExposureMetrics` (non-optional). It is consumed by
+    the `_compute_derived_trade_metrics` / exposure-series helpers in
+    analytics_runner.
     """
 
     mean_gross_exposure: float
