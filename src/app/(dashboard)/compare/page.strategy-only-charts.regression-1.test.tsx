@@ -68,6 +68,17 @@ vi.mock("@/lib/supabase/server", () => ({
       }),
     },
     from: (table: string) => {
+      if (table === "profiles") {
+        // Phase 109 requireRolePage guard (compare is allocator-owned) reads
+        // profiles.role first — return an allocator so the guard passes.
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: () => Promise.resolve({ data: { role: "allocator" }, error: null }),
+            }),
+          }),
+        };
+      }
       if (table === "strategies") {
         return {
           select: () => ({

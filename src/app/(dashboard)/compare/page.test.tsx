@@ -73,6 +73,9 @@ vi.mock("@/lib/supabase/server", () => ({
         order: vi.fn().mockReturnThis(),
         // limit() is called as the terminal step for snapshot queries
         limit: vi.fn(async () => ({ data: resolveData(), error: null })),
+        // maybeSingle() is the terminal step for the Phase 109 requireRolePage
+        // guard's `profiles.select("role").eq("id", …).maybeSingle()` lookup.
+        maybeSingle: vi.fn(async () => ({ data: resolveData()[0] ?? null, error: null })),
         // Make the builder itself awaitable (Supabase pattern: await builder resolves { data, error })
         then: (
           onfulfilled?: ((v: unknown) => unknown) | null,
@@ -98,6 +101,11 @@ vi.mock("@/lib/supabase/server", () => ({
         })),
       },
       from: vi.fn((table: string) => {
+        // Phase 109: the requireRolePage guard (compare is allocator-owned)
+        // reads profiles.role first — return an allocator so the guard passes.
+        if (table === "profiles") {
+          return makeQueryBuilder(() => [{ role: "allocator" }]);
+        }
         if (table === "strategies") {
           return makeQueryBuilder(() => mockStrategyData);
         }
