@@ -64,7 +64,16 @@ export function DashboardChrome({
   // `contributeOpen`. onSuccess refreshes so a freshly-contributed private
   // strategy shows up in server-rendered surfaces.
   const [contributeOpen, setContributeOpen] = useState(false);
-  const openContribute = () => setContributeOpen(true);
+  const openContribute = () => {
+    // Close the mobile drawer first: it owns a window-level Tab focus trap that
+    // stays armed until `menuOpen` goes false. The overlay portals to <body>
+    // (outside the drawer-inert <main>), so a still-open drawer would hijack
+    // every Tab press in the overlay — a keyboard trap (WCAG 2.1.2). Opening
+    // the overlay doesn't change the route, so the drawer's route-change
+    // auto-close never fires; close it explicitly here.
+    setMenuOpen(false);
+    setContributeOpen(true);
+  };
   const contributionOverlay = (
     <ContributionWizardOverlay
       isOpen={contributeOpen}

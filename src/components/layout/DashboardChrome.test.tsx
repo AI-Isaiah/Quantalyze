@@ -283,6 +283,27 @@ describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () =
     expect(screen.queryByTestId("mock-wizard")).toBeNull();
     expect(hoisted.refresh).toHaveBeenCalled();
   });
+
+  // MD-01 (Phase 110 review) — firing the contribute action from inside the
+  // OPEN mobile drawer must CLOSE the drawer as it opens the overlay. The drawer
+  // owns a window-level Tab focus trap that stays armed until it unmounts
+  // (`open=false`); the overlay portals to <body> outside the drawer-inert
+  // <main>, so a still-open drawer would hijack every Tab in the overlay — a
+  // keyboard trap (WCAG 2.1.2). Opening the overlay changes no route, so the
+  // drawer's route-change auto-close never fires; DashboardChrome must close it
+  // explicitly. This fails if openContribute stops calling setMenuOpen(false).
+  it("closes the mobile drawer (releasing its Tab trap) when contribute fires from inside it", () => {
+    renderChrome();
+    // Open the drawer via the hamburger, then act from WITHIN the drawer dialog.
+    fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
+    const drawer = screen.getByRole("dialog", { name: "Main navigation" });
+    fireEvent.click(within(drawer).getByText("Add a Strategy"));
+    // Overlay opened AND the drawer unmounted (window Tab trap torn down).
+    expect(screen.getByTestId("mock-wizard")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Main navigation" }),
+    ).toBeNull();
+  });
 });
 
 describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {

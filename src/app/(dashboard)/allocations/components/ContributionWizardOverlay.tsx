@@ -26,7 +26,7 @@
  * same keying discipline, minus the URL.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { WizardClient } from "@/app/(dashboard)/strategies/new/wizard/WizardClient";
 
@@ -46,6 +46,8 @@ export function ContributionWizardOverlay({
   // `key={source}` on WizardClient below drives the remount on toggle, exactly
   // like the manager page's URL keying (wizard/page.tsx:120).
   const [source, setSource] = useState<"api" | "csv">("api");
+  // Panel node so we can pull focus INTO the dialog on open (see below).
+  const panelRef = useRef<HTMLDivElement>(null);
 
   // Esc-to-dismiss + reset-on-close. Hooks MUST run unconditionally, so this
   // sits ABOVE the `!isOpen` early return (StrategyBrowseDrawer discipline).
@@ -60,6 +62,14 @@ export function ContributionWizardOverlay({
       setSource("api");
       return;
     }
+    // Move focus INTO the dialog on open. Without this, opening from the mobile
+    // drawer leaves focus on the hamburger BEHIND the portalled overlay (the
+    // drawer's close transition calls triggerRef.focus()), so a Tab would walk
+    // background content — WCAG 2.4.3. Focusing the tabIndex=-1 panel parks
+    // focus inside the modal; the first Tab then lands on a real control. This
+    // mirrors MobileSidebarDrawer's initial-focus pattern (minus the full Tab
+    // trap, which matches the sibling ScenarioCommitDrawer precedent).
+    panelRef.current?.focus();
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
@@ -80,7 +90,9 @@ export function ContributionWizardOverlay({
       onClick={onClose}
     >
       <div
-        className="my-8 w-[760px] max-w-[92vw] rounded-lg border border-border bg-surface shadow-[0_1px_3px_rgba(0,0,0,0.04)]"
+        ref={panelRef}
+        tabIndex={-1}
+        className="my-8 w-[760px] max-w-[92vw] rounded-lg border border-border bg-surface shadow-[0_1px_3px_rgba(0,0,0,0.04)] outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-border px-6 py-4">
