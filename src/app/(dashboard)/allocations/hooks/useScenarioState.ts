@@ -42,6 +42,7 @@ import {
   scenarioStorageKey,
   clearScenarioDraft,
   toggleHolding as toggleHoldingPure,
+  togglePerKeySource as togglePerKeySourcePure,
   addStrategyBrowse as addBrowsePure,
   addStrategyBridge as addBridgePure,
   removeAddedStrategy as removePure,
@@ -90,6 +91,15 @@ export interface UseScenarioStateReturn {
   fingerprintMismatch: boolean;
   diffCount: number;
   toggleHolding: (scopeRef: string) => void;
+  /**
+   * Phase 111 / CONSTIT-03 — toggle a per-key data-source constituent
+   * (`api_key <uuid>` ref) through the SAME `toggleByScopeRef` channel as every
+   * other constituent, WITHOUT rescaling `weightOverrides` (per-key legs ride
+   * the raw equity-share path; the engine renormalizes). Excluding writes an
+   * explicit `false` (persists with the draft — supersedes CF-05 transient);
+   * re-including deletes the ref (absent === included).
+   */
+  togglePerKeySource: (ref: string) => void;
   addStrategyBrowse: (s: AddedStrategy) => void;
   addStrategyBridge: (holdingScopeRef: string, s: AddedStrategy) => void;
   removeAddedStrategy: (id: string) => void;
@@ -281,6 +291,12 @@ export function useScenarioState(
     },
     [setValue, baseOf],
   );
+  const togglePerKeySource = useCallback(
+    (ref: string) => {
+      setValue((prev) => togglePerKeySourcePure(baseOf(prev), ref));
+    },
+    [setValue, baseOf],
+  );
   const addStrategyBrowse = useCallback(
     (s: AddedStrategy) => {
       setValue((prev) => addBrowsePure(baseOf(prev), s));
@@ -378,6 +394,7 @@ export function useScenarioState(
     fingerprintMismatch,
     diffCount,
     toggleHolding,
+    togglePerKeySource,
     addStrategyBrowse,
     addStrategyBridge,
     removeAddedStrategy,

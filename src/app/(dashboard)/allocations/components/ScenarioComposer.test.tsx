@@ -4789,13 +4789,16 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
-  // Review WR-02 — the ephemeral per-source include map must NOT survive a
-  // draft replacement. Excluding a source then opening a saved scenario must
-  // start the opened scenario with every source included again (the toggle is
-  // not persisted; a stale exclusion would silently omit a source the user
-  // never excluded for THIS scenario — a cosmetic-hide-by-leak regression).
+  // Review WR-02 (survives CONSTIT-03) — a per-key exclusion must NOT leak
+  // across a draft replacement. Under CONSTIT-03 the exclusion lives in
+  // `draft.toggleByScopeRef`, so opening a saved scenario (which REPLACES the
+  // draft via hydrateFromSaved) adopts that scenario's own per-source state: a
+  // saved draft with no key-B exclusion shows key-B included again. The
+  // no-cross-scenario-leak invariant now holds via draft replacement rather than
+  // an ephemeral-map reset — a stale exclusion can never silently omit a source
+  // the user never excluded for THIS scenario.
   // -------------------------------------------------------------------------
-  it("review WR-02 opening a saved scenario clears the ephemeral per-source exclusion (toggle resets to all-included)", () => {
+  it("review WR-02 opening a saved scenario adopts its own per-source state (a no-exclusion saved draft shows every source included)", () => {
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
@@ -4831,9 +4834,10 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       openSaved?.({ id: "saved-1", name: "Saved scenario", draft: validDraft });
     });
 
-    // The exclusion must NOT carry over — every source included again. Without
-    // the WR-02 fix (setIncludeByApiKeyId({}) on open) this stays aria-checked
-    // "false" and the opened scenario silently omits key-B.
+    // The exclusion must NOT carry over — the opened scenario's own draft has no
+    // key-B exclusion, and hydrateFromSaved replaces the working draft, so key-B
+    // is included again. If a stale exclusion leaked across the replacement this
+    // would stay aria-checked "false" and silently omit key-B.
     expect(
       screen.getByRole("switch", {
         name: "Include OKX — ••••ey-B in projection",
@@ -4974,9 +4978,14 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
-  // DSRC-03 / Pitfall 5 — ephemeral: a toggle never changes diffCount / commit
+  // CONSTIT-03 (supersedes Phase-66 CF-05) — a per-key exclusion is now a
+  // DRAFT CHANGE. It rides the ONE `toggleByScopeRef` channel every other
+  // constituent uses, so it persists with the draft AND counts toward diffCount
+  // exactly like an added-strategy toggle. This is the intended supersession of
+  // the old "transient / never in the diff" behavior. (Re-including deletes the
+  // ref → back to the zero-diff baseline.)
   // -------------------------------------------------------------------------
-  it("Pitfall 5 toggling a data source off does NOT change diffCount (ephemeral — never in the commit diff)", () => {
+  it("CONSTIT-03 toggling a per-key source off is a draft change: diffCount increments (persists via toggleByScopeRef); re-including returns to the zero-diff baseline", () => {
     renderPerKey(makePerKeyPayload());
 
     // Fresh draft seeded from the live book → no diff yet. The Commit button is
@@ -4989,17 +4998,25 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     expect(screen.getAllByText("No changes yet").length).toBeGreaterThan(0);
     expect(commit.disabled).toBe(true);
 
-    // Toggle a source off — exclusion recomputes the projection but must NOT
-    // enter the draft / commit diff.
+    // Exclude a source — CONSTIT-03: this writes `toggleByScopeRef[key]=false`,
+    // so it registers as a draft change (diffCount → 1) just like any other
+    // constituent toggle. "No changes yet" is gone.
     fireEvent.click(
       screen.getByRole("switch", {
         name: "Include OKX — ••••ey-B in projection",
       }),
     );
+    expect(screen.queryAllByText("No changes yet")).toHaveLength(0);
 
-    // diffCount unchanged — still "No changes yet", Commit still disabled. If the
-    // toggle leaked into scenario.draft (e.g. via toggleByScopeRef) diffCount
-    // would increment and the button would enable — this asserts it does not.
+    // Re-include (deletes the ref → absent === included) → back to the zero-diff
+    // baseline: "No changes yet" returns and Commit disables again. This proves
+    // the exclusion lived in the draft (not a cosmetic overlay) and is cleanly
+    // reversible without perturbing the added/holding weight set.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
     expect(screen.getAllByText("No changes yet").length).toBeGreaterThan(0);
     expect(commit.disabled).toBe(true);
   });

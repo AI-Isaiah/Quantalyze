@@ -886,33 +886,19 @@ export function ScenarioComposer({
   // decision (default 1.0 when a ref is absent).
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
-  // DSRC-02/03 — per-data-source include/exclude map (api_key_id → included?).
-  // Ephemeral exploration state, structurally modeled on R4 `leverageByRef`
-  // above — but DIVERGING on persistence: `leverageByRef` is now folded into the
-  // saved draft at Save (LEV-02), whereas this include-map is genuinely
-  // ephemeral. This map is NOT persisted to scenario.draft, NOT routed through
-  // `scenario.draft.toggleByScopeRef`, NOT part of the commit diff, and resets on
-  // reload (Pitfall 5). `{}` = all included (default). A key resolves to included
-  // via `includeByApiKeyId[id] ?? true` wherever it is read. Threaded into the
-  // existing `projectionState.selected` channel keyed by api_key_id so the frozen
-  // engine honestly recomputes the curve + every KPI on exclusion (DSRC-03) —
-  // never a cosmetic hide.
-  //
-  // D3 source-toggle persistence: DECIDED no persistence (YAGNI, Phase 66
-  // CF-05). The Phase-36 D3 toggle is deliberately TRANSIENT exploration UI
-  // state — resets on reload, out of the commit diff — and no user has asked to
-  // persist an exclusion set across sessions. Revisit only on real user demand.
-  const [includeByApiKeyId, setIncludeByApiKeyId] = useState<
-    Record<string, boolean>
-  >({});
-
-  // DSRC-02 — fail-loud, visible-state toggle handler. Mirrors
-  // handleLeverageChange's "state visible immediately, never silent" posture; a
-  // boolean toggle has no invalid value so it never clamps. The row's
-  // aria-checked reflects the change synchronously and the projection recomputes.
-  function handleDataSourceToggle(apiKeyId: string, include: boolean) {
-    setIncludeByApiKeyId((prev) => ({ ...prev, [apiKeyId]: include }));
-  }
+  // CONSTIT-03 (Phase 111, locked 2026-07-16) — per-key data-source
+  // include/exclude now rides the ONE canonical `scenario.draft.toggleByScopeRef`
+  // channel every other constituent uses (via `scenario.togglePerKeySource`),
+  // NOT a separate composer-local `useState`. This SUPERSEDES the Phase-66 CF-05
+  // "transient by design" decision: a per-key exclusion now PERSISTS with the
+  // draft (autosave + saved scenarios + the compare surface — closing the
+  // composer↔compare divergence the ephemeral map left open) and, like every
+  // other `toggleByScopeRef` change, counts toward `diffCount`. A source resolves
+  // to included via `scenario.draft.toggleByScopeRef[apiKeyId] !== false` (absent
+  // → included). The frozen engine honestly recomputes the curve + every KPI on
+  // exclusion (DSRC-03) through the same `projectionState.selected` channel — the
+  // `togglePerKeySource` mutator deliberately never touches `weightOverrides`
+  // (per-key legs ride the raw equity-share path; weight editing is Phase 112).
 
   // -------------------------------------------------------------------------
   // UNIFY-04 — lazy-returns plumbing (29-RESEARCH "SSR-LIFT vs LAZY-FETCH").
@@ -1276,12 +1262,11 @@ export function ScenarioComposer({
     // replaced the draft with the windowless default.) The Phase-57 "sticky by
     // design" rationale covers deselect, not reset.
     resetWindowToDefaultOnReopen();
-    // Review WR-02 — clear the ephemeral per-source include map on every reset /
-    // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
-    // opened scenario must start with every data source included; without this a
-    // prior exclusion would silently carry over and the loaded scenario's
-    // projection would omit a source the user never excluded for it.
-    setIncludeByApiKeyId({});
+    // CONSTIT-03 — per-key exclusions now live in `scenario.draft.toggleByScopeRef`
+    // and are cleared automatically by `scenario.reset()` (draft → default) /
+    // `scenario.hydrateFromSaved()` (draft replaced), so no separate ephemeral-map
+    // reset is needed here. A stale exclusion can no longer carry across a reset
+    // or a saved-scenario open (the WR-02 invariant survives via draft replacement).
     // LEV-02 (HIGH-1) — clear the per-strategy leverage overlay on EVERY reset /
     // commit-success. Unlike include-map (never persisted), leverageByRef is
     // FOLDED INTO the draft at the next Save (setLeverageOverrides at POST/PUT),
@@ -1494,10 +1479,9 @@ export function ScenarioComposer({
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
         scenario.hydrateFromSaved(hydratedValue);
-        // Review WR-02 — opening a saved scenario replaces the draft, so clear
-        // the ephemeral per-source include map (it is not persisted) → the
-        // opened scenario starts with every data source included.
-        setIncludeByApiKeyId({});
+        // CONSTIT-03 — per-key exclusions live in the draft's toggleByScopeRef,
+        // so hydrateFromSaved (draft replacement) adopts exactly the saved
+        // scenario's per-source state; no separate ephemeral-map reset needed.
         // LEV-02 (T-90.5-12) — REPLACE leverage from the saved draft (never
         // merge): closes the latent session-bleed (leverageByRef was never reset
         // on open). sanitizeLeverageMap clamps a tampered/legacy value on read
@@ -1546,9 +1530,9 @@ export function ScenarioComposer({
       // hydratedValue carries the DERIVE-AND-STAMP for an underived draft so the
       // reopened working draft is self-describing (v1.6 MEMBER-04).
       scenario.hydrateFromSaved(hydratedValue);
-      // Review WR-02 — clear the ephemeral per-source include map on open (it is
-      // not persisted) → the opened scenario starts with every source included.
-      setIncludeByApiKeyId({});
+      // CONSTIT-03 — per-key exclusions live in the draft's toggleByScopeRef, so
+      // hydrateFromSaved (draft replacement) adopts exactly the saved scenario's
+      // per-source state; no separate ephemeral-map reset needed.
       // LEV-02 (T-90.5-12) — REPLACE leverage from the saved draft (never merge):
       // closes the latent session-bleed (leverageByRef was never reset on open).
       // sanitizeLeverageMap clamps a tampered/legacy value on read (T-90.5-09);
@@ -2195,8 +2179,9 @@ export function ScenarioComposer({
   // added leg is a legitimate added-only projection — the "nothing to project"
   // card must not contradict the live chart below it (red-team F1). The added
   // liveness check mirrors projectionState's draft-toggle rule (absent → on).
-  // Derived from the ephemeral include map (default included), so re-including
-  // any source instantly flips this back to false and restores the projection.
+  // CONSTIT-03 — derived from the unified `toggleByScopeRef` channel (default
+  // included), so re-including any source instantly flips this back to false and
+  // restores the projection.
   const hasLiveAddedStrategy = scenario.draft.addedStrategies.some(
     (s) => scenario.draft.toggleByScopeRef[s.id] !== false,
   );
@@ -2204,7 +2189,9 @@ export function ScenarioComposer({
     showDataSources &&
     !hasLiveAddedStrategy &&
     dataSourceKeys.length > 0 &&
-    dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
+    dataSourceKeys.every(
+      (k) => scenario.draft.toggleByScopeRef[k.id] === false,
+    );
 
   // -------------------------------------------------------------------------
   // H-0133 — wire the draft's weight + toggle state INTO the projection.
@@ -2223,10 +2210,11 @@ export function ScenarioComposer({
   // R4 leverage rides the SAME projection state; holdings have no leverage UI so
   // their multiplier is always 1, while an added strategy's multiplier flows
   // through here, and computeScenario applies `wᵢ·Lᵢ·rᵢ` over the engine set.
-  // P61-BUG-1: the ids of the draft's added strategies — the per-key branch
-  // below needs this to tell an ADDED unit (draft toggle/weight semantics)
-  // apart from a per-key unit (ephemeral include map). Also consumed by the
-  // WINDOW-06 outlier machinery further down.
+  // The ids of the draft's added strategies — consumed by the WINDOW-06 outlier
+  // machinery further down to tell an ADDED unit apart from a per-key unit when
+  // rendering the outlier "Deselect {name}" affordance. (No longer read by
+  // `projectionState`: CONSTIT-03 unified per-key + added onto the one
+  // `toggleByScopeRef` selected channel.)
   const addedIdSet = useMemo(
     () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
     [scenario.draft.addedStrategies],
@@ -2237,25 +2225,20 @@ export function ScenarioComposer({
     const weights: Record<string, number> = {};
     const leverage: Record<string, number> = {};
     for (const s of activeAdapterOutput.strategies) {
-      // DSRC-03 — the per-key path rides the SAME `selected` channel keyed by
-      // api_key_id: `includeByApiKeyId[s.id] ?? true` (absent → included). The
-      // ephemeral exclusion drops the key from the engine's activeStrategies and
+      // CONSTIT-03 — ONE unified include/exclude channel for EVERY unit (per-key
+      // + added + holding): read `draft.toggleByScopeRef[s.id]`, defaulting an
+      // absent ref to the adapter's built-in selected state (per-key units are
+      // selected=true by construction; added units too). A per-key `false` (from
+      // `togglePerKeySource`) drops the key from the engine's activeStrategies and
       // the per-day weight mass; the engine renormalizes over the remaining
-      // selected set (r / activeWeightSum) — an honest recompute, never a hide.
-      // The holdings path keeps its draft `toggleByScopeRef` semantics unchanged.
-      //
-      // P61-BUG-1: on the per-key path the merged set ALSO carries the draft's
-      // added-strategy units — those ride the draft toggle channel (same
-      // semantics as the holdings path), NOT the per-key include map.
-      if (usePerKeySources && !addedIdSet.has(s.id)) {
-        selected[s.id] = includeByApiKeyId[s.id] ?? true;
-      } else {
-        const toggle = scenario.draft.toggleByScopeRef[s.id];
-        selected[s.id] =
-          toggle === undefined
-            ? (activeAdapterOutput.state.selected[s.id] ?? true)
-            : toggle;
-      }
+      // selected set — an honest recompute, never a hide. This is byte-identical
+      // to the compare surface's selected-map derivation (scenario-compare.ts),
+      // so composer and compare can no longer diverge on a per-key exclusion.
+      const toggle = scenario.draft.toggleByScopeRef[s.id];
+      selected[s.id] =
+        toggle === undefined
+          ? (activeAdapterOutput.state.selected[s.id] ?? true)
+          : toggle;
       // WR-04 (Phase 21 review): narrow with `typeof` instead of `Number.isFinite`
       // + `as number` so the compiler keeps protecting these reads against future
       // value-type drift (e.g. a `null` "cleared" sentinel) rather than the cast
@@ -2279,9 +2262,6 @@ export function ScenarioComposer({
     };
   }, [
     activeAdapterOutput,
-    usePerKeySources,
-    addedIdSet,
-    includeByApiKeyId,
     scenario.draft.toggleByScopeRef,
     scenario.draft.weightOverrides,
     leverageByRef,
@@ -3658,7 +3638,7 @@ export function ScenarioComposer({
               className="flex flex-col"
             >
             {dataSourceKeys.map((k) => {
-              const included = includeByApiKeyId[k.id] ?? true;
+              const included = scenario.draft.toggleByScopeRef[k.id] !== false;
               const { exchange, nickname, maskedTail } = dataSourceLabel(k);
               const labelText = nickname ?? maskedTail;
               return (
@@ -3672,7 +3652,7 @@ export function ScenarioComposer({
                     role="switch"
                     aria-checked={included}
                     aria-label={`Include ${exchange} — ${labelText} in projection`}
-                    onClick={() => handleDataSourceToggle(k.id, !included)}
+                    onClick={() => scenario.togglePerKeySource(k.id)}
                     className={`rounded-sm px-3 py-1 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
                       included
                         ? "border border-accent text-accent"
