@@ -38,8 +38,9 @@ describe("WizardIpAllowlistHint (S7 / D-07)", () => {
     const { container } = render(<WizardIpAllowlistHint />);
     const root = container.firstElementChild as HTMLElement;
     expect(root).toBeTruthy();
-    expect(root.className).toContain("border-l-4");
-    expect(root.className).toContain("border-warning");
+    expect(root.className).not.toContain("border-l-4");
+    expect(root.className).toContain("rounded-md");
+    expect(root.className).toContain("border-warning/30");
     expect(root.className).toContain("bg-warning/5");
   });
 

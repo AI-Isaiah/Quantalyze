@@ -126,15 +126,16 @@ describe("OnboardingBanner (Phase 11 / S1) — verbatim copy + behavior", () => 
     ).toBeNull();
   });
 
-  it("uses <WarningBanner className='border-l-4 border-warning bg-warning/5'> override (UI-SPEC AC #14)", () => {
+  it("uses <WarningBanner className='rounded-md border border-warning/30 bg-warning/5'> full-border envelope override (UI-SPEC AC #14)", () => {
     const { container } = render(<OnboardingBanner />);
     // The WarningBanner primitive renders a single root <div>; the className
-    // override is appended via cn(). We assert the substrings exist on the
-    // outer div.
+    // override is appended via cn(). We assert the full-border envelope tokens
+    // exist on the outer div and that the banned left stripe is gone.
     const root = container.firstElementChild as HTMLElement | null;
     expect(root).not.toBeNull();
-    expect(root?.className).toContain("border-l-4");
-    expect(root?.className).toContain("border-warning");
+    expect(root?.className).not.toContain("border-l-4");
+    expect(root?.className).toContain("rounded-md");
+    expect(root?.className).toContain("border-warning/30");
     expect(root?.className).toContain("bg-warning/5");
   });
 

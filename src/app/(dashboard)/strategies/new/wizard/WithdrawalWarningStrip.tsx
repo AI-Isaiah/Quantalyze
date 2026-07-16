@@ -12,7 +12,8 @@ import { WarningBanner } from "@/components/ui/WarningBanner";
  *   - Verbatim sentence: "READ ONLY ONLY — keys with Trade
  *     or Withdraw permissions are refused on submission."
  *   - Composes from the existing <WarningBanner> primitive with the
- *     locked className override `border-l-4 border-warning bg-warning/5`.
+ *     full-border envelope className override `rounded-md border
+ *     border-warning/30 bg-warning/5` (no left stripe — banned in DESIGN.md).
  *   - role="note" (NOT role="alert") — strip is persistent informational
  *     context, not a transient announcement.
  *   - NO dismiss control — strip persists for the entire wizard session.
@@ -25,7 +26,7 @@ import { WarningBanner } from "@/components/ui/WarningBanner";
  */
 export function WithdrawalWarningStrip() {
   return (
-    <WarningBanner className="border-l-4 border-warning bg-warning/5">
+    <WarningBanner className="rounded-md border border-warning/30 bg-warning/5">
       <div role="note" aria-label="Wizard read-only key requirement">
         <p className="text-body">
           <span className="font-semibold text-text-primary">READ ONLY</span>{" "}

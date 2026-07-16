@@ -24,9 +24,11 @@ describe("ScopedBanner", () => {
     expect(screen.getByRole("button", { name: "Go" })).toBeInTheDocument();
   });
 
-  it("applies tone-specific classes", () => {
+  it("applies tone-specific classes (full-border envelope, no left stripe)", () => {
     const { container } = render(<ScopedBanner tone="warning" title="x" />);
-    expect(container.firstChild).toHaveClass("border-negative");
+    expect(container.firstChild).toHaveClass("border-negative/30");
+    expect(container.firstChild).toHaveClass("rounded-md");
+    expect(container.firstChild).not.toHaveClass("border-l-4");
   });
 
   it("H-0408: does not truncate the title — trust-critical scope tags must be shown in full", () => {

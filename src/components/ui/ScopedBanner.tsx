@@ -9,15 +9,19 @@ interface ScopedBannerProps {
   cta?: ReactNode;
 }
 
+// Full-border envelope treatment per the codified ErrorEnvelope contract
+// (DESIGN.md "Error Envelope": `rounded-md border border-<sev>/30 bg-<sev>/5`).
+// The colored-left-border stripe is banned (DESIGN.md AI-slop table) — identity
+// is carried by the full border + fill tint, not a left rule.
 const TONE_CLASSES: Record<Tone, string> = {
-  accent: "border-l-4 border-accent bg-accent/5",
-  neutral: "border-l-4 border-border bg-surface",
-  warning: "border-l-4 border-negative bg-negative/5",
-  success: "border-l-4 border-positive bg-positive/5",
+  accent: "border border-accent/30 bg-accent/5",
+  neutral: "border border-border bg-surface",
+  warning: "border border-negative/30 bg-negative/5",
+  success: "border border-positive/30 bg-positive/5",
 };
 
 /**
- * A prominent, full-width, left-border-accented banner used for filter
+ * A prominent, full-width, full-border envelope banner used for filter
  * scope indicators, read-only previews, pipeline hero cards, and success
  * confirmations. Ensures the trust-critical filtered vs. unfiltered
  * symmetry on the eval dashboard stays enforced at the component level —
@@ -25,7 +29,7 @@ const TONE_CLASSES: Record<Tone, string> = {
  */
 export function ScopedBanner({ tone, title, subtitle, cta }: ScopedBannerProps) {
   return (
-    <div className={`${TONE_CLASSES[tone]} px-4 py-3 flex items-center justify-between gap-4`}>
+    <div className={`rounded-md ${TONE_CLASSES[tone]} px-4 py-3 flex items-center justify-between gap-4`}>
       <div className="min-w-0 flex-1">
         {/* No `truncate`: the title can be a trust-critical partner scope tag
             (e.g. a long `acme-capital-management-pilot-2026` slug) that must be

@@ -870,7 +870,7 @@ export function ScenarioCommitDrawer({
             )}
             {removed.length > 0 && (
               <section className="mt-6">
-                <div className="border-l-4 border-negative pl-3">
+                <div className="rounded-md border border-negative/30 bg-negative/5 px-3 py-2">
                   <div className="text-sm font-semibold text-text-primary">
                     Holdings removed · {removed.length}
                   </div>
@@ -958,7 +958,7 @@ export function ScenarioCommitDrawer({
 
             {added.length > 0 && (
               <section className="mt-6">
-                <div className="border-l-4 border-positive pl-3">
+                <div className="rounded-md border border-positive/30 bg-positive/5 px-3 py-2">
                   <div className="text-sm font-semibold text-text-primary">
                     Strategies added · {added.length}
                   </div>
@@ -1036,7 +1036,7 @@ export function ScenarioCommitDrawer({
 
             {modified.length > 0 && (
               <section className="mt-6">
-                <div className="border-l-4 border-text-muted pl-3">
+                <div className="rounded-md border border-text-muted/30 bg-text-muted/5 px-3 py-2">
                   <div className="text-sm font-semibold text-text-primary">
                     Weight changes · {modified.length}
                   </div>
