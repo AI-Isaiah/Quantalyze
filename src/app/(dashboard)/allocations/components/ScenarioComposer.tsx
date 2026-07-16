@@ -151,6 +151,7 @@ import { KpiStrip } from "./KpiStrip";
 import { toWealth } from "../widgets/performance/EquityChart";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
+import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
 import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
@@ -842,6 +843,12 @@ export function ScenarioComposer({
   );
 
   const [browseOpen, setBrowseOpen] = useState(false);
+  // Phase 110 CONTRIB-05 — the contribution overlay, opened from the Browse
+  // drawer's "Add your own" CTA. onAddOwn closes Browse + opens this; the
+  // overlay's onSuccess closes it + REOPENS Browse, which refetches on open
+  // (once-per-open contract) so the freshly-contributed private strategy — now
+  // owner-visible via withPublishedOrOwner (110-02) — is selectable.
+  const [contributeOpen, setContributeOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   // Plan 07 — ScenarioCommitDrawer wire-in. handleCommit builds the diffs,
@@ -3290,7 +3297,21 @@ export function ScenarioComposer({
               strategy_types: s.strategy_types,
             })
           }
+          onAddOwn={() => {
+            setBrowseOpen(false);
+            setContributeOpen(true);
+          }}
           allocatorMandate={allocatorMandate}
+        />
+        {/* Phase 110 CONTRIB-05 — reused overlay; onSuccess reopens Browse so
+            the new private row (refetched on open) is selectable. */}
+        <ContributionWizardOverlay
+          isOpen={contributeOpen}
+          onClose={() => setContributeOpen(false)}
+          onSuccess={() => {
+            setContributeOpen(false);
+            setBrowseOpen(true);
+          }}
         />
       </div>
     );
@@ -4584,7 +4605,21 @@ export function ScenarioComposer({
             strategy_types: s.strategy_types,
           })
         }
+        onAddOwn={() => {
+          setBrowseOpen(false);
+          setContributeOpen(true);
+        }}
         allocatorMandate={allocatorMandate}
+      />
+      {/* Phase 110 CONTRIB-05 — reused overlay; onSuccess reopens Browse so
+          the new private row (refetched on open) is selectable. */}
+      <ContributionWizardOverlay
+        isOpen={contributeOpen}
+        onClose={() => setContributeOpen(false)}
+        onSuccess={() => {
+          setContributeOpen(false);
+          setBrowseOpen(true);
+        }}
       />
       <BridgeDrawer
         isOpen={bridgeOpen}

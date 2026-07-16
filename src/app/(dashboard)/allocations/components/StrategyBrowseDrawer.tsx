@@ -75,6 +75,14 @@ export interface StrategyBrowseDrawerProps {
   allocatorMandate: AllocatorMandateForFit | null;
   /** Optional fetcher override for tests — defaults to fetch("/api/strategies/browse"). */
   fetchStrategies?: () => Promise<StrategyBrowseRow[]>;
+  /**
+   * Phase 110 CONTRIB-05 — the browse-list escape hatch. When provided, the
+   * drawer surfaces a "Can't find it? Add your own" CTA that dispatches this
+   * callback (the composer wires it to close Browse + open the
+   * ContributionWizardOverlay). Absent → no CTA (optional-prop safety for mounts
+   * that do not support contribution).
+   */
+  onAddOwn?: () => void;
 }
 
 const TIER_COPY: Record<MandateFitTier, string> = {
@@ -129,6 +137,7 @@ export function StrategyBrowseDrawer({
   onAdd,
   allocatorMandate,
   fetchStrategies,
+  onAddOwn,
 }: StrategyBrowseDrawerProps) {
   const [strategies, setStrategies] = useState<StrategyBrowseRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -534,6 +543,27 @@ export function StrategyBrowseDrawer({
               );
             })}
           </ul>
+
+          {/*
+            Phase 110 CONTRIB-05 — the browse-list escape hatch. Rendered beneath
+            the results/empty/no-results/error states (all live in this block) so
+            it reads as "if none of these are it, add your own". A restrained
+            text button separated by a hairline (DESIGN.md — never a second
+            accent-fill competing with the row Add buttons). Client action only —
+            no href; the composer opens the ContributionWizardOverlay.
+          */}
+          {onAddOwn && (
+            <div className="mt-6 border-t border-border pt-4 text-center">
+              <button
+                type="button"
+                onClick={onAddOwn}
+                data-testid="browse-add-own"
+                className="text-sm text-accent underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              >
+                Can&apos;t find it? Add your own
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
