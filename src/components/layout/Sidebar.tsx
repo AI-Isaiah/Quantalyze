@@ -111,9 +111,14 @@ function buildNavSections(
   // (/allocations, above). The phase-32 frozen-spine guard pins this: no
   // Sandbox-route reference may reappear in this file.
   if (showsManagerWorkspace) {
+    // Phase 109 review correction: "Portfolios" is NOT a manager surface —
+    // /portfolios is an allocator feature (14 allocator owners / 0 manager
+    // owners in prod). It was mis-placed here and mis-classified as sell-side
+    // in ROLE-02. Managers get only Strategies. Portfolios stays a deep-link
+    // surface (reached via AddToPortfolio on discovery), not a primary nav item,
+    // per the v0.4.0 pivot — so it is intentionally absent from every workspace.
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
     );
   }
 
@@ -228,9 +233,11 @@ export function buildPrimaryMobileNav(p: {
     fillers.push({ label: "Discovery", href: "/discovery/crypto-sma", icon: SearchIcon });
   }
   if (showsManagerWorkspace) {
+    // Phase 109 review correction: Portfolios is an allocator (deep-link)
+    // surface, not a manager one — see buildNavSections above. Managers get
+    // only Strategies in the mobile primary nav.
     primary.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
     );
   }
 
@@ -415,15 +422,6 @@ function UserIcon({ className }: { className?: string }) {
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="8" cy="5" r="2.5" />
       <path d="M3 14a5 5 0 0110 0" />
-    </svg>
-  );
-}
-
-function PieChartIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="8" cy="8" r="6" />
-      <path d="M8 2v6l4.24 4.24" />
     </svg>
   );
 }

@@ -69,12 +69,15 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     }
   });
 
-  it("manager-only: Strategies + Portfolios + Profile; no allocator items; <=5", () => {
+  it("manager-only: Strategies + Profile; NO Portfolios; no allocator items; <=5", () => {
+    // Phase 109 review correction: Portfolios is an allocator deep-link surface
+    // (14 allocator owners / 0 manager owners in prod), not a manager one — it
+    // is in NO primary nav. Managers get Strategies only.
     const items = buildPrimaryMobileNav({ isManager: true });
     const hrefs = items.map((i) => i.href);
     expect(items.length).toBeLessThanOrEqual(5);
     expect(hrefs).toContain("/strategies");
-    expect(hrefs).toContain("/portfolios");
+    expect(hrefs).not.toContain("/portfolios");
     expect(hrefs).toContain("/profile");
     // No allocator destinations leak into a manager's bottom nav.
     expect(hrefs).not.toContain("/allocations");
@@ -108,8 +111,10 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
       "/strategies",
       "/profile",
     ]);
-    // Portfolios + Discovery are INTENTIONALLY absent from the bottom nav
-    // (reachable via the drawer) — assert the drop so it stays deliberate.
+    // Discovery is INTENTIONALLY absent from the bottom nav (reachable via the
+    // drawer) — assert the drop so it stays deliberate. Portfolios is absent
+    // everywhere (allocator deep-link surface, not in any nav — Phase 109
+    // review correction).
     expect(hrefs).not.toContain("/portfolios");
     expect(hrefs).not.toContain("/discovery");
     // Distinct hrefs even when both families are present.
@@ -153,7 +158,9 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     render(<MobileNav isManager />);
     const nav = screen.getByRole("navigation", { name: "Primary mobile" });
     expect(within(nav).getByText("Strategies")).toBeInTheDocument();
-    expect(within(nav).getByText("Portfolios")).toBeInTheDocument();
+    // Portfolios is an allocator deep-link surface — not in the manager nav
+    // (Phase 109 review correction).
+    expect(within(nav).queryByText("Portfolios")).toBeNull();
     // The old role-blind stub surfaced Discovery to everyone — it must be gone
     // for a manager (Discovery is the allocator's browse surface).
     expect(within(nav).queryByText("My Allocation")).toBeNull();

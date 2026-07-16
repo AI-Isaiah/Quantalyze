@@ -9,7 +9,16 @@ import { requireRolePage } from "@/lib/auth/requireRolePage";
 export const dynamic = "force-dynamic";
 
 /**
- * Phase 109 ROLE-04 — manager segment layout for the whole /portfolios/* subtree.
+ * Phase 109 ROLE-04 — ALLOCATOR segment layout for the whole /portfolios/* subtree.
+ *
+ * Ownership note (Phase 109 review correction): /portfolios is an ALLOCATOR
+ * feature — a collection of discovered strategies "for comparison", populated
+ * via AddToPortfolio on the allocator discovery detail page. Prod data at ship
+ * time: 14 allocator owners, 0 manager owners. The pre-109 nav wrongly placed
+ * Portfolios under the manager workspace and the original ROLE-02 requirement
+ * mis-classified it as sell-side; both were corrected. Post-v0.4.0 it is a
+ * deep-link surface (removed from primary nav — allocators reach it via
+ * AddToPortfolio), which is why it is guarded but not re-added to the sidebar.
  *
  * A `layout.tsx` is the outermost component in its route segment: it wraps
  * `page.js` AND every descendant segment's page (Next 16 docs,
@@ -39,7 +48,7 @@ export default async function PortfoliosLayout({
     redirect("/login?redirect=/portfolios");
   }
 
-  await requireRolePage(supabase, user, "manager");
+  await requireRolePage(supabase, user, "allocator");
 
   return <>{children}</>;
 }

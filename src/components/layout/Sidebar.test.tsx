@@ -19,7 +19,9 @@ import { Sidebar } from "./Sidebar";
  *     (Discovery + Account handle the rest. No Strategies, no Portfolios,
  *     no Scenarios top-level entry.)
  *
- *   Manager / crypto-team view: Strategies → Portfolios.
+ *   Manager / crypto-team view: Strategies. (Portfolios was reclassified in
+ *     the Phase 109 review as an allocator deep-link surface — 14 allocator
+ *     owners / 0 manager owners in prod — so it is in NO workspace nav.)
  *
  *   Admin view (Phase 109): is_admin is an OPS-OVERLAY that gates ONLY the
  *     Admin section — it is NOT a workspace persona. `profiles.role` is the
@@ -137,12 +139,15 @@ describe("Sidebar Strategy Sandbox nav item is retired (FLOW-03)", () => {
 });
 
 describe("Sidebar workspace — manager / crypto-team view", () => {
-  it("renders Strategies + Portfolios for managers", () => {
+  it("renders Strategies (NOT Portfolios) for managers", () => {
+    // Phase 109 review correction: Portfolios is an allocator (deep-link)
+    // surface, not a manager one — managers own zero portfolios in prod. The
+    // manager workspace is Strategies only; Portfolios is in no primary nav.
     render(
       <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
     );
     expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    expect(screen.queryByText("Portfolios")).toBeNull();
   });
 
   it("does NOT render allocator-only items for managers", () => {
@@ -190,7 +195,8 @@ describe("Sidebar workspace — dual-role (manager + allocator)", () => {
     );
     expect(screen.getByText("My Allocation")).toBeInTheDocument();
     expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    // Portfolios is a deep-link allocator surface — in no workspace nav.
+    expect(screen.queryByText("Portfolios")).toBeNull();
   });
 });
 
@@ -223,7 +229,7 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
       <Sidebar populatedSlugs={[]} isAdmin={true} isManager={true} />,
     );
     expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    expect(screen.queryByText("Portfolios")).toBeNull();
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
     // Allocator surface requires the allocator role (or role='both'), not is_admin.
     expect(screen.queryByText("My Allocation")).toBeNull();
@@ -243,7 +249,8 @@ describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
     );
     expect(screen.getByText("My Allocation")).toBeInTheDocument();
     expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    // Portfolios is a deep-link allocator surface — in no workspace nav.
+    expect(screen.queryByText("Portfolios")).toBeNull();
     expect(screen.getByText("ADMIN")).toBeInTheDocument();
   });
 });
@@ -485,7 +492,7 @@ describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
  * Phase 109 made the derivations pure-role — `showsAllocatorWorkspace =
  * isAllocator` / `showsManagerWorkspace = isManager` in buildNavSections
  * (is_admin no longer OR-s in) — so "My Allocation" (allocator surface) and
- * "Strategies"/"Portfolios" (manager surface) gate strictly on their own role
+ * "Strategies" (manager surface) gate strictly on their own role
  * flag. The mobile twin (buildPrimaryMobileNav) is already pinned by
  * MobileNav.test.tsx; this is the DESKTOP-render pin for the same security
  * property.
@@ -497,7 +504,8 @@ describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () =
     );
     // Manager surface present...
     expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    // Portfolios is a deep-link allocator surface — not in the manager nav.
+    expect(screen.queryByText("Portfolios")).toBeNull();
     // ...but the allocator-only workspace entry must NOT leak to a manager.
     expect(screen.queryByText("My Allocation")).toBeNull();
   });
