@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import { buildPrimaryMobileNav } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 
@@ -61,11 +61,18 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     // Allocator must NOT get manager-only destinations.
     expect(hrefs).not.toContain("/strategies");
     expect(hrefs).not.toContain("/portfolios");
-    // Every item carries the NavItem shape.
+    // Every item carries the NavItem shape. Phase 110 (CONTRIB-01): NavItem is
+    // now a union — link items carry a string `href`, while the "Add a Strategy"
+    // action item carries a string `action` and NO href instead.
     for (const item of items) {
       expect(typeof item.label).toBe("string");
-      expect(typeof item.href).toBe("string");
       expect(typeof item.icon).toBe("function");
+      if ("action" in item && item.action) {
+        expect(typeof item.action).toBe("string");
+        expect(item.href).toBeUndefined();
+      } else {
+        expect(typeof item.href).toBe("string");
+      }
     }
   });
 
@@ -126,6 +133,39 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(items.map((i) => i.href)).toEqual(["/profile"]);
   });
 
+  /**
+   * Phase 110 CONTRIB-01 — the allocator "Add a Strategy" client action is the
+   * LEADING discretionary filler, so it survives the single filler slot the
+   * <=5 cap grants a pure allocator (the SC#1 primary trio still leads). It is
+   * href-less (an action, not a route) and never surfaces for a non-allocator
+   * (role-leak T-110-16).
+   */
+  it("pure allocator: surfaces the href-less 'Add a Strategy' action filler, trio still leads", () => {
+    const items = buildPrimaryMobileNav({ isAllocator: true });
+    const addItem = items.find((i) => i.label === "Add a Strategy");
+    expect(addItem).toBeDefined();
+    expect(addItem?.href).toBeUndefined();
+    expect(
+      addItem && "action" in addItem ? addItem.action : undefined,
+    ).toBe("add-strategy");
+    // The SC#1 trio still leads — the action is a filler, not a primary.
+    expect(items.slice(0, 3).map((i) => i.label)).toEqual([
+      "My Allocation",
+      "Risk",
+      "Bridge",
+    ]);
+  });
+
+  it("manager-only: does NOT surface 'Add a Strategy'", () => {
+    const items = buildPrimaryMobileNav({ isManager: true });
+    expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
+  });
+
+  it("bare is_admin: does NOT surface 'Add a Strategy'", () => {
+    const items = buildPrimaryMobileNav({ isAdmin: true });
+    expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
+  });
+
   it("My Allocation carries the flaggedCount badge when > 0", () => {
     const withBadge = buildPrimaryMobileNav({ isAllocator: true, flaggedCount: 3 });
     const myAlloc = withBadge.find((i) => i.href === "/allocations");
@@ -151,6 +191,18 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(within(nav).getByText("My Allocation")).toBeInTheDocument();
     expect(within(nav).getByText("Bridge")).toBeInTheDocument();
     expect(within(nav).getByText("Risk")).toBeInTheDocument();
+  });
+
+  it("renders 'Add a Strategy' as a <button> that fires onNavAction (CONTRIB-01)", () => {
+    pathnameMock.mockReturnValue("/allocations");
+    const onNavAction = vi.fn();
+    render(<MobileNav isAllocator onNavAction={onNavAction} />);
+    const nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    const button = within(nav).getByText("Add a Strategy").closest("button");
+    expect(button).not.toBeNull();
+    expect(button).toHaveAttribute("type", "button");
+    fireEvent.click(button!);
+    expect(onNavAction).toHaveBeenCalledWith("add-strategy");
   });
 
   it("does NOT render a hardcoded TABS list — manager sees only their set", () => {

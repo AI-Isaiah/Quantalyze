@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 
 /**
@@ -518,5 +518,70 @@ describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () =
     // The manager surface must NOT leak to a pure allocator.
     expect(screen.queryByText("Strategies")).toBeNull();
     expect(screen.queryByText("Portfolios")).toBeNull();
+  });
+});
+
+/**
+ * Phase 110 CONTRIB-01 (ROLE-02 scoped exception) — the allocator-scoped
+ * "Add a Strategy" client-action nav entry. It opens the
+ * ContributionWizardOverlay via `onNavAction` — NO href, NO navigation (the
+ * wizard route lives under the Phase-109 manager-guarded /strategies subtree, so
+ * routing an allocator there would redirect-bounce them). These pin:
+ *   - allocator-only visibility (role-leak T-110-16 — never for a manager or a
+ *     bare is_admin without the allocator role),
+ *   - the button (NOT link) affordance by construction,
+ *   - the dispatch payload,
+ *   - and that the existing href nav items are untouched.
+ */
+describe("Sidebar 'Add a Strategy' action entry (CONTRIB-01)", () => {
+  it("renders 'Add a Strategy' as a <button> (no href) in the allocator workspace", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    const el = screen.getByText("Add a Strategy");
+    const button = el.closest("button");
+    expect(button).not.toBeNull();
+    expect(button).toHaveAttribute("type", "button");
+    // A client action — never a route. No anchor wraps it.
+    expect(el.closest("a")).toBeNull();
+  });
+
+  it("fires onNavAction('add-strategy') when clicked", () => {
+    const onNavAction = vi.fn();
+    render(
+      <Sidebar
+        populatedSlugs={[]}
+        isAllocator={true}
+        onNavAction={onNavAction}
+      />,
+    );
+    fireEvent.click(screen.getByText("Add a Strategy"));
+    expect(onNavAction).toHaveBeenCalledTimes(1);
+    expect(onNavAction).toHaveBeenCalledWith("add-strategy");
+  });
+
+  it("is ABSENT for a manager-only user (role-leak pin T-110-16)", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={false} isManager={true} />,
+    );
+    expect(screen.queryByText("Add a Strategy")).toBeNull();
+  });
+
+  it("is ABSENT for a bare is_admin user (ops-overlay, no allocator role)", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
+    expect(screen.queryByText("Add a Strategy")).toBeNull();
+  });
+
+  it("is PRESENT for a role='both' user (isAllocator && isManager)", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} isManager={true} />,
+    );
+    expect(screen.getByText("Add a Strategy")).toBeInTheDocument();
+  });
+
+  it("does NOT break the href items — 'My Allocation' is still a link", () => {
+    render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
+    expect(screen.getByText("My Allocation").closest("a")).toHaveAttribute(
+      "href",
+      "/allocations",
+    );
   });
 });
