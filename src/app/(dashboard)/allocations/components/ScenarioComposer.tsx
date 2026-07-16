@@ -716,15 +716,27 @@ async function readSaveIssues(res: Response): Promise<SaveIssue[] | undefined> {
  * dropping genuinely-removed/stale refs. The engine reads leverage only for
  * iterated legs anyway, so this changes no projection — it only keeps the SAVED
  * blob honest.
+ *
+ * WEIGHTS-02 (Phase 112, Pitfall 1) — `eligiblePerKeyIds` extends the keep-set
+ * with the currently-eligible per-key `api_key_id`s. An INCLUDED per-key source
+ * legitimately carries a leverage-only edit with NO weightOverride entry (rides
+ * the raw equity share) AND NO toggle entry (absent = included), so it is in
+ * NONE of the three signals above and would be dropped at Save — its leverage
+ * silently reset to 1× on reopen. Eligibility itself is therefore the keep
+ * signal for per-key leverage. Callers pass `[]` when the per-key path is
+ * inactive (no per-key leverage input renders), preserving the original
+ * stale-pruning behavior exactly.
  */
 function pruneLeverageToDraftRefs(
   leverageByRef: Record<string, number>,
   draft: ScenarioDraft,
+  eligiblePerKeyIds: ReadonlyArray<string> = [],
 ): Record<string, number> {
   const current = new Set<string>([
     ...draft.addedStrategies.map((s) => s.id as string),
     ...Object.keys(draft.toggleByScopeRef),
     ...Object.keys(draft.weightOverrides),
+    ...eligiblePerKeyIds,
   ]);
   const out: Record<string, number> = {};
   for (const [id, L] of Object.entries(leverageByRef)) {
@@ -1782,7 +1794,12 @@ export function ScenarioComposer({
           draft: setLeverageOverrides(
             setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
             // M-2 — prune stranded refs so a removed leg's leverage never persists.
-            pruneLeverageToDraftRefs(leverageByRef, scenario.draft),
+            // WEIGHTS-02 (Pitfall 1) — keep eligible per-key leverage-only edits.
+            pruneLeverageToDraftRefs(
+              leverageByRef,
+              scenario.draft,
+              eligiblePerKeyIds,
+            ),
           ),
         }),
       });
@@ -1826,7 +1843,12 @@ export function ScenarioComposer({
             draft: setLeverageOverrides(
               setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
               // M-2 — prune stranded refs so a removed leg's leverage never persists.
-              pruneLeverageToDraftRefs(leverageByRef, scenario.draft),
+              // WEIGHTS-02 (Pitfall 1) — keep eligible per-key leverage-only edits.
+              pruneLeverageToDraftRefs(
+                leverageByRef,
+                scenario.draft,
+                eligiblePerKeyIds,
+              ),
             ),
           }),
         },
@@ -2226,6 +2248,17 @@ export function ScenarioComposer({
     const eligible = payload.eligibleApiKeyIds ?? [];
     return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
   }, [payload.apiKeys, payload.eligibleApiKeyIds]);
+
+  // WEIGHTS-02 (Phase 112, Pitfall 1) — the eligible per-key `api_key_id`s that
+  // render a leverage input this render. Folded into `pruneLeverageToDraftRefs`
+  // at both Save call sites so a leverage-only edit on an INCLUDED per-key source
+  // (no weightOverride, no toggle entry) is NOT dropped at Save. Empty when the
+  // per-key path is inactive — no per-key leverage input renders, so the Save
+  // prune keeps its original stale-dropping behavior exactly.
+  const eligiblePerKeyIds = useMemo(
+    () => (usePerKeySources ? dataSourceKeys.map((k) => k.id) : []),
+    [usePerKeySources, dataSourceKeys],
+  );
 
   // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off
   // AND no live added strategy. Since P61-BUG-1 the merged engine set carries
