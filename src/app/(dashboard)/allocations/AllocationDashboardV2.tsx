@@ -91,7 +91,15 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             Surface the banner here too so the gap reads as a data-horizon
             limit, not a missing connection. */}
         {equityBaselineUnknown && <BaselineUnknownBanner />}
-        <EmptyState hasSyncing={false} />
+        {/* DOGFOOD-1: activeVenues is derived server-side from active api_keys
+            (src/lib/queries.ts:2371), so activeVenues.length > 0 is the
+            connected-keys signal without a new query or payload field. When
+            keys ARE connected but no positions synced, EmptyState shows the
+            honest connected-but-empty copy instead of a "Connect a key" CTA. */}
+        <EmptyState
+          hasSyncing={false}
+          hasConnectedKeys={activeVenues.length > 0}
+        />
       </div>
     );
   }
