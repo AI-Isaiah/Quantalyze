@@ -146,7 +146,7 @@ DS-04's raw-px rejection is an app-wide prohibition: no production source can
 author a new raw px without failing CI, the frozen islands excepted.
 
 ## Numbers Contract
-Promoted from `src/lib/factsheet/format.ts:1-80` — the factsheet's formatting
+Promoted from `src/app/factsheet/[id]/v2/format.ts` — the factsheet's formatting
 rules are the product-wide contract for how a figure renders. Numbers are the
 product; they format one way, everywhere.
 
@@ -154,7 +154,7 @@ product; they format one way, everywhere.
 |------|------|
 | Typeface | Geist Mono, `tabular-nums` (via `.font-metric`) so digits align in a column |
 | Ratios (Sharpe, Calmar, Sortino) | 2 decimal places |
-| Percentages | 1 decimal place, **signed** — a `+` prefix on gains, `−` on losses |
+| Percentages | 1 decimal place, **signed** — a `+` prefix on gains, `−` on losses. A dense comparison table (e.g. `StrategyTable`) may widen to 2dp for precision; the sign rule still holds. |
 | Tail-risk (VaR, CVaR, max drawdown) | 2 decimal places |
 | Integers (counts, observations) | thousands separators |
 | **Null / non-finite** | **em-dash `—`. Never `0`, never blank, never a fabricated value.** A metric that cannot be computed says so with a dash. |
@@ -242,7 +242,7 @@ absence.
   fluid-fill `max-w-[1920px]` decision). Wider content earns a wider measure;
   prose never exceeds 1100px regardless of viewport.
 - **Sidebar width:** 260px (fixed, desktop only)
-- **Border radius:** sm: 4px (badges, inputs), md: 6px (buttons, small cards), lg: 8px (cards, panels), xl: 12px (hero sections)
+- **Border radius:** sm: 4px (badges, inputs), md: 6px (buttons, small cards), lg: 8px (interactive cards), xl: 12px (hero sections). **Data panels are square (no radius)** — see the Cards-vs-Data-panels split below; they are not on this ladder.
 
 ## Motion
 - **Approach:** Minimal-functional — only transitions that aid comprehension
@@ -276,7 +276,7 @@ carries meaning:
 Heavy frame vs interior hairline: never use the near-black frame weight for an
 interior divider, and never use a hairline where the document edge wants a frame.
 
-- **Tables:** No outer border. Header row with bottom border. Rows separated by hairline borders. Hover state with subtle background.
+- **Tables:** a data panel — **square corners**, wrapped in a 1px hairline outer border (`border border-border`), no radius, no shadow. Header row with bottom border. Rows separated by hairline borders. Hover state with subtle background.
 - **Buttons:** Primary (accent bg, white text), Secondary (transparent, border), Ghost (transparent, no border)
 - **Badges:** 4px radius, uppercase 10-11px, specific colors per category
 - **Inputs:** 6px radius, 1px border, accent border on focus
@@ -416,7 +416,7 @@ instance:** review for the shape, not a single occurrence.
 | Centered-everything layouts | Reads as a brochure, not a report | Left-aligned, grid-disciplined; a report is left-anchored |
 | Uniform bubbly radius on all elements | Toy-like; erases the card-vs-panel distinction | Two primitives: rounded cards, square data panels |
 | Decorative blobs / patterns / glassmorphism | Pure ornament; fails the print test | Nothing. The numbers do the work |
-| Emoji as decoration | Cheerful, unserious, unprintable | **Permit only semantic glyphs `⚠ — · ×`**, and only when colored by a semantic token AND adjacent to text |
+| Emoji as decoration | Cheerful, unserious, unprintable | **Permit only semantic glyphs `⚠ — · × ✓`**, and only when colored by a semantic token AND adjacent to text (`✓` marks the winning cell in comparison tables) |
 | Colored-left-border cards | A dated Bootstrap tell | Semantic tone on text/fill per the color gates, not a stripe |
 | Generic hero copy (Unlock / Empower / Supercharge / "seamlessly") | Marketing filler; adjectives where numbers belong | Declarative sentence-case copy that states the fact (see Voice) |
 | system-ui / Inter / Roboto as a display font — or ANY new font | Breaks the three-voice system; the overused-font tell | The three voices only: Instrument Serif / DM Sans / Geist Mono |
@@ -428,9 +428,11 @@ mechanically enforceable in the repo's existing token-drift test style and
 should be ratcheted the same way — `warn` repo-wide, then `error` per-surface as
 each surface is cleaned:
 1. **Gradients outside the allowlist** — any `bg-gradient-*` / `linear-gradient`
-   in `src/**` except the `StrategyTable.tsx` functional overflow-fade.
+   in `src/**` except these *functional* (not decorative) gradients: the
+   `StrategyTable.tsx` overflow-fade, the mandate-slider fill (`globals.css`
+   `--slider-fill`), and the `CorrelationMatrix` scale-legend ramp.
 2. **Emoji codepoints in `src/**` JSX** — reject decorative emoji; the semantic
-   glyphs `⚠ — · ×` are the only permitted codepoints.
+   glyphs `⚠ — · × ✓` are the only permitted codepoints.
 3. **`rounded-full` sized 10–12 with an icon child** — the icon-in-circle
    feature-grid tell.
 
@@ -464,4 +466,4 @@ each surface is cleaned:
 | 2026-07-02 | Three-state coverage-chip palette (v1.5 Phase 58, COVERAGE-02) | The scenario composer's per-row membership state maps to exactly three token treatments: **in-blend** = accent `#1B6B5A` (member, verified-in), **manually-excluded** = muted neutral (deliberate, sticky), **auto-excluded (outside window)** = warning amber (`#B45309` text / `#FEF3C7` bg / `#FDE68A` border — the HoldingsTable revoked-key chip pairing). Red/negative is explicitly forbidden for auto-excluded: coverage exclusion is recoverable, not a permanent failure. Chip anatomy follows the Badge ladder (4px radius, micro tier). Pinned by `CoverageStateChip.test.tsx` token assertions. |
 | 2026-07-02 | Amber semantic extended: "recovers on its own" → "recoverable" (v1.5 Phase 58) | The 2026-04-11 rule reserved warning amber for "transient states that will recover on their own". The coverage-window auto-excluded state recovers only via a *user action* (narrowing the window / one-click Include), yet red would wrongly signal permanence and muted would hide the recoverability. The reservation is therefore widened to **transient/recoverable states** — whether the system or a disclosed one-click user action performs the recovery — keeping the tripartite semantics: green=success, red=permanent failure, amber=recoverable. |
 | 2026-07-02 | CoverageTimeline mini-gantt bar treatment (v1.5 Phase 58 + ship review) | The coverage mini-gantt renders one solid bar per strategy on a `bg-track` rail: in-blend = solid accent, auto-excluded = `bg-warning-bg` fill with a **`border-warning` (#B45309) border** — the ship design-specialist measured the original `border-warning-border` pairing at ~1.02:1 against the track (invisible; the chip precedent carries its contrast in TEXT, which a bar fill lacks), so the bar's ≥3:1 non-text contrast (WCAG 1.4.11) is carried by the strong border. Bars are `role="img"` with an aria-label restating coverage dates + membership (aria-label on a role-less div is ignored by AT). The active window is a separate accent band overlay; the collapse gates visibility, not compute. |
-| 2026-07-16 | Sidebar navy #0F172A → light rail | Founder disliked the flat navy rail; chose the light-surface direction, deliberately reopening the previously-locked "keep current" token. Nav now: light `bg-surface`, right hairline (`border-r border-border`), mono-eyebrow section headings (uppercase Geist Mono, tracked — the factsheet annotation voice), accent-text active state, ACCOUNT pinned to the bottom. The old `#0F172A` sidebar token is retired; the Color-section token is updated to match so DESIGN.md carries one direction, not both. |
+| 2026-07-16 | Sidebar navy #0F172A → light rail | Founder disliked the flat navy rail; chose the light-surface direction, deliberately reopening the previously-locked "keep current" token. Nav now: light `bg-surface`, right hairline (`border-r border-border`), mono-eyebrow section headings (uppercase Geist Mono, tracked — the factsheet annotation voice), accent-text active state, ACCOUNT pinned to the bottom. The navy is no longer used by the nav; the `--color-sidebar*` tokens are NOT yet deleted — one non-nav consumer (`ApiKeyManager` exchange-avatar tint, `bg-sidebar/10`) still references them, so their removal is a follow-up once that chip is migrated to a neutral token. |
