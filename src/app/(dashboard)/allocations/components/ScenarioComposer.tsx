@@ -4521,6 +4521,7 @@ export function ScenarioComposer({
           addedProvenanceByRef={addedProvenanceByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
+          blendShareByRef={blendShareByRef}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           onRemoveAdded={handleRemoveAdded}
@@ -4875,6 +4876,13 @@ interface CompositionListProps {
   addedProvenanceByRef: Record<string, ProvenanceTier | null>;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
+  /**
+   * WEIGHTS-01 (Phase 112) — ref → effective blend share (each SELECTED engine
+   * unit's weight over the selected-weight mass). The per-key row's weight input
+   * displays this so a typed 30% renders as 30% of the blend; an EXCLUDED per-key
+   * row is absent here and falls back to its preserved stored weightOverride.
+   */
+  blendShareByRef: Record<string, number>;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
@@ -4897,6 +4905,7 @@ function CompositionList({
   addedProvenanceByRef,
   onToggle,
   onSetWeight,
+  blendShareByRef,
   leverageByRef,
   onSetLeverage,
   onRemoveAdded,
@@ -4915,10 +4924,12 @@ function CompositionList({
             anatomy as an added row: an include/exclude toggle (the shared
             toggleByScopeRef channel via onTogglePerKey), the source label, a
             provenance badge (api_verified by construction — a per-key unit IS a
-            connected-exchange api-key), and the coverage chip. NO weight/leverage
-            inputs (Phase 112 fence) and no remove (a source is toggled, not
-            removed). Per-coin holdings are NOT rendered — they live on the
-            Holdings tab (CONSTIT-03). */}
+            connected-exchange api-key), and the coverage chip. WEIGHT input is
+            now LIVE (Phase 112 WEIGHTS-01) — routed through the engine-unit basis
+            writer (handleWeightChange). The LEVERAGE input stays fenced to Plan 02
+            (WEIGHTS-02). A per-key source still has NO remove button (it is
+            toggled, not removed). Per-coin holdings are NOT rendered — they live
+            on the Holdings tab (CONSTIT-03). */}
         {perKeySources.map((k) => {
           const included = draft.toggleByScopeRef[k.id] !== false;
           const { exchange, nickname, maskedTail } = dataSourceLabel(k);
@@ -4970,6 +4981,33 @@ function CompositionList({
                 {chipState && (
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
+              </div>
+              {/* WEIGHTS-01 — per-key weight input, mirroring the added-row weight
+                  input exactly (id `weight-<api_key_id>`, step 0.001, [0,1]).
+                  Value shows the EFFECTIVE blend share (blendShareByRef); an
+                  excluded row is absent from that map and falls back to its
+                  PRESERVED stored weightOverride (Wave-0 pin (d)). Disabled when
+                  excluded — no onChange fires, so an excluded row never routes a
+                  weight edit. Leverage input is Plan 02. */}
+              <div className="flex items-center gap-2">
+                <label className="sr-only" htmlFor={`weight-${k.id}`}>
+                  {labelText} weight
+                </label>
+                <input
+                  id={`weight-${k.id}`}
+                  type="number"
+                  step="0.001"
+                  min="0"
+                  max="1"
+                  value={(
+                    blendShareByRef[k.id] ??
+                    draft.weightOverrides[k.id] ??
+                    0
+                  ).toFixed(3)}
+                  disabled={!included}
+                  onChange={(e) => onSetWeight(k.id, Number(e.target.value))}
+                  className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                />
               </div>
             </li>
           );

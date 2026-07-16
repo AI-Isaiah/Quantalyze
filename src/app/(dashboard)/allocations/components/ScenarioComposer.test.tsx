@@ -5334,10 +5334,11 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     cleanup();
   });
 
-  // (a) RED — each per-key row renders a weight + leverage input (leverage bounds
-  // [0, MAX_LEVERAGE]), both disabled when the row is excluded. Fails today: the
-  // per-key fence renders no inputs, so `weight-<api_key_id>` is not found.
-  it("(a) RED — each per-key row renders weight + leverage inputs bounded [0, MAX_LEVERAGE], disabled when excluded", () => {
+  // (a-weight) [112-01 — GREEN] — each per-key row renders a weight input (min 0),
+  // disabled when the row is excluded. Split from the original combined (a) so
+  // Plan 01 (weights) exits with zero unexpected reds; the leverage half below
+  // stays RED for Plan 02. Weight input keyed by api_key_id (the engine unit id).
+  it("(a-weight) — each per-key row renders a weight input (min 0), disabled when excluded", () => {
     render112();
     const list = screen.getByTestId("scenario-constituent-list");
     expect(
@@ -5345,22 +5346,31 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     ).toHaveLength(2);
 
     const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
-    const l1 = document.getElementById(
-      `leverage-${K1}`,
-    ) as HTMLInputElement | null;
-    // The RED assertions — these inputs do not exist under the Phase 112 fence.
     expect(w1).not.toBeNull();
-    expect(l1).not.toBeNull();
     expect(w1!.getAttribute("min")).toBe("0");
-    expect(l1!.getAttribute("min")).toBe("0");
-    expect(l1!.getAttribute("max")).toBe(String(MAX_LEVERAGE));
 
-    // Excluding the row disables both inputs (the added-row disabled contract,
-    // mirrored onto per-key rows).
+    // Excluding the row disables the weight input (the added-row disabled
+    // contract, mirrored onto per-key rows).
     fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
     expect(
       (document.getElementById(`weight-${K1}`) as HTMLInputElement).disabled,
     ).toBe(true);
+  });
+
+  // (a-leverage) [112-02 — RED] — each per-key row renders a leverage input
+  // bounded [0, MAX_LEVERAGE], disabled when excluded. Stays RED until Plan 02
+  // adds the per-key leverage input; Plan 01 renders only the weight input.
+  it("(a-leverage) RED — each per-key row renders a leverage input bounded [0, MAX_LEVERAGE], disabled when excluded", () => {
+    render112();
+    const l1 = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    // The RED assertions — the per-key leverage input does not exist yet (Plan 02).
+    expect(l1).not.toBeNull();
+    expect(l1!.getAttribute("min")).toBe("0");
+    expect(l1!.getAttribute("max")).toBe(String(MAX_LEVERAGE));
+
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
     expect(
       (document.getElementById(`leverage-${K1}`) as HTMLInputElement).disabled,
     ).toBe(true);
