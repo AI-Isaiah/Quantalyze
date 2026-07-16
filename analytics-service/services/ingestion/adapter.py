@@ -79,8 +79,11 @@ class ValidationResult:
     read_only: bool | None
     # AUTH_FAILED | PERMISSION_DENIED | RATE_LIMITED | DDOS_PROTECTION |
     # NETWORK_UNAVAILABLE | EXCHANGE_UNAVAILABLE | UNSUPPORTED_EXCHANGE |
-    # WITHDRAW_SCOPE | TRADE_SCOPE | VALIDATION_UNEXPECTED |
+    # WITHDRAW_SCOPE | TRADE_SCOPE | MISSING_SCOPE | PROBE_FAILED |
+    # VALIDATION_UNEXPECTED |
     # CSV_VALIDATION_FAILED (Phase 19 addition for the CSV adapter).
+    # (PROBE_FAILED is set by services/exchange.py when the permission probe
+    # fail-closes on a transient upstream error — Phase 110.1 / DOGFOOD-3.)
     error_code: str | None
     # SoT for human-readable text: src/lib/wizardErrors.ts (Phase 17
     # DESIGN-05). Adapters return `error_code`; the Next.js layer does
