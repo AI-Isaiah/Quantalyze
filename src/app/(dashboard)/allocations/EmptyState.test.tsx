@@ -29,8 +29,8 @@ import { render, screen } from "@testing-library/react";
 import { EmptyState } from "./EmptyState";
 
 describe("EmptyState — PURGE-04 / D-07 / D-08", () => {
-  it("Test 1 (zero holdings, no syncing): renders the empty-state card with heading + CTA to /profile?tab=exchanges", () => {
-    render(<EmptyState hasSyncing={false} />);
+  it("Test 1 (zero holdings, no syncing, no keys): renders the empty-state card with heading + CTA to /profile?tab=exchanges", () => {
+    render(<EmptyState hasSyncing={false} hasConnectedKeys={false} />);
 
     // Heading is present (verbatim from UI-SPEC.md §Copywriting).
     expect(
@@ -47,7 +47,7 @@ describe("EmptyState — PURGE-04 / D-07 / D-08", () => {
   });
 
   it("Test 2 (syncing): renders the first-sync InfoBanner; empty-state heading absent", () => {
-    render(<EmptyState hasSyncing={true} />);
+    render(<EmptyState hasSyncing={true} hasConnectedKeys={false} />);
 
     // First-sync copy (verbatim from UI-SPEC.md §Copywriting, em-dash U+2014).
     expect(
@@ -63,7 +63,9 @@ describe("EmptyState — PURGE-04 / D-07 / D-08", () => {
   });
 
   it("Test 3 (D-07 minimalism): hasSyncing=false renders exactly one <a>, zero <img>/<svg>/<ol>/<ul>", () => {
-    const { container } = render(<EmptyState hasSyncing={false} />);
+    const { container } = render(
+      <EmptyState hasSyncing={false} hasConnectedKeys={false} />,
+    );
 
     // D-07: single headline + single sub-line + single primary button.
     // The button is a next/link <a>; it is the ONLY anchor in the tree.
@@ -84,7 +86,9 @@ describe("EmptyState — PURGE-04 / D-07 / D-08", () => {
     // because in that branch the component renders only the InfoBanner with
     // no link — consistent with the spec (first-sync state doesn't need a
     // redundant CTA; the key is already connected).
-    const { unmount } = render(<EmptyState hasSyncing={false} />);
+    const { unmount } = render(
+      <EmptyState hasSyncing={false} hasConnectedKeys={false} />,
+    );
     for (const a of screen.getAllByRole("link")) {
       if ((a.textContent ?? "").includes("Connect Exchange")) {
         const href = a.getAttribute("href") ?? "";
@@ -94,6 +98,82 @@ describe("EmptyState — PURGE-04 / D-07 / D-08", () => {
       }
     }
     unmount();
+  });
+});
+
+/**
+ * Phase 110.1 Plan 01 Task 1 — DOGFOOD-1 three-way branch.
+ *
+ * The pre-110.1 EmptyState only knew `hasSyncing`, so an allocator with
+ * connected+synced keys but zero open positions was told to "Connect a
+ * read-only exchange API key" — actively wrong (they already have keys).
+ * The new `hasConnectedKeys` signal splits the non-syncing empty state into:
+ *   - no keys   → existing connect CTA (unchanged copy).
+ *   - has keys  → honest "connected · nothing synced yet" + a Manage-exchanges
+ *                 link (NOT a Connect CTA).
+ */
+describe("EmptyState — DOGFOOD-1 connected-but-empty (110.1)", () => {
+  it("Test A (regression): connected + not syncing → honest copy, Manage-exchanges link, NO connect CTA", () => {
+    const { container } = render(
+      <EmptyState hasSyncing={false} hasConnectedKeys={true} />,
+    );
+
+    // Same headline as the no-keys card.
+    expect(
+      screen.getByText("No positions to analyze yet."),
+    ).toBeInTheDocument();
+
+    // The misleading connect copy must be ABSENT — this is the bug being fixed.
+    expect(
+      screen.queryByText(/Connect a read-only exchange API key/),
+    ).not.toBeInTheDocument();
+
+    // Exactly one anchor, and it points to Manage exchanges — not a Connect CTA.
+    const anchors = container.querySelectorAll("a");
+    expect(anchors.length).toBe(1);
+    const link = anchors[0];
+    expect(link.getAttribute("href")).toBe("/profile?tab=exchanges");
+    expect(link.textContent ?? "").toContain("Manage exchanges");
+    expect(link.textContent ?? "").not.toContain("Connect Exchange");
+
+    // Minimalism gate holds for this branch too: no illustration, no list.
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("svg")).toBeNull();
+    expect(container.querySelector("ol")).toBeNull();
+    expect(container.querySelector("ul")).toBeNull();
+  });
+
+  it("Test B: no keys + not syncing → existing connect CTA is unchanged", () => {
+    render(<EmptyState hasSyncing={false} hasConnectedKeys={false} />);
+
+    expect(
+      screen.getByText(
+        "Connect a read-only exchange API key to see your real holdings and performance.",
+      ),
+    ).toBeInTheDocument();
+
+    const cta = screen
+      .getAllByRole("link")
+      .find((a) => (a.textContent ?? "").includes("Connect Exchange"));
+    expect(cta, "Connect Exchange CTA must exist for the no-keys branch").toBeDefined();
+    expect(cta!.getAttribute("href")).toBe("/profile?tab=exchanges");
+  });
+
+  it("Test C: syncing overrides the keys signal → InfoBanner branch unchanged, no card heading", () => {
+    for (const hasConnectedKeys of [true, false]) {
+      const { unmount } = render(
+        <EmptyState hasSyncing={true} hasConnectedKeys={hasConnectedKeys} />,
+      );
+      expect(
+        screen.getByText(
+          "Syncing your first positions — this usually takes under a minute.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("No positions to analyze yet."),
+      ).not.toBeInTheDocument();
+      unmount();
+    }
   });
 });
 
