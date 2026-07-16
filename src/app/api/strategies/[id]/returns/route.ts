@@ -84,6 +84,24 @@ export interface ReturnsResponse {
    * existence-oracle didn't already gate (T-84-05a: accept).
    */
   asset_class: string | null;
+  /**
+   * Phase 111 / CONSTIT-02 (BLEND-01 widening pattern) — the drawer-added
+   * strategy's provenance trust tier, picked from the most-recent
+   * `strategy_verifications` row on the SAME published-gated probe (D-04:
+   * trust_tier lives ONLY on strategy_verifications). `null` when the strategy
+   * has no verification rows OR on a stale build predating this field (the
+   * composer tolerates absence → null provenance, never a throw). PUBLIC
+   * metadata already rendered on factsheets / watchlist — no new disclosure
+   * surface beyond what the 404 existence-oracle already gates (T-111-03).
+   */
+  trust_tier: string | null;
+  /**
+   * Phase 111 / CONSTIT-02 — server-coerced composite discriminator, strict
+   * `data_quality_flags.composite === true` (T-111-04). Drives the `composite`
+   * provenance badge for drawer-added constituents. The RAW data_quality_flags
+   * blob is NEVER forwarded — only this boolean projection (T-111-03).
+   */
+  is_composite: boolean;
 }
 
 export async function GET(
@@ -146,8 +164,16 @@ export async function GET(
       // and stays behind the SAME published-only gate, so this reveals nothing
       // the existing existence-oracle didn't already gate (404 on unpublished /
       // cross-tenant is unchanged — T-84-05a).
+      // Phase 111 / CONSTIT-02 — embed strategy_verifications on the SAME
+      // published-gated probe so a drawer-added strategy carries its trust_tier
+      // (D-04: trust_tier lives only on strategy_verifications). The rows are
+      // picked most-recent-first in JS below (mirrors queries.ts:465-478),
+      // avoiding a second round-trip. Public metadata; no new disclosure surface.
       const { data: strat, error: probeError } = await withPublishedOnly(
-        supabase.from("strategies").select("id, asset_class").eq("id", id),
+        supabase
+          .from("strategies")
+          .select("id, asset_class, strategy_verifications (trust_tier, status, created_at)")
+          .eq("id", id),
       ).maybeSingle();
       if (probeError) {
         // error-absent ≠ legit-absent: a PostgREST error (e.g. asset_class column
@@ -166,9 +192,13 @@ export async function GET(
         );
       }
 
+      // Phase 111 / CONSTIT-02 — widen the series read to also fetch
+      // data_quality_flags so is_composite can be derived server-side. Only the
+      // strict `composite === true` boolean is forwarded; the raw blob (venue
+      // detail) never leaves the server (T-111-03).
       const { data, error } = await supabase
         .from("strategy_analytics")
-        .select("daily_returns")
+        .select("daily_returns, data_quality_flags")
         .eq("strategy_id", id)
         .maybeSingle();
 
@@ -206,7 +236,33 @@ export async function GET(
       // widening simply omits it → null (the composer tolerates absence).
       const asset_class =
         (strat as { asset_class?: string | null }).asset_class ?? null;
-      const body: ReturnsResponse = { daily_returns, asset_class };
+
+      // CONSTIT-02 — pick the most-recent verification row's trust_tier (D-04
+      // latest-verification pick; most-recent created_at wins). A stale build or
+      // a strategy with no verification rows → null (never a throw).
+      const verifications =
+        (strat as unknown as {
+          strategy_verifications?: { trust_tier: string; status: string; created_at: string }[];
+        }).strategy_verifications ?? [];
+      const latestVerification = verifications
+        .slice()
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      const trust_tier: string | null = latestVerification?.trust_tier ?? null;
+
+      // CONSTIT-02 — strict `=== true` composite coercion (T-111-04). The raw
+      // data_quality_flags blob is read here but only the boolean is emitted.
+      const dqf = (data as { data_quality_flags?: unknown } | null)?.data_quality_flags as
+        | { composite?: unknown }
+        | null
+        | undefined;
+      const is_composite = dqf?.composite === true;
+
+      const body: ReturnsResponse = {
+        daily_returns,
+        asset_class,
+        trust_tier,
+        is_composite,
+      };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },
   )(req);

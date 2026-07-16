@@ -1554,6 +1554,25 @@ export interface MyAllocationDashboardPayload {
        * enum already exposed on public factsheets (#597); no tier redaction.
        */
       asset_class?: string | null;
+      /**
+       * Phase 111 / CONSTIT-02 — the strategy's provenance trust tier, projected
+       * from the most-recent `strategy_verifications` row (D-04: trust_tier lives
+       * ONLY on strategy_verifications, never on `strategies`). `null` when the
+       * strategy has no verification rows. Consumed by the wave-3 scenario
+       * composer's `addedStrategyMetadataLookup` to render the per-row provenance
+       * badge for book strategies. Non-sensitive — already public on factsheets /
+       * watchlist. The DB `TrustTier` union stays 3-valued; the badge layer widens
+       * to `ProvenanceTier` (adds `composite`) independently of this string.
+       */
+      trust_tier: string | null;
+      /**
+       * Phase 111 / CONSTIT-02 — server-coerced composite discriminator, strict
+       * `data_quality_flags.composite === true` (T-111-04: malformed jsonb must
+       * never read as composite). Drives the `composite` provenance badge variant.
+       * The RAW `data_quality_flags` blob (degraded-member venue detail) is NEVER
+       * shipped to the client — only this boolean projection (T-111-03).
+       */
+      is_composite: boolean;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -3133,12 +3152,18 @@ export const getMyAllocationDashboard = cache(
             start_date,
             asset_class,
             organization:organizations(name),
+            strategy_verifications (
+              trust_tier,
+              status,
+              created_at
+            ),
             strategy_analytics (
               daily_returns,
               cagr,
               sharpe,
               volatility,
-              max_drawdown
+              max_drawdown,
+              data_quality_flags
             )
           )
           `,
@@ -3241,6 +3266,35 @@ export const getMyAllocationDashboard = cache(
         ? rawAnalytics[0]
         : rawAnalytics;
 
+      // Phase 111 / CONSTIT-02 — trust_tier via the D-04 latest-verification
+      // pick (copied from getStrategyDetail :465-478 — most-recent created_at
+      // wins; trust_tier lives ONLY on strategy_verifications). null when the
+      // strategy has no verification rows.
+      const verifications =
+        (strategy as unknown as {
+          strategy_verifications?: { trust_tier: string; status: string; created_at: string }[];
+        }).strategy_verifications ?? [];
+      const latestVerification = verifications
+        .slice()
+        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      const trust_tier: string | null = latestVerification?.trust_tier ?? null;
+
+      // Phase 111 / CONSTIT-02 — is_composite via strict `=== true` coercion
+      // (mirrors factsheet v2 page.tsx:90; T-111-04: malformed jsonb must never
+      // assert composite). The raw data_quality_flags blob is stripped from the
+      // emitted analytics below so only this boolean crosses to the client
+      // (T-111-03: degraded-member venue detail never ships).
+      const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
+      const dqf = analyticsObj?.data_quality_flags as { composite?: unknown } | null | undefined;
+      const is_composite = dqf?.composite === true;
+      let strategyAnalyticsForPayload:
+        | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"] = null;
+      if (analyticsObj) {
+        const { data_quality_flags: _dqf, ...analyticsRest } = analyticsObj;
+        strategyAnalyticsForPayload =
+          analyticsRest as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
+      }
+
       // eligibility: a strategy is eligible for outcome
       // recording only when:
       //   1. it was sent_as_intro to this allocator
@@ -3285,9 +3339,17 @@ export const getMyAllocationDashboard = cache(
 
       // Drop the raw `organization` embed so `...strategyRest` below cannot
       // spread the unredacted org name into the payload (only the redacted
-      // `organization_name` is emitted).
-      const { organization: _rawOrganization, ...strategyRest } =
-        strategy as StrategyPayload & { organization?: unknown };
+      // `organization_name` is emitted). Phase 111 / CONSTIT-02: likewise drop
+      // the raw `strategy_verifications` embed — only the derived `trust_tier`
+      // string is emitted (the embed's status/created_at never ship).
+      const {
+        organization: _rawOrganization,
+        strategy_verifications: _rawVerifications,
+        ...strategyRest
+      } = strategy as StrategyPayload & {
+        organization?: unknown;
+        strategy_verifications?: unknown;
+      };
 
       // NEW-C09-08 (B1, audit-2026-05-07) — CLOSED. Gate `current_weight`
       // through the `safeFraction` boundary so a producer-side bug
@@ -3319,8 +3381,11 @@ export const getMyAllocationDashboard = cache(
             ...strategyRest,
             name: redactedName,
             organization_name: redactedOrgName,
-            strategy_analytics: (analytics ?? null) as
-              | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"],
+            // CONSTIT-02: derived provenance metadata (boolean/string only —
+            // the raw verification + flags embeds are stripped above).
+            trust_tier,
+            is_composite,
+            strategy_analytics: strategyAnalyticsForPayload,
           },
         },
       ];

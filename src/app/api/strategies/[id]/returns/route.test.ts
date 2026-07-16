@@ -65,10 +65,19 @@ const STATE = vi.hoisted(() => ({
   // route forwards it on the 200 body (null models a strategy with no class /
   // a stale build that predates the widened select).
   publishedAssetClass: "crypto" as string | null,
+  // Phase 111 / CONSTIT-02 — the strategy_verifications rows the widened probe
+  // embed carries. The route picks the most-recent by created_at and forwards
+  // its trust_tier (null when no rows). Defaults to empty (→ trust_tier null).
+  publishedVerifications: [] as Array<{
+    trust_tier: string;
+    status: string;
+    created_at: string;
+  }>,
   // The strategy_analytics row the series read resolves. `null` models an
-  // absent analytics row → honest empty [].
+  // absent analytics row → honest empty []. data_quality_flags is the source of
+  // the server-coerced is_composite boolean (strict === true, T-111-04).
   analyticsRow: { daily_returns: [] as unknown } as
-    | { daily_returns: unknown }
+    | { daily_returns: unknown; data_quality_flags?: unknown }
     | null,
   // When set, the strategy_analytics read resolves with this error so the
   // route's 500 branch + redaction can be pinned.
@@ -141,7 +150,11 @@ vi.mock("@/lib/supabase/server", () => ({
           },
           maybeSingle: async () => ({
             data: STATE.publishedExists
-              ? { id: PUBLISHED_ID, asset_class: STATE.publishedAssetClass }
+              ? {
+                  id: PUBLISHED_ID,
+                  asset_class: STATE.publishedAssetClass,
+                  strategy_verifications: STATE.publishedVerifications,
+                }
               : null,
             error: null,
           }),
@@ -219,6 +232,7 @@ beforeEach(() => {
   STATE.profileRole = "allocator";
   STATE.publishedExists = true;
   STATE.publishedAssetClass = "crypto";
+  STATE.publishedVerifications = [];
   STATE.analyticsRow = { daily_returns: [] };
   STATE.analyticsQueryError = null;
   STATE.observedFilters = {
@@ -329,13 +343,66 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.asset_class).toBe("crypto");
     // The probe select was widened to include asset_class (non-vacuous — the
     // route reads it from the SAME published-gated probe, not a second query).
-    expect(STATE.observedFilters.strategiesSelect).toBe("id, asset_class");
+    // Phase 111 / CONSTIT-02 also embeds strategy_verifications on the SAME probe.
+    expect(STATE.observedFilters.strategiesSelect).toContain("asset_class");
+    expect(STATE.observedFilters.strategiesSelect).toContain("strategy_verifications");
 
     // A strategy with no class (or a stale build) → null, never fabricated.
     STATE.publishedAssetClass = null;
     const res2 = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     body = await res2.json();
     expect(body.asset_class).toBeNull();
+  });
+
+  it("R9 — CONSTIT-02: forwards trust_tier (most-recent verification) + is_composite on the 200 body", async () => {
+    STATE.publishedVerifications = [
+      { trust_tier: "self_reported", status: "pending", created_at: "2026-01-01T00:00:00Z" },
+      { trust_tier: "api_verified", status: "verified", created_at: "2026-06-01T00:00:00Z" },
+    ];
+    STATE.analyticsRow = { daily_returns: [], data_quality_flags: { composite: true } };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // most-recent created_at wins (D-04 latest-verification pick)
+    expect(body.trust_tier).toBe("api_verified");
+    expect(body.is_composite).toBe(true);
+    // The analytics read was widened to fetch data_quality_flags for the
+    // is_composite derivation.
+    expect(STATE.observedFilters.analyticsSelect).toContain("data_quality_flags");
+  });
+
+  it("R9b — CONSTIT-02: missing verification row → trust_tier null (never a 500)", async () => {
+    STATE.publishedVerifications = [];
+    STATE.analyticsRow = { daily_returns: [] };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.trust_tier).toBeNull();
+    expect(body.is_composite).toBe(false);
+  });
+
+  it("R9c — CONSTIT-02: is_composite is strict === true; malformed flags coerce to false + raw blob never ships (T-111-03/04)", async () => {
+    for (const flags of [null, {}, { composite: "true" }, { composite: 1 }]) {
+      STATE.analyticsRow = { daily_returns: [], data_quality_flags: flags };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      const body = await res.json();
+      expect(body.is_composite).toBe(false);
+    }
+    // Info-disclosure guard: the raw flags blob (venue detail) never reaches the
+    // client — only the boolean projection.
+    STATE.analyticsRow = {
+      daily_returns: [],
+      data_quality_flags: { composite: true, degraded_members: ["okx:BTC"] },
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.is_composite).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("data_quality_flags");
+    expect(JSON.stringify(body)).not.toContain("degraded_members");
   });
 
   it("R5 — absent analytics row → 200 + { daily_returns: [] } (honest empty)", async () => {

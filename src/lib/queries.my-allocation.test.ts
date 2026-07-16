@@ -2404,3 +2404,123 @@ describe("liveBaselineMetricsFromPerKeyDailies — financial edge branches (Phas
     // CAGR clock 84-06 converts to calendar-span this same phase.
   });
 });
+
+// Phase 111 / CONSTIT-02 — provenance threading into the SSR payload.
+// trust_tier lives ONLY on strategy_verifications (D-04); is_composite is a
+// server-coerced boolean from strategy_analytics.data_quality_flags.composite.
+// The raw flags blob must NEVER reach the client (T-111-03), and the embed
+// rows must not leak either.
+function psProvenance(overrides: {
+  strategy_id?: string;
+  verifications?: Array<{ trust_tier: string; status: string; created_at: string }>;
+  data_quality_flags?: unknown;
+}): unknown {
+  const {
+    strategy_id = "sc",
+    verifications = [],
+    data_quality_flags = null,
+  } = overrides;
+  return {
+    portfolio_id: "real-1",
+    strategy_id,
+    current_weight: 0.3,
+    allocated_amount: 30000,
+    alias: null,
+    strategy: {
+      id: strategy_id,
+      name: "Composite Book",
+      codename: null,
+      disclosure_tier: "institutional",
+      strategy_types: [],
+      markets: [],
+      start_date: null,
+      asset_class: "crypto",
+      organization: null,
+      strategy_verifications: verifications,
+      strategy_analytics: {
+        daily_returns: [],
+        cagr: 0.1,
+        sharpe: 1,
+        volatility: 0.2,
+        max_drawdown: -0.1,
+        data_quality_flags,
+      },
+    },
+  };
+}
+
+describe("getMyAllocationDashboard — CONSTIT-02 provenance threading", () => {
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+  });
+
+  it("projects the most-recent strategy_verifications.trust_tier onto strategy.trust_tier", async () => {
+    state.portfolioStrategies = [
+      psProvenance({
+        verifications: [
+          { trust_tier: "self_reported", status: "pending", created_at: "2026-01-01T00:00:00Z" },
+          { trust_tier: "api_verified", status: "verified", created_at: "2026-06-01T00:00:00Z" },
+        ],
+      }) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const row = result.strategies.find((s) => s.strategy_id === "sc");
+    expect(row).toBeDefined();
+    expect((row!.strategy as unknown as { trust_tier: unknown }).trust_tier).toBe("api_verified");
+  });
+
+  it("yields trust_tier null when no verification rows exist (not a throw)", async () => {
+    state.portfolioStrategies = [
+      psProvenance({ verifications: [] }) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const row = result.strategies.find((s) => s.strategy_id === "sc");
+    expect((row!.strategy as unknown as { trust_tier: unknown }).trust_tier).toBeNull();
+  });
+
+  it("derives is_composite === true only from data_quality_flags.composite === true", async () => {
+    state.portfolioStrategies = [
+      psProvenance({ data_quality_flags: { composite: true } }) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const row = result.strategies.find((s) => s.strategy_id === "sc");
+    expect((row!.strategy as unknown as { is_composite: unknown }).is_composite).toBe(true);
+  });
+
+  it("coerces malformed/absent data_quality_flags to is_composite=false (T-111-04 strict === true)", async () => {
+    for (const flags of [null, {}, { composite: "true" }, { composite: 1 }, "garbage"]) {
+      state.portfolioStrategies = [
+        psProvenance({ data_quality_flags: flags }) as (typeof state.portfolioStrategies)[number],
+      ];
+      const { getMyAllocationDashboard } = await import("./queries");
+      const result = await getMyAllocationDashboard("user-1");
+      const row = result.strategies.find((s) => s.strategy_id === "sc");
+      expect((row!.strategy as unknown as { is_composite: unknown }).is_composite).toBe(false);
+    }
+  });
+
+  it("never ships the raw data_quality_flags blob or the strategy_verifications embed to the client (T-111-03)", async () => {
+    state.portfolioStrategies = [
+      psProvenance({
+        verifications: [
+          { trust_tier: "api_verified", status: "verified", created_at: "2026-06-01T00:00:00Z" },
+        ],
+        data_quality_flags: { composite: true, degraded_members: ["okx:BTC"] },
+      }) as (typeof state.portfolioStrategies)[number],
+    ];
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    const strat = row.strategy as unknown as Record<string, unknown>;
+    // boolean projection only — no raw flags object, no verification embed
+    expect("data_quality_flags" in (strat.strategy_analytics as Record<string, unknown>)).toBe(false);
+    expect("strategy_verifications" in strat).toBe(false);
+    // the venue-detail degraded_members must not appear anywhere in the payload
+    expect(JSON.stringify(row)).not.toContain("degraded_members");
+    expect(JSON.stringify(row)).not.toContain("okx:BTC");
+  });
+});
