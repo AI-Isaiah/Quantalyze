@@ -524,7 +524,7 @@ function PortfolioIcon({ className }: { className?: string }) {
 function MatchIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H9zM9 9h4v4H9z" />
+      <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z" />
       <path d="M7 5h2M7 11h2M5 7v2M11 7v2" />
     </svg>
   );
