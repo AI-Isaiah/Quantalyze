@@ -36,7 +36,10 @@ export interface NavActionItem extends NavItemBase {
 }
 export type NavItem = NavLinkItem | NavActionItem;
 interface NavSubGroup { label: string; items: NavItem[] }
-interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[] }
+/** `icon` is the single section-level glyph. Light-rail redesign: Discovery
+ *  carries ONE search icon on its heading instead of repeating the magnifier on
+ *  every category row (one icon per SECTION, not per item). */
+interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[]; icon?: IconComponent }
 
 /**
  * Phase 66 CF-06 — cap the flagged-count badge's DISPLAYED text at "99+".
@@ -170,6 +173,10 @@ function buildNavSections(
           // heading without duplicating links.
           items: [],
           subGroups: discoveryGroups,
+          // Light-rail: the ONE search glyph lives on the section heading —
+          // the category rows below drop their (identical) per-item magnifier
+          // and indent under a hairline instead.
+          icon: SearchIcon,
         }]
       : []),
     ...(isAdmin
@@ -337,30 +344,36 @@ export function Sidebar({
     <aside
       className={
         variant === "desktop"
-          ? "fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text"
+          ? "fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col border-r border-border bg-surface text-text-secondary"
           : // Audit 2026-05-07 G11.C.3: drawer variant lacked overflow-y-auto.
             // On 320×667 viewports with admin nav (MY WORKSPACE + 5 DISCOVERY
             // sub-groups + 5 ADMIN items + ACCOUNT) the content exceeds 100vh
             // and the bottom items are unreachable. Adding overflow-y-auto
             // lets the drawer scroll inside the overlay panel.
-            "flex h-full w-[260px] flex-col bg-sidebar text-sidebar-text overflow-y-auto"
+            "flex h-full w-[260px] flex-col border-r border-border bg-surface text-text-secondary overflow-y-auto"
       }
     >
       <div className="flex h-16 items-center px-6">
-        <Link href="/" className="text-lg font-display text-white tracking-tight">
+        <Link href="/" className="text-lg font-display text-text-primary tracking-tight">
           Quantalyze
         </Link>
       </div>
 
-      <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
-        {sections.map((section) => (
-          <div key={section.heading} className="mt-6 first:mt-2">
-            {/* PR #108 review: removed `text-sidebar-text/50` — Tailwind opacity
-                modifier collapses fg+bg through to the parent (#0F172A), giving
-                effective `#525D71 on #0F172A = 2.68:1` (axe color-contrast,
-                serious). Use full sidebar-text (#94A3B8) which gives 6.75:1 on
-                the same bg. Hierarchy preserved by font-semibold + tracking. */}
-            <p className="mb-2 px-3 text-fixed-10 font-semibold uppercase tracking-widest text-sidebar-text">
+      {/* flex-col so the ACCOUNT section can pin to the rail bottom (mt-auto). */}
+      <nav aria-label="Primary" className="flex flex-1 flex-col overflow-y-auto px-3 pb-4">
+        {sections.map((section) => {
+          // Light-rail: ACCOUNT is the factsheet-footer idiom — pinned to the
+          // bottom with a hairline rule above it.
+          const isAccount = section.heading === "ACCOUNT";
+          return (
+          <div
+            key={section.heading}
+            className={isAccount ? "mt-auto border-t border-border pt-4" : "mt-6 first:mt-2"}
+          >
+            {/* Factsheet eyebrow voice: mono, uppercase, wide tracking, muted
+                ink on the light surface. */}
+            <p className="mb-2 flex items-center gap-2 px-3 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
+              {section.icon && <section.icon className="h-3.5 w-3.5 shrink-0" />}
               {section.heading}
             </p>
             {section.items.length > 0 && (
@@ -380,27 +393,28 @@ export function Sidebar({
                 key={group.label}
                 className={idx === 0 ? "" : "mt-3"}
               >
-                {/* PR #108 review: removed `text-sidebar-text/35` — same
-                    alpha-collapse issue as the parent heading (1.94:1 on
-                    #0F172A, axe-flagged). Sub-group labels use full
-                    sidebar-text and rely on font-medium (vs the parent's
-                    semibold) + smaller tracking for hierarchy. */}
-                <p className="mb-1 px-3 text-fixed-10 font-medium uppercase tracking-wider text-sidebar-text">
+                {/* Sub-group labels sit one notch quieter than the section
+                    heading via TIGHTER tracking (0.1em vs 0.18em), not opacity. */}
+                <p className="mb-1 px-3 text-micro font-mono uppercase tracking-[0.1em] text-text-muted">
                   {group.label}
                 </p>
-                <ul className="space-y-0.5">
+                {/* Icon dedupe: the category rows carry no per-item icon; they
+                    indent under a hairline that visually binds them to the label. */}
+                <ul className="ml-3 space-y-0.5 border-l border-border pl-2">
                   {group.items.map((item) => (
                     <NavItemLink
                       key={item.href}
                       item={item}
                       pathname={pathname}
+                      hideIcon
                     />
                   ))}
                 </ul>
               </div>
             ))}
           </div>
-        ))}
+          );
+        })}
       </nav>
     </aside>
   );
@@ -410,10 +424,14 @@ function NavItemLink({
   item,
   pathname,
   onNavAction,
+  hideIcon,
 }: {
   item: NavItem;
   pathname: string;
   onNavAction?: (action: NavAction) => void;
+  /** Light-rail Discovery dedupe: sub-group category rows render label-only
+   *  (the single search glyph lives on the DISCOVERY heading). */
+  hideIcon?: boolean;
 }) {
   const badge = item.badge;
   const showBadge = typeof badge === "number" && badge > 0;
@@ -422,16 +440,17 @@ function NavItemLink({
   // onNavAction, never a route. Same visual language as a sibling nav link
   // (icon + label, hover/focus treatment) minus the active-route state, since
   // it navigates nowhere. w-full + text-left so the button fills the row like
-  // the <Link> rows do.
+  // the <Link> rows do. The transparent 2px left border reserves the active
+  // accent-bar gutter so a link becoming active never shifts the label.
   if (item.action) {
     return (
       <li>
         <button
           type="button"
           onClick={() => onNavAction?.(item.action)}
-          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-sidebar-hover hover:text-sidebar-text-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+          className="flex w-full items-center gap-3 rounded-sm border-l-2 border-transparent px-3 py-2 text-left text-sm text-text-secondary transition-colors hover:bg-surface-subtle hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
         >
-          <item.icon className="h-4 w-4 shrink-0" />
+          {!hideIcon && <item.icon className="h-4 w-4 shrink-0" />}
           <span>{item.label}</span>
         </button>
       </li>
@@ -443,23 +462,24 @@ function NavItemLink({
     <li>
       <Link
         href={item.href}
-        // Phase 51 NAV-02 — expose the active item to AT (aria-current) and add a
-        // keyboard-only focus ring (the rail had neither). The ring is WHITE with a
-        // navy ring-offset, NOT the accent token: accent teal #1B6B5A on the dark
-        // rail measures 2.8:1 / 2.3:1 / 1.63:1 against bg-sidebar / -hover / -active,
-        // all below the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor for a focus
-        // indicator (the project LOCKS WCAG-AA). White-on-navy clears it with margin
-        // (>9:1 on every rail state). aria-current mirrors MobileNav; focus-visible
-        // (never bare focus:) per UI-SPEC §Item state contract. The active bg stays
-        // slate bg-sidebar-active (an accent FILL on the navy rail fails contrast too).
+        // Phase 51 NAV-02 — expose the active item to AT (aria-current) and a
+        // keyboard-only focus ring. Light-rail (founder decision): the ring is the
+        // ACCENT token #1B6B5A, which measures 6.36:1 on bg-surface #FFFFFF —
+        // clearing the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor with margin
+        // (the old white-on-navy ring would be invisible on the light surface).
+        // Active state is visually DISTINCT from hover: hover is a plain
+        // surface-subtle fill, while active adds an accent-text label AND a 2px
+        // left inset accent bar (border-l-2 border-accent). The accent label text
+        // also clears WCAG AA (6.36:1) on the light bg. focus-visible (never bare
+        // focus:) per UI-SPEC §Item state contract.
         aria-current={active ? "page" : undefined}
-        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar ${
+        className={`flex items-center gap-3 rounded-sm border-l-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface ${
           active
-            ? "bg-sidebar-active text-sidebar-text-active"
-            : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
+            ? "border-accent bg-surface-subtle font-medium text-accent"
+            : "border-transparent text-text-secondary hover:bg-surface-subtle hover:text-text-primary"
         }`}
       >
-        <item.icon className="h-4 w-4 shrink-0" />
+        {!hideIcon && <item.icon className="h-4 w-4 shrink-0" />}
         <span>{item.label}</span>
         {showBadge && (
           <span

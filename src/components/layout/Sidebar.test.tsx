@@ -462,24 +462,21 @@ describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
     expect(active).toHaveAttribute("aria-current", "page");
   });
 
-  it("gives the nav link a WCAG-AA-contrast focus ring on the dark rail (NOT accent)", () => {
+  it("gives the nav link a WCAG-AA-contrast focus ring on the LIGHT rail (accent, not white)", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} />);
     const link = screen.getByText("My Allocation").closest("a");
     expect(link).not.toBeNull();
     const className = link?.getAttribute("class") ?? "";
     // Keyboard-only focus affordance via focus-visible (never bare focus:). The
-    // ring MUST clear the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor against
-    // the navy rail (bg-sidebar #0F172A / -hover #1E293B / -active #334155). The
-    // accent token #1B6B5A measured 2.8:1 / 2.3:1 / 1.63:1 there — all FAIL — so
-    // the rail ring is intentionally WHITE (ring-white, >9:1 on every state) with a
-    // navy ring-offset, NOT accent. This is the dark-rail counterpart to the
-    // Breadcrumb ring, which keeps the accent token because it renders on the light
-    // page bg (6:1, passes). Pin both the focus-visible keyword AND that the rail
-    // ring is white-not-accent so a future "consistency" refactor can't silently
-    // reintroduce the contrast regression.
+    // light-rail redesign (founder decision) swapped the navy surface for
+    // bg-surface #FFFFFF, so the focus ring MUST now be the ACCENT token #1B6B5A
+    // — 6.36:1 on white, clearing the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast
+    // floor with margin. The prior white-on-navy ring would be invisible on the
+    // light surface. Pin the focus-visible keyword AND that the ring is
+    // accent-not-white so a future refactor can't reintroduce an invisible ring.
     expect(className).toMatch(/focus-visible:/);
-    expect(className).toMatch(/ring-white/);
-    expect(className).not.toMatch(/ring-accent/);
+    expect(className).toMatch(/ring-accent/);
+    expect(className).not.toMatch(/ring-white/);
   });
 });
 
