@@ -114,6 +114,16 @@ vi.mock("./StrategyBrowseDrawer", () => ({
   ),
 }));
 
+// Phase 110 CONTRIB-05 — the contribution overlay is mounted by the composer as
+// a sibling of the browse drawer. Mocked to an inert spy so the composer's
+// onAddOwn/onSuccess wiring is the unit-under-test.
+vi.mock("./ContributionWizardOverlay", () => ({
+  ContributionWizardOverlay: vi.fn(
+    ({ isOpen }: { isOpen: boolean }) =>
+      isOpen ? <div data-testid="contribution-overlay-mock" /> : null,
+  ),
+}));
+
 vi.mock("./BridgeDrawer", () => ({
   BridgeDrawer: vi.fn(
     ({ isOpen }: { isOpen: boolean }) =>
@@ -295,6 +305,7 @@ import {
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
+import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 // Phase 37 / DSRC-03 — the REAL per-key builder + REAL engine for the independent
 // two→one recompute oracle. The adapter is used REAL (importOriginal), and
@@ -579,6 +590,63 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toBeNull();
     expect(screen.queryByText(/Strategy Sandbox/i)).toBeNull();
     fireEvent.click(browseBtn);
+    expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // T_C_CONTRIB — Phase 110 CONTRIB-05 Browse → "Add your own" → overlay chain
+  // -------------------------------------------------------------------------
+  it("T_C_CONTRIB onAddOwn closes Browse + opens the contribution overlay; overlay onSuccess reopens Browse (CONTRIB-05)", () => {
+    let capturedOnAddOwn: (() => void) | null = null;
+    let capturedOnSuccess: ((id: string) => void) | null = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAddOwn?: () => void;
+    }) => {
+      capturedOnAddOwn = props.onAddOwn ?? null;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    vi.mocked(ContributionWizardOverlay).mockImplementation(((props: {
+      isOpen: boolean;
+      onSuccess?: (id: string) => void;
+    }) => {
+      capturedOnSuccess = props.onSuccess ?? null;
+      return props.isOpen ? (
+        <div data-testid="contribution-overlay-mock" />
+      ) : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+
+    const payload = makePayload({ holdingsSummary: [] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Open Browse from the empty-state CTA.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Browse strategies/i }),
+    );
+    expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
+    expect(screen.queryByTestId("contribution-overlay-mock")).toBeNull();
+
+    // The drawer's "Add your own" CTA (onAddOwn) closes Browse + opens overlay.
+    expect(capturedOnAddOwn).not.toBeNull();
+    act(() => capturedOnAddOwn!());
+    expect(screen.queryByTestId("browse-drawer-mock")).toBeNull();
+    expect(
+      screen.getByTestId("contribution-overlay-mock"),
+    ).toBeInTheDocument();
+
+    // A successful contribution closes the overlay and REOPENS Browse (which
+    // refetches per its once-per-open contract → the new private row appears).
+    expect(capturedOnSuccess).not.toBeNull();
+    act(() => capturedOnSuccess!("new-private-id"));
+    expect(screen.queryByTestId("contribution-overlay-mock")).toBeNull();
     expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
   });
 
