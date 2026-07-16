@@ -35,6 +35,13 @@ const ROOT = process.cwd();
 const REPO_WIDE_ERROR_RULES = [
   "no-raw-localstorage",
   "no-raw-published-predicate",
+  // CONTRIB-04 (Phase 110) — bans a raw owner-OR predicate
+  // (`.or('...user_id...')`) outside src/lib/visibility.ts's withPublishedOrOwner,
+  // so a future admin-client swap can't silently drop the RLS backstop and leak
+  // unpublished rows. Registered + wired to "error" repo-wide by plan 110-02
+  // (eslint.config.mjs); visibility.ts is exempt inside the rule's AST logic (the
+  // config level there is still "error", so the repo-wide probe below holds).
+  "no-owner-or-on-admin-client",
   "no-raw-retry-after-parse",
   // B9 — bans Zod .passthrough()/.catchall() at boundary parsers.
   "no-passthrough-on-ipc",
