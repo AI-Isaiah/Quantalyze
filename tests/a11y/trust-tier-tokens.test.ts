@@ -44,6 +44,24 @@ describe("DESIGN.md ↔ TRUST_TIER_TOKENS consistency (DESIGN-01)", () => {
     },
   );
 
+  // Phase 111 / CONSTIT-02 — the 4th provenance variant `composite`.
+  // ProvenanceTier = TrustTier | "composite" is the badge-layer union; the DB
+  // TrustTier union stays 3-valued (WatchlistPanel TIER_ORDER depends on it).
+  describe("composite provenance variant (CONSTIT-02)", () => {
+    it("exposes a composite token slot labelled 'Composite'", () => {
+      expect(TRUST_TIER_TOKENS.composite).toBeDefined();
+      expect(TRUST_TIER_TOKENS.composite.label).toBe("Composite");
+    });
+
+    it("composite token hexes + label appear verbatim in DESIGN.md (drift gate)", () => {
+      const { fill, text, border, label } = TRUST_TIER_TOKENS.composite;
+      for (const hex of [fill, text, border]) {
+        expect(designMd.includes(hex)).toBe(true);
+      }
+      expect(designMd.includes(label)).toBe(true);
+    });
+  });
+
   it("new Trust-Tier Badges sub-section uses canonical #B45309 with zero #D97706 drift", () => {
     // The retired #D97706 hex legitimately appears in pre-existing historical
     // content (the `--color-warning` token row that records "Was #D97706 …
