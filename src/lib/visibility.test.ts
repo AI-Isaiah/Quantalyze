@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { withPublishedOnly } from "./visibility";
+import { withPublishedOnly, withPublishedOrOwner } from "./visibility";
 
 describe("withPublishedOnly", () => {
   it("appends .eq('status','published') and returns the SAME builder (chain preserved)", () => {
@@ -33,6 +33,54 @@ describe("withPublishedOnly", () => {
     // The helper must not order/limit/select on the caller's behalf.
     expect(builder.order).not.toHaveBeenCalled();
     expect(builder.limit).not.toHaveBeenCalled();
+  });
+});
+
+describe("withPublishedOrOwner", () => {
+  it("appends .or('status.eq.published,user_id.eq.<uid>') and returns the SAME builder (chain preserved)", () => {
+    // Fake PostgrestFilterBuilder: .or returns the builder (mirrors the real
+    // `this`-polymorphic return) so downstream .order()/.limit()/.single()
+    // keep chaining off the helper's result.
+    const builder: { or: ReturnType<typeof vi.fn> } = {
+      or: vi.fn(() => builder),
+    };
+    const result = withPublishedOrOwner(builder, "uid-123");
+
+    expect(builder.or).toHaveBeenCalledTimes(1);
+    // The predicate mirrors the strategies_read RLS shape exactly:
+    // published OR the caller's own rows. The id is interpolated verbatim.
+    expect(builder.or).toHaveBeenCalledWith(
+      "status.eq.published,user_id.eq.uid-123",
+    );
+    expect(result).toBe(builder);
+  });
+
+  it("only appends the predicate — it does not order/limit on the caller's behalf", () => {
+    const builder: {
+      or: ReturnType<typeof vi.fn>;
+      order: ReturnType<typeof vi.fn>;
+      limit: ReturnType<typeof vi.fn>;
+    } = {
+      or: vi.fn(() => builder),
+      order: vi.fn(() => builder),
+      limit: vi.fn(() => builder),
+    };
+    withPublishedOrOwner(builder, "uid-123");
+    expect(builder.order).not.toHaveBeenCalled();
+    expect(builder.limit).not.toHaveBeenCalled();
+  });
+
+  it("embeds EXACTLY the id it is given — no other id can enter the predicate", () => {
+    // Wiring guarantee for the browse route: the ONLY id in the filter is the
+    // argument. A caller that fed a client-supplied param instead of the
+    // session id would change this string — which is what the route test pins.
+    const builder: { or: ReturnType<typeof vi.fn> } = {
+      or: vi.fn(() => builder),
+    };
+    withPublishedOrOwner(builder, "session-owner");
+    const filter = builder.or.mock.calls[0][0] as string;
+    expect(filter).toBe("status.eq.published,user_id.eq.session-owner");
+    expect(filter).not.toContain("attacker");
   });
 });
 
