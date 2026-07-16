@@ -2,33 +2,13 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260501055202_strategy_verifications.sql
--- ==========================================================================
--- STEP 5: finalize_csv_strategy RPC (sibling per D-02; SECURITY DEFINER)
--- ==========================================================================
--- RPC param resolution note (Phase 15 WARNING fix from checker iteration 1):
--- No overload exists for finalize_csv_strategy; PostgREST resolves by named
--- argument matching, NOT by positional argument order. The order of
--- (p_user_id, p_wizard_session_id, p_fmt, p_strategy_name) below is
--- documentation only — at call time, the Next.js route in plan 15-05
--- passes a JSON object whose keys match these parameter names, and
--- PostgREST routes by key. Reordering the SQL signature would NOT break
--- existing callers; renaming any parameter WOULD. Do not rename.
---
--- Cross-AI revision 2026-04-30: parameter is `p_strategy_name`. The user
--- types the name on the Upload step; the route forwards it; this RPC
--- writes it to strategies.name.
---
--- Pattern: copy the structure of create_wizard_strategy at
--- supabase/migrations/20260411103316_wizard_source_column.sql:118-186 (atomic two-table
--- insert with SECURITY DEFINER + manual auth.uid() guard) but adapt for the
--- CSV path: no api_keys insert; instead an immediate strategy_verifications
--- insert at status='validated', trust_tier='csv_uploaded'.
-CREATE OR REPLACE FUNCTION public.finalize_csv_strategy(
+-- source migration: 20260716130500_finalize_terminal_status_param.sql
+CREATE FUNCTION public.finalize_csv_strategy(
   p_user_id            UUID,
   p_wizard_session_id  UUID,
   p_fmt                TEXT,
-  p_strategy_name      TEXT
+  p_strategy_name      TEXT,
+  p_terminal_status    TEXT DEFAULT 'pending_review'
 )
 RETURNS UUID
 LANGUAGE plpgsql
@@ -39,6 +19,15 @@ DECLARE
   v_auth_uid     UUID := auth.uid();
   v_strategy_id  UUID;
 BEGIN
+  -- CONTRIB-02 guard (T-110-02): restrict the terminal status; 'published' is
+  -- unreachable from any finalize caller. FIRST statement so it RAISEs before
+  -- the strategies INSERT.
+  IF p_terminal_status NOT IN ('pending_review', 'private') THEN
+    RAISE EXCEPTION 'finalize_csv_strategy: p_terminal_status % is not allowed (expected pending_review or private)',
+      p_terminal_status
+      USING ERRCODE = '22023';
+  END IF;
+
   -- Caller-identity guard (mirrors create_wizard_strategy:140-153):
   -- the route layer calls with the authenticated user's id; we assert
   -- it matches the JWT so a SECURITY DEFINER RPC can't be abused via
@@ -77,11 +66,12 @@ BEGIN
   END IF;
 
   -- Insert the strategies row. source='csv' marks the row's ingestion
-  -- path; status='pending_review' matches finalize_wizard_strategy's
-  -- post-promotion state so downstream queries (strategy_grid,
-  -- /strategies/[id]) treat CSV strategies the same as API strategies
-  -- once they reach this terminal state. supported_exchanges is empty
-  -- because CSV strategies have no broker linkage. strategy_types /
+  -- path; status=p_terminal_status ('pending_review' for the manager flow,
+  -- 'private' for the CONTRIB-02 contribution flow) matches
+  -- finalize_wizard_strategy's post-promotion state so downstream queries
+  -- (strategy_grid, /strategies/[id]) treat CSV strategies the same as API
+  -- strategies once they reach this terminal state. supported_exchanges is
+  -- empty because CSV strategies have no broker linkage. strategy_types /
   -- subtypes / markets default empty per Phase 15 v0; Phase 17 metadata
   -- step (deferred) will populate.
   INSERT INTO strategies (
@@ -89,12 +79,15 @@ BEGIN
     strategy_types, subtypes, markets, supported_exchanges
   )
   VALUES (
-    p_user_id, p_strategy_name, 'pending_review', 'csv',
+    p_user_id, p_strategy_name, p_terminal_status, 'csv',
     '{}', '{}', '{}', '{}'::text[]
   )
   RETURNING id INTO v_strategy_id;
 
   -- Insert the verification row at status='validated', trust_tier='csv_uploaded'.
+  -- CONTRIB-02 note: KEPT on both terminal statuses — trust_tier is an
+  -- owner-facing data-quality label, not a publish signal (the admin queue keys
+  -- on strategies.status='pending_review').
   -- Phase 16 / OBSERV-06 will populate correlation_id; we leave NULL.
   -- FK ordering note: PostgreSQL allows the strategy_verifications.strategy_id
   -- FK to reference the just-inserted strategy because both inserts run in
