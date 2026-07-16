@@ -11,6 +11,14 @@ export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
   | "KEY_HAS_TRADING_PERMS"
   | "KEY_HAS_WITHDRAW_PERMS"
+  // Phase 110.1 / DOGFOOD-3 FIX 3: honest reasons that do not assert an
+  // unobserved scope. KEY_NOT_READ_ONLY = a bare read_only:false with no
+  // observed permission scopes (the validator could not confirm read-only,
+  // but never reported trade/withdraw). KEY_PROBE_FAILED = the exchange
+  // permission probe fail-closed transiently (retryable upstream blip), not a
+  // 500 "something went wrong".
+  | "KEY_NOT_READ_ONLY"
+  | "KEY_PROBE_FAILED"
   | "KEY_INVALID_SIGNATURE"
   | "KEY_INVALID_FORMAT"
   | "KEY_IP_ALLOWLIST"
@@ -143,6 +151,31 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#readonly-key",
     actions: ["try_another_key", "request_call"],
+  },
+
+  KEY_NOT_READ_ONLY: {
+    title: "We could not verify this key as read-only.",
+    cause:
+      "The exchange did not confirm this key is read-only, and it did not report a specific trading or withdrawal scope either. We accept read-only keys only, so we cannot use it — but we are not claiming it has trade permissions we did not observe.",
+    fix: [
+      "Open your exchange API Management page and confirm this key has only Read enabled.",
+      "If you are unsure, create a fresh read-only key from scratch.",
+      "Paste the key here again.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
+  KEY_PROBE_FAILED: {
+    title: "We could not check this key's permissions just now.",
+    cause:
+      "The permission check against the exchange did not complete — a transient upstream issue, not a problem with your key. We fail closed when we cannot verify, so nothing was saved.",
+    fix: [
+      "Try again in a moment.",
+      "If it keeps failing, switch to a different exchange or contact support.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
   },
 
   KEY_INVALID_SIGNATURE: {

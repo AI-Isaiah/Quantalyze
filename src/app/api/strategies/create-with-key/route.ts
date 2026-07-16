@@ -176,10 +176,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
 
     if (!validation.read_only) {
-      const perms = validation.permissions?.join(",").toLowerCase() ?? "";
-      const code = perms.includes("withdraw")
-        ? "KEY_HAS_WITHDRAW_PERMS"
-        : "KEY_HAS_TRADING_PERMS";
+      // FIX 3 (Phase 110.1 / DOGFOOD-3): the Python /api/validate-key route
+      // returns only { valid, read_only }; `permissions` is optional in the
+      // schema and is NOT populated by that route. So the pre-fix code, which
+      // always fell through to KEY_HAS_TRADING_PERMS on a bare read_only:false,
+      // asserted an UNOBSERVED trade scope ("This key has trading permissions
+      // enabled"). Only claim a specific scope when the validator ACTUALLY
+      // observed one (permissions present & non-empty); otherwise report the
+      // honest "could not be verified as read-only". The key is STILL rejected
+      // either way — only the user-facing reason changes.
+      const perms = validation.permissions?.map((p) => p.toLowerCase()) ?? [];
+      const code =
+        perms.length === 0
+          ? "KEY_NOT_READ_ONLY"
+          : perms.some((p) => p.includes("withdraw"))
+            ? "KEY_HAS_WITHDRAW_PERMS"
+            : "KEY_HAS_TRADING_PERMS";
       return NextResponse.json(
         // H-0305 consistency: ConnectKeyStep reads `code` only (maps it to copy
         // client-side), so omit `error` — all failure bodies are uniform { code }.
@@ -364,6 +376,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // Network timeout reaching analytics-service — upstream unavailable, 502.
       code = "KEY_NETWORK_TIMEOUT";
       status = 502;
+    } else if (
+      // FIX 3 facet b (Phase 110.1 / DOGFOOD-3): the Python probe fail-closed
+      // ("Could not verify the key's permission scopes…") is a TRANSIENT
+      // upstream blip, not a client fault or a 500 "something went wrong, team
+      // notified". Map it to a retryable 5xx with a retry-flavored code
+      // (mirrors the route's H-0310 5xx-for-upstream convention) so the wizard
+      // offers a clear-and-retry path instead of the terminal UNKNOWN copy.
+      lower.includes("could not verify") ||
+      lower.includes("permission scope") ||
+      lower.includes("probe")
+    ) {
+      code = "KEY_PROBE_FAILED";
+      status = 503;
     } else if (lower.includes("trading") || lower.includes("withdraw")) {
       // Should have been caught by the read_only check above; defensive 400.
       code = "KEY_HAS_TRADING_PERMS";
