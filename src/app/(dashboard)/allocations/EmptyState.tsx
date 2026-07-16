@@ -37,8 +37,11 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 
 interface EmptyStateProps {
   hasSyncing: boolean;
-  // DOGFOOD-1: true when the allocator has at least one active exchange key.
-  // Derived caller-side from activeVenues.length > 0 (no new query/payload).
+  // DOGFOOD-1 (Phase 110.1): true when the allocator has at least one
+  // genuinely connected key — derived server-side via
+  // isPerKeyDailiesEligibleKey (is_active && !revoked && !disconnected) and
+  // threaded through MyAllocationDashboardPayload.hasConnectedKeys. NOT
+  // activeVenues.length, which counts soft-disconnected / revoked keys.
   hasConnectedKeys: boolean;
 }
 
@@ -58,8 +61,11 @@ export function EmptyState({ hasSyncing, hasConnectedKeys }: EmptyStateProps) {
           No positions to analyze yet.
         </h2>
         <p className="text-sm text-text-secondary max-w-md mx-auto mb-6">
-          Your exchange is connected — no open positions have synced yet. Either
-          none are open, or the next position sync hasn&apos;t run.
+          {/* DOGFOOD-1 (Phase 110.1): count-neutral copy — the repro allocator
+              has 5 connected venues, so "Your exchange is connected" (singular)
+              read wrong. This phrasing works for one key or many. */}
+          You&apos;re connected — no open positions have synced yet. Either none
+          are open, or the next position sync hasn&apos;t run.
         </p>
         <Link
           href="/profile?tab=exchanges"
