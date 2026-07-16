@@ -2,6 +2,7 @@ import Link from "next/link";
 import { unstable_noStore as noStore } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -41,6 +42,9 @@ export default async function RecommendationsPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login?redirect=/recommendations");
+  // Phase 109 ROLE-04 — allocator-owned surface. OUTSIDE the attestation
+  // try/catch below: the wrong-role redirect() throws NEXT_REDIRECT.
+  await requireRolePage(supabase, user, "allocator");
 
   // Fail-closed attestation gate: any error or missing row → render the gate.
   let attestedAt: string | null = null;

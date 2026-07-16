@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
 
 // Pin to dynamic rendering. The compliance gate must run on every request —
@@ -36,6 +37,12 @@ export default async function DiscoveryLayout({
   if (!user) {
     redirect("/login?redirect=/discovery/crypto-sma");
   }
+
+  // Phase 109 ROLE-04 — /discovery/* is the allocator buy-side surface. This
+  // segment layout gates the whole subtree. OUTSIDE the attestation try/catch
+  // below: the wrong-role redirect() throws NEXT_REDIRECT (redirect.md) and a
+  // wrapping catch would swallow it (fail-open).
+  await requireRolePage(supabase, user, "allocator");
 
   let attestedAt: string | null = null;
   try {

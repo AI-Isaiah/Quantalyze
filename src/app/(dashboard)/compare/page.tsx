@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { withPublishedOnly } from "@/lib/visibility";
 import { EMPTY_ANALYTICS } from "@/lib/queries";
 import { redirect } from "next/navigation";
@@ -28,6 +29,9 @@ export default async function ComparePage({
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+  // Phase 109 ROLE-04 — allocator-owned surface. OUTSIDE any try/catch:
+  // the wrong-role redirect() throws NEXT_REDIRECT.
+  await requireRolePage(supabase, user, "allocator");
 
   const params = await searchParams;
   const ids = params.ids?.split(",").filter(Boolean).slice(0, 4) ?? [];
