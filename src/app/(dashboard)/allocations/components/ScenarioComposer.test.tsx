@@ -1191,6 +1191,68 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     });
   });
 
+  it("T_C_PROVENANCE the widened returns body (trust_tier + is_composite, CONSTIT-02) is tolerated: the asset_class + series flow still resolves (settle-parse widening is non-breaking)", async () => {
+    // Phase 111 / CONSTIT-02 widened the lazy-returns settle to also parse
+    // trust_tier + is_composite. This guards that adding those fields to the 200
+    // body does NOT regress the existing series + asset_class settle (a revert of
+    // the widened parse, or a throw on the new fields, would fail here). Provenance
+    // itself is presentation metadata (NOT a StrategyForBuilder / engine field,
+    // Pitfall 3), so it is not observable at the computeScenario call site — its
+    // derivation is unit-pinned in `provenance.test.ts` and its badge render lands
+    // in 111-03; this test pins the wiring tolerance at the settle seam.
+    let resolveReturns: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return new Promise((resolve) => {
+          resolveReturns = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              // The CONSTIT-02-widened body: series + asset_class + provenance.
+              json: async () => ({
+                daily_returns: LAZY_SERIES,
+                asset_class: "crypto",
+                trust_tier: "api_verified",
+                is_composite: true,
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "Provenance Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    await act(async () => {
+      resolveReturns(undefined);
+      await Promise.resolve();
+    });
+
+    // The engine leg still resolves its series AND asset_class — the two new
+    // provenance fields rode the same 200 body without disturbing the settle.
+    await waitFor(() => {
+      expect(latestAssetClassLookup()[LAZY_ID]).toBe("crypto");
+    });
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES);
+  });
+
   it("T_C_LAZY1 add a catalog strategy → lazy GET /api/strategies/<id>/returns; once resolved the adapter's returns-lookup carries the non-empty series (and was [] before resolve)", async () => {
     // A deferred fetch so we can observe the in-flight [] state, then resolve.
     let resolveReturns: (v: unknown) => void = () => {};

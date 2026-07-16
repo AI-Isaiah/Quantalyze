@@ -941,6 +941,18 @@ export function ScenarioComposer({
   const [addedAssetClassById, setAddedAssetClassById] = useState<
     Record<string, string | null>
   >({});
+  // Phase 111 / CONSTIT-02 — the lazily-fetched provenance metadata (trust_tier
+  // + is_composite) for a drawer-added, NON-book strategy, keyed by id. Same
+  // rationale as addedAssetClassById: the book-only SSR payload carries these on
+  // book strategies, but a drawer-added strategy's provenance can only come from
+  // the widened /api/strategies/[id]/returns response. Written by fetchAddedReturns
+  // beside addedAssetClassById and purged identically in handleRemoveAdded (a
+  // re-add starts clean). Fed into addedStrategyMetadataLookup so the wave-3
+  // per-row provenance badge (via deriveProvenance) reaches every constituent.
+  // Presentation-only — never threaded into the frozen engine (Pitfall 3).
+  const [addedProvenanceById, setAddedProvenanceById] = useState<
+    Record<string, { trust_tier: string | null; is_composite: boolean }>
+  >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
   // (warm-up-gated), NEVER a fabricated flat/zero series (Pitfall 4).
@@ -1148,9 +1160,15 @@ export function ScenarioComposer({
     // reuses it (idempotent) rather than re-fetching. BLEND-01: also records the
     // widened response's asset_class (null when absent — tolerates a stale
     // deploy that predates the widening) so the blend basis can read it.
-    const settle = (series: DailyPoint[], assetClass: string | null) => {
+    const settle = (
+      series: DailyPoint[],
+      assetClass: string | null,
+      provenance: { trust_tier: string | null; is_composite: boolean },
+    ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
+      // CONSTIT-02 — record the drawer-added leg's provenance beside asset_class.
+      setAddedProvenanceById((prev) => ({ ...prev, [id]: provenance }));
       clearInflight();
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
@@ -1167,22 +1185,37 @@ export function ScenarioComposer({
         }
         return r.json();
       })
-      .then((d: { daily_returns?: unknown; asset_class?: unknown }) => {
-        // A 200 with a non-array body is a malformed/failed response, NOT a
-        // genuine empty series — treat it as a retryable failure (WR-01).
-        if (!Array.isArray(d?.daily_returns)) {
-          throw new Error("returns route body missing a daily_returns array");
-        }
-        // BLEND-01 — accept asset_class only when it is a string; anything else
-        // (absent from a stale deploy, null, or malformed) collapses to null →
-        // the leg keeps the conservative 252 blend default.
-        const assetClass =
-          typeof d.asset_class === "string" ? d.asset_class : null;
-        // A genuine 200 with a real array (including an empty one) settles. An
-        // empty array here means the strategy legitimately has no published
-        // returns yet — distinct from a failure, so it is cached, not retried.
-        settle(d.daily_returns as DailyPoint[], assetClass);
-      })
+      .then(
+        (d: {
+          daily_returns?: unknown;
+          asset_class?: unknown;
+          trust_tier?: unknown;
+          is_composite?: unknown;
+        }) => {
+          // A 200 with a non-array body is a malformed/failed response, NOT a
+          // genuine empty series — treat it as a retryable failure (WR-01).
+          if (!Array.isArray(d?.daily_returns)) {
+            throw new Error("returns route body missing a daily_returns array");
+          }
+          // BLEND-01 — accept asset_class only when it is a string; anything else
+          // (absent from a stale deploy, null, or malformed) collapses to null →
+          // the leg keeps the conservative 252 blend default.
+          const assetClass =
+            typeof d.asset_class === "string" ? d.asset_class : null;
+          // CONSTIT-02 — accept trust_tier only when a string, is_composite only
+          // when a strict boolean true. A stale deploy predating the widening
+          // omits both → null / false provenance (degrade to "no badge", never a
+          // throw — mirrors the asset_class tolerance).
+          const provenance = {
+            trust_tier: typeof d.trust_tier === "string" ? d.trust_tier : null,
+            is_composite: d.is_composite === true,
+          };
+          // A genuine 200 with a real array (including an empty one) settles. An
+          // empty array here means the strategy legitimately has no published
+          // returns yet — distinct from a failure, so it is cached, not retried.
+          settle(d.daily_returns as DailyPoint[], assetClass, provenance);
+        },
+      )
       .catch((err: unknown) => {
         // An abort (remove / reset / unmount) is benign — the canceller already
         // owns the cleanup. Just drop the (possibly stale) abort ref and return.
@@ -1922,6 +1955,13 @@ export function ScenarioComposer({
         const { [id]: _dropClass, ...rest } = prev;
         return rest;
       });
+      // CONSTIT-02 — purge the fetched provenance identically (settle/purge
+      // symmetry with asset_class; a remove + re-add starts clean).
+      setAddedProvenanceById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropProv, ...rest } = prev;
+        return rest;
+      });
       // LEV-02 (round-2 M-2) — purge the removed leg's leverage overlay too, or
       // it strands: leverageByRef is folded into the draft at Save
       // (setLeverageOverrides), so a removed leg's multiplier would persist into a
@@ -1945,7 +1985,16 @@ export function ScenarioComposer({
       Pick<
         StrategyForBuilder,
         "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
-      >
+      > & {
+        // CONSTIT-02 — presentation-only provenance metadata carried BESIDE the
+        // engine-facing Pick fields. Deliberately NOT part of StrategyForBuilder
+        // (Pitfall 3): the adapter reads only the Pick fields, so these ride the
+        // lookup for the wave-3 badge (via deriveProvenance) without leaking into
+        // the frozen engine. The cast to the bare Pick at the adapter call sites
+        // erases them from the engine-input type.
+        trust_tier: string | null;
+        is_composite: boolean;
+      }
     >
   >(() => {
     const map: Record<
@@ -1953,7 +2002,7 @@ export function ScenarioComposer({
       Pick<
         StrategyForBuilder,
         "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
-      >
+      > & { trust_tier: string | null; is_composite: boolean }
     > = {};
     for (const a of scenario.draft.addedStrategies) {
       const found = strategyById.get(a.id);
@@ -1973,10 +2022,26 @@ export function ScenarioComposer({
         // else null (unknown → the conservative 252 blend default).
         asset_class:
           found?.strategy.asset_class ?? addedAssetClassById[a.id] ?? null,
+        // CONSTIT-02 — book payload provenance wins; else the drawer-added
+        // lazily-fetched value; else null / false (no badge — honest absence).
+        // Same book-wins precedence as asset_class above.
+        trust_tier:
+          found?.strategy.trust_tier ??
+          addedProvenanceById[a.id]?.trust_tier ??
+          null,
+        is_composite:
+          found?.strategy.is_composite ??
+          addedProvenanceById[a.id]?.is_composite ??
+          false,
       };
     }
     return map;
-  }, [scenario.draft.addedStrategies, strategyById, addedAssetClassById]);
+  }, [
+    scenario.draft.addedStrategies,
+    strategyById,
+    addedAssetClassById,
+    addedProvenanceById,
+  ]);
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
