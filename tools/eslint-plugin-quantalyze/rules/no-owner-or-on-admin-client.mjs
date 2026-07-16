@@ -19,6 +19,21 @@
  * `.or('status.eq.published,is_example.eq.true')`) or whose arg is a helper
  * call (`.or(spec.or_filter(userId))`) is untouched.
  *
+ * SCOPE — what this rule does NOT catch (be honest about the guarantee):
+ * because the match is purely on the `.or(...)` argument SOURCE TEXT at the
+ * call site, the one dangerous shape it cannot see is
+ * `withPublishedOrOwner(createAdminClient().from('strategies'), id)` — the
+ * `.or()` lives INSIDE the marker-exempt helper, and the call site has no raw
+ * `.or()` to test. So this lint does NOT by itself guarantee the owner-OR never
+ * runs on an admin client; it only bans the raw predicate from being
+ * hand-written outside the helper. Note RLS is NOT a backstop against an
+ * admin-client swap — service_role has BYPASSRLS, so `strategies_read` is OFF on
+ * that client. The only guard against the swap is the helper's contract that its
+ * caller passes a user-scoped `createClient()` (enforced by code review, not by
+ * this rule). RLS backstops the DIFFERENT failure — the predicate being dropped
+ * on a properly user-scoped client. Treat this rule as "keep the predicate in
+ * one place", not "the predicate can never touch a service-role client".
+ *
  * Exemptions (file-level markers, already present): the helper itself
  * (`B10 visibility:` in visibility.ts) and any single sanctioned exception
  * (`B10 sanctioned-exception:`).

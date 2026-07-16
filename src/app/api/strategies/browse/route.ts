@@ -117,10 +117,15 @@ export const GET = withAllocatorAuth(
     //      so even if the predicate were dropped no cross-tenant row leaks.
     // The owner id is `user.id` from withAllocatorAuth — session-only, NEVER a
     // request param (T-110-05/07). The admin / service-role client is
-    // intentionally NOT used here (Pitfall 4): a swap to the RLS-bypassing
-    // admin client would drop the RLS backstop, so the owner-OR predicate must
-    // never run on a service-role client — the no-owner-or-on-admin-client lint
-    // rule enforces that a raw owner-OR lives only in withPublishedOrOwner.
+    // intentionally NOT used here (Pitfall 4): service_role has BYPASSRLS, so a
+    // swap to the admin client would turn RLS OFF and the owner-OR would leak
+    // every user's private rows. What keeps the owner-OR OFF a service-role
+    // client is the `createClient()` above (a user-scoped client) — enforced by
+    // code review, NOT by the no-owner-or-on-admin-client lint (that rule only
+    // bans a RAW owner-OR outside withPublishedOrOwner and cannot see an admin
+    // client handed INTO the helper, whose `.or()` is marker-exempt). RLS is the
+    // backstop for a DIFFERENT failure — the predicate being dropped on this
+    // user-scoped client. Keep this call on the user-scoped client.
     // Audit C-0112 — co-fetch `disclosure_tier` so the response mapping
      // can suppress the real `name` for non-institutional rows. Ordering
      // still happens on `name` server-side (alphabetical browse is the
