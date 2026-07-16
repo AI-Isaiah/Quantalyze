@@ -10,7 +10,9 @@ export interface ExchangesTabContentProps {
   activePortfolio: { id: string; name: string } | null;
   // DOGFOOD-2: forwarded to AllocatorExchangeManager to gate the
   // "Active Allocation auto-synced" affirmative on real holdings presence.
-  hasHoldings: boolean;
+  // Tri-state (FIX 2): null = the holdings head-count failed → neutral
+  // subtitle, never the affirmative-negative "no open positions yet".
+  hasHoldings: boolean | null;
 }
 
 export function ExchangesTabContent({

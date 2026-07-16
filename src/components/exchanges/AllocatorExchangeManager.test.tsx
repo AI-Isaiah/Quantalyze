@@ -1428,5 +1428,43 @@ describe("AllocatorExchangeManager — DOGFOOD-2 subtitle gated on holdings", ()
       screen.queryByText(/Active Allocation auto-synced/),
     ).not.toBeInTheDocument();
   });
+
+  // FIX 2 (Phase 110.1, fail-loud): when the holdings head-count FAILS
+  // server-side, profile/page.tsx passes hasHoldings=null. The subtitle must
+  // NOT assert the affirmative-negative "no open positions yet" — a failed
+  // count cannot support a claim of a flat book. It shows a neutral
+  // "connected" subtitle instead. This FAILS against the pre-fix boolean prop
+  // where null was falsy and fell through to "no open positions yet".
+  it("Test D (regression, FIX 2): non-syncing key + hasHoldings=null (count failed) → neutral 'connected', NOT 'no open positions yet' nor the affirmative", () => {
+    render(
+      <AllocatorExchangeManager hasHoldings={null} initialKeys={[makeKey()]} />,
+    );
+
+    // Neutral subtitle: asserts nothing about the book state.
+    expect(screen.getByText(/^1 connected$/)).toBeInTheDocument();
+
+    // The affirmative-negative must be ABSENT — the failed count can't back it.
+    expect(
+      screen.queryByText(/no open positions yet/),
+    ).not.toBeInTheDocument();
+    // And the positive affirmative must also be absent (count unknown).
+    expect(
+      screen.queryByText(/Active Allocation auto-synced/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Test E (FIX 2): syncing key + hasHoldings=null → neutral 'connected' (unknown count wins over the syncing hint)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={null}
+        initialKeys={[makeKey({ sync_status: "syncing" })]}
+      />,
+    );
+
+    expect(screen.getByText(/^1 connected$/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/no open positions yet/),
+    ).not.toBeInTheDocument();
+  });
 });
 

@@ -107,7 +107,14 @@ interface Props {
   // on holdings presence. This is a page-load-time signal (server-derived in
   // profile/page.tsx); it does not need to live-update with the 5s sync poll —
   // router.refresh() re-reads it.
-  hasHoldings: boolean;
+  //
+  // DOGFOOD-2 fail-loud (Phase 110.1 FIX 2): tri-state. `true` = holdings
+  // present; `false` = confirmed zero holdings; `null` = the head-count
+  // FAILED (transient RLS/network). On `null` the subtitle must NOT assert
+  // "no open positions yet" — that affirmative-negative would falsely claim a
+  // flat book when the count simply errored. Show a neutral "connected"
+  // subtitle instead (mirror of the H-0499 no-affirmative-on-error rule).
+  hasHoldings: boolean | null;
 }
 
 // Exchange tag: 3-letter code, tier-colored. No emoji in the UI per
@@ -674,11 +681,18 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   // state instead — either the first sync is still in flight, or no positions
   // are open. anySyncing distinguishes those two cases.
   const anySyncing = activeKeys.some((k) => k.sync_status === "syncing");
-  const connectedSubtitle = hasHoldings
-    ? `${activeKeys.length} connected · Active Allocation auto-synced`
-    : anySyncing
-      ? `${activeKeys.length} connected · first sync in progress`
-      : `${activeKeys.length} connected · no open positions yet`;
+  // DOGFOOD-2 FIX 2 (fail-loud): hasHoldings === null means the holdings
+  // head-count failed server-side. Do NOT fall through to "no open positions
+  // yet" (an affirmative-negative the failed count cannot support) — show a
+  // neutral "connected" subtitle that asserts nothing about the book state.
+  const connectedSubtitle =
+    hasHoldings === true
+      ? `${activeKeys.length} connected · Active Allocation auto-synced`
+      : hasHoldings === null
+        ? `${activeKeys.length} connected`
+        : anySyncing
+          ? `${activeKeys.length} connected · first sync in progress`
+          : `${activeKeys.length} connected · no open positions yet`;
 
   return (
     <div className="mt-6 space-y-4">
