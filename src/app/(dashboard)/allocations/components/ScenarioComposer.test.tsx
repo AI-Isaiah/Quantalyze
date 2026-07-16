@@ -400,20 +400,6 @@ const HOLDING_SOL = {
   entry_price: null as number | null,
   unrealized_pnl_usd: null as number | null,
 };
-const HOLDING_BTC_OKX = {
-  symbol: "BTC",
-  venue: "okx",
-  holding_type: "spot" as const,
-  value_usd: 20_000,
-  quantity: 0.33,
-  mark_price_usd: 60_000,
-  api_key_id: "key-okx",
-  // NEW-C03-10: required-but-nullable fields
-  side: null as "long" | "short" | "flat" | null,
-  entry_price: null as number | null,
-  unrealized_pnl_usd: null as number | null,
-};
-
 const FLAGGED_BTC: FlaggedHolding = {
   venue: "binance",
   symbol: "BTC",
@@ -666,12 +652,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(screen.getByTestId("kpi-strip-mock")).toBeInTheDocument();
     expect(screen.getByTestId("equity-chart-mock")).toBeInTheDocument();
     expect(screen.getByTestId("drawdown-chart-mock")).toBeInTheDocument();
-    // Read-only-tokens model: composition list renders BTC / ETH / SOL as
-    // read-only rows (symbol text), NOT interactive toggle switches.
+    // CONSTIT-01/03: the ONE unified constituent list renders; per-coin holdings
+    // are NOT rows here (they live on the Holdings tab). The default payload has
+    // no per-key sources and no added strategies → no toggle switches.
+    expect(
+      screen.getByTestId("scenario-constituent-list"),
+    ).toBeInTheDocument();
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
-    expect(screen.getByText("BTC")).toBeInTheDocument();
-    expect(screen.getByText("ETH")).toBeInTheDocument();
-    expect(screen.getByText("SOL")).toBeInTheDocument();
     // ScenarioFooter — Commit + Reset buttons
     expect(screen.getByTestId("scenario-footer-commit")).toBeInTheDocument();
     expect(screen.getByTestId("scenario-footer-reset")).toBeInTheDocument();
@@ -827,11 +814,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C6 — Read-only-tokens model: holdings render read-only (no toggle switch);
-  // each row shows its USD value. The only switches in the list are added
-  // strategies (none here).
+  // T_C6 — CONSTIT-03: per-coin holdings are NOT constituent rows. A book seed
+  // collapses to strategy/key-level constituents; per-coin detail lives on the
+  // Holdings tab. The composer's unified list must therefore carry NO
+  // `holding:`-scoped rows (and no per-holding toggle/weight/leverage).
   // -------------------------------------------------------------------------
-  it("T_C6 Composition list renders holdings read-only (no toggle switch); each row shows its USD value", () => {
+  it("T_C6 per-coin holdings are NOT rendered as constituent rows (they live on the Holdings tab)", () => {
     const payload = makePayload();
     const { container } = render(
       <ScenarioComposer
@@ -840,36 +828,19 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    // No per-holding toggle: holdings are fixed context.
+    // No per-holding toggle: holdings are not constituents here.
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
-    // BTC's read-only row shows its USD value ($60,000 from the fixture).
-    const btcRow = container.querySelector(`[data-scope-ref="${REF_BTC}"]`);
-    expect(btcRow).not.toBeNull();
-    expect((btcRow as HTMLElement).textContent ?? "").toMatch(/\$60,000/);
-    // …and no editable weight / leverage inputs on the holding row.
-    expect(btcRow?.querySelector("input")).toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
-  // formatUsd0 non-finite branch — a sold-down / coingecko_fallback row can
-  // surface a non-finite value_usd; the read-only row must render "—", never
-  // "$NaN". (value_usd is typed number, so NaN is the runtime-only case.)
-  // -------------------------------------------------------------------------
-  it("read-only holding row renders '—' for a non-finite value_usd (not '$NaN')", () => {
-    const payload = makePayload({
-      holdingsSummary: [{ ...HOLDING_BTC, value_usd: Number.NaN }],
-    });
-    const { container } = render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    const btcRow = container.querySelector(`[data-scope-ref="${REF_BTC}"]`);
-    expect(btcRow).not.toBeNull();
-    expect((btcRow as HTMLElement).textContent ?? "").toContain("—");
-    expect((btcRow as HTMLElement).textContent ?? "").not.toMatch(/NaN/);
+    // No `holding:`-scoped constituent row survives the CONSTIT-03 collapse.
+    expect(
+      container.querySelector(`[data-scope-ref="${REF_BTC}"]`),
+    ).toBeNull();
+    expect(
+      container.querySelectorAll('[data-scope-ref^="holding:"]'),
+    ).toHaveLength(0);
+    // The unified list itself still renders (empty of rows for this payload).
+    expect(
+      screen.getByTestId("scenario-constituent-list"),
+    ).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -1993,7 +1964,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toHaveAttribute("aria-checked", "true");
     // The calm DSRC-02 note still renders (repointed to hasLiveBook, so forcing
     // blank does NOT silently drop it) — never a broken or empty book UI.
-    const fallback = screen.getByTestId("scenario-data-sources-fallback");
+    const fallback = screen.getByTestId("scenario-constituent-fallback");
     expect(fallback).toBeInTheDocument();
     expect(
       screen.getByText(/Per-source modeling needs per-key history\./i),
@@ -2045,7 +2016,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.getByRole("radio", { name: /From my book/i }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
   });
 
@@ -2064,7 +2035,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // No live book → the note (which needs hasLiveBook + eligible keys) is absent.
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
   });
 
@@ -2218,26 +2189,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C16 — Compare → for flagged-holding rows
+  // (Removed T_C16) — CONSTIT-03 deletes the per-coin holding rows from the
+  // composer's constituent list, so the per-row inline "Compare →" deep-link is
+  // gone with them. The Bridge / Compare flow survives via the Bridge inline
+  // card + BridgeDrawer ("Open Bridge"), covered by T_C8 / the Bridge suite.
   // -------------------------------------------------------------------------
-  it("T_C16 Composition row for a flagged holding renders a Compare → button routing to /compare?ids=...", () => {
-    const payload = makePayload({ flaggedHoldings: [FLAGGED_BTC] });
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    const compareBtn = screen.getByRole("button", { name: /^Compare →$/i });
-    fireEvent.click(compareBtn);
-    expect(mockPush).toHaveBeenCalled();
-    const url = String(mockPush.mock.calls[0][0]);
-    expect(url).toContain("/compare?ids=");
-    // URL encodes the colons in the scope_ref (encodeURIComponent gives %3A)
-    expect(url).toMatch(/holding(?:%3A|:)binance(?:%3A|:)BTC(?:%3A|:)spot/);
-    expect(url).toContain("uuid-candidate-1");
-  });
 
   // -------------------------------------------------------------------------
   // T_C17 — Remove × on added strategies
@@ -2604,31 +2560,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C_M5_multi_venue_tooltip (M5) — multi-venue caveat
-  //   Aliases the RESEARCH-spec'd `T03_multi_venue_correlation` test name.
+  // (Removed T_C_M5_multi_venue_tooltip) — the per-coin "Returns merged with"
+  // caveat lived on the read-only holding rows, which CONSTIT-03 removes from the
+  // composer (per-coin detail is a Holdings-tab concern). The merged-returns
+  // BEHAVIOR (same-symbol holdings fold into one per-key series) is engine-level
+  // and unaffected; only the row-level tooltip moved off this surface.
   // -------------------------------------------------------------------------
-  it("T_C_M5_multi_venue_tooltip / T03_multi_venue_correlation: multi-venue rows surface 'Returns merged with' tooltip; non-shared rows don't", () => {
-    const payload = makePayload({
-      holdingsSummary: [HOLDING_BTC, HOLDING_BTC_OKX, HOLDING_ETH],
-    });
-    const { container } = render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    // Both BTC rows render the multi-venue caveat (read-only rows keep it).
-    const tooltips = screen.getAllByText(/Returns merged with/i);
-    expect(tooltips.length).toBeGreaterThanOrEqual(2);
-    // ETH row has no shared symbol — no caveat. Located by data-scope-ref since
-    // holdings no longer render a toggle switch.
-    const ethRow = container.querySelector(`[data-scope-ref="${REF_ETH}"]`);
-    expect(ethRow).not.toBeNull();
-    expect(
-      (ethRow as HTMLElement).textContent ?? "",
-    ).not.toMatch(/Returns merged with/i);
-  });
 
   // -------------------------------------------------------------------------
   // T_C_M4_live_ssr_lifted (M4) — live baseline read from payload
@@ -4661,49 +4598,54 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   }
 
   // -------------------------------------------------------------------------
-  // DSRC-02 — gating: present in book mode + gate satisfied
+  // CONSTIT-01 — per-key sources render as uniform constituent rows in the ONE
+  // unified list (no separate "Data sources" section / group).
   // -------------------------------------------------------------------------
-  it("DSRC-02 book mode + D3 gate satisfied → Data sources control renders one row per eligible key with the group accessible name", () => {
+  it("CONSTIT-01 book mode + D3 gate satisfied → each eligible key is a constituent row in the unified list (no separate Data-sources group)", () => {
     renderPerKey(makePerKeyPayload());
-    const group = screen.getByRole("group", { name: "Data sources" });
-    expect(group).toBeInTheDocument();
-    expect(group).toHaveAttribute("data-testid", "scenario-data-sources");
-    // One switch per eligible key, each with its per-row aria-label.
-    const switches = within(group).getAllByRole("switch");
-    expect(switches).toHaveLength(2);
+    // The separate Data-sources section is GONE — no such group anywhere.
     expect(
-      screen.getByRole("switch", {
+      screen.queryByRole("group", { name: "Data sources" }),
+    ).not.toBeInTheDocument();
+    // The unified constituent list holds one per-key constituent row per key.
+    const list = screen.getByTestId("scenario-constituent-list");
+    const perKeyRows = within(list).getAllByTestId("scenario-constituent-perkey");
+    expect(perKeyRows).toHaveLength(2);
+    // One switch per eligible key, each with its per-row aria-label — now inside
+    // the unified list.
+    expect(
+      within(list).getByRole("switch", {
         name: "Include Binance — Main desk in projection",
       }),
     ).toBeInTheDocument();
     // key-B has no nickname → masked tail (last 4 of the id).
     expect(
-      screen.getByRole("switch", {
+      within(list).getByRole("switch", {
         name: "Include OKX — ••••ey-B in projection",
       }),
     ).toBeInTheDocument();
-    // No InfoBanner fallback when the control IS shown.
+    // No InfoBanner fallback when the sources ARE shown.
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
   // DSRC-02 — gating: absent in blank mode
   // -------------------------------------------------------------------------
-  it("DSRC-02 blank mode → no Data sources control, no InfoBanner, no EmptyStateCard for this control", () => {
+  it("DSRC-02 blank mode → no per-key constituent rows, no InfoBanner, no EmptyStateCard", () => {
     // No live book → blank mode is forced (entry-mode book segment absent).
     renderPerKey(
       makePerKeyPayload({ holdingsSummary: [] }),
     );
     expect(
-      screen.queryByTestId("scenario-data-sources"),
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
+    expect(
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("scenario-data-sources-empty"),
+      screen.queryByTestId("scenario-constituent-empty"),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("group", { name: "Data sources" }),
@@ -4713,14 +4655,14 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   // -------------------------------------------------------------------------
   // DSRC-02 — gating: gate NOT satisfied → control hidden, calm InfoBanner note
   // -------------------------------------------------------------------------
-  it("DSRC-02 book mode + D3 gate NOT satisfied → control hidden, InfoBanner fallback note (NOT role=alert)", () => {
+  it("DSRC-02 book mode + D3 gate NOT satisfied → no per-key rows, InfoBanner fallback note (NOT role=alert)", () => {
     renderPerKey(
       makePerKeyPayload({ perKeyDailiesGateSatisfied: false }),
     );
     expect(
-      screen.queryByTestId("scenario-data-sources"),
-    ).not.toBeInTheDocument();
-    const fallback = screen.getByTestId("scenario-data-sources-fallback");
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
+    const fallback = screen.getByTestId("scenario-constituent-fallback");
     expect(fallback).toBeInTheDocument();
     expect(
       screen.getByText(/Per-source modeling needs per-key history\./i),
@@ -4866,15 +4808,16 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       }),
     );
 
-    // Honest empty card renders with the exact copy.
-    const emptyCard = screen.getByTestId("scenario-data-sources-empty");
+    // Honest empty card renders with the exact copy (re-homed onto the unified
+    // constituent model).
+    const emptyCard = screen.getByTestId("scenario-constituent-empty");
     expect(emptyCard).toBeInTheDocument();
     expect(
-      screen.getByText("Select at least one data source"),
+      screen.getByText("Select at least one source"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Every data source is excluded — there's nothing to project\./i,
+        /Every source is excluded — there's nothing to project\./i,
       ),
     ).toBeInTheDocument();
     // Honest absence — not an error.
@@ -4895,7 +4838,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       }),
     );
     expect(
-      screen.queryByTestId("scenario-data-sources-empty"),
+      screen.queryByTestId("scenario-constituent-empty"),
     ).not.toBeInTheDocument();
     const restored = lastKpiScenarioMetrics();
     const aOnly = independentRecompute(["key-A"]);
@@ -4944,11 +4887,14 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       }),
     );
 
-    // Only the two ELIGIBLE keys get a toggle row — no row for key-C (Bybit).
-    const group = screen.getByRole("group", { name: "Data sources" });
-    expect(within(group).getAllByRole("switch")).toHaveLength(2);
+    // Only the two ELIGIBLE keys get a constituent row — no row for key-C
+    // (Bybit). Rows now live in the unified list, not a separate group.
+    const list = screen.getByTestId("scenario-constituent-list");
     expect(
-      within(group).queryByRole("switch", { name: /Bybit/i }),
+      within(list).getAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(2);
+    expect(
+      within(list).queryByRole("switch", { name: /Bybit/i }),
     ).toBeNull();
 
     // Exclude BOTH toggleable (eligible) sources.
@@ -4969,7 +4915,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     // residue) would keep driving a non-empty projection here — a silent honesty
     // violation. This assertion fails loudly if that filter is ever removed.
     expect(
-      screen.getByTestId("scenario-data-sources-empty"),
+      screen.getByTestId("scenario-constituent-empty"),
     ).toBeInTheDocument();
     const allOff = lastKpiScenarioMetrics();
     expect(allOff?.sharpe).toBeNull();
@@ -5051,16 +4997,17 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
-  // DSRC-02 (a11y) — per-row aria-label + aria-checked state + group name
+  // DSRC-02 (a11y) — per-row aria-label + aria-checked state, now on unified-list
+  // constituent rows (no separate group).
   // -------------------------------------------------------------------------
-  it("DSRC-02 a11y each toggle carries aria-label + aria-checked, the group is named, and excluded flips aria-checked", () => {
+  it("DSRC-02 a11y each per-key toggle carries aria-label + aria-checked in the unified list, and excluded flips aria-checked", () => {
     renderPerKey(makePerKeyPayload());
 
-    const group = screen.getByRole("group", { name: "Data sources" });
-    const switchA = within(group).getByRole("switch", {
+    const list = screen.getByTestId("scenario-constituent-list");
+    const switchA = within(list).getByRole("switch", {
       name: "Include Binance — Main desk in projection",
     });
-    const switchB = within(group).getByRole("switch", {
+    const switchB = within(list).getByRole("switch", {
       name: "Include OKX — ••••ey-B in projection",
     });
     // Default included.
@@ -5887,7 +5834,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     act(() => {
       fireEvent.click(
         document.querySelector(
-          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+          `[data-scope-ref="${REF_WIN_B}"] button[role="switch"]`,
         ) as HTMLElement,
       );
     });
@@ -6446,7 +6393,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     act(() => {
       fireEvent.click(
         document.querySelector(
-          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+          `[data-scope-ref="${REF_WIN_B}"] button[role="switch"]`,
         ) as HTMLElement,
       );
     });
@@ -6678,7 +6625,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     act(() => {
       fireEvent.click(
         document.querySelector(
-          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+          `[data-scope-ref="${REF_WIN_B}"] button[role="switch"]`,
         ) as HTMLElement,
       );
     });
@@ -7635,10 +7582,11 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
       target: { value: "0.5" },
     });
 
-    // Exclude EVERY data source (both keys).
-    const group = screen.getByRole("group", { name: "Data sources" });
-    for (const sw of within(group).getAllByRole("switch")) {
-      fireEvent.click(sw);
+    // Exclude EVERY per-key source (both keys) — scope to the per-key rows so we
+    // don't also toggle the added strategy's switch, which shares the list.
+    const list = screen.getByTestId("scenario-constituent-list");
+    for (const row of within(list).getAllByTestId("scenario-constituent-perkey")) {
+      fireEvent.click(within(row).getByRole("switch"));
     }
 
     // The engine keeps a live added-only projection…
@@ -7651,7 +7599,7 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
     });
     // …so the DSRC-03 honest-empty card must NOT render above it.
     expect(
-      screen.queryByTestId("scenario-data-sources-empty"),
+      screen.queryByTestId("scenario-constituent-empty"),
     ).not.toBeInTheDocument();
   });
 
@@ -8058,13 +8006,13 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     expect(savedDraft(fetchMock).memberKeyIds).toEqual(["key-A", "key-B"]);
   });
 
-  it("F-1 (b): opening a saved BOOK draft in a BLANK session syncs the engine basis to per-key (Data sources control + book segment)", () => {
+  it("F-1 (b): opening a saved BOOK draft in a BLANK session syncs the engine basis to per-key (per-key constituent rows + book segment)", () => {
     renderM4(m4Payload());
     fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
-    // Pre-fix: session stays blank → added-only engine → NO Data sources control.
+    // Pre-fix: session stays blank → added-only engine → NO per-key rows.
     expect(
-      screen.queryByTestId("scenario-data-sources"),
-    ).not.toBeInTheDocument();
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
     const savedBook = {
       ...defaultDraftFromHoldings(M4_HOLDINGS),
       memberKeyIds: ["key-A", "key-B"],
@@ -8073,9 +8021,11 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
       registeredOpen!({ id: "book-row", name: "My book", draft: savedBook });
     });
     // Post-fix: the open syncs the session to book → the per-key engine basis
-    // (usePerKeySources), the SAME basis compare shows. The per-key "Data
-    // sources" control now renders and the "From my book" segment is selected.
-    expect(screen.getByTestId("scenario-data-sources")).toBeInTheDocument();
+    // (usePerKeySources), the SAME basis compare shows. The per-key constituent
+    // rows now render in the unified list and the "From my book" segment selects.
+    expect(
+      screen.getAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(2);
     expect(
       screen.getByRole("radio", { name: /From my book/i }),
     ).toHaveAttribute("aria-checked", "true");

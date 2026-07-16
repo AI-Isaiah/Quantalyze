@@ -65,7 +65,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
   buildDateMapCache,
   computeScenario,
@@ -138,10 +137,7 @@ import {
   buildPerKeyStrategyForBuilderSet,
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
-import {
-  buildHoldingRef,
-  type FlaggedHolding,
-} from "../lib/holding-outcome-adapter";
+import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import { KpiStrip } from "./KpiStrip";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
@@ -156,6 +152,9 @@ import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
+import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
+import { deriveProvenance } from "../lib/provenance";
 import { CoverageTimeline } from "./CoverageTimeline";
 import { DefaultChangeNote } from "./DefaultChangeNote";
 import { ProvenanceNote } from "./ProvenanceNote";
@@ -403,19 +402,6 @@ function liveBaselineToComputedMetrics(
     effective_start: eq[0]?.date ?? null,
     effective_end: eq[eq.length - 1]?.date ?? null,
   };
-}
-
-/** Read-only-tokens model: live holdings display their USD value (no editable
- *  weight). Whole-dollar USD; a non-finite value (sold-down / coingecko_fallback
- *  rows can surface null) renders an em dash rather than "$NaN". */
-function formatUsd0(n: number): string {
-  return Number.isFinite(n)
-    ? n.toLocaleString("en-US", {
-        style: "currency",
-        currency: "USD",
-        maximumFractionDigits: 0,
-      })
-    : "—";
 }
 
 const MONTH_ABBR = [
@@ -774,7 +760,6 @@ export function ScenarioComposer({
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
-  const router = useRouter();
 
   // UNIFY-01/02 — entry mode. One composer surface, two front doors:
   //   "book"  — seed the working composition from the allocator's live holdings.
@@ -2027,6 +2012,26 @@ export function ScenarioComposer({
     addedProvenanceById,
   ]);
 
+  // CONSTIT-02 (wave-3 render) — the per-row provenance badge variant for each
+  // ADDED constituent, derived from the metadata lookup's presentation-only
+  // trust_tier / is_composite via the pure `deriveProvenance` helper (composite >
+  // valid tier > null). Null = honest absence (no badge). Per-key legs do NOT
+  // appear here — they are api_verified by construction and badged directly in
+  // the row. Presentation-only: never enters the frozen engine (Pitfall 3).
+  const addedProvenanceByRef = useMemo<Record<string, ProvenanceTier | null>>(
+    () => {
+      const out: Record<string, ProvenanceTier | null> = {};
+      for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
+        out[id] = deriveProvenance({
+          trust_tier: meta.trust_tier,
+          is_composite: meta.is_composite,
+        });
+      }
+      return out;
+    },
+    [addedStrategyMetadataLookup],
+  );
+
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
   // engine. Read-only-tokens model: live holdings are FIXED context with no
@@ -3273,26 +3278,6 @@ export function ScenarioComposer({
   }
 
   // -------------------------------------------------------------------------
-  // M5 — multi-venue caveat: identify symbols shared across multiple venues.
-  // Returns the set of symbols that appear under more than one venue in the
-  // current holdings. Composition rows whose symbol is in this set surface
-  // a tooltip explaining the merged-returns side-effect.
-  // -------------------------------------------------------------------------
-  const sharedSymbols = useMemo(() => {
-    const symbolToVenues = new Map<string, Set<string>>();
-    for (const h of holdingsSummary) {
-      const set = symbolToVenues.get(h.symbol) ?? new Set<string>();
-      set.add(h.venue);
-      symbolToVenues.set(h.symbol, set);
-    }
-    const out = new Set<string>();
-    for (const [sym, venues] of symbolToVenues.entries()) {
-      if (venues.size > 1) out.add(sym);
-    }
-    return out;
-  }, [holdingsSummary]);
-
-  // -------------------------------------------------------------------------
   // Render — M3 empty-state branch first (after ALL hooks have run, so
   // React's hooks-order invariant holds when the user adds a strategy from
   // the empty state and the composer transitions to its main body).
@@ -3605,83 +3590,16 @@ export function ScenarioComposer({
         </div>
       )}
 
-      {/* DSRC-02 — "Data sources" control. Book mode + D3 gate satisfied → one
-          include/exclude row per connected exchange api_key, each toggle
-          honestly re-blends the curve + every KPI via the frozen engine
-          (DSRC-03). Book mode + gate NOT satisfied → a calm InfoBanner honest
-          note (per-key history incomplete). Blank mode → nothing. Reuses the
-          entry-mode pill recipe + existing tokens only (no new design token).
-          The included state = accent outline (no fill); excluded = neutral
-          outline; never red (excluding a source is a normal modeling action). */}
-      {/* GUARD-01 (43-01) — the Phase-37 Data-sources include/exclude control
-          is folded into a factsheet-shaped CollapsibleSection so it reads as a
-          sibling editorial section with Diversification (:2601) and
-          Strategies-&-weights (:2962) — compose + read on one surface. The
-          per-key role="switch" rows are REPOSITIONED verbatim (same handlers,
-          no redesign); only the wrapping container changed. `storageKey` is
-          OMITTED on purpose (mirrors Diversification's deliberate omission —
-          GUARD-04 asserts no new persisted key on the composer surface). The
-          old inline header/subtitle <p> are absorbed by the CollapsibleSection
-          title + subtitle. */}
-      {showDataSources && (
-        <Card className="mt-6">
-          <CollapsibleSection
-            id="factsheet-data-sources"
-            title="Data sources"
-            subtitle="Toggle a source off to model the book without it. Resets on reload."
-            defaultOpen
-          >
-            <div
-              role="group"
-              aria-label="Data sources"
-              data-testid="scenario-data-sources"
-              className="flex flex-col"
-            >
-            {dataSourceKeys.map((k) => {
-              const included = scenario.draft.toggleByScopeRef[k.id] !== false;
-              const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-              const labelText = nickname ?? maskedTail;
-              return (
-                <div
-                  key={k.id}
-                  data-data-source-id={k.id}
-                  className="flex min-h-[44px] items-center gap-2 border-b border-border last:border-b-0"
-                >
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={included}
-                    aria-label={`Include ${exchange} — ${labelText} in projection`}
-                    onClick={() => scenario.togglePerKeySource(k.id)}
-                    className={`rounded-sm px-3 py-1 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
-                      included
-                        ? "border border-accent text-accent"
-                        : "border border-border text-text-secondary"
-                    }`}
-                  >
-                    {included ? "Included" : "Excluded"}
-                  </button>
-                  <span className="text-sm text-text-secondary">
-                    {exchange}
-                    {" — "}
-                    {nickname ? (
-                      nickname
-                    ) : (
-                      <span className="font-mono text-text-muted">
-                        {maskedTail}
-                      </span>
-                    )}
-                  </span>
-                </div>
-              );
-            })}
-            </div>
-          </CollapsibleSection>
-        </Card>
-      )}
-
+      {/* CONSTIT-01 — the separate "Data sources" section is DELETED. Per-key
+          exchange sources now render as uniform constituent rows inside the ONE
+          unified CompositionList (below), interleaved with added strategies —
+          one row anatomy, one include/exclude channel, one provenance badge per
+          row. The former per-key toggle rows moved verbatim (same handlers, same
+          accessible names) into that list. Only the book-level honest states
+          re-home here: the per-key-history-missing fallback (below) and the
+          all-constituents-excluded empty card (further down). */}
       {showDataSourcesFallback && (
-        <div className="mt-4" data-testid="scenario-data-sources-fallback">
+        <div className="mt-4" data-testid="scenario-constituent-fallback">
           <InfoBanner>
             <span className="font-semibold text-text-primary">
               Per-source modeling needs per-key history.
@@ -3944,17 +3862,19 @@ export function ScenarioComposer({
         />
       </div>
 
-      {/* DSRC-03 — all-excluded honest empty. When every data source is toggled
-          off the engine returns null KPIs + an empty curve (KpiStrip above
-          falls to its degenerate "—" convention, never a stale number), and the
-          projection region renders this honest-absence card. Re-including any
-          source instantly restores the live projection. Neutral/calm, no
+      {/* CONSTIT-01 (Pitfall 5) — all-constituents-excluded honest empty,
+          re-homed from the deleted Data-Sources section onto the unified
+          constituent model. When every per-key source is toggled off (and no
+          live added leg) the engine returns null KPIs + an empty curve (KpiStrip
+          above falls to its degenerate "—" convention, never a stale number),
+          and the projection region renders this honest-absence card. Re-including
+          any source instantly restores the live projection. Neutral/calm, no
           role="alert", no red (honesty-color rule, UI-SPEC §4). */}
       {allDataSourcesExcluded && (
-        <div className="mt-4" data-testid="scenario-data-sources-empty">
+        <div className="mt-4" data-testid="scenario-constituent-empty">
           <EmptyStateCard
-            heading="Select at least one data source"
-            body="Every data source is excluded — there's nothing to project. Re-include a source to see the curve and metrics."
+            heading="Select at least one source"
+            body="Every source is excluded — there's nothing to project. Re-include a source to see the curve and metrics."
           />
         </div>
       )}
@@ -4524,19 +4444,14 @@ export function ScenarioComposer({
       >
         <CompositionList
           draft={scenario.draft}
-          holdingsSummary={holdingsSummary}
-          flaggedHoldings={flaggedHoldings}
-          sharedSymbols={sharedSymbols}
+          perKeySources={usePerKeySources ? dataSourceKeys : EMPTY_PER_KEY_SOURCES}
+          onTogglePerKey={scenario.togglePerKeySource}
+          addedProvenanceByRef={addedProvenanceByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           onRemoveAdded={handleRemoveAdded}
-          onCompare={(scopeRef, candidateId) =>
-            router.push(
-              `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
-            )
-          }
           coverageEligible={coverageEligible}
         />
       </CollapsibleSection>
@@ -4849,24 +4764,47 @@ function AutoExcludedRow({
 // CompositionList — sub-component
 // ---------------------------------------------------------------------------
 
+/** CONSTIT-01 — a per-key exchange source rendered as a uniform constituent row
+ *  (one per eligible connected api_key). Shape = the SSR payload's apiKeys row,
+ *  labelled via `dataSourceLabel`. */
+type PerKeySource = MyAllocationDashboardPayload["apiKeys"][number];
+
+/** Stable empty per-key source list — passed when the per-key path is inactive
+ *  so CompositionList's props stay referentially stable across renders. */
+const EMPTY_PER_KEY_SOURCES: PerKeySource[] = [];
+
 interface CompositionListProps {
   draft: ReturnType<typeof useScenarioState>["draft"];
-  holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"];
-  flaggedHoldings: FlaggedHolding[];
-  sharedSymbols: Set<string>;
+  /**
+   * CONSTIT-01 — the eligible per-key exchange sources (empty when the per-key
+   * path is inactive). Rendered as uniform constituent rows ABOVE the added
+   * strategies in the ONE list — the deleted "Data sources" section's rows,
+   * re-homed. Per-coin holdings are deliberately NOT rendered here (CONSTIT-03 —
+   * they live on the Holdings tab).
+   */
+  perKeySources: PerKeySource[];
+  /** CONSTIT-03 — toggle a per-key source through the shared toggleByScopeRef
+   *  channel (never rescales weightOverrides). */
+  onTogglePerKey: (ref: string) => void;
+  /**
+   * CONSTIT-02 — added-strategy id → provenance badge variant (or null for
+   * honest absence), derived in the parent via `deriveProvenance`. Per-key rows
+   * are `api_verified` by construction and badged directly, so they are not in
+   * this map.
+   */
+  addedProvenanceByRef: Record<string, ProvenanceTier | null>;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
   onRemoveAdded: (id: string) => void;
-  onCompare: (scopeRef: string, candidateId: string) => void;
   /**
    * Phase 58 COVERAGE-02 — the coverage-eligibility axis (the `coverageEligible`
-   * memo in ScenarioComposer). Threaded READ-ONLY so each added-strategy row
-   * can render its three-state chip from the SAME axis the engine's divisor
-   * and the coverageEligible↔member_ids dev cross-check read. The chip state
-   * is NOT re-derived here — it is a projection of `selected` (row `enabled`)
+   * memo in ScenarioComposer). Threaded READ-ONLY so each constituent row (per-key
+   * + added) can render its three-state chip from the SAME axis the engine's
+   * divisor and the coverageEligible↔member_ids dev cross-check read. The chip
+   * state is NOT re-derived here — it is a projection of `selected` (row `enabled`)
    * + this map.
    */
   coverageEligible: Record<string, boolean>;
@@ -4874,40 +4812,16 @@ interface CompositionListProps {
 
 function CompositionList({
   draft,
-  holdingsSummary,
-  flaggedHoldings,
-  sharedSymbols,
+  perKeySources,
+  onTogglePerKey,
+  addedProvenanceByRef,
   onToggle,
   onSetWeight,
   leverageByRef,
   onSetLeverage,
   onRemoveAdded,
-  onCompare,
   coverageEligible,
 }: CompositionListProps) {
-  const flaggedByRef = useMemo(() => {
-    const map = new Map<string, FlaggedHolding>();
-    for (const f of flaggedHoldings) {
-      map.set(buildHoldingRef(f), f);
-    }
-    return map;
-  }, [flaggedHoldings]);
-
-  // M-0101: precompute symbol → venues ONCE so each row's "merged across
-  // venues" note is an O(1) Map.get + a tiny same-symbol filter, instead of an
-  // O(N) holdingsSummary.filter scan per row (O(N²) across the list). The
-  // venue list preserves holdingsSummary order so the rendered join is byte-
-  // identical to the previous filter().map().
-  const venuesBySymbol = useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const h of holdingsSummary) {
-      const list = map.get(h.symbol);
-      if (list) list.push(h.venue);
-      else map.set(h.symbol, [h.venue]);
-    }
-    return map;
-  }, [holdingsSummary]);
-
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       {/* No inner "Composition" heading: the enclosing CollapsibleSection summary
@@ -4915,60 +4829,66 @@ function CompositionList({
           here double-labels the same content. No top margin on the card either:
           the list is the sole child inside the collapsible's <details> body, so
           spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
-      <ul className="grid gap-2">
-        {/* Read-only-tokens model: live holdings are FIXED context. They render
-            read-only (symbol · venue · USD value) with no toggle / weight /
-            leverage — those controls live only on the added-strategy rows below.
-            The multi-venue caveat and the Bridge "Compare →" deep-link stay
-            because both are read-only affordances. */}
-        {holdingsSummary.map((h) => {
-          const ref = buildHoldingRef({
-            venue: h.venue,
-            symbol: h.symbol,
-            holding_type: h.holding_type,
-          });
-          const flagged = flaggedByRef.get(ref);
-          const sharedSym = sharedSymbols.has(h.symbol);
-          const otherVenuesForSym = sharedSym
-            ? (venuesBySymbol.get(h.symbol) ?? []).filter(
-                (v) => v !== h.venue,
-              )
-            : [];
+      <ul className="grid gap-2" data-testid="scenario-constituent-list">
+        {/* CONSTIT-01/02/03 — per-key exchange sources as uniform constituent
+            rows, interleaved ABOVE the added strategies in the ONE list. Same row
+            anatomy as an added row: an include/exclude toggle (the shared
+            toggleByScopeRef channel via onTogglePerKey), the source label, a
+            provenance badge (api_verified by construction — a per-key unit IS a
+            connected-exchange api-key), and the coverage chip. NO weight/leverage
+            inputs (Phase 112 fence) and no remove (a source is toggled, not
+            removed). Per-coin holdings are NOT rendered — they live on the
+            Holdings tab (CONSTIT-03). */}
+        {perKeySources.map((k) => {
+          const included = draft.toggleByScopeRef[k.id] !== false;
+          const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+          const labelText = nickname ?? maskedTail;
+          const chipState: CoverageState | null = !included
+            ? "manually-excluded"
+            : coverageEligible[k.id]
+              ? "in-blend"
+              : null;
           return (
             <li
-              key={ref}
-              data-scope-ref={ref}
-              className="flex items-center justify-between gap-3 rounded-md border border-border p-3"
+              key={k.id}
+              data-scope-ref={k.id}
+              data-testid="scenario-constituent-perkey"
+              className={`flex items-center justify-between gap-3 rounded-md border border-border p-3 ${
+                included ? "" : "opacity-50 line-through"
+              }`}
             >
               <div className="flex min-w-0 items-center gap-3">
-                <span className="font-mono text-sm text-text-primary">
-                  {h.symbol}
-                </span>
-                <span className="text-xs text-text-muted">{h.venue}</span>
-                {sharedSym && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={included}
+                  aria-label={`Include ${exchange} — ${labelText} in projection`}
+                  onClick={() => onTogglePerKey(k.id)}
+                  className={`flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                    included ? "bg-accent" : "bg-border"
+                  }`}
+                >
                   <span
-                    className="text-fixed-11 text-warning"
-                    title={`Returns merged with ${otherVenuesForSym.join(", ")} (symbol shared across venues)`}
-                  >
-                    Returns merged with {otherVenuesForSym.join(", ")} (symbol
-                    shared across venues)
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs text-text-secondary">
-                  {formatUsd0(h.value_usd)}
+                    aria-hidden
+                    className={`h-4 w-4 rounded-full bg-white transition-transform ${
+                      included ? "translate-x-4" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+                <span className="text-sm text-text-primary">
+                  {exchange}
+                  {" — "}
+                  {nickname ? (
+                    nickname
+                  ) : (
+                    <span className="font-mono text-text-muted">
+                      {maskedTail}
+                    </span>
+                  )}
                 </span>
-                {flagged && flagged.top_candidate_strategy_id && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onCompare(ref, flagged.top_candidate_strategy_id)
-                    }
-                    className="rounded-md border border-border px-2 py-1 text-xs text-text-secondary hover:border-accent"
-                  >
-                    Compare →
-                  </button>
+                <TrustTierLabel trustTier="api_verified" className="shrink-0" />
+                {chipState && (
+                  <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
               </div>
             </li>
@@ -4999,6 +4919,7 @@ function CompositionList({
             <li
               key={a.id}
               data-scope-ref={a.id}
+              data-testid="scenario-constituent-added"
               className={`flex items-center justify-between gap-3 rounded-md border border-border p-3 ${
                 enabled ? "" : "opacity-50 line-through"
               }`}
@@ -5022,6 +4943,12 @@ function CompositionList({
                   />
                 </button>
                 <span className="text-sm text-text-primary">{a.name}</span>
+                {/* CONSTIT-02 — per-row provenance badge (api_verified / csv /
+                    self_reported / composite). Null → no badge (honest absence). */}
+                <TrustTierLabel
+                  trustTier={addedProvenanceByRef[a.id] ?? null}
+                  className="shrink-0"
+                />
                 {chipState && (
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
