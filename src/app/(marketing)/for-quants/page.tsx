@@ -286,7 +286,7 @@ export default function ForQuantsPage() {
 const TRUST_ATOMS: { title: string; body: string }[] = [
   {
     title: "Read-only keys verified at submission",
-    body: "Trading and withdraw permissions are rejected with the exact error: \"This key has trading or withdrawal permissions. Only read-only keys are accepted.\" You cannot bypass this check.",
+    body: "Trading and withdrawal permissions are rejected at submission — for example, \"Key has trading permissions. Please use a read-only key.\" Any key we can't positively verify as read-only is rejected too, and the check runs server-side, so you cannot bypass it.",
   },
   {
     title: "Envelope encryption at rest",
