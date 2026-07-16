@@ -31,11 +31,17 @@
 -- signature first guarantees exactly one overload survives.
 --
 -- p_terminal_status guard = the server-side enforcement of the never-published
--- invariant (T-110-02). Restricting the terminal status to
--- ('pending_review','private') makes 'published' unreachable from ANY caller —
--- including a direct PostgREST call by an authenticated user — because the
--- guard RAISEs before the strategies write. 'published' can only ever be reached
--- via the admin review promotion path, never a finalize.
+-- invariant (T-110-02) ON THE FINALIZE PATH. Restricting the terminal status to
+-- ('pending_review','private') makes 'published' unreachable via ANY finalize
+-- caller — including a direct authenticated PostgREST call to these RPCs —
+-- because the guard RAISEs before the strategies write. This does NOT by itself
+-- close a direct authenticated write to the strategies TABLE (INSERT/PATCH with
+-- status='published'), which the finalize guard never sees: RLS
+-- strategies_insert/update gate only user_id=auth.uid(), not status. That
+-- table-level transition is blocked separately by the
+-- guard_strategies_publish_transition trigger (migration 20260716131000), so
+-- 'published' can only ever be reached via the admin review promotion path
+-- (service_role), never a finalize AND never a direct owner write.
 --
 -- The strategy_verifications insert is KEPT on BOTH terminal statuses. Trust-tier
 -- provenance ('api_verified' / 'csv_uploaded') is a data-quality label the

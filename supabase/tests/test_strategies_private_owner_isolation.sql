@@ -21,7 +21,15 @@
 --   4. anon sees ZERO rows for the status='private' strategy;
 --   5. GUARD PIN (CONTRIB-02 / T-110-02): finalize_wizard_strategy called with
 --      p_terminal_status => 'published' RAISEs — 'published' is unreachable from
---      any finalize caller. Pins the never-published invariant at the DB layer.
+--      any finalize caller. Pins the never-published invariant at the FINALIZE layer.
+--   6. TABLE GUARD (red-team Finding 1): owner A, as the authenticated role,
+--      cannot UPDATE its OWN private strategy to status='published' directly —
+--      the guard_strategies_publish_transition trigger RAISEs insufficient_privilege.
+--   7. TABLE GUARD (red-team Finding 1): owner A, as the authenticated role,
+--      cannot INSERT a fresh status='published' strategy directly — same trigger.
+--   8. POSITIVE CONTROL: the service_role (the admin review route's client) CAN
+--      transition a pending_review strategy to published — proving the trigger
+--      blocks only end-users, never the sole sanctioned publisher.
 --
 -- The private-row INSERT is ALSO the CHECK-widen probe: it fails loudly with a
 -- check_violation (23514) if 20260716130000 is not applied — this test is
@@ -62,6 +70,7 @@ DECLARE
   strat_private  UUID;  -- owned by A, status='private'
   strat_pub      UUID;  -- owned by A, status='published' (control)
   strat_draft    UUID;  -- owned by A, wizard draft (for the guard-pin call)
+  strat_pending  UUID;  -- owned by A, status='pending_review' (positive-control publish target)
   row_cnt        INTEGER;
   raised         BOOLEAN;
   err_msg        TEXT;
@@ -100,8 +109,14 @@ BEGIN
   VALUES (uid_a, 'contrib-private A draft', 'draft', 'wizard', '{}', '{}', '{}', ARRAY['binance'])
   RETURNING id INTO strat_draft;
 
-  RAISE NOTICE 'Seed OK: A uid=% private=% pub=% draft=%, B uid=%',
-    uid_a, strat_private, strat_pub, strat_draft, uid_b;
+  -- Owner A's pending_review strategy — the positive-control publish target for
+  -- GUARD 8 (service_role may promote it; an authenticated end-user may not).
+  INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+  VALUES (uid_a, 'contrib-private A pending', 'pending_review', '{}', '{}', '{}', ARRAY['binance'])
+  RETURNING id INTO strat_pending;
+
+  RAISE NOTICE 'Seed OK: A uid=% private=% pub=% draft=% pending=%, B uid=%',
+    uid_a, strat_private, strat_pub, strat_draft, strat_pending, uid_b;
 
   -- ----- RLS 1: owner B sees 0 of owner A's PRIVATE row (isolation) ---------
   PERFORM set_config('request.jwt.claims',
@@ -167,8 +182,51 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (GUARD 5): finalize_wizard_strategy raised the WRONG error (expected the p_terminal_status guard, got: %)', err_msg;
   END IF;
 
+  -- ----- GUARD 6: authenticated owner A cannot UPDATE own private -> published --
+  -- Still authenticated as owner A (RLS strategies_update passes — A owns the
+  -- row), so the ONLY thing that can raise insufficient_privilege (42501) here is
+  -- the guard_strategies_publish_transition trigger. A different failure (e.g. a
+  -- constraint) would NOT be insufficient_privilege, so this cannot false-pass.
+  raised := FALSE;
+  BEGIN
+    UPDATE strategies SET status = 'published' WHERE id = strat_private;
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (GUARD 6): authenticated owner A published its own private strategy via a direct UPDATE — table-level never-published guard missing';
+  END IF;
+
+  -- ----- GUARD 7: authenticated owner A cannot INSERT a fresh published row -----
+  -- user_id = uid_a so RLS strategies_insert (WITH CHECK user_id=auth.uid())
+  -- passes; the trigger is the sole source of 42501.
+  raised := FALSE;
+  BEGIN
+    INSERT INTO strategies (user_id, name, status, strategy_types, subtypes, markets, supported_exchanges)
+    VALUES (uid_a, 'contrib-private A self-published', 'published', '{}', '{}', '{}', ARRAY['binance']);
+  EXCEPTION WHEN insufficient_privilege THEN
+    raised := TRUE;
+  END;
+  IF NOT raised THEN
+    RESET ROLE;
+    RAISE EXCEPTION 'TEST FAILED (GUARD 7): authenticated owner A created a fresh published strategy via a direct INSERT — table-level never-published guard missing';
+  END IF;
+
   RESET ROLE;
   PERFORM set_config('request.jwt.claims', NULL, true);
+
+  -- ----- GUARD 8: service_role (admin review route) CAN publish (positive control)
+  -- Proves the trigger blocks only current_user='authenticated', never the sole
+  -- sanctioned publisher. Without this, GUARD 6/7 could pass simply because the
+  -- trigger over-blocks EVERYONE — which would break the real admin route.
+  SET LOCAL ROLE service_role;
+  UPDATE strategies SET status = 'published' WHERE id = strat_pending;
+  SELECT count(*) INTO row_cnt FROM strategies WHERE id = strat_pending AND status = 'published';
+  RESET ROLE;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (GUARD 8): service_role could NOT publish a pending_review strategy (got % published rows) — the guard over-blocks the sanctioned admin publisher', row_cnt;
+  END IF;
 
   -- ----- RLS 4: anon sees 0 of owner A's PRIVATE row -----------------------
   -- anon can SELECT strategies (the public /browse catalog reads published rows
