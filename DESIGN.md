@@ -14,10 +14,45 @@
 - **Mood:** Opening a well-organized financial report. Trustworthy, precise, data-dense. The numbers speak for themselves.
 - **Reference sites:** FactSet, Stripe Dashboard, Bloomberg Terminal web
 
+## Generative Principle — every surface is a dated document
+This is the root principle every other token derives from. The factsheet — the
+strongest surface in the app — reads like a signed, dated report: a masthead
+eyebrow, a two-weight rule frame, a provenance pill on the title, a freshness
+stamp toned by age, a footer stamp carrying an ID + page number, print
+hardening, and copy that states its own limits. Every screen should carry that
+same posture.
+
+**Five-second test:** *would this screen survive being printed and handed to an
+LP?* If a surface would embarrass us on paper — decorative filler, a claim with
+no date, a metric with no provenance, a cheerful empty state — it fails.
+
+This principle is WHY the tokens are what they are: the mono eyebrows, the
+near-black document frame, the em-dash null rule, the semantic-color gates, the
+serif masthead all exist to make each surface legible as a dated, sourced,
+signable document. New design decisions derive from this test first, then reach
+for the token that serves it.
+
 ## Typography
+
+**Three voices, fixed roles, never mixed.** Each typeface owns one job and does
+not stray into another's:
+1. **Instrument Serif** — display voice. Page titles, landing hero, strategy
+   names / mastheads. Editorial gravitas; nobody in this space uses a serif —
+   that's the point.
+2. **DM Sans** — interactive voice. Form labels, menu items, buttons, body
+   prose, nav. Anything the user reads to *act*.
+3. **Geist Mono, uppercase, letter-tracked** — data-annotation voice. Data
+   eyebrows and micro-labels above/beside numbers (`FactsheetView.tsx:575,878,1027`),
+   plus all tabular figures. Anything that *labels or is* data.
+
+The failure mode is putting DM Sans on a data eyebrow (reads like a form
+control) or the mono on a form label (reads like a value). Keep the voices in
+their lanes.
+
 - **Display/Hero:** Instrument Serif — editorial gravitas without being stuffy. Used only for page titles, landing hero, strategy names in detail view. Nobody in this space uses a serif... that's the point.
 - **Body:** DM Sans — clean geometric sans, slightly warmer than Inter. Replaces Inter everywhere. Excellent readability at all sizes.
-- **UI/Labels:** DM Sans (same as body, medium weight for labels)
+- **Interactive labels:** DM Sans (medium weight) — form labels, menu items, buttons, nav, tabs. The voice for anything the user reads to act on. NOT the mono.
+- **Data eyebrows & micro-labels:** Geist Mono, **uppercase**, letter-tracked (see tracking ladder below) — the small labels that sit above or beside data (KPI captions, section eyebrows, strip headers). This is the factsheet's signature annotation voice, not DM Sans.
 - **Data/Tables:** Geist Mono (tabular-nums) — sharper than JetBrains Mono for financial data. Designed for UI, not coding. All numbers in the product use this.
 - **Code:** Geist Mono
 - **Loading:** Google Fonts CDN via next/font
@@ -29,6 +64,25 @@
   - Small: 13px
   - Caption: 12px
   - Micro: 10-11px (labels, badges, uppercase tracking)
+
+### Tracking ladder (uppercase mono eyebrows)
+Uppercase Geist Mono eyebrows carry deliberate letter-spacing — the tighter the
+strip, the tighter the track. Three fixed steps:
+
+| Token | Tracking | Use |
+|-------|----------|-----|
+| Eyebrow tight | `0.14em` | dense strips (multi-cell KPI rows where space is scarce) |
+| Eyebrow std | `0.18em` | the default eyebrow / micro-label |
+| Eyebrow masthead | `0.22em` | the document title's masthead eyebrow (widest, most formal) |
+
+Wider tracking = more ceremony. Pick by the strip's density, not by taste.
+
+### Real primitives (globals.css:323-330)
+Two authored utility classes back the display + data voices; use them, don't
+re-derive the font-family inline:
+- **`.font-display`** — Instrument Serif; the display/masthead voice.
+- **`.font-metric`** — Geist Mono with tabular-nums; the figures voice. All
+  product numbers route through this so columns align.
 
 ### Fluid Type Spine (v1.4 Phase 49 / DS-02·DS-03)
 
@@ -91,13 +145,36 @@ because any byte edit reds the frozen-spine guard. (The Phase-52/53 per-surface
 DS-04's raw-px rejection is an app-wide prohibition: no production source can
 author a new raw px without failing CI, the frozen islands excepted.
 
+## Numbers Contract
+Promoted from `src/lib/factsheet/format.ts:1-80` — the factsheet's formatting
+rules are the product-wide contract for how a figure renders. Numbers are the
+product; they format one way, everywhere.
+
+| Kind | Rule |
+|------|------|
+| Typeface | Geist Mono, `tabular-nums` (via `.font-metric`) so digits align in a column |
+| Ratios (Sharpe, Calmar, Sortino) | 2 decimal places |
+| Percentages | 1 decimal place, **signed** — a `+` prefix on gains, `−` on losses |
+| Tail-risk (VaR, CVaR, max drawdown) | 2 decimal places |
+| Integers (counts, observations) | thousands separators |
+| **Null / non-finite** | **em-dash `—`. Never `0`, never blank, never a fabricated value.** A metric that cannot be computed says so with a dash. |
+
+The `—` rule is load-bearing: a zeroed or blanked null reads as a real value and
+misleads an LP. A dash is honest about absence. (See also the Color gates: a
+`—` cell never carries a semantic color.)
+
+**Rule: one formatter module per surface family.** Each surface family owns a
+single formatter module (as the factsheet owns `format.ts`) — never inline
+`toFixed`/`toLocaleString` at a call site. This keeps the contract enforceable
+and drift-auditable.
+
 ## Color
 - **Approach:** Restrained — 1 accent + 3 semantic (positive/negative/warning) + neutrals. Color is rare and meaningful; warning is reserved for transient recoverable states that the system will handle on its own.
 - **Accent:** #1B6B5A — muted institutional teal. Darker and more serious than the bright teal (#0D9488) that competitors use. Means "verified" and "action".
 - **Accent hover:** #155A4B
 - **Page background:** #F8F9FA — warm off-white
 - **Surface:** #FFFFFF — cards, panels, modals
-- **Sidebar:** #0F172A — dark navy (keep current)
+- **Sidebar:** light rail — `bg-surface` (#FFFFFF) with a right hairline (`border-r border-border`, #E2E8F0). Section headings carry the factsheet mono-eyebrow voice (uppercase Geist Mono, tracked); active item uses accent text (`text-accent`). ACCOUNT is pinned to the bottom. **Was #0F172A navy (superseded 2026-07-16 — see Decisions Log).**
 - **Text primary:** #1A1A2E — dark navy, nearly black
 - **Text secondary:** #4A5568 — for descriptions, secondary content
 - **Text muted:** #64748B — for labels, captions, timestamps. Was #718096 (3.8:1 on bg-page, 4.01:1 on bg-surface) — shifted 2026-04-30 to meet WCAG 2 AA (4.85:1 on white) for 12px small text. Same shade DESIGN.md already blessed for chart axis ticks (see 2026-04-29 entry below).
@@ -113,6 +190,24 @@ author a new raw px without failing CI, the frozen islands excepted.
 - **Chart strategy:** #1B6B5A — equity curve color
 - **Chart benchmark:** #94A3B8 — benchmark overlay (muted)
 - **Dark mode:** Not planned. Institutional finance is light mode.
+
+### Semantic-color gates (normative)
+Tone is earned, not decorative. The rules:
+- **Tone renders ONLY on finite values.** A metric with no computable value (`—`)
+  is colorless. A `—` cell never carries a semantic color.
+- **A zero is not "bad".** A zero drawdown, a flat return — these are neutral
+  facts, not failures. No red on a zero.
+- **Red** = permanent / negative only (a realized loss, a hard error, a
+  permanent failure). Never for absence, never for a zero.
+- **Amber** = system- or user-recoverable disclosure (a transient retry state, a
+  coverage-window exclusion that a one-click action reverses). Recoverable, not
+  broken.
+- **Muted** = steady-state, honest-empty. The neutral default when there is
+  nothing to flag.
+
+The failure mode is coloring by shape (all negatives red, all nulls amber)
+instead of by meaning. Gate on *what the value means*, not on its sign or its
+absence.
 
 ## Spacing
 - **Base unit:** 4px
@@ -140,7 +235,12 @@ author a new raw px without failing CI, the frozen islands excepted.
 ## Layout
 - **Approach:** Grid-disciplined — strict columns, predictable alignment
 - **Grid:** 12 columns, responsive
-- **Max content width:** 1100px (main content area)
+- **Measure ladder (max content width):** three measures, picked by content
+  type — **1100px prose** (reading copy, forms, admin text pages), **1440px
+  document** (the default factsheet / single-strategy document width), **1920px
+  dense tables** (ultra-wide allocator tables, compare grids — the Phase 52
+  fluid-fill `max-w-[1920px]` decision). Wider content earns a wider measure;
+  prose never exceeds 1100px regardless of viewport.
 - **Sidebar width:** 260px (fixed, desktop only)
 - **Border radius:** sm: 4px (badges, inputs), md: 6px (buttons, small cards), lg: 8px (cards, panels), xl: 12px (hero sections)
 
@@ -153,7 +253,29 @@ author a new raw px without failing CI, the frozen islands excepted.
 - **No decorative animation.** No bouncing, no spinning logos, no scroll-triggered effects.
 
 ## Component Patterns
-- **Cards:** White surface, 1px border (#E2E8F0), 8px radius, subtle shadow (0 1px 3px rgba(0,0,0,0.04))
+
+**Cards vs Data panels — two different primitives, don't conflate them.** A card
+is an interactive container; a data panel is a flat region of a document. They
+look different on purpose:
+- **Cards** (interactive containers — click, hover, navigate): White surface,
+  1px border (#E2E8F0), rounded (8px radius), subtle shadow (0 1px 3px
+  rgba(0,0,0,0.04)). The radius + shadow signal "this is a thing you act on."
+- **Data panels** (a region of the document — KPI strips, factsheet panels):
+  **square (no radius), flat (no shadow), 1px-bordered, hairline-divided.** They
+  read as sections of a printed report, not as floating chips. This is the
+  factsheet's deliberate treatment; do NOT apply the card radius/shadow to a
+  data panel.
+
+**Two-weight rule hierarchy.** Rules come in exactly two weights, and the weight
+carries meaning:
+- **Frame** — a near-black rule (`border-text`, ~#1A1A2E) frames the *document*
+  as a whole. Heavy, deliberate, like the border of a printed report.
+- **Interior hairline** — #E2E8F0 (`border-border`) hairlines structure the
+  *interior*: divide rows, separate panels, split strip cells.
+
+Heavy frame vs interior hairline: never use the near-black frame weight for an
+interior divider, and never use a hairline where the document edge wants a frame.
+
 - **Tables:** No outer border. Header row with bottom border. Rows separated by hairline borders. Hover state with subtle background.
 - **Buttons:** Primary (accent bg, white text), Secondary (transparent, border), Ghost (transparent, no border)
 - **Badges:** 4px radius, uppercase 10-11px, specific colors per category
@@ -270,14 +392,47 @@ hairline dividers (`border-t border-border`, 1px `#E2E8F0`). No card borders
 between blocks. This is the exception to the default Card primitive pattern.
 Reference: FactSet quarterly factsheet pages.
 
-## Anti-Patterns (never use)
-- Purple/violet gradients
-- 3-column feature grids with icons in colored circles
-- Centered everything with uniform spacing
-- Decorative blobs, gradients, or background patterns
-- Generic stock-photo hero sections
-- Bubbly uniform border-radius on all elements
-- Inter, Roboto, or any overused font as primary
+## Voice / microcopy
+The copy is part of the document. It reads like a careful analyst wrote it, not
+a marketing team:
+- **Declarative, sentence-case captions.** State the fact. No title-case
+  headlines, no exclamation.
+- **State limitations with the threshold attached.** Don't hide a gap — name it
+  and give the number: *"Appears once the strategy has ~35 observations."* The
+  reader learns exactly what unlocks it.
+- **No adjectives where a number exists.** "Strong returns" is slop; "+12.4%" is
+  the fact. Let the figure carry the weight.
+- **Active voice.** "We validate every row" — not "every row is validated."
+
+## AI-Slop Ban (enforceable)
+These patterns are banned because they read as generic AI-generated design —
+the opposite of a dated, signed document. **The ban is on the pattern, not the
+instance:** review for the shape, not a single occurrence.
+
+| Banned pattern | Why it's slop here | What we do instead |
+|----------------|--------------------|--------------------|
+| 3-column icon-in-circle feature grids | The universal "AI landing page" tell; says nothing, sourced from nothing | Data panels with real figures; one panel, columns of facts |
+| Purple / indigo / any decorative gradient | Decoration with no meaning; not institutional | Flat surfaces + hairlines. **ALLOWLIST:** the one *functional* overflow-fade at `StrategyTable.tsx` (`bg-gradient-to-l from-surface to-transparent`) that signals horizontally-scrollable content |
+| Centered-everything layouts | Reads as a brochure, not a report | Left-aligned, grid-disciplined; a report is left-anchored |
+| Uniform bubbly radius on all elements | Toy-like; erases the card-vs-panel distinction | Two primitives: rounded cards, square data panels |
+| Decorative blobs / patterns / glassmorphism | Pure ornament; fails the print test | Nothing. The numbers do the work |
+| Emoji as decoration | Cheerful, unserious, unprintable | **Permit only semantic glyphs `⚠ — · ×`**, and only when colored by a semantic token AND adjacent to text |
+| Colored-left-border cards | A dated Bootstrap tell | Semantic tone on text/fill per the color gates, not a stripe |
+| Generic hero copy (Unlock / Empower / Supercharge / "seamlessly") | Marketing filler; adjectives where numbers belong | Declarative sentence-case copy that states the fact (see Voice) |
+| system-ui / Inter / Roboto as a display font — or ANY new font | Breaks the three-voice system; the overused-font tell | The three voices only: Instrument Serif / DM Sans / Geist Mono |
+| Cookie-cutter marketing rhythm (hero → 3 features → testimonial → CTA) | The template every AI emits | Document layout: masthead, panels, provenance, footer stamp |
+| Icon-first cheerful empty states | Unserious; hides the real reason | State the limitation with its threshold (see Voice) |
+
+**Greppable CI gates (ratchet like `no-raw-font-px`).** Three of these are
+mechanically enforceable in the repo's existing token-drift test style and
+should be ratcheted the same way — `warn` repo-wide, then `error` per-surface as
+each surface is cleaned:
+1. **Gradients outside the allowlist** — any `bg-gradient-*` / `linear-gradient`
+   in `src/**` except the `StrategyTable.tsx` functional overflow-fade.
+2. **Emoji codepoints in `src/**` JSX** — reject decorative emoji; the semantic
+   glyphs `⚠ — · ×` are the only permitted codepoints.
+3. **`rounded-full` sized 10–12 with an icon child** — the icon-in-circle
+   feature-grid tell.
 
 ## Decisions Log
 | Date | Decision | Rationale |
@@ -309,3 +464,4 @@ Reference: FactSet quarterly factsheet pages.
 | 2026-07-02 | Three-state coverage-chip palette (v1.5 Phase 58, COVERAGE-02) | The scenario composer's per-row membership state maps to exactly three token treatments: **in-blend** = accent `#1B6B5A` (member, verified-in), **manually-excluded** = muted neutral (deliberate, sticky), **auto-excluded (outside window)** = warning amber (`#B45309` text / `#FEF3C7` bg / `#FDE68A` border — the HoldingsTable revoked-key chip pairing). Red/negative is explicitly forbidden for auto-excluded: coverage exclusion is recoverable, not a permanent failure. Chip anatomy follows the Badge ladder (4px radius, micro tier). Pinned by `CoverageStateChip.test.tsx` token assertions. |
 | 2026-07-02 | Amber semantic extended: "recovers on its own" → "recoverable" (v1.5 Phase 58) | The 2026-04-11 rule reserved warning amber for "transient states that will recover on their own". The coverage-window auto-excluded state recovers only via a *user action* (narrowing the window / one-click Include), yet red would wrongly signal permanence and muted would hide the recoverability. The reservation is therefore widened to **transient/recoverable states** — whether the system or a disclosed one-click user action performs the recovery — keeping the tripartite semantics: green=success, red=permanent failure, amber=recoverable. |
 | 2026-07-02 | CoverageTimeline mini-gantt bar treatment (v1.5 Phase 58 + ship review) | The coverage mini-gantt renders one solid bar per strategy on a `bg-track` rail: in-blend = solid accent, auto-excluded = `bg-warning-bg` fill with a **`border-warning` (#B45309) border** — the ship design-specialist measured the original `border-warning-border` pairing at ~1.02:1 against the track (invisible; the chip precedent carries its contrast in TEXT, which a bar fill lacks), so the bar's ≥3:1 non-text contrast (WCAG 1.4.11) is carried by the strong border. Bars are `role="img"` with an aria-label restating coverage dates + membership (aria-label on a role-less div is ignored by AT). The active window is a separate accent band overlay; the collapse gates visibility, not compute. |
+| 2026-07-16 | Sidebar navy #0F172A → light rail | Founder disliked the flat navy rail; chose the light-surface direction, deliberately reopening the previously-locked "keep current" token. Nav now: light `bg-surface`, right hairline (`border-r border-border`), mono-eyebrow section headings (uppercase Geist Mono, tracked — the factsheet annotation voice), accent-text active state, ACCOUNT pinned to the bottom. The old `#0F172A` sidebar token is retired; the Color-section token is updated to match so DESIGN.md carries one direction, not both. |
