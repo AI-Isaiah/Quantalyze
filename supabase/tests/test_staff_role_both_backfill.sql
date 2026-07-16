@@ -14,16 +14,16 @@
 -- Invariant asserted
 -- ------------------
 -- After migration 20260716120000_backfill_staff_role_both.sql has been applied,
--- NO staff row may have a role other than 'both', where "staff" is the SAME
--- union the dropped `|| isAdmin` nav OR-in consumed: profiles.is_admin=true OR a
--- user_app_roles.role='admin' row (isAdminUser(), src/lib/admin.ts). Keying the
--- assertion on the union (not just profiles.is_admin) is what catches a future
--- user_app_roles-only admin that the backfill missed — that account would be
--- self-locked out of the allocator workspace (threat T-109-06). This is the
--- CI-enforced proof that the atomic GATE held: the backfill ran AND the active
--- prevent_profile_privileged_change trigger (20260529150000, SECURITY INVOKER)
--- did not block it (assumption A2 / threat T-109-07 — a nonzero count means the
--- UPDATE was no-op'd or the runner was not on the privileged allowlist).
+-- NO `profiles.is_admin=true` row may have a role other than 'both'. The
+-- predicate is intentionally NARROW (is_admin only, NOT the isAdminUser() union)
+-- — see the migration header: a `user_app_roles`-only admin is deliberately not
+-- backfilled because flipping an unverified account to 'both' would lock it out
+-- via approval.ts, and `profiles.is_admin` is the ops-overlay predicate this
+-- phase establishes. This is the CI-enforced proof that the atomic GATE held:
+-- the backfill ran AND the active prevent_profile_privileged_change trigger
+-- (20260529150000, SECURITY INVOKER) did not block it (assumption A2 / threat
+-- T-109-07 — a nonzero count means the UPDATE was no-op'd or the runner was not
+-- on the privileged allowlist).
 --
 -- RED-guard: this assertion PASSES only once the backfill migration is applied
 -- to this database. On the shared test project it therefore fails until the
@@ -42,22 +42,15 @@ BEGIN
   SELECT count(*)
     INTO v_violations
     FROM public.profiles p
-   WHERE p.role NOT IN ('both')
-     AND (
-       p.is_admin = true
-       OR EXISTS (
-         SELECT 1 FROM public.user_app_roles r
-         WHERE r.user_id = p.id
-           AND r.role = 'admin'
-       )
-     );
+   WHERE p.is_admin = true
+     AND p.role NOT IN ('both');
 
   IF v_violations <> 0 THEN
     RAISE EXCEPTION
-      'GATE FAILED: % staff rows (is_admin=true OR user_app_roles admin) have '
-      'role NOT IN (both) — the Phase 109 role=''both'' backfill (20260716120000) '
-      'did not fully apply, or a join-table-only admin was not covered, or the '
-      'prevent_profile_privileged_change trigger blocked it (A2 / T-109-07).',
+      'GATE FAILED: % staff rows have is_admin=true but role NOT IN (both) — '
+      'the Phase 109 role=''both'' backfill (20260716120000) did not fully '
+      'apply, or the prevent_profile_privileged_change trigger blocked it '
+      '(A2 / T-109-07).',
       v_violations;
   END IF;
 

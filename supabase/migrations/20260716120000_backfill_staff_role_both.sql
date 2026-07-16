@@ -40,17 +40,27 @@
 -- runner RAISES (loud red CI / failed apply), never a silent lockout. The
 -- Task 3 test-project apply confirmed the empty-set count went 2->0.
 --
--- Which admins are backfilled (must match what the dropped `|| isAdmin`
--- OR-in consumed)
--- ----------------------------------------------------------------------
--- The nav derivation the OR-in fed (`(dashboard)/layout.tsx`) computed its
--- admin signal from `isAdminUser()`, which is `profiles.is_admin = true` OR a
--- `user_app_roles.role = 'admin'` row (src/lib/admin.ts). So the staff-access
--- backfill MUST cover that same UNION — a `user_app_roles`-only admin
--- (profiles.is_admin = false) that this migration missed would be silently
--- redirected off the allocator workspace after the drop (threat T-109-06).
--- There are zero such accounts today, but keying the backfill (and the CI
--- empty-set assertion) on the union closes the future blind spot honestly.
+-- Which admins are backfilled — `profiles.is_admin` ONLY (deliberately narrow)
+-- ---------------------------------------------------------------------------
+-- The dropped `|| isAdmin` nav OR-in fed off `(dashboard)/layout.tsx`, whose
+-- admin signal is `isAdminUser()` = `profiles.is_admin=true` OR a
+-- `user_app_roles.role='admin'` row (src/lib/admin.ts). It is tempting to key
+-- the backfill on that same UNION so a `user_app_roles`-only admin isn't
+-- redirected off the allocator workspace after the drop. We do NOT, on purpose:
+--   * `role='both'` raises the approval bar — `src/lib/approval.ts` requires
+--     BOTH allocator_status AND manager_status = 'verified' for a `both`
+--     profile, with `is_admin=true` as the ONLY override. Flipping a
+--     `user_app_roles`-only admin (is_admin=false) that is not verified on both
+--     sides to `role='both'` would send it through `/pending-approval` and lock
+--     it out of the ENTIRE dashboard — strictly worse than the nav-only gap.
+--   * `profiles.is_admin` IS the ops-overlay predicate this phase establishes.
+--     A `user_app_roles`-only admin (is_admin=false) is a misconfiguration
+--     (migration 054 keeps the two signals in sync); the supported staff recipe
+--     is `profiles.is_admin=true`, which both grants the approval override AND
+--     is covered by this backfill. There are ZERO such rows today (verified on
+--     prod + test at ship time). The CI empty-set assertion is keyed on the same
+--     narrow `is_admin` predicate so it proves the real staff population is safe
+--     without asserting a lockout-inducing invariant.
 --
 -- Idempotency
 -- -----------
@@ -61,12 +71,5 @@
 
 UPDATE profiles
 SET role = 'both'
-WHERE role <> 'both'
-  AND (
-    is_admin = true
-    OR EXISTS (
-      SELECT 1 FROM public.user_app_roles r
-      WHERE r.user_id = profiles.id
-        AND r.role = 'admin'
-    )
-  );
+WHERE is_admin = true
+  AND role <> 'both';
