@@ -6,13 +6,35 @@ import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 export type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
-export interface NavItem {
+
+/** Phase 110 CONTRIB-01 — the set of client-action nav affordances. Kept a
+ *  string-literal union (currently one member) so a new action is a compile-time
+ *  addition, not a stringly-typed free-for-all. */
+export type NavAction = "add-strategy";
+
+interface NavItemBase {
   label: string;
-  href: string;
   icon: IconComponent;
   /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label. */
   badge?: number;
 }
+/** The default nav item: an href-based <Link>. Every pre-Phase-110 item. */
+export interface NavLinkItem extends NavItemBase {
+  href: string;
+  action?: never;
+}
+/**
+ * Phase 110 CONTRIB-01 — a CLIENT-ACTION nav entry that dispatches
+ * `onNavAction(action)` instead of navigating. The allocator "Add a Strategy"
+ * affordance uses this: the onboarding wizard route lives under the Phase-109
+ * manager-guarded /strategies subtree, so an href would redirect-bounce an
+ * allocator. Rendered as a `<button type="button">`, never a <Link>.
+ */
+export interface NavActionItem extends NavItemBase {
+  action: NavAction;
+  href?: never;
+}
+export type NavItem = NavLinkItem | NavActionItem;
 interface NavSubGroup { label: string; items: NavItem[] }
 interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[] }
 
@@ -101,6 +123,19 @@ function buildNavSections(
       { label: "Compare", href: "/compare", icon: CompareIcon },
       { label: "Decks", href: "/decks", icon: DeckIcon },
     );
+    // Phase 110 CONTRIB-01 (ROLE-02 scoped exception) — the allocator brings a
+    // strategy to track/compose. A CLIENT ACTION (opens the
+    // ContributionWizardOverlay hosted at the DashboardChrome level), NOT an
+    // href: the wizard route sits under the Phase-109 manager-guarded
+    // /strategies subtree, so a Link would redirect-bounce the allocator. It
+    // lives INSIDE showsAllocatorWorkspace so it never leaks to a manager
+    // (T-110-16 info-disclosure). Allocator-framed copy — never the manager
+    // "publish to investors" voice.
+    workspaceItems.push({
+      label: "Add a Strategy",
+      icon: PlusIcon,
+      action: "add-strategy",
+    });
   }
   // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (which
   // pointed at the now-retired Sandbox route) is removed. The example-universe
@@ -224,6 +259,15 @@ export function buildPrimaryMobileNav(p: {
       { label: "Risk", href: "/allocations?tab=risk", icon: ShieldIcon },
       { label: "Bridge", href: "/allocations?tab=scenario", icon: BridgeIcon },
     );
+    // Phase 110 CONTRIB-01 — the allocator "Add a Strategy" client action as the
+    // LEADING discretionary filler. The SC#1 primary trio still leads (fillers
+    // only fill the budget AFTER primaries); placing it ahead of Discovery lets
+    // it survive the single filler slot a pure allocator's <=5 cap grants
+    // (Discovery overflows to the hamburger drawer, where the full nav —
+    // buildNavSections — still carries it). Href-less: it dispatches
+    // onNavAction, never navigates (see NavActionItem). Never emitted outside
+    // this allocator branch → T-110-16 role-leak pin.
+    fillers.push({ label: "Add a Strategy", icon: PlusIcon, action: "add-strategy" });
     // Discovery is a discretionary filler (allocator browse surface) — trimmed
     // first when the cap binds (admin keeps the SC trio + a manager destination).
     // Href is the canonical landing slug `/discovery/crypto-sma` (the same target
@@ -258,6 +302,7 @@ export function Sidebar({
   isManager,
   variant = "desktop",
   flaggedCount,
+  onNavAction,
 }: {
   populatedSlugs?: string[];
   isAdmin?: boolean;
@@ -276,6 +321,11 @@ export function Sidebar({
    *  via DashboardChrome's `useFlaggedCountStore()` (no new server
    *  query). Renders as a badge on "My Allocation" when > 0. */
   flaggedCount?: number;
+  /** Phase 110 CONTRIB-01 — dispatched when a client-action nav item (e.g.
+   *  "Add a Strategy") is activated. DashboardChrome wires this to open the
+   *  ContributionWizardOverlay. Undefined on surfaces that carry no action
+   *  items (the action entry only appears in the allocator workspace). */
+  onNavAction?: (action: NavAction) => void;
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
@@ -317,9 +367,10 @@ export function Sidebar({
               <ul className="space-y-0.5">
                 {section.items.map((item) => (
                   <NavItemLink
-                    key={item.href}
+                    key={item.href ?? item.action}
                     item={item}
                     pathname={pathname}
+                    onNavAction={onNavAction}
                   />
                 ))}
               </ul>
@@ -358,13 +409,36 @@ export function Sidebar({
 function NavItemLink({
   item,
   pathname,
+  onNavAction,
 }: {
   item: NavItem;
   pathname: string;
+  onNavAction?: (action: NavAction) => void;
 }) {
-  const active = pathname === item.href || pathname.startsWith(item.href + "/");
   const badge = item.badge;
   const showBadge = typeof badge === "number" && badge > 0;
+
+  // Phase 110 CONTRIB-01 — client-action item: a <button> that dispatches
+  // onNavAction, never a route. Same visual language as a sibling nav link
+  // (icon + label, hover/focus treatment) minus the active-route state, since
+  // it navigates nowhere. w-full + text-left so the button fills the row like
+  // the <Link> rows do.
+  if (item.action) {
+    return (
+      <li>
+        <button
+          type="button"
+          onClick={() => onNavAction?.(item.action)}
+          className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-sidebar-hover hover:text-sidebar-text-active focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
+        >
+          <item.icon className="h-4 w-4 shrink-0" />
+          <span>{item.label}</span>
+        </button>
+      </li>
+    );
+  }
+
+  const active = pathname === item.href || pathname.startsWith(item.href + "/");
   return (
     <li>
       <Link
@@ -397,6 +471,17 @@ function NavItemLink({
         )}
       </Link>
     </li>
+  );
+}
+
+// Phase 110 CONTRIB-01 — the "Add a Strategy" action glyph. House style:
+// 16x16 viewBox, stroke-1.5, currentColor, no icon dependency — a plain plus
+// that reads as "add", distinct from the search/portfolio/bar glyphs.
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <path d="M8 3.5v9M3.5 8h9" />
+    </svg>
   );
 }
 
