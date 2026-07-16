@@ -17,8 +17,13 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  *
  * Calls the SECURITY DEFINER `finalize_csv_strategy` RPC (migration 093)
  * which atomically inserts a strategies row + a strategy_verifications
- * row with status='pending_review' and trust_tier='csv_uploaded',
- * returning the new strategy_id.
+ * row with trust_tier='csv_uploaded', returning the new strategy_id.
+ *
+ * The terminal status is p_terminal_status: 'pending_review' for the manager
+ * flow (publish candidate) or 'private' for a CONTRIB-02 (Phase 110) allocator
+ * contribution (owner-only, never a publish candidate). The manager flow rides
+ * the unified backbone; the contribution flow calls the RPC directly with
+ * p_terminal_status='private' (see contributionCsvFinalizeHandler).
  *
  * Phase 19 / BACKBONE-10 → Phase 106 Stage B
  * -------------------------------------------
@@ -839,7 +844,36 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     fmt,
     strategy_name,
     metadata: metadataRaw,
+    entry_context,
   } = body as Record<string, unknown>;
+
+  // CONTRIB-02 (Phase 110) — entry_context selects the terminal-status branch,
+  // mirroring finalize-wizard. Closed set {manager, contribution}; ABSENT/null →
+  // 'manager' (back-compat: every caller before this phase sends nothing). A
+  // garbage value is a hard 400 before the RPC — never silently coerced. Safe by
+  // construction: BOTH reachable statuses ('pending_review','private') are
+  // non-published, the admin publish queue lists only 'pending_review', and the
+  // finalize_csv_strategy RPC RAISEs on any other terminal value (server-side
+  // enforcement, T-110-10 / V5).
+  if (
+    entry_context !== undefined &&
+    entry_context !== null &&
+    entry_context !== "manager" &&
+    entry_context !== "contribution"
+  ) {
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_INVALID_FORMAT",
+        human_message: "entry_context must be 'manager' or 'contribution'.",
+        debug_context: {},
+        correlation_id,
+      },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+  const entryContext =
+    entry_context === "contribution" ? "contribution" : "manager";
 
   if (typeof wizard_session_id !== "string" || !isUuid(wizard_session_id)) {
     return NextResponse.json(
@@ -942,7 +976,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // > 0. If a malformed-but-zod-passing payload lands `[]` (or omits
   // the field entirely → parseDailyReturnsSeries returns rows=[] per
   // its undefined/null branch) for fmt=daily_returns or fmt=daily_nav,
-  // the strategy row would be created (status='pending_review') but
+  // the strategy row would be created (at its terminal status —
+  // 'pending_review' or, for a CONTRIB-02 contribution, 'private') but
   // no series is persisted and no compute job is enqueued. The
   // wizard's SyncProgress poller then hangs indefinitely because
   // strategy_analytics has no row at all — no 'computing', no
@@ -1014,6 +1049,27 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
+  }
+
+  // CONTRIB-02 (Phase 110) — a contribution finalizes to an owner-only
+  // status='private'. The unified backbone (below) calls finalize_csv_strategy
+  // WITHOUT p_terminal_status (defaults to 'pending_review') and hardcodes the
+  // response status, so it cannot produce a 'private' row (W1 note, 110-01).
+  // Route the contribution through a direct user-scoped finalize_csv_strategy
+  // call that passes p_terminal_status='private', then reuse the IDENTICAL
+  // post-finalize side-effect fan-out (metadata UPDATE + persist daily returns +
+  // analytics enqueue) the unified path runs — dailies are canonical, the
+  // contribution needs its KPIs. The manager flow stays on the unified backbone.
+  if (entryContext === "contribution") {
+    return await contributionCsvFinalizeHandler({
+      wizard_session_id,
+      fmt,
+      strategy_name: trimmedName,
+      userId: user.id,
+      metadataRaw,
+      dailyReturnsSeries,
+      correlationId: correlation_id,
+    });
   }
 
   // Phase 106 Stage B (D2): the unified backbone is now the sole finalize
@@ -1214,5 +1270,127 @@ async function unifiedCsvFinalizeHandler(args: {
       correlation_id: args.correlationId,
     },
     { status: result.status, headers: NO_STORE_HEADERS },
+  );
+}
+
+/**
+ * CONTRIB-02 (Phase 110) — contribution CSV finalize. Calls finalize_csv_strategy
+ * DIRECTLY on the user-scoped Supabase client with p_terminal_status='private'
+ * (the owner-only terminal status), then runs the SAME post-finalize side-effect
+ * fan-out the unified path runs (metadata UPDATE, persist daily returns, analytics
+ * enqueue). Diverges from unifiedCsvFinalizeHandler only in the WRITER: the unified
+ * Python backbone calls finalize_csv_strategy without p_terminal_status (defaults
+ * to 'pending_review') and hardcodes its response status, so it cannot terminate a
+ * draft at 'private' (W1 note, 110-01).
+ *
+ * Why a direct RPC call is correct here (and needs no INTERNAL_API_TOKEN / no JWT
+ * forwarding to Python): the route's `createClient()` is already user-scoped (the
+ * SSR cookie session), so the SECURITY DEFINER RPC's auth.uid() = p_user_id guard
+ * is satisfied natively — the token-forwarding dance the unified path performs
+ * exists only because the analytics service's module client is service-role.
+ *
+ * There is NO publish-review notification on the CSV path to suppress (unlike
+ * finalize-wizard's founder email) — the CSV route never notified. The analytics
+ * enqueue is KEPT: a contribution is a real track record and the allocator needs
+ * its daily series + KPIs in the composer (dailies are canonical).
+ */
+async function contributionCsvFinalizeHandler(args: {
+  wizard_session_id: string;
+  fmt: string;
+  strategy_name: string;
+  userId: string;
+  metadataRaw: unknown;
+  dailyReturnsSeries: CsvDailyReturnRow[];
+  correlationId: string;
+}): Promise<NextResponse> {
+  const supabase = await createClient();
+
+  // The generated database.types.ts does not carry finalize_csv_strategy (it was
+  // never called from TS — the analytics service invokes it) nor the new trailing
+  // p_terminal_status parameter, so cast through unknown (mirrors the
+  // persist_csv_daily_returns cast). The RPC RAISEs on any p_terminal_status
+  // outside ('pending_review','private') — server-side enforcement of the
+  // never-published invariant.
+  const { data: newStrategyId, error } = await (
+    supabase.rpc as unknown as (
+      fn: "finalize_csv_strategy",
+      rpcArgs: {
+        p_user_id: string;
+        p_wizard_session_id: string;
+        p_fmt: string;
+        p_strategy_name: string;
+        p_terminal_status: string;
+      },
+    ) => Promise<{
+      data: string | null;
+      error: { code?: string; message?: string } | null;
+    }>
+  )("finalize_csv_strategy", {
+    p_user_id: args.userId,
+    p_wizard_session_id: args.wizard_session_id,
+    p_fmt: args.fmt,
+    p_strategy_name: args.strategy_name,
+    p_terminal_status: "private",
+  });
+
+  if (error || !isUuid(newStrategyId)) {
+    console.error(
+      `[strategies/csv-finalize contribution] finalize_csv_strategy failed [correlation_id=${args.correlationId}]:`,
+      error?.code,
+      error?.message,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_FINALIZE_FAIL",
+        human_message:
+          "Your contribution could not be finalized. Please retry, and contact support@quantalyze.com if it persists.",
+        debug_context: { rpc_error_code: error?.code ?? null },
+        correlation_id: args.correlationId,
+      },
+      { status: 422, headers: NO_STORE_HEADERS },
+    );
+  }
+  const strategyId: string = newStrategyId;
+
+  // Identical post-finalize fan-out to the unified path (shared helpers, so the
+  // two cannot drift): metadata UPDATE, persist daily returns, analytics enqueue.
+  const metaErrResponse = await applyCsvMetadataUpdate(
+    supabase,
+    strategyId,
+    args.userId,
+    args.metadataRaw,
+    { correlationId: args.correlationId },
+  );
+  if (metaErrResponse) return metaErrResponse;
+
+  const persistFailResponse = await persistDailyReturnsOrErrorResponse(
+    supabase,
+    args.userId,
+    strategyId,
+    args.dailyReturnsSeries,
+    {
+      logPrefix: "[strategies/csv-finalize contribution]",
+      correlationId: args.correlationId,
+    },
+  );
+  if (persistFailResponse) return persistFailResponse;
+
+  if (args.dailyReturnsSeries.length > 0) {
+    enqueueCsvAnalyticsAfter(strategyId, args.fmt, {
+      logPrefix: "[strategies/csv-finalize contribution]",
+      correlationId: args.correlationId,
+    });
+  }
+
+  return NextResponse.json(
+    {
+      ok: true,
+      strategy_id: strategyId,
+      // CONTRIB-02 — the ACTUAL terminal status this contribution wrote.
+      status: "private",
+      correlation_id: args.correlationId,
+    },
+    { status: 200, headers: NO_STORE_HEADERS },
   );
 }
