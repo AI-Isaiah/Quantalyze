@@ -145,10 +145,7 @@ export function BridgeWidget({
           >
             Bridge
           </span>
-          <span
-            className="text-base font-semibold text-text-primary"
-            style={{ fontFamily: "var(--font-serif, Fraunces, Georgia, serif)" }}
-          >
+          <span className="text-base font-display text-text-primary">
             Status unavailable
           </span>
           <span className="text-sm text-text-secondary">
@@ -199,8 +196,7 @@ export function BridgeWidget({
         className="rounded-lg border px-4 py-3"
         style={{
           borderColor: "var(--color-bridge-border-100)",
-          background:
-            "linear-gradient(135deg, var(--color-bridge-bg-100) 0%, var(--color-bridge-bg-50) 100%)",
+          background: "var(--color-bridge-bg-100)",
         }}
       >
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -210,10 +206,7 @@ export function BridgeWidget({
           >
             Bridge
           </span>
-          <span
-            className="text-base font-semibold text-text-primary"
-            style={{ fontFamily: "var(--font-serif, Fraunces, Georgia, serif)" }}
-          >
+          <span className="text-base font-display text-text-primary">
             All clear
           </span>
           <span className="text-sm text-text-secondary">
@@ -333,8 +326,7 @@ export function BridgeWidget({
         className="rounded-lg border p-6"
         style={{
           borderColor: "var(--color-bridge-border-100)",
-          background:
-            "linear-gradient(135deg, var(--color-bridge-bg-100) 0%, var(--color-bridge-bg-50) 100%)",
+          background: "var(--color-bridge-bg-100)",
         }}
       >
         <div
@@ -343,12 +335,7 @@ export function BridgeWidget({
         >
           Bridge flagged
         </div>
-        <div
-          className="mt-1 text-xl font-semibold text-text-primary"
-          style={{
-            fontFamily: "var(--font-serif, Fraunces, Georgia, serif)",
-          }}
-        >
+        <div className="mt-1 text-xl font-display text-text-primary">
           {count} holding{plural} need{count === 1 ? "s" : ""} review
         </div>
         <ul className="mt-3 grid gap-1 text-sm text-text-secondary">

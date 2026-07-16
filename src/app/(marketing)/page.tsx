@@ -55,7 +55,7 @@ export default async function Home() {
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-6 py-24 md:py-32 text-center">
         <div className="mx-auto max-w-3xl">
-          <div className="mb-6 inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
+          <div className="mb-6 inline-flex items-center gap-1.5 rounded-sm border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
             <svg className="h-3.5 w-3.5 text-positive" viewBox="0 0 16 16" fill="currentColor">
               <path
                 fillRule="evenodd"
@@ -187,7 +187,7 @@ export default async function Home() {
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="grid gap-8 text-center md:grid-cols-4">
             <div>
-              <p className="text-page-title font-bold text-text-primary font-metric">
+              <p className="text-page-title font-semibold text-text-primary font-metric">
                 {stats.strategies > 0 ? `${stats.strategies}+` : "--"}
               </p>
               <p className="mt-1 text-caption text-text-muted">
@@ -195,7 +195,7 @@ export default async function Home() {
               </p>
             </div>
             <div>
-              <p className="text-page-title font-bold text-text-primary font-metric">
+              <p className="text-page-title font-semibold text-text-primary font-metric">
                 {formatAum(stats.aum)}
               </p>
               <p className="mt-1 text-caption text-text-muted">
@@ -203,7 +203,7 @@ export default async function Home() {
               </p>
             </div>
             <div>
-              <p className="text-page-title font-bold text-text-primary font-metric">
+              <p className="text-page-title font-semibold text-text-primary font-metric">
                 {stats.intros > 0 ? `${stats.intros}+` : "--"}
               </p>
               <p className="mt-1 text-caption text-text-muted">
@@ -211,7 +211,7 @@ export default async function Home() {
               </p>
             </div>
             <div>
-              <p className="text-page-title font-bold text-text-primary font-metric">
+              <p className="text-page-title font-semibold text-text-primary font-metric">
                 {EXCHANGES.length}
               </p>
               <p className="mt-1 text-caption text-text-muted">

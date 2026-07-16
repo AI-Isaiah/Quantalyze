@@ -26,11 +26,11 @@ export function HoldingFactsheet({ item }: { item: HoldingCompareItem }) {
   return (
     <div
       data-testid="holding-factsheet"
-      className="rounded-lg border border-[#E2E8F0] bg-white p-6 flex flex-col gap-4"
+      className="rounded-lg border border-border bg-surface p-6 flex flex-col gap-4"
     >
       <div className="flex items-start justify-between">
         <div>
-          <span className="inline-block text-fixed-10 uppercase tracking-wider text-text-muted font-medium px-2 py-0.5 rounded bg-[#F8F9FA] mb-2">
+          <span className="inline-block text-fixed-10 uppercase tracking-wider text-text-muted font-medium px-2 py-0.5 rounded-sm bg-page mb-2">
             Holding
           </span>
           <h3 className="font-display text-2xl text-text-primary">{symbol}</h3>

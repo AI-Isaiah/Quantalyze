@@ -5,7 +5,7 @@ export default function SignupPage() {
   return (
     <>
       <div className="mb-8 text-center">
-        <h1 className="text-2xl font-bold text-text-primary">Quantalyze</h1>
+        <h1 className="text-2xl font-display text-text-primary">Quantalyze</h1>
         <p className="mt-2 text-sm text-text-secondary">Create your account</p>
       </div>
       <SignupForm />

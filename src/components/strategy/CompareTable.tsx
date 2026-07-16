@@ -135,10 +135,14 @@ export function CompareTable({ items }: { items: CompareItem[] }) {
                                 fluid type spine and across the @container reflow. */}
                             <span className={cn(
                               "text-xs font-metric tabular-nums",
-                              isWinner ? "text-accent font-bold" : "text-text-secondary",
+                              isWinner ? "text-accent font-semibold" : "text-text-secondary",
                             )}>
                               {formatValue(val, metric.format)}
-                              {isWinner && " ✓"}
+                              {/* Winner mark: a discrete DM Sans accent glyph
+                                  (own span, own spacing) — NOT a " ✓" string
+                                  concatenated into the mono numeric run. Drops
+                                  the banned third weight (font-bold) too. */}
+                              {isWinner && <span className="ml-1 font-sans">✓</span>}
                             </span>
                           </div>
                         </td>
