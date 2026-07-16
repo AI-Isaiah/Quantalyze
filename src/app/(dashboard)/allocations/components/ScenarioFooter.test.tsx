@@ -155,6 +155,57 @@ describe("ScenarioFooter", () => {
     expect(onCommitRequested).toHaveBeenCalledTimes(1); // unchanged
   });
 
+  it("T_F7b 111-05 committableCount gates Commit independently of diffCount — dirty-but-uncommittable draft keeps Commit disabled + shows the dirty chip", () => {
+    const onCommitRequested = vi.fn();
+    // Exclusion-only draft: diffCount=1 (dirty chip shows "1 change") but zero
+    // committable diffs → Commit MUST be disabled and clicking must not fire.
+    const { rerender } = render(
+      <ScenarioFooter
+        diffCount={1}
+        committableCount={0}
+        deltaSummary={NO_DELTAS}
+        onResetRequested={() => {}}
+        onCommitRequested={onCommitRequested}
+      />,
+    );
+    // CF-05: the exclusion still counts toward the dirty indicator.
+    expect(screen.getByText("1 change")).toBeTruthy();
+    const commit = screen.getByTestId("scenario-footer-commit");
+    expect((commit as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(commit);
+    expect(onCommitRequested).not.toHaveBeenCalled();
+
+    // A committable change (committableCount>0) enables Commit — even though the
+    // dirty count is unchanged from the display's perspective.
+    rerender(
+      <ScenarioFooter
+        diffCount={2}
+        committableCount={1}
+        deltaSummary={NO_DELTAS}
+        onResetRequested={() => {}}
+        onCommitRequested={onCommitRequested}
+      />,
+    );
+    const commit2 = screen.getByTestId("scenario-footer-commit");
+    expect((commit2 as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(commit2);
+    expect(onCommitRequested).toHaveBeenCalledTimes(1);
+  });
+
+  it("T_F7c 111-05 committableCount omitted → falls back to diffCount (legacy display-only footers unaffected)", () => {
+    render(
+      <ScenarioFooter
+        diffCount={3}
+        deltaSummary={SOME_DELTAS}
+        onResetRequested={() => {}}
+        onCommitRequested={() => {}}
+      />,
+    );
+    // No committableCount passed → gate falls back to diffCount>0 → enabled.
+    const commit = screen.getByTestId("scenario-footer-commit");
+    expect((commit as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("T_F8 footer has role='region' aria-label='Scenario draft summary and actions' + position:sticky bottom:0", () => {
     const { container } = render(
       <ScenarioFooter

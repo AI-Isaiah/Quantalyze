@@ -4546,6 +4546,14 @@ export function ScenarioComposer({
 
       <ScenarioFooter
         diffCount={scenario.diffCount}
+        // 111-05 (red-team HIGH fix): Commit gates on COMMITTABLE diffs, not the
+        // raw dirty count. `handleCommit` emits a diff ONLY per added strategy
+        // (voluntary_add) — exclusions produce none. So the committable count is
+        // exactly `addedStrategies.length`. An exclusion-only draft is dirty
+        // (diffCount>0, CF-05) but has zero committable diffs → Commit stays
+        // disabled instead of advertising a change the commit path dead-ends on
+        // (the F-01 "Nothing to commit" error remains as the backstop guard).
+        committableCount={scenario.draft.addedStrategies.length}
         deltaSummary={deltaSummary}
         onResetRequested={() => setResetModalOpen(true)}
         onCommitRequested={handleCommit}

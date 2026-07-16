@@ -44,6 +44,26 @@ export interface ScenarioFooterDeltaItem {
 
 export interface ScenarioFooterProps {
   diffCount: number;
+  /**
+   * 111-05 (red-team HIGH fix): count of COMMITTABLE diffs — the diffs the
+   * commit path (`handleCommit`) will actually emit (voluntary_add rows from
+   * added strategies). The Commit button's enabled-state gates on THIS, not on
+   * `diffCount`.
+   *
+   * Why they diverge: a draft can be dirty (`diffCount > 0`) with ZERO
+   * committable changes — e.g. an exclusion-only draft (a per-key data source
+   * toggled off, no strategy added). Exclusions are real draft changes for the
+   * save / dirty-indicator / mode-switch-park (CF-05), so they MUST still count
+   * toward `diffCount`. But `handleCommit` produces no diff for them, so
+   * enabling Commit on `diffCount` advertised a change the commit path
+   * dead-ends on (F-01 "Nothing to commit" error). Gating Commit on
+   * `committableCount` makes the button honest: it is enabled iff clicking it
+   * would produce a non-empty diff set.
+   *
+   * Optional for display-only footers; defaults to `diffCount` (legacy
+   * behavior) when omitted. The composer always passes it explicitly.
+   */
+  committableCount?: number;
   deltaSummary: ScenarioFooterDeltaItem[];
   onResetRequested: () => void;
   onCommitRequested: () => void;
@@ -70,12 +90,20 @@ const FOOTER_STYLE: CSSProperties = {
 
 export function ScenarioFooter({
   diffCount,
+  committableCount,
   deltaSummary,
   onResetRequested,
   onCommitRequested,
   commitBlocked = false,
 }: ScenarioFooterProps) {
+  // `hasDiffs` drives the DISPLAY (dirty chip + summary line) — exclusions count
+  // here (CF-05). It does NOT gate Commit; see `canCommit` below.
   const hasDiffs = diffCount > 0;
+  // Commit is enabled iff there is at least one COMMITTABLE diff (and no
+  // unresolved fingerprint mismatch). Falls back to `diffCount` for
+  // display-only footers that don't distinguish the two counts.
+  const committable = committableCount ?? diffCount;
+  const canCommit = committable > 0 && !commitBlocked;
   const significant = deltaSummary.filter((d) => d.tier !== "muted");
 
   // Diff-count chip copy — verb-less verb+noun pair.
@@ -131,7 +159,7 @@ export function ScenarioFooter({
         <button
           type="button"
           onClick={onCommitRequested}
-          disabled={!hasDiffs || commitBlocked}
+          disabled={!canCommit}
           aria-describedby={commitBlocked ? "scenario-fingerprint-mismatch-banner" : undefined}
           className="rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="scenario-footer-commit"

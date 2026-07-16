@@ -2097,13 +2097,20 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.queryByText(/Your live holdings have changed/i),
     ).not.toBeInTheDocument();
     // (2) The working draft carries the saved book (3 holdings toggled on) — the
-    //     diff-count footer reflects the APPLIED draft (Commit enabled), NOT the
-    //     empty blank default (Commit disabled) the pre-fix hook fell back to.
+    //     dirty-count footer reflects the APPLIED draft ("3 changes"), NOT the
+    //     empty blank default ("No changes yet") the pre-fix hook fell back to.
     //     This is the "Update persists what is shown" oracle: the working draft
     //     is the saved book, so a save round-trips the book — no blank-default
     //     overwrite / silent data loss.
-    expect(screen.getByTestId("scenario-footer-commit")).not.toBeDisabled();
+    //
+    //     111-05: the DIRTY-COUNT chip ("3 changes") is the distinguishing
+    //     oracle here, NOT the Commit button. A book-only draft (holdings toggled
+    //     on, no strategy added) is dirty-but-uncommittable under the
+    //     read-only-tokens model (`handleCommit` emits only voluntary_add diffs),
+    //     so Commit is correctly DISABLED — as it is for the blank default too.
+    //     Asserting the dirty chip is what separates applied-book from blank.
     expect(screen.getByText(/3 changes/i)).toBeInTheDocument();
+    expect(screen.getByTestId("scenario-footer-commit")).toBeDisabled();
   });
 
   // -------------------------------------------------------------------------
@@ -3103,19 +3110,26 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // F-01 regression — empty diff guard is NOT silent
+  // F-01 regression — an uncommittable (exclusion/stale-toggle-only) draft must
+  // keep Commit DISABLED, so the empty-diff dead-end is never reachable via the
+  // button.
   //
   // Scenario: seed a draft whose fingerprint MATCHES the current holdings
   // (so the draft is loaded as-is, no fingerprint mismatch banner), but
   // includes an extra toggle-off entry for a holding NOT in holdingsSummary.
-  // diffCount counts the stale toggle as 1 diff → button enabled.
-  // handleCommit's holdingsSummary.find() skips the stale holding →
-  // diffs.length===0 → F-01 guard fires.
+  // diffCount counts the stale toggle as 1 diff (the draft is dirty), but there
+  // is NO added strategy → `handleCommit` would emit zero diffs and hit the F-01
+  // guard.
   //
-  // Before this fix: handleCommit returned silently with no user feedback.
-  // After: it calls setCommitError so an alert appears.
+  // 111-05 (red-team HIGH fix): pre-fix the footer gated Commit on diffCount, so
+  // the button was ENABLED and clicking it dead-ended at the misleading F-01
+  // "Nothing to commit" error. The fix gates Commit on the COMMITTABLE count
+  // (added strategies), so the button is DISABLED here and the dead-end is never
+  // reached from the UI. The F-01 setCommitError guard REMAINS in `handleCommit`
+  // as a defense-in-depth backstop (kept, not weakened), now unreachable by
+  // design via the disabled button.
   // -------------------------------------------------------------------------
-  it("F-01: handleCommit with stale toggle (holding no longer in holdingsSummary) shows 'Nothing to commit' error", () => {
+  it("F-01: an uncommittable stale-toggle-only draft keeps Commit DISABLED (dirty chip still shows) and cannot reach the 'Nothing to commit' dead-end", () => {
     const payload = makePayload();
     const STALE_REF = "holding:kraken:DOT:spot"; // NOT in holdingsSummary
 
@@ -3166,20 +3180,25 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.queryByText(/Your live holdings have changed/i),
     ).toBeNull();
 
-    // Footer Commit must be enabled (diffCount=1 from the stale toggle).
-    const commitBtn = screen.getByTestId("scenario-footer-commit") as HTMLButtonElement;
-    expect(commitBtn.disabled).toBe(false);
+    // The stale toggle makes the draft DIRTY (diffCount=1 → "1 change" chip,
+    // CF-05) — the dirty indicator still counts the exclusion.
+    expect(screen.getByText(/1 change/i)).toBeInTheDocument();
 
+    // 111-05: Commit is DISABLED — there is no committable (voluntary_add) diff,
+    // so the button never advertises the change that would dead-end at F-01.
+    const commitBtn = screen.getByTestId("scenario-footer-commit") as HTMLButtonElement;
+    expect(commitBtn.disabled).toBe(true);
+
+    // Clicking the disabled button is a no-op: no F-01 error surfaces and the
+    // commit handler never runs (the dead-end is unreachable from the UI).
     act(() => {
       fireEvent.click(commitBtn);
     });
-
-    // F-01: error banner must appear (not a silent return).
-    const alerts = screen.getAllByRole("alert");
     expect(
-      alerts.some((a) => /Nothing to commit/i.test(a.textContent ?? "")),
-    ).toBe(true);
-    // onCommitRequested must NOT be called (no diffs to hand off).
+      screen.queryAllByRole("alert").some((a) =>
+        /Nothing to commit/i.test(a.textContent ?? ""),
+      ),
+    ).toBe(false);
     expect(onCommitRequested).not.toHaveBeenCalled();
   });
 
@@ -4729,6 +4748,53 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
 
     // aria-checked reflects the exclusion (state visible, not silent).
     expect(switchB).toHaveAttribute("aria-checked", "false");
+  });
+
+  // -------------------------------------------------------------------------
+  // 111-05 (red-team HIGH) — an EXCLUSION-ONLY draft must NOT enable Commit.
+  //
+  // Repro the dead-end the red team traced: book mode, per-key gate satisfied,
+  // NO strategy added → toggle one data source off. That makes the draft dirty
+  // (diffCount counts the toggle → the footer shows "1 change"), but
+  // `handleCommit` emits ONLY voluntary_add diffs from added strategies — of
+  // which there are none — so clicking Commit would hit the F-01 "Nothing to
+  // commit" guard. The button must therefore stay DISABLED for an exclusion-only
+  // draft, and only become enabled once a committable change (an added strategy)
+  // exists. This guards the WIRING: the composer must pass the committable count
+  // (addedStrategies.length), NOT the raw diffCount, to the footer.
+  // -------------------------------------------------------------------------
+  it("111-05 exclusion-only draft (source toggled off, no strategy added) keeps Commit DISABLED; adding a strategy enables it — while the exclusion still shows as a dirty change", () => {
+    renderPerKey(makePerKeyPayload());
+
+    const commit = screen.getByTestId(
+      "scenario-footer-commit",
+    ) as HTMLButtonElement;
+    // Clean draft → Commit disabled.
+    expect(commit.disabled).toBe(true);
+
+    // Toggle key-B OFF — an exclusion, the ONLY change in the draft.
+    const switchB = screen.getByRole("switch", {
+      name: "Include OKX — ••••ey-B in projection",
+    });
+    fireEvent.click(switchB);
+    expect(switchB).toHaveAttribute("aria-checked", "false");
+
+    // The exclusion IS a dirty change (CF-05): the footer's dirty chip reflects
+    // it, so save / mode-switch-park still treat the draft as dirty…
+    expect(screen.getByText(/1 change/i)).toBeInTheDocument();
+    // …but it is NOT committable: `handleCommit` would emit zero diffs and hit
+    // the F-01 guard, so the button MUST remain disabled (this is the bug —
+    // pre-fix the footer gated on diffCount and enabled Commit here).
+    expect(commit.disabled).toBe(true);
+
+    // Adding a strategy introduces a committable (voluntary_add) diff → enabled.
+    addStrategy({
+      id: "strat-111-05",
+      name: "Committable Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(commit.disabled).toBe(false);
   });
 
   // -------------------------------------------------------------------------
