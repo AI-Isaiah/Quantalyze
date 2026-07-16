@@ -1066,7 +1066,55 @@ export function ScenarioComposer({
     // which clamps locally before dispatch. Keeps the message and the stored value
     // in lockstep even if the downstream clamp bound ever changes.
     const clampedWeight = Math.min(1, Math.max(0, weight));
-    scenario.setWeightOverride(scopeRef, clampedWeight);
+
+    // WEIGHTS-01 (Phase 112) — weight-sum basis branch. A PER-KEY unit edit on
+    // the mixed book surface must renormalize over the SELECTED ENGINE UNIT basis
+    // (WR-01), NEVER setWeightOverride's `enabledIdsOf` basis — which excludes
+    // per-key units, so a per-key edit would leave the sum ≠ 1 across the mixed
+    // per-key + added set (Pitfall 2 / the #528 apply-back drift class, D-locked
+    // decision 3). ADDED-strategy edits keep the legacy `setWeightOverride` path
+    // byte-for-byte: their `enabledIdsOf` renormalization is correct while per-key
+    // rows ride the raw equity share, and it is the reference behavior the Wave-0
+    // mixed fixture depends on. `togglePerKeySource` stays the include/exclude
+    // channel untouched; because ALL per-key weight math now flows through this
+    // explicit engine-unit basis, the toggle's delete-on-re-include semantics no
+    // longer govern the weight — an exclusion honestly shrinks the denominator via
+    // the engine's ephemeral renorm (scenario.ts:314-319, read-only reference)
+    // while a typed weight persists in `weightOverrides` across exclude/re-include
+    // (Wave-0 pin (d)).
+    const isPerKeyEdit = usePerKeySources && !addedIdSet.has(scopeRef);
+    if (!isPerKeyEdit) {
+      scenario.setWeightOverride(scopeRef, clampedWeight);
+      return;
+    }
+
+    const basisIds = engineSet.strategies
+      .filter((s) => engineSet.state.selected[s.id])
+      .map((s) => s.id);
+    const otherIds = basisIds.filter((id) => id !== scopeRef);
+    const otherSum = otherIds.reduce(
+      (acc, id) => acc + (blendShareByRef[id] ?? 0),
+      0,
+    );
+    const remainingMass = 1 - clampedWeight;
+    const vector: Record<string, number> = { [scopeRef]: clampedWeight };
+    if (otherIds.length > 0) {
+      if (otherSum <= 0) {
+        // Mirror setWeightOverride's :599-602 equal-split fallback when the other
+        // selected units carry no share mass to scale.
+        const equal = remainingMass / otherIds.length;
+        for (const id of otherIds) vector[id] = equal;
+      } else {
+        const scale = remainingMass / otherSum;
+        for (const id of otherIds) {
+          vector[id] = (blendShareByRef[id] ?? 0) * scale;
+        }
+      }
+    }
+    // The vector sums to 1 over `basisIds`, so applyWeightOverrides reproduces the
+    // typed value exactly; `[scopeRef]` stamps ONE user gesture into
+    // userWeightOverrides (diffCount honesty — Task 1's parameter).
+    scenario.applyWeightOverrides(vector, basisIds, [scopeRef]);
   }
 
   // R4 — leverage input change handler. Mirrors handleWeightChange's fail-loud
@@ -2284,6 +2332,29 @@ export function ScenarioComposer({
     () => ({ strategies: activeAdapterOutput.strategies, state: projectionState }),
     [activeAdapterOutput.strategies, projectionState],
   );
+
+  // WEIGHTS-01 (Phase 112) — the effective BLEND SHARE per engine unit: each
+  // SELECTED unit's projection weight over the selected-weight mass. This is the
+  // single display-and-edit basis for the per-key + added weight inputs — it
+  // mirrors exactly how the engine renormalizes over the selected set, so a typed
+  // per-key weight and the value the row shows agree. Σ ≤ 0 → empty map (never
+  // fabricate a share — DESIGN.md Numbers Contract). The per-key weight writer in
+  // handleWeightChange reads these effective shares to build a sum-1 vector over
+  // the engine basis (WR-01).
+  const blendShareByRef = useMemo(() => {
+    const out: Record<string, number> = {};
+    let sum = 0;
+    for (const s of engineSet.strategies) {
+      if (!projectionState.selected[s.id]) continue;
+      sum += projectionState.weights[s.id] ?? 0;
+    }
+    if (sum <= 0) return out;
+    for (const s of engineSet.strategies) {
+      if (!projectionState.selected[s.id]) continue;
+      out[s.id] = (projectionState.weights[s.id] ?? 0) / sum;
+    }
+    return out;
+  }, [engineSet.strategies, projectionState]);
   const dateMapCache = useMemo(
     // Reads ONLY strategies.daily_returns — key on the referentially-stable
     // `engineSet.strategies` (=== activeAdapterOutput.strategies) so a
