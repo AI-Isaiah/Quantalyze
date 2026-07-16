@@ -118,6 +118,7 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
+import { formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -2259,6 +2260,20 @@ export function ScenarioComposer({
     () => (usePerKeySources ? dataSourceKeys.map((k) => k.id) : []),
     [usePerKeySources, dataSourceKeys],
   );
+
+  // WEIGHTS-00 (A1 locked) — the allocator's real book equity: Σ equityByApiKeyId
+  // (the canonical D2 per-key equity, NEVER re-derived from value_usd) over the
+  // eligible per-key ids, ONLY in the per-key book path. This is the base the
+  // derived read-only Notional column (equity × L) reads against. In added-only /
+  // blank / gate=false there is no book equity, so this is `null` and every
+  // notional cell falls to an em-dash `—` (Numbers Contract) — never a fabricated
+  // $0. A degenerate Σ ≤ 0 is also `null` (honest non-derivable, not a real book).
+  const totalBookEquity = useMemo<number | null>(() => {
+    if (!usePerKeySources) return null;
+    let sum = 0;
+    for (const k of dataSourceKeys) sum += equityByApiKeyId[k.id] ?? 0;
+    return Number.isFinite(sum) && sum > 0 ? sum : null;
+  }, [usePerKeySources, dataSourceKeys, equityByApiKeyId]);
 
   // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off
   // AND no live added strategy. Since P61-BUG-1 the merged engine set carries
@@ -4555,6 +4570,7 @@ export function ScenarioComposer({
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
           blendShareByRef={blendShareByRef}
+          totalBookEquity={totalBookEquity}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
           onRemoveAdded={handleRemoveAdded}
@@ -4916,6 +4932,13 @@ interface CompositionListProps {
    * row is absent here and falls back to its preserved stored weightOverride.
    */
   blendShareByRef: Record<string, number>;
+  /**
+   * WEIGHTS-00 (A1 locked) — the allocator's total book equity, or `null` when
+   * there is no book (added-only / blank / gate=false). The base for the derived
+   * read-only Notional column (equity × L). Null → every notional cell is an
+   * em-dash `—` (Numbers Contract), never a fabricated $0.
+   */
+  totalBookEquity: number | null;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
@@ -4939,11 +4962,43 @@ function CompositionList({
   onToggle,
   onSetWeight,
   blendShareByRef,
+  totalBookEquity,
   leverageByRef,
   onSetLeverage,
   onRemoveAdded,
   coverageEligible,
 }: CompositionListProps) {
+  // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional string for a row:
+  // equity × blend-share × leverage. It is purely informative (a
+  // clears-minimum-invest readout) and STRUCTURALLY never a weight input. Any
+  // factor missing/non-finite (no book equity; an EXCLUDED row absent from
+  // blendShareByRef; a degenerate share) → `null` → em-dash `—` per the Numbers
+  // Contract — never 0, never a fabricated dollar figure an LP could act on.
+  const notionalText = (ref: string): string => {
+    const share = blendShareByRef[ref];
+    if (
+      totalBookEquity == null ||
+      typeof share !== "number" ||
+      !Number.isFinite(share)
+    ) {
+      return "—";
+    }
+    const notional = share * totalBookEquity * (leverageByRef[ref] ?? 1);
+    return Number.isFinite(notional) ? formatCurrency(notional) : "—";
+  };
+  // Whether ANY included row carries a non-1× leverage — gates the honest
+  // leverage-invariance caveat (Sharpe/Sortino/Calmar do not shift with leverage).
+  const perKeyIncludedLevered = perKeySources.some(
+    (k) =>
+      draft.toggleByScopeRef[k.id] !== false &&
+      (leverageByRef[k.id] ?? 1) !== 1,
+  );
+  const addedIncludedLevered = draft.addedStrategies.some(
+    (a) =>
+      draft.toggleByScopeRef[a.id] !== false &&
+      (leverageByRef[a.id] ?? 1) !== 1,
+  );
+  const anyLevered = perKeyIncludedLevered || addedIncludedLevered;
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       {/* No inner "Composition" heading: the enclosing CollapsibleSection summary
@@ -5063,6 +5118,15 @@ function CompositionList({
                   onChange={(e) => onSetLeverage(k.id, Number(e.target.value))}
                   className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
+                    never a weight input. Em-dash when non-derivable. */}
+                <span
+                  data-testid="scenario-constituent-notional"
+                  title="Notional = equity × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  className="w-20 text-right font-mono text-xs text-text-muted"
+                >
+                  {notionalText(k.id)}
+                </span>
               </div>
             </li>
           );
@@ -5157,6 +5221,15 @@ function CompositionList({
                   onChange={(e) => onSetLeverage(a.id, Number(e.target.value))}
                   className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
+                    never a weight input. Em-dash when non-derivable. */}
+                <span
+                  data-testid="scenario-constituent-notional"
+                  title="Notional = equity × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  className="w-20 text-right font-mono text-xs text-text-muted"
+                >
+                  {notionalText(a.id)}
+                </span>
                 <button
                   type="button"
                   aria-label="Remove from scenario"
@@ -5170,6 +5243,21 @@ function CompositionList({
           );
         })}
       </ul>
+      {/* WEIGHTS-00 honesty caveat (A1 locked) — leverage scales return, vol and
+          max drawdown but the risk-adjusted ratios and correlation are
+          leverage-INVARIANT (no borrow cost modeled). Mirrors the
+          Diversification subtitle precedent; renders ONLY when a selected row is
+          levered so the surface never implies leverage improves Sharpe. */}
+      {anyLevered && (
+        <p
+          data-testid="scenario-leverage-invariance-note"
+          className="mt-3 text-xs text-text-muted"
+        >
+          Leverage scales return, volatility and max drawdown. Risk-adjusted
+          ratios (Sharpe, Sortino, Calmar) and correlation do not shift with
+          leverage — borrow cost is not modeled.
+        </p>
+      )}
     </div>
   );
 }

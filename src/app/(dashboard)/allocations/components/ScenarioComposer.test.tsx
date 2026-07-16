@@ -327,6 +327,7 @@ import { blendPeriodsPerYear } from "@/lib/closed-sets";
 // Phase 112 (WEIGHTS-02) — the shared leverage ceiling, asserted as the max
 // attribute on the per-key leverage inputs the phase adds.
 import { MAX_LEVERAGE } from "@/lib/leverage";
+import { formatCurrency } from "@/lib/utils";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
@@ -5441,6 +5442,100 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
       `weight-${K1}`,
     ) as HTMLInputElement;
     expect(Number(restored.value)).toBeCloseTo(0.3, 3);
+  });
+
+  // --- Plan 02 Task 3: derived read-only notional column + honesty caveat ---
+
+  /** The notional cell (read-only text) for a given constituent row, scoped by
+   *  data-scope-ref so the assertion targets the intended row. */
+  function notionalCellFor(ref: string): HTMLElement | null {
+    return document.querySelector(
+      `[data-scope-ref="${ref}"] [data-testid="scenario-constituent-notional"]`,
+    );
+  }
+
+  /** An ADDED-only render (no live book → usePerKeySources false → no book
+   *  equity), used to prove the notional falls to an em-dash, never $0. */
+  function renderAddedOnly() {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [],
+          apiKeys: [],
+          eligibleApiKeyIds: [],
+          perKeyReturnsByApiKeyId: {},
+          strategies: [catalogStrategy(A_ID, "Strat A 112", A_SERIES)],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  // (e) — the derived notional column reads equity × blend-share × leverage as
+  // read-only TEXT (locked decision 1: notional is NEVER a weight input). With
+  // book equity 100000 (K1 60000 / K2 40000), K1 weight 0.3 and K1 leverage 2 →
+  // K1 notional = 0.3 × 100000 × 2; the unlevered K2 = 0.7 × 100000 × 1.
+  it("(e) — the per-key notional cell renders equity × share × leverage as read-only text", () => {
+    render112();
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`weight-${K1}`) as HTMLInputElement,
+        { target: { value: "0.3" } },
+      );
+    });
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`leverage-${K1}`) as HTMLInputElement,
+        { target: { value: "2" } },
+      );
+    });
+
+    const k1Cell = notionalCellFor(K1);
+    const k2Cell = notionalCellFor(K2);
+    expect(k1Cell).not.toBeNull();
+    // Structural lock: notional is TEXT, never an <input> (never a weight input).
+    expect(k1Cell!.tagName).not.toBe("INPUT");
+    expect(k1Cell!.querySelector("input")).toBeNull();
+
+    expect(k1Cell!.textContent).toBe(formatCurrency(0.3 * 100_000 * 2));
+    expect(k2Cell!.textContent).toBe(formatCurrency(0.7 * 100_000 * 1));
+  });
+
+  // (f) — with NO book equity (added-only mode) the notional is non-derivable, so
+  // every notional cell shows the em-dash `—` (DESIGN.md Numbers Contract), never
+  // a fabricated $0.
+  it("(f) — added-only mode (no book equity) renders the notional as an em-dash, never $0", () => {
+    renderAddedOnly();
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const cell = notionalCellFor(A_ID);
+    expect(cell).not.toBeNull();
+    expect(cell!.textContent).toBe("—");
+    expect(cell!.textContent).not.toContain("$0");
+  });
+
+  // (g) — the leverage-invariance honesty caveat renders exactly when a selected
+  // row is levered (L ≠ 1), and is absent when every row is at 1×.
+  it("(g) — the leverage-invariance caveat renders only when a selected row is levered", () => {
+    render112();
+    expect(
+      screen.queryByTestId("scenario-leverage-invariance-note"),
+    ).toBeNull();
+
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`leverage-${K1}`) as HTMLInputElement,
+        { target: { value: "2" } },
+      );
+    });
+    expect(
+      screen.queryByTestId("scenario-leverage-invariance-note"),
+    ).not.toBeNull();
   });
 });
 
