@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { withPublishedOnly } from "@/lib/visibility";
+import { withPublishedOrOwner } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -56,7 +56,7 @@ export interface BrowseStrategyRow {
    * marks an example-universe row (`is_example=true AND status='published'`)
    * so the drawer can render the neutral-outline "Example" pill. This is a
    * co-fetched flag, NOT a published-bypass: example rows are just published
-   * rows that ALSO carry the flag — they still flow through `withPublishedOnly`
+   * rows that ALSO carry the flag — they still flow through `withPublishedOrOwner`
    * (RLS + defence-in-depth) and `displayStrategyName` (pseudonymity) like any
    * verified row. Verified rows carry `false`.
    */
@@ -106,28 +106,39 @@ export const GET = withAllocatorAuth(
     }
 
     const supabase = await createClient();
-    // RLS on `strategies` enforces SELECT for `status='published'` rows
-    // for authenticated callers — same client choice as
-    // getStrategiesByCategory in src/lib/queries.ts. The admin / service-
-    // role client is intentionally NOT used here: a read-only catalog of
-    // published strategies has no need to bypass RLS.
+    // CONTRIB-03 — owner-inclusive Browse discovery. Two-layer contract:
+    //   1. Query-builder isolation: withPublishedOrOwner appends the
+    //      `status.eq.published,user_id.eq.<sessionId>` predicate, mirroring
+    //      the `strategies_read` RLS shape EXACTLY (published OR the caller's
+    //      OWN rows) so an owner sees their own not-yet-published strategies
+    //      while everyone else sees only published ones.
+    //   2. RLS backstop: the `strategies_read` policy
+    //      (`status='published' OR user_id=auth.uid()`) still gates the read,
+    //      so even if the predicate were dropped no cross-tenant row leaks.
+    // The owner id is `user.id` from withAllocatorAuth — session-only, NEVER a
+    // request param (T-110-05/07). The admin / service-role client is
+    // intentionally NOT used here (Pitfall 4): a swap to the RLS-bypassing
+    // admin client would drop the RLS backstop, so the owner-OR predicate must
+    // never run on a service-role client — the no-owner-or-on-admin-client lint
+    // rule enforces that a raw owner-OR lives only in withPublishedOrOwner.
     // Audit C-0112 — co-fetch `disclosure_tier` so the response mapping
      // can suppress the real `name` for non-institutional rows. Ordering
      // still happens on `name` server-side (alphabetical browse is the
      // drawer contract); the leak prevention is in the projection step
      // below, not in the SELECT/ORDER list.
-    const { data, error } = await withPublishedOnly(
+    const { data, error } = await withPublishedOrOwner(
       supabase
         .from("strategies")
         .select(
           // Phase 29 / UNIFY-03 — co-fetch `is_example` so the response can
           // TAG example-universe rows in the unified Browse drawer. This is
-          // NOT a `.or(is_example.eq.true)` that would bypass the published
-          // predicate: example rows are published rows that ALSO carry the
-          // flag, so `withPublishedOnly` + RLS still gate the SET, and the
-          // flag is only read to drive the client-side "Example" pill.
+          // NOT an extra `is_example.eq.true` OR leg that would bypass the
+          // owner-inclusive predicate: example rows are published rows that
+          // ALSO carry the flag, so `withPublishedOrOwner` + RLS still gate
+          // the SET, and the flag is only read to drive the "Example" pill.
           "id, name, codename, disclosure_tier, markets, strategy_types, is_example",
         ),
+      user.id,
     )
       .order("name", { ascending: true })
       // M-0343 (audit-2026-05-07 F5b): fetch one row past the cap so the
