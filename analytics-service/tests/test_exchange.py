@@ -725,6 +725,105 @@ class TestValidateKeyPermissions:
         assert result["markets_error"] is None
 
 
+class TestValidateKeyPermissionsProbeError:
+    """DOGFOOD-3: a permission-probe fail-close (network blip, WAF, exchange
+    5xx) sets the _FAIL_CLOSED default {read:T, trade:T, withdraw:T,
+    probe_error:T} (key_permissions.py:56-65). The pre-fix derivation entered
+    the ``if has_withdraw`` branch and mislabeled the transient probe failure
+    as "Key has withdrawal permissions" (error_code=WITHDRAW_SCOPE). Post-fix,
+    probe_error is honest cause (PROBE_FAILED) while the key stays REJECTED
+    (read_only False) so every rejection gate keeps refusing it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_probe_error_yields_honest_probe_failed_not_scope(self):
+        # Test A (regression, fails without fix): the fail-closed default must
+        # NOT be treated as scope evidence.
+        exchange = MagicMock()
+        exchange.id = "binance"
+        exchange.load_markets = AsyncMock(return_value={})
+        exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(
+                return_value={
+                    "read": True,
+                    "trade": True,
+                    "withdraw": True,
+                    "probe_error": True,
+                }
+            ),
+        ):
+            result = await validate_key_permissions(exchange)
+
+        assert result["error_code"] == "PROBE_FAILED", (
+            "a fail-closed probe must derive PROBE_FAILED, not a scope code; "
+            f"got {result['error_code']!r}"
+        )
+        assert result["probe_error"] is True
+        # Fail-closed REJECTION is preserved: read_only stays False so every
+        # downstream rejection gate keeps refusing the key.
+        assert result["read_only"] is False
+        # fetch_balance succeeded, so the key is functionally "valid" — the
+        # probe of SCOPES is what failed, not the credentials.
+        assert result["valid"] is True
+        # The mislabel copy must be gone.
+        assert "withdrawal permissions" not in result["error"]
+        assert "trading permissions" not in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_genuine_withdraw_scope_still_named(self):
+        # Test B (guard the guard): a real withdraw scope with no probe error
+        # keeps the exact WITHDRAW_SCOPE copy.
+        exchange = MagicMock()
+        exchange.id = "binance"
+        exchange.load_markets = AsyncMock(return_value={})
+        exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(
+                return_value={
+                    "read": True,
+                    "trade": False,
+                    "withdraw": True,
+                    "probe_error": False,
+                }
+            ),
+        ):
+            result = await validate_key_permissions(exchange)
+
+        assert result["error_code"] == "WITHDRAW_SCOPE"
+        assert "withdrawal permissions" in result["error"]
+        assert result["read_only"] is False
+
+    @pytest.mark.asyncio
+    async def test_genuine_trade_scope_still_named(self):
+        # Test C: a real trade scope with no probe error keeps TRADE_SCOPE.
+        exchange = MagicMock()
+        exchange.id = "binance"
+        exchange.load_markets = AsyncMock(return_value={})
+        exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 100}})
+
+        with patch(
+            "services.key_permissions.detect_permissions",
+            new=AsyncMock(
+                return_value={
+                    "read": True,
+                    "trade": True,
+                    "withdraw": False,
+                    "probe_error": False,
+                }
+            ),
+        ):
+            result = await validate_key_permissions(exchange)
+
+        assert result["error_code"] == "TRADE_SCOPE"
+        assert "trading permissions" in result["error"]
+        assert result["read_only"] is False
+
+
 # ---------------------------------------------------------------------------
 # NEW-C13-10: credential / HMAC-signature redaction in logged exceptions
 # ---------------------------------------------------------------------------
