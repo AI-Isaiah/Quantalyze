@@ -4924,12 +4924,15 @@ function CompositionList({
             anatomy as an added row: an include/exclude toggle (the shared
             toggleByScopeRef channel via onTogglePerKey), the source label, a
             provenance badge (api_verified by construction — a per-key unit IS a
-            connected-exchange api-key), and the coverage chip. WEIGHT input is
-            now LIVE (Phase 112 WEIGHTS-01) — routed through the engine-unit basis
-            writer (handleWeightChange). The LEVERAGE input stays fenced to Plan 02
-            (WEIGHTS-02). A per-key source still has NO remove button (it is
-            toggled, not removed). Per-coin holdings are NOT rendered — they live
-            on the Holdings tab (CONSTIT-03). */}
+            connected-exchange api-key), and the coverage chip. Final column
+            anatomy per WEIGHTS-00 Route 1 / Option A (A1 locked 2026-07-17):
+            {equity-share weight — editable, engine-unit-basis writer
+            handleWeightChange} × {leverage — editable, handleLeverageChange
+            clamp} → {notional — derived read-only, equity × L, informative only}.
+            Both inputs key strictly by api_key_id (the engine unit id) — never a
+            symbol/coin (Pitfall 3, CONSTIT-04 grep gate). A per-key source still
+            has NO remove button (it is toggled, not removed). Per-coin holdings
+            are NOT rendered — they live on the Holdings tab (CONSTIT-03). */}
         {perKeySources.map((k) => {
           const included = draft.toggleByScopeRef[k.id] !== false;
           const { exchange, nickname, maskedTail } = dataSourceLabel(k);
@@ -4982,13 +4985,16 @@ function CompositionList({
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
               </div>
-              {/* WEIGHTS-01 — per-key weight input, mirroring the added-row weight
-                  input exactly (id `weight-<api_key_id>`, step 0.001, [0,1]).
-                  Value shows the EFFECTIVE blend share (blendShareByRef); an
-                  excluded row is absent from that map and falls back to its
-                  PRESERVED stored weightOverride (Wave-0 pin (d)). Disabled when
-                  excluded — no onChange fires, so an excluded row never routes a
-                  weight edit. Leverage input is Plan 02. */}
+              {/* WEIGHTS-01/02 — per-key weight + leverage inputs, mirroring the
+                  added-row inputs exactly. WEIGHT (id `weight-<api_key_id>`, step
+                  0.001, [0,1]): value shows the EFFECTIVE blend share
+                  (blendShareByRef); an excluded row is absent from that map and
+                  falls back to its PRESERVED stored weightOverride (Wave-0 pin
+                  (d)). LEVERAGE (id `leverage-<api_key_id>`, step 0.1, [0,
+                  MAX_LEVERAGE]): reuses leverageByRef + handleLeverageChange
+                  VERBATIM (locked decision 4 — no new leverage map, no new
+                  handler, no zod refine). Both disabled when excluded — no
+                  onChange fires, so an excluded row never routes an edit. */}
               <div className="flex items-center gap-2">
                 <label className="sr-only" htmlFor={`weight-${k.id}`}>
                   {labelText} weight
@@ -5007,6 +5013,22 @@ function CompositionList({
                   disabled={!included}
                   onChange={(e) => onSetWeight(k.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                />
+                <label className="sr-only" htmlFor={`leverage-${k.id}`}>
+                  {labelText} leverage
+                </label>
+                <input
+                  id={`leverage-${k.id}`}
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max={MAX_LEVERAGE}
+                  value={(leverageByRef[k.id] ?? 1).toString()}
+                  disabled={!included}
+                  title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
+                  aria-label={`${labelText} leverage multiplier`}
+                  onChange={(e) => onSetLeverage(k.id, Number(e.target.value))}
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
               </div>
             </li>
