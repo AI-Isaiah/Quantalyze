@@ -121,8 +121,14 @@ async function legacyValidateAndEncryptHandler(args: {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase);
     if (!validation.read_only) {
+      // DOGFOOD-3: after the Task-1 Python fix, genuine scope rejections and
+      // probe failures arrive as curated 4xx details via the F5b forward below
+      // (137-143). This branch only fires on an unknown-cause read_only:false
+      // 200 that carried no error, so it must NOT assert trade/withdraw scopes
+      // it never observed — the key is still rejected, only the reason stays
+      // honest.
       return NextResponse.json({
-        error: "This key has trading or withdrawal permissions. Only read-only keys are accepted.",
+        error: "This key could not be verified as read-only. Only read-only keys are accepted.",
       }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
