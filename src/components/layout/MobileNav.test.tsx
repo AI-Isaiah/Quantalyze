@@ -9,9 +9,12 @@ import { MobileNav } from "./MobileNav";
  * The bottom nav is single-sourced from `buildPrimaryMobileNav` in Sidebar.tsx
  * (DRY / project Rule 6) so the desktop Sidebar and the mobile bottom nav never
  * drift. These tests pin:
- *   - the role OR-logic (showsAllocatorWorkspace = isAllocator || isAdmin etc.)
- *     so an allocator never gets manager/admin-only destinations and vice-versa
- *     (T-45-01 information-disclosure mitigation in the plan threat register);
+ *   - the pure-role derivation (Phase 109: showsAllocatorWorkspace =
+ *     p.isAllocator, showsManagerWorkspace = p.isManager — is_admin no longer
+ *     OR-s in; it is an ops-overlay, and staff hold role='both') so an
+ *     allocator never gets manager-only destinations and vice-versa, and a
+ *     bare is_admin fixture surfaces only Profile (T-45-01
+ *     information-disclosure mitigation in the plan threat register);
  *   - the SC#1 allocator head — My Allocation / Risk / Bridge with DISTINCT
  *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1;
  *     Bridge deep-links the Scenario tab `/allocations?tab=scenario`, where the
@@ -79,14 +82,25 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).not.toContain("/allocations?tab=scenario");
   });
 
-  it("admin: EXACT <=5 set — SC#1 trio + one manager dest + Profile; Portfolios/Discovery trimmed to the drawer", () => {
+  it("bare is_admin: only Profile — is_admin is an ops-overlay, not a workspace persona (Phase 109)", () => {
+    // ROLE-03: is_admin no longer OR-s into the workspace flags. An admin with
+    // no allocator/manager role surfaces NO workspace destinations in the
+    // bottom nav — only the always-present Profile item. Staff retain the
+    // workspaces via role='both' (asserted in the role='both' case below).
+    // Re-introducing `|| p.isAdmin` would relight the allocator set and fail this.
     const items = buildPrimaryMobileNav({ isAdmin: true });
+    expect(items.map((i) => i.href)).toEqual(["/profile"]);
+  });
+
+  it('role "both" (isAllocator && isManager): EXACT <=5 set — allocator head lit, Portfolios trimmed to the drawer (ROLE-05)', () => {
+    const items = buildPrimaryMobileNav({ isAllocator: true, isManager: true });
     const hrefs = items.map((i) => i.href);
-    // Pin the EXACT set + ORDER so a reorder of the priority array can't
-    // silently change which destination is dropped at the <=5 cap (WR-02).
-    // budget = CAP(5) - 1 reserved for Profile = 4 → [My Allocation, Risk,
-    // Bridge, Strategies] then Profile; Portfolios + Discovery overflow to the
-    // hamburger drawer (the full nav) by design.
+    // The allocator head lights (NOT the pre-fix !isAllocator short-circuit),
+    // via pure role. Pin the EXACT set + ORDER so a reorder of the priority
+    // array can't silently change which destination is dropped at the <=5 cap
+    // (WR-02): budget = CAP(5) - 1 reserved for Profile = 4 → [My Allocation,
+    // Risk, Bridge, Strategies] then Profile; Portfolios + Discovery overflow
+    // to the hamburger drawer (the full nav) by design.
     expect(hrefs).toEqual([
       "/allocations",
       "/allocations?tab=risk",
@@ -100,22 +114,6 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).not.toContain("/discovery");
     // Distinct hrefs even when both families are present.
     expect(new Set(hrefs).size).toBe(hrefs.length);
-  });
-
-  it('role "both" (isAllocator && isManager): EXACT set equals admin — allocator set lit, Portfolios trimmed', () => {
-    const items = buildPrimaryMobileNav({ isAllocator: true, isManager: true });
-    const hrefs = items.map((i) => i.href);
-    // The allocator head lights (NOT the pre-fix !isAllocator short-circuit),
-    // and the resolved set is identical to admin (same OR-logic). Pinned so a
-    // priority reorder that silently dropped a different item is caught (WR-02).
-    expect(hrefs).toEqual([
-      "/allocations",
-      "/allocations?tab=risk",
-      "/allocations?tab=scenario",
-      "/strategies",
-      "/profile",
-    ]);
-    expect(hrefs).not.toContain("/portfolios");
   });
 
   it("no roles: only the always-present Profile item", () => {

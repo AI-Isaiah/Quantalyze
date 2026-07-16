@@ -21,11 +21,15 @@ import { Sidebar } from "./Sidebar";
  *
  *   Manager / crypto-team view: Strategies → Portfolios.
  *
- *   Admin view: My Allocation + Strategies + Portfolios. Admins need
- *     access to both surfaces for triage / demo / QA.
+ *   Admin view (Phase 109): is_admin is an OPS-OVERLAY that gates ONLY the
+ *     Admin section — it is NOT a workspace persona. `profiles.role` is the
+ *     sole workspace predicate; staff hold role='both' (backfilled in the
+ *     same PR, migration 20260716120000) so an admin still lights both
+ *     workspaces VIA ROLE. A bare is_admin fixture (no allocator/manager
+ *     role) therefore sees NO workspace items — only the Admin section.
  *
- * If a future refactor collapses these back together or flips the
- * labels, these tests catch it.
+ * If a future refactor collapses these back together or re-introduces the
+ * `|| isAdmin` OR-in, these tests catch it.
  */
 
 vi.mock("next/navigation", () => ({
@@ -112,8 +116,11 @@ describe("Sidebar Strategy Sandbox nav item is retired (FLOW-03)", () => {
   });
 
   it("admin-only users do NOT see a 'Strategy Sandbox' link", () => {
+    // Phase 109: a bare is_admin fixture surfaces NO workspace item (is_admin
+    // is an ops-overlay, not a persona), so the Strategy-Sandbox retirement is
+    // asserted against the Admin-only surface directly.
     render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
     expect(screen.queryByText("Strategy Sandbox")).toBeNull();
   });
 
@@ -187,24 +194,57 @@ describe("Sidebar workspace — dual-role (manager + allocator)", () => {
   });
 });
 
-describe("Sidebar workspace — admin view", () => {
-  it("renders 'My Allocation' AND the manager surfaces so admins can triage either", () => {
-    // Pre-fix the rule was `isAllocator && !isAdmin`, which hid My
-    // Allocation from admins (even admin-allocators). Admins now see
-    // both surfaces so they can navigate any user-facing route.
+describe("Sidebar workspace — admin view (Phase 109 role-only)", () => {
+  it("a bare is_admin fixture renders NO workspace items (ops-overlay, not a persona)", () => {
+    // ROLE-03: is_admin no longer OR-s into the workspace flags. An admin with
+    // no allocator/manager role sees only the Admin section — no My Allocation,
+    // no Strategies/Portfolios. Re-introducing `|| isAdmin` would fail this.
     render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
-    expect(screen.getByText("My Allocation")).toBeInTheDocument();
-    expect(screen.getByText("Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
+    expect(screen.queryByText("My Allocation")).toBeNull();
+    expect(screen.queryByText("Strategies")).toBeNull();
+    expect(screen.queryByText("Portfolios")).toBeNull();
   });
 
-  it("dual-role (admin + allocator) sees both surfaces", () => {
+  it("admin + allocator sees the allocator workspace + Admin, NOT the manager surface", () => {
+    // isAllocator lights My Allocation; the manager surface requires isManager,
+    // which is unset here, so Strategies/Portfolios must be absent (ROLE-02).
     render(
       <Sidebar populatedSlugs={[]} isAdmin={true} isAllocator={true} />,
     );
     expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
+    expect(screen.queryByText("Strategies")).toBeNull();
+    expect(screen.queryByText("Portfolios")).toBeNull();
+  });
+
+  it("admin + manager sees the manager workspace + Admin, NOT the allocator surface (ROLE-03)", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAdmin={true} isManager={true} />,
+    );
     expect(screen.getByText("Strategies")).toBeInTheDocument();
     expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
+    // Allocator surface requires the allocator role (or role='both'), not is_admin.
+    expect(screen.queryByText("My Allocation")).toBeNull();
+  });
+
+  it("a role='both' admin (staff after backfill) sees BOTH workspaces + Admin (ROLE-05)", () => {
+    // The atomic-backfill nav truth: post-migration every is_admin account is
+    // role='both', so isAllocator && isManager are both true and the admin
+    // retains both workspaces WITHOUT the retired `|| isAdmin` OR-in.
+    render(
+      <Sidebar
+        populatedSlugs={[]}
+        isAdmin={true}
+        isAllocator={true}
+        isManager={true}
+      />,
+    );
+    expect(screen.getByText("My Allocation")).toBeInTheDocument();
+    expect(screen.getByText("Strategies")).toBeInTheDocument();
+    expect(screen.getByText("Portfolios")).toBeInTheDocument();
+    expect(screen.getByText("ADMIN")).toBeInTheDocument();
   });
 });
 
@@ -441,13 +481,14 @@ describe("Sidebar NavItemLink a11y (NAV-02, RED until 51-03)", () => {
  * existing-correct behavior so any 51-03 nav-completeness edit that leaks an
  * allocator-only surface to a manager (or vice-versa) turns this red.
  *
- * GREEN NOW (it pins live-correct behavior, NOT a future implementation): the
- * `showsAllocatorWorkspace = isAllocator || isAdmin` /
- * `showsManagerWorkspace = isManager || isAdmin` derivations in
- * buildNavSections (Sidebar.tsx L34-35) already gate "My Allocation" (allocator
- * surface) vs "Strategies"/"Portfolios" (manager surface) correctly. The mobile
- * twin (buildPrimaryMobileNav) is already pinned by MobileNav.test.tsx; this is
- * the DESKTOP-render pin for the same security property.
+ * GREEN NOW (it pins live-correct behavior, NOT a future implementation):
+ * Phase 109 made the derivations pure-role — `showsAllocatorWorkspace =
+ * isAllocator` / `showsManagerWorkspace = isManager` in buildNavSections
+ * (is_admin no longer OR-s in) — so "My Allocation" (allocator surface) and
+ * "Strategies"/"Portfolios" (manager surface) gate strictly on their own role
+ * flag. The mobile twin (buildPrimaryMobileNav) is already pinned by
+ * MobileNav.test.tsx; this is the DESKTOP-render pin for the same security
+ * property.
  */
 describe("Sidebar role OR-logic pin — T-45-01 (GREEN, must not regress)", () => {
   it("a manager-only user does NOT see the allocator-only 'My Allocation' entry", () => {

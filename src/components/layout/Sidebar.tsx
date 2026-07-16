@@ -38,17 +38,21 @@ function buildNavSections(
   flaggedCount?: number,
   isManager?: boolean,
 ): NavSection[] {
-  // Admins see BOTH allocator AND manager surfaces (triage / demo).
-  // Allocators see the allocator workspace + the Discovery rail (their
-  // strategy-shopping surface). Managers see the manager workspace and
-  // the Discovery rail is HIDDEN — Discovery is the allocator's
-  // browse-investable-strategies surface, not the manager's. role="both"
-  // gets both workspaces; the manager flag is derived independently so
-  // it does not get nulled out the way the pre-fix `!isAllocator` short
-  // circuit did.
-  const showsAllocatorWorkspace = isAllocator || isAdmin;
-  const showsManagerWorkspace = isManager || isAdmin;
-  const showsDiscovery = isAllocator || isAdmin;
+  // Phase 109 (ROLE-01/02/03): `profiles.role` is the SOLE persona predicate;
+  // `is_admin` is an ops-overlay that gates ONLY the Admin section below —
+  // never a workspace. Staff hold role='both' (backfilled atomically in the
+  // same PR, migration 20260716120000), so an admin still lights BOTH
+  // workspaces via role, not via an `|| isAdmin` OR-in. Dropping that OR-in
+  // without the backfill would self-lock staff out of the allocator workspace
+  // (threat T-109-06) — hence the two changes are inseparable.
+  //   - Allocators see the allocator workspace + the Discovery rail (their
+  //     strategy-shopping surface).
+  //   - Managers see the manager workspace; Discovery is HIDDEN (it is the
+  //     allocator's browse-investable-strategies surface, not the manager's).
+  //   - role='both' lights both workspaces (isAllocator && isManager both true).
+  const showsAllocatorWorkspace = isAllocator;
+  const showsManagerWorkspace = isManager;
+  const showsDiscovery = isAllocator;
 
   // Bucket categories by `group` preserving first-seen order so the
   // Discovery section renders as stable sub-groups (Digital Assets → TradFi).
@@ -192,11 +196,13 @@ export function buildPrimaryMobileNav(p: {
   isAdmin?: boolean;
   flaggedCount?: number;
 }): NavItem[] {
-  // Mirror buildNavSections' role OR-logic EXACTLY (its showsAllocatorWorkspace
-  // / showsManagerWorkspace derivations) so the two navs share one source of
-  // truth and "both" lights the allocator set.
-  const showsAllocatorWorkspace = p.isAllocator || p.isAdmin;
-  const showsManagerWorkspace = p.isManager || p.isAdmin;
+  // Mirror buildNavSections' role derivation EXACTLY (Phase 109: pure role,
+  // no `|| isAdmin` OR-in) so the two navs share one source of truth. is_admin
+  // is an ops-overlay, not a workspace persona; staff hold role='both' (which
+  // sets both p.isAllocator and p.isManager), so "both" lights the allocator
+  // set via role. An admin with no allocator/manager role sees only Profile.
+  const showsAllocatorWorkspace = p.isAllocator;
+  const showsManagerWorkspace = p.isManager;
 
   // Profile is ACCOUNT — always present (mirrors buildNavSections' trailing
   // Profile item). Held aside so it survives the <=5 cap even when both the
