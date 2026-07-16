@@ -131,7 +131,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
   });
 
   it("renders AllocatorSyncStatus pill + Sync now button per row (not the stale Auto-synced button)", () => {
-    render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
     expect(screen.getByTestId("allocator-sync-pill")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /Sync binance now/i }),
@@ -145,7 +145,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
       status: 200,
       json: async () => ({ ok: true, job_id: "job-1" }),
     });
-    render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
     const btn = screen.getByRole("button", { name: /Sync binance now/i });
     await act(async () => {
       fireEvent.click(btn);
@@ -163,7 +163,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
   it("Sync now button is disabled while sync_status === 'syncing'", () => {
     render(
       <AllocatorExchangeManager
-        initialKeys={[makeKey({ sync_status: "syncing" })]}
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "syncing" })]}
       />,
     );
     const btn = screen.getByRole("button", { name: /Sync binance now/i });
@@ -177,7 +177,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
       resolveFetch = r;
     });
     fetchMock.mockReturnValueOnce(pending);
-    render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
     // Initially 'complete' pill.
     expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
       "Synced",
@@ -206,7 +206,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
       status: 500,
       json: async () => ({ error: "boom" }),
     });
-    render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
     await act(async () => {
       fireEvent.click(
         screen.getByRole("button", { name: /Sync binance now/i }),
@@ -221,7 +221,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
 
   it("handleSync on network error (rejected fetch) surfaces 'Sync request failed' helper_override", async () => {
     fetchMock.mockRejectedValueOnce(new Error("network down"));
-    render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
     await act(async () => {
       fireEvent.click(
         screen.getByRole("button", { name: /Sync binance now/i }),
@@ -248,7 +248,7 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
         next_attempt_at: nextAttemptAt,
       }),
     });
-    render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
     await act(async () => {
       fireEvent.click(
         screen.getByRole("button", { name: /Sync binance now/i }),
@@ -340,7 +340,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       error: null,
     });
 
-    render(<AllocatorExchangeManager initialKeys={[]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
     await submitAddKeyForm();
 
     // Row appears with syncing pill.
@@ -388,7 +388,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
       error: null,
     });
 
-    render(<AllocatorExchangeManager initialKeys={[]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
     await submitAddKeyForm();
 
     // (a) Modal is closed — "Connect Exchange API Key" form heading gone.
@@ -445,7 +445,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     });
     insertMock.mockReturnValue({ data: makeKey({ id: "new-key" }), error: null });
 
-    render(<AllocatorExchangeManager initialKeys={[]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
     await submitAddKeyForm();
 
     await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
@@ -488,7 +488,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     });
     insertMock.mockReturnValue({ data: makeKey({ id: "new-key-2" }), error: null });
 
-    render(<AllocatorExchangeManager initialKeys={[]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
     await submitAddKeyForm();
 
     await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
@@ -530,7 +530,7 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     });
     insertMock.mockReturnValue({ data: makeKey({ id: "new-key-3" }), error: null });
 
-    render(<AllocatorExchangeManager initialKeys={[]} />);
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
     await submitAddKeyForm();
 
     await waitFor(() => expect(insertMock).toHaveBeenCalledTimes(1));
@@ -562,7 +562,7 @@ describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
   it("setInterval fires router.refresh every 5s when any row is syncing", () => {
     render(
       <AllocatorExchangeManager
-        initialKeys={[makeKey({ sync_status: "syncing" })]}
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "syncing" })]}
       />,
     );
     act(() => {
@@ -593,7 +593,7 @@ describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
     (syncStatus) => {
       render(
         <AllocatorExchangeManager
-          initialKeys={[makeKey({ sync_status: syncStatus })]}
+          hasHoldings={true} initialKeys={[makeKey({ sync_status: syncStatus })]}
         />,
       );
       act(() => {
@@ -610,7 +610,7 @@ describe("AllocatorExchangeManager — 5s polling (D-11)", () => {
   it("interval is cleared on unmount", () => {
     const { unmount } = render(
       <AllocatorExchangeManager
-        initialKeys={[makeKey({ sync_status: "syncing" })]}
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "syncing" })]}
       />,
     );
     act(() => {
@@ -642,7 +642,7 @@ describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)"
     const last429At = new Date(Date.now() - 35_000).toISOString();
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             id: "key-okx-rate",
             exchange: "okx",
@@ -665,7 +665,7 @@ describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)"
     const last429At = new Date(Date.now() - 10_000).toISOString();
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             id: "key-binance-rate",
             exchange: "binance",
@@ -684,7 +684,7 @@ describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)"
   it("rate_limited with no last_429_at falls back to 'retry in 0s' (no data)", () => {
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             id: "key-null-429",
             exchange: "okx",
@@ -702,7 +702,7 @@ describe("AllocatorExchangeManager — rate_limited retry countdown (ISSUE-006)"
     const last429At = new Date(Date.now() - 400_000).toISOString();
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             id: "key-expired",
             exchange: "okx",
@@ -739,7 +739,7 @@ describe("AllocatorExchangeManager — Disconnect rename + cascade-optional moda
 
   function renderWithHoldings(count: number) {
     holdingsCountMock.mockReturnValue({ count, error: null });
-    return render(<AllocatorExchangeManager initialKeys={[makeKey()]} />);
+    return render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />);
   }
 
   it("row button label reads 'Disconnect' (not 'Remove') with Disconnect aria-label", async () => {
@@ -1021,7 +1021,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
   it("disconnected key renders in the Disconnected section with a Reconnect button (no Sync / Disconnect)", () => {
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             disconnected_at: "2026-04-22T09:00:00Z",
             sync_status: "idle",
@@ -1048,7 +1048,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     rpcMock.mockResolvedValue({ data: true, error: null });
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             disconnected_at: "2026-04-22T09:00:00Z",
             sync_status: "idle",
@@ -1079,7 +1079,7 @@ describe("AllocatorExchangeManager — migration 075 soft-disconnect + Reconnect
     rpcMock.mockResolvedValue({ data: true, error: null });
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             disconnected_at: "2026-04-22T09:00:00Z",
             sync_status: "idle",
@@ -1118,7 +1118,7 @@ describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 
   it("re-rendering with new initialKeys propagates updated sync_status to the pill", () => {
     const { rerender } = render(
       <AllocatorExchangeManager
-        initialKeys={[makeKey({ sync_status: "syncing" })]}
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "syncing" })]}
       />,
     );
     expect(screen.getByTestId("allocator-sync-pill").textContent).toContain(
@@ -1126,7 +1126,7 @@ describe("AllocatorExchangeManager — initialKeys prop→state merge (Landmine 
     );
     rerender(
       <AllocatorExchangeManager
-        initialKeys={[makeKey({ sync_status: "complete" })]}
+        hasHoldings={true} initialKeys={[makeKey({ sync_status: "complete" })]}
       />,
     );
     // Landmine 8: without the initialKeys useEffect, this would stay stuck at "Syncing…".
@@ -1157,7 +1157,7 @@ describe("AllocatorExchangeManager — NEW-C29-01 Reconnect in-flight guard", ()
     // Reconnect click). The button must be disabled to prevent a second RPC + POST.
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             disconnected_at: "2026-04-22T09:00:00Z",
             sync_status: "syncing",
@@ -1173,7 +1173,7 @@ describe("AllocatorExchangeManager — NEW-C29-01 Reconnect in-flight guard", ()
   it("NEW-C29-01: Reconnect button is enabled when sync_status is idle (ready to reconnect)", () => {
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             disconnected_at: "2026-04-22T09:00:00Z",
             sync_status: "idle",
@@ -1256,7 +1256,7 @@ describe("AllocatorExchangeManager — M1 (red-team) Reconnect replica-lag guard
     // that handleReconnect stamps before the RPC.
     const { rerender } = render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             sync_status: "syncing",
             // disconnected_at is absent (undefined → normalized to null)
@@ -1278,7 +1278,7 @@ describe("AllocatorExchangeManager — M1 (red-team) Reconnect replica-lag guard
     // old disconnected_at timestamp and sync_status="idle".
     rerender(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             sync_status: "idle",
             disconnected_at: "2026-04-22T09:00:00Z",
@@ -1336,7 +1336,7 @@ describe("AllocatorExchangeManager — M2 (red-team) Reconnect revert timestamp"
 
     render(
       <AllocatorExchangeManager
-        initialKeys={[
+        hasHoldings={true} initialKeys={[
           makeKey({
             id: "key-binance-m2",
             disconnected_at: originalDisconnectedAt,
@@ -1369,6 +1369,62 @@ describe("AllocatorExchangeManager — M2 (red-team) Reconnect revert timestamp"
       .getByRole("heading", { name: /Disconnected/i })
       .closest("div");
     expect(disconnectedSection?.textContent).not.toContain("just now");
+  });
+});
+
+/**
+ * Phase 110.1 Plan 01 Task 2 — DOGFOOD-2: the "Active Allocation auto-synced"
+ * affirmative must not assert an active allocation that `allocator_holdings`
+ * can't back. The per-key `account_balance_usdt` is real and keeps rendering;
+ * only the subtitle affirmative is gated on holdings presence.
+ */
+describe("AllocatorExchangeManager — DOGFOOD-2 subtitle gated on holdings", () => {
+  it("Test A (regression): active non-syncing key + hasHoldings=false → no affirmative, honest copy, balance still renders", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={false}
+        initialKeys={[makeKey()]}
+      />,
+    );
+
+    // The misleading affirmative must be ABSENT — this is the bug being fixed.
+    expect(
+      screen.queryByText(/Active Allocation auto-synced/),
+    ).not.toBeInTheDocument();
+
+    // Honest connected-but-empty subtitle instead.
+    expect(
+      screen.getByText(/1 connected · no open positions yet/),
+    ).toBeInTheDocument();
+
+    // The real per-key balance still renders (fix the label, not the data).
+    expect(screen.getByText(/Read-only · Balance/)).toBeInTheDocument();
+  });
+
+  it("Test B: active non-syncing key + hasHoldings=true → affirmative preserved", () => {
+    render(
+      <AllocatorExchangeManager hasHoldings={true} initialKeys={[makeKey()]} />,
+    );
+
+    expect(
+      screen.getByText(/1 connected · Active Allocation auto-synced/),
+    ).toBeInTheDocument();
+  });
+
+  it("Test C: syncing key + hasHoldings=false → 'first sync in progress', no affirmative", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={false}
+        initialKeys={[makeKey({ sync_status: "syncing" })]}
+      />,
+    );
+
+    expect(
+      screen.getByText(/1 connected · first sync in progress/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Active Allocation auto-synced/),
+    ).not.toBeInTheDocument();
   });
 });
 
