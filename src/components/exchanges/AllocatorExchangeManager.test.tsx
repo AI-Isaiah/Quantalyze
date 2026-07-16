@@ -298,7 +298,9 @@ describe("AllocatorExchangeManager — handleAddKey first-run awaited sync (f4)"
     // side; it calls onSubmit when the user clicks "Connect".
     const labelInput = screen.getByLabelText(/Label/i);
     const keyInput = screen.getByLabelText(/API Key$/i);
-    const secretInput = screen.getByLabelText(/API Secret/i);
+    // Exact label — the reveal toggle button's aria-label ("Show API secret")
+    // also matches /API Secret/i, so an exact string disambiguates to the input.
+    const secretInput = screen.getByLabelText("API Secret");
     fireEvent.change(labelInput, { target: { value: "Test Key" } });
     fireEvent.change(keyInput, { target: { value: "test-key" } });
     fireEvent.change(secretInput, { target: { value: "test-secret" } });
