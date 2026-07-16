@@ -84,7 +84,7 @@ export default function ForQuantsPage() {
       <section className="border-b border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
+            <span className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
               For Crypto Quant Teams
             </span>
 

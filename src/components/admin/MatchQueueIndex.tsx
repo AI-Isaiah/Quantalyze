@@ -385,7 +385,7 @@ function FilterChip({
     >
       {label}
       {count !== undefined && count > 0 && (
-        <span className="rounded-full bg-text-muted/20 px-1.5 text-micro font-mono tabular-nums">
+        <span className="rounded-sm bg-text-muted/20 px-1.5 text-micro font-mono tabular-nums">
           {count}
         </span>
       )}

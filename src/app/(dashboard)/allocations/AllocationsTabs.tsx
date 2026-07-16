@@ -326,9 +326,9 @@ const TAB_BUTTON_INACTIVE =
   "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
 
 const TAB_COUNT_BADGE_ACTIVE =
-  "rounded-full bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";
+  "rounded-sm bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";
 const TAB_COUNT_BADGE_INACTIVE =
-  "rounded-full bg-page px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-text-muted";
+  "rounded-sm bg-page px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-text-muted";
 
 /**
  * NAV-02 (Phase 45) — pure horizontal-scroll math for the <sm tab strip.

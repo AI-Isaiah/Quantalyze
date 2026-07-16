@@ -201,8 +201,8 @@ export function MandateQuickSetCard({ onSaved, onSkipped }: Props) {
                 onClick={() => toggleType(t)}
                 className={
                   active
-                    ? "rounded-full border border-accent bg-accent px-3 py-1 text-xs text-white transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
-                    : "rounded-full border border-border bg-surface px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent/30 focus:outline-none focus:ring-2 focus:ring-accent/50"
+                    ? "rounded-md border border-accent bg-accent px-3 py-1 text-xs text-white transition-colors focus:outline-none focus:ring-2 focus:ring-accent/50"
+                    : "rounded-md border border-border bg-surface px-3 py-1 text-xs text-text-secondary transition-colors hover:border-accent/30 focus:outline-none focus:ring-2 focus:ring-accent/50"
                 }
               >
                 {t}

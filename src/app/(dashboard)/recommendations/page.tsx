@@ -289,7 +289,7 @@ function RecommendationCard({
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3">
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/10 text-xs font-semibold text-accent">
+            <span className="font-mono text-xs font-medium text-text-muted">
               #{rank}
             </span>
             <h3 className="text-lg font-semibold text-text-primary">

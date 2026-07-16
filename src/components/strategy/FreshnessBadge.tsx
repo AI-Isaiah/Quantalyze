@@ -53,7 +53,7 @@ export function FreshnessBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-fixed-11 font-medium",
+        "inline-flex items-center gap-1.5 rounded-sm px-2.5 py-0.5 text-fixed-11 font-medium",
         colors.badge,
         className,
       )}
