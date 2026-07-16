@@ -480,6 +480,7 @@ function makePayload(
     minHistoryDepthMonths: 12,
     equityBaselineUnknown: false,
     activeVenues: ["Binance"],
+    hasConnectedKeys: true,
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,

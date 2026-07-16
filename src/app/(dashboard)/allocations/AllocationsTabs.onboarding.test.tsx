@@ -110,6 +110,7 @@ function basePayload(
     minHistoryDepthMonths: null,
     equityBaselineUnknown: false,
     activeVenues: [],
+    hasConnectedKeys: false,
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,

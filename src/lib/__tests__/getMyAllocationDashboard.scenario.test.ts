@@ -22,6 +22,7 @@ import {
   partitionTrustworthyEquitySnapshots,
   emptyLiveBaselineMetrics,
   liveBaselineMetricsFromPerKeyDailies,
+  derivePhase07Fields,
   type MyAllocationDashboardPayload,
 } from "../queries";
 
@@ -395,5 +396,73 @@ describe("Phase 36 — liveBaselineMetrics shape-identity (per-key branch vs fal
     // perKeyReturnsByApiKeyId).
     const again = liveBaselineMetricsFromPerKeyDailies(holdings, perKeyInput);
     expect(again).toEqual(metrics);
+  });
+});
+
+/**
+ * Phase 110.1 / DOGFOOD-1 (HIGH) — the connected-keys SIGNAL must use the
+ * canonical isPerKeyDailiesEligibleKey predicate, NOT `activeKeys.length`.
+ *
+ * WHY this matters: soft-disconnected (`disconnected_at != null`) and
+ * credential-revoked (`sync_status='revoked'`) keys keep `is_active=true`
+ * (routers/cron.py sets those columns WITHOUT deactivating). The pre-110.1
+ * dashboard derived the empty-state connected signal from
+ * `activeVenues.length > 0` (is_active-only), so an allocator who disconnected
+ * their ONLY key was wrongly told "connected — no positions synced yet"
+ * instead of the honest "Connect a key" CTA. This test exercises the real
+ * payload builder (derivePhase07Fields), so it guards the WIRING — that the
+ * builder invokes the predicate — not merely the predicate in isolation. It
+ * FAILS against the old `apiKeys.filter(k => k.is_active).length > 0`
+ * derivation.
+ */
+describe("DOGFOOD-1 — derivePhase07Fields.hasConnectedKeys uses isPerKeyDailiesEligibleKey (110.1)", () => {
+  const NO_SNAPSHOTS: MyAllocationDashboardPayload["equitySnapshots"] = [];
+  const NO_HOLDINGS: Parameters<typeof derivePhase07Fields>[3] = [];
+
+  type Key = Parameters<typeof derivePhase07Fields>[0][number];
+  const key = (over: Partial<Key>): Key => ({
+    is_active: true,
+    exchange: "binance",
+    sync_status: "ok",
+    last_sync_at: "2026-07-16T00:00:00Z",
+    disconnected_at: null,
+    ...over,
+  });
+
+  const derive = (apiKeys: Key[]) =>
+    derivePhase07Fields(apiKeys, NO_SNAPSHOTS, 0, NO_HOLDINGS, false);
+
+  it("a live is_active key → hasConnectedKeys=true", () => {
+    expect(derive([key({})]).hasConnectedKeys).toBe(true);
+  });
+
+  it("REGRESSION: an is_active key that is soft-disconnected (disconnected_at != null) → hasConnectedKeys=false", () => {
+    // is_active stays true (the disconnect worker does not deactivate) — the
+    // old activeKeys.length derivation returned true here (the bug).
+    const out = derive([
+      key({ is_active: true, disconnected_at: "2026-07-15T09:00:00Z" }),
+    ]);
+    expect(out.hasConnectedKeys).toBe(false);
+    // activeVenues still lists the venue (factsheet "markets" line is
+    // is_active-scoped and must NOT change) — proving the two signals diverge.
+    expect(out.activeVenues).toEqual(["Binance"]);
+  });
+
+  it("REGRESSION: an is_active key with sync_status='revoked' → hasConnectedKeys=false", () => {
+    const out = derive([key({ is_active: true, sync_status: "revoked" })]);
+    expect(out.hasConnectedKeys).toBe(false);
+    expect(out.activeVenues).toEqual(["Binance"]);
+  });
+
+  it("no keys → hasConnectedKeys=false", () => {
+    expect(derive([]).hasConnectedKeys).toBe(false);
+  });
+
+  it("mixed: one revoked + one live → hasConnectedKeys=true (some, not every)", () => {
+    const out = derive([
+      key({ exchange: "okx", sync_status: "revoked" }),
+      key({ exchange: "binance" }),
+    ]);
+    expect(out.hasConnectedKeys).toBe(true);
   });
 });

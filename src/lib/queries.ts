@@ -1689,6 +1689,19 @@ export interface MyAllocationDashboardPayload {
    * "OKX"]). Used in the venue-specific warm-up copy.
    */
   activeVenues: string[];
+  /**
+   * DOGFOOD-1 (Phase 110.1): True when the allocator has at least one key
+   * that is genuinely connected — i.e. passes the canonical
+   * `isPerKeyDailiesEligibleKey` predicate (is_active && sync_status !==
+   * "revoked" && disconnected_at == null). This is DELIBERATELY narrower
+   * than `activeVenues.length > 0`, which derives from `is_active` ALONE and
+   * therefore still counts soft-disconnected (`disconnected_at != null`) and
+   * credential-revoked (`sync_status='revoked'`) keys as "connected". An
+   * allocator who disconnected their only key must see the "Connect a key"
+   * empty state, NOT the connected-but-empty state. Drives the EmptyState
+   * no-keys vs connected-but-empty branch.
+   */
+  hasConnectedKeys: boolean;
   // ─────────────────────────────────────────────────────────────────────
   // Phase 09 / D-07 + D-08 + D-11 + finding f5
   // ─────────────────────────────────────────────────────────────────────
@@ -2301,15 +2314,24 @@ export function buildPerKeyReturnsByApiKeyId(
 
 /**
  * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
- * both branches (portfolio-exists and !portfolio). Kept internal — the
- * dashboard function is the only caller.
+ * both branches (portfolio-exists and !portfolio). The dashboard function
+ * is the only production caller.
+ *
+ * @internal Exported for unit testing only (Phase 110.1 / DOGFOOD-1): the
+ * `hasConnectedKeys` derivation is the exact wiring under regression — a test
+ * must be able to prove this builder invokes `isPerKeyDailiesEligibleKey`
+ * (not `activeKeys.length`), so it exercises the real derivation, not just the
+ * predicate in isolation.
  */
-function derivePhase07Fields(
+export function derivePhase07Fields(
   apiKeys: Array<{
     is_active: boolean;
     exchange: string;
     sync_status: string | null;
     last_sync_at: string | null;
+    // DOGFOOD-1 (Phase 110.1): required by isPerKeyDailiesEligibleKey to
+    // distinguish a genuinely connected key from a soft-disconnected one.
+    disconnected_at: string | null;
   }>,
   equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
   snapshotCount: number,
@@ -2343,9 +2365,18 @@ function derivePhase07Fields(
   | "equityDailyPoints"
   | "minHistoryDepthMonths"
   | "activeVenues"
+  | "hasConnectedKeys"
   | "equityBaselineUnknown"
 > {
   const activeKeys = apiKeys.filter((k) => k.is_active);
+  // DOGFOOD-1 (Phase 110.1): the connected-keys SIGNAL uses the canonical
+  // isPerKeyDailiesEligibleKey predicate, NOT `activeKeys.length` — a
+  // soft-disconnected (disconnected_at != null) or credential-revoked
+  // (sync_status='revoked') key keeps is_active=true (routers/cron.py sets
+  // those columns without deactivating) but is NOT connected. `activeKeys`
+  // above stays is_active-only on purpose: it feeds the factsheet "markets"
+  // line (activeVenues), where the historically-active venue set is correct.
+  const hasConnectedKeys = apiKeys.some(isPerKeyDailiesEligibleKey);
   // B14: single-source the sync-staleness decision in deriveSyncFreshness so the
   // 24h cutoff + the two independent stale/syncing predicates cannot drift per
   // surface (NEW-C09-04). The three fields below stay the payload read-contract
@@ -2424,6 +2455,7 @@ function derivePhase07Fields(
     equityDailyPoints,
     minHistoryDepthMonths,
     activeVenues,
+    hasConnectedKeys,
     equityBaselineUnknown,
   };
 }
