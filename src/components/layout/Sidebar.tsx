@@ -395,7 +395,7 @@ export function Sidebar({
               >
                 {/* Sub-group labels sit one notch quieter than the section
                     heading via TIGHTER tracking (0.1em vs 0.18em), not opacity. */}
-                <p className="mb-1 px-3 text-micro font-mono uppercase tracking-[0.1em] text-text-muted">
+                <p className="mb-1 px-3 text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
                   {group.label}
                 </p>
                 {/* Icon dedupe: the category rows carry no per-item icon; they
@@ -475,7 +475,7 @@ function NavItemLink({
         aria-current={active ? "page" : undefined}
         className={`flex items-center gap-3 rounded-sm border-l-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface ${
           active
-            ? "border-accent bg-surface-subtle font-medium text-accent"
+            ? "border-accent bg-surface-subtle text-accent"
             : "border-transparent text-text-secondary hover:bg-surface-subtle hover:text-text-primary"
         }`}
       >
@@ -484,7 +484,7 @@ function NavItemLink({
         {showBadge && (
           <span
             aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
-            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
+            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm bg-accent px-1.5 text-fixed-10 font-medium text-white"
           >
             {formatBadgeCount(badge)}
           </span>

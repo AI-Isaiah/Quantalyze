@@ -78,7 +78,7 @@ export function MobileNav({
                 {showBadge && (
                   <span
                     aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
-                    className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
+                    className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm bg-accent px-1.5 text-fixed-10 font-medium text-white"
                   >
                     {formatBadgeCount(badge)}
                   </span>

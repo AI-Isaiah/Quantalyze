@@ -28,7 +28,7 @@ function formatAum(value: number): string {
   if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(1)}B`;
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(1)}M`;
   if (value >= 1_000) return `$${(value / 1_000).toFixed(0)}K`;
-  return value > 0 ? `$${value}` : "--";
+  return value > 0 ? `$${value}` : "—";
 }
 
 export default async function Home() {
@@ -188,7 +188,7 @@ export default async function Home() {
           <div className="grid gap-8 text-center md:grid-cols-4">
             <div>
               <p className="text-page-title font-semibold text-text-primary font-metric">
-                {stats.strategies > 0 ? `${stats.strategies}+` : "--"}
+                {stats.strategies > 0 ? `${stats.strategies}+` : "—"}
               </p>
               <p className="mt-1 text-caption text-text-muted">
                 Verified strategies
@@ -204,7 +204,7 @@ export default async function Home() {
             </div>
             <div>
               <p className="text-page-title font-semibold text-text-primary font-metric">
-                {stats.intros > 0 ? `${stats.intros}+` : "--"}
+                {stats.intros > 0 ? `${stats.intros}+` : "—"}
               </p>
               <p className="mt-1 text-caption text-text-muted">
                 Introductions made
