@@ -324,6 +324,9 @@ import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 // oracle mirrors the composer's derived basis (crypto legs → √365) rather than
 // hardcoding the pre-#597 √252 default.
 import { blendPeriodsPerYear } from "@/lib/closed-sets";
+// Phase 112 (WEIGHTS-02) — the shared leverage ceiling, asserted as the max
+// attribute on the per-key leverage inputs the phase adds.
+import { MAX_LEVERAGE } from "@/lib/leverage";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
@@ -5238,6 +5241,196 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       ).value;
       expect(weightAfter).toBe(weightBefore);
     });
+  });
+});
+
+// ===========================================================================
+// Phase 112 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-01/02 per-key row inputs.
+//
+// The per-key constituent rows carry NO weight/leverage inputs today (the
+// "Phase 112 fence" at ScenarioComposer.tsx:4847-4850). Phase 112 extends the
+// SAME weight + leverage inputs the added rows already render onto the per-key
+// rows, keyed by api_key_id (the engine unit id). Every test below FAILS on the
+// current tree because those inputs do not exist yet — the failure is a
+// missing-element query, never a harness/import crash.
+//
+// Fixture: two eligible per-key sources (equity 60k / 40k → merged equity shares
+// 0.6 / 0.4) and one added strategy A carrying weightOverride 0.5. Mixed engine
+// mass = 0.6 + 0.4 + 0.5 = 1.5 → effective shares K1 0.4, K2 0.2667, A 0.3333.
+// ===========================================================================
+describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffold)", () => {
+  const K1 = "pk-112-k1"; // per-key unit id (api_key_id)
+  const K2 = "pk-112-k2"; // per-key unit id (api_key_id)
+  const A_ID = "strat-112-a"; // added strategy id
+
+  // ≥10 points so the engine clears its n<10 floor; two materially different
+  // series so a leverage edit on one moves the blend volatility.
+  const P112_DATES = Array.from({ length: 14 }, (_, i) =>
+    `2026-03-${String(i + 1).padStart(2, "0")}`,
+  );
+  const K1_SERIES = P112_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const K2_SERIES = P112_DATES.map((date, i) => ({
+    date,
+    value: [-0.02, 0.03, -0.04, 0.02, -0.01][i % 5],
+  }));
+  const A_SERIES = P112_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const SWITCH_K1 = `Include Binance — ${K1} in projection`;
+
+  function make112Payload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([
+        { id: K1, returns: K1_SERIES, valueUsd: 60_000 },
+        { id: K2, returns: K2_SERIES, valueUsd: 40_000 },
+      ]),
+      apiKeys: [winApiKey(K1), winApiKey(K2)],
+      strategies: [catalogStrategy(A_ID, "Strat A 112", A_SERIES)],
+    });
+  }
+
+  function render112() {
+    render(
+      <ScenarioComposer
+        payload={make112Payload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** Add A and pin its weight to 0.5 so the mixed engine mass is 1.5 (the
+   *  effective-share fixture). The added-row weight input EXISTS today. */
+  function addAWithWeightHalf() {
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const wA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(wA, { target: { value: "0.5" } });
+    });
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // (a) RED — each per-key row renders a weight + leverage input (leverage bounds
+  // [0, MAX_LEVERAGE]), both disabled when the row is excluded. Fails today: the
+  // per-key fence renders no inputs, so `weight-<api_key_id>` is not found.
+  it("(a) RED — each per-key row renders weight + leverage inputs bounded [0, MAX_LEVERAGE], disabled when excluded", () => {
+    render112();
+    const list = screen.getByTestId("scenario-constituent-list");
+    expect(
+      within(list).getAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(2);
+
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
+    const l1 = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    // The RED assertions — these inputs do not exist under the Phase 112 fence.
+    expect(w1).not.toBeNull();
+    expect(l1).not.toBeNull();
+    expect(w1!.getAttribute("min")).toBe("0");
+    expect(l1!.getAttribute("min")).toBe("0");
+    expect(l1!.getAttribute("max")).toBe(String(MAX_LEVERAGE));
+
+    // Excluding the row disables both inputs (the added-row disabled contract,
+    // mirrored onto per-key rows).
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+    expect(
+      (document.getElementById(`weight-${K1}`) as HTMLInputElement).disabled,
+    ).toBe(true);
+    expect(
+      (document.getElementById(`leverage-${K1}`) as HTMLInputElement).disabled,
+    ).toBe(true);
+  });
+
+  // (b) RED — typing a per-key weight renormalizes over the ENGINE-unit basis
+  // {K1,K2,A}: K1 → 0.300, and the other two scale proportionally (K2 0.4 / A 0.5
+  // over the remaining 0.7 → K2 0.3111, A 0.3889), summing to 1. Fails today: the
+  // per-key weight input does not exist.
+  it("(b) RED — typing 0.3 into K1's weight renormalizes the mixed basis: K1 0.300 / K2 0.3111 / A 0.3889, sum 1", () => {
+    render112();
+    addAWithWeightHalf();
+
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
+    // RED — no per-key weight input yet.
+    expect(w1).not.toBeNull();
+    act(() => {
+      fireEvent.change(w1!, { target: { value: "0.3" } });
+    });
+
+    const wv1 = document.getElementById(`weight-${K1}`) as HTMLInputElement;
+    const wv2 = document.getElementById(`weight-${K2}`) as HTMLInputElement;
+    const wvA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    expect(Number(wv1.value)).toBeCloseTo(0.3, 3);
+    expect(Number(wv2.value)).toBeCloseTo(0.3111, 3);
+    expect(Number(wvA.value)).toBeCloseTo(0.3889, 3);
+    expect(
+      Number(wv1.value) + Number(wv2.value) + Number(wvA.value),
+    ).toBeCloseTo(1, 3);
+  });
+
+  // (c) RED — setting K1's leverage to 2 re-derives the blend (wᵢ·Lᵢ·rᵢ), moving a
+  // projection-derived KPI vs the 1× baseline. Fails today: the per-key leverage
+  // input does not exist.
+  it("(c) RED — setting K1's leverage to 2 moves the projection volatility vs the 1× baseline", () => {
+    render112();
+    const beforeVol = lastKpiScenarioMetrics()?.volatility;
+    expect(beforeVol).toBeTypeOf("number");
+
+    const l1 = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    // RED — no per-key leverage input yet.
+    expect(l1).not.toBeNull();
+    act(() => {
+      fireEvent.change(l1!, { target: { value: "2" } });
+    });
+    expect(lastKpiScenarioMetrics()?.volatility).not.toBe(beforeVol);
+  });
+
+  // (d) RED — a typed per-key weight survives an exclude → re-include cycle
+  // (preserve-and-restore, Open Question 2; togglePerKeySource never touches
+  // weightOverrides). Fails today: the per-key weight input does not exist.
+  it("(d) RED — a typed per-key weight is preserved across exclude → re-include", () => {
+    render112();
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
+    // RED — no per-key weight input yet.
+    expect(w1).not.toBeNull();
+    act(() => {
+      fireEvent.change(w1!, { target: { value: "0.3" } });
+    });
+
+    // Exclude K1, then re-include it.
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+
+    const restored = document.getElementById(
+      `weight-${K1}`,
+    ) as HTMLInputElement;
+    expect(Number(restored.value)).toBeCloseTo(0.3, 3);
   });
 });
 
