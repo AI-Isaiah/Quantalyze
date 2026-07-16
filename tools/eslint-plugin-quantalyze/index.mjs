@@ -18,6 +18,7 @@
  */
 import noRawLocalstorage from "./rules/no-raw-localstorage.mjs";
 import noRawPublishedPredicate from "./rules/no-raw-published-predicate.mjs";
+import noOwnerOrOnAdminClient from "./rules/no-owner-or-on-admin-client.mjs";
 import noRawRetryAfterParse from "./rules/no-raw-retry-after-parse.mjs";
 import noPassthroughOnIpc from "./rules/no-passthrough-on-ipc.mjs";
 import noRawStalenessDerivation from "./rules/no-raw-staleness-derivation.mjs";
@@ -29,6 +30,7 @@ const plugin = {
   rules: {
     "no-raw-localstorage": noRawLocalstorage,
     "no-raw-published-predicate": noRawPublishedPredicate,
+    "no-owner-or-on-admin-client": noOwnerOrOnAdminClient,
     "no-raw-retry-after-parse": noRawRetryAfterParse,
     "no-passthrough-on-ipc": noPassthroughOnIpc,
     "no-raw-staleness-derivation": noRawStalenessDerivation,
