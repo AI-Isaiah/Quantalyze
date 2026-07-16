@@ -66,8 +66,10 @@ function signColor(value: number | null | undefined): string {
   return value >= 0 ? "text-positive" : "text-negative";
 }
 
-// Magnitude cells (Sharpe, CAGR) carry no sign meaning → neutral ink; a "—"
-// cell stays muted, never tinted.
+// Magnitude cells (Sharpe, CAGR) render neutral ink: the sign, when it
+// matters, already survives in the printed +/- prefix, so tinting the whole
+// column adds color without adding signal (color is a verdict, not a coat of
+// paint). A "—"/non-finite cell stays muted, never tinted.
 function magnitudeColor(value: number | null | undefined): string {
   return value == null || !Number.isFinite(value)
     ? "text-text-muted"
@@ -474,9 +476,14 @@ export function StrategyTable({
     if (!metric) return null;
     const p = percentiles[s.id]?.[metric];
     if (p == null || !Number.isFinite(p)) return null;
+    // Clamp to 1..99: getPercentiles emits 0..100, but "P0"/"P100" are edge
+    // artifacts that read as nonsense in a rank hint. Fixed-width right-aligned
+    // span so the suffix never varies the sorted figure's position — the
+    // Numbers Contract (digits align in a column) must hold on this surface.
+    const shown = Math.min(99, Math.max(1, Math.round(p)));
     return (
-      <span className="ml-1 align-baseline text-micro font-mono tabular-nums text-text-muted">
-        P{p}
+      <span className="ml-1 inline-block min-w-[3ch] text-right align-baseline text-micro font-mono tabular-nums text-text-muted">
+        P{shown}
       </span>
     );
   };
@@ -541,7 +548,7 @@ export function StrategyTable({
           <div
             data-strategy-table=""
             data-density={density === "compact" ? "tight" : undefined}
-            className="relative rounded-sm border border-border bg-surface"
+            className="relative border border-border bg-surface"
           >
             {/* Density control \u2014 table-SCOPED (drives the data-density on this
                 root only, never <body>, so it cannot flip the allocator
@@ -599,7 +606,7 @@ export function StrategyTable({
                         accessible name is the sr-only "Rank". */}
                     <th
                       scope="col"
-                      className={`sticky left-0 top-0 z-30 w-10 bg-surface px-4 py-3 text-right ${HEADER_LABEL} text-text-muted`}
+                      className={`sticky left-0 top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`}
                     >
                       <span className="sr-only">Rank</span>
                       <span aria-hidden="true">#</span>
@@ -607,7 +614,7 @@ export function StrategyTable({
                     {showStarColumn && (
                       <th
                         scope="col"
-                        className={`sticky left-10 top-0 z-30 w-11 bg-surface px-2 py-3 text-left ${HEADER_LABEL} text-text-muted`}
+                        className={`sticky left-14 top-0 z-30 w-11 bg-surface px-2 py-3 text-left ${HEADER_LABEL} text-text-muted`}
                       >
                         <span className="sr-only">Watchlist</span>
                       </th>
@@ -626,8 +633,8 @@ export function StrategyTable({
                       const isFirstCol = i === 0;
                       const stickyLeft = isFirstCol
                         ? showStarColumn
-                          ? "sticky left-[5.25rem] top-0 z-20 bg-surface border-r border-border"
-                          : "sticky left-10 top-0 z-20 bg-surface border-r border-border"
+                          ? "sticky left-[6.25rem] top-0 z-20 bg-surface border-r border-border"
+                          : "sticky left-14 top-0 z-20 bg-surface border-r border-border"
                         : "sticky top-0 z-20 bg-surface";
                       const sortedHere = tableSortKey === col.key;
                       return (
@@ -696,11 +703,11 @@ export function StrategyTable({
                         {/* Sticky rank cell — solid bg-surface (NOT the
                             translucent row hover) so scrolled cells don't bleed
                             through, matching the sticky identity column. */}
-                        <td className="sticky left-0 z-10 w-10 bg-surface px-4 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                        <td className="sticky left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
                           #{rank}
                         </td>
                         {showStarColumn && (
-                          <td className="sticky left-10 z-10 w-11 bg-surface px-2 py-3 align-middle">
+                          <td className="sticky left-14 z-10 w-11 bg-surface px-2 py-3 align-middle">
                             <StarToggle
                               strategyId={s.id}
                               name={s.name}
@@ -714,7 +721,7 @@ export function StrategyTable({
                             translucent hover:bg-page/50, so scrolled cells do not
                             bleed through (Pitfall 5). */}
                         <td
-                          className={`sticky z-10 bg-surface px-4 py-3 border-r border-border ${showStarColumn ? "left-[5.25rem]" : "left-10"}`}
+                          className={`sticky z-10 bg-surface px-4 py-3 border-r border-border ${showStarColumn ? "left-[6.25rem]" : "left-14"}`}
                         >
                           <div className="flex items-center gap-1.5">
                             <Link

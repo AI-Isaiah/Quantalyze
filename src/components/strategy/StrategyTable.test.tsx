@@ -624,9 +624,10 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     expect(rankHeader.className).toContain("left-0");
     expect(rankHeader.className).toContain("z-30");
     // The Strategy identity column stays sticky as the SECOND pinned column
-    // (to the right of the rank column at left-10), one z-tier below the corner.
+    // (to the right of the rank column, which is w-14/left-0), one z-tier below
+    // the corner — so it pins at left-14 when there is no star column.
     const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
-    expect(strategyHeader.className).toContain("left-10");
+    expect(strategyHeader.className).toContain("left-14");
     expect(strategyHeader.className).toContain("z-20");
   });
 
@@ -651,9 +652,9 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     const firstCell = nameLink.closest("td");
     expect(firstCell).not.toBeNull();
     expect(firstCell!.className).toContain("sticky");
-    // The identity column is the second sticky column (pinned at left-10, to the
-    // right of the leading rank cell which owns left-0).
-    expect(firstCell!.className).toContain("left-10");
+    // The identity column is the second sticky column (pinned at left-14, to the
+    // right of the leading w-14 rank cell which owns left-0).
+    expect(firstCell!.className).toContain("left-14");
     expect(firstCell!.className).toContain("bg-surface");
     // The translucent hover lives on the OTHER cells (group-hover:bg-page/50);
     // the sticky first column must not carry it or scrolled cells bleed through.
