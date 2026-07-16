@@ -64,9 +64,29 @@ export interface CsvSubmitStepProps {
    * so the strategy can be discovered after admin approval.
    */
   metadata: MetadataDraft;
+  /**
+   * Phase 110 / CONTRIB-01..02 — mount surface. `"manager"` (default) keeps
+   * the sell-side "founder reviews" copy and finalize `entry_context:
+   * "manager"` (→ status `pending_review`). `"contribution"` shows the
+   * allocator-framed private-add copy and sends `entry_context: "contribution"`
+   * (→ status `private`, owner-only, never published — plan 110-04 server side).
+   */
+  entryContext?: "manager" | "contribution";
   onSubmitted: (strategyId: string) => void;
   onBack: () => void;
 }
+
+/**
+ * Phase 110 — contribution-mode overrides of the sell-side CSV headings.
+ * Manager mode uses CSV_SUBMIT_STEP_HEADINGS byte-for-byte.
+ */
+const CSV_SUBMIT_STEP_HEADINGS_CONTRIBUTION = {
+  title: "Review and add",
+  subtitle:
+    "This strategy is added privately to your account. Only you can see it — it is never published or submitted for review.",
+  submitCtaLabel: "Add to my strategies",
+  submittingCtaLabel: "Adding…",
+} as const;
 
 // Format-picker labels are component-local UI taxonomy (read-only summary
 // row), not error/heading copy — they stay inline. wizardErrors.ts owns
@@ -84,11 +104,16 @@ export function CsvSubmitStep({
   preview,
   dailyReturnsSeries,
   metadata,
+  entryContext = "manager",
   onSubmitted,
   onBack,
 }: CsvSubmitStepProps) {
   const [submitting, setSubmitting] = useState(false);
   const [envelope, setEnvelope] = useState<ValidationEnvelope | null>(null);
+  const headings =
+    entryContext === "contribution"
+      ? CSV_SUBMIT_STEP_HEADINGS_CONTRIBUTION
+      : CSV_SUBMIT_STEP_HEADINGS;
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
@@ -103,6 +128,11 @@ export function CsvSubmitStep({
           wizard_session_id: wizardSessionId,
           fmt,
           strategy_name: strategyName, // Cross-AI revision 2026-04-30
+          // Phase 110 / CONTRIB-02 — routing hint the csv-finalize RPC branches
+          // on: "contribution" finalizes status='private' (owner-only),
+          // "manager" finalizes status='pending_review'. HINT only — the RPC
+          // terminal-status guard (plan 110-01) is the real enforcement.
+          entry_context: entryContext,
           // Phase 19.1 — REQUIRED for fmt=daily_returns/daily_nav. The
           // csv-finalize route rejects with CSV_INVALID_FORMAT "received
           // 0 rows" if this is absent (route.ts:748). Omitted when the
@@ -245,7 +275,7 @@ export function CsvSubmitStep({
       });
       setSubmitting(false);
     }
-  }, [submitting, wizardSessionId, fmt, strategyName, dailyReturnsSeries, metadata, onSubmitted]);
+  }, [submitting, wizardSessionId, fmt, strategyName, dailyReturnsSeries, metadata, onSubmitted, entryContext]);
 
   return (
     <section aria-labelledby="wizard-csv-submit-heading">
@@ -253,10 +283,10 @@ export function CsvSubmitStep({
         id="wizard-csv-submit-heading"
         className="font-sans text-h3 font-semibold text-text-primary"
       >
-        {CSV_SUBMIT_STEP_HEADINGS.title}
+        {headings.title}
       </h2>
       <p className="mt-2 text-body text-text-secondary">
-        {CSV_SUBMIT_STEP_HEADINGS.subtitle}
+        {headings.subtitle}
       </p>
 
       {/* Read-only summary — Strategy name is the FIRST row (cross-AI revision 2026-04-30). */}
@@ -307,8 +337,8 @@ export function CsvSubmitStep({
           data-testid="wizard-csv-submit-cta"
         >
           {submitting
-            ? CSV_SUBMIT_STEP_HEADINGS.submittingCtaLabel
-            : CSV_SUBMIT_STEP_HEADINGS.submitCtaLabel}
+            ? headings.submittingCtaLabel
+            : headings.submitCtaLabel}
         </Button>
       </div>
     </section>
