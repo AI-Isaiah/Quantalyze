@@ -48,11 +48,22 @@ export default async function ProfilePage() {
       .eq("user_id", user.id)
       .ilike("name", "Active Allocation")
       .maybeSingle();
+    // DOGFOOD-2: head-count allocator_holdings so the Exchanges-tab subtitle
+    // only asserts "Active Allocation auto-synced" when holdings actually back
+    // it. head:true fetches no row payload — same authorization scope as the
+    // other admin reads on this page (gated by user.id from auth.getUser()).
+    // This is a page-load-time signal; router.refresh() re-reads it, so it
+    // does not need to track the 5s client sync poll.
+    const { count: holdingsCount } = await admin
+      .from("allocator_holdings")
+      .select("id", { count: "exact", head: true })
+      .eq("allocator_id", user.id);
     exchanges = {
       initialKeys,
       activePortfolio: activePortfolio
         ? { id: activePortfolio.id as string, name: activePortfolio.name as string }
         : null,
+      hasHoldings: (holdingsCount ?? 0) > 0,
     };
   }
 

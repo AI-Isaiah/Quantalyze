@@ -100,6 +100,14 @@ type InitialKey = Omit<
 
 interface Props {
   initialKeys: InitialKey[];
+  // DOGFOOD-2: true when the allocator has at least one row in
+  // allocator_holdings. The connected-case affirmative subtitle must not
+  // assert an active allocation that holdings can't back — the per-key
+  // account_balance_usdt is real and still renders, but the subtitle is gated
+  // on holdings presence. This is a page-load-time signal (server-derived in
+  // profile/page.tsx); it does not need to live-update with the 5s sync poll —
+  // router.refresh() re-reads it.
+  hasHoldings: boolean;
 }
 
 // Exchange tag: 3-letter code, tier-colored. No emoji in the UI per
@@ -186,7 +194,7 @@ function normalizeInitialKey(
   };
 }
 
-export function AllocatorExchangeManager({ initialKeys }: Props) {
+export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   const router = useRouter();
   const [keys, setKeys] = useState<ExchangeConnection[]>(() =>
     initialKeys.map((k) => normalizeInitialKey(k)),
@@ -661,6 +669,17 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
   const activeKeys = keys.filter((k) => k.disconnected_at === null);
   const disconnectedKeys = keys.filter((k) => k.disconnected_at !== null);
 
+  // DOGFOOD-2: only assert an active allocation when holdings actually back it.
+  // When keys are connected but allocator_holdings is empty, show an honest
+  // state instead — either the first sync is still in flight, or no positions
+  // are open. anySyncing distinguishes those two cases.
+  const anySyncing = activeKeys.some((k) => k.sync_status === "syncing");
+  const connectedSubtitle = hasHoldings
+    ? `${activeKeys.length} connected · Active Allocation auto-synced`
+    : anySyncing
+      ? `${activeKeys.length} connected · first sync in progress`
+      : `${activeKeys.length} connected · no open positions yet`;
+
   return (
     <div className="mt-6 space-y-4">
       <Card>
@@ -672,7 +691,7 @@ export function AllocatorExchangeManager({ initialKeys }: Props) {
             <p className="text-xs text-text-muted mt-0.5">
               {activeKeys.length === 0
                 ? "No exchanges connected yet."
-                : `${activeKeys.length} connected · Active Allocation auto-synced`}
+                : connectedSubtitle}
             </p>
           </div>
           <Button onClick={() => setShowForm(true)}>+ Connect exchange</Button>
