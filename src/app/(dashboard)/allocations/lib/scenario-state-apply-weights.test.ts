@@ -188,8 +188,8 @@ describe("Phase 112 — engine-unit weight basis over a mixed per-key + added se
       mixedDraft({ [A]: 0.5 }),
       { [K1]: 0.3, [K2]: 0.311111, [A]: 0.388889 },
       [K1, K2, A],
-      // @ts-expect-error Plan 01 adds the userExplicitRefs (4th) parameter; it
-      // does not exist on the current 3-arg signature. This is the RED marker.
+      // Phase 112 WEIGHTS-01 — the userExplicitRefs (4th) parameter now exists;
+      // a single-row edit stamps ONLY the user-edited ref (K1).
       [K1],
     );
     // The user only edited K1 → only K1 is a user-explicit override.

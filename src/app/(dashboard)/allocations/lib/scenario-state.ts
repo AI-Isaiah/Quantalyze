@@ -637,13 +637,22 @@ export function setWeightOverride(
  * (legacy), or pass the engine unit ids (WR-01 — the composer's optimizer
  * apply-back does this so the mixed per-key + added path is not diluted by stale
  * `holding:` override mass). Non-finite / negative / empty input is a no-op
- * (defensive). Every provided ref is recorded as a user-explicit override (the
- * allocator clicked Apply).
+ * (defensive).
+ *
+ * `userExplicitRefs` (Phase 112 WEIGHTS-01) parameterizes the H-0126 diffCount
+ * honesty. When OMITTED, every provided ref is recorded as a user-explicit
+ * override — the optimizer's "the allocator clicked Apply for the whole vector"
+ * semantics (unchanged, pinned by the pre-existing apply-weights tests). When
+ * PROVIDED, only those refs are stamped into `userWeightOverrides` — the
+ * composer's single-row edit passes the ONE edited ref (built into a full sum-1
+ * vector over the engine basis) so one user gesture counts as one edit, not the
+ * whole renormalized basis.
  */
 export function applyWeightOverrides(
   draft: ScenarioDraft,
   weights: Record<string, number>,
   basisIds?: ReadonlyArray<string>,
+  userExplicitRefs?: ReadonlyArray<string>,
 ): ScenarioDraft {
   const refs = Object.keys(weights);
   if (refs.length === 0) return draft;
@@ -671,12 +680,21 @@ export function applyWeightOverrides(
   const normalized = renormalizeWeights(merged, normBasis);
   const nextWeights: Record<string, number> = { ...merged, ...normalized };
 
+  // H-0126 — record the refs the USER explicitly re-weighted. Default: every
+  // provided ref (optimizer whole-vector Apply). When `userExplicitRefs` is
+  // supplied, stamp only those (composer single-row edit → one edited ref), so
+  // diffCount counts one gesture as one edit rather than the whole renormalized
+  // basis. Each stamped ref records its POST-normalization weight.
+  const stampRefs = userExplicitRefs ?? refs;
+
   return {
     ...draft,
     weightOverrides: clampAllWeights(nextWeights),
     userWeightOverrides: {
       ...(draft.userWeightOverrides ?? {}),
-      ...Object.fromEntries(refs.map((r) => [r, nextWeights[r] ?? merged[r]])),
+      ...Object.fromEntries(
+        stampRefs.map((r) => [r, nextWeights[r] ?? merged[r]]),
+      ),
     },
     lastEditedAt: new Date().toISOString(),
   };

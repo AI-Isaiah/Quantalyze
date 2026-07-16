@@ -110,10 +110,16 @@ export interface UseScenarioStateReturn {
    * applied vector over the engine basis rather than the draft's `holding:`
    * toggle basis, so the mixed per-key + added path reproduces the suggestion
    * (no #528 dilution). Omitted by non-optimizer callers.
+   *
+   * WEIGHTS-01 (Phase 112) — `userExplicitRefs` names the ref(s) the user
+   * actually edited; the composer's per-key single-row writer passes the ONE
+   * edited ref so diffCount stamps a single gesture, not the whole renormalized
+   * engine basis. Omitted → every provided ref is stamped (optimizer Apply).
    */
   applyWeightOverrides: (
     weights: Record<string, number>,
     basisIds?: ReadonlyArray<string>,
+    userExplicitRefs?: ReadonlyArray<string>,
   ) => void;
   /**
    * v1.5 PERSIST-01 (review CR-01) — write the composer's APPLIED coverage
@@ -322,8 +328,14 @@ export function useScenarioState(
     [setValue, baseOf],
   );
   const applyWeightOverrides = useCallback(
-    (weights: Record<string, number>, basisIds?: ReadonlyArray<string>) => {
-      setValue((prev) => applyWeightsPure(baseOf(prev), weights, basisIds));
+    (
+      weights: Record<string, number>,
+      basisIds?: ReadonlyArray<string>,
+      userExplicitRefs?: ReadonlyArray<string>,
+    ) => {
+      setValue((prev) =>
+        applyWeightsPure(baseOf(prev), weights, basisIds, userExplicitRefs),
+      );
     },
     [setValue, baseOf],
   );
