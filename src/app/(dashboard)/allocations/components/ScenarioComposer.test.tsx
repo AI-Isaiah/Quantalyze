@@ -4427,8 +4427,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 // Phase 37 / DSRC-02 + DSRC-03 — honest per-data-source toggle
 // ===========================================================================
 //
-// The load-bearing suite. The "Data sources" control lets a book allocator
-// include/exclude each connected exchange api_key from the projection; toggling
+// The load-bearing suite. Each per-key exchange source is a constituent row in
+// the unified list (CONSTIT-01); its include/exclude toggle lets a book allocator
+// drop each connected exchange api_key from the projection; toggling
 // a source off must HONESTLY recompute the curve + every KPI from the remaining
 // per-key series (DSRC-03), never a cosmetic hide. These tests drive the REAL
 // per-key builder + REAL frozen computeScenario (only the former holdings-snapshot builder
@@ -5019,6 +5020,159 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     expect(switchA).toHaveAttribute("aria-checked", "false");
     expect(switchB).toHaveAttribute("aria-checked", "true");
   });
+
+  // =========================================================================
+  // Phase 111 / CONSTIT-01/02/03 — the three named intent groups for the
+  // composer reshape. These pin the unified-list model directly (rather than
+  // via the pre-existing DSRC honesty tests), across all four badge variants
+  // and the shared toggle channel.
+  // =========================================================================
+
+  /** A BOOK catalog strategy (so adding it needs no lazy fetch) carrying the
+   *  given presentation provenance on `strategy.trust_tier` / `is_composite`. */
+  function bookStratWithProvenance(
+    id: string,
+    name: string,
+    prov: { trust_tier?: string | null; is_composite?: boolean },
+  ) {
+    const base = catalogStrategy(id, name, KEY_A_SERIES);
+    return {
+      ...base,
+      strategy: { ...base.strategy, ...prov },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+  }
+
+  describe("unified constituent list", () => {
+    it("renders every source as ONE row in a single list — per-key + added interleaved, NO separate Data-Sources section", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [bookStratWithProvenance("uni-added", "Uni Added", {})],
+        }),
+      );
+      addStrategy({
+        id: "uni-added",
+        name: "Uni Added",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+
+      // Exactly ONE unified constituent list.
+      expect(screen.getAllByTestId("scenario-constituent-list")).toHaveLength(1);
+      const list = screen.getByTestId("scenario-constituent-list");
+      // Per-key sources AND the added strategy are rows in the SAME list.
+      expect(
+        within(list).getAllByTestId("scenario-constituent-perkey"),
+      ).toHaveLength(2);
+      expect(
+        within(list).getAllByTestId("scenario-constituent-added"),
+      ).toHaveLength(1);
+      // The separate "Data sources" section/group is DELETED.
+      expect(
+        screen.queryByRole("group", { name: "Data sources" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("provenance badge", () => {
+    it("per-key rows badge api_verified by construction", () => {
+      renderPerKey(makePerKeyPayload());
+      const list = screen.getByTestId("scenario-constituent-list");
+      const rows = within(list).getAllByTestId("scenario-constituent-perkey");
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(within(row).getByTestId("trust-tier-label")).toHaveAttribute(
+          "data-trust-tier",
+          "api_verified",
+        );
+      }
+    });
+
+    it("added rows badge the derived variant (csv / composite) and show NO badge when provenance is null", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [
+            bookStratWithProvenance("added-csv", "Added CSV", {
+              trust_tier: "csv_uploaded",
+            }),
+            bookStratWithProvenance("added-comp", "Added Comp", {
+              is_composite: true,
+            }),
+            bookStratWithProvenance("added-none", "Added None", {}),
+          ],
+        }),
+      );
+      for (const id of ["added-csv", "added-comp", "added-none"]) {
+        addStrategy({
+          id,
+          name: id,
+          markets: ["binance"],
+          strategy_types: ["momentum"],
+        });
+      }
+      const list = screen.getByTestId("scenario-constituent-list");
+      const rowOf = (id: string) =>
+        list.querySelector(`[data-scope-ref="${id}"]`) as HTMLElement;
+
+      // csv_uploaded tier → its badge variant.
+      expect(
+        within(rowOf("added-csv")).getByTestId("trust-tier-label"),
+      ).toHaveAttribute("data-trust-tier", "csv_uploaded");
+      // is_composite === true → the 4th composite variant (composite > tier).
+      expect(
+        within(rowOf("added-comp")).getByTestId("trust-tier-label"),
+      ).toHaveAttribute("data-trust-tier", "composite");
+      // No tier, not composite → honest absence: NO badge.
+      expect(
+        within(rowOf("added-none")).queryByTestId("trust-tier-label"),
+      ).toBeNull();
+    });
+  });
+
+  describe("shared toggle", () => {
+    it("per-key + added rows toggle through the SAME switch mechanism; a per-key toggle leaves added weights byte-identical (Phase 112 fence)", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [
+            bookStratWithProvenance("shared-add", "Shared Add", {}),
+          ],
+        }),
+      );
+      addStrategy({
+        id: "shared-add",
+        name: "Shared Add",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+
+      const list = screen.getByTestId("scenario-constituent-list");
+      // Both row kinds expose a role="switch" toggle inside the one list.
+      const perKeySwitch = within(list).getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      });
+      const addedSwitch = within(list).getByRole("switch", {
+        name: /Toggle Shared Add on\/off/i,
+      });
+      expect(perKeySwitch).toBeInTheDocument();
+      expect(addedSwitch).toBeInTheDocument();
+
+      // The added weight BEFORE a per-key toggle.
+      const weightBefore = (
+        screen.getByLabelText("Shared Add weight") as HTMLInputElement
+      ).value;
+
+      // Toggling a per-key source flips the shared toggleByScopeRef channel…
+      fireEvent.click(perKeySwitch);
+      expect(perKeySwitch).toHaveAttribute("aria-checked", "false");
+
+      // …WITHOUT perturbing any added-strategy weight (togglePerKeySource never
+      // rescales weightOverrides — weight editing is Phase 112).
+      const weightAfter = (
+        screen.getByLabelText("Shared Add weight") as HTMLInputElement
+      ).value;
+      expect(weightAfter).toBe(weightBefore);
+    });
+  });
 });
 
 // ===========================================================================
@@ -5498,8 +5652,8 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   });
 
   // CF-05 — a per-key (book-member) gantt row must render the friendly
-  // exchange/account label the composer already shows in the "Data sources"
-  // control (dataSourceLabel), NOT the raw api_key_id that
+  // exchange/account label the composer already shows on the per-key constituent
+  // rows (dataSourceLabel), NOT the raw api_key_id that
   // buildPerKeyStrategyForBuilderSet stamps as the unit `name` (`key <uuid>`).
   // Fails against the pre-fix code, which carried the raw id into the gantt.
   it("gantt: a per-key book-member row renders the friendly dataSourceLabel, never the raw api_key_id (CF-05)", () => {

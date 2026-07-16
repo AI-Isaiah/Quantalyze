@@ -2148,8 +2148,9 @@ export function ScenarioComposer({
     addedStrategyMetadataLookup,
   ]);
 
-  // DSRC-02 — render-gating for the "Data sources" control:
-  //   showDataSources       → the per-key path is active → render the control.
+  // CONSTIT-01 — render-gating for the per-key constituent rows + honest states:
+  //   showDataSources       → the per-key path is active → render per-key rows
+  //                           inside the unified CompositionList.
   //   book mode + !gate      → render the calm InfoBanner fallback note.
   //   blank mode             → render nothing (no live book, no live keys).
   const showDataSources = usePerKeySources;
@@ -2626,8 +2627,8 @@ export function ScenarioComposer({
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
   // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
-  // `payload.apiKeys` + `dataSourceLabel` idiom the "Data sources" control
-  // renders (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
+  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
+  // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
   // unit carries the RAW api_key_id as its `name` from
   // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts: `key <uuid>`), so
   // without this map the gantt would show a raw UUID. This is the ONE place the
