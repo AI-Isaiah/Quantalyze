@@ -233,7 +233,7 @@ describe("requireRolePage", () => {
       ["both", true],
     ] as const)(
       "role=%s is_admin=%s stays loop-free on both surfaces",
-      async (role) => {
+      async (role, _isAdmin) => {
         const ownsAllocator = role === "allocator" || role === "both";
         const ownsManager = role === "manager" || role === "both";
 
