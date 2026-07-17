@@ -5516,6 +5516,38 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     expect(Number(restored.value)).toBeCloseTo(0.3, 3);
   });
 
+  // (WR-01) Phase 112 review — a per-key-only weight edit must dirty the draft so
+  // the book→blank entry-mode switch routes through the unsaved-changes
+  // confirmation instead of silently wiping the in-progress edit. Pre-fix,
+  // diffCount ignored per-key weight edits (the `!== true` + `defaultWeight ==
+  // null` guards both skipped an included-by-absence per-key ref), so diffCount
+  // stayed 0 and `handleEntryModeSelect` flipped the mode with no modal (the
+  // silent wipe). RED-proof: against the pre-fix diffCount this fails — no
+  // confirmation modal opens, so the `getByText` throws.
+  it("(WR-01) a per-key-only weight edit opens the reset confirmation on a book→blank switch (no silent wipe)", () => {
+    render112();
+    // Edit ONE per-key weight — no add, no toggle. This is the exact gesture
+    // that pre-fix left invisible to diffCount.
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`weight-${K1}`) as HTMLInputElement,
+        { target: { value: "0.3" } },
+      );
+    });
+
+    // Switch book → blank with the (now-dirty) draft.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+
+    // The reset confirmation opens (the SAME modal the footer Reset uses) and the
+    // mode does NOT flip until the user confirms — the per-key edit is protected.
+    expect(
+      screen.getByText(/Discard your scenario draft\?/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
   // --- Plan 02 Task 3: derived read-only notional column + honesty caveat ---
 
   /** The notional cell (read-only text) for a given constituent row, scoped by

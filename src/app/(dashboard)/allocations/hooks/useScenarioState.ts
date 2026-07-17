@@ -378,9 +378,12 @@ export function useScenarioState(
   //   (c) user-explicit weight overrides via `userWeightOverrides`.
   // Toggle-off renormalization rewrites the entire weightOverrides map but NOT
   // userWeightOverrides, so it counts as exactly one toggle change (T_USE13),
-  // never N weight changes. `setWeightOverride` is the only writer of
-  // userWeightOverrides, so a pure-rebalance now counts (H-0126) — the prior
-  // "conservative zero" locked out the voluntary_modify workflow.
+  // never N weight changes. Both `setWeightOverride` (holding rebalance) and the
+  // composer's per-key `applyWeightOverrides` single-row writer stamp
+  // userWeightOverrides, so a pure-rebalance counts (H-0126) and a per-key
+  // weight edit counts as one gesture (WR-01) — the prior "conservative zero"
+  // plus the `!== true` guard locked out the voluntary_modify workflow and
+  // per-key edits respectively.
   const diffCount = useMemo(() => {
     let count = 0;
     for (const [k, v] of Object.entries(draft.toggleByScopeRef)) {
@@ -388,14 +391,31 @@ export function useScenarioState(
     }
     count += draft.addedStrategies.length;
     const userExplicit = draft.userWeightOverrides ?? {};
+    const addedIds = new Set<string>(draft.addedStrategies.map((s) => s.id));
     for (const [k, v] of Object.entries(userExplicit)) {
       // A disabled ref's user weight is not part of the committed allocation
       // (the commit path skips toggled-off refs), so it must NOT count — else a
       // weight-edit-then-toggle-off of the SAME ref double-counts (one toggle
       // change + one stale override) and the "N changes" chip over-reports.
-      if (draft.toggleByScopeRef[k] !== true) continue;
+      // WR-01 (Phase 112 review): "included" is absent-OR-true, NOT strictly
+      // === true. A per-key ref is included-by-absence (togglePerKeySource
+      // deletes the ref on re-include), so the old `!== true` guard skipped
+      // EVERY per-key weight edit — a real, savable gesture counted as zero and
+      // an unsaved per-key edit was silently wiped on the entry-mode switch.
+      // Only an explicitly excluded ref (=== false) is out.
+      if (draft.toggleByScopeRef[k] === false) continue;
+      // Added strategies each already count once via `addedStrategies.length`
+      // (the add gesture); their reweight is part of that same gesture, so it
+      // must NOT add a second count — keeps added counting byte-identical.
+      if (addedIds.has(k)) continue;
       const defaultWeight = defaultDraft.weightOverrides[k];
-      if (defaultWeight == null) continue;
+      if (defaultWeight == null) {
+        // WR-01: a per-key ref rides raw equity (no default weightOverride). A
+        // user-explicit override on it IS a change — userWeightOverrides is
+        // written only on an explicit edit, so its mere presence is one gesture.
+        count++;
+        continue;
+      }
       if (Math.abs(v - defaultWeight) > 1e-9) count++;
     }
     return count;
