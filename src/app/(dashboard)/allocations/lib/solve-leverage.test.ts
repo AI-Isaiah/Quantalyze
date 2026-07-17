@@ -228,4 +228,40 @@ describe("solveLeverageForMaxDD — Phase 113 Wave-0 RED scaffold", () => {
     );
     expect(Math.abs(perturbed - target)).toBeGreaterThan(DD_TOL);
   });
+
+  // (g2) ROUND-TRIP DELEVERAGE (WEIGHTS-04, both sides of 1×) — the same
+  // non-tautological forward-then-back contract at a DELEVERAGE root L* = 0.6 on
+  // the −0.10-day fixture (|dd(L)| = 0.10·L, so dd(0.6) = −0.06 < the 0.10 base).
+  // Proves the tolerance contract holds below 1×, not just when levering up.
+  // Perturbation arithmetic: +0.15 nudges L 0.6→0.75, |dd| 0.06→0.075 — a 0.015
+  // move, ~15× DD_TOL, so the teeth bite on the deleverage side too.
+  it("(g2) ROUND-TRIP DELEVERAGE — solved L≈0.6 re-fed through the engine reproduces the target; a perturbed L does not", () => {
+    const s = makeStrategy([0, 0, 0, 0, -0.1, 0, 0, 0, 0, 0, 0, 0]);
+    const cache = buildDateMapCache([s]);
+    const target = Math.abs(
+      computeScenario([s], sleeveStateAt(0.6), cache, 252).max_drawdown!,
+    );
+
+    const result = solveLeverageForMaxDD(solveArgs(s, target));
+    expect(result.ok).toBe(true);
+    const solvedL = asOk(result).leverage;
+
+    // (i) the solver found the deleverage root (L < 1).
+    expect(Math.abs(solvedL - 0.6)).toBeLessThanOrEqual(L_TOL);
+    expect(solvedL).toBeLessThan(1);
+
+    // (ii) re-fed through the ENGINE (not the solver) → reproduces the target.
+    const reFed = Math.abs(
+      computeScenario([s], sleeveStateAt(solvedL), cache, 252).max_drawdown!,
+    );
+    expect(Math.abs(reFed - target)).toBeLessThanOrEqual(DD_TOL);
+
+    // (iii) PERTURBATION — nudging L by +0.15 breaks the reproduction on the
+    // deleverage side too (non-tautology proven below 1×).
+    const perturbed = Math.abs(
+      computeScenario([s], sleeveStateAt(solvedL + 0.15), cache, 252)
+        .max_drawdown!,
+    );
+    expect(Math.abs(perturbed - target)).toBeGreaterThan(DD_TOL);
+  });
 });
