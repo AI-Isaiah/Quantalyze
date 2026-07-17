@@ -5475,6 +5475,61 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     ).toBeCloseTo(1, 3);
   });
 
+  // (RT-01) [Phase 112 red team] — a SOLE selected per-key unit is trivially 100%.
+  // Typing any 0 ≤ w < 1 into it must be REFUSED with a visible message and stamp
+  // NO weight override, so re-including the excluded key restores the DEFAULT
+  // raw-equity blend. Pre-fix the vector {K1:0} renormalized over the single-unit
+  // basis lifted K1 to 1.0 and applyWeightOverrides persisted
+  // userWeightOverrides[K1]=1.0 — a poisoned override that silently drifted the
+  // re-included blend to 0.714 / 0.286. RED-proof: pre-fix the re-include assertion
+  // reads 0.714 / 0.286, not 0.600 / 0.400 (and no commit-error is shown).
+  it("(RT-01) — typing 0 into the SOLE selected per-key unit is refused (no poisoned 1.0 override); re-including the other key restores the 0.6/0.4 default", () => {
+    render112();
+    // Exclude K2 → K1 is the sole selected engine unit (no added strategy present).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K2} in projection`,
+        }),
+      );
+    });
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement;
+    // A sole unit's honest display IS 1.000 (100% of the selected mass).
+    expect(Number(w1.value)).toBeCloseTo(1, 3);
+    // Type 0 — must be refused (visible message, nothing written).
+    act(() => {
+      fireEvent.change(w1, { target: { value: "0" } });
+    });
+    expect(
+      screen.getByTestId("scenario-commit-error").textContent,
+    ).toMatch(/single constituent is always 100%/i);
+    // Unchanged (the refused edit wrote nothing).
+    expect(
+      Number(
+        (document.getElementById(`weight-${K1}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(1, 3);
+    // Re-include K2. With NO override stamped on K1 both ride raw equity → the
+    // default 0.6 / 0.4 blend. (Pre-fix K1's poisoned 1.0 override → 0.714 / 0.286.)
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K2} in projection`,
+        }),
+      );
+    });
+    expect(
+      Number(
+        (document.getElementById(`weight-${K1}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(0.6, 3);
+    expect(
+      Number(
+        (document.getElementById(`weight-${K2}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(0.4, 3);
+  });
+
   // (RT-02) [Phase 112 red team] — with EVERY per-key source excluded, the added
   // row's DISPLAY basis must equal the EDIT basis. No selected per-key engine unit
   // remains → the edit path (legacy setWeightOverride) stores the RAW typed 0.5, so

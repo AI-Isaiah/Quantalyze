@@ -1126,6 +1126,19 @@ export function ScenarioComposer({
     }
 
     const otherIds = basisIds.filter((id) => id !== scopeRef);
+    // RT-01 (Phase 112 red team) — a SOLE selected engine unit is trivially 100%.
+    // Renormalizing the vector {scopeRef: w} over a single-unit basis makes
+    // renormalizeWeights' sum-0 equal-split fallback lift ANY typed 0 ≤ w < 1 back
+    // to 1.0, and applyWeightOverrides would then STAMP that lifted 1.0 into
+    // userWeightOverrides — a poisoned override that survives exclude/re-include
+    // and silently drifts the default blend when the other unit is re-included
+    // (a gesture the UI rendered as a no-op). Refuse the edit visibly and write
+    // NOTHING, mirroring the added-only carve-out's honesty (a single constituent
+    // has no free weight to allocate).
+    if (otherIds.length === 0) {
+      setCommitError("A single constituent is always 100%.");
+      return;
+    }
     const otherSum = otherIds.reduce(
       (acc, id) => acc + (blendShareByRef[id] ?? 0),
       0,
