@@ -5260,10 +5260,19 @@ function CompositionList({
         title="Target this constituent's OWN standalone max drawdown (the sleeve, not the portfolio). Commits on blur/Enter and back-solves the leverage."
         onKeyDown={(e) => {
           if (e.key === "Enter") {
-            onCommitTarget(ref, Number((e.target as HTMLInputElement).value));
+            const raw = (e.target as HTMLInputElement).value;
+            // F2 — a blank field is "no target entered", not a 0% target: skip
+            // the commit so Number("") === 0 never trips the out-of-range banner.
+            // Real out-of-range values still commit and honestly refuse.
+            if (raw.trim() !== "") onCommitTarget(ref, Number(raw));
           }
         }}
-        onBlur={(e) => onCommitTarget(ref, Number(e.target.value))}
+        onBlur={(e) => {
+          const raw = e.target.value;
+          // F2 — a benign focus→blur of an empty input is a no-op (no commit, no
+          // error banner); real out-of-range values still commit and refuse.
+          if (raw.trim() !== "") onCommitTarget(ref, Number(raw));
+        }}
         className="w-16 rounded border border-accent bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
       />
     </>

@@ -6139,6 +6139,42 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
       within(reRow2).queryByTestId("scenario-target-dd-state"),
     ).toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // F2 (code-review 2026-07-17) — a benign focus→blur of an EMPTY target input
+  // must be a no-op: Number("") === 0 previously tripped the out-of-range commit
+  // banner ("above 0% and below 100%"). An empty field is "no target entered",
+  // not a 0% target. RED before the fix: the empty blur surfaces the banner.
+  // Non-vacuous: a genuinely out-of-range value still errors.
+  // -------------------------------------------------------------------------
+  it("F2 focus→blur of an EMPTY target input is a no-op (no commit-error banner); a real out-of-range value still errors", () => {
+    render113();
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+
+    // Focus then blur while EMPTY — no commit, no banner.
+    act(() => {
+      fireEvent.focus(target);
+      fireEvent.blur(target);
+    });
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+
+    // Non-vacuous — a genuinely out-of-range value (≥100) still surfaces the
+    // honest range error (the empty-string guard must not suppress it).
+    act(() => {
+      fireEvent.change(target, { target: { value: "150" } });
+      fireEvent.blur(target);
+    });
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /above 0% and below 100%/i,
+    );
+  });
 });
 
 // ===========================================================================
