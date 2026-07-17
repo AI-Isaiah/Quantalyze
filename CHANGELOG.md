@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.44.0.1] - 2026-07-17
+### Fix — DistributionPanels duplicate axis-tick keys
+QA of the blank-slate Scenario composer surfaced a React "two children with the
+same key" console error in the folded factsheet distribution panel: the quantile
+box-plot keyed its x-axis tick `<g>` by `t.value` (and the correlation band ticks
+by `t`), which collapse to a single value (0) on degenerate/empty data → duplicate
+keys (`xt-0`). Pre-existing since v1.10; non-fatal but can omit/duplicate ticks.
+Both tick maps now key by array index (static, non-reordering list). Regression
+test asserts no duplicate-key warning on the degenerate blend.
+
 ## [0.44.0.0] - 2026-07-17
 ### v1.11 Scenario Composer v2 — Phases 109–113 (first tranche; 114–117 to follow)
 Turns the scenario composer from a position-editor with a broken role surface
