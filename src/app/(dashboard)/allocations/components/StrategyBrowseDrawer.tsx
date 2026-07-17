@@ -551,13 +551,24 @@ export function StrategyBrowseDrawer({
             text button separated by a hairline (DESIGN.md — never a second
             accent-fill competing with the row Add buttons). Client action only —
             no href; the composer opens the ContributionWizardOverlay.
+
+            data-testid is DELIBERATELY `browse-contribute-own`, NOT the
+            `browse-add-*` family the per-strategy Add buttons use (line ~537).
+            This CTA opens the contribution wizard — it does NOT add a strategy —
+            so it must stay OUT of the `browse-add-` namespace. A prefixed testid
+            (the former `browse-add-own`) collides with the automation contract
+            `[data-testid^="browse-add-"]` used to "add the first strategy": while
+            the fetch is in flight the strategy rows have not rendered yet, so
+            such a first-match locator would bind to THIS CTA and fire onAddOwn —
+            closing the drawer and opening the wizard instead of composing a
+            strategy (the composer close-drawer e2e regression, PR #620).
           */}
           {onAddOwn && (
             <div className="mt-6 border-t border-border pt-4 text-center">
               <button
                 type="button"
                 onClick={onAddOwn}
-                data-testid="browse-add-own"
+                data-testid="browse-contribute-own"
                 className="text-sm text-accent underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
               >
                 Can&apos;t find it? Add your own
