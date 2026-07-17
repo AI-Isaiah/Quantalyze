@@ -2819,9 +2819,16 @@ export function ScenarioComposer({
       ref: scopeRef,
       targetMaxDD: targetPct / 100,
     });
+    // F3 — a valid (in-range) target clears any PRIOR range-error banner up front,
+    // whether the solve is feasible OR an honest-infeasible refusal. The
+    // infeasible reason renders from the row's own solve-state line
+    // (solveResultByRef), NOT the commit-error banner; leaving a stale range error
+    // beside the honest infeasible state would show two contradictory messages.
+    // The range banner is set ONLY for actually-out-of-range input (the guard
+    // above), so clearing it here never suppresses a genuine range error.
+    setCommitError(null);
     setSolveResultByRef((prev) => ({ ...prev, [scopeRef]: result }));
     if (result.ok) {
-      setCommitError(null);
       handleLeverageChange(scopeRef, Math.round(result.leverage * 1000) / 1000);
     }
   }

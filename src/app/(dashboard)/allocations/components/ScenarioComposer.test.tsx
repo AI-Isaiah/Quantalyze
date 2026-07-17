@@ -6175,6 +6175,43 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
       /above 0% and below 100%/i,
     );
   });
+
+  // -------------------------------------------------------------------------
+  // F3 (code-review 2026-07-17) — committing a VALID (in-range) target that
+  // solves to an INFEASIBLE result must clear any PRIOR range-error banner, so
+  // the row never shows a stale range error contradicting the honest infeasible
+  // state. RED before the fix: the range banner lingered because commitError was
+  // cleared only on `result.ok`. The range error stays only for out-of-range input.
+  // -------------------------------------------------------------------------
+  it("F3 a valid-but-infeasible commit clears a prior range-error banner and shows only the honest infeasible state", () => {
+    render113();
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+
+    // 1) Trigger a range error with an out-of-range target (≥100).
+    act(() => {
+      fireEvent.change(target, { target: { value: "150" } });
+      fireEvent.blur(target);
+    });
+    expect(screen.getByTestId("scenario-commit-error")).not.toBeNull();
+
+    // 2) Commit a VALID but INFEASIBLE target (99% on K1's 5% base exceeds
+    //    MAX_LEVERAGE). The prior range banner MUST clear; the honest infeasible
+    //    state renders in its place.
+    act(() => {
+      fireEvent.change(target, { target: { value: "99" } });
+      fireEvent.blur(target);
+    });
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+    const state = within(rowByRef(K1)).getByTestId("scenario-target-dd-state");
+    expect(state.textContent).toMatch(/unreachable at .*×/i);
+  });
 });
 
 // ===========================================================================
