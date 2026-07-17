@@ -671,6 +671,51 @@ describe("GET /api/strategies/browse", () => {
     expect(cols).toContain("name");
   });
 
+  it("T12f (CONTRIB-03) — the caller's OWN non-institutional row shows its REAL name; another owner's stays pseudonymised", async () => {
+    // Browse became owner-inclusive, so an allocator's OWN not-yet-published
+    // contribution now appears in the drawer. Running it through
+    // displayStrategyName would collapse the fresh (exploratory) name they just
+    // typed to `Strategy #<id>` — over-redacting it from its own author. The
+    // owner-row branch surfaces the real name for own rows ONLY; everyone else's
+    // non-institutional rows stay pseudonymised (the T12 pseudonymity contract).
+    const SESSION_ID = "00000000-0000-0000-0000-000000000001"; // STATE.authUser.id
+    STATE.strategyRows = [
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        user_id: SESSION_ID, // the caller's OWN contribution
+        name: "My Alpha Sleeve",
+        codename: null,
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+      },
+      {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        user_id: "22222222-2222-4222-8222-222222222222", // a DIFFERENT owner
+        name: "Someone Elses Secret Book",
+        codename: "Zephyr-9",
+        disclosure_tier: "exploratory",
+        markets: ["fx"],
+        strategy_types: ["macro"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(2);
+    // Own row: real name surfaces (fails today — displayStrategyName redacts it
+    // to `Strategy #aaaaaaaa`).
+    expect(body.strategies[0].name).toBe("My Alpha Sleeve");
+    // Another owner's non-institutional row stays pseudonymised to its codename;
+    // the real name never crosses the wire.
+    expect(body.strategies[1].name).toBe("Zephyr-9");
+    expect(JSON.stringify(body)).not.toContain("Someone Elses Secret Book");
+    // Defence-in-depth: the co-fetched user_id is read only for the comparison,
+    // never emitted (the H-0300 allow-list fence holds).
+    expect(JSON.stringify(body)).not.toContain(SESSION_ID);
+  });
+
   // ============================================================
   // H-0300 — response-payload allow-list / forbidden-key fence
   //

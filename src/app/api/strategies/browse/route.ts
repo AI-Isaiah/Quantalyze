@@ -43,9 +43,14 @@ export interface BrowseStrategyRow {
    * rows this is the real strategy name; for exploratory rows it is the
    * codename (when present) or a synthetic `Strategy #<id-prefix>` label
    * derived by `displayStrategyName`. The raw `strategies.name` column is
-   * NEVER emitted on exploratory rows because pairing it with the codename
-   * defeats the pseudonymity contract (the drawer search would otherwise
-   * cross-correlate a known real name back to its codename).
+   * NEVER emitted on another owner's exploratory rows because pairing it with
+   * the codename defeats the pseudonymity contract (the drawer search would
+   * otherwise cross-correlate a known real name back to its codename).
+   *
+   * CONTRIB-03 exception: the caller's OWN rows (`user_id === session id`,
+   * surfaced by the owner-inclusive predicate) carry their REAL name so the
+   * allocator can recognise the contribution they just named. This widens
+   * disclosure to nobody — the owner already knows their own name + codename.
    */
   name: string;
   codename: string | null;
@@ -141,7 +146,11 @@ export const GET = withAllocatorAuth(
           // owner-inclusive predicate: example rows are published rows that
           // ALSO carry the flag, so `withPublishedOrOwner` + RLS still gate
           // the SET, and the flag is only read to drive the "Example" pill.
-          "id, name, codename, disclosure_tier, markets, strategy_types, is_example",
+          // CONTRIB-03 — co-fetch `user_id` so the projection can surface the
+          // owner's OWN name un-redacted (see the own-row branch below). It is
+          // read ONLY to compare against the session id; the raw column is never
+          // emitted on the wire.
+          "id, user_id, name, codename, disclosure_tier, markets, strategy_types, is_example",
         ),
       user.id,
     )
@@ -191,6 +200,7 @@ export const GET = withAllocatorAuth(
     const strategies: BrowseStrategyRow[] = pageRows.map((row) => {
       const r = row as {
         id: string;
+        user_id: string | null;
         name: string;
         codename: string | null;
         disclosure_tier: DisclosureTier | null;
@@ -199,16 +209,27 @@ export const GET = withAllocatorAuth(
         is_example: unknown;
       };
       const tier: DisclosureTier = r.disclosure_tier ?? "exploratory";
+      // CONTRIB-03 — the owner's OWN rows (now surfaced by withPublishedOrOwner,
+      // including their not-yet-published contributions) show the REAL name they
+      // just typed: an allocator must be able to recognise their own strategy in
+      // the drawer. `displayStrategyName` would otherwise collapse a fresh
+      // (non-institutional) contribution to a codename / `Strategy #<id>` label,
+      // over-redacting it from its own author. This is safe — the owner already
+      // knows both their name and codename, so it never widens disclosure to
+      // anyone else. Everyone else's rows stay pseudonymised (below).
+      const isOwnRow = r.user_id !== null && r.user_id === user.id;
       // Phase 29 / UNIFY-03 — `displayStrategyName` runs on example rows too:
       // the provenance tag must NOT reintroduce a raw-name leak. An example
       // row whose tier is exploratory still surfaces its codename / synthetic
       // label, never `strategies.name` (T12-class pseudonymity contract).
-      const safeLabel = displayStrategyName({
-        id: r.id,
-        name: r.name,
-        codename: r.codename,
-        disclosure_tier: tier,
-      });
+      const safeLabel = isOwnRow
+        ? r.name
+        : displayStrategyName({
+            id: r.id,
+            name: r.name,
+            codename: r.codename,
+            disclosure_tier: tier,
+          });
       return {
         id: r.id,
         name: safeLabel,
