@@ -73,7 +73,9 @@ export interface SeededAllocator {
  * Create a fresh test allocator user via the service-role admin API.
  * Email is timestamped to avoid collisions across reruns.
  */
-export async function seedTestAllocator(): Promise<SeededAllocator> {
+export async function seedTestAllocator(opts?: {
+  role?: "allocator" | "manager" | "both";
+}): Promise<SeededAllocator> {
   const admin = getAdmin();
   // Phase 11 WR-05: @example.test (RFC 6761 reserved TLD, guaranteed
   // unrouted) instead of @example.com (an IANA-reserved real domain that
@@ -99,11 +101,19 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
   // Ensure the profile row exists. The signup trigger normally handles
   // this, but tests should not race the trigger — make the dependency
   // explicit so the spec is rerun-safe even if the trigger is dropped
-  // in a future migration. role='allocator' so the Profile > Security
-  // tab actually renders (ProfileTabs.tsx:114 gates
-  // `activeTab === "security" && isAllocator` where
-  // `isAllocator = role === 'allocator' || role === 'both'`). Migration
-  // 001 default is `manager`, so the upsert must be explicit.
+  // in a future migration. Role is caller-selectable (default
+  // 'allocator') so the Profile > Security tab actually renders
+  // (ProfileTabs.tsx:114 gates `activeTab === "security" && isAllocator`
+  // where `isAllocator = role === 'allocator' || role === 'both'`).
+  // Migration 001 default is `manager`, so the upsert must be explicit.
+  // Sweep specs that must reach the manager-gated standalone
+  // `/strategies/new/wizard` route (Phase 109 ROLE-04,
+  // strategies/layout.tsx) pass `role:'both'` — `both` owns BOTH the
+  // allocator surfaces AND the manager wizard route and is never
+  // redirected (requireRolePage), so one user sweeps both without a
+  // detour. Both allocator_status/manager_status stay 'verified' below,
+  // so 'both' clears isProfileApproved (which requires BOTH sides) with
+  // no other change.
   //
   // profiles + investor_attestations are independent (different tables,
   // no cross-dependency). Run in parallel so each seeded test setup costs
@@ -116,7 +126,7 @@ export async function seedTestAllocator(): Promise<SeededAllocator> {
         {
           id: data.user.id,
           display_name: email,
-          role: "allocator",
+          role: opts?.role ?? "allocator",
           // v0.24.5.18 universal approval gate (src/lib/approval.ts):
           // every dashboard route redirects un-verified profiles to
           // /pending-approval. Seeded test users would otherwise hit

@@ -246,7 +246,7 @@ test.describe("axe app-wide (A11Y-01) — authed standalone routes", () => {
       page,
     }) => {
       await page.setViewportSize({ width: vp.w, height: vp.h });
-      const allocator = await seedTestAllocator();
+      const allocator = await seedTestAllocator({ role: "both" });
       await loginViaForm(page, allocator.email, allocator.password);
 
       const res = await page.goto("/strategies/new/wizard");

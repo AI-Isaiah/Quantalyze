@@ -167,7 +167,7 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // what the stubs echo, so the preview poller + factsheet read the seeded rows.
     // The composite is owned by the logged-in allocator so the RLS-bound wizard
     // reads resolve (allocator created FIRST so it exists before the composite).
-    const allocator = await seedTestAllocator();
+    const allocator = await seedTestAllocator({ role: "both" });
     const composite = await seedCompositeStrategy({ ownerUserId: allocator.userId });
     await stubWizardLiveCalls(page, composite.strategyId);
     await loginViaForm(page, allocator.email, allocator.password);
@@ -262,7 +262,7 @@ test.describe("Phase 91 — composite multi-key onboarding (QA-02 / QA-03)", () 
     // the discoverability status gate. It never re-derives the backend behaviour.
     // Allocator created FIRST so both composites can be owned by it — the
     // RLS-bound wizard reads only resolve for the logged-in owner.
-    const allocator = await seedTestAllocator();
+    const allocator = await seedTestAllocator({ role: "both" });
     // Known name so the absence assertion below can prove the draft did NOT
     // leak its content (not merely that a not-found page rendered).
     const failedName = `e2e-composite-failed-${Date.now()}`;
@@ -427,7 +427,7 @@ test.describe("Phase 94 — wizard resumability (WIZ-03 / WIZ-05)", () => {
     //    for the logged-in owner (Ph91). variant "resumable" = draft + wizard, so
     //    the wizard's draft-resume query hydrates initialDraft and WizardClient
     //    inits step "sync_preview".
-    const allocator = await seedTestAllocator();
+    const allocator = await seedTestAllocator({ role: "both" });
     const composite = await seedCompositeStrategy({
       variant: "resumable",
       ownerUserId: allocator.userId,
