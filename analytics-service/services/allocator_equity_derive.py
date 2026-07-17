@@ -275,6 +275,15 @@ def blend_concurrent_returns(
     # Sole eligible key: pass its series through untouched at weight 1.0.
     if len(keys) == 1:
         sole = keys[0]
+        # F6 (Fable): a sole key with zero/non-positive weight is HONEST-EMPTY, matching
+        # the multi-key LOW-8 zero-mass path — otherwise ONE zero-capital key yields a
+        # full trustworthy curve while TWO yield honest-empty (an inconsistency).
+        if max(0.0, float(weights_by_key.get(sole, 0.0))) <= 0.0:
+            return BlendResult(
+                None,
+                {"honest_empty": True, "reason": REASON_ZERO_WEIGHT_MASS},
+                frozenset({DegradeReason.ZERO_WEIGHT_MASS}),
+            )
         return BlendResult(
             series_by_key[sole].copy(),
             {"sole_key": True, "weight": 1.0},

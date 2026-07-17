@@ -125,6 +125,23 @@ def test_weights_are_static_not_performance_tracking():
         assert v == pytest.approx(0.6 * a_returns.iloc[i] + 0.4 * b_returns.iloc[i])
 
 
+def test_sole_key_zero_weight_is_honest_empty():
+    """F6: a sole key with zero/non-positive weight is HONEST-EMPTY
+    (REASON_ZERO_WEIGHT_MASS), consistent with the multi-key LOW-8 path — one
+    zero-capital key must not be MORE trustworthy (full curve) than two zero-capital
+    keys (honest-empty). A positive-weight sole key still passes through."""
+    from services.allocator_equity_derive import REASON_ZERO_WEIGHT_MASS
+
+    r = pd.Series([0.01, 0.01], index=["2026-03-01", "2026-03-02"], name="a")
+    zero = blend_concurrent_returns({"a": r}, {"a": 0.0})
+    assert zero.blended is None
+    assert zero.flags["reason"] == REASON_ZERO_WEIGHT_MASS
+    neg = blend_concurrent_returns({"a": r}, {"a": -5.0})
+    assert neg.blended is None
+    ok = blend_concurrent_returns({"a": r}, {"a": 100.0})
+    assert ok.blended is not None and ok.flags["sole_key"] is True
+
+
 def test_non_finite_weight_refuses_loud():
     """F3: the module refused non-finite RETURNS but LAUNDERED non-finite WEIGHTS. A
     NaN value_usd -> max(0.0, nan)=0.0 silently DROPPED the key (blended==pure other,
