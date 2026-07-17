@@ -5745,6 +5745,258 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
 });
 
 // ===========================================================================
+// Phase 113 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-03 Target-max-DD mode.
+//
+// Phase 113 adds a per-row MODE TOGGLE (Leverage | Target max-DD, default
+// Leverage). In Target mode the allocator types a max-drawdown target and the
+// client-side solver back-solves the SLEEVE's own leverage (founder lock), keeps
+// the derived L visible read-only, shows the resulting PORTFOLIO max-DD, and
+// renders honest infeasible states. Every test below FAILS on the current tree
+// because the pinned identifiers (`scenario-leverage-mode-toggle`, `target-dd-*`,
+// `scenario-target-dd-state`, `scenario-target-dd-portfolio-note`) do NOT exist
+// yet — the failure is a missing-element query (assertion), never a crash. Each
+// test LEADS with `expect(<queryByTestId>).not.toBeNull()` so the RED is a clean
+// assertion; the happy-path continuation flips green when Plan 113-03 lands.
+//
+// Fixture: two eligible per-key sources. K1 carries a founder-style series (one
+// −5% day among zeros → sleeve base max-DD 5% → target 20% solves to L≈4×,
+// confirmed against the frozen engine). K2 is a mild all-positive series.
+// ===========================================================================
+describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () => {
+  const K1 = "pk-113-k1"; // per-key unit id (api_key_id) — has a real drawdown
+  const K2 = "pk-113-k2"; // per-key unit id (api_key_id) — mild, no drawdown
+
+  const P113_DATES = Array.from({ length: 14 }, (_, i) =>
+    `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  // One −5% day among zeros → sleeve |dd(L)| = 0.05·L → base 5%, target 20% → 4×.
+  const K1_SERIES = P113_DATES.map((date, i) => ({
+    date,
+    value: i === 6 ? -0.05 : 0,
+  }));
+  const K2_SERIES = P113_DATES.map((date, i) => ({
+    date,
+    value: [0.001, 0.002, 0.0015][i % 3],
+  }));
+
+  function make113Payload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([
+        { id: K1, returns: K1_SERIES, valueUsd: 60_000 },
+        { id: K2, returns: K2_SERIES, valueUsd: 40_000 },
+      ]),
+      apiKeys: [winApiKey(K1), winApiKey(K2)],
+    });
+  }
+
+  function render113() {
+    render(
+      <ScenarioComposer
+        payload={make113Payload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** The constituent row element for a per-key ref (carries data-scope-ref). */
+  function rowByRef(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"]`,
+    ) as HTMLElement | null;
+    expect(el).not.toBeNull();
+    return el!;
+  }
+
+  /** Every weight input's value across ALL rows (the landmine non-regression
+   *  snapshot — the solve must write LEVERAGE only, never a weight). */
+  function allWeightValues(): Record<string, string> {
+    const out: Record<string, string> = {};
+    document
+      .querySelectorAll<HTMLInputElement>('input[id^="weight-"]')
+      .forEach((el) => {
+        out[el.id] = el.value;
+      });
+    return out;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // (h) DEFAULT-LEVERAGE — every per-key row renders the mode toggle at
+  // data-mode="leverage"; the target input is ABSENT in Leverage mode; the
+  // existing leverage input is editable (no readOnly). RED: the toggle testid does
+  // not exist yet.
+  it("(h) RED — each row renders the mode toggle at data-mode='leverage'; no target input; leverage editable", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED — the toggle does not exist yet.
+    expect(toggle!.getAttribute("data-mode")).toBe("leverage");
+
+    // The target input is absent while in Leverage mode.
+    expect(document.getElementById(`target-dd-${K1}`)).toBeNull();
+
+    // The Phase-112 leverage input still renders and is editable (not readOnly).
+    const lev = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    expect(lev).not.toBeNull();
+    expect(lev!.readOnly).toBe(false);
+  });
+
+  // (i) TARGET MODE — clicking the toggle flips data-mode to "target", reveals the
+  // target input, and makes the derived leverage input readOnly while keeping it
+  // VISIBLE with a value (founder lock: derived L stays visible read-only). RED:
+  // the toggle does not exist.
+  it("(i) RED — clicking the toggle flips to Target mode: target input revealed, leverage input read-only + still visible", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+
+    expect(
+      within(rowByRef(K1))
+        .getByTestId("scenario-leverage-mode-toggle")
+        .getAttribute("data-mode"),
+    ).toBe("target");
+
+    // The target input appears (percent units).
+    expect(document.getElementById(`target-dd-${K1}`)).not.toBeNull();
+
+    // The derived leverage stays VISIBLE, now read-only (never hidden).
+    const lev = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    expect(lev).not.toBeNull();
+    expect(lev!.value).not.toBe("");
+    expect(lev!).toHaveAttribute("readonly");
+  });
+
+  // (j) SOLVE COMMIT — in Target mode, typing a reachable target and committing
+  // (blur) writes the SOLVED leverage into the read-only leverage input and shows
+  // the resulting PORTFOLIO max-DD note as a 2dp signed percentage (computed, not
+  // "solved"). RED: the toggle does not exist.
+  it("(j) RED — committing a reachable target writes the solved L and shows the resulting portfolio max-DD note", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+
+    const levBefore = (
+      document.getElementById(`leverage-${K1}`) as HTMLInputElement
+    ).value;
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+
+    // The derived leverage becomes the solved value (K1's 5% base → 20% ≈ 4×).
+    const levAfter = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement;
+    expect(parseFloat(levAfter.value)).toBeGreaterThan(1);
+    expect(levAfter.value).not.toBe(levBefore);
+
+    // The resulting PORTFOLIO max-DD note renders as a 2dp signed percentage
+    // (full-book computed value, labelled computed — never "solved").
+    const note = within(rowByRef(K1)).getByTestId(
+      "scenario-target-dd-portfolio-note",
+    );
+    expect(note.textContent).toMatch(/[−-]?\d+\.\d{2}%/);
+  });
+
+  // (k) INFEASIBLE HONESTY — an unreachable target (99% on the mild series capped
+  // by MAX_LEVERAGE) renders honest "unreachable at {L}×" copy + an em-dash where
+  // a derived value would sit, and leaves the leverage input UNCHANGED (no
+  // fabricated L — the clamp-and-lie failure mode is RED-proofed). RED: the toggle
+  // does not exist.
+  it("(k) RED — an unreachable target renders honest 'unreachable at …×' + em-dash and does NOT fabricate a leverage", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+
+    const levBefore = (
+      document.getElementById(`leverage-${K1}`) as HTMLInputElement
+    ).value;
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "99" } });
+      fireEvent.blur(target);
+    });
+
+    const state = within(rowByRef(K1)).getByTestId(
+      "scenario-target-dd-state",
+    );
+    expect(state.textContent).toMatch(/unreachable at .*×/i);
+    expect(state.textContent).toContain("—");
+
+    // No fabricated leverage — the input is byte-unchanged from before the commit.
+    expect(
+      (document.getElementById(`leverage-${K1}`) as HTMLInputElement).value,
+    ).toBe(levBefore);
+  });
+
+  // (l) LANDMINE NON-REGRESSION — after a successful solve on one row, every
+  // weight input across ALL rows is byte-unchanged (the solve writes LEVERAGE
+  // only; the Phase-112 weight-basis landmines — mixed-book renorm, sole-unit
+  // refuse, per-key diffCount — must stay structurally untouched). RED: the toggle
+  // does not exist.
+  it("(l) RED — a solve writes leverage only: every weight input across all rows is byte-unchanged", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    const weightsBefore = allWeightValues();
+
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+
+    expect(allWeightValues()).toEqual(weightsBefore);
+  });
+});
+
+// ===========================================================================
 // Phase 43 / GUARD-01 (milestone v1.2.2 close) — PERMANENT static guard +
 // assembled-surface degenerate-matrix cross-check.
 // ===========================================================================
