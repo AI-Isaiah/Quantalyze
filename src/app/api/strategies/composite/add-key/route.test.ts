@@ -152,6 +152,49 @@ describe("POST /api/strategies/composite/add-key — read-only enforcement (T-88
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
+  // FIX 3 (Phase 110.1 / DOGFOOD-3) — class-closure on the composite sibling.
+  // A bare read_only:false (the real /api/validate-key shape, which never
+  // returns `permissions`) must not assert an unobserved trade scope.
+  it("regression (FIX 3): bare read_only:false with NO permissions → KEY_NOT_READ_ONLY, not KEY_HAS_TRADING_PERMS", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: false,
+      // permissions omitted — the real routers/exchange.py shape.
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_NOT_READ_ONLY");
+    expect(json.code).not.toBe("KEY_HAS_TRADING_PERMS");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("regression (FIX 3 facet b): a 'could not verify permission scopes' probe failure → retryable 5xx + KEY_PROBE_FAILED, not 500/UNKNOWN", async () => {
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error("Could not verify the key's permission scopes"),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBeGreaterThanOrEqual(502);
+    expect(res.status).toBeLessThan(504);
+    expect(res.status).not.toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_PROBE_FAILED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
   it("accepts a read-only key: encrypts then calls add_wizard_composite_key", async () => {
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));

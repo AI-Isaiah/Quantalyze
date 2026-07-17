@@ -84,7 +84,7 @@ export default function ForQuantsPage() {
       <section className="border-b border-border bg-white">
         <div className="mx-auto max-w-6xl px-6 py-20 md:py-24">
           <div className="max-w-3xl">
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
+            <span className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-page px-3 py-1 text-caption font-medium text-text-secondary">
               For Crypto Quant Teams
             </span>
 
@@ -286,7 +286,7 @@ export default function ForQuantsPage() {
 const TRUST_ATOMS: { title: string; body: string }[] = [
   {
     title: "Read-only keys verified at submission",
-    body: "Trading and withdraw permissions are rejected with the exact error: \"This key has trading or withdrawal permissions. Only read-only keys are accepted.\" You cannot bypass this check.",
+    body: "Trading and withdrawal permissions are rejected at submission — for example, \"Key has trading permissions. Please use a read-only key.\" Any key we can't positively verify as read-only is rejected too, and the check runs server-side, so you cannot bypass it.",
   },
   {
     title: "Envelope encryption at rest",

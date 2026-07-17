@@ -3,7 +3,11 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { buildPrimaryMobileNav, formatBadgeCount } from "./Sidebar";
+import {
+  buildPrimaryMobileNav,
+  formatBadgeCount,
+  type NavAction,
+} from "./Sidebar";
 
 /**
  * Phase 45 Plan 01 (NAV-01) — role-aware mobile bottom nav.
@@ -33,11 +37,16 @@ export function MobileNav({
   isAdmin,
   flaggedCount,
   inert,
+  onNavAction,
 }: {
   isAllocator?: boolean;
   isManager?: boolean;
   isAdmin?: boolean;
   flaggedCount?: number;
+  /** Phase 110 CONTRIB-01 — dispatched when a client-action cell (e.g.
+   *  "Add a Strategy") is tapped. DashboardChrome wires it to open the
+   *  ContributionWizardOverlay. */
+  onNavAction?: (action: NavAction) => void;
   /**
    * NAV-03: when the mobile drawer is open, DashboardChrome passes
    * `inert={true}` so the bottom nav (a SIBLING of the inert `<main>`, not
@@ -59,10 +68,47 @@ export function MobileNav({
     >
       <div className="flex">
         {items.map((item) => {
-          // KEEP the existing pathname-prefix active rule (see header note).
-          const active = pathname === item.href || pathname.startsWith(item.href + "/");
           const badge = item.badge;
           const showBadge = typeof badge === "number" && badge > 0;
+          // Shared cell content — icon (+ optional badge) over the label.
+          const iconAndLabel = (
+            <>
+              <span className="relative">
+                <item.icon className="h-5 w-5" />
+                {showBadge && (
+                  <span
+                    aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
+                    className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm bg-accent px-1.5 text-fixed-10 font-medium text-white"
+                  >
+                    {formatBadgeCount(badge)}
+                  </span>
+                )}
+              </span>
+              {item.label}
+            </>
+          );
+
+          // Phase 110 CONTRIB-01 — a client-action cell renders a <button> that
+          // dispatches onNavAction (no navigation), so it is never "active".
+          // Same 44px WCAG floor + focus ring as the link cells.
+          if (item.action) {
+            return (
+              <button
+                key={item.action}
+                type="button"
+                onClick={() => onNavAction?.(item.action)}
+                className={cn(
+                  "relative flex flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-fixed-10 font-medium text-text-muted transition-colors",
+                  "focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
+                )}
+              >
+                {iconAndLabel}
+              </button>
+            );
+          }
+
+          // KEEP the existing pathname-prefix active rule (see header note).
+          const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
             <Link
               key={item.href}
@@ -77,18 +123,7 @@ export function MobileNav({
                 active ? "text-accent" : "text-text-muted",
               )}
             >
-              <span className="relative">
-                <item.icon className="h-5 w-5" />
-                {showBadge && (
-                  <span
-                    aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
-                    className="absolute -right-2 -top-1 inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
-                  >
-                    {formatBadgeCount(badge)}
-                  </span>
-                )}
-              </span>
-              {item.label}
+              {iconAndLabel}
             </Link>
           );
         })}

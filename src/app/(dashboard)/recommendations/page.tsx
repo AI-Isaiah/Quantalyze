@@ -2,6 +2,7 @@ import Link from "next/link";
 import { unstable_noStore as noStore } from "next/cache";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
+import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -41,6 +42,9 @@ export default async function RecommendationsPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login?redirect=/recommendations");
+  // Phase 109 ROLE-04 — allocator-owned surface. OUTSIDE the attestation
+  // try/catch below: the wrong-role redirect() throws NEXT_REDIRECT.
+  await requireRolePage(supabase, user, "allocator");
 
   // Fail-closed attestation gate: any error or missing row → render the gate.
   let attestedAt: string | null = null;
@@ -285,7 +289,7 @@ function RecommendationCard({
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3">
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/10 text-xs font-semibold text-accent">
+            <span className="font-mono text-xs font-medium text-text-muted">
               #{rank}
             </span>
             <h3 className="text-lg font-semibold text-text-primary">

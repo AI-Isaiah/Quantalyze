@@ -18,8 +18,9 @@ import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTabl
  *      "0.00", "0%", or "N/A". The test FAILS if a 0 is shown for that column.
  *   3. Each column renders its OWN methodologyLine(n) — two columns with
  *      different n show DIFFERENT stamps (no single shared-window header).
- *   4. The per-metric winner cell carries text-accent font-bold + " ✓" via
- *      findWinner; Max Drawdown + Volatility use higherIsBetter=false.
+ *   4. The per-metric winner cell carries text-accent font-semibold + a
+ *      discrete ✓ glyph via findWinner; Max Drawdown + Volatility use
+ *      higherIsBetter=false.
  *   5. A "Best Sharpe: {name}" callout names the Sharpe leader (neutral).
  *   6. A whole below-floor column (n < 60) is gated to neutral sample-floor
  *      copy (no red/amber, no role="alert").
@@ -152,7 +153,7 @@ describe("ScenarioCompareTable", () => {
     expect(methodologyLine(120)).not.toBe(methodologyLine(65));
   });
 
-  it("highlights the per-metric winner with text-accent font-bold + ✓", () => {
+  it("highlights the per-metric winner with text-accent font-semibold + ✓", () => {
     // Beta has the higher Sharpe; Alpha has the better (less-negative) Max DD.
     const alpha = healthy(120, { sharpe: 1.2, max_drawdown: -0.05 });
     const beta = healthy(120, { sharpe: 2.4, max_drawdown: -0.2 });
@@ -166,7 +167,10 @@ describe("ScenarioCompareTable", () => {
     // The Sharpe winner (Beta, 2.40) carries the accent + check styling.
     const sharpeWinner = screen.getByTestId("winner-sharpe");
     expect(sharpeWinner.className).toContain("text-accent");
-    expect(sharpeWinner.className).toContain("font-bold");
+    expect(sharpeWinner.className).toContain("font-semibold");
+    // Winner mark is a discrete accent glyph nested in the winner span (no
+    // longer a " ✓" string glued to the mono numeric run) — still within the
+    // winner span's textContent.
     expect(sharpeWinner.textContent).toContain("✓");
     expect(sharpeWinner.textContent).toContain("2.40");
 

@@ -127,7 +127,7 @@ export function AdminTabs({ introRequests, pendingStrategies, pendingAllocators,
           <TabsTrigger key={t} value={t} variant="underline">
             {t}
             {badgeCounts[t] > 0 && (
-              <span className="ml-2 rounded-full bg-accent px-1.5 py-0.5 text-micro text-white">
+              <span className="ml-2 rounded-sm bg-accent px-1.5 py-0.5 text-micro text-white">
                 {badgeCounts[t]}
               </span>
             )}

@@ -115,6 +115,18 @@ describe("TrustTierLabel (Phase 17 / DESIGN-01 outline pill)", () => {
     expect(el.style.borderColor).toBe("rgb(180, 83, 9)");
   });
 
+  it("renders the composite provenance pill (#1A1A2E outline on white, CONSTIT-02)", () => {
+    const { getByTestId } = render(
+      <TrustTierLabel trustTier="composite" />,
+    );
+    const el = getByTestId("trust-tier-label");
+    expect(el.getAttribute("data-trust-tier")).toBe("composite");
+    expect(el.textContent).toBe("Composite");
+    expect(el.style.backgroundColor).toBe("rgb(255, 255, 255)");
+    expect(el.style.color).toBe("rgb(26, 26, 46)");
+    expect(el.style.borderColor).toBe("rgb(26, 26, 46)");
+  });
+
   it("returns null when trustTier is null (Phase 15 v0 contract preserved)", () => {
     const { container } = render(<TrustTierLabel trustTier={null} />);
     expect(container.firstChild).toBeNull();

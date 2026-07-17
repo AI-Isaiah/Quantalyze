@@ -2,46 +2,8 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260521185008_wizard_finalize_inserts_verification.sql
--- Wizard finalize writes strategy_verifications (QA report 2026-05-21, ISSUE-007).
---
--- BEFORE this migration: finalize_wizard_strategy (migration
--- 20260411103316) only UPDATEs the strategies row from draft to
--- pending_review. The sibling finalize_csv_strategy (migration
--- 20260501055202) atomically inserts BOTH the strategies row AND a
--- strategy_verifications row with trust_tier='csv_uploaded'. The wizard
--- API path was missing the second insert, so /strategy/[id] read
--- strategy.trust_tier as undefined (Locked D-04: trust_tier lives ONLY
--- on strategy_verifications) and the public Disclaimer fell back to
--- the 'self_reported' copy — contradicting the green "Verified" badge
--- the page renders for API-tier strategies. Allocators saw a strategy
--- card claiming "Verified" alongside footer text reading "Performance
--- data is self-reported by the manager and not independently verified
--- by Quantalyze." Manifestly wrong for a strategy whose factsheet was
--- computed from a read-only exchange API key.
---
--- AFTER: finalize_wizard_strategy inserts a strategy_verifications row
--- at status='validated' / trust_tier='api_verified' / flow_type='onboard'
--- in the same transaction as the strategies UPDATE. The source column is
--- derived from api_keys.exchange via the strategy's api_key_id —
--- {bybit, okx, binance} are admitted by the existing check constraint.
--- wizard_session_id is generated internally with gen_random_uuid()
--- because the RPC's signature is locked (no client-supplied value
--- threading without a coordinated route change). Telemetry that wants
--- the client-supplied wizard_session_id should read it from
--- /api/strategies/finalize-wizard's body, not from the verification row.
---
--- Backfill: the three CURRENT strategies (Momentum Sphinx, Alpha
--- Centauri, Phoenix Protocol) created via the wizard with api_key_id
--- IS NOT NULL and status IN ('pending_review','published') have no
--- verification row. Backfill them so the disclaimer flips for already-
--- published strategies on the next page load. Future inserts go through
--- the RPC; this is one-time.
---
--- Locked decision D-04 reaffirmed: trust_tier lives ONLY on
--- strategy_verifications. Do not add a strategy.trust_tier column.
-
-CREATE OR REPLACE FUNCTION finalize_wizard_strategy(
+-- source migration: 20260716130500_finalize_terminal_status_param.sql
+CREATE FUNCTION finalize_wizard_strategy(
   p_strategy_id UUID,
   p_user_id UUID,
   p_name TEXT,
@@ -53,7 +15,8 @@ CREATE OR REPLACE FUNCTION finalize_wizard_strategy(
   p_supported_exchanges TEXT[],
   p_leverage_range TEXT,
   p_aum NUMERIC,
-  p_max_capacity NUMERIC
+  p_max_capacity NUMERIC,
+  p_terminal_status TEXT DEFAULT 'pending_review'
 )
 RETURNS UUID
 LANGUAGE plpgsql
@@ -68,6 +31,17 @@ DECLARE
   v_api_key_id UUID;
   v_exchange TEXT;
 BEGIN
+  -- CONTRIB-02 guard (T-110-02): the terminal status is restricted to an
+  -- owner-only or review-candidate value. 'published' is deliberately
+  -- unreachable from any finalize caller — a strategy becomes published ONLY
+  -- via the admin review promotion path. FIRST statement so it RAISEs before
+  -- any strategies read/write.
+  IF p_terminal_status NOT IN ('pending_review', 'private') THEN
+    RAISE EXCEPTION 'finalize_wizard_strategy: p_terminal_status % is not allowed (expected pending_review or private)',
+      p_terminal_status
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
   IF v_auth_uid IS NULL THEN
     RAISE EXCEPTION 'finalize_wizard_strategy called without an auth session'
       USING ERRCODE = 'insufficient_privilege';
@@ -122,12 +96,18 @@ BEGIN
       leverage_range = p_leverage_range,
       aum = p_aum,
       max_capacity = p_max_capacity,
-      status = 'pending_review'
+      status = p_terminal_status
     WHERE id = p_strategy_id;
 
-  -- Insert the API-tier verification row so the public /strategy/[id]
+  -- Insert the API-tier verification row so the OWNER's /strategy/[id]
   -- disclaimer reads "Data verified from exchange API" instead of the
   -- self_reported fallback.
+  --
+  -- CONTRIB-02 note: this insert is KEPT on BOTH terminal statuses (including
+  -- 'private'). trust_tier ('api_verified') is a data-quality label the owner's
+  -- own surfaces read, NOT a publish signal — the admin publish queue keys on
+  -- strategies.status='pending_review', so a 'private' row carrying a
+  -- verification row is still never publishable.
   --
   -- Only insert when:
   --  (a) the strategy is API-tier (api_key_id IS NOT NULL), AND

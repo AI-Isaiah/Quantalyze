@@ -618,11 +618,17 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
       expect(th.className).toContain("bg-surface");
       expect(th.className).toMatch(/\bz-\d+\b/);
     }
-    // The Strategy (first) header is the sticky-left corner; with no star column
-    // it is the highest-ranked cell (z-30) and pins left.
+    // The leading rank ("#") column is now the sticky-left corner — the
+    // highest-ranked cell (z-30) that pins left-0.
+    const rankHeader = screen.getByRole("columnheader", { name: /Rank/ });
+    expect(rankHeader.className).toContain("left-0");
+    expect(rankHeader.className).toContain("z-30");
+    // The Strategy identity column stays sticky as the SECOND pinned column
+    // (to the right of the rank column, which is w-14/left-0), one z-tier below
+    // the corner — so it pins at left-14 when there is no star column.
     const strategyHeader = screen.getByRole("columnheader", { name: /Strategy/ });
-    expect(strategyHeader.className).toContain("left-0");
-    expect(strategyHeader.className).toContain("z-30");
+    expect(strategyHeader.className).toContain("left-14");
+    expect(strategyHeader.className).toContain("z-20");
   });
 
   it("50-REVIEW — sortable headers are keyboard-operable <button>s with aria-sort (WCAG 2.1.1 / 4.1.2)", () => {
@@ -646,11 +652,20 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     const firstCell = nameLink.closest("td");
     expect(firstCell).not.toBeNull();
     expect(firstCell!.className).toContain("sticky");
-    expect(firstCell!.className).toContain("left-0");
+    // The identity column is the second sticky column (pinned at left-14, to the
+    // right of the leading w-14 rank cell which owns left-0).
+    expect(firstCell!.className).toContain("left-14");
     expect(firstCell!.className).toContain("bg-surface");
     // The translucent hover lives on the OTHER cells (group-hover:bg-page/50);
     // the sticky first column must not carry it or scrolled cells bleed through.
     expect(firstCell!.className).not.toContain("group-hover:bg-page/50");
+    // The leading rank cell is itself sticky at left-0 with the same opaque
+    // backing, so it doesn't bleed under horizontal scroll either.
+    const rankCell = within(firstCell!.closest("tr")!).getByText(/^#\d+$/).closest("td");
+    expect(rankCell!.className).toContain("sticky");
+    expect(rankCell!.className).toContain("left-0");
+    expect(rankCell!.className).toContain("bg-surface");
+    expect(rankCell!.className).not.toContain("group-hover:bg-page/50");
   });
 
   it("a collapsed-column <details> relocates the SAME real value the visible cell shows", () => {
@@ -735,5 +750,162 @@ describe("StrategyTable — 50-06 dense reshape (STATE-03/04)", () => {
     const labelEl = document.getElementById(labelledBy!);
     expect(labelEl).not.toBeNull();
     expect(labelEl!.getAttribute("role")).toBe("tab");
+  });
+});
+
+// --- v1.11 rank + percentile encoding ---------------------------------------
+//
+// The ranking table now carries an explicit encoding: a leading `#n` rank column
+// tied to the ACTIVE sort order, and a quiet `Pnn` percentile suffix on the
+// sorted column (fed by getPercentiles() via the `percentiles` prop). These
+// tests pin the rank re-numbering and the honest-absence rules for the suffix.
+
+/** Full PercentileMap entry (all metric keys required) with per-metric overrides. */
+function makePercentiles(
+  id: string,
+  overrides: Partial<Record<string, number>>,
+): Record<string, Record<string, number>> {
+  return {
+    [id]: {
+      cagr: 50,
+      sharpe: 50,
+      sortino: 50,
+      calmar: 50,
+      max_drawdown: 50,
+      volatility: 50,
+      cumulative_return: 50,
+      ...overrides,
+    },
+  };
+}
+
+describe("StrategyTable — v1.11 rank + percentile encoding", () => {
+  it("renders a #n rank column tied to the active sort order and re-numbers when it changes", async () => {
+    const user = userEvent.setup();
+    const a = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    const b = makeStrategy({ id: STRATEGY_ID_B, name: "Beta Voyager" });
+    const c = makeStrategy({ id: STRATEGY_ID_C, name: "Gamma Pioneer" });
+    a.analytics.cagr = 0.1;
+    b.analytics.cagr = 0.3;
+    c.analytics.cagr = 0.2;
+    render(<StrategyTable strategies={[a, b, c]} categorySlug="crypto-sma" />);
+
+    // Sort by CAGR (a fresh column → descending): Beta(30%) #1, Gamma(20%) #2,
+    // Alpha(10%) #3 — rank 1 is the top of the current sort.
+    const cagrHeader = screen.getByRole("columnheader", { name: /CAGR/ });
+    await user.click(within(cagrHeader).getByRole("button"));
+    let rows = Array.from(document.querySelectorAll("tbody tr"));
+    expect(rows[0].textContent).toContain("#1");
+    expect(rows[0].textContent).toContain("Beta Voyager");
+    expect(rows[2].textContent).toContain("#3");
+    expect(rows[2].textContent).toContain("Alpha Stellar");
+
+    // Toggle CAGR ascending → the order (and thus the ranks) invert: #1 = Alpha.
+    await user.click(within(cagrHeader).getByRole("button"));
+    rows = Array.from(document.querySelectorAll("tbody tr"));
+    expect(rows[0].textContent).toContain("#1");
+    expect(rows[0].textContent).toContain("Alpha Stellar");
+  });
+
+  it("appends the category-scoped percentile suffix on the ACTIVE sort column when percentiles are provided", async () => {
+    const user = userEvent.setup();
+    const percentiles = makePercentiles(STRATEGY_ID_A, { cagr: 82 });
+    render(
+      <StrategyTable
+        strategies={[makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" })]}
+        categorySlug="crypto-sma"
+        percentiles={percentiles}
+      />,
+    );
+    // Make CAGR the sorted column; its cell gains the quiet P82 suffix.
+    const cagrHeader = screen.getByRole("columnheader", { name: /CAGR/ });
+    await user.click(within(cagrHeader).getByRole("button"));
+
+    const suffix = screen.getByText("P82");
+    expect(suffix).toBeDefined();
+    // The suffix rides the CAGR value cell (+18.00% from the fixture), proving it
+    // is scoped to the ACTIVE sort column, not sprayed across every metric.
+    expect(suffix.closest("td")?.textContent).toContain("+18.00%");
+  });
+
+  it("renders NO percentile suffix when percentiles are unavailable (honest absence, no fabricated rank)", () => {
+    render(
+      <StrategyTable
+        strategies={[makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" })]}
+        categorySlug="crypto-sma"
+      />,
+    );
+    expect(screen.queryByText(/^P\d+$/)).toBeNull();
+  });
+
+  it("renders NO percentile suffix when the sorted column has no percentile metric (e.g. Strategy name)", async () => {
+    const user = userEvent.setup();
+    const percentiles = makePercentiles(STRATEGY_ID_A, { cagr: 82 });
+    render(
+      <StrategyTable
+        strategies={[makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" })]}
+        categorySlug="crypto-sma"
+        percentiles={percentiles}
+      />,
+    );
+    // Sort by the Strategy-name column — it has no percentile mapping, so NO
+    // suffix renders anywhere (and none leaks from another column).
+    const nameHeader = screen.getByRole("columnheader", { name: /Strategy/ });
+    await user.click(within(nameHeader).getByRole("button"));
+    expect(screen.queryByText(/^P\d+$/)).toBeNull();
+  });
+});
+
+// --- v1.11 sign-restricted cell color policy --------------------------------
+//
+// Founder decision (audit finding 2): color is restricted to sign-carrying
+// cells. Return/PnL keep the positive/negative tint (finite values only);
+// magnitude columns (CAGR, Sharpe) render neutral ink; Max DD is red ONLY when
+// finitely negative — never a blanket red column; and a non-finite "—" cell is
+// never tinted.
+
+describe("StrategyTable — v1.11 sign-restricted color policy", () => {
+  it("sign-tints the return cell but renders CAGR + Sharpe in neutral ink", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.cumulative_return = 0.42; // +42.00%
+    fixture.analytics.cagr = 0.18; // +18.00%
+    fixture.analytics.sharpe = 1.5; // 1.50
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+    const td = (t: string) => screen.getByText(t).closest("td")!;
+    // Return carries a sign → positive token.
+    expect(td("+42.00%").className).toContain("text-positive");
+    // CAGR + Sharpe are magnitudes → neutral ink, never sign-tinted.
+    expect(td("+18.00%").className).toContain("text-text-primary");
+    expect(td("+18.00%").className).not.toMatch(/text-(positive|negative)/);
+    expect(td("1.50").className).toContain("text-text-primary");
+    expect(td("1.50").className).not.toMatch(/text-(positive|negative)/);
+  });
+
+  it("Max DD is red only for a finite negative value; a 0 value renders neutral (no blanket red column)", () => {
+    const neg = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    neg.analytics.max_drawdown = -0.12;
+    const { unmount } = render(
+      <StrategyTable strategies={[neg]} categorySlug="crypto-sma" />,
+    );
+    expect(screen.getByText("-12.00%").closest("td")!.className).toContain(
+      "text-negative",
+    );
+    unmount();
+
+    const zero = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    zero.analytics.max_drawdown = 0;
+    render(<StrategyTable strategies={[zero]} categorySlug="crypto-sma" />);
+    const cell = screen.getByText("+0.00%").closest("td")!;
+    expect(cell.className).toContain("text-text-primary");
+    expect(cell.className).not.toContain("text-negative");
+  });
+
+  it("never sign-tints a non-finite '—' cell", () => {
+    const fixture = makeStrategy({ id: STRATEGY_ID_A, name: "Alpha Stellar" });
+    fixture.analytics.cumulative_return = null as unknown as number;
+    render(<StrategyTable strategies={[fixture]} categorySlug="crypto-sma" />);
+    const cell = screen.getByText("—").closest("td")!;
+    expect(cell.className).not.toContain("text-positive");
+    expect(cell.className).not.toContain("text-negative");
   });
 });

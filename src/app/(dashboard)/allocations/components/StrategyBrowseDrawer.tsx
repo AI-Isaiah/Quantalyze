@@ -75,6 +75,14 @@ export interface StrategyBrowseDrawerProps {
   allocatorMandate: AllocatorMandateForFit | null;
   /** Optional fetcher override for tests — defaults to fetch("/api/strategies/browse"). */
   fetchStrategies?: () => Promise<StrategyBrowseRow[]>;
+  /**
+   * Phase 110 CONTRIB-05 — the browse-list escape hatch. When provided, the
+   * drawer surfaces a "Can't find it? Add your own" CTA that dispatches this
+   * callback (the composer wires it to close Browse + open the
+   * ContributionWizardOverlay). Absent → no CTA (optional-prop safety for mounts
+   * that do not support contribution).
+   */
+  onAddOwn?: () => void;
 }
 
 const TIER_COPY: Record<MandateFitTier, string> = {
@@ -129,6 +137,7 @@ export function StrategyBrowseDrawer({
   onAdd,
   allocatorMandate,
   fetchStrategies,
+  onAddOwn,
 }: StrategyBrowseDrawerProps) {
   const [strategies, setStrategies] = useState<StrategyBrowseRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -534,6 +543,38 @@ export function StrategyBrowseDrawer({
               );
             })}
           </ul>
+
+          {/*
+            Phase 110 CONTRIB-05 — the browse-list escape hatch. Rendered beneath
+            the results/empty/no-results/error states (all live in this block) so
+            it reads as "if none of these are it, add your own". A restrained
+            text button separated by a hairline (DESIGN.md — never a second
+            accent-fill competing with the row Add buttons). Client action only —
+            no href; the composer opens the ContributionWizardOverlay.
+
+            data-testid is DELIBERATELY `browse-contribute-own`, NOT the
+            `browse-add-*` family the per-strategy Add buttons use (line ~537).
+            This CTA opens the contribution wizard — it does NOT add a strategy —
+            so it must stay OUT of the `browse-add-` namespace. A prefixed testid
+            (the former `browse-add-own`) collides with the automation contract
+            `[data-testid^="browse-add-"]` used to "add the first strategy": while
+            the fetch is in flight the strategy rows have not rendered yet, so
+            such a first-match locator would bind to THIS CTA and fire onAddOwn —
+            closing the drawer and opening the wizard instead of composing a
+            strategy (the composer close-drawer e2e regression, PR #620).
+          */}
+          {onAddOwn && (
+            <div className="mt-6 border-t border-border pt-4 text-center">
+              <button
+                type="button"
+                onClick={onAddOwn}
+                data-testid="browse-contribute-own"
+                className="text-sm text-accent underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+              >
+                Can&apos;t find it? Add your own
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

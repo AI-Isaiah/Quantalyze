@@ -33,7 +33,12 @@ describe("Phase 84 — asset_class flows to every blend surface", () => {
 
   it("the lazy returns route probe projects asset_class (drawer-added legs)", () => {
     const src = read("src/app/api/strategies/[id]/returns/route.ts");
-    expect(src).toContain('.select("id, asset_class")');
+    // Phase 111 / CONSTIT-02 widened this probe select to also embed
+    // strategy_verifications; assert asset_class is still projected on the same
+    // published-gated probe (substring, not exact — the select is multi-field).
+    expect(src).toContain(
+      '.select("id, asset_class, strategy_verifications (trust_tier, status, created_at)")',
+    );
   });
 
   it("the public share page strategies read projects asset_class (shared scenarios)", () => {

@@ -40,6 +40,10 @@ const STATE = vi.hoisted(() => ({
   strategyRows: [] as Array<Record<string, unknown>>,
   observedFilters: {
     status: null as string | null,
+    // CONTRIB-03 — the owner-inclusive predicate is now a single `.or(...)`
+    // filter string (`status.eq.published,user_id.eq.<sessionId>`), captured
+    // verbatim so tests can pin BOTH the published leg and the session-only id.
+    orFilter: null as string | null,
     orderColumn: null as string | null,
     orderAsc: null as boolean | null,
     limit: null as number | null,
@@ -102,6 +106,14 @@ vi.mock("@/lib/supabase/server", () => ({
           if (col === "status") STATE.observedFilters.status = val;
           return builder;
         },
+        // CONTRIB-03 — owner-inclusive discovery routes through
+        // withPublishedOrOwner, which appends a single `.or(filter)`. Capture
+        // the raw filter string so tests can assert the published leg AND that
+        // the embedded owner id is the SESSION id, never a request param.
+        or: (filter: string) => {
+          STATE.observedFilters.orFilter = filter;
+          return builder;
+        },
         order: (
           col: string,
           opts: { ascending: boolean } = { ascending: true },
@@ -157,6 +169,16 @@ function makeRequest(): NextRequest {
   });
 }
 
+// CONTRIB-03/04 — a request that ATTEMPTS to name another owner via a query
+// param. The route must ignore it entirely; the owner id in the predicate is
+// session-only. Used by the session-only wiring test below.
+function makeRequestWithUserIdParam(userId: string): NextRequest {
+  return new NextRequest(
+    `http://localhost:3000/api/strategies/browse?user_id=${userId}`,
+    { method: "GET", headers: { origin: "http://localhost:3000" } },
+  );
+}
+
 beforeEach(() => {
   STATE.authUser = {
     id: "00000000-0000-0000-0000-000000000001",
@@ -166,6 +188,7 @@ beforeEach(() => {
   STATE.strategyRows = [];
   STATE.observedFilters = {
     status: null,
+    orFilter: null,
     orderColumn: null,
     orderAsc: null,
     limit: null,
@@ -219,7 +242,11 @@ describe("GET /api/strategies/browse", () => {
     });
   });
 
-  it("T3 — passes .eq('status','published') to the supabase chain", async () => {
+  it("T3 (CONTRIB-03) — passes the owner-inclusive .or('status.eq.published,user_id.eq.<sessionId>') predicate", async () => {
+    // The route no longer filters status='published' alone. It routes through
+    // withPublishedOrOwner, whose single `.or(...)` predicate mirrors the
+    // strategies_read RLS shape: published rows OR the session owner's own
+    // rows. The embedded id is the withAllocatorAuth session id, verbatim.
     STATE.strategyRows = [
       {
         id: "11111111-1111-4111-8111-111111111111",
@@ -232,7 +259,68 @@ describe("GET /api/strategies/browse", () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest());
     expect(res.status).toBe(200);
-    expect(STATE.observedFilters.status).toBe("published");
+    expect(STATE.observedFilters.orFilter).toBe(
+      "status.eq.published,user_id.eq.00000000-0000-0000-0000-000000000001",
+    );
+    // The old published-only `.eq("status","published")` predicate is GONE —
+    // superseded by the owner-inclusive `.or(...)`.
+    expect(STATE.observedFilters.status).toBeNull();
+  });
+
+  it("T3a (CONTRIB-03, owner-inclusive) — owner sees their OWN not-yet-published row alongside published rows", async () => {
+    // The mock models the DB the way RLS + the owner-OR predicate deliver it:
+    // for session owner A, the query returns A's own draft row AND published
+    // rows. The route must surface BOTH (it does not re-filter status).
+    STATE.strategyRows = [
+      {
+        id: "11111111-1111-4111-8111-111111111111",
+        name: "My Draft",
+        codename: null,
+        disclosure_tier: "institutional",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+      },
+      {
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "Someone Published",
+        codename: null,
+        disclosure_tier: "institutional",
+        markets: ["equity"],
+        strategy_types: ["long-short"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    // Owner-inclusive: the predicate names the session owner, so the DB is
+    // free to return their own private row.
+    expect(STATE.observedFilters.orFilter).toContain(
+      "user_id.eq.00000000-0000-0000-0000-000000000001",
+    );
+    expect(STATE.observedFilters.orFilter).toContain("status.eq.published");
+    const body = await res.json();
+    expect(body.strategies.map((s: { name: string }) => s.name)).toEqual([
+      "My Draft",
+      "Someone Published",
+    ]);
+  });
+
+  it("T3b (CONTRIB-03/04, session-only) — a ?user_id=<other> param does NOT alter the predicate; the id is session-only", async () => {
+    // THREAT T-110-05/07: the owner id in the predicate must come EXCLUSIVELY
+    // from the withAllocatorAuth session. A caller who appends ?user_id=<A>
+    // must NOT be able to read A's private rows. This is a WIRING test: if the
+    // route is ever mutated to read a userId from the request (query/body), the
+    // filter string embeds the attacker-supplied id and this assertion FAILS.
+    const OTHER_OWNER = "99999999-9999-4999-8999-999999999999";
+    STATE.strategyRows = [];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequestWithUserIdParam(OTHER_OWNER));
+    expect(res.status).toBe(200);
+    // The predicate embeds the SESSION id, never the request param.
+    expect(STATE.observedFilters.orFilter).toBe(
+      "status.eq.published,user_id.eq.00000000-0000-0000-0000-000000000001",
+    );
+    expect(STATE.observedFilters.orFilter).not.toContain(OTHER_OWNER);
   });
 
   it("T4 — orders by name ascending (alphabetical) — UI doesn't re-sort", async () => {
@@ -583,6 +671,51 @@ describe("GET /api/strategies/browse", () => {
     expect(cols).toContain("name");
   });
 
+  it("T12f (CONTRIB-03) — the caller's OWN non-institutional row shows its REAL name; another owner's stays pseudonymised", async () => {
+    // Browse became owner-inclusive, so an allocator's OWN not-yet-published
+    // contribution now appears in the drawer. Running it through
+    // displayStrategyName would collapse the fresh (exploratory) name they just
+    // typed to `Strategy #<id>` — over-redacting it from its own author. The
+    // owner-row branch surfaces the real name for own rows ONLY; everyone else's
+    // non-institutional rows stay pseudonymised (the T12 pseudonymity contract).
+    const SESSION_ID = "00000000-0000-0000-0000-000000000001"; // STATE.authUser.id
+    STATE.strategyRows = [
+      {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        user_id: SESSION_ID, // the caller's OWN contribution
+        name: "My Alpha Sleeve",
+        codename: null,
+        disclosure_tier: "exploratory",
+        markets: ["crypto"],
+        strategy_types: ["systematic"],
+      },
+      {
+        id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+        user_id: "22222222-2222-4222-8222-222222222222", // a DIFFERENT owner
+        name: "Someone Elses Secret Book",
+        codename: "Zephyr-9",
+        disclosure_tier: "exploratory",
+        markets: ["fx"],
+        strategy_types: ["macro"],
+      },
+    ];
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest());
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.strategies).toHaveLength(2);
+    // Own row: real name surfaces (fails today — displayStrategyName redacts it
+    // to `Strategy #aaaaaaaa`).
+    expect(body.strategies[0].name).toBe("My Alpha Sleeve");
+    // Another owner's non-institutional row stays pseudonymised to its codename;
+    // the real name never crosses the wire.
+    expect(body.strategies[1].name).toBe("Zephyr-9");
+    expect(JSON.stringify(body)).not.toContain("Someone Elses Secret Book");
+    // Defence-in-depth: the co-fetched user_id is read only for the comparison,
+    // never emitted (the H-0300 allow-list fence holds).
+    expect(JSON.stringify(body)).not.toContain(SESSION_ID);
+  });
+
   // ============================================================
   // H-0300 — response-payload allow-list / forbidden-key fence
   //
@@ -714,11 +847,17 @@ describe("GET /api/strategies/browse", () => {
     // Both halves of the catalog are in the SAME response.
     expect(body.strategies).toHaveLength(2);
 
-    // (a) The published predicate is STILL enforced even with is_example
-    //     co-fetched — a stray `.or(is_example.eq.true)` would have
-    //     bypassed `withPublishedOnly` and the observed status filter
-    //     would no longer be exactly "published".
-    expect(STATE.observedFilters.status).toBe("published");
+    // (a) The published leg of the owner-inclusive predicate is STILL
+    //     enforced even with is_example co-fetched — a stray
+    //     `.or(is_example.eq.true)` would have bypassed withPublishedOrOwner,
+    //     so the observed predicate is EXACTLY the published-OR-owner filter
+    //     with no is_example leg. (CONTRIB-03: the swap from withPublishedOnly
+    //     to withPublishedOrOwner replaces the `.eq("status","published")`
+    //     predicate with the owner-inclusive `.or(...)`; the published leg
+    //     remains — an owner's OWN row is included, never a cross-tenant one.)
+    expect(STATE.observedFilters.orFilter).toBe(
+      "status.eq.published,user_id.eq.00000000-0000-0000-0000-000000000001",
+    );
 
     // (b) is_example is co-fetched on the SAME RLS-scoped SELECT (NOT a
     //     second published-bypassing query). T12e-style SELECT-shape pin.

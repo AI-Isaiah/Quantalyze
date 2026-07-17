@@ -201,6 +201,7 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
   activeVenues: [],
+  hasConnectedKeys: false,
   flaggedHoldings: [],
   matchDecisionsByHoldingRef: {},
   mandate: null,

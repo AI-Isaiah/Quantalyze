@@ -99,6 +99,10 @@ function buildStrategy(
       organization_name: null,
       strategy_analytics: null,
       ...strategyOverrides,
+      // CONSTIT-02 — required (non-optional) provenance fields; coalesce after
+      // the Partial spread so they can never widen to `undefined`.
+      trust_tier: strategyOverrides?.trust_tier ?? null,
+      is_composite: strategyOverrides?.is_composite ?? false,
     },
     ...rest,
   };

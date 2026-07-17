@@ -166,10 +166,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
 
     if (!validation.read_only) {
-      const perms = validation.permissions?.join(",").toLowerCase() ?? "";
-      const code = perms.includes("withdraw")
-        ? "KEY_HAS_WITHDRAW_PERMS"
-        : "KEY_HAS_TRADING_PERMS";
+      // FIX 3 (Phase 110.1 / DOGFOOD-3) — same honest treatment as the sibling
+      // create-with-key route. /api/validate-key returns only { valid,
+      // read_only }; `permissions` is never populated, so the old fall-through
+      // asserted an UNOBSERVED trade scope on every bare read_only:false. Only
+      // claim a specific scope when one was actually observed; otherwise report
+      // the honest KEY_NOT_READ_ONLY. Key is STILL rejected either way.
+      const perms = validation.permissions?.map((p) => p.toLowerCase()) ?? [];
+      const code =
+        perms.length === 0
+          ? "KEY_NOT_READ_ONLY"
+          : perms.some((p) => p.includes("withdraw"))
+            ? "KEY_HAS_WITHDRAW_PERMS"
+            : "KEY_HAS_TRADING_PERMS";
       return NextResponse.json(
         // H-0305 consistency: the client reads `code` only, so omit `error` —
         // all failure bodies are uniform { code }.
@@ -329,6 +338,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     } else if (lower.includes("timeout") || lower.includes("etimedout")) {
       code = "KEY_NETWORK_TIMEOUT";
       status = 502;
+    } else if (
+      // FIX 3 facet b (Phase 110.1 / DOGFOOD-3) — probe fail-closed ("Could not
+      // verify the key's permission scopes…") is a transient upstream blip, not
+      // a terminal 500. Map to a retryable 5xx with a retry-flavored code.
+      lower.includes("could not verify") ||
+      lower.includes("permission scope") ||
+      lower.includes("probe")
+    ) {
+      code = "KEY_PROBE_FAILED";
+      status = 503;
     } else if (lower.includes("trading") || lower.includes("withdraw")) {
       code = "KEY_HAS_TRADING_PERMS";
       status = 400;

@@ -404,6 +404,50 @@ export function toggleHolding(
 }
 
 /**
+ * Phase 111 / CONSTIT-03 — toggle a PER-KEY data-source constituent (keyed by
+ * the bare `api_key_id`, a raw uuid with NO prefix; the engine unit's NAME is
+ * the prefixed `key <uuid>`, but the ref/id every consumer keys on is the bare
+ * uuid) on/off through the ONE `toggleByScopeRef` channel every other
+ * constituent uses. Distinct from `toggleHolding` in exactly one way: per-key
+ * units ride the RAW equity-share weight path (the engine renormalizes over the
+ * selected set — Pitfall 1) and carry NO `weightOverrides` entry, so this mutator
+ * NEVER rescales `weightOverrides`. A per-key toggle must not perturb any
+ * added-strategy weight (weight editing is Phase 112).
+ *
+ * Absent → included (the composer reads `toggleByScopeRef[ref] ?? true`), so:
+ *   - EXCLUDE: write an explicit `false`. This persists with the draft (autosave
+ *     + saved scenarios + compare), SUPERSEDING the Phase-66 CF-05 "transient"
+ *     decision — per-key exclusions now behave like every other constituent
+ *     toggle (locked 2026-07-16). Because it lands in `toggleByScopeRef`, an
+ *     exclusion counts toward `diffCount` exactly like an added-strategy toggle.
+ *   - RE-INCLUDE: DELETE the ref (back to the absent=included default) rather
+ *     than writing `true`. Deleting keeps per-key refs OUT of `enabledIdsOf`
+ *     (which filters `=== true`), so a re-include can never inflate the enabled
+ *     set that the added-strategy weight-rescale math (`addStrategyBrowse` n-count
+ *     / `renormalizeWeights`) reads — the sum-to-1 invariant stays over
+ *     holding/added refs only.
+ *
+ * Returns a new draft (never mutates).
+ */
+export function togglePerKeySource(
+  draft: ScenarioDraft,
+  ref: string,
+): ScenarioDraft {
+  const currentlyIncluded = draft.toggleByScopeRef[ref] !== false;
+  const nextToggle = { ...draft.toggleByScopeRef };
+  if (currentlyIncluded) {
+    nextToggle[ref] = false;
+  } else {
+    delete nextToggle[ref];
+  }
+  return {
+    ...draft,
+    toggleByScopeRef: nextToggle,
+    lastEditedAt: new Date().toISOString(),
+  };
+}
+
+/**
  * Browse-add (D-03): the new strategy is allocated `1 / (n + 1)` and the
  * existing enabled set is scaled by `1 - 1/(n+1)`. Maintains sum === 1.0.
  *
@@ -595,13 +639,22 @@ export function setWeightOverride(
  * (legacy), or pass the engine unit ids (WR-01 — the composer's optimizer
  * apply-back does this so the mixed per-key + added path is not diluted by stale
  * `holding:` override mass). Non-finite / negative / empty input is a no-op
- * (defensive). Every provided ref is recorded as a user-explicit override (the
- * allocator clicked Apply).
+ * (defensive).
+ *
+ * `userExplicitRefs` (Phase 112 WEIGHTS-01) parameterizes the H-0126 diffCount
+ * honesty. When OMITTED, every provided ref is recorded as a user-explicit
+ * override — the optimizer's "the allocator clicked Apply for the whole vector"
+ * semantics (unchanged, pinned by the pre-existing apply-weights tests). When
+ * PROVIDED, only those refs are stamped into `userWeightOverrides` — the
+ * composer's single-row edit passes the ONE edited ref (built into a full sum-1
+ * vector over the engine basis) so one user gesture counts as one edit, not the
+ * whole renormalized basis.
  */
 export function applyWeightOverrides(
   draft: ScenarioDraft,
   weights: Record<string, number>,
   basisIds?: ReadonlyArray<string>,
+  userExplicitRefs?: ReadonlyArray<string>,
 ): ScenarioDraft {
   const refs = Object.keys(weights);
   if (refs.length === 0) return draft;
@@ -629,12 +682,21 @@ export function applyWeightOverrides(
   const normalized = renormalizeWeights(merged, normBasis);
   const nextWeights: Record<string, number> = { ...merged, ...normalized };
 
+  // H-0126 — record the refs the USER explicitly re-weighted. Default: every
+  // provided ref (optimizer whole-vector Apply). When `userExplicitRefs` is
+  // supplied, stamp only those (composer single-row edit → one edited ref), so
+  // diffCount counts one gesture as one edit rather than the whole renormalized
+  // basis. Each stamped ref records its POST-normalization weight.
+  const stampRefs = userExplicitRefs ?? refs;
+
   return {
     ...draft,
     weightOverrides: clampAllWeights(nextWeights),
     userWeightOverrides: {
       ...(draft.userWeightOverrides ?? {}),
-      ...Object.fromEntries(refs.map((r) => [r, nextWeights[r] ?? merged[r]])),
+      ...Object.fromEntries(
+        stampRefs.map((r) => [r, nextWeights[r] ?? merged[r]]),
+      ),
     },
     lastEditedAt: new Date().toISOString(),
   };

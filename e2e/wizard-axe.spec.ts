@@ -103,7 +103,7 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     page,
   }) => {
     if (HAS_SEED_ENV) {
-      const allocator = await seedTestAllocator();
+      const allocator = await seedTestAllocator({ role: "both" });
       await loginViaForm(page, allocator.email, allocator.password);
     }
 
@@ -135,7 +135,7 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     page,
   }) => {
     if (HAS_SEED_ENV) {
-      const allocator = await seedTestAllocator();
+      const allocator = await seedTestAllocator({ role: "both" });
       await loginViaForm(page, allocator.email, allocator.password);
     }
 
@@ -170,7 +170,7 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     page,
   }) => {
     if (HAS_SEED_ENV) {
-      const allocator = await seedTestAllocator();
+      const allocator = await seedTestAllocator({ role: "both" });
       await loginViaForm(page, allocator.email, allocator.password);
     }
 
@@ -259,7 +259,7 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
   // buildAxe zero-violation set (same idiom as the api/csv branches above).
   test("zero axe violations on the multi-key mode", async ({ page }) => {
     if (HAS_SEED_ENV) {
-      const allocator = await seedTestAllocator();
+      const allocator = await seedTestAllocator({ role: "both" });
       await loginViaForm(page, allocator.email, allocator.password);
     }
 
@@ -290,7 +290,7 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
   // plan SUMMARY — this plan does NOT patch production markup.
   test("zero axe violations on the overlap-error state", async ({ page }) => {
     if (HAS_SEED_ENV) {
-      const allocator = await seedTestAllocator();
+      const allocator = await seedTestAllocator({ role: "both" });
       await loginViaForm(page, allocator.email, allocator.password);
     }
     // Registered BEFORE navigation so the first per-key validate POST is caught.

@@ -65,7 +65,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
   buildDateMapCache,
   computeScenario,
@@ -119,6 +118,7 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
+import { formatCurrency, formatPercent } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -138,10 +138,11 @@ import {
   buildPerKeyStrategyForBuilderSet,
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
+import { buildHoldingRef } from "../lib/holding-outcome-adapter";
 import {
-  buildHoldingRef,
-  type FlaggedHolding,
-} from "../lib/holding-outcome-adapter";
+  solveLeverageForMaxDD,
+  type SolveLeverageResult,
+} from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
@@ -151,10 +152,14 @@ import { KpiStrip } from "./KpiStrip";
 import { toWealth } from "../widgets/performance/EquityChart";
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
+import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
 import { CustomRangePicker } from "./CustomRangePicker";
 import { BlendHeader } from "./BlendHeader";
 import { CoverageStateChip } from "./CoverageStateChip";
 import type { CoverageState } from "./CoverageStateChip";
+import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
+import { deriveProvenance } from "../lib/provenance";
 import { CoverageTimeline } from "./CoverageTimeline";
 import { DefaultChangeNote } from "./DefaultChangeNote";
 import { ProvenanceNote } from "./ProvenanceNote";
@@ -402,19 +407,6 @@ function liveBaselineToComputedMetrics(
     effective_start: eq[0]?.date ?? null,
     effective_end: eq[eq.length - 1]?.date ?? null,
   };
-}
-
-/** Read-only-tokens model: live holdings display their USD value (no editable
- *  weight). Whole-dollar USD; a non-finite value (sold-down / coingecko_fallback
- *  rows can surface null) renders an em dash rather than "$NaN". */
-function formatUsd0(n: number): string {
-  return Number.isFinite(n)
-    ? n.toLocaleString("en-US", {
-        style: "currency",
-        currency: "USD",
-        maximumFractionDigits: 0,
-      })
-    : "—";
 }
 
 const MONTH_ABBR = [
@@ -729,15 +721,27 @@ async function readSaveIssues(res: Response): Promise<SaveIssue[] | undefined> {
  * dropping genuinely-removed/stale refs. The engine reads leverage only for
  * iterated legs anyway, so this changes no projection — it only keeps the SAVED
  * blob honest.
+ *
+ * WEIGHTS-02 (Phase 112, Pitfall 1) — `eligiblePerKeyIds` extends the keep-set
+ * with the currently-eligible per-key `api_key_id`s. An INCLUDED per-key source
+ * legitimately carries a leverage-only edit with NO weightOverride entry (rides
+ * the raw equity share) AND NO toggle entry (absent = included), so it is in
+ * NONE of the three signals above and would be dropped at Save — its leverage
+ * silently reset to 1× on reopen. Eligibility itself is therefore the keep
+ * signal for per-key leverage. Callers pass `[]` when the per-key path is
+ * inactive (no per-key leverage input renders), preserving the original
+ * stale-pruning behavior exactly.
  */
 function pruneLeverageToDraftRefs(
   leverageByRef: Record<string, number>,
   draft: ScenarioDraft,
+  eligiblePerKeyIds: ReadonlyArray<string> = [],
 ): Record<string, number> {
   const current = new Set<string>([
     ...draft.addedStrategies.map((s) => s.id as string),
     ...Object.keys(draft.toggleByScopeRef),
     ...Object.keys(draft.weightOverrides),
+    ...eligiblePerKeyIds,
   ]);
   const out: Record<string, number> = {};
   for (const [id, L] of Object.entries(leverageByRef)) {
@@ -773,7 +777,6 @@ export function ScenarioComposer({
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
-  const router = useRouter();
 
   // UNIFY-01/02 — entry mode. One composer surface, two front doors:
   //   "book"  — seed the working composition from the allocator's live holdings.
@@ -842,6 +845,12 @@ export function ScenarioComposer({
   );
 
   const [browseOpen, setBrowseOpen] = useState(false);
+  // Phase 110 CONTRIB-05 — the contribution overlay, opened from the Browse
+  // drawer's "Add your own" CTA. onAddOwn closes Browse + opens this; the
+  // overlay's onSuccess closes it + REOPENS Browse, which refetches on open
+  // (once-per-open contract) so the freshly-contributed private strategy — now
+  // owner-visible via withPublishedOrOwner (110-02) — is selectable.
+  const [contributeOpen, setContributeOpen] = useState(false);
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [resetModalOpen, setResetModalOpen] = useState(false);
   // Plan 07 — ScenarioCommitDrawer wire-in. handleCommit builds the diffs,
@@ -879,33 +888,64 @@ export function ScenarioComposer({
   // decision (default 1.0 when a ref is absent).
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
-  // DSRC-02/03 — per-data-source include/exclude map (api_key_id → included?).
-  // Ephemeral exploration state, structurally modeled on R4 `leverageByRef`
-  // above — but DIVERGING on persistence: `leverageByRef` is now folded into the
-  // saved draft at Save (LEV-02), whereas this include-map is genuinely
-  // ephemeral. This map is NOT persisted to scenario.draft, NOT routed through
-  // `scenario.draft.toggleByScopeRef`, NOT part of the commit diff, and resets on
-  // reload (Pitfall 5). `{}` = all included (default). A key resolves to included
-  // via `includeByApiKeyId[id] ?? true` wherever it is read. Threaded into the
-  // existing `projectionState.selected` channel keyed by api_key_id so the frozen
-  // engine honestly recomputes the curve + every KPI on exclusion (DSRC-03) —
-  // never a cosmetic hide.
-  //
-  // D3 source-toggle persistence: DECIDED no persistence (YAGNI, Phase 66
-  // CF-05). The Phase-36 D3 toggle is deliberately TRANSIENT exploration UI
-  // state — resets on reload, out of the commit diff — and no user has asked to
-  // persist an exclusion set across sessions. Revisit only on real user demand.
-  const [includeByApiKeyId, setIncludeByApiKeyId] = useState<
+  // WEIGHTS-03 (Phase 113) — TRANSIENT per-row Target-max-DD UI state (founder
+  // lock 2026-07-17). `targetModeByRef[ref] === true` ⇒ the row is in Target mode
+  // (absent/false = the DEFAULT Leverage mode); `solveResultByRef[ref]` is the
+  // last solve outcome for the row's honest state line. Both are pure UI state —
+  // NEVER folded into the draft, NEVER serialized (no SCENARIO_SCHEMA_VERSION
+  // bump): only the SOLVED L persists, and it rides the existing leverageByRef
+  // path indistinguishably from a typed L. Reset alongside leverageByRef at every
+  // session-bleed seam (reset/commit + the two saved-scenario opens) so a stale
+  // mode/solve can never carry across a fresh open.
+  const [targetModeByRef, setTargetModeByRef] = useState<
     Record<string, boolean>
   >({});
+  const [solveResultByRef, setSolveResultByRef] = useState<
+    Record<string, SolveLeverageResult>
+  >({});
 
-  // DSRC-02 — fail-loud, visible-state toggle handler. Mirrors
-  // handleLeverageChange's "state visible immediately, never silent" posture; a
-  // boolean toggle has no invalid value so it never clamps. The row's
-  // aria-checked reflects the change synchronously and the projection recomputes.
-  function handleDataSourceToggle(apiKeyId: string, include: boolean) {
-    setIncludeByApiKeyId((prev) => ({ ...prev, [apiKeyId]: include }));
-  }
+  // WEIGHTS-04 / F1 (2026-07-17) — the SINGLE teardown path for the transient
+  // Target-mode trio (leverageByRef + the mode/solve twins). BEFORE this, four
+  // seams reset the trio by hand and handleRemoveAdded dropped only
+  // leverageByRef, leaving targetModeByRef/solveResultByRef behind — so a
+  // remove→re-add of the SAME catalog id reopened the row in stale Target mode
+  // with a stale solve note ("Portfolio max-DD at 4.00×") against a leverage
+  // that had actually been purged to 1× (a fabricated/stale value WEIGHTS-04
+  // forbids). Every seam now routes through one of these two helpers so no future
+  // seam can silently drop a twin:
+  //   • clearRowTransientState(ref) — per-ref delete from ALL THREE maps
+  //     (handleRemoveAdded re-add hygiene: the only per-ref seam).
+  //   • resetAllTransientState()    — clear ALL THREE maps (the reset/commit seam
+  //     and the two saved-scenario opens, which reseed leverage afterwards).
+  const clearRowTransientState = useCallback((ref: string) => {
+    const dropRef = <T,>(prev: Record<string, T>): Record<string, T> => {
+      if (!(ref in prev)) return prev;
+      const { [ref]: _drop, ...rest } = prev;
+      return rest;
+    };
+    setLeverageByRef(dropRef);
+    setTargetModeByRef(dropRef);
+    setSolveResultByRef(dropRef);
+  }, []);
+  const resetAllTransientState = useCallback(() => {
+    setLeverageByRef({});
+    setTargetModeByRef({});
+    setSolveResultByRef({});
+  }, []);
+
+  // CONSTIT-03 (Phase 111, locked 2026-07-16) — per-key data-source
+  // include/exclude now rides the ONE canonical `scenario.draft.toggleByScopeRef`
+  // channel every other constituent uses (via `scenario.togglePerKeySource`),
+  // NOT a separate composer-local `useState`. This SUPERSEDES the Phase-66 CF-05
+  // "transient by design" decision: a per-key exclusion now PERSISTS with the
+  // draft (autosave + saved scenarios + the compare surface — closing the
+  // composer↔compare divergence the ephemeral map left open) and, like every
+  // other `toggleByScopeRef` change, counts toward `diffCount`. A source resolves
+  // to included via `scenario.draft.toggleByScopeRef[apiKeyId] !== false` (absent
+  // → included). The frozen engine honestly recomputes the curve + every KPI on
+  // exclusion (DSRC-03) through the same `projectionState.selected` channel — the
+  // `togglePerKeySource` mutator deliberately never touches `weightOverrides`
+  // (per-key legs ride the raw equity-share path; weight editing is Phase 112).
 
   // -------------------------------------------------------------------------
   // UNIFY-04 — lazy-returns plumbing (29-RESEARCH "SSR-LIFT vs LAZY-FETCH").
@@ -933,6 +973,18 @@ export function ScenarioComposer({
   // an honest class per leg (or null → the conservative 252 default).
   const [addedAssetClassById, setAddedAssetClassById] = useState<
     Record<string, string | null>
+  >({});
+  // Phase 111 / CONSTIT-02 — the lazily-fetched provenance metadata (trust_tier
+  // + is_composite) for a drawer-added, NON-book strategy, keyed by id. Same
+  // rationale as addedAssetClassById: the book-only SSR payload carries these on
+  // book strategies, but a drawer-added strategy's provenance can only come from
+  // the widened /api/strategies/[id]/returns response. Written by fetchAddedReturns
+  // beside addedAssetClassById and purged identically in handleRemoveAdded (a
+  // re-add starts clean). Fed into addedStrategyMetadataLookup so the wave-3
+  // per-row provenance badge (via deriveProvenance) reaches every constituent.
+  // Presentation-only — never threaded into the frozen engine (Pitfall 3).
+  const [addedProvenanceById, setAddedProvenanceById] = useState<
+    Record<string, { trust_tier: string | null; is_composite: boolean }>
   >({});
   // Ids whose lazy fetch is in flight — drives the honest "loading returns…"
   // affordance on the added row. While loading, the strategy contributes []
@@ -1076,7 +1128,89 @@ export function ScenarioComposer({
     // which clamps locally before dispatch. Keeps the message and the stored value
     // in lockstep even if the downstream clamp bound ever changes.
     const clampedWeight = Math.min(1, Math.max(0, weight));
-    scenario.setWeightOverride(scopeRef, clampedWeight);
+
+    // WEIGHTS-01 (Phase 112) + CR-01 (Phase 112 review) — weight-sum basis
+    // branch. In a MIXED book — one carrying at least one SELECTED per-key
+    // engine unit — EVERY weight edit (per-key AND added) must renormalize over
+    // the SELECTED ENGINE UNIT basis, NEVER setWeightOverride's `enabledIdsOf`
+    // basis. That basis (holding refs + added ids) EXCLUDES the per-key units
+    // (they are included-by-absence, never toggleByScopeRef === true), so
+    // renormalizing an ADDED edit over it makes the typed fraction compete
+    // against the raw per-key equity dollars still in projectionState: the typed
+    // 0.5 renders ~0% (CR-01 failure A), and a second added edit pushes
+    // `weightOverrides` past sum 1, silently dropping an untouched per-key row
+    // (failure B). The engine basis is exactly the basis the per-key edit
+    // already used; widening it to added edits closes the asymmetry and keeps
+    // the mixed per-key + added set at sum 1 (Pitfall 2 / the #528 apply-back
+    // drift class, D-locked decision 3).
+    //
+    // Keep the legacy `setWeightOverride` path for the NON-mixed case (no
+    // selected per-key engine unit — blank mode, or a book+gate render whose
+    // per-key returns are empty so the engine set is effectively added-only).
+    // There `enabledIdsOf` is the correct, tested basis, and a lone added unit
+    // must keep its RAW typed weight (the zero-size / >1 clamp gates read it)
+    // rather than be renormalized to 1.0 by a single-unit engine basis.
+    //
+    // `togglePerKeySource` stays the include/exclude channel untouched; because
+    // ALL mixed-book weight math now flows through this explicit engine-unit
+    // basis, the toggle's delete-on-re-include semantics no longer govern the
+    // weight — an exclusion honestly shrinks the denominator via the engine's
+    // ephemeral renorm (scenario.ts:314-319, read-only reference) while a typed
+    // weight persists in `weightOverrides` across exclude/re-include (Wave-0 pin
+    // (d)).
+    const basisIds = engineSet.strategies
+      .filter((s) => engineSet.state.selected[s.id])
+      .map((s) => s.id);
+    // Mixed book ⇔ the engine basis carries a per-key (non-added) unit. A pure
+    // added-only engine set (no per-key units) keeps the legacy path so a lone
+    // added weight is not renormalized to 1.0. RT-02 (Phase 112 red team): read
+    // the SHARED `isMixedPerKeyBook` memo — the identical condition the added-row
+    // DISPLAY basis reads — so the edit basis and the display basis can never
+    // diverge (the old inline `usePerKeySources && basisIds.some(...)` and the
+    // display's weaker `perKeySources.length > 0` desynced when all per-key
+    // sources were excluded).
+    if (!isMixedPerKeyBook) {
+      scenario.setWeightOverride(scopeRef, clampedWeight);
+      return;
+    }
+
+    const otherIds = basisIds.filter((id) => id !== scopeRef);
+    // RT-01 (Phase 112 red team) — a SOLE selected engine unit is trivially 100%.
+    // Renormalizing the vector {scopeRef: w} over a single-unit basis makes
+    // renormalizeWeights' sum-0 equal-split fallback lift ANY typed 0 ≤ w < 1 back
+    // to 1.0, and applyWeightOverrides would then STAMP that lifted 1.0 into
+    // userWeightOverrides — a poisoned override that survives exclude/re-include
+    // and silently drifts the default blend when the other unit is re-included
+    // (a gesture the UI rendered as a no-op). Refuse the edit visibly and write
+    // NOTHING, mirroring the added-only carve-out's honesty (a single constituent
+    // has no free weight to allocate).
+    if (otherIds.length === 0) {
+      setCommitError("A single constituent is always 100%.");
+      return;
+    }
+    const otherSum = otherIds.reduce(
+      (acc, id) => acc + (blendShareByRef[id] ?? 0),
+      0,
+    );
+    const remainingMass = 1 - clampedWeight;
+    const vector: Record<string, number> = { [scopeRef]: clampedWeight };
+    // otherIds is guaranteed non-empty here: the `=== 0` case already returned
+    // above. Distribute the remaining mass across the other constituents.
+    if (otherSum <= 0) {
+      // Mirror setWeightOverride's :599-602 equal-split fallback when the other
+      // selected units carry no share mass to scale.
+      const equal = remainingMass / otherIds.length;
+      for (const id of otherIds) vector[id] = equal;
+    } else {
+      const scale = remainingMass / otherSum;
+      for (const id of otherIds) {
+        vector[id] = (blendShareByRef[id] ?? 0) * scale;
+      }
+    }
+    // The vector sums to 1 over `basisIds`, so applyWeightOverrides reproduces the
+    // typed value exactly; `[scopeRef]` stamps ONE user gesture into
+    // userWeightOverrides (diffCount honesty — Task 1's parameter).
+    scenario.applyWeightOverrides(vector, basisIds, [scopeRef]);
   }
 
   // R4 — leverage input change handler. Mirrors handleWeightChange's fail-loud
@@ -1141,9 +1275,15 @@ export function ScenarioComposer({
     // reuses it (idempotent) rather than re-fetching. BLEND-01: also records the
     // widened response's asset_class (null when absent — tolerates a stale
     // deploy that predates the widening) so the blend basis can read it.
-    const settle = (series: DailyPoint[], assetClass: string | null) => {
+    const settle = (
+      series: DailyPoint[],
+      assetClass: string | null,
+      provenance: { trust_tier: string | null; is_composite: boolean },
+    ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
+      // CONSTIT-02 — record the drawer-added leg's provenance beside asset_class.
+      setAddedProvenanceById((prev) => ({ ...prev, [id]: provenance }));
       clearInflight();
     };
     fetch(`/api/strategies/${encodeURIComponent(id)}/returns`, {
@@ -1160,22 +1300,37 @@ export function ScenarioComposer({
         }
         return r.json();
       })
-      .then((d: { daily_returns?: unknown; asset_class?: unknown }) => {
-        // A 200 with a non-array body is a malformed/failed response, NOT a
-        // genuine empty series — treat it as a retryable failure (WR-01).
-        if (!Array.isArray(d?.daily_returns)) {
-          throw new Error("returns route body missing a daily_returns array");
-        }
-        // BLEND-01 — accept asset_class only when it is a string; anything else
-        // (absent from a stale deploy, null, or malformed) collapses to null →
-        // the leg keeps the conservative 252 blend default.
-        const assetClass =
-          typeof d.asset_class === "string" ? d.asset_class : null;
-        // A genuine 200 with a real array (including an empty one) settles. An
-        // empty array here means the strategy legitimately has no published
-        // returns yet — distinct from a failure, so it is cached, not retried.
-        settle(d.daily_returns as DailyPoint[], assetClass);
-      })
+      .then(
+        (d: {
+          daily_returns?: unknown;
+          asset_class?: unknown;
+          trust_tier?: unknown;
+          is_composite?: unknown;
+        }) => {
+          // A 200 with a non-array body is a malformed/failed response, NOT a
+          // genuine empty series — treat it as a retryable failure (WR-01).
+          if (!Array.isArray(d?.daily_returns)) {
+            throw new Error("returns route body missing a daily_returns array");
+          }
+          // BLEND-01 — accept asset_class only when it is a string; anything else
+          // (absent from a stale deploy, null, or malformed) collapses to null →
+          // the leg keeps the conservative 252 blend default.
+          const assetClass =
+            typeof d.asset_class === "string" ? d.asset_class : null;
+          // CONSTIT-02 — accept trust_tier only when a string, is_composite only
+          // when a strict boolean true. A stale deploy predating the widening
+          // omits both → null / false provenance (degrade to "no badge", never a
+          // throw — mirrors the asset_class tolerance).
+          const provenance = {
+            trust_tier: typeof d.trust_tier === "string" ? d.trust_tier : null,
+            is_composite: d.is_composite === true,
+          };
+          // A genuine 200 with a real array (including an empty one) settles. An
+          // empty array here means the strategy legitimately has no published
+          // returns yet — distinct from a failure, so it is cached, not retried.
+          settle(d.daily_returns as DailyPoint[], assetClass, provenance);
+        },
+      )
       .catch((err: unknown) => {
         // An abort (remove / reset / unmount) is benign — the canceller already
         // owns the cleanup. Just drop the (possibly stale) abort ref and return.
@@ -1236,12 +1391,11 @@ export function ScenarioComposer({
     // replaced the draft with the windowless default.) The Phase-57 "sticky by
     // design" rationale covers deselect, not reset.
     resetWindowToDefaultOnReopen();
-    // Review WR-02 — clear the ephemeral per-source include map on every reset /
-    // saved-scenario open. The toggle is NOT persisted to the draft, so a freshly
-    // opened scenario must start with every data source included; without this a
-    // prior exclusion would silently carry over and the loaded scenario's
-    // projection would omit a source the user never excluded for it.
-    setIncludeByApiKeyId({});
+    // CONSTIT-03 — per-key exclusions now live in `scenario.draft.toggleByScopeRef`
+    // and are cleared automatically by `scenario.reset()` (draft → default) /
+    // `scenario.hydrateFromSaved()` (draft replaced), so no separate ephemeral-map
+    // reset is needed here. A stale exclusion can no longer carry across a reset
+    // or a saved-scenario open (the WR-02 invariant survives via draft replacement).
     // LEV-02 (HIGH-1) — clear the per-strategy leverage overlay on EVERY reset /
     // commit-success. Unlike include-map (never persisted), leverageByRef is
     // FOLDED INTO the draft at the next Save (setLeverageOverrides at POST/PUT),
@@ -1251,7 +1405,10 @@ export function ScenarioComposer({
     // already rehydrate-REPLACE it; reset/commit is the third seam that must drop
     // it (the exact class the WR-02 include-map clear above fixes). Every ref
     // back to the 1× default on a fresh live book.
-    setLeverageByRef({});
+    // WEIGHTS-03 / F1 — the transient Target-mode UI state rides the SAME reset
+    // seam: a fresh/reset book carries no row-level leverage, mode or solve
+    // outcome. Routed through the unified reset so no seam can drop a twin.
+    resetAllTransientState();
     // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
     // it now (on the SAME confirm that discards the draft). `reset()` re-inits
     // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
@@ -1454,10 +1611,9 @@ export function ScenarioComposer({
       if (decoded.outcome === "readonly") {
         // Newer-version blob: hydrate the user's real data but block edits.
         scenario.hydrateFromSaved(hydratedValue);
-        // Review WR-02 — opening a saved scenario replaces the draft, so clear
-        // the ephemeral per-source include map (it is not persisted) → the
-        // opened scenario starts with every data source included.
-        setIncludeByApiKeyId({});
+        // CONSTIT-03 — per-key exclusions live in the draft's toggleByScopeRef,
+        // so hydrateFromSaved (draft replacement) adopts exactly the saved
+        // scenario's per-source state; no separate ephemeral-map reset needed.
         // LEV-02 (T-90.5-12) — REPLACE leverage from the saved draft (never
         // merge): closes the latent session-bleed (leverageByRef was never reset
         // on open). sanitizeLeverageMap clamps a tampered/legacy value on read
@@ -1468,6 +1624,13 @@ export function ScenarioComposer({
         // draft multipliers onto the fresh default would project it under
         // leverage it never had, and an "Update" would persist default-draft +
         // stale leverage.
+        // WEIGHTS-03 / F1 — clear the transient Target-mode UI state on open via
+        // the unified reset (mode/solve never persist, so a reopened scenario
+        // starts every row in Leverage mode), THEN reseed leverage from the saved
+        // draft. The reset's leverage clear is immediately overridden by the
+        // reseed below (direct value setter — last write wins); both twins are
+        // cleared through the one shared path so neither can be dropped.
+        resetAllTransientState();
         setLeverageByRef(
           drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
         );
@@ -1506,9 +1669,9 @@ export function ScenarioComposer({
       // hydratedValue carries the DERIVE-AND-STAMP for an underived draft so the
       // reopened working draft is self-describing (v1.6 MEMBER-04).
       scenario.hydrateFromSaved(hydratedValue);
-      // Review WR-02 — clear the ephemeral per-source include map on open (it is
-      // not persisted) → the opened scenario starts with every source included.
-      setIncludeByApiKeyId({});
+      // CONSTIT-03 — per-key exclusions live in the draft's toggleByScopeRef, so
+      // hydrateFromSaved (draft replacement) adopts exactly the saved scenario's
+      // per-source state; no separate ephemeral-map reset needed.
       // LEV-02 (T-90.5-12) — REPLACE leverage from the saved draft (never merge):
       // closes the latent session-bleed (leverageByRef was never reset on open).
       // sanitizeLeverageMap clamps a tampered/legacy value on read (T-90.5-09);
@@ -1518,6 +1681,11 @@ export function ScenarioComposer({
       // the SAME drift-branch rule the window below follows. Otherwise the fresh
       // default draft projects under the refused draft's multipliers, and an
       // "Update portfolio" would persist the default draft + stale leverage.
+      // WEIGHTS-03 / F1 — clear the transient Target-mode UI state on open via the
+      // unified reset (see the readonly branch above), THEN reseed leverage from
+      // the saved draft: a reopened scenario starts every row in Leverage mode;
+      // the solved L already rehydrated through leverageByRef.
+      resetAllTransientState();
       setLeverageByRef(
         drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
       );
@@ -1725,7 +1893,12 @@ export function ScenarioComposer({
           draft: setLeverageOverrides(
             setMemberKeyIds(scenario.draft, memberKeyIdsForSave),
             // M-2 — prune stranded refs so a removed leg's leverage never persists.
-            pruneLeverageToDraftRefs(leverageByRef, scenario.draft),
+            // WEIGHTS-02 (Pitfall 1) — keep eligible per-key leverage-only edits.
+            pruneLeverageToDraftRefs(
+              leverageByRef,
+              scenario.draft,
+              eligiblePerKeyIds,
+            ),
           ),
         }),
       });
@@ -1769,7 +1942,12 @@ export function ScenarioComposer({
             draft: setLeverageOverrides(
               setMemberKeyIds(scenario.draft, memberKeyIdsForUpdate),
               // M-2 — prune stranded refs so a removed leg's leverage never persists.
-              pruneLeverageToDraftRefs(leverageByRef, scenario.draft),
+              // WEIGHTS-02 (Pitfall 1) — keep eligible per-key leverage-only edits.
+              pruneLeverageToDraftRefs(
+                leverageByRef,
+                scenario.draft,
+                eligiblePerKeyIds,
+              ),
             ),
           }),
         },
@@ -1915,21 +2093,26 @@ export function ScenarioComposer({
         const { [id]: _dropClass, ...rest } = prev;
         return rest;
       });
-      // LEV-02 (round-2 M-2) — purge the removed leg's leverage overlay too, or
-      // it strands: leverageByRef is folded into the draft at Save
-      // (setLeverageOverrides), so a removed leg's multiplier would persist into a
-      // scenario that no longer contains the leg AND re-apply the instant the leg
-      // is re-added (breaking the seam's "starts clean" contract — the same class
-      // the addedReturnsById purge above fixes for series). Mirrors the draft
-      // mutator's toggle/weight prune (scenario-state.removeAddedStrategy).
-      setLeverageByRef((prev) => {
+      // CONSTIT-02 — purge the fetched provenance identically (settle/purge
+      // symmetry with asset_class; a remove + re-add starts clean).
+      setAddedProvenanceById((prev) => {
         if (!(id in prev)) return prev;
-        const { [id]: _dropLev, ...rest } = prev;
+        const { [id]: _dropProv, ...rest } = prev;
         return rest;
       });
+      // LEV-02 (round-2 M-2) + WEIGHTS-04 / F1 — purge the removed leg's ENTIRE
+      // transient trio (leverage overlay AND the Target-mode/solve twins) via the
+      // unified reset, or it strands: leverageByRef is folded into the draft at
+      // Save (setLeverageOverrides), so a removed leg's multiplier would persist
+      // into a scenario that no longer contains the leg AND re-apply the instant
+      // the leg is re-added; the mode/solve twins (the F1 miss) would likewise
+      // reopen a re-added id in stale Target mode with a stale solve note against
+      // the purged leverage — a fabricated/stale value WEIGHTS-04 forbids. Mirrors
+      // the draft mutator's toggle/weight prune (scenario-state.removeAddedStrategy).
+      clearRowTransientState(id);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [scenario.removeAddedStrategy],
+    [scenario.removeAddedStrategy, clearRowTransientState],
   );
 
   const addedStrategyMetadataLookup = useMemo<
@@ -1938,7 +2121,16 @@ export function ScenarioComposer({
       Pick<
         StrategyForBuilder,
         "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
-      >
+      > & {
+        // CONSTIT-02 — presentation-only provenance metadata carried BESIDE the
+        // engine-facing Pick fields. Deliberately NOT part of StrategyForBuilder
+        // (Pitfall 3): the adapter reads only the Pick fields, so these ride the
+        // lookup for the wave-3 badge (via deriveProvenance) without leaking into
+        // the frozen engine. The cast to the bare Pick at the adapter call sites
+        // erases them from the engine-input type.
+        trust_tier: string | null;
+        is_composite: boolean;
+      }
     >
   >(() => {
     const map: Record<
@@ -1946,7 +2138,7 @@ export function ScenarioComposer({
       Pick<
         StrategyForBuilder,
         "disclosure_tier" | "cagr" | "sharpe" | "asset_class"
-      >
+      > & { trust_tier: string | null; is_composite: boolean }
     > = {};
     for (const a of scenario.draft.addedStrategies) {
       const found = strategyById.get(a.id);
@@ -1966,10 +2158,46 @@ export function ScenarioComposer({
         // else null (unknown → the conservative 252 blend default).
         asset_class:
           found?.strategy.asset_class ?? addedAssetClassById[a.id] ?? null,
+        // CONSTIT-02 — book payload provenance wins; else the drawer-added
+        // lazily-fetched value; else null / false (no badge — honest absence).
+        // Same book-wins precedence as asset_class above.
+        trust_tier:
+          found?.strategy.trust_tier ??
+          addedProvenanceById[a.id]?.trust_tier ??
+          null,
+        is_composite:
+          found?.strategy.is_composite ??
+          addedProvenanceById[a.id]?.is_composite ??
+          false,
       };
     }
     return map;
-  }, [scenario.draft.addedStrategies, strategyById, addedAssetClassById]);
+  }, [
+    scenario.draft.addedStrategies,
+    strategyById,
+    addedAssetClassById,
+    addedProvenanceById,
+  ]);
+
+  // CONSTIT-02 (wave-3 render) — the per-row provenance badge variant for each
+  // ADDED constituent, derived from the metadata lookup's presentation-only
+  // trust_tier / is_composite via the pure `deriveProvenance` helper (composite >
+  // valid tier > null). Null = honest absence (no badge). Per-key legs do NOT
+  // appear here — they are api_verified by construction and badged directly in
+  // the row. Presentation-only: never enters the frozen engine (Pitfall 3).
+  const addedProvenanceByRef = useMemo<Record<string, ProvenanceTier | null>>(
+    () => {
+      const out: Record<string, ProvenanceTier | null> = {};
+      for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
+        out[id] = deriveProvenance({
+          trust_tier: meta.trust_tier,
+          is_composite: meta.is_composite,
+        });
+      }
+      return out;
+    },
+    [addedStrategyMetadataLookup],
+  );
 
   // -------------------------------------------------------------------------
   // Build scenario projection via the series-space adapter + frozen scenario.ts
@@ -2087,8 +2315,9 @@ export function ScenarioComposer({
     addedStrategyMetadataLookup,
   ]);
 
-  // DSRC-02 — render-gating for the "Data sources" control:
-  //   showDataSources       → the per-key path is active → render the control.
+  // CONSTIT-01 — render-gating for the per-key constituent rows + honest states:
+  //   showDataSources       → the per-key path is active → render per-key rows
+  //                           inside the unified CompositionList.
   //   book mode + !gate      → render the calm InfoBanner fallback note.
   //   blank mode             → render nothing (no live book, no live keys).
   const showDataSources = usePerKeySources;
@@ -2117,14 +2346,40 @@ export function ScenarioComposer({
     return (payload.apiKeys ?? []).filter((k) => eligible.includes(k.id));
   }, [payload.apiKeys, payload.eligibleApiKeyIds]);
 
+  // WEIGHTS-02 (Phase 112, Pitfall 1) — the eligible per-key `api_key_id`s that
+  // render a leverage input this render. Folded into `pruneLeverageToDraftRefs`
+  // at both Save call sites so a leverage-only edit on an INCLUDED per-key source
+  // (no weightOverride, no toggle entry) is NOT dropped at Save. Empty when the
+  // per-key path is inactive — no per-key leverage input renders, so the Save
+  // prune keeps its original stale-dropping behavior exactly.
+  const eligiblePerKeyIds = useMemo(
+    () => (usePerKeySources ? dataSourceKeys.map((k) => k.id) : []),
+    [usePerKeySources, dataSourceKeys],
+  );
+
+  // WEIGHTS-00 (A1 locked) — the allocator's real book equity: Σ equityByApiKeyId
+  // (the canonical D2 per-key equity, NEVER re-derived from value_usd) over the
+  // eligible per-key ids, ONLY in the per-key book path. This is the base the
+  // derived read-only Notional column (equity × L) reads against. In added-only /
+  // blank / gate=false there is no book equity, so this is `null` and every
+  // notional cell falls to an em-dash `—` (Numbers Contract) — never a fabricated
+  // $0. A degenerate Σ ≤ 0 is also `null` (honest non-derivable, not a real book).
+  const totalBookEquity = useMemo<number | null>(() => {
+    if (!usePerKeySources) return null;
+    let sum = 0;
+    for (const k of dataSourceKeys) sum += equityByApiKeyId[k.id] ?? 0;
+    return Number.isFinite(sum) && sum > 0 ? sum : null;
+  }, [usePerKeySources, dataSourceKeys, equityByApiKeyId]);
+
   // All-excluded honest-empty trigger (DSRC-03): every eligible key toggled off
   // AND no live added strategy. Since P61-BUG-1 the merged engine set carries
   // the draft's added strategies, so all-keys-excluded with a live (toggled-on)
   // added leg is a legitimate added-only projection — the "nothing to project"
   // card must not contradict the live chart below it (red-team F1). The added
   // liveness check mirrors projectionState's draft-toggle rule (absent → on).
-  // Derived from the ephemeral include map (default included), so re-including
-  // any source instantly flips this back to false and restores the projection.
+  // CONSTIT-03 — derived from the unified `toggleByScopeRef` channel (default
+  // included), so re-including any source instantly flips this back to false and
+  // restores the projection.
   const hasLiveAddedStrategy = scenario.draft.addedStrategies.some(
     (s) => scenario.draft.toggleByScopeRef[s.id] !== false,
   );
@@ -2132,7 +2387,9 @@ export function ScenarioComposer({
     showDataSources &&
     !hasLiveAddedStrategy &&
     dataSourceKeys.length > 0 &&
-    dataSourceKeys.every((k) => includeByApiKeyId[k.id] === false);
+    dataSourceKeys.every(
+      (k) => scenario.draft.toggleByScopeRef[k.id] === false,
+    );
 
   // -------------------------------------------------------------------------
   // H-0133 — wire the draft's weight + toggle state INTO the projection.
@@ -2151,10 +2408,11 @@ export function ScenarioComposer({
   // R4 leverage rides the SAME projection state; holdings have no leverage UI so
   // their multiplier is always 1, while an added strategy's multiplier flows
   // through here, and computeScenario applies `wᵢ·Lᵢ·rᵢ` over the engine set.
-  // P61-BUG-1: the ids of the draft's added strategies — the per-key branch
-  // below needs this to tell an ADDED unit (draft toggle/weight semantics)
-  // apart from a per-key unit (ephemeral include map). Also consumed by the
-  // WINDOW-06 outlier machinery further down.
+  // The ids of the draft's added strategies — consumed by the WINDOW-06 outlier
+  // machinery further down to tell an ADDED unit apart from a per-key unit when
+  // rendering the outlier "Deselect {name}" affordance. (No longer read by
+  // `projectionState`: CONSTIT-03 unified per-key + added onto the one
+  // `toggleByScopeRef` selected channel.)
   const addedIdSet = useMemo(
     () => new Set<string>(scenario.draft.addedStrategies.map((a) => a.id)),
     [scenario.draft.addedStrategies],
@@ -2165,25 +2423,20 @@ export function ScenarioComposer({
     const weights: Record<string, number> = {};
     const leverage: Record<string, number> = {};
     for (const s of activeAdapterOutput.strategies) {
-      // DSRC-03 — the per-key path rides the SAME `selected` channel keyed by
-      // api_key_id: `includeByApiKeyId[s.id] ?? true` (absent → included). The
-      // ephemeral exclusion drops the key from the engine's activeStrategies and
+      // CONSTIT-03 — ONE unified include/exclude channel for EVERY unit (per-key
+      // + added + holding): read `draft.toggleByScopeRef[s.id]`, defaulting an
+      // absent ref to the adapter's built-in selected state (per-key units are
+      // selected=true by construction; added units too). A per-key `false` (from
+      // `togglePerKeySource`) drops the key from the engine's activeStrategies and
       // the per-day weight mass; the engine renormalizes over the remaining
-      // selected set (r / activeWeightSum) — an honest recompute, never a hide.
-      // The holdings path keeps its draft `toggleByScopeRef` semantics unchanged.
-      //
-      // P61-BUG-1: on the per-key path the merged set ALSO carries the draft's
-      // added-strategy units — those ride the draft toggle channel (same
-      // semantics as the holdings path), NOT the per-key include map.
-      if (usePerKeySources && !addedIdSet.has(s.id)) {
-        selected[s.id] = includeByApiKeyId[s.id] ?? true;
-      } else {
-        const toggle = scenario.draft.toggleByScopeRef[s.id];
-        selected[s.id] =
-          toggle === undefined
-            ? (activeAdapterOutput.state.selected[s.id] ?? true)
-            : toggle;
-      }
+      // selected set — an honest recompute, never a hide. This is byte-identical
+      // to the compare surface's selected-map derivation (scenario-compare.ts),
+      // so composer and compare can no longer diverge on a per-key exclusion.
+      const toggle = scenario.draft.toggleByScopeRef[s.id];
+      selected[s.id] =
+        toggle === undefined
+          ? (activeAdapterOutput.state.selected[s.id] ?? true)
+          : toggle;
       // WR-04 (Phase 21 review): narrow with `typeof` instead of `Number.isFinite`
       // + `as number` so the compiler keeps protecting these reads against future
       // value-type drift (e.g. a `null` "cleared" sentinel) rather than the cast
@@ -2207,9 +2460,6 @@ export function ScenarioComposer({
     };
   }, [
     activeAdapterOutput,
-    usePerKeySources,
-    addedIdSet,
-    includeByApiKeyId,
     scenario.draft.toggleByScopeRef,
     scenario.draft.weightOverrides,
     leverageByRef,
@@ -2225,6 +2475,49 @@ export function ScenarioComposer({
   const engineSet = useMemo(
     () => ({ strategies: activeAdapterOutput.strategies, state: projectionState }),
     [activeAdapterOutput.strategies, projectionState],
+  );
+
+  // WEIGHTS-01 (Phase 112) — the effective BLEND SHARE per engine unit: each
+  // SELECTED unit's projection weight over the selected-weight mass. This is the
+  // single display-and-edit basis for the per-key + added weight inputs — it
+  // mirrors exactly how the engine renormalizes over the selected set, so a typed
+  // per-key weight and the value the row shows agree. Σ ≤ 0 → empty map (never
+  // fabricate a share — DESIGN.md Numbers Contract). The per-key weight writer in
+  // handleWeightChange reads these effective shares to build a sum-1 vector over
+  // the engine basis (WR-01).
+  const blendShareByRef = useMemo(() => {
+    const out: Record<string, number> = {};
+    let sum = 0;
+    for (const s of engineSet.strategies) {
+      if (!projectionState.selected[s.id]) continue;
+      sum += projectionState.weights[s.id] ?? 0;
+    }
+    if (sum <= 0) return out;
+    for (const s of engineSet.strategies) {
+      if (!projectionState.selected[s.id]) continue;
+      out[s.id] = (projectionState.weights[s.id] ?? 0) / sum;
+    }
+    return out;
+  }, [engineSet.strategies, projectionState]);
+
+  // RT-02 (Phase 112 red team) — the ONE mixing condition, computed once and
+  // shared by BOTH the weight EDIT path (handleWeightChange's `isMixedPerKeyBook`)
+  // and the added-row DISPLAY basis (threaded to CompositionList). A "mixed book"
+  // is one whose SELECTED engine basis actually carries a per-key (non-added) unit
+  // — NOT merely `perKeySources.length > 0`, which is true even when every per-key
+  // source is excluded. The weaker `perKeySources.length > 0` display switch made
+  // the added input show `blendShareByRef` (a normalized 1.000 when the added row
+  // is the sole selected unit) while the edit path stored the RAW typed value —
+  // a controlled-input desync where the box snapped to a value that did not
+  // reproduce on re-type. Deriving both from this single boolean keeps display
+  // basis == edit basis in every selection state.
+  const isMixedPerKeyBook = useMemo(
+    () =>
+      usePerKeySources &&
+      engineSet.strategies.some(
+        (s) => projectionState.selected[s.id] && !addedIdSet.has(s.id),
+      ),
+    [usePerKeySources, engineSet.strategies, projectionState, addedIdSet],
   );
   const dateMapCache = useMemo(
     // Reads ONLY strategies.daily_returns — key on the referentially-stable
@@ -2483,6 +2776,68 @@ export function ScenarioComposer({
     [engineSet, engineState, dateMapCache, blendBasis],
   );
 
+  // WEIGHTS-03 (Phase 113) — flip a row between Leverage (default) and Target
+  // max-DD mode. Flipping OFF (back to Leverage) drops the row's solve outcome:
+  // the derived L is now a normal Phase-112 leverage the allocator hand-tweaks,
+  // so no stale honest-state line should linger.
+  function handleSetTargetMode(scopeRef: string, on: boolean) {
+    setTargetModeByRef((prev) => ({ ...prev, [scopeRef]: on }));
+    if (!on) {
+      setSolveResultByRef((prev) => {
+        if (!(scopeRef in prev)) return prev;
+        const { [scopeRef]: _drop, ...rest } = prev;
+        return rest;
+      });
+    }
+  }
+
+  // WEIGHTS-03/04 (Phase 113) — the ONE-SHOT solve-on-commit handler (founder
+  // lock: the SOLE `solveLeverageForMaxDD` call site — no effect/subscription
+  // re-solves on other edits). Mirrors handleLeverageChange's fail-loud shape:
+  // an out-of-range target (non-finite / ≤0 / ≥100) is an HONEST refusal that
+  // keeps the prior value — NEVER a clamp, because a clamped target would solve
+  // for a value the allocator never typed (T-113-05). The solver runs over the
+  // MEMOIZED engine inputs (engineSet.strategies / engineState / dateMapCache /
+  // blendBasis) — zero rebuilt caches, zero new computeScenario call sites. On a
+  // reachable solve the derived L (3dp-rounded — the round shifts dd by ≪ DD_TOL)
+  // routes through handleLeverageChange, so a solved L IS a leverage on the exact
+  // same clamp + message + persistence path as a typed one. On any honest failure
+  // it writes NOTHING to leverageByRef (Pitfall 3 — no fabricated L); the row's
+  // solve-state line renders the reason + an em-dash.
+  function handleTargetCommit(scopeRef: string, targetPct: number) {
+    // RT113-02 — the target-DD out-of-range message, extracted so a valid commit
+    // clears ONLY this specific range error (below), never an unrelated
+    // commitError tenant (the leverage-clamp banner or handleCommit's AUM/size/
+    // empty errors). The shared banner follows a last-gesture convention, but an
+    // infeasible target commit is a no-op that must not evict another row's banner.
+    const TARGET_DD_RANGE_ERROR =
+      "Enter a max-drawdown target above 0% and below 100% — the previous value was kept.";
+    if (!Number.isFinite(targetPct) || targetPct <= 0 || targetPct >= 100) {
+      setCommitError(TARGET_DD_RANGE_ERROR);
+      return;
+    }
+    const result = solveLeverageForMaxDD({
+      strategies: engineSet.strategies,
+      engineState,
+      dateMapCache,
+      periodsPerYear: blendBasis,
+      ref: scopeRef,
+      targetMaxDD: targetPct / 100,
+    });
+    // F3 + RT113-02 — a valid (in-range) target clears ONLY a PRIOR target-range
+    // banner, whether the solve is feasible OR an honest-infeasible refusal, so
+    // the infeasible state never sits beside a stale range error (F3). Scoped to
+    // the target-range message (not setCommitError(null)) so an infeasible no-op
+    // commit does NOT evict an UNRELATED banner tenant — the leverage-clamp
+    // message or a handleCommit AUM/size/empty error (RT113-02). The infeasible
+    // reason itself renders from the row's own solve-state line, never the banner.
+    setCommitError((prev) => (prev === TARGET_DD_RANGE_ERROR ? null : prev));
+    setSolveResultByRef((prev) => ({ ...prev, [scopeRef]: result }));
+    if (result.ok) {
+      handleLeverageChange(scopeRef, Math.round(result.leverage * 1000) / 1000);
+    }
+  }
+
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
   // coverage-eligibility axis. For each SELECTED strategy (the manual subset),
   // `eligible[id] = covers(coverageSpanOf(returns), coverageWindow)` using the
@@ -2569,11 +2924,12 @@ export function ScenarioComposer({
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
   // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
-  // `payload.apiKeys` + `dataSourceLabel` idiom the "Data sources" control
-  // renders (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
-  // unit carries the RAW api_key_id as its `name` from
-  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts: `key <uuid>`), so
-  // without this map the gantt would show a raw UUID. This is the ONE place the
+  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
+  // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
+  // unit carries the PREFIXED `key <uuid>` as its `name` from
+  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts:146 — the unit's `id`
+  // is the bare api_key_id; its `name` is `key ${apiKeyId}`), so without this
+  // map the gantt would show that raw token. This is the ONE place the
   // per-key row name is resolved before rows reach CoverageTimeline (which only
   // renders `row.name` — it never derives labels). No second label formatter.
   const apiKeyLabelById = useMemo(() => {
@@ -3221,26 +3577,6 @@ export function ScenarioComposer({
   }
 
   // -------------------------------------------------------------------------
-  // M5 — multi-venue caveat: identify symbols shared across multiple venues.
-  // Returns the set of symbols that appear under more than one venue in the
-  // current holdings. Composition rows whose symbol is in this set surface
-  // a tooltip explaining the merged-returns side-effect.
-  // -------------------------------------------------------------------------
-  const sharedSymbols = useMemo(() => {
-    const symbolToVenues = new Map<string, Set<string>>();
-    for (const h of holdingsSummary) {
-      const set = symbolToVenues.get(h.symbol) ?? new Set<string>();
-      set.add(h.venue);
-      symbolToVenues.set(h.symbol, set);
-    }
-    const out = new Set<string>();
-    for (const [sym, venues] of symbolToVenues.entries()) {
-      if (venues.size > 1) out.add(sym);
-    }
-    return out;
-  }, [holdingsSummary]);
-
-  // -------------------------------------------------------------------------
   // Render — M3 empty-state branch first (after ALL hooks have run, so
   // React's hooks-order invariant holds when the user adds a strategy from
   // the empty state and the composer transitions to its main body).
@@ -3290,7 +3626,21 @@ export function ScenarioComposer({
               strategy_types: s.strategy_types,
             })
           }
+          onAddOwn={() => {
+            setBrowseOpen(false);
+            setContributeOpen(true);
+          }}
           allocatorMandate={allocatorMandate}
+        />
+        {/* Phase 110 CONTRIB-05 — reused overlay; onSuccess reopens Browse so
+            the new private row (refetched on open) is selectable. */}
+        <ContributionWizardOverlay
+          isOpen={contributeOpen}
+          onClose={() => setContributeOpen(false)}
+          onSuccess={() => {
+            setContributeOpen(false);
+            setBrowseOpen(true);
+          }}
         />
       </div>
     );
@@ -3539,83 +3889,16 @@ export function ScenarioComposer({
         </div>
       )}
 
-      {/* DSRC-02 — "Data sources" control. Book mode + D3 gate satisfied → one
-          include/exclude row per connected exchange api_key, each toggle
-          honestly re-blends the curve + every KPI via the frozen engine
-          (DSRC-03). Book mode + gate NOT satisfied → a calm InfoBanner honest
-          note (per-key history incomplete). Blank mode → nothing. Reuses the
-          entry-mode pill recipe + existing tokens only (no new design token).
-          The included state = accent outline (no fill); excluded = neutral
-          outline; never red (excluding a source is a normal modeling action). */}
-      {/* GUARD-01 (43-01) — the Phase-37 Data-sources include/exclude control
-          is folded into a factsheet-shaped CollapsibleSection so it reads as a
-          sibling editorial section with Diversification (:2601) and
-          Strategies-&-weights (:2962) — compose + read on one surface. The
-          per-key role="switch" rows are REPOSITIONED verbatim (same handlers,
-          no redesign); only the wrapping container changed. `storageKey` is
-          OMITTED on purpose (mirrors Diversification's deliberate omission —
-          GUARD-04 asserts no new persisted key on the composer surface). The
-          old inline header/subtitle <p> are absorbed by the CollapsibleSection
-          title + subtitle. */}
-      {showDataSources && (
-        <Card className="mt-6">
-          <CollapsibleSection
-            id="factsheet-data-sources"
-            title="Data sources"
-            subtitle="Toggle a source off to model the book without it. Resets on reload."
-            defaultOpen
-          >
-            <div
-              role="group"
-              aria-label="Data sources"
-              data-testid="scenario-data-sources"
-              className="flex flex-col"
-            >
-            {dataSourceKeys.map((k) => {
-              const included = includeByApiKeyId[k.id] ?? true;
-              const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-              const labelText = nickname ?? maskedTail;
-              return (
-                <div
-                  key={k.id}
-                  data-data-source-id={k.id}
-                  className="flex min-h-[44px] items-center gap-2 border-b border-border last:border-b-0"
-                >
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={included}
-                    aria-label={`Include ${exchange} — ${labelText} in projection`}
-                    onClick={() => handleDataSourceToggle(k.id, !included)}
-                    className={`rounded-sm px-3 py-1 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 ${
-                      included
-                        ? "border border-accent text-accent"
-                        : "border border-border text-text-secondary"
-                    }`}
-                  >
-                    {included ? "Included" : "Excluded"}
-                  </button>
-                  <span className="text-sm text-text-secondary">
-                    {exchange}
-                    {" — "}
-                    {nickname ? (
-                      nickname
-                    ) : (
-                      <span className="font-mono text-text-muted">
-                        {maskedTail}
-                      </span>
-                    )}
-                  </span>
-                </div>
-              );
-            })}
-            </div>
-          </CollapsibleSection>
-        </Card>
-      )}
-
+      {/* CONSTIT-01 — the separate "Data sources" section is DELETED. Per-key
+          exchange sources now render as uniform constituent rows inside the ONE
+          unified CompositionList (below), interleaved with added strategies —
+          one row anatomy, one include/exclude channel, one provenance badge per
+          row. The former per-key toggle rows moved verbatim (same handlers, same
+          accessible names) into that list. Only the book-level honest states
+          re-home here: the per-key-history-missing fallback (below) and the
+          all-constituents-excluded empty card (further down). */}
       {showDataSourcesFallback && (
-        <div className="mt-4" data-testid="scenario-data-sources-fallback">
+        <div className="mt-4" data-testid="scenario-constituent-fallback">
           <InfoBanner>
             <span className="font-semibold text-text-primary">
               Per-source modeling needs per-key history.
@@ -3878,17 +4161,19 @@ export function ScenarioComposer({
         />
       </div>
 
-      {/* DSRC-03 — all-excluded honest empty. When every data source is toggled
-          off the engine returns null KPIs + an empty curve (KpiStrip above
-          falls to its degenerate "—" convention, never a stale number), and the
-          projection region renders this honest-absence card. Re-including any
-          source instantly restores the live projection. Neutral/calm, no
+      {/* CONSTIT-01 (Pitfall 5) — all-constituents-excluded honest empty,
+          re-homed from the deleted Data-Sources section onto the unified
+          constituent model. When every per-key source is toggled off (and no
+          live added leg) the engine returns null KPIs + an empty curve (KpiStrip
+          above falls to its degenerate "—" convention, never a stale number),
+          and the projection region renders this honest-absence card. Re-including
+          any source instantly restores the live projection. Neutral/calm, no
           role="alert", no red (honesty-color rule, UI-SPEC §4). */}
       {allDataSourcesExcluded && (
-        <div className="mt-4" data-testid="scenario-data-sources-empty">
+        <div className="mt-4" data-testid="scenario-constituent-empty">
           <EmptyStateCard
-            heading="Select at least one data source"
-            body="Every data source is excluded — there's nothing to project. Re-include a source to see the curve and metrics."
+            heading="Select at least one source"
+            body="Every source is excluded — there's nothing to project. Re-include a source to see the curve and metrics."
           />
         </div>
       )}
@@ -4458,19 +4743,22 @@ export function ScenarioComposer({
       >
         <CompositionList
           draft={scenario.draft}
-          holdingsSummary={holdingsSummary}
-          flaggedHoldings={flaggedHoldings}
-          sharedSymbols={sharedSymbols}
+          perKeySources={usePerKeySources ? dataSourceKeys : EMPTY_PER_KEY_SOURCES}
+          mixedPerKeyBook={isMixedPerKeyBook}
+          onTogglePerKey={scenario.togglePerKeySource}
+          addedProvenanceByRef={addedProvenanceByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
+          blendShareByRef={blendShareByRef}
+          totalBookEquity={totalBookEquity}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
+          targetModeByRef={targetModeByRef}
+          onSetTargetMode={handleSetTargetMode}
+          onCommitTarget={handleTargetCommit}
+          solveResultByRef={solveResultByRef}
+          portfolioMaxDrawdown={scenarioMetrics.max_drawdown}
           onRemoveAdded={handleRemoveAdded}
-          onCompare={(scopeRef, candidateId) =>
-            router.push(
-              `/compare?ids=${encodeURIComponent(scopeRef)},${candidateId}`,
-            )
-          }
           coverageEligible={coverageEligible}
         />
       </CollapsibleSection>
@@ -4564,6 +4852,14 @@ export function ScenarioComposer({
 
       <ScenarioFooter
         diffCount={scenario.diffCount}
+        // 111-05 (red-team HIGH fix): Commit gates on COMMITTABLE diffs, not the
+        // raw dirty count. `handleCommit` emits a diff ONLY per added strategy
+        // (voluntary_add) — exclusions produce none. So the committable count is
+        // exactly `addedStrategies.length`. An exclusion-only draft is dirty
+        // (diffCount>0, CF-05) but has zero committable diffs → Commit stays
+        // disabled instead of advertising a change the commit path dead-ends on
+        // (the F-01 "Nothing to commit" error remains as the backstop guard).
+        committableCount={scenario.draft.addedStrategies.length}
         deltaSummary={deltaSummary}
         onResetRequested={() => setResetModalOpen(true)}
         onCommitRequested={handleCommit}
@@ -4584,7 +4880,21 @@ export function ScenarioComposer({
             strategy_types: s.strategy_types,
           })
         }
+        onAddOwn={() => {
+          setBrowseOpen(false);
+          setContributeOpen(true);
+        }}
         allocatorMandate={allocatorMandate}
+      />
+      {/* Phase 110 CONTRIB-05 — reused overlay; onSuccess reopens Browse so
+          the new private row (refetched on open) is selectable. */}
+      <ContributionWizardOverlay
+        isOpen={contributeOpen}
+        onClose={() => setContributeOpen(false)}
+        onSuccess={() => {
+          setContributeOpen(false);
+          setBrowseOpen(true);
+        }}
       />
       <BridgeDrawer
         isOpen={bridgeOpen}
@@ -4769,65 +5079,274 @@ function AutoExcludedRow({
 // CompositionList — sub-component
 // ---------------------------------------------------------------------------
 
+/** CONSTIT-01 — a per-key exchange source rendered as a uniform constituent row
+ *  (one per eligible connected api_key). Shape = the SSR payload's apiKeys row,
+ *  labelled via `dataSourceLabel`. */
+type PerKeySource = MyAllocationDashboardPayload["apiKeys"][number];
+
+/** Stable empty per-key source list — passed when the per-key path is inactive
+ *  so CompositionList's props stay referentially stable across renders. */
+const EMPTY_PER_KEY_SOURCES: PerKeySource[] = [];
+
 interface CompositionListProps {
   draft: ReturnType<typeof useScenarioState>["draft"];
-  holdingsSummary: MyAllocationDashboardPayload["holdingsSummary"];
-  flaggedHoldings: FlaggedHolding[];
-  sharedSymbols: Set<string>;
+  /**
+   * CONSTIT-01 — the eligible per-key exchange sources (empty when the per-key
+   * path is inactive). Rendered as uniform constituent rows ABOVE the added
+   * strategies in the ONE list — the deleted "Data sources" section's rows,
+   * re-homed. Per-coin holdings are deliberately NOT rendered here (CONSTIT-03 —
+   * they live on the Holdings tab).
+   */
+  perKeySources: PerKeySource[];
+  /**
+   * RT-02 (Phase 112 red team) — TRUE ⇔ the SELECTED engine basis carries a
+   * per-key (non-added) unit (the exact `isMixedPerKeyBook` condition the weight
+   * EDIT path uses). The added-row weight input reads its display basis from THIS
+   * — normalized blend share when mixed, raw stored weight otherwise — so the
+   * displayed value always matches what an edit would store. Deliberately NOT
+   * `perKeySources.length > 0`, which stays true even when every per-key source
+   * is excluded (the desync bug).
+   */
+  mixedPerKeyBook: boolean;
+  /** CONSTIT-03 — toggle a per-key source through the shared toggleByScopeRef
+   *  channel (never rescales weightOverrides). */
+  onTogglePerKey: (ref: string) => void;
+  /**
+   * CONSTIT-02 — added-strategy id → provenance badge variant (or null for
+   * honest absence), derived in the parent via `deriveProvenance`. Per-key rows
+   * are `api_verified` by construction and badged directly, so they are not in
+   * this map.
+   */
+  addedProvenanceByRef: Record<string, ProvenanceTier | null>;
   onToggle: (scopeRef: string) => void;
   onSetWeight: (scopeRef: string, weight: number) => void;
+  /**
+   * WEIGHTS-01 (Phase 112) — ref → effective blend share (each SELECTED engine
+   * unit's weight over the selected-weight mass). The per-key row's weight input
+   * displays this so a typed 30% renders as 30% of the blend; an EXCLUDED per-key
+   * row is absent here and falls back to its preserved stored weightOverride.
+   */
+  blendShareByRef: Record<string, number>;
+  /**
+   * WEIGHTS-00 (A1 locked) — the allocator's total book equity, or `null` when
+   * there is no book (added-only / blank / gate=false). The base for the derived
+   * read-only Notional column (equity × L). Null → every notional cell is an
+   * em-dash `—` (Numbers Contract), never a fabricated $0.
+   */
+  totalBookEquity: number | null;
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
+  /**
+   * WEIGHTS-03 (Phase 113) — TRANSIENT per-row Target-max-DD UI wiring.
+   * `targetModeByRef[ref] === true` ⇒ the row is in Target mode (absent/false =
+   * the DEFAULT Leverage mode). `onSetTargetMode` flips the mode; `onCommitTarget`
+   * runs the one-shot solve on blur/Enter (percent units). `solveResultByRef[ref]`
+   * drives the honest state line; `portfolioMaxDrawdown` is the full-book computed
+   * max-DD (the existing scenarioMetrics memo) shown for the solved L — a COMPUTED
+   * readout, never "solved", em-dash when null.
+   */
+  targetModeByRef: Record<string, boolean>;
+  onSetTargetMode: (scopeRef: string, on: boolean) => void;
+  onCommitTarget: (scopeRef: string, targetPct: number) => void;
+  solveResultByRef: Record<string, SolveLeverageResult>;
+  portfolioMaxDrawdown: number | null;
   onRemoveAdded: (id: string) => void;
-  onCompare: (scopeRef: string, candidateId: string) => void;
   /**
    * Phase 58 COVERAGE-02 — the coverage-eligibility axis (the `coverageEligible`
-   * memo in ScenarioComposer). Threaded READ-ONLY so each added-strategy row
-   * can render its three-state chip from the SAME axis the engine's divisor
-   * and the coverageEligible↔member_ids dev cross-check read. The chip state
-   * is NOT re-derived here — it is a projection of `selected` (row `enabled`)
+   * memo in ScenarioComposer). Threaded READ-ONLY so each constituent row (per-key
+   * + added) can render its three-state chip from the SAME axis the engine's
+   * divisor and the coverageEligible↔member_ids dev cross-check read. The chip
+   * state is NOT re-derived here — it is a projection of `selected` (row `enabled`)
    * + this map.
    */
   coverageEligible: Record<string, boolean>;
 }
 
+// WEIGHTS-04 (Phase 113) — the honest failure copy for a `!ok` solve. Mirrors
+// the reason enum's TSDoc contract in solve-leverage.ts (the single source of the
+// pinned copy). `unreachable` interpolates the domain-ceiling leverage.
+function solveReasonCopy(
+  result: Extract<SolveLeverageResult, { ok: false }>,
+): string {
+  switch (result.reason) {
+    case "unreachable":
+      return `Unreachable at ${(result.ceiling ?? MAX_LEVERAGE).toFixed(2)}×`;
+    case "no-drawdown":
+      return "No drawdown in this series";
+    case "insufficient-history":
+      return "Insufficient history to model drawdown";
+    case "degenerate":
+      return "Series can't be modeled (data quality)";
+  }
+}
+
 function CompositionList({
   draft,
-  holdingsSummary,
-  flaggedHoldings,
-  sharedSymbols,
+  perKeySources,
+  mixedPerKeyBook,
+  onTogglePerKey,
+  addedProvenanceByRef,
   onToggle,
   onSetWeight,
+  blendShareByRef,
+  totalBookEquity,
   leverageByRef,
   onSetLeverage,
+  targetModeByRef,
+  onSetTargetMode,
+  onCommitTarget,
+  solveResultByRef,
+  portfolioMaxDrawdown,
   onRemoveAdded,
-  onCompare,
   coverageEligible,
 }: CompositionListProps) {
-  const flaggedByRef = useMemo(() => {
-    const map = new Map<string, FlaggedHolding>();
-    for (const f of flaggedHoldings) {
-      map.set(buildHoldingRef(f), f);
+  // WEIGHTS-00 (A1 locked) — the DERIVED, read-only notional string for a row:
+  // equity × blend-share × leverage. It is purely informative (a
+  // clears-minimum-invest readout) and STRUCTURALLY never a weight input. Any
+  // factor missing/non-finite (no book equity; an EXCLUDED row absent from
+  // blendShareByRef; a degenerate share) → `null` → em-dash `—` per the Numbers
+  // Contract — never 0, never a fabricated dollar figure an LP could act on.
+  const notionalText = (ref: string): string => {
+    const share = blendShareByRef[ref];
+    if (
+      totalBookEquity == null ||
+      typeof share !== "number" ||
+      !Number.isFinite(share)
+    ) {
+      return "—";
     }
-    return map;
-  }, [flaggedHoldings]);
+    const notional = share * totalBookEquity * (leverageByRef[ref] ?? 1);
+    return Number.isFinite(notional) ? formatCurrency(notional) : "—";
+  };
 
-  // M-0101: precompute symbol → venues ONCE so each row's "merged across
-  // venues" note is an O(1) Map.get + a tiny same-symbol filter, instead of an
-  // O(N) holdingsSummary.filter scan per row (O(N²) across the list). The
-  // venue list preserves holdingsSummary order so the rendered join is byte-
-  // identical to the previous filter().map().
-  const venuesBySymbol = useMemo(() => {
-    const map = new Map<string, string[]>();
-    for (const h of holdingsSummary) {
-      const list = map.get(h.symbol);
-      if (list) list.push(h.venue);
-      else map.set(h.symbol, [h.venue]);
+  // WEIGHTS-03/04 (Phase 113) — the shared Target-max-DD row surface. ONE
+  // definition, rendered identically into BOTH row types (per-key + added):
+  // WEIGHTS-03 is per-row and Phase 112 gave both a leverage input.
+
+  // The per-row mode toggle: Leverage (default) ⇄ Target max-DD. `data-mode`
+  // exposes the current mode; disabled mirrors the row's inputs (excluded rows).
+  const renderModeToggle = (
+    ref: string,
+    labelText: string,
+    disabled: boolean,
+  ) => {
+    const isTarget = targetModeByRef[ref] === true;
+    return (
+      <button
+        type="button"
+        data-testid="scenario-leverage-mode-toggle"
+        data-mode={isTarget ? "target" : "leverage"}
+        aria-label={`${labelText} — input mode (currently ${
+          isTarget ? "Target max-drawdown" : "Leverage"
+        }); switch to ${isTarget ? "Leverage" : "Target max-drawdown"}`}
+        disabled={disabled}
+        onClick={() => onSetTargetMode(ref, !isTarget)}
+        className="shrink-0 rounded border border-border bg-surface px-2 py-1 font-metric text-fixed-11 uppercase tracking-wider text-text-muted transition-colors hover:border-accent disabled:opacity-50"
+      >
+        {isTarget ? "Target DD" : "Leverage"}
+      </button>
+    );
+  };
+
+  // The Target-mode drawdown input (percent). Uncontrolled + solve-on-COMMIT
+  // (blur / Enter) — never per keystroke (Pitfall 5). The title/label copy is
+  // load-bearing: the target is THIS constituent's OWN standalone max drawdown
+  // (the sleeve), not the portfolio's.
+  const renderTargetInput = (
+    ref: string,
+    labelText: string,
+    disabled: boolean,
+  ) => (
+    <>
+      <label className="sr-only" htmlFor={`target-dd-${ref}`}>
+        {labelText} target max drawdown (percent) — this constituent&apos;s own
+        standalone drawdown, not the portfolio&apos;s
+      </label>
+      <input
+        id={`target-dd-${ref}`}
+        type="number"
+        step="0.1"
+        min="0"
+        max="100"
+        disabled={disabled}
+        title="Target this constituent's OWN standalone max drawdown (the sleeve, not the portfolio). Commits on blur/Enter and back-solves the leverage."
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            const raw = (e.target as HTMLInputElement).value;
+            // F2 — a blank field is "no target entered", not a 0% target: skip
+            // the commit so Number("") === 0 never trips the out-of-range banner.
+            // Real out-of-range values still commit and honestly refuse.
+            if (raw.trim() !== "") onCommitTarget(ref, Number(raw));
+          }
+        }}
+        onBlur={(e) => {
+          const raw = e.target.value;
+          // F2 — a benign focus→blur of an empty input is a no-op (no commit, no
+          // error banner); real out-of-range values still commit and refuse.
+          if (raw.trim() !== "") onCommitTarget(ref, Number(raw));
+        }}
+        className="w-16 rounded border border-accent bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+      />
+    </>
+  );
+
+  // The honest solve-state line under the row controls (WEIGHTS-04). ok → the
+  // COMPUTED full-book portfolio max-DD at the solved L (never "solved"); failure
+  // → the reason copy + an em-dash where a derived value would sit (no fabricated
+  // value, no semantic color on the dash — DESIGN.md Numbers Contract).
+  const renderSolveState = (ref: string) => {
+    if (targetModeByRef[ref] !== true) return null;
+    // RT113-01 — an EXCLUDED row shows NO solve note. The mode toggle + target
+    // input are DISABLED while excluded, so a lingering "Portfolio max-DD at N×"
+    // note would strand a value computed for a book the row is no longer in
+    // (e.g. +0.00% with a drawdown leg toggled out) that the user cannot clear or
+    // refresh without re-including — the value-shaped ambiguity WEIGHTS-04 bars.
+    // Inclusion mirrors the toggle's own predicate at both call sites
+    // (draft.toggleByScopeRef[ref] !== false). Exclusion is REVERSIBLE, so the
+    // transient twins are deliberately NOT cleared (the solved L persists via
+    // leverageByRef): re-including reopens the gate and the note recomputes
+    // against the live full-book DD (scenarioMetrics.max_drawdown) with the row
+    // back in the book.
+    if (draft.toggleByScopeRef[ref] === false) return null;
+    const result = solveResultByRef[ref];
+    if (!result) return null;
+    if (result.ok) {
+      return (
+        <p
+          data-testid="scenario-target-dd-portfolio-note"
+          className="mt-2 text-fixed-11 text-text-muted"
+        >
+          Portfolio max-DD at {result.leverage.toFixed(2)}× (computed for the
+          whole book):{" "}
+          <span className="font-metric">
+            {formatPercent(portfolioMaxDrawdown, 2)}
+          </span>
+        </p>
+      );
     }
-    return map;
-  }, [holdingsSummary]);
-
+    return (
+      <p
+        data-testid="scenario-target-dd-state"
+        className="mt-2 text-fixed-11 text-text-muted"
+      >
+        {solveReasonCopy(result)} <span className="font-metric">—</span>
+      </p>
+    );
+  };
+  // Whether ANY included row carries a non-1× leverage — gates the honest
+  // leverage-invariance caveat (Sharpe/Sortino/Calmar do not shift with leverage).
+  const perKeyIncludedLevered = perKeySources.some(
+    (k) =>
+      draft.toggleByScopeRef[k.id] !== false &&
+      (leverageByRef[k.id] ?? 1) !== 1,
+  );
+  const addedIncludedLevered = draft.addedStrategies.some(
+    (a) =>
+      draft.toggleByScopeRef[a.id] !== false &&
+      (leverageByRef[a.id] ?? 1) !== 1,
+  );
+  const anyLevered = perKeyIncludedLevered || addedIncludedLevered;
   return (
     <div className="rounded-lg border border-border bg-surface p-4">
       {/* No inner "Composition" heading: the enclosing CollapsibleSection summary
@@ -4835,62 +5354,138 @@ function CompositionList({
           here double-labels the same content. No top margin on the card either:
           the list is the sole child inside the collapsible's <details> body, so
           spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
-      <ul className="grid gap-2">
-        {/* Read-only-tokens model: live holdings are FIXED context. They render
-            read-only (symbol · venue · USD value) with no toggle / weight /
-            leverage — those controls live only on the added-strategy rows below.
-            The multi-venue caveat and the Bridge "Compare →" deep-link stay
-            because both are read-only affordances. */}
-        {holdingsSummary.map((h) => {
-          const ref = buildHoldingRef({
-            venue: h.venue,
-            symbol: h.symbol,
-            holding_type: h.holding_type,
-          });
-          const flagged = flaggedByRef.get(ref);
-          const sharedSym = sharedSymbols.has(h.symbol);
-          const otherVenuesForSym = sharedSym
-            ? (venuesBySymbol.get(h.symbol) ?? []).filter(
-                (v) => v !== h.venue,
-              )
-            : [];
+      <ul className="grid gap-2" data-testid="scenario-constituent-list">
+        {/* CONSTIT-01/02/03 — per-key exchange sources as uniform constituent
+            rows, interleaved ABOVE the added strategies in the ONE list. Same row
+            anatomy as an added row: an include/exclude toggle (the shared
+            toggleByScopeRef channel via onTogglePerKey), the source label, a
+            provenance badge (api_verified by construction — a per-key unit IS a
+            connected-exchange api-key), and the coverage chip. Final column
+            anatomy per WEIGHTS-00 Route 1 / Option A (A1 locked 2026-07-17):
+            {equity-share weight — editable, engine-unit-basis writer
+            handleWeightChange} × {leverage — editable, handleLeverageChange
+            clamp} → {notional — derived read-only, equity × L, informative only}.
+            Both inputs key strictly by api_key_id (the engine unit id) — never a
+            symbol/coin (Pitfall 3, CONSTIT-04 grep gate). A per-key source still
+            has NO remove button (it is toggled, not removed). Per-coin holdings
+            are NOT rendered — they live on the Holdings tab (CONSTIT-03). */}
+        {perKeySources.map((k) => {
+          const included = draft.toggleByScopeRef[k.id] !== false;
+          const { exchange, nickname, maskedTail } = dataSourceLabel(k);
+          const labelText = nickname ?? maskedTail;
+          const chipState: CoverageState | null = !included
+            ? "manually-excluded"
+            : coverageEligible[k.id]
+              ? "in-blend"
+              : null;
           return (
             <li
-              key={ref}
-              data-scope-ref={ref}
-              className="flex items-center justify-between gap-3 rounded-md border border-border p-3"
+              key={k.id}
+              data-scope-ref={k.id}
+              data-testid="scenario-constituent-perkey"
+              className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
+                included ? "" : "opacity-50 line-through"
+              }`}
             >
+              <div className="flex w-full items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
-                <span className="font-mono text-sm text-text-primary">
-                  {h.symbol}
-                </span>
-                <span className="text-xs text-text-muted">{h.venue}</span>
-                {sharedSym && (
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={included}
+                  aria-label={`Include ${exchange} — ${labelText} in projection`}
+                  onClick={() => onTogglePerKey(k.id)}
+                  className={`flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                    included ? "bg-accent" : "bg-border"
+                  }`}
+                >
                   <span
-                    className="text-fixed-11 text-warning"
-                    title={`Returns merged with ${otherVenuesForSym.join(", ")} (symbol shared across venues)`}
-                  >
-                    Returns merged with {otherVenuesForSym.join(", ")} (symbol
-                    shared across venues)
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="font-mono text-xs text-text-secondary">
-                  {formatUsd0(h.value_usd)}
+                    aria-hidden
+                    className={`h-4 w-4 rounded-full bg-white transition-transform ${
+                      included ? "translate-x-4" : "translate-x-0.5"
+                    }`}
+                  />
+                </button>
+                <span className="text-sm text-text-primary">
+                  {exchange}
+                  {" — "}
+                  {nickname ? (
+                    nickname
+                  ) : (
+                    <span className="font-mono text-text-muted">
+                      {maskedTail}
+                    </span>
+                  )}
                 </span>
-                {flagged && flagged.top_candidate_strategy_id && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onCompare(ref, flagged.top_candidate_strategy_id)
-                    }
-                    className="rounded-md border border-border px-2 py-1 text-xs text-text-secondary hover:border-accent"
-                  >
-                    Compare →
-                  </button>
+                <TrustTierLabel trustTier="api_verified" className="shrink-0" />
+                {chipState && (
+                  <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
               </div>
+              {/* WEIGHTS-01/02 — per-key weight + leverage inputs, mirroring the
+                  added-row inputs exactly. WEIGHT (id `weight-<api_key_id>`, step
+                  0.001, [0,1]): value shows the EFFECTIVE blend share
+                  (blendShareByRef); an excluded row is absent from that map and
+                  falls back to its PRESERVED stored weightOverride (Wave-0 pin
+                  (d)). LEVERAGE (id `leverage-<api_key_id>`, step 0.1, [0,
+                  MAX_LEVERAGE]): reuses leverageByRef + handleLeverageChange
+                  VERBATIM (locked decision 4 — no new leverage map, no new
+                  handler, no zod refine). Both disabled when excluded — no
+                  onChange fires, so an excluded row never routes an edit. */}
+              <div className="flex items-center gap-2">
+                <label className="sr-only" htmlFor={`weight-${k.id}`}>
+                  {labelText} weight
+                </label>
+                <input
+                  id={`weight-${k.id}`}
+                  type="number"
+                  step="0.001"
+                  min="0"
+                  max="1"
+                  value={(
+                    blendShareByRef[k.id] ??
+                    draft.weightOverrides[k.id] ??
+                    0
+                  ).toFixed(3)}
+                  disabled={!included}
+                  onChange={(e) => onSetWeight(k.id, Number(e.target.value))}
+                  className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                />
+                {/* WEIGHTS-03 — per-row mode toggle + (Target mode) drawdown
+                    input. In Target mode the leverage input below is READ-ONLY
+                    (never disabled — the derived L stays visible). */}
+                {renderModeToggle(k.id, labelText, !included)}
+                {targetModeByRef[k.id] === true &&
+                  renderTargetInput(k.id, labelText, !included)}
+                <label className="sr-only" htmlFor={`leverage-${k.id}`}>
+                  {labelText} leverage
+                </label>
+                <input
+                  id={`leverage-${k.id}`}
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  max={MAX_LEVERAGE}
+                  value={(leverageByRef[k.id] ?? 1).toString()}
+                  disabled={!included}
+                  readOnly={targetModeByRef[k.id] === true}
+                  title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
+                  aria-label={`${labelText} leverage multiplier`}
+                  onChange={(e) => onSetLeverage(k.id, Number(e.target.value))}
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
+                />
+                {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
+                    never a weight input. Em-dash when non-derivable. */}
+                <span
+                  data-testid="scenario-constituent-notional"
+                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  className="w-20 text-right font-mono text-xs text-text-muted"
+                >
+                  {notionalText(k.id)}
+                </span>
+              </div>
+              </div>
+              {renderSolveState(k.id)}
             </li>
           );
         })}
@@ -4901,7 +5496,20 @@ function CompositionList({
         )}
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;
-          const weight = draft.weightOverrides[a.id] ?? 0;
+          // CR-01 (Phase 112 review) — in a MIXED book (a SELECTED per-key engine
+          // unit exists) show the NORMALIZED blend share so the added row reads the
+          // SAME basis the per-key rows do (both are engine units renormalized to
+          // sum 1); a raw `weightOverrides` value would display a different basis
+          // than the per-key rows even before an edit. Added-only keeps the raw
+          // value byte-identical — the zero-size / clamp gates and their tests read
+          // it. RT-02 (Phase 112 red team): switch on the SHARED `mixedPerKeyBook`
+          // (the exact edit-path condition), NOT `perKeySources.length > 0` — the
+          // latter stayed true when every per-key source was excluded, so the
+          // display showed a normalized 1.000 while the edit path stored the raw
+          // typed value (a controlled-input desync).
+          const weight = mixedPerKeyBook
+            ? (blendShareByRef[a.id] ?? draft.weightOverrides[a.id] ?? 0)
+            : (draft.weightOverrides[a.id] ?? 0);
           // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
           // from the row's `enabled` (the `selected` axis) + the threaded
           // `coverageEligible` map, exactly the two states the plan wires here:
@@ -4919,10 +5527,12 @@ function CompositionList({
             <li
               key={a.id}
               data-scope-ref={a.id}
-              className={`flex items-center justify-between gap-3 rounded-md border border-border p-3 ${
+              data-testid="scenario-constituent-added"
+              className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
                 enabled ? "" : "opacity-50 line-through"
               }`}
             >
+              <div className="flex w-full items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <button
                   type="button"
@@ -4942,6 +5552,12 @@ function CompositionList({
                   />
                 </button>
                 <span className="text-sm text-text-primary">{a.name}</span>
+                {/* CONSTIT-02 — per-row provenance badge (api_verified / csv /
+                    self_reported / composite). Null → no badge (honest absence). */}
+                <TrustTierLabel
+                  trustTier={addedProvenanceByRef[a.id] ?? null}
+                  className="shrink-0"
+                />
                 {chipState && (
                   <CoverageStateChip state={chipState} className="shrink-0" />
                 )}
@@ -4961,6 +5577,12 @@ function CompositionList({
                   onChange={(e) => onSetWeight(a.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* WEIGHTS-03 — per-row mode toggle + (Target mode) drawdown
+                    input; the leverage input below goes READ-ONLY in Target mode
+                    (never disabled — the derived L stays visible). */}
+                {renderModeToggle(a.id, a.name, !enabled)}
+                {targetModeByRef[a.id] === true &&
+                  renderTargetInput(a.id, a.name, !enabled)}
                 <label className="sr-only" htmlFor={`leverage-${a.id}`}>
                   {a.name} leverage
                 </label>
@@ -4972,11 +5594,21 @@ function CompositionList({
                   max={MAX_LEVERAGE}
                   value={(leverageByRef[a.id] ?? 1).toString()}
                   disabled={!enabled}
+                  readOnly={targetModeByRef[a.id] === true}
                   title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
                   aria-label={`${a.name} leverage multiplier`}
                   onChange={(e) => onSetLeverage(a.id, Number(e.target.value))}
-                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
+                {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
+                    never a weight input. Em-dash when non-derivable. */}
+                <span
+                  data-testid="scenario-constituent-notional"
+                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  className="w-20 text-right font-mono text-xs text-text-muted"
+                >
+                  {notionalText(a.id)}
+                </span>
                 <button
                   type="button"
                   aria-label="Remove from scenario"
@@ -4986,10 +5618,27 @@ function CompositionList({
                   ×
                 </button>
               </div>
+              </div>
+              {renderSolveState(a.id)}
             </li>
           );
         })}
       </ul>
+      {/* WEIGHTS-00 honesty caveat (A1 locked) — leverage scales return, vol and
+          max drawdown but the risk-adjusted ratios and correlation are
+          leverage-INVARIANT (no borrow cost modeled). Mirrors the
+          Diversification subtitle precedent; renders ONLY when a selected row is
+          levered so the surface never implies leverage improves Sharpe. */}
+      {anyLevered && (
+        <p
+          data-testid="scenario-leverage-invariance-note"
+          className="mt-3 text-xs text-text-muted"
+        >
+          Leverage scales return, volatility and max drawdown. Risk-adjusted
+          ratios (Sharpe, Sortino, Calmar) and correlation do not shift with
+          leverage — borrow cost is not modeled.
+        </p>
+      )}
     </div>
   );
 }

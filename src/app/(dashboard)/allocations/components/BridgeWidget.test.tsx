@@ -64,15 +64,16 @@ describe("BridgeWidget — empty state (no breaches, with outcomes)", () => {
     // Region role + accessible label preserved
     const region = screen.getByRole("region", { name: /bridge status/i });
     expect(region).toBeTruthy();
-    // Cream tone applied via inline style (Tailwind doesn't have this exact gradient).
+    // Flat cream fill applied via inline style ("no gradients" is a top-level
+    // DESIGN.md rule — the prior linear-gradient was removed for a flat
+    // --color-bridge-bg-100 fill, keeping the Bridge cream identity).
     // Phase 09.1 UI-FLAG-01: hex literals replaced with bridge token family
-    // (--color-bridge-bg-100 = #FFF7ED, --color-bridge-bg-50 = #FFFAF3,
-    // --color-bridge-border-100 = #FED7AA). JSDom doesn't resolve CSS vars
-    // so we assert on the variable references in the inline style attribute.
+    // (--color-bridge-bg-100 = #FFF7ED, --color-bridge-border-100 = #FED7AA).
+    // JSDom doesn't resolve CSS vars so we assert on the variable references
+    // in the inline style attribute.
     const styleAttr = (region as HTMLElement).getAttribute("style") ?? "";
-    expect(styleAttr).toMatch(/linear-gradient/);
+    expect(styleAttr).not.toMatch(/linear-gradient/);
     expect(styleAttr).toMatch(/var\(--color-bridge-bg-100\)/);
-    expect(styleAttr).toMatch(/var\(--color-bridge-bg-50\)/);
     expect(styleAttr).toMatch(/var\(--color-bridge-border-100\)/);
   });
 

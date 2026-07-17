@@ -472,7 +472,7 @@ function RecommendationCard({ rec }: { rec: RecommendationRow }) {
       <div className="flex items-start justify-between gap-6">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-3">
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-accent/10 text-micro font-semibold text-accent">
+            <span className="font-mono text-micro font-medium text-text-muted">
               #{rec.rank ?? "—"}
             </span>
             <h3 className="font-display text-body text-text-primary">

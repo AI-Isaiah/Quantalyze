@@ -9,12 +9,16 @@ import { redirect } from "next/navigation";
 /**
  * /portfolios — generic portfolios browser.
  *
- * The v0.4.0 pivot dropped the "Test Portfolios" rename. Allocators no
- * longer use this page directly (it's removed from their sidebar —
- * their real book lives on /allocations, their what-if exploration
- * lives in the scenario composer on /allocations). The route is kept for managers and for any
- * deep links that still point here. CreatePortfolioForm is still
- * available for manual portfolio creation.
+ * The v0.4.0 pivot dropped the "Test Portfolios" rename and moved the
+ * allocator's REAL book to /allocations (their what-if exploration lives
+ * in the scenario composer there). This page remains an ALLOCATOR
+ * deep-link surface for building comparison collections of discovered
+ * strategies — it is reached via AddToPortfolio on the discovery detail
+ * page, not from primary nav (removed from the sidebar in v0.4.0).
+ * Phase 109 review correction: /portfolios is guarded allocator-owned
+ * (prod: 14 allocator owners, 0 manager owners); the prior "kept for
+ * managers" note was wrong — no manager has ever owned a portfolio.
+ * CreatePortfolioForm is still available for manual (is_test) creation.
  */
 export default async function PortfoliosPage() {
   const supabase = await createClient();

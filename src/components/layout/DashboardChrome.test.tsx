@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 import { DashboardChrome } from "./DashboardChrome";
 import {
@@ -39,12 +39,51 @@ import {
 // Mutable pathname so the DashboardChrome tests can exercise both the
 // standard layout and the full-bleed (/admin/match/[id]) branch.
 const navState = { pathname: "/allocations" };
+// Phase 110 CONTRIB-01 — DashboardChrome now hosts ContributionWizardOverlay
+// and calls router.refresh() on a successful contribution. hoisted so the mock
+// factory (which is hoisted above the imports) can reference the shared spy.
+const hoisted = vi.hoisted(() => ({ refresh: vi.fn() }));
 vi.mock("next/navigation", () => ({
   usePathname: () => navState.pathname,
+  useRouter: () => ({
+    refresh: hoisted.refresh,
+    push: vi.fn(),
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+}));
+
+// Stub the wizard so the host tests drive DashboardChrome's own overlay wiring,
+// not the wizard internals (mirrors ContributionWizardOverlay.test.tsx).
+vi.mock("@/app/(dashboard)/strategies/new/wizard/WizardClient", () => ({
+  WizardClient: (props: {
+    onSuccess?: (id: string) => void;
+    onClose?: () => void;
+  }) => (
+    <div data-testid="mock-wizard">
+      <button
+        type="button"
+        data-testid="wizard-fire-success"
+        onClick={() => props.onSuccess?.("id-1")}
+      >
+        fire success
+      </button>
+      <button
+        type="button"
+        data-testid="wizard-fire-close"
+        onClick={() => props.onClose?.()}
+      >
+        fire close
+      </button>
+    </div>
+  ),
 }));
 
 beforeEach(() => {
   navState.pathname = "/allocations";
+  hoisted.refresh.mockClear();
 });
 
 describe("DashboardChrome — sidebar flagged-count badge (prop path)", () => {
@@ -201,6 +240,72 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
  * The content container is the direct child <div> of the labeled <main> that
  * holds the page children (the `mx-auto max-w-* px-4 …` wrapper).
  */
+/**
+ * Phase 110 CONTRIB-01 — DashboardChrome hosts the ContributionWizardOverlay so
+ * BOTH launch surfaces (the allocator nav action here, and the Browse "Add your
+ * own" CTA in ScenarioComposer) mount the same reusable overlay. These pin the
+ * chrome-level host contract: closed by default, opened by the nav action,
+ * closed on the wizard's onClose, and closed + router.refresh()'d on onSuccess.
+ */
+describe("DashboardChrome — ContributionWizardOverlay host (CONTRIB-01)", () => {
+  function renderChrome() {
+    navState.pathname = "/allocations";
+    render(
+      <DashboardChrome isAllocator={true} populatedSlugs={[]}>
+        <div>page</div>
+      </DashboardChrome>,
+    );
+    return screen.getByRole("navigation", { name: "Primary" });
+  }
+
+  it("mounts the overlay CLOSED by default (no wizard until the action fires)", () => {
+    renderChrome();
+    expect(screen.queryByTestId("mock-wizard")).toBeNull();
+  });
+
+  it("opens the overlay when the desktop 'Add a Strategy' nav action fires", () => {
+    const desktopNav = renderChrome();
+    fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
+    expect(screen.getByTestId("mock-wizard")).toBeInTheDocument();
+  });
+
+  it("closes the overlay on the wizard onClose", () => {
+    const desktopNav = renderChrome();
+    fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
+    fireEvent.click(screen.getByTestId("wizard-fire-close"));
+    expect(screen.queryByTestId("mock-wizard")).toBeNull();
+  });
+
+  it("closes the overlay AND refreshes on the wizard onSuccess", () => {
+    const desktopNav = renderChrome();
+    fireEvent.click(within(desktopNav).getByText("Add a Strategy"));
+    fireEvent.click(screen.getByTestId("wizard-fire-success"));
+    expect(screen.queryByTestId("mock-wizard")).toBeNull();
+    expect(hoisted.refresh).toHaveBeenCalled();
+  });
+
+  // MD-01 (Phase 110 review) — firing the contribute action from inside the
+  // OPEN mobile drawer must CLOSE the drawer as it opens the overlay. The drawer
+  // owns a window-level Tab focus trap that stays armed until it unmounts
+  // (`open=false`); the overlay portals to <body> outside the drawer-inert
+  // <main>, so a still-open drawer would hijack every Tab in the overlay — a
+  // keyboard trap (WCAG 2.1.2). Opening the overlay changes no route, so the
+  // drawer's route-change auto-close never fires; DashboardChrome must close it
+  // explicitly. This fails if openContribute stops calling setMenuOpen(false).
+  it("closes the mobile drawer (releasing its Tab trap) when contribute fires from inside it", () => {
+    renderChrome();
+    // Open the drawer via the hamburger, then act from WITHIN the drawer dialog.
+    fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
+    const drawer = screen.getByRole("dialog", { name: "Main navigation" });
+    fireEvent.click(within(drawer).getByText("Add a Strategy"));
+    // Overlay opened AND the drawer unmounted (window Tab trap torn down).
+    expect(screen.getByTestId("mock-wizard")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Main navigation" }),
+    ).toBeNull();
+  });
+});
+
 describe("DashboardChrome — wide fluid-fill variant (Phase 52)", () => {
   function contentContainerFor(pathname: string) {
     navState.pathname = pathname;

@@ -1,7 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { withPublishedOnly } from "@/lib/visibility";
+import { withPublishedOrOwner } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -43,9 +43,14 @@ export interface BrowseStrategyRow {
    * rows this is the real strategy name; for exploratory rows it is the
    * codename (when present) or a synthetic `Strategy #<id-prefix>` label
    * derived by `displayStrategyName`. The raw `strategies.name` column is
-   * NEVER emitted on exploratory rows because pairing it with the codename
-   * defeats the pseudonymity contract (the drawer search would otherwise
-   * cross-correlate a known real name back to its codename).
+   * NEVER emitted on another owner's exploratory rows because pairing it with
+   * the codename defeats the pseudonymity contract (the drawer search would
+   * otherwise cross-correlate a known real name back to its codename).
+   *
+   * CONTRIB-03 exception: the caller's OWN rows (`user_id === session id`,
+   * surfaced by the owner-inclusive predicate) carry their REAL name so the
+   * allocator can recognise the contribution they just named. This widens
+   * disclosure to nobody — the owner already knows their own name + codename.
    */
   name: string;
   codename: string | null;
@@ -56,7 +61,7 @@ export interface BrowseStrategyRow {
    * marks an example-universe row (`is_example=true AND status='published'`)
    * so the drawer can render the neutral-outline "Example" pill. This is a
    * co-fetched flag, NOT a published-bypass: example rows are just published
-   * rows that ALSO carry the flag — they still flow through `withPublishedOnly`
+   * rows that ALSO carry the flag — they still flow through `withPublishedOrOwner`
    * (RLS + defence-in-depth) and `displayStrategyName` (pseudonymity) like any
    * verified row. Verified rows carry `false`.
    */
@@ -106,28 +111,48 @@ export const GET = withAllocatorAuth(
     }
 
     const supabase = await createClient();
-    // RLS on `strategies` enforces SELECT for `status='published'` rows
-    // for authenticated callers — same client choice as
-    // getStrategiesByCategory in src/lib/queries.ts. The admin / service-
-    // role client is intentionally NOT used here: a read-only catalog of
-    // published strategies has no need to bypass RLS.
+    // CONTRIB-03 — owner-inclusive Browse discovery. Two-layer contract:
+    //   1. Query-builder isolation: withPublishedOrOwner appends the
+    //      `status.eq.published,user_id.eq.<sessionId>` predicate, mirroring
+    //      the `strategies_read` RLS shape EXACTLY (published OR the caller's
+    //      OWN rows) so an owner sees their own not-yet-published strategies
+    //      while everyone else sees only published ones.
+    //   2. RLS backstop: the `strategies_read` policy
+    //      (`status='published' OR user_id=auth.uid()`) still gates the read,
+    //      so even if the predicate were dropped no cross-tenant row leaks.
+    // The owner id is `user.id` from withAllocatorAuth — session-only, NEVER a
+    // request param (T-110-05/07). The admin / service-role client is
+    // intentionally NOT used here (Pitfall 4): service_role has BYPASSRLS, so a
+    // swap to the admin client would turn RLS OFF and the owner-OR would leak
+    // every user's private rows. What keeps the owner-OR OFF a service-role
+    // client is the `createClient()` above (a user-scoped client) — enforced by
+    // code review, NOT by the no-owner-or-on-admin-client lint (that rule only
+    // bans a RAW owner-OR outside withPublishedOrOwner and cannot see an admin
+    // client handed INTO the helper, whose `.or()` is marker-exempt). RLS is the
+    // backstop for a DIFFERENT failure — the predicate being dropped on this
+    // user-scoped client. Keep this call on the user-scoped client.
     // Audit C-0112 — co-fetch `disclosure_tier` so the response mapping
      // can suppress the real `name` for non-institutional rows. Ordering
      // still happens on `name` server-side (alphabetical browse is the
      // drawer contract); the leak prevention is in the projection step
      // below, not in the SELECT/ORDER list.
-    const { data, error } = await withPublishedOnly(
+    const { data, error } = await withPublishedOrOwner(
       supabase
         .from("strategies")
         .select(
           // Phase 29 / UNIFY-03 — co-fetch `is_example` so the response can
           // TAG example-universe rows in the unified Browse drawer. This is
-          // NOT a `.or(is_example.eq.true)` that would bypass the published
-          // predicate: example rows are published rows that ALSO carry the
-          // flag, so `withPublishedOnly` + RLS still gate the SET, and the
-          // flag is only read to drive the client-side "Example" pill.
-          "id, name, codename, disclosure_tier, markets, strategy_types, is_example",
+          // NOT an extra `is_example.eq.true` OR leg that would bypass the
+          // owner-inclusive predicate: example rows are published rows that
+          // ALSO carry the flag, so `withPublishedOrOwner` + RLS still gate
+          // the SET, and the flag is only read to drive the "Example" pill.
+          // CONTRIB-03 — co-fetch `user_id` so the projection can surface the
+          // owner's OWN name un-redacted (see the own-row branch below). It is
+          // read ONLY to compare against the session id; the raw column is never
+          // emitted on the wire.
+          "id, user_id, name, codename, disclosure_tier, markets, strategy_types, is_example",
         ),
+      user.id,
     )
       .order("name", { ascending: true })
       // M-0343 (audit-2026-05-07 F5b): fetch one row past the cap so the
@@ -175,6 +200,7 @@ export const GET = withAllocatorAuth(
     const strategies: BrowseStrategyRow[] = pageRows.map((row) => {
       const r = row as {
         id: string;
+        user_id: string | null;
         name: string;
         codename: string | null;
         disclosure_tier: DisclosureTier | null;
@@ -183,16 +209,27 @@ export const GET = withAllocatorAuth(
         is_example: unknown;
       };
       const tier: DisclosureTier = r.disclosure_tier ?? "exploratory";
+      // CONTRIB-03 — the owner's OWN rows (now surfaced by withPublishedOrOwner,
+      // including their not-yet-published contributions) show the REAL name they
+      // just typed: an allocator must be able to recognise their own strategy in
+      // the drawer. `displayStrategyName` would otherwise collapse a fresh
+      // (non-institutional) contribution to a codename / `Strategy #<id>` label,
+      // over-redacting it from its own author. This is safe — the owner already
+      // knows both their name and codename, so it never widens disclosure to
+      // anyone else. Everyone else's rows stay pseudonymised (below).
+      const isOwnRow = r.user_id !== null && r.user_id === user.id;
       // Phase 29 / UNIFY-03 — `displayStrategyName` runs on example rows too:
       // the provenance tag must NOT reintroduce a raw-name leak. An example
       // row whose tier is exploratory still surfaces its codename / synthetic
       // label, never `strategies.name` (T12-class pseudonymity contract).
-      const safeLabel = displayStrategyName({
-        id: r.id,
-        name: r.name,
-        codename: r.codename,
-        disclosure_tier: tier,
-      });
+      const safeLabel = isOwnRow
+        ? r.name
+        : displayStrategyName({
+            id: r.id,
+            name: r.name,
+            codename: r.codename,
+            disclosure_tier: tier,
+          });
       return {
         id: r.id,
         name: safeLabel,

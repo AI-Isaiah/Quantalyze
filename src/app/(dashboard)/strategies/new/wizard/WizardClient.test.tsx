@@ -192,12 +192,91 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
 // WIZ-04: stub the metadata + review steps so the stepper-navigation tests
 // observe the active step without depending on either step's internals. The
 // pre-existing tests never reach these steps, so the stubs are inert for them.
+// Phase 110: the stubs now expose advance triggers (onComplete / onContinue)
+// so the contribution-mode terminal tests can drive metadata → review → submit
+// WITHOUT the steps' internals. Pre-existing tests only assert the testid's
+// presence and never click the triggers, so they stay green.
+const METADATA_DRAFT_STUB = {
+  name: "Aurora",
+  description: "desc",
+  categoryId: "cat-aaa",
+  strategyTypes: ["Directional"],
+  subtypes: [],
+  markets: ["BTC"],
+  supportedExchanges: ["Binance"],
+  leverageRange: "1x-3x",
+  aum: "1000000",
+  maxCapacity: "5000000",
+  assetClass: "crypto",
+};
+
 vi.mock("./steps/MetadataStep", () => ({
-  MetadataStep: () => <div data-testid="mock-metadata-step" />,
+  MetadataStep: (props: { onComplete?: (draft: typeof METADATA_DRAFT_STUB) => void }) => (
+    <div data-testid="mock-metadata-step">
+      <button
+        type="button"
+        data-testid="metadata-complete"
+        onClick={() => props.onComplete?.(METADATA_DRAFT_STUB)}
+      >
+        Complete metadata
+      </button>
+    </div>
+  ),
 }));
 
 vi.mock("./steps/ReviewStep", () => ({
-  ReviewStep: () => <div data-testid="mock-review-step" />,
+  ReviewStep: (props: { onContinue?: () => void }) => (
+    <div data-testid="mock-review-step">
+      <button
+        type="button"
+        data-testid="review-continue"
+        onClick={() => props.onContinue?.()}
+      >
+        Continue to submit
+      </button>
+    </div>
+  ),
+}));
+
+// Phase 110: stub the two finalize steps so the contribution terminal-path
+// tests can (a) observe the entryContext WizardClient threads down and
+// (b) fire onSubmitted to drive handleSubmitSuccess without a real POST.
+vi.mock("./steps/SubmitStep", () => ({
+  SubmitStep: (props: {
+    entryContext?: string;
+    onSubmitted: (strategyId: string) => void;
+  }) => (
+    <div data-testid="mock-submit-step">
+      <span data-testid="submit-entry-context">{props.entryContext ?? "manager"}</span>
+      <button
+        type="button"
+        data-testid="submit-onsubmitted"
+        onClick={() => props.onSubmitted("strat-final")}
+      >
+        Fire onSubmitted
+      </button>
+    </div>
+  ),
+}));
+
+vi.mock("./steps/CsvSubmitStep", () => ({
+  CsvSubmitStep: (props: {
+    entryContext?: string;
+    onSubmitted: (strategyId: string) => void;
+  }) => (
+    <div data-testid="mock-csv-submit-step">
+      <span data-testid="csv-submit-entry-context">
+        {props.entryContext ?? "manager"}
+      </span>
+      <button
+        type="button"
+        data-testid="csv-submit-onsubmitted"
+        onClick={() => props.onSubmitted("csv-strat-final")}
+      >
+        Fire csv onSubmitted
+      </button>
+    </div>
+  ),
 }));
 
 const DRAFT = {
@@ -638,5 +717,105 @@ describe("[94.1 F2] WizardClient — dirty connect_key blocks forward stepper ju
     // Committing (or clearing) the edit re-opens forward navigation.
     fireEvent.click(screen.getByTestId("connect-clean"));
     await screen.findByTestId("wizard-step-review");
+  });
+});
+
+describe("[110-03] WizardClient — contribution-mode terminal paths", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // Drive the API branch to the submit step: mount on sync_preview (DRAFT
+  // seeds strategyId + metadataDraft), complete sync → metadata → review →
+  // submit via the enriched step stubs.
+  async function driveToSubmit() {
+    fireEvent.click(await screen.findByTestId("sync-complete"));
+    fireEvent.click(await screen.findByTestId("metadata-complete"));
+    fireEvent.click(await screen.findByTestId("review-continue"));
+    return screen.findByTestId("mock-submit-step");
+  }
+
+  it("threads entryContext='contribution' to SubmitStep and finalizes via onSuccess with NO router.push (T-110-09)", async () => {
+    const onSuccess = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <WizardClient
+        initialDraft={DRAFT}
+        entryContext="contribution"
+        onSuccess={onSuccess}
+        onClose={onClose}
+      />,
+    );
+
+    await driveToSubmit();
+    // WizardClient handed the contribution context down to the finalize step.
+    expect(screen.getByTestId("submit-entry-context")).toHaveTextContent(
+      "contribution",
+    );
+
+    // Finalize success routes through the injected callback, NOT a navigation
+    // to the 109 manager-guarded /strategies route.
+    fireEvent.click(screen.getByTestId("submit-onsubmitted"));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledWith("strat-final"));
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("defaults entryContext to 'manager' and keeps the /strategies navigation when no override is given", async () => {
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    await driveToSubmit();
+    expect(screen.getByTestId("submit-entry-context")).toHaveTextContent(
+      "manager",
+    );
+
+    // Manager mode still navigates to the list page (byte-compatible behavior).
+    fireEvent.click(screen.getByTestId("submit-onsubmitted"));
+    await waitFor(() =>
+      expect(pushMock).toHaveBeenCalledWith("/strategies?wizard_submitted=1"),
+    );
+  });
+
+  it("sourceOverride='csv' drives the CSV branch WITHOUT any route searchParams (Pitfall 3)", async () => {
+    // The overlay has no route searchParams — it passes the branch explicitly.
+    // With searchParamsString empty (the URL says 'api'), sourceOverride='csv'
+    // must still render the CSV upload step. This pins that the overlay owns the
+    // toggle. The csv-finalize `entry_context` payload is pinned in
+    // CsvSubmitStep.test.tsx (the fetch body lives in that step).
+    searchParamsString = "";
+    render(
+      <WizardClient
+        initialDraft={null}
+        entryContext="contribution"
+        sourceOverride="csv"
+        onSuccess={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(await screen.findByTestId("csv-strategy-name")).toBeInTheDocument();
+  });
+
+  it("bfcache fail-safe with no draft pointer calls onClose (NOT router.push) in contribution mode (T-110-09)", async () => {
+    const onSuccess = vi.fn();
+    const onClose = vi.fn();
+    render(
+      <WizardClient
+        initialDraft={null}
+        entryContext="contribution"
+        onSuccess={onSuccess}
+        onClose={onClose}
+      />,
+    );
+    await waitFor(() => expect(authCallback).not.toBeNull());
+
+    // loadWizardState is mocked to resolve null → no draft pointer → fail-safe.
+    const evt = new Event("pageshow");
+    Object.defineProperty(evt, "persisted", { value: true });
+    act(() => {
+      window.dispatchEvent(evt);
+    });
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(pushMock).not.toHaveBeenCalled();
   });
 });

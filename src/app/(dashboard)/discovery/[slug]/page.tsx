@@ -7,6 +7,7 @@ import {
   getRealPortfolio,
   getStrategiesByCategory,
   getMyWatchlist,
+  getPercentiles,
 } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
@@ -29,10 +30,16 @@ export default async function DiscoveryPage({
   // DB / RLS error so the page can render a "Watchlist temporarily
   // unavailable" notice instead of silently rendering every star as empty
   // (which would let the user re-toggle a row they already starred).
-  const [strategies, portfolio, watchedSet] = await Promise.all([
+  // getPercentiles is category-scoped and joins the same parallel fetch so the
+  // StrategyTable's active-sort-column `Pnn` suffix renders. It returns null for
+  // a peer set under 5 strategies (or on a transient DB/RLS error) → passed as
+  // undefined so the table renders no suffix (honest absence, never a
+  // fabricated rank).
+  const [strategies, portfolio, watchedSet, percentiles] = await Promise.all([
     getStrategiesByCategory(slug),
     getRealPortfolio(user.id),
     getMyWatchlist(user.id),
+    getPercentiles(slug),
   ]);
 
   const watchlistFailed = watchedSet === null;
@@ -78,6 +85,7 @@ export default async function DiscoveryPage({
         portfolioId={portfolio?.id ?? null}
         userId={user.id}
         initialWatchedSet={initialWatchedSet}
+        percentiles={percentiles ?? undefined}
       />
     </div>
   );

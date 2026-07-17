@@ -3,7 +3,7 @@ import { Breadcrumb } from "@/components/layout/Breadcrumb";
 import { InfoBanner } from "@/components/ui/InfoBanner";
 import { StrategyTable } from "@/components/strategy/StrategyTable";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
-import { getStrategiesByCategory } from "@/lib/queries";
+import { getStrategiesByCategory, getPercentiles } from "@/lib/queries";
 import type { Metadata } from "next";
 
 export async function generateMetadata({
@@ -29,7 +29,15 @@ export default async function PublicCategoryPage({
   const cat = DISCOVERY_CATEGORIES.find((c) => c.slug === slug);
   const meta = cat ?? { name: slug, slug, description: "" };
 
-  const strategies = await getStrategiesByCategory(slug);
+  // Category-scoped peer-percentile ranks fetched alongside the rows so the
+  // StrategyTable's active-sort-column `Pnn` suffix renders. getPercentiles
+  // returns null for a peer set under 5 strategies (or on a transient DB/RLS
+  // error) → passed as undefined so the table renders no suffix (honest
+  // absence), never a fabricated rank.
+  const [strategies, percentiles] = await Promise.all([
+    getStrategiesByCategory(slug),
+    getPercentiles(slug),
+  ]);
 
   return (
     <>
@@ -57,6 +65,7 @@ export default async function PublicCategoryPage({
         strategies={strategies}
         categorySlug={slug}
         basePath="/browse"
+        percentiles={percentiles ?? undefined}
       />
 
       <div className="mt-8 rounded-xl border border-border bg-page p-5 text-center">

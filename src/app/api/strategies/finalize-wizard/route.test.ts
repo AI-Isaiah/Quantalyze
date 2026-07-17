@@ -1656,3 +1656,131 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     fetchSpy.mockRestore();
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// CONTRIB-02 (Phase 110) — the contribution wizard entry finalizes an allocator
+// strategy to an owner-only status='private', on both the single-key API path
+// and (no per-source fork) the composite path — never 'pending_review'. The
+// manager flow (default / entry_context absent) stays byte-identical, and the
+// admin review-notify is suppressed for a private contribution while the
+// analytics enqueue is KEPT (the allocator needs KPIs in the composer).
+// ══════════════════════════════════════════════════════════════════════════
+describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default contribution", () => {
+  it("default body (no entry_context) → 200 status='pending_review' via the unified arm (byte-identical manager flow)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("pending_review");
+    // Manager single-key stays on the unified arm — legacy RPC untouched.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("entry_context='contribution' single-key API → routes through the legacy RPC with p_terminal_status='private' and returns status='private'", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // The response reflects the ACTUAL terminal status.
+    expect(body.status).toBe("private");
+    // A contribution MUST NOT ride the unified arm (which never promotes
+    // strategies.status) — it must call finalize_wizard_strategy directly
+    // with p_terminal_status='private' (W1 note, 110-01).
+    const rpc = STATE.rpcCalls.find(
+      (c) => c.name === "finalize_wizard_strategy",
+    );
+    expect(rpc).toBeDefined();
+    expect(rpc!.args.p_terminal_status).toBe("private");
+    fetchSpy.mockRestore();
+  });
+
+  it("entry_context='contribution' composite (api_key_id NULL, ≥1 member) → also finalizes 'private' (no per-source fork)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [{ api_key_id: MEMBER_KEY_1 }];
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("private");
+    const rpc = STATE.rpcCalls.find(
+      (c) => c.name === "finalize_wizard_strategy",
+    );
+    expect(rpc).toBeDefined();
+    expect(rpc!.args.p_terminal_status).toBe("private");
+    fetchSpy.mockRestore();
+  });
+
+  it("contribution: admin review-notify is SUPPRESSED but the analytics enqueue is KEPT", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.adminApiKeyId = API_KEY_ID; // so the single-key sync_trades enqueue fires
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    // Review-notify suppressed — a 'private' row is never a review candidate.
+    expect(STATE.notifyFounderCalls.length).toBe(0);
+    // Analytics enqueue retained — the allocator needs KPIs in the composer.
+    expect(
+      STATE.adminRpcCalls.find(
+        (c) =>
+          c.name === "enqueue_compute_job" &&
+          (c.args as { p_kind?: string }).p_kind === "sync_trades",
+      ),
+    ).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("neutrality: a MANAGER composite (default entry_context) STILL fires the founder review-notify — proving the suppression is contribution-specific, not a global removal", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize(); // composite, default (manager) entry_context
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("pending_review");
+    await flushAfter();
+    // Manager path notifies the founder (byte-identical pre-phase behavior).
+    expect(STATE.notifyFounderCalls.length).toBe(1);
+    fetchSpy.mockRestore();
+  });
+
+  it("entry_context='garbage' → 400 at validation, never reaches the finalize RPC", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "garbage" }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(String(body.error)).toContain("entry_context");
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+  });
+});

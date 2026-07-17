@@ -16,8 +16,9 @@ import { useSessionStorageBoolean } from "@/lib/hooks/useSessionStorageBoolean";
  *   Client useEffect reads sessionStorage post-mount and may HIDE
  *   the banner (state update — no layout shift on initial paint).
  *
- * Composition: <WarningBanner className="border-l-4 border-warning
- * bg-warning/5">. No new wrapper component.
+ * Composition: <WarningBanner className="rounded-md border border-warning/30
+ * bg-warning/5">. Full-border envelope treatment (no left stripe — banned in
+ * DESIGN.md). No new wrapper component.
  *
  * Copy: locked. Do not rephrase. The byte-identical "Connect Exchange →"
  * string also appears in EmptyState.tsx.
@@ -37,7 +38,7 @@ export function OnboardingBanner() {
   if (dismissed) return null;
 
   return (
-    <WarningBanner className="border-l-4 border-warning bg-warning/5">
+    <WarningBanner className="rounded-md border border-warning/30 bg-warning/5">
       {/*
         flex-wrap + a grouped shrink-0 actions block: the CTA Link and the
         dismiss × are kept together and never compressed. On wide/normal widths

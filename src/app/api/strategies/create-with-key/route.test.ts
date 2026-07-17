@@ -322,6 +322,63 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     expect(rpcMock).not.toHaveBeenCalled();
     consoleErr.mockRestore();
   });
+
+  // FIX 3 facet a (Phase 110.1 / DOGFOOD-3) — the Python /api/validate-key
+  // route returns only { valid, read_only }; it NEVER populates `permissions`.
+  // So a real rejection arrives as a bare read_only:false. The pre-fix code
+  // always fell through to KEY_HAS_TRADING_PERMS, asserting an UNOBSERVED trade
+  // scope. This test FAILS against that: a bare read_only:false must map to the
+  // honest KEY_NOT_READ_ONLY, not "trading permissions enabled". Key is still
+  // rejected (still 400, never encrypted/inserted).
+  it("(f) regression: bare read_only:false (NO permissions field, as Python actually returns) → KEY_NOT_READ_ONLY, not KEY_HAS_TRADING_PERMS", async () => {
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: false,
+      // permissions intentionally OMITTED — this is the real /api/validate-key
+      // shape (routers/exchange.py returns only { valid, read_only }).
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_NOT_READ_ONLY");
+    // The mislabel must be gone — we never observed a trade scope.
+    expect(json.code).not.toBe("KEY_HAS_TRADING_PERMS");
+    // Fail-closed preserved: still rejected, never encrypted or inserted.
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  // FIX 3 facet b (Phase 110.1 / DOGFOOD-3) — the Python probe fail-closed
+  // detail ("Could not verify the key's permission scopes…") previously fell
+  // through the catch classifier to code=UNKNOWN, status=500 — reading as a
+  // terminal "something went wrong, team notified" for a TRANSIENT upstream
+  // blip. This test FAILS against that: it must map to a retryable 5xx with a
+  // retry-flavored code.
+  it("(g) regression: a 'could not verify permission scopes' probe failure → retryable 5xx + KEY_PROBE_FAILED, not 500/UNKNOWN", async () => {
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error("Could not verify the key's permission scopes"),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Retryable upstream fault, NOT a terminal 500.
+    expect(res.status).toBeGreaterThanOrEqual(502);
+    expect(res.status).toBeLessThan(504);
+    expect(res.status).not.toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_PROBE_FAILED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
 });
 
 /**

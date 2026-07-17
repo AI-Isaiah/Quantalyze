@@ -585,6 +585,38 @@ describe("useScenarioState", () => {
     expect(result.current.diffCount).toBe(1);
   });
 
+  // WR-01 (Phase 112 review) — the composer's per-key single-row writer is
+  // `applyWeightOverrides(vector, basisIds, [editedRef])`: a full sum-1 vector
+  // over the ENGINE basis (per-key api_key ids), stamping ONLY the edited ref
+  // into userWeightOverrides. That ref is included-by-absence (never
+  // toggleByScopeRef === true) and rides raw equity (no defaultDraft.weightOverride),
+  // so the pre-fix diffCount `!== true` + `defaultWeight == null` guards BOTH
+  // skipped it — a real, savable per-key edit counted as ZERO, defeating the
+  // "one gesture = one edit" goal and leaving unsaved per-key edits unprotected
+  // on an entry-mode switch. It must now count as exactly ONE.
+  it("WR-01 — a single per-key weight edit (engine-basis applyWeightOverrides) increments diffCount by 1", () => {
+    const PK1 = "api-key-uuid-1";
+    const PK2 = "api-key-uuid-2";
+    const { result } = renderHook(() =>
+      useScenarioState({ holdingsSummary: HOLDINGS_2, allocatorId: ALLOCATOR_A }),
+    );
+    const before = result.current.diffCount;
+
+    act(() => {
+      // Per-key refs are absent from the holdings draft (included-by-absence);
+      // the writer stamps only PK1 (the edited ref).
+      result.current.applyWeightOverrides(
+        { [PK1]: 0.3, [PK2]: 0.7 },
+        [PK1, PK2],
+        [PK1],
+      );
+    });
+
+    expect(result.current.draft.userWeightOverrides?.[PK1]).toBeCloseTo(0.3, 9);
+    // One user gesture → exactly one diff (not zero, and not the whole basis).
+    expect(result.current.diffCount).toBe(before + 1);
+  });
+
   it("B7a-2 — editing while the fingerprint-mismatch banner is up rebases onto the default draft and clears the mismatch", () => {
     // Stored draft is a valid v1 blob but for a DIFFERENT holdings set.
     const persisted: ScenarioDraft = {

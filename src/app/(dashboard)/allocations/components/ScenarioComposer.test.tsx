@@ -114,6 +114,16 @@ vi.mock("./StrategyBrowseDrawer", () => ({
   ),
 }));
 
+// Phase 110 CONTRIB-05 — the contribution overlay is mounted by the composer as
+// a sibling of the browse drawer. Mocked to an inert spy so the composer's
+// onAddOwn/onSuccess wiring is the unit-under-test.
+vi.mock("./ContributionWizardOverlay", () => ({
+  ContributionWizardOverlay: vi.fn(
+    ({ isOpen }: { isOpen: boolean }) =>
+      isOpen ? <div data-testid="contribution-overlay-mock" /> : null,
+  ),
+}));
+
 vi.mock("./BridgeDrawer", () => ({
   BridgeDrawer: vi.fn(
     ({ isOpen }: { isOpen: boolean }) =>
@@ -295,6 +305,7 @@ import {
 import { ScenarioFactsheetChart } from "../widgets/performance/ScenarioFactsheetChart";
 import { KpiStrip } from "./KpiStrip";
 import { StrategyBrowseDrawer } from "./StrategyBrowseDrawer";
+import { ContributionWizardOverlay } from "./ContributionWizardOverlay";
 import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 // Phase 37 / DSRC-03 — the REAL per-key builder + REAL engine for the independent
 // two→one recompute oracle. The adapter is used REAL (importOriginal), and
@@ -313,6 +324,10 @@ import { sampleBasisRatios } from "@/lib/sample-basis-ratios";
 // oracle mirrors the composer's derived basis (crypto legs → √365) rather than
 // hardcoding the pre-#597 √252 default.
 import { blendPeriodsPerYear } from "@/lib/closed-sets";
+// Phase 112 (WEIGHTS-02) — the shared leverage ceiling, asserted as the max
+// attribute on the per-key leverage inputs the phase adds.
+import { MAX_LEVERAGE } from "@/lib/leverage";
+import { formatCurrency } from "@/lib/utils";
 import type { FlaggedHolding } from "../lib/holding-outcome-adapter";
 // IMPACT-02 — imported REAL (never mocked) so the R3 guard's positive control
 // renders a genuine PercentileRankBadge in isolation, proving the testid query
@@ -344,7 +359,21 @@ const localStorageMock = {
   },
   key: vi.fn(() => null),
 };
-vi.stubGlobal("localStorage", localStorageMock);
+// Global-stub isolation (file-scoped). Several tests below install a per-test
+// `vi.stubGlobal("fetch", …)`; `vi.clearAllMocks()` in the per-describe
+// beforeEach does NOT undo a stubGlobal, so without this the last fetch stub
+// leaks into every subsequent test. On Node 22 (CI's runtime) that leaked stub
+// deterministically corrupted the per-key weight/leverage/notional renders in
+// the Phase 37 + Phase 112 blocks (a real cross-test-pollution bug that Node 25
+// happened to mask). Re-establish the localStorage stub before each test and
+// clear ALL global stubs after each test so every test starts from a clean
+// global surface.
+beforeEach(() => {
+  vi.stubGlobal("localStorage", localStorageMock);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 // --- Fixtures -------------------------------------------------------------
 
@@ -389,20 +418,6 @@ const HOLDING_SOL = {
   entry_price: null as number | null,
   unrealized_pnl_usd: null as number | null,
 };
-const HOLDING_BTC_OKX = {
-  symbol: "BTC",
-  venue: "okx",
-  holding_type: "spot" as const,
-  value_usd: 20_000,
-  quantity: 0.33,
-  mark_price_usd: 60_000,
-  api_key_id: "key-okx",
-  // NEW-C03-10: required-but-nullable fields
-  side: null as "long" | "short" | "flat" | null,
-  entry_price: null as number | null,
-  unrealized_pnl_usd: null as number | null,
-};
-
 const FLAGGED_BTC: FlaggedHolding = {
   venue: "binance",
   symbol: "BTC",
@@ -469,6 +484,7 @@ function makePayload(
     minHistoryDepthMonths: 12,
     equityBaselineUnknown: false,
     activeVenues: ["Binance"],
+    hasConnectedKeys: true,
     flaggedHoldings: [],
     matchDecisionsByHoldingRef: {},
     mandate: null,
@@ -583,6 +599,63 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // T_C_CONTRIB — Phase 110 CONTRIB-05 Browse → "Add your own" → overlay chain
+  // -------------------------------------------------------------------------
+  it("T_C_CONTRIB onAddOwn closes Browse + opens the contribution overlay; overlay onSuccess reopens Browse (CONTRIB-05)", () => {
+    let capturedOnAddOwn: (() => void) | null = null;
+    let capturedOnSuccess: ((id: string) => void) | null = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAddOwn?: () => void;
+    }) => {
+      capturedOnAddOwn = props.onAddOwn ?? null;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    vi.mocked(ContributionWizardOverlay).mockImplementation(((props: {
+      isOpen: boolean;
+      onSuccess?: (id: string) => void;
+    }) => {
+      capturedOnSuccess = props.onSuccess ?? null;
+      return props.isOpen ? (
+        <div data-testid="contribution-overlay-mock" />
+      ) : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+
+    const payload = makePayload({ holdingsSummary: [] });
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    // Open Browse from the empty-state CTA.
+    fireEvent.click(
+      screen.getByRole("button", { name: /Browse strategies/i }),
+    );
+    expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
+    expect(screen.queryByTestId("contribution-overlay-mock")).toBeNull();
+
+    // The drawer's "Add your own" CTA (onAddOwn) closes Browse + opens overlay.
+    expect(capturedOnAddOwn).not.toBeNull();
+    act(() => capturedOnAddOwn!());
+    expect(screen.queryByTestId("browse-drawer-mock")).toBeNull();
+    expect(
+      screen.getByTestId("contribution-overlay-mock"),
+    ).toBeInTheDocument();
+
+    // A successful contribution closes the overlay and REOPENS Browse (which
+    // refetches per its once-per-open contract → the new private row appears).
+    expect(capturedOnSuccess).not.toBeNull();
+    act(() => capturedOnSuccess!("new-private-id"));
+    expect(screen.queryByTestId("contribution-overlay-mock")).toBeNull();
+    expect(screen.getByTestId("browse-drawer-mock")).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
   // T_C2 — Normal path renders KpiStrip / charts / composition / footer
   // -------------------------------------------------------------------------
   it("T_C2 holdingsSummary present → KpiStrip + EquityChart + DrawdownChart + composition list + Browse CTA + ScenarioFooter", () => {
@@ -597,12 +670,13 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(screen.getByTestId("kpi-strip-mock")).toBeInTheDocument();
     expect(screen.getByTestId("equity-chart-mock")).toBeInTheDocument();
     expect(screen.getByTestId("drawdown-chart-mock")).toBeInTheDocument();
-    // Read-only-tokens model: composition list renders BTC / ETH / SOL as
-    // read-only rows (symbol text), NOT interactive toggle switches.
+    // CONSTIT-01/03: the ONE unified constituent list renders; per-coin holdings
+    // are NOT rows here (they live on the Holdings tab). The default payload has
+    // no per-key sources and no added strategies → no toggle switches.
+    expect(
+      screen.getByTestId("scenario-constituent-list"),
+    ).toBeInTheDocument();
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
-    expect(screen.getByText("BTC")).toBeInTheDocument();
-    expect(screen.getByText("ETH")).toBeInTheDocument();
-    expect(screen.getByText("SOL")).toBeInTheDocument();
     // ScenarioFooter — Commit + Reset buttons
     expect(screen.getByTestId("scenario-footer-commit")).toBeInTheDocument();
     expect(screen.getByTestId("scenario-footer-reset")).toBeInTheDocument();
@@ -758,11 +832,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C6 — Read-only-tokens model: holdings render read-only (no toggle switch);
-  // each row shows its USD value. The only switches in the list are added
-  // strategies (none here).
+  // T_C6 — CONSTIT-03: per-coin holdings are NOT constituent rows. A book seed
+  // collapses to strategy/key-level constituents; per-coin detail lives on the
+  // Holdings tab. The composer's unified list must therefore carry NO
+  // `holding:`-scoped rows (and no per-holding toggle/weight/leverage).
   // -------------------------------------------------------------------------
-  it("T_C6 Composition list renders holdings read-only (no toggle switch); each row shows its USD value", () => {
+  it("T_C6 per-coin holdings are NOT rendered as constituent rows (they live on the Holdings tab)", () => {
     const payload = makePayload();
     const { container } = render(
       <ScenarioComposer
@@ -771,36 +846,19 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
         allocatorMandate={null}
       />,
     );
-    // No per-holding toggle: holdings are fixed context.
+    // No per-holding toggle: holdings are not constituents here.
     expect(screen.queryAllByRole("switch")).toHaveLength(0);
-    // BTC's read-only row shows its USD value ($60,000 from the fixture).
-    const btcRow = container.querySelector(`[data-scope-ref="${REF_BTC}"]`);
-    expect(btcRow).not.toBeNull();
-    expect((btcRow as HTMLElement).textContent ?? "").toMatch(/\$60,000/);
-    // …and no editable weight / leverage inputs on the holding row.
-    expect(btcRow?.querySelector("input")).toBeNull();
-  });
-
-  // -------------------------------------------------------------------------
-  // formatUsd0 non-finite branch — a sold-down / coingecko_fallback row can
-  // surface a non-finite value_usd; the read-only row must render "—", never
-  // "$NaN". (value_usd is typed number, so NaN is the runtime-only case.)
-  // -------------------------------------------------------------------------
-  it("read-only holding row renders '—' for a non-finite value_usd (not '$NaN')", () => {
-    const payload = makePayload({
-      holdingsSummary: [{ ...HOLDING_BTC, value_usd: Number.NaN }],
-    });
-    const { container } = render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    const btcRow = container.querySelector(`[data-scope-ref="${REF_BTC}"]`);
-    expect(btcRow).not.toBeNull();
-    expect((btcRow as HTMLElement).textContent ?? "").toContain("—");
-    expect((btcRow as HTMLElement).textContent ?? "").not.toMatch(/NaN/);
+    // No `holding:`-scoped constituent row survives the CONSTIT-03 collapse.
+    expect(
+      container.querySelector(`[data-scope-ref="${REF_BTC}"]`),
+    ).toBeNull();
+    expect(
+      container.querySelectorAll('[data-scope-ref^="holding:"]'),
+    ).toHaveLength(0);
+    // The unified list itself still renders (empty of rows for this payload).
+    expect(
+      screen.getByTestId("scenario-constituent-list"),
+    ).toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
@@ -1120,6 +1178,68 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     await waitFor(() => {
       expect(latestAssetClassLookup()[LAZY_ID]).toBeUndefined();
     });
+  });
+
+  it("T_C_PROVENANCE the widened returns body (trust_tier + is_composite, CONSTIT-02) is tolerated: the asset_class + series flow still resolves (settle-parse widening is non-breaking)", async () => {
+    // Phase 111 / CONSTIT-02 widened the lazy-returns settle to also parse
+    // trust_tier + is_composite. This guards that adding those fields to the 200
+    // body does NOT regress the existing series + asset_class settle (a revert of
+    // the widened parse, or a throw on the new fields, would fail here). Provenance
+    // itself is presentation metadata (NOT a StrategyForBuilder / engine field,
+    // Pitfall 3), so it is not observable at the computeScenario call site — its
+    // derivation is unit-pinned in `provenance.test.ts` and its badge render lands
+    // in 111-03; this test pins the wiring tolerance at the settle seam.
+    let resolveReturns: (v: unknown) => void = () => {};
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc")) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return new Promise((resolve) => {
+          resolveReturns = () =>
+            resolve({
+              ok: true,
+              status: 200,
+              // The CONSTIT-02-widened body: series + asset_class + provenance.
+              json: async () => ({
+                daily_returns: LAZY_SERIES,
+                asset_class: "crypto",
+                trust_tier: "api_verified",
+                is_composite: true,
+              }),
+            });
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+
+    addStrategy({
+      id: LAZY_ID,
+      name: "Provenance Catalog Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    await act(async () => {
+      resolveReturns(undefined);
+      await Promise.resolve();
+    });
+
+    // The engine leg still resolves its series AND asset_class — the two new
+    // provenance fields rode the same 200 body without disturbing the settle.
+    await waitFor(() => {
+      expect(latestAssetClassLookup()[LAZY_ID]).toBe("crypto");
+    });
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES);
   });
 
   it("T_C_LAZY1 add a catalog strategy → lazy GET /api/strategies/<id>/returns; once resolved the adapter's returns-lookup carries the non-empty series (and was [] before resolve)", async () => {
@@ -1862,7 +1982,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     ).toHaveAttribute("aria-checked", "true");
     // The calm DSRC-02 note still renders (repointed to hasLiveBook, so forcing
     // blank does NOT silently drop it) — never a broken or empty book UI.
-    const fallback = screen.getByTestId("scenario-data-sources-fallback");
+    const fallback = screen.getByTestId("scenario-constituent-fallback");
     expect(fallback).toBeInTheDocument();
     expect(
       screen.getByText(/Per-source modeling needs per-key history\./i),
@@ -1914,7 +2034,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.getByRole("radio", { name: /From my book/i }),
     ).toHaveAttribute("aria-checked", "true");
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
   });
 
@@ -1933,7 +2053,7 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     );
     // No live book → the note (which needs hasLiveBook + eligible keys) is absent.
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
   });
 
@@ -1995,13 +2115,20 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.queryByText(/Your live holdings have changed/i),
     ).not.toBeInTheDocument();
     // (2) The working draft carries the saved book (3 holdings toggled on) — the
-    //     diff-count footer reflects the APPLIED draft (Commit enabled), NOT the
-    //     empty blank default (Commit disabled) the pre-fix hook fell back to.
+    //     dirty-count footer reflects the APPLIED draft ("3 changes"), NOT the
+    //     empty blank default ("No changes yet") the pre-fix hook fell back to.
     //     This is the "Update persists what is shown" oracle: the working draft
     //     is the saved book, so a save round-trips the book — no blank-default
     //     overwrite / silent data loss.
-    expect(screen.getByTestId("scenario-footer-commit")).not.toBeDisabled();
+    //
+    //     111-05: the DIRTY-COUNT chip ("3 changes") is the distinguishing
+    //     oracle here, NOT the Commit button. A book-only draft (holdings toggled
+    //     on, no strategy added) is dirty-but-uncommittable under the
+    //     read-only-tokens model (`handleCommit` emits only voluntary_add diffs),
+    //     so Commit is correctly DISABLED — as it is for the blank default too.
+    //     Asserting the dirty chip is what separates applied-book from blank.
     expect(screen.getByText(/3 changes/i)).toBeInTheDocument();
+    expect(screen.getByTestId("scenario-footer-commit")).toBeDisabled();
   });
 
   // -------------------------------------------------------------------------
@@ -2087,26 +2214,11 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C16 — Compare → for flagged-holding rows
+  // (Removed T_C16) — CONSTIT-03 deletes the per-coin holding rows from the
+  // composer's constituent list, so the per-row inline "Compare →" deep-link is
+  // gone with them. The Bridge / Compare flow survives via the Bridge inline
+  // card + BridgeDrawer ("Open Bridge"), covered by T_C8 / the Bridge suite.
   // -------------------------------------------------------------------------
-  it("T_C16 Composition row for a flagged holding renders a Compare → button routing to /compare?ids=...", () => {
-    const payload = makePayload({ flaggedHoldings: [FLAGGED_BTC] });
-    render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    const compareBtn = screen.getByRole("button", { name: /^Compare →$/i });
-    fireEvent.click(compareBtn);
-    expect(mockPush).toHaveBeenCalled();
-    const url = String(mockPush.mock.calls[0][0]);
-    expect(url).toContain("/compare?ids=");
-    // URL encodes the colons in the scope_ref (encodeURIComponent gives %3A)
-    expect(url).toMatch(/holding(?:%3A|:)binance(?:%3A|:)BTC(?:%3A|:)spot/);
-    expect(url).toContain("uuid-candidate-1");
-  });
 
   // -------------------------------------------------------------------------
   // T_C17 — Remove × on added strategies
@@ -2473,31 +2585,12 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // T_C_M5_multi_venue_tooltip (M5) — multi-venue caveat
-  //   Aliases the RESEARCH-spec'd `T03_multi_venue_correlation` test name.
+  // (Removed T_C_M5_multi_venue_tooltip) — the per-coin "Returns merged with"
+  // caveat lived on the read-only holding rows, which CONSTIT-03 removes from the
+  // composer (per-coin detail is a Holdings-tab concern). The merged-returns
+  // BEHAVIOR (same-symbol holdings fold into one per-key series) is engine-level
+  // and unaffected; only the row-level tooltip moved off this surface.
   // -------------------------------------------------------------------------
-  it("T_C_M5_multi_venue_tooltip / T03_multi_venue_correlation: multi-venue rows surface 'Returns merged with' tooltip; non-shared rows don't", () => {
-    const payload = makePayload({
-      holdingsSummary: [HOLDING_BTC, HOLDING_BTC_OKX, HOLDING_ETH],
-    });
-    const { container } = render(
-      <ScenarioComposer
-        payload={payload}
-        allocatorId={ALLOCATOR_A}
-        allocatorMandate={null}
-      />,
-    );
-    // Both BTC rows render the multi-venue caveat (read-only rows keep it).
-    const tooltips = screen.getAllByText(/Returns merged with/i);
-    expect(tooltips.length).toBeGreaterThanOrEqual(2);
-    // ETH row has no shared symbol — no caveat. Located by data-scope-ref since
-    // holdings no longer render a toggle switch.
-    const ethRow = container.querySelector(`[data-scope-ref="${REF_ETH}"]`);
-    expect(ethRow).not.toBeNull();
-    expect(
-      (ethRow as HTMLElement).textContent ?? "",
-    ).not.toMatch(/Returns merged with/i);
-  });
 
   // -------------------------------------------------------------------------
   // T_C_M4_live_ssr_lifted (M4) — live baseline read from payload
@@ -3035,19 +3128,26 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
-  // F-01 regression — empty diff guard is NOT silent
+  // F-01 regression — an uncommittable (exclusion/stale-toggle-only) draft must
+  // keep Commit DISABLED, so the empty-diff dead-end is never reachable via the
+  // button.
   //
   // Scenario: seed a draft whose fingerprint MATCHES the current holdings
   // (so the draft is loaded as-is, no fingerprint mismatch banner), but
   // includes an extra toggle-off entry for a holding NOT in holdingsSummary.
-  // diffCount counts the stale toggle as 1 diff → button enabled.
-  // handleCommit's holdingsSummary.find() skips the stale holding →
-  // diffs.length===0 → F-01 guard fires.
+  // diffCount counts the stale toggle as 1 diff (the draft is dirty), but there
+  // is NO added strategy → `handleCommit` would emit zero diffs and hit the F-01
+  // guard.
   //
-  // Before this fix: handleCommit returned silently with no user feedback.
-  // After: it calls setCommitError so an alert appears.
+  // 111-05 (red-team HIGH fix): pre-fix the footer gated Commit on diffCount, so
+  // the button was ENABLED and clicking it dead-ended at the misleading F-01
+  // "Nothing to commit" error. The fix gates Commit on the COMMITTABLE count
+  // (added strategies), so the button is DISABLED here and the dead-end is never
+  // reached from the UI. The F-01 setCommitError guard REMAINS in `handleCommit`
+  // as a defense-in-depth backstop (kept, not weakened), now unreachable by
+  // design via the disabled button.
   // -------------------------------------------------------------------------
-  it("F-01: handleCommit with stale toggle (holding no longer in holdingsSummary) shows 'Nothing to commit' error", () => {
+  it("F-01: an uncommittable stale-toggle-only draft keeps Commit DISABLED (dirty chip still shows) and cannot reach the 'Nothing to commit' dead-end", () => {
     const payload = makePayload();
     const STALE_REF = "holding:kraken:DOT:spot"; // NOT in holdingsSummary
 
@@ -3098,20 +3198,25 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       screen.queryByText(/Your live holdings have changed/i),
     ).toBeNull();
 
-    // Footer Commit must be enabled (diffCount=1 from the stale toggle).
-    const commitBtn = screen.getByTestId("scenario-footer-commit") as HTMLButtonElement;
-    expect(commitBtn.disabled).toBe(false);
+    // The stale toggle makes the draft DIRTY (diffCount=1 → "1 change" chip,
+    // CF-05) — the dirty indicator still counts the exclusion.
+    expect(screen.getByText(/1 change/i)).toBeInTheDocument();
 
+    // 111-05: Commit is DISABLED — there is no committable (voluntary_add) diff,
+    // so the button never advertises the change that would dead-end at F-01.
+    const commitBtn = screen.getByTestId("scenario-footer-commit") as HTMLButtonElement;
+    expect(commitBtn.disabled).toBe(true);
+
+    // Clicking the disabled button is a no-op: no F-01 error surfaces and the
+    // commit handler never runs (the dead-end is unreachable from the UI).
     act(() => {
       fireEvent.click(commitBtn);
     });
-
-    // F-01: error banner must appear (not a silent return).
-    const alerts = screen.getAllByRole("alert");
     expect(
-      alerts.some((a) => /Nothing to commit/i.test(a.textContent ?? "")),
-    ).toBe(true);
-    // onCommitRequested must NOT be called (no diffs to hand off).
+      screen.queryAllByRole("alert").some((a) =>
+        /Nothing to commit/i.test(a.textContent ?? ""),
+      ),
+    ).toBe(false);
     expect(onCommitRequested).not.toHaveBeenCalled();
   });
 
@@ -4359,8 +4464,9 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
 // Phase 37 / DSRC-02 + DSRC-03 — honest per-data-source toggle
 // ===========================================================================
 //
-// The load-bearing suite. The "Data sources" control lets a book allocator
-// include/exclude each connected exchange api_key from the projection; toggling
+// The load-bearing suite. Each per-key exchange source is a constituent row in
+// the unified list (CONSTIT-01); its include/exclude toggle lets a book allocator
+// drop each connected exchange api_key from the projection; toggling
 // a source off must HONESTLY recompute the curve + every KPI from the remaining
 // per-key series (DSRC-03), never a cosmetic hide. These tests drive the REAL
 // per-key builder + REAL frozen computeScenario (only the former holdings-snapshot builder
@@ -4530,49 +4636,54 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   }
 
   // -------------------------------------------------------------------------
-  // DSRC-02 — gating: present in book mode + gate satisfied
+  // CONSTIT-01 — per-key sources render as uniform constituent rows in the ONE
+  // unified list (no separate "Data sources" section / group).
   // -------------------------------------------------------------------------
-  it("DSRC-02 book mode + D3 gate satisfied → Data sources control renders one row per eligible key with the group accessible name", () => {
+  it("CONSTIT-01 book mode + D3 gate satisfied → each eligible key is a constituent row in the unified list (no separate Data-sources group)", () => {
     renderPerKey(makePerKeyPayload());
-    const group = screen.getByRole("group", { name: "Data sources" });
-    expect(group).toBeInTheDocument();
-    expect(group).toHaveAttribute("data-testid", "scenario-data-sources");
-    // One switch per eligible key, each with its per-row aria-label.
-    const switches = within(group).getAllByRole("switch");
-    expect(switches).toHaveLength(2);
+    // The separate Data-sources section is GONE — no such group anywhere.
     expect(
-      screen.getByRole("switch", {
+      screen.queryByRole("group", { name: "Data sources" }),
+    ).not.toBeInTheDocument();
+    // The unified constituent list holds one per-key constituent row per key.
+    const list = screen.getByTestId("scenario-constituent-list");
+    const perKeyRows = within(list).getAllByTestId("scenario-constituent-perkey");
+    expect(perKeyRows).toHaveLength(2);
+    // One switch per eligible key, each with its per-row aria-label — now inside
+    // the unified list.
+    expect(
+      within(list).getByRole("switch", {
         name: "Include Binance — Main desk in projection",
       }),
     ).toBeInTheDocument();
     // key-B has no nickname → masked tail (last 4 of the id).
     expect(
-      screen.getByRole("switch", {
+      within(list).getByRole("switch", {
         name: "Include OKX — ••••ey-B in projection",
       }),
     ).toBeInTheDocument();
-    // No InfoBanner fallback when the control IS shown.
+    // No InfoBanner fallback when the sources ARE shown.
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
   });
 
   // -------------------------------------------------------------------------
   // DSRC-02 — gating: absent in blank mode
   // -------------------------------------------------------------------------
-  it("DSRC-02 blank mode → no Data sources control, no InfoBanner, no EmptyStateCard for this control", () => {
+  it("DSRC-02 blank mode → no per-key constituent rows, no InfoBanner, no EmptyStateCard", () => {
     // No live book → blank mode is forced (entry-mode book segment absent).
     renderPerKey(
       makePerKeyPayload({ holdingsSummary: [] }),
     );
     expect(
-      screen.queryByTestId("scenario-data-sources"),
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
+    expect(
+      screen.queryByTestId("scenario-constituent-fallback"),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByTestId("scenario-data-sources-fallback"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByTestId("scenario-data-sources-empty"),
+      screen.queryByTestId("scenario-constituent-empty"),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("group", { name: "Data sources" }),
@@ -4582,14 +4693,14 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   // -------------------------------------------------------------------------
   // DSRC-02 — gating: gate NOT satisfied → control hidden, calm InfoBanner note
   // -------------------------------------------------------------------------
-  it("DSRC-02 book mode + D3 gate NOT satisfied → control hidden, InfoBanner fallback note (NOT role=alert)", () => {
+  it("DSRC-02 book mode + D3 gate NOT satisfied → no per-key rows, InfoBanner fallback note (NOT role=alert)", () => {
     renderPerKey(
       makePerKeyPayload({ perKeyDailiesGateSatisfied: false }),
     );
     expect(
-      screen.queryByTestId("scenario-data-sources"),
-    ).not.toBeInTheDocument();
-    const fallback = screen.getByTestId("scenario-data-sources-fallback");
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
+    const fallback = screen.getByTestId("scenario-constituent-fallback");
     expect(fallback).toBeInTheDocument();
     expect(
       screen.getByText(/Per-source modeling needs per-key history\./i),
@@ -4658,13 +4769,63 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
-  // Review WR-02 — the ephemeral per-source include map must NOT survive a
-  // draft replacement. Excluding a source then opening a saved scenario must
-  // start the opened scenario with every source included again (the toggle is
-  // not persisted; a stale exclusion would silently omit a source the user
-  // never excluded for THIS scenario — a cosmetic-hide-by-leak regression).
+  // 111-05 (red-team HIGH) — an EXCLUSION-ONLY draft must NOT enable Commit.
+  //
+  // Repro the dead-end the red team traced: book mode, per-key gate satisfied,
+  // NO strategy added → toggle one data source off. That makes the draft dirty
+  // (diffCount counts the toggle → the footer shows "1 change"), but
+  // `handleCommit` emits ONLY voluntary_add diffs from added strategies — of
+  // which there are none — so clicking Commit would hit the F-01 "Nothing to
+  // commit" guard. The button must therefore stay DISABLED for an exclusion-only
+  // draft, and only become enabled once a committable change (an added strategy)
+  // exists. This guards the WIRING: the composer must pass the committable count
+  // (addedStrategies.length), NOT the raw diffCount, to the footer.
   // -------------------------------------------------------------------------
-  it("review WR-02 opening a saved scenario clears the ephemeral per-source exclusion (toggle resets to all-included)", () => {
+  it("111-05 exclusion-only draft (source toggled off, no strategy added) keeps Commit DISABLED; adding a strategy enables it — while the exclusion still shows as a dirty change", () => {
+    renderPerKey(makePerKeyPayload());
+
+    const commit = screen.getByTestId(
+      "scenario-footer-commit",
+    ) as HTMLButtonElement;
+    // Clean draft → Commit disabled.
+    expect(commit.disabled).toBe(true);
+
+    // Toggle key-B OFF — an exclusion, the ONLY change in the draft.
+    const switchB = screen.getByRole("switch", {
+      name: "Include OKX — ••••ey-B in projection",
+    });
+    fireEvent.click(switchB);
+    expect(switchB).toHaveAttribute("aria-checked", "false");
+
+    // The exclusion IS a dirty change (CF-05): the footer's dirty chip reflects
+    // it, so save / mode-switch-park still treat the draft as dirty…
+    expect(screen.getByText(/1 change/i)).toBeInTheDocument();
+    // …but it is NOT committable: `handleCommit` would emit zero diffs and hit
+    // the F-01 guard, so the button MUST remain disabled (this is the bug —
+    // pre-fix the footer gated on diffCount and enabled Commit here).
+    expect(commit.disabled).toBe(true);
+
+    // Adding a strategy introduces a committable (voluntary_add) diff → enabled.
+    addStrategy({
+      id: "strat-111-05",
+      name: "Committable Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    expect(commit.disabled).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Review WR-02 (survives CONSTIT-03) — a per-key exclusion must NOT leak
+  // across a draft replacement. Under CONSTIT-03 the exclusion lives in
+  // `draft.toggleByScopeRef`, so opening a saved scenario (which REPLACES the
+  // draft via hydrateFromSaved) adopts that scenario's own per-source state: a
+  // saved draft with no key-B exclusion shows key-B included again. The
+  // no-cross-scenario-leak invariant now holds via draft replacement rather than
+  // an ephemeral-map reset — a stale exclusion can never silently omit a source
+  // the user never excluded for THIS scenario.
+  // -------------------------------------------------------------------------
+  it("review WR-02 opening a saved scenario adopts its own per-source state (a no-exclusion saved draft shows every source included)", () => {
     let openSaved:
       | ((row: { id: string; name: string; draft: unknown }) => void)
       | null = null;
@@ -4700,9 +4861,10 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       openSaved?.({ id: "saved-1", name: "Saved scenario", draft: validDraft });
     });
 
-    // The exclusion must NOT carry over — every source included again. Without
-    // the WR-02 fix (setIncludeByApiKeyId({}) on open) this stays aria-checked
-    // "false" and the opened scenario silently omits key-B.
+    // The exclusion must NOT carry over — the opened scenario's own draft has no
+    // key-B exclusion, and hydrateFromSaved replaces the working draft, so key-B
+    // is included again. If a stale exclusion leaked across the replacement this
+    // would stay aria-checked "false" and silently omit key-B.
     expect(
       screen.getByRole("switch", {
         name: "Include OKX — ••••ey-B in projection",
@@ -4731,15 +4893,16 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       }),
     );
 
-    // Honest empty card renders with the exact copy.
-    const emptyCard = screen.getByTestId("scenario-data-sources-empty");
+    // Honest empty card renders with the exact copy (re-homed onto the unified
+    // constituent model).
+    const emptyCard = screen.getByTestId("scenario-constituent-empty");
     expect(emptyCard).toBeInTheDocument();
     expect(
-      screen.getByText("Select at least one data source"),
+      screen.getByText("Select at least one source"),
     ).toBeInTheDocument();
     expect(
       screen.getByText(
-        /Every data source is excluded — there's nothing to project\./i,
+        /Every source is excluded — there's nothing to project\./i,
       ),
     ).toBeInTheDocument();
     // Honest absence — not an error.
@@ -4760,7 +4923,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       }),
     );
     expect(
-      screen.queryByTestId("scenario-data-sources-empty"),
+      screen.queryByTestId("scenario-constituent-empty"),
     ).not.toBeInTheDocument();
     const restored = lastKpiScenarioMetrics();
     const aOnly = independentRecompute(["key-A"]);
@@ -4809,11 +4972,14 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       }),
     );
 
-    // Only the two ELIGIBLE keys get a toggle row — no row for key-C (Bybit).
-    const group = screen.getByRole("group", { name: "Data sources" });
-    expect(within(group).getAllByRole("switch")).toHaveLength(2);
+    // Only the two ELIGIBLE keys get a constituent row — no row for key-C
+    // (Bybit). Rows now live in the unified list, not a separate group.
+    const list = screen.getByTestId("scenario-constituent-list");
     expect(
-      within(group).queryByRole("switch", { name: /Bybit/i }),
+      within(list).getAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(2);
+    expect(
+      within(list).queryByRole("switch", { name: /Bybit/i }),
     ).toBeNull();
 
     // Exclude BOTH toggleable (eligible) sources.
@@ -4834,7 +5000,7 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     // residue) would keep driving a non-empty projection here — a silent honesty
     // violation. This assertion fails loudly if that filter is ever removed.
     expect(
-      screen.getByTestId("scenario-data-sources-empty"),
+      screen.getByTestId("scenario-constituent-empty"),
     ).toBeInTheDocument();
     const allOff = lastKpiScenarioMetrics();
     expect(allOff?.sharpe).toBeNull();
@@ -4843,9 +5009,14 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
-  // DSRC-03 / Pitfall 5 — ephemeral: a toggle never changes diffCount / commit
+  // CONSTIT-03 (supersedes Phase-66 CF-05) — a per-key exclusion is now a
+  // DRAFT CHANGE. It rides the ONE `toggleByScopeRef` channel every other
+  // constituent uses, so it persists with the draft AND counts toward diffCount
+  // exactly like an added-strategy toggle. This is the intended supersession of
+  // the old "transient / never in the diff" behavior. (Re-including deletes the
+  // ref → back to the zero-diff baseline.)
   // -------------------------------------------------------------------------
-  it("Pitfall 5 toggling a data source off does NOT change diffCount (ephemeral — never in the commit diff)", () => {
+  it("CONSTIT-03 toggling a per-key source off is a draft change: diffCount increments (persists via toggleByScopeRef); re-including returns to the zero-diff baseline", () => {
     renderPerKey(makePerKeyPayload());
 
     // Fresh draft seeded from the live book → no diff yet. The Commit button is
@@ -4858,17 +5029,25 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     expect(screen.getAllByText("No changes yet").length).toBeGreaterThan(0);
     expect(commit.disabled).toBe(true);
 
-    // Toggle a source off — exclusion recomputes the projection but must NOT
-    // enter the draft / commit diff.
+    // Exclude a source — CONSTIT-03: this writes `toggleByScopeRef[key]=false`,
+    // so it registers as a draft change (diffCount → 1) just like any other
+    // constituent toggle. "No changes yet" is gone.
     fireEvent.click(
       screen.getByRole("switch", {
         name: "Include OKX — ••••ey-B in projection",
       }),
     );
+    expect(screen.queryAllByText("No changes yet")).toHaveLength(0);
 
-    // diffCount unchanged — still "No changes yet", Commit still disabled. If the
-    // toggle leaked into scenario.draft (e.g. via toggleByScopeRef) diffCount
-    // would increment and the button would enable — this asserts it does not.
+    // Re-include (deletes the ref → absent === included) → back to the zero-diff
+    // baseline: "No changes yet" returns and Commit disables again. This proves
+    // the exclusion lived in the draft (not a cosmetic overlay) and is cleanly
+    // reversible without perturbing the added/holding weight set.
+    fireEvent.click(
+      screen.getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      }),
+    );
     expect(screen.getAllByText("No changes yet").length).toBeGreaterThan(0);
     expect(commit.disabled).toBe(true);
   });
@@ -4903,16 +5082,17 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
   });
 
   // -------------------------------------------------------------------------
-  // DSRC-02 (a11y) — per-row aria-label + aria-checked state + group name
+  // DSRC-02 (a11y) — per-row aria-label + aria-checked state, now on unified-list
+  // constituent rows (no separate group).
   // -------------------------------------------------------------------------
-  it("DSRC-02 a11y each toggle carries aria-label + aria-checked, the group is named, and excluded flips aria-checked", () => {
+  it("DSRC-02 a11y each per-key toggle carries aria-label + aria-checked in the unified list, and excluded flips aria-checked", () => {
     renderPerKey(makePerKeyPayload());
 
-    const group = screen.getByRole("group", { name: "Data sources" });
-    const switchA = within(group).getByRole("switch", {
+    const list = screen.getByTestId("scenario-constituent-list");
+    const switchA = within(list).getByRole("switch", {
       name: "Include Binance — Main desk in projection",
     });
-    const switchB = within(group).getByRole("switch", {
+    const switchB = within(list).getByRole("switch", {
       name: "Include OKX — ••••ey-B in projection",
     });
     // Default included.
@@ -4923,6 +5103,1316 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
     fireEvent.click(switchA);
     expect(switchA).toHaveAttribute("aria-checked", "false");
     expect(switchB).toHaveAttribute("aria-checked", "true");
+  });
+
+  // =========================================================================
+  // Phase 111 / CONSTIT-01/02/03 — the three named intent groups for the
+  // composer reshape. These pin the unified-list model directly (rather than
+  // via the pre-existing DSRC honesty tests), across all four badge variants
+  // and the shared toggle channel.
+  // =========================================================================
+
+  /** A BOOK catalog strategy (so adding it needs no lazy fetch) carrying the
+   *  given presentation provenance on `strategy.trust_tier` / `is_composite`. */
+  function bookStratWithProvenance(
+    id: string,
+    name: string,
+    prov: { trust_tier?: string | null; is_composite?: boolean },
+  ) {
+    const base = catalogStrategy(id, name, KEY_A_SERIES);
+    return {
+      ...base,
+      strategy: { ...base.strategy, ...prov },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any;
+  }
+
+  describe("unified constituent list", () => {
+    it("renders every source as ONE row in a single list — per-key + added interleaved, NO separate Data-Sources section", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [bookStratWithProvenance("uni-added", "Uni Added", {})],
+        }),
+      );
+      addStrategy({
+        id: "uni-added",
+        name: "Uni Added",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+
+      // Exactly ONE unified constituent list.
+      expect(screen.getAllByTestId("scenario-constituent-list")).toHaveLength(1);
+      const list = screen.getByTestId("scenario-constituent-list");
+      // Per-key sources AND the added strategy are rows in the SAME list.
+      expect(
+        within(list).getAllByTestId("scenario-constituent-perkey"),
+      ).toHaveLength(2);
+      expect(
+        within(list).getAllByTestId("scenario-constituent-added"),
+      ).toHaveLength(1);
+      // The separate "Data sources" section/group is DELETED.
+      expect(
+        screen.queryByRole("group", { name: "Data sources" }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  describe("provenance badge", () => {
+    it("per-key rows badge api_verified by construction", () => {
+      renderPerKey(makePerKeyPayload());
+      const list = screen.getByTestId("scenario-constituent-list");
+      const rows = within(list).getAllByTestId("scenario-constituent-perkey");
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        expect(within(row).getByTestId("trust-tier-label")).toHaveAttribute(
+          "data-trust-tier",
+          "api_verified",
+        );
+      }
+    });
+
+    it("added rows badge the derived variant (csv / composite) and show NO badge when provenance is null", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [
+            bookStratWithProvenance("added-csv", "Added CSV", {
+              trust_tier: "csv_uploaded",
+            }),
+            bookStratWithProvenance("added-comp", "Added Comp", {
+              is_composite: true,
+            }),
+            bookStratWithProvenance("added-none", "Added None", {}),
+          ],
+        }),
+      );
+      for (const id of ["added-csv", "added-comp", "added-none"]) {
+        addStrategy({
+          id,
+          name: id,
+          markets: ["binance"],
+          strategy_types: ["momentum"],
+        });
+      }
+      const list = screen.getByTestId("scenario-constituent-list");
+      const rowOf = (id: string) =>
+        list.querySelector(`[data-scope-ref="${id}"]`) as HTMLElement;
+
+      // csv_uploaded tier → its badge variant.
+      expect(
+        within(rowOf("added-csv")).getByTestId("trust-tier-label"),
+      ).toHaveAttribute("data-trust-tier", "csv_uploaded");
+      // is_composite === true → the 4th composite variant (composite > tier).
+      expect(
+        within(rowOf("added-comp")).getByTestId("trust-tier-label"),
+      ).toHaveAttribute("data-trust-tier", "composite");
+      // No tier, not composite → honest absence: NO badge.
+      expect(
+        within(rowOf("added-none")).queryByTestId("trust-tier-label"),
+      ).toBeNull();
+    });
+  });
+
+  describe("shared toggle", () => {
+    it("per-key + added rows toggle through the SAME switch mechanism; a per-key toggle leaves added weights byte-identical (Phase 112 fence)", () => {
+      renderPerKey(
+        makePerKeyPayload({
+          strategies: [
+            bookStratWithProvenance("shared-add", "Shared Add", {}),
+          ],
+        }),
+      );
+      addStrategy({
+        id: "shared-add",
+        name: "Shared Add",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+
+      const list = screen.getByTestId("scenario-constituent-list");
+      // Both row kinds expose a role="switch" toggle inside the one list.
+      const perKeySwitch = within(list).getByRole("switch", {
+        name: "Include OKX — ••••ey-B in projection",
+      });
+      const addedSwitch = within(list).getByRole("switch", {
+        name: /Toggle Shared Add on\/off/i,
+      });
+      expect(perKeySwitch).toBeInTheDocument();
+      expect(addedSwitch).toBeInTheDocument();
+
+      // The added weight BEFORE a per-key toggle. With CR-01 (Phase 112 review)
+      // the added row now displays its NORMALIZED blend share (same basis as the
+      // per-key rows), not the raw stored weightOverride. Book key-A $70k / key-B
+      // $30k + shared-add stored weight 1/3 → engine masses 0.7 / 0.3 / 0.3333,
+      // Σ 1.3333 → shared-add blend share 0.250.
+      const shareBefore = (
+        screen.getByLabelText("Shared Add weight") as HTMLInputElement
+      ).value;
+      expect(shareBefore).toBe("0.250");
+
+      // Toggling a per-key source flips the shared toggleByScopeRef channel…
+      fireEvent.click(perKeySwitch);
+      expect(perKeySwitch).toHaveAttribute("aria-checked", "false");
+
+      // …and the added row's DISPLAYED share honestly re-normalizes: excluding
+      // key-B shrinks the denominator to 0.7 + 0.3333 = 1.0333, so shared-add's
+      // share rises to 0.3333 / 1.0333 = 0.323. This is honest (an exclusion
+      // shrinks the blend basis), NOT a rescale of the stored weightOverride.
+      const shareExcluded = (
+        screen.getByLabelText("Shared Add weight") as HTMLInputElement
+      ).value;
+      expect(shareExcluded).toBe("0.323");
+
+      // The TRUE fence — togglePerKeySource never rescales the STORED added
+      // weightOverride (weight editing is Phase 112): re-including key-B restores
+      // the exact pre-toggle blend share. A stored-weight rescale would not
+      // round-trip.
+      fireEvent.click(perKeySwitch);
+      expect(perKeySwitch).toHaveAttribute("aria-checked", "true");
+      const shareRestored = (
+        screen.getByLabelText("Shared Add weight") as HTMLInputElement
+      ).value;
+      expect(shareRestored).toBe(shareBefore);
+    });
+  });
+});
+
+// ===========================================================================
+// Phase 112 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-01/02 per-key row inputs.
+//
+// The per-key constituent rows carry NO weight/leverage inputs today (the
+// "Phase 112 fence" at ScenarioComposer.tsx:4847-4850). Phase 112 extends the
+// SAME weight + leverage inputs the added rows already render onto the per-key
+// rows, keyed by api_key_id (the engine unit id). Every test below FAILS on the
+// current tree because those inputs do not exist yet — the failure is a
+// missing-element query, never a harness/import crash.
+//
+// Fixture: two eligible per-key sources (equity 60k / 40k → merged equity shares
+// 0.6 / 0.4) and one added strategy A carrying weightOverride 0.5. Mixed engine
+// mass = 0.6 + 0.4 + 0.5 = 1.5 → effective shares K1 0.4, K2 0.2667, A 0.3333.
+// ===========================================================================
+describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffold)", () => {
+  const K1 = "pk-112-k1"; // per-key unit id (api_key_id)
+  const K2 = "pk-112-k2"; // per-key unit id (api_key_id)
+  const A_ID = "strat-112-a"; // added strategy id
+
+  // ≥10 points so the engine clears its n<10 floor; two materially different
+  // series so a leverage edit on one moves the blend volatility.
+  const P112_DATES = Array.from({ length: 14 }, (_, i) =>
+    `2026-03-${String(i + 1).padStart(2, "0")}`,
+  );
+  const K1_SERIES = P112_DATES.map((date, i) => ({
+    date,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const K2_SERIES = P112_DATES.map((date, i) => ({
+    date,
+    value: [-0.02, 0.03, -0.04, 0.02, -0.01][i % 5],
+  }));
+  const A_SERIES = P112_DATES.map((date, i) => ({
+    date,
+    value: [0.01, -0.008, 0.012][i % 3],
+  }));
+
+  const SWITCH_K1 = `Include Binance — ${K1} in projection`;
+
+  function make112Payload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([
+        { id: K1, returns: K1_SERIES, valueUsd: 60_000 },
+        { id: K2, returns: K2_SERIES, valueUsd: 40_000 },
+      ]),
+      apiKeys: [winApiKey(K1), winApiKey(K2)],
+      strategies: [catalogStrategy(A_ID, "Strat A 112", A_SERIES)],
+    });
+  }
+
+  function render112() {
+    render(
+      <ScenarioComposer
+        payload={make112Payload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** Add A and pin its weight to 0.5 so the mixed engine mass is 1.5 (the
+   *  effective-share fixture). The added-row weight input EXISTS today. */
+  function addAWithWeightHalf() {
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const wA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(wA, { target: { value: "0.5" } });
+    });
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // (a-weight) [112-01 — GREEN] — each per-key row renders a weight input (min 0),
+  // disabled when the row is excluded. Split from the original combined (a) so
+  // Plan 01 (weights) exits with zero unexpected reds; the leverage half below
+  // stays RED for Plan 02. Weight input keyed by api_key_id (the engine unit id).
+  it("(a-weight) — each per-key row renders a weight input (min 0), disabled when excluded", () => {
+    render112();
+    const list = screen.getByTestId("scenario-constituent-list");
+    expect(
+      within(list).getAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(2);
+
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
+    expect(w1).not.toBeNull();
+    expect(w1!.getAttribute("min")).toBe("0");
+
+    // Excluding the row disables the weight input (the added-row disabled
+    // contract, mirrored onto per-key rows).
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+    expect(
+      (document.getElementById(`weight-${K1}`) as HTMLInputElement).disabled,
+    ).toBe(true);
+  });
+
+  // (a-leverage) [112-02 — RED] — each per-key row renders a leverage input
+  // bounded [0, MAX_LEVERAGE], disabled when excluded. Stays RED until Plan 02
+  // adds the per-key leverage input; Plan 01 renders only the weight input.
+  it("(a-leverage) RED — each per-key row renders a leverage input bounded [0, MAX_LEVERAGE], disabled when excluded", () => {
+    render112();
+    const l1 = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    // The RED assertions — the per-key leverage input does not exist yet (Plan 02).
+    expect(l1).not.toBeNull();
+    expect(l1!.getAttribute("min")).toBe("0");
+    expect(l1!.getAttribute("max")).toBe(String(MAX_LEVERAGE));
+
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+    expect(
+      (document.getElementById(`leverage-${K1}`) as HTMLInputElement).disabled,
+    ).toBe(true);
+  });
+
+  // (b) — typing a per-key weight renormalizes over the ENGINE-unit basis
+  // {K1,K2,A}, sum 1. The typed value is honored and the OTHER two engine units
+  // scale proportionally by their blend share.
+  //
+  // Numbers re-derived for CR-01 (Phase 112 review). Pre-fix, addAWithWeightHalf's
+  // A edit routed through the legacy `setWeightOverride` (whose `enabledIdsOf`
+  // basis excludes the per-key units), leaving projectionState = {K1:0.6, K2:0.4,
+  // A:0.5} (raw equity vs a fraction) → blend shares 0.4 / 0.2667 / 0.3333; typing
+  // 0.3 into K1 then scaled the other two over the remaining 0.7 → 0.3111 / 0.3889.
+  // That state was the BUG: the added row's typed 0.5 was NOT the honest blend
+  // share (0.3333). Post-fix BOTH edits route through the engine basis:
+  //   1. addAWithWeightHalf (A → 0.5): pre-edit projectionState = {K1:0.6, K2:0.4,
+  //      A:0.3333 (the 1/3 default a 3rd add seeds)} → blend {K1:0.45, K2:0.30,
+  //      A:0.25}. otherSum(K1,K2)=0.75, remaining 0.5, scale 0.6667 →
+  //      vector {A:0.5, K1:0.3, K2:0.2}, sum 1. weightOverrides now K1 0.3 / K2 0.2
+  //      / A 0.5, so blend {K1:0.3, K2:0.2, A:0.5}.
+  //   2. typing 0.3 into K1: otherSum(K2,A)=0.7, remaining 0.7, scale 1.0 →
+  //      vector {K1:0.3, K2:0.2, A:0.5} (identity — K1 was already 0.3).
+  // Honest result: K1 0.300 / K2 0.200 / A 0.500, sum 1. The A=0.500 assertion is
+  // exactly CR-01's contract — the added row's typed 0.5 IS its honest blend
+  // share. RED-proof: pre-fix this yields K2 0.3111 / A 0.3889 (added edit not
+  // honored), so the new numbers fail against the `isPerKeyEdit`-gated code.
+  it("(b) — typing 0.3 into K1's weight renormalizes the mixed basis: K1 0.300 / K2 0.200 / A 0.500, sum 1", () => {
+    render112();
+    addAWithWeightHalf();
+
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
+    expect(w1).not.toBeNull();
+    act(() => {
+      fireEvent.change(w1!, { target: { value: "0.3" } });
+    });
+
+    const wv1 = document.getElementById(`weight-${K1}`) as HTMLInputElement;
+    const wv2 = document.getElementById(`weight-${K2}`) as HTMLInputElement;
+    const wvA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    expect(Number(wv1.value)).toBeCloseTo(0.3, 3);
+    expect(Number(wv2.value)).toBeCloseTo(0.2, 3);
+    expect(Number(wvA.value)).toBeCloseTo(0.5, 3);
+    expect(
+      Number(wv1.value) + Number(wv2.value) + Number(wvA.value),
+    ).toBeCloseTo(1, 3);
+  });
+
+  // (b2) CR-01 (Phase 112 review) — editing an ADDED weight in a mixed per-key +
+  // added book honors the typed value: it renders as its blend share and the
+  // mixed {per-key + added} set sums to 1. Pre-fix, an added edit fell to the
+  // legacy `setWeightOverride`, whose `enabledIdsOf` basis excludes the per-key
+  // units, so the typed 0.5 competed against raw per-key equity dollars and
+  // rendered ~0% while the set sum drifted off 1 (CR-01 failures A/B). RED-proof:
+  // against the pre-fix `isPerKeyEdit = usePerKeySources && !addedIdSet.has(ref)`
+  // gate this fails — A's input shows ~0.001, not 0.5.
+  it("(b2) CR-01 — editing an added weight in a mixed book renders the typed value as its blend share; the mixed set sums to 1", () => {
+    render112();
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    const wA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement | null;
+    expect(wA).not.toBeNull();
+    act(() => {
+      fireEvent.change(wA!, { target: { value: "0.5" } });
+    });
+
+    const wv1 = document.getElementById(`weight-${K1}`) as HTMLInputElement;
+    const wv2 = document.getElementById(`weight-${K2}`) as HTMLInputElement;
+    const wvA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    // A's typed 0.5 IS its honest blend share (not swamped by raw equity dollars).
+    expect(Number(wvA.value)).toBeCloseTo(0.5, 3);
+    // The two untouched per-key rows keep the remaining 0.5, split by their
+    // pre-edit blend shares (0.45 / 0.30 over 0.75 → 0.3 / 0.2), sum to 1.
+    expect(Number(wv1.value)).toBeCloseTo(0.3, 3);
+    expect(Number(wv2.value)).toBeCloseTo(0.2, 3);
+    expect(
+      Number(wv1.value) + Number(wv2.value) + Number(wvA.value),
+    ).toBeCloseTo(1, 3);
+  });
+
+  // (RT-01) [Phase 112 red team] — a SOLE selected per-key unit is trivially 100%.
+  // Typing any 0 ≤ w < 1 into it must be REFUSED with a visible message and stamp
+  // NO weight override, so re-including the excluded key restores the DEFAULT
+  // raw-equity blend. Pre-fix the vector {K1:0} renormalized over the single-unit
+  // basis lifted K1 to 1.0 and applyWeightOverrides persisted
+  // userWeightOverrides[K1]=1.0 — a poisoned override that silently drifted the
+  // re-included blend to 0.714 / 0.286. RED-proof: pre-fix the re-include assertion
+  // reads 0.714 / 0.286, not 0.600 / 0.400 (and no commit-error is shown).
+  it("(RT-01) — typing 0 into the SOLE selected per-key unit is refused (no poisoned 1.0 override); re-including the other key restores the 0.6/0.4 default", () => {
+    render112();
+    // Exclude K2 → K1 is the sole selected engine unit (no added strategy present).
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K2} in projection`,
+        }),
+      );
+    });
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement;
+    // A sole unit's honest display IS 1.000 (100% of the selected mass).
+    expect(Number(w1.value)).toBeCloseTo(1, 3);
+    // Type 0 — must be refused (visible message, nothing written).
+    act(() => {
+      fireEvent.change(w1, { target: { value: "0" } });
+    });
+    expect(
+      screen.getByTestId("scenario-commit-error").textContent,
+    ).toMatch(/single constituent is always 100%/i);
+    // Unchanged (the refused edit wrote nothing).
+    expect(
+      Number(
+        (document.getElementById(`weight-${K1}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(1, 3);
+    // Re-include K2. With NO override stamped on K1 both ride raw equity → the
+    // default 0.6 / 0.4 blend. (Pre-fix K1's poisoned 1.0 override → 0.714 / 0.286.)
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K2} in projection`,
+        }),
+      );
+    });
+    expect(
+      Number(
+        (document.getElementById(`weight-${K1}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(0.6, 3);
+    expect(
+      Number(
+        (document.getElementById(`weight-${K2}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(0.4, 3);
+  });
+
+  // (RT-02) [Phase 112 red team] — with EVERY per-key source excluded, the added
+  // row's DISPLAY basis must equal the EDIT basis. No selected per-key engine unit
+  // remains → the edit path (legacy setWeightOverride) stores the RAW typed 0.5, so
+  // the input must DISPLAY 0.5 — never the normalized 1.000 the old
+  // `perKeySources.length > 0` display switch showed (a controlled-input desync
+  // where re-typing the displayed 1.000 silently overwrote the 0.5). RED-proof:
+  // pre-fix the added input reads 1.000, not 0.500.
+  it("(RT-02) — all per-key excluded + one added: the added input DISPLAYS the raw typed 0.5, not a normalized 1.000", () => {
+    render112();
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Exclude BOTH per-key sources → no selected per-key engine unit remains.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K1} in projection`,
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K2} in projection`,
+        }),
+      );
+    });
+    const wA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(wA, { target: { value: "0.5" } });
+    });
+    // Display basis == edit basis: raw 0.5, NOT the normalized 1.000.
+    const shownA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    expect(Number(shownA.value)).toBeCloseTo(0.5, 3);
+    // Re-typing the displayed value reproduces the stored value (no snap-drift).
+    act(() => {
+      fireEvent.change(shownA, { target: { value: shownA.value } });
+    });
+    expect(
+      Number(
+        (document.getElementById(`weight-${A_ID}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(0.5, 3);
+  });
+
+  // (c) RED — setting K1's leverage to 2 re-derives the blend (wᵢ·Lᵢ·rᵢ), moving a
+  // projection-derived KPI vs the 1× baseline. Fails today: the per-key leverage
+  // input does not exist.
+  it("(c) RED — setting K1's leverage to 2 moves the projection volatility vs the 1× baseline", () => {
+    render112();
+    const beforeVol = lastKpiScenarioMetrics()?.volatility;
+    expect(beforeVol).toBeTypeOf("number");
+
+    const l1 = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    // RED — no per-key leverage input yet.
+    expect(l1).not.toBeNull();
+    act(() => {
+      fireEvent.change(l1!, { target: { value: "2" } });
+    });
+    expect(lastKpiScenarioMetrics()?.volatility).not.toBe(beforeVol);
+  });
+
+  // (d) RED — a typed per-key weight survives an exclude → re-include cycle
+  // (preserve-and-restore, Open Question 2; togglePerKeySource never touches
+  // weightOverrides). Fails today: the per-key weight input does not exist.
+  it("(d) RED — a typed per-key weight is preserved across exclude → re-include", () => {
+    render112();
+    const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
+    // RED — no per-key weight input yet.
+    expect(w1).not.toBeNull();
+    act(() => {
+      fireEvent.change(w1!, { target: { value: "0.3" } });
+    });
+
+    // Exclude K1, then re-include it.
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+    fireEvent.click(screen.getByRole("switch", { name: SWITCH_K1 }));
+
+    const restored = document.getElementById(
+      `weight-${K1}`,
+    ) as HTMLInputElement;
+    expect(Number(restored.value)).toBeCloseTo(0.3, 3);
+  });
+
+  // (WR-01) Phase 112 review — a per-key-only weight edit must dirty the draft so
+  // the book→blank entry-mode switch routes through the unsaved-changes
+  // confirmation instead of silently wiping the in-progress edit. Pre-fix,
+  // diffCount ignored per-key weight edits (the `!== true` + `defaultWeight ==
+  // null` guards both skipped an included-by-absence per-key ref), so diffCount
+  // stayed 0 and `handleEntryModeSelect` flipped the mode with no modal (the
+  // silent wipe). RED-proof: against the pre-fix diffCount this fails — no
+  // confirmation modal opens, so the `getByText` throws.
+  it("(WR-01) a per-key-only weight edit opens the reset confirmation on a book→blank switch (no silent wipe)", () => {
+    render112();
+    // Edit ONE per-key weight — no add, no toggle. This is the exact gesture
+    // that pre-fix left invisible to diffCount.
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`weight-${K1}`) as HTMLInputElement,
+        { target: { value: "0.3" } },
+      );
+    });
+
+    // Switch book → blank with the (now-dirty) draft.
+    fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
+
+    // The reset confirmation opens (the SAME modal the footer Reset uses) and the
+    // mode does NOT flip until the user confirms — the per-key edit is protected.
+    expect(
+      screen.getByText(/Discard your scenario draft\?/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /From my book/i }),
+    ).toHaveAttribute("aria-checked", "true");
+  });
+
+  // --- Plan 02 Task 3: derived read-only notional column + honesty caveat ---
+
+  /** The notional cell (read-only text) for a given constituent row, scoped by
+   *  data-scope-ref so the assertion targets the intended row. */
+  function notionalCellFor(ref: string): HTMLElement | null {
+    return document.querySelector(
+      `[data-scope-ref="${ref}"] [data-testid="scenario-constituent-notional"]`,
+    );
+  }
+
+  /** An ADDED-only render (no live book → usePerKeySources false → no book
+   *  equity), used to prove the notional falls to an em-dash, never $0. */
+  function renderAddedOnly() {
+    render(
+      <ScenarioComposer
+        payload={makePayload({
+          holdingsSummary: [],
+          apiKeys: [],
+          eligibleApiKeyIds: [],
+          perKeyReturnsByApiKeyId: {},
+          strategies: [catalogStrategy(A_ID, "Strat A 112", A_SERIES)],
+        })}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  // (e) — the derived notional column reads equity × blend-share × leverage as
+  // read-only TEXT (locked decision 1: notional is NEVER a weight input). With
+  // book equity 100000 (K1 60000 / K2 40000), K1 weight 0.3 and K1 leverage 2 →
+  // K1 notional = 0.3 × 100000 × 2; the unlevered K2 = 0.7 × 100000 × 1.
+  it("(e) — the per-key notional cell renders equity × share × leverage as read-only text", () => {
+    render112();
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`weight-${K1}`) as HTMLInputElement,
+        { target: { value: "0.3" } },
+      );
+    });
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`leverage-${K1}`) as HTMLInputElement,
+        { target: { value: "2" } },
+      );
+    });
+
+    const k1Cell = notionalCellFor(K1);
+    const k2Cell = notionalCellFor(K2);
+    expect(k1Cell).not.toBeNull();
+    // Structural lock: notional is TEXT, never an <input> (never a weight input).
+    expect(k1Cell!.tagName).not.toBe("INPUT");
+    expect(k1Cell!.querySelector("input")).toBeNull();
+
+    expect(k1Cell!.textContent).toBe(formatCurrency(0.3 * 100_000 * 2));
+    expect(k2Cell!.textContent).toBe(formatCurrency(0.7 * 100_000 * 1));
+  });
+
+  // (f) — with NO book equity (added-only mode) the notional is non-derivable, so
+  // every notional cell shows the em-dash `—` (DESIGN.md Numbers Contract), never
+  // a fabricated $0.
+  it("(f) — added-only mode (no book equity) renders the notional as an em-dash, never $0", () => {
+    renderAddedOnly();
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    const cell = notionalCellFor(A_ID);
+    expect(cell).not.toBeNull();
+    expect(cell!.textContent).toBe("—");
+    expect(cell!.textContent).not.toContain("$0");
+  });
+
+  // (g) — the leverage-invariance honesty caveat renders exactly when a selected
+  // row is levered (L ≠ 1), and is absent when every row is at 1×.
+  it("(g) — the leverage-invariance caveat renders only when a selected row is levered", () => {
+    render112();
+    expect(
+      screen.queryByTestId("scenario-leverage-invariance-note"),
+    ).toBeNull();
+
+    act(() => {
+      fireEvent.change(
+        document.getElementById(`leverage-${K1}`) as HTMLInputElement,
+        { target: { value: "2" } },
+      );
+    });
+    expect(
+      screen.queryByTestId("scenario-leverage-invariance-note"),
+    ).not.toBeNull();
+  });
+});
+
+// ===========================================================================
+// Phase 113 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-03 Target-max-DD mode.
+//
+// Phase 113 adds a per-row MODE TOGGLE (Leverage | Target max-DD, default
+// Leverage). In Target mode the allocator types a max-drawdown target and the
+// client-side solver back-solves the SLEEVE's own leverage (founder lock), keeps
+// the derived L visible read-only, shows the resulting PORTFOLIO max-DD, and
+// renders honest infeasible states. Every test below FAILS on the current tree
+// because the pinned identifiers (`scenario-leverage-mode-toggle`, `target-dd-*`,
+// `scenario-target-dd-state`, `scenario-target-dd-portfolio-note`) do NOT exist
+// yet — the failure is a missing-element query (assertion), never a crash. Each
+// test LEADS with `expect(<queryByTestId>).not.toBeNull()` so the RED is a clean
+// assertion; the happy-path continuation flips green when Plan 113-03 lands.
+//
+// Fixture: two eligible per-key sources. K1 carries a founder-style series (one
+// −5% day among zeros → sleeve base max-DD 5% → target 20% solves to L≈4×,
+// confirmed against the frozen engine). K2 is a mild all-positive series.
+// ===========================================================================
+describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () => {
+  const K1 = "pk-113-k1"; // per-key unit id (api_key_id) — has a real drawdown
+  const K2 = "pk-113-k2"; // per-key unit id (api_key_id) — mild, no drawdown
+
+  const P113_DATES = Array.from({ length: 14 }, (_, i) =>
+    `2026-05-${String(i + 1).padStart(2, "0")}`,
+  );
+  // One −5% day among zeros → sleeve |dd(L)| = 0.05·L → base 5%, target 20% → 4×.
+  const K1_SERIES = P113_DATES.map((date, i) => ({
+    date,
+    value: i === 6 ? -0.05 : 0,
+  }));
+  const K2_SERIES = P113_DATES.map((date, i) => ({
+    date,
+    value: [0.001, 0.002, 0.0015][i % 3],
+  }));
+
+  function make113Payload(): MyAllocationDashboardPayload {
+    return makePayload({
+      ...perKeyBook([
+        { id: K1, returns: K1_SERIES, valueUsd: 60_000 },
+        { id: K2, returns: K2_SERIES, valueUsd: 40_000 },
+      ]),
+      apiKeys: [winApiKey(K1), winApiKey(K2)],
+    });
+  }
+
+  function render113() {
+    render(
+      <ScenarioComposer
+        payload={make113Payload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  /** The constituent row element for a per-key ref (carries data-scope-ref). */
+  function rowByRef(ref: string): HTMLElement {
+    const el = document.querySelector(
+      `[data-scope-ref="${ref}"]`,
+    ) as HTMLElement | null;
+    expect(el).not.toBeNull();
+    return el!;
+  }
+
+  /** Every weight input's value across ALL rows (the landmine non-regression
+   *  snapshot — the solve must write LEVERAGE only, never a weight). */
+  function allWeightValues(): Record<string, string> {
+    const out: Record<string, string> = {};
+    document
+      .querySelectorAll<HTMLInputElement>('input[id^="weight-"]')
+      .forEach((el) => {
+        out[el.id] = el.value;
+      });
+    return out;
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    browseOnAdd = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onAdd: (s: unknown) => void;
+    }) => {
+      browseOnAdd = props.onAdd;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+    cleanup();
+  });
+
+  // (h) DEFAULT-LEVERAGE — every per-key row renders the mode toggle at
+  // data-mode="leverage"; the target input is ABSENT in Leverage mode; the
+  // existing leverage input is editable (no readOnly). RED: the toggle testid does
+  // not exist yet.
+  it("(h) RED — each row renders the mode toggle at data-mode='leverage'; no target input; leverage editable", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED — the toggle does not exist yet.
+    expect(toggle!.getAttribute("data-mode")).toBe("leverage");
+
+    // The target input is absent while in Leverage mode.
+    expect(document.getElementById(`target-dd-${K1}`)).toBeNull();
+
+    // The Phase-112 leverage input still renders and is editable (not readOnly).
+    const lev = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    expect(lev).not.toBeNull();
+    expect(lev!.readOnly).toBe(false);
+  });
+
+  // (i) TARGET MODE — clicking the toggle flips data-mode to "target", reveals the
+  // target input, and makes the derived leverage input readOnly while keeping it
+  // VISIBLE with a value (founder lock: derived L stays visible read-only). RED:
+  // the toggle does not exist.
+  it("(i) RED — clicking the toggle flips to Target mode: target input revealed, leverage input read-only + still visible", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+
+    expect(
+      within(rowByRef(K1))
+        .getByTestId("scenario-leverage-mode-toggle")
+        .getAttribute("data-mode"),
+    ).toBe("target");
+
+    // The target input appears (percent units).
+    expect(document.getElementById(`target-dd-${K1}`)).not.toBeNull();
+
+    // The derived leverage stays VISIBLE, now read-only (never hidden).
+    const lev = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement | null;
+    expect(lev).not.toBeNull();
+    expect(lev!.value).not.toBe("");
+    expect(lev!).toHaveAttribute("readonly");
+  });
+
+  // (j) SOLVE COMMIT — in Target mode, typing a reachable target and committing
+  // (blur) writes the SOLVED leverage into the read-only leverage input and shows
+  // the resulting PORTFOLIO max-DD note as a 2dp signed percentage (computed, not
+  // "solved"). RED: the toggle does not exist.
+  it("(j) RED — committing a reachable target writes the solved L and shows the resulting portfolio max-DD note", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+
+    const levBefore = (
+      document.getElementById(`leverage-${K1}`) as HTMLInputElement
+    ).value;
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+
+    // The derived leverage becomes the solved value (K1's 5% base → 20% ≈ 4×).
+    const levAfter = document.getElementById(
+      `leverage-${K1}`,
+    ) as HTMLInputElement;
+    expect(parseFloat(levAfter.value)).toBeGreaterThan(1);
+    expect(levAfter.value).not.toBe(levBefore);
+
+    // The resulting PORTFOLIO max-DD note renders as a 2dp signed percentage
+    // (full-book computed value, labelled computed — never "solved").
+    const note = within(rowByRef(K1)).getByTestId(
+      "scenario-target-dd-portfolio-note",
+    );
+    expect(note.textContent).toMatch(/[−-]?\d+\.\d{2}%/);
+  });
+
+  // (k) INFEASIBLE HONESTY — an unreachable target (99% on the mild series capped
+  // by MAX_LEVERAGE) renders honest "unreachable at {L}×" copy + an em-dash where
+  // a derived value would sit, and leaves the leverage input UNCHANGED (no
+  // fabricated L — the clamp-and-lie failure mode is RED-proofed). RED: the toggle
+  // does not exist.
+  it("(k) RED — an unreachable target renders honest 'unreachable at …×' + em-dash and does NOT fabricate a leverage", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+
+    const levBefore = (
+      document.getElementById(`leverage-${K1}`) as HTMLInputElement
+    ).value;
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "99" } });
+      fireEvent.blur(target);
+    });
+
+    const state = within(rowByRef(K1)).getByTestId(
+      "scenario-target-dd-state",
+    );
+    expect(state.textContent).toMatch(/unreachable at .*×/i);
+    expect(state.textContent).toContain("—");
+
+    // No fabricated leverage — the input is byte-unchanged from before the commit.
+    expect(
+      (document.getElementById(`leverage-${K1}`) as HTMLInputElement).value,
+    ).toBe(levBefore);
+  });
+
+  // (l) LANDMINE NON-REGRESSION — after a successful solve on one row, every
+  // weight input across ALL rows is byte-unchanged (the solve writes LEVERAGE
+  // only; the Phase-112 weight-basis landmines — mixed-book renorm, sole-unit
+  // refuse, per-key diffCount — must stay structurally untouched). RED: the toggle
+  // does not exist.
+  it("(l) RED — a solve writes leverage only: every weight input across all rows is byte-unchanged", () => {
+    render113();
+    const toggle = within(rowByRef(K1)).queryByTestId(
+      "scenario-leverage-mode-toggle",
+    );
+    expect(toggle).not.toBeNull(); // RED
+    const weightsBefore = allWeightValues();
+
+    act(() => {
+      fireEvent.click(toggle!);
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+
+    expect(allWeightValues()).toEqual(weightsBefore);
+  });
+
+  // -------------------------------------------------------------------------
+  // F1 (WEIGHTS-04, code-review 2026-07-17) — remove→re-add of the SAME catalog
+  // id must NOT reopen the row in stale Target mode / with a stale solve note.
+  // The fix routes handleRemoveAdded through the unified clearRowTransientState
+  // helper so a leg's per-ref leverage AND both mode/solve twins drop together.
+  // RED before the fix: handleRemoveAdded purged ONLY leverageByRef, so the
+  // re-added row reopened in data-mode="target" with the stale
+  // "Portfolio max-DD at N×" note beside a leverage that was actually purged to
+  // 1× — the value-shaped dishonesty WEIGHTS-04 forbids. Intent (Rule 9): the
+  // transient trio is ONE unit at every teardown seam; no seam may drop a twin.
+  // -------------------------------------------------------------------------
+  it("F1 remove + re-add of a Target-mode leg reopens in Leverage mode with NO stale mode/solve twin", async () => {
+    const DRAWER_ID = "cccccccc-9999-8888-7777-666666666666";
+    // A single −5% day → sleeve base max-DD 5% → target 20% back-solves to ~4×
+    // (the finding's exact "4.00×" note scenario).
+    const DRAWER_SERIES = P113_DATES.map((date, i) => ({
+      date,
+      value: i === 6 ? -0.05 : 0,
+    }));
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes(`/api/strategies/${DRAWER_ID}/returns`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: DRAWER_SERIES,
+            asset_class: "crypto",
+          }),
+        });
+      }
+      // benchmark + anything else → benign empty body.
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render113();
+
+    // Add the catalog strategy via the drawer and flush its lazy returns into the
+    // engine set so it is a real, solvable leg.
+    addStrategy({
+      id: DRAWER_ID,
+      name: "Drawer Solved Leg",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(`[data-scope-ref="${DRAWER_ID}"]`),
+      ).not.toBeNull();
+    });
+
+    // Flip the row to Target mode and commit a target → a solve line renders and
+    // sets BOTH twins (targetModeByRef + solveResultByRef).
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(DRAWER_ID)).getByTestId(
+          "scenario-leverage-mode-toggle",
+        ),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${DRAWER_ID}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+
+    // Precondition: the row IS in Target mode with a solve line present (the ok
+    // portfolio-note OR the honest-infeasible state — either sets the solve twin
+    // under test). Both twins are now populated for DRAWER_ID.
+    const preRow = rowByRef(DRAWER_ID);
+    expect(
+      within(preRow)
+        .getByTestId("scenario-leverage-mode-toggle")
+        .getAttribute("data-mode"),
+    ).toBe("target");
+    expect(
+      within(preRow).queryByTestId("scenario-target-dd-portfolio-note") ??
+        within(preRow).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+
+    // Remove the leg (the real CompositionList Remove button), then re-add the
+    // SAME catalog id.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    addStrategy({
+      id: DRAWER_ID,
+      name: "Drawer Solved Leg",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(`[data-scope-ref="${DRAWER_ID}"]`),
+      ).not.toBeNull();
+    });
+
+    // FIX — the re-added row opens in the DEFAULT Leverage mode (mode twin
+    // cleared) with NO stale solve note, and leverage back at the 1× default (no
+    // stranded solved L). RED before the fix: data-mode="target" + stale note.
+    const reRow = rowByRef(DRAWER_ID);
+    expect(
+      within(reRow)
+        .getByTestId("scenario-leverage-mode-toggle")
+        .getAttribute("data-mode"),
+    ).toBe("leverage");
+    expect(
+      within(reRow).queryByTestId("scenario-target-dd-portfolio-note"),
+    ).toBeNull();
+    expect(
+      within(reRow).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+    expect(
+      (document.getElementById(`leverage-${DRAWER_ID}`) as HTMLInputElement)
+        .value,
+    ).toBe("1");
+
+    // STRONGER — re-flipping to Target mode shows NO stale solve line: the
+    // solveResultByRef twin was truly CLEARED, not merely hidden by the mode
+    // reset (a fresh Target-mode entry with no committed target shows no line).
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(DRAWER_ID)).getByTestId(
+          "scenario-leverage-mode-toggle",
+        ),
+      );
+    });
+    const reRow2 = rowByRef(DRAWER_ID);
+    expect(
+      within(reRow2).queryByTestId("scenario-target-dd-portfolio-note"),
+    ).toBeNull();
+    expect(
+      within(reRow2).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // F2 (code-review 2026-07-17) — a benign focus→blur of an EMPTY target input
+  // must be a no-op: Number("") === 0 previously tripped the out-of-range commit
+  // banner ("above 0% and below 100%"). An empty field is "no target entered",
+  // not a 0% target. RED before the fix: the empty blur surfaces the banner.
+  // Non-vacuous: a genuinely out-of-range value still errors.
+  // -------------------------------------------------------------------------
+  it("F2 focus→blur of an EMPTY target input is a no-op (no commit-error banner); a real out-of-range value still errors", () => {
+    render113();
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+
+    // Focus then blur while EMPTY — no commit, no banner.
+    act(() => {
+      fireEvent.focus(target);
+      fireEvent.blur(target);
+    });
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+
+    // Non-vacuous — a genuinely out-of-range value (≥100) still surfaces the
+    // honest range error (the empty-string guard must not suppress it).
+    act(() => {
+      fireEvent.change(target, { target: { value: "150" } });
+      fireEvent.blur(target);
+    });
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /above 0% and below 100%/i,
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // F3 (code-review 2026-07-17) — committing a VALID (in-range) target that
+  // solves to an INFEASIBLE result must clear any PRIOR range-error banner, so
+  // the row never shows a stale range error contradicting the honest infeasible
+  // state. RED before the fix: the range banner lingered because commitError was
+  // cleared only on `result.ok`. The range error stays only for out-of-range input.
+  // -------------------------------------------------------------------------
+  it("F3 a valid-but-infeasible commit clears a prior range-error banner and shows only the honest infeasible state", () => {
+    render113();
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+
+    // 1) Trigger a range error with an out-of-range target (≥100).
+    act(() => {
+      fireEvent.change(target, { target: { value: "150" } });
+      fireEvent.blur(target);
+    });
+    expect(screen.getByTestId("scenario-commit-error")).not.toBeNull();
+
+    // 2) Commit a VALID but INFEASIBLE target (99% on K1's 5% base exceeds
+    //    MAX_LEVERAGE). The prior range banner MUST clear; the honest infeasible
+    //    state renders in its place.
+    act(() => {
+      fireEvent.change(target, { target: { value: "99" } });
+      fireEvent.blur(target);
+    });
+    expect(screen.queryByTestId("scenario-commit-error")).toBeNull();
+    const state = within(rowByRef(K1)).getByTestId("scenario-target-dd-state");
+    expect(state.textContent).toMatch(/unreachable at .*×/i);
+  });
+
+  // -------------------------------------------------------------------------
+  // RT113-01 (Fable red team, 2026-07-17) — SAME class as F1 at a DIFFERENT
+  // seam: excluding (toggle-off) a solved Target-mode row left its
+  // "Portfolio max-DD at N×" note rendering UNCONDITIONALLY while the mode
+  // toggle + target input were DISABLED, so the note stranded a portfolio-DD
+  // computed for a book the excluded leg is no longer in (e.g. +0.00% after a
+  // drawdown leg is toggled out) that the user could not clear without
+  // re-including. Fix: gate renderSolveState on inclusion. Exclusion is
+  // REVERSIBLE (unlike removal) — the twins are NOT cleared, so re-include
+  // restores the note recomputed against the live full-book DD. Covers BOTH a
+  // per-key row (:5470) and an added row (:5604).
+  // -------------------------------------------------------------------------
+  it("RT113-01 excluding a solved Target-mode PER-KEY row hides its solve note; re-include restores it", () => {
+    render113();
+    // Flip K1 to Target mode and commit a target → the solve line renders.
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-portfolio-note") ??
+        within(rowByRef(K1)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+
+    // Exclude K1 (its include switch) → the solve note is GONE (RED before the
+    // fix: it lingered, claiming a portfolio-DD "at N×" without K1 in the book).
+    act(() => {
+      fireEvent.click(within(rowByRef(K1)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-portfolio-note"),
+    ).toBeNull();
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+
+    // Re-include → the note reappears (recomputed against the live full-book DD;
+    // the solved L persisted via leverageByRef — exclusion is reversible).
+    act(() => {
+      fireEvent.click(within(rowByRef(K1)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-portfolio-note") ??
+        within(rowByRef(K1)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+  });
+
+  it("RT113-01 excluding a solved Target-mode ADDED row hides its solve note; re-include restores it", async () => {
+    const DRAWER_ID = "dddddddd-5555-4444-3333-222222222222";
+    const DRAWER_SERIES = P113_DATES.map((date, i) => ({
+      date,
+      value: i === 6 ? -0.05 : 0,
+    }));
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes(`/api/strategies/${DRAWER_ID}/returns`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: DRAWER_SERIES,
+            asset_class: "crypto",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render113();
+    addStrategy({
+      id: DRAWER_ID,
+      name: "Drawer Excl Leg",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(`[data-scope-ref="${DRAWER_ID}"]`),
+      ).not.toBeNull();
+    });
+
+    // Flip the added row to Target mode and commit a target → solve line renders.
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(DRAWER_ID)).getByTestId(
+          "scenario-leverage-mode-toggle",
+        ),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${DRAWER_ID}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId(
+        "scenario-target-dd-portfolio-note",
+      ) ??
+        within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+
+    // Toggle the added row OFF → its solve note is GONE (RED before the fix).
+    act(() => {
+      fireEvent.click(within(rowByRef(DRAWER_ID)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId(
+        "scenario-target-dd-portfolio-note",
+      ),
+    ).toBeNull();
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+
+    // Toggle back ON → the note reappears.
+    act(() => {
+      fireEvent.click(within(rowByRef(DRAWER_ID)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId(
+        "scenario-target-dd-portfolio-note",
+      ) ??
+        within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // RT113-02 (Fable red team, 2026-07-17) — F3's setCommitError(null) fired on
+  // EVERY in-range target commit including an INFEASIBLE no-op, wiping unrelated
+  // shared-banner tenants (the leverage-clamp message, handleCommit's AUM/size/
+  // empty errors). Scoped fix (option a): a valid target commit clears ONLY a
+  // prior TARGET-RANGE error, never an unrelated banner. F3 intent survives (a
+  // stale range error is still cleared beside the honest infeasible state).
+  // -------------------------------------------------------------------------
+  it("RT113-02 an infeasible target commit preserves an unrelated leverage-clamp banner (clears only a stale target-range error)", () => {
+    render113();
+    // Over-max leverage on K2 (Leverage mode) → the shared clamp banner.
+    const k2Lev = document.getElementById(
+      `leverage-${K2}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(k2Lev, { target: { value: "50" } });
+    });
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /Leverage clamped/i,
+    );
+
+    // Flip K1 to Target and commit an INFEASIBLE 99% (writes nothing to the book).
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "99" } });
+      fireEvent.blur(target);
+    });
+
+    // The UNRELATED clamp banner MUST survive (RED before the scoping fix: F3's
+    // unconditional clear wiped it although the K1 gesture changed nothing).
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /Leverage clamped/i,
+    );
+    // The honest infeasible reason still renders in the row's OWN solve-state
+    // line (never needs the shared commit-error banner).
+    expect(
+      within(rowByRef(K1)).getByTestId("scenario-target-dd-state").textContent,
+    ).toMatch(/unreachable at .*×/i);
   });
 });
 
@@ -5403,8 +6893,8 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
   });
 
   // CF-05 — a per-key (book-member) gantt row must render the friendly
-  // exchange/account label the composer already shows in the "Data sources"
-  // control (dataSourceLabel), NOT the raw api_key_id that
+  // exchange/account label the composer already shows on the per-key constituent
+  // rows (dataSourceLabel), NOT the raw api_key_id that
   // buildPerKeyStrategyForBuilderSet stamps as the unit `name` (`key <uuid>`).
   // Fails against the pre-fix code, which carried the raw id into the gantt.
   it("gantt: a per-key book-member row renders the friendly dataSourceLabel, never the raw api_key_id (CF-05)", () => {
@@ -5739,7 +7229,7 @@ describe("ScenarioComposer — Phase 57 coverage window (WINDOW-01, hazard fix)"
     act(() => {
       fireEvent.click(
         document.querySelector(
-          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+          `[data-scope-ref="${REF_WIN_B}"] button[role="switch"]`,
         ) as HTMLElement,
       );
     });
@@ -6298,7 +7788,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-toggle (WINDOW-02/03)", () 
     act(() => {
       fireEvent.click(
         document.querySelector(
-          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+          `[data-scope-ref="${REF_WIN_B}"] button[role="switch"]`,
         ) as HTMLElement,
       );
     });
@@ -6530,7 +8020,7 @@ describe("ScenarioComposer — Phase 57 Plan 03 auto-excluded group (POLISH-02)"
     act(() => {
       fireEvent.click(
         document.querySelector(
-          `[data-data-source-id="${REF_WIN_B}"] button[role="switch"]`,
+          `[data-scope-ref="${REF_WIN_B}"] button[role="switch"]`,
         ) as HTMLElement,
       );
     });
@@ -7487,10 +8977,11 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
       target: { value: "0.5" },
     });
 
-    // Exclude EVERY data source (both keys).
-    const group = screen.getByRole("group", { name: "Data sources" });
-    for (const sw of within(group).getAllByRole("switch")) {
-      fireEvent.click(sw);
+    // Exclude EVERY per-key source (both keys) — scope to the per-key rows so we
+    // don't also toggle the added strategy's switch, which shares the list.
+    const list = screen.getByTestId("scenario-constituent-list");
+    for (const row of within(list).getAllByTestId("scenario-constituent-perkey")) {
+      fireEvent.click(within(row).getByRole("switch"));
     }
 
     // The engine keeps a live added-only projection…
@@ -7503,7 +8994,7 @@ describe("ScenarioComposer — P61-BUG-1: added strategies join the per-key book
     });
     // …so the DSRC-03 honest-empty card must NOT render above it.
     expect(
-      screen.queryByTestId("scenario-data-sources-empty"),
+      screen.queryByTestId("scenario-constituent-empty"),
     ).not.toBeInTheDocument();
   });
 
@@ -7910,13 +9401,13 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
     expect(savedDraft(fetchMock).memberKeyIds).toEqual(["key-A", "key-B"]);
   });
 
-  it("F-1 (b): opening a saved BOOK draft in a BLANK session syncs the engine basis to per-key (Data sources control + book segment)", () => {
+  it("F-1 (b): opening a saved BOOK draft in a BLANK session syncs the engine basis to per-key (per-key constituent rows + book segment)", () => {
     renderM4(m4Payload());
     fireEvent.click(screen.getByRole("radio", { name: /Blank slate/i }));
-    // Pre-fix: session stays blank → added-only engine → NO Data sources control.
+    // Pre-fix: session stays blank → added-only engine → NO per-key rows.
     expect(
-      screen.queryByTestId("scenario-data-sources"),
-    ).not.toBeInTheDocument();
+      screen.queryAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(0);
     const savedBook = {
       ...defaultDraftFromHoldings(M4_HOLDINGS),
       memberKeyIds: ["key-A", "key-B"],
@@ -7925,9 +9416,11 @@ describe("ScenarioComposer — MEMBER-04 membership stamping + reopen derive + i
       registeredOpen!({ id: "book-row", name: "My book", draft: savedBook });
     });
     // Post-fix: the open syncs the session to book → the per-key engine basis
-    // (usePerKeySources), the SAME basis compare shows. The per-key "Data
-    // sources" control now renders and the "From my book" segment is selected.
-    expect(screen.getByTestId("scenario-data-sources")).toBeInTheDocument();
+    // (usePerKeySources), the SAME basis compare shows. The per-key constituent
+    // rows now render in the unified list and the "From my book" segment selects.
+    expect(
+      screen.getAllByTestId("scenario-constituent-perkey"),
+    ).toHaveLength(2);
     expect(
       screen.getByRole("radio", { name: /From my book/i }),
     ).toHaveAttribute("aria-checked", "true");

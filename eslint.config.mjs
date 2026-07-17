@@ -44,6 +44,11 @@ const eslintConfig = defineConfig([
     rules: {
       "quantalyze/no-raw-localstorage": "error",
       "quantalyze/no-raw-published-predicate": "error",
+      // CONTRIB-04 — ban a raw owner-OR `.or(...user_id.eq...)` outside
+      // withPublishedOrOwner (src/lib/visibility.ts). Clean baseline, so this
+      // fails CI by construction on a future admin-client swap that would
+      // bypass the strategies_read RLS backstop.
+      "quantalyze/no-owner-or-on-admin-client": "error",
       "quantalyze/no-raw-retry-after-parse": "error",
       // B9 — ban Zod .passthrough()/.catchall() at boundary parsers. Enforced
       // repo-wide (not file-scoped) because passthrough only ever appears at a
@@ -262,6 +267,7 @@ const eslintConfig = defineConfig([
     rules: {
       "quantalyze/no-raw-localstorage": "off",
       "quantalyze/no-raw-published-predicate": "off",
+      "quantalyze/no-owner-or-on-admin-client": "off",
       "quantalyze/no-raw-retry-after-parse": "off",
       "quantalyze/no-passthrough-on-ipc": "off",
       "quantalyze/no-raw-staleness-derivation": "off",

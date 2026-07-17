@@ -64,7 +64,7 @@ export function ManagerIdentityPanel({
               once an allocator requests an introduction and the manager accepts.
             </p>
           </div>
-          <span className="shrink-0 rounded-full border border-border bg-page px-3 py-1 text-fixed-11 font-medium text-text-secondary">
+          <span className="shrink-0 rounded-sm border border-border bg-page px-3 py-1 text-fixed-11 font-medium text-text-secondary">
             Exploratory
           </span>
         </div>
@@ -116,7 +116,7 @@ export function ManagerIdentityPanel({
             </a>
           )}
         </div>
-        <span className="shrink-0 rounded-full border border-accent/30 bg-accent/5 px-3 py-1 text-fixed-11 font-medium text-accent">
+        <span className="shrink-0 rounded-sm border border-accent/30 bg-accent/5 px-3 py-1 text-fixed-11 font-medium text-accent">
           Institutional
         </span>
       </div>

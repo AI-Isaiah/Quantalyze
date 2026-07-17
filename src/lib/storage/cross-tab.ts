@@ -280,6 +280,15 @@ export function useCrossTabStorage<T>(
   // robust than a first-render-tick skip: deferred hydration changes `value`
   // post-mount with a fresh object identity, which a tick counter mis-handles.
   const dirtyRef = useRef(false);
+  // Guards the deferred-hydration adoption against a mount-race clobber. The
+  // mount-time hydration effect adopts the disk value ONCE; if a user mutation
+  // (setValue) lands between the mount render and that passive effect flushing —
+  // a window that only opens under heavy scheduler contention, when React defers
+  // the mount's passive effects past a synchronously-dispatched event — adopting
+  // the disk read would silently discard the edit (dirtyRef is already set). This
+  // ref keeps the guard scoped to the FIRST hydration: a later key-flip / enabled
+  // re-run of the same effect must still adopt the new scope's value.
+  const hydratedOnceRef = useRef(false);
   // The {key,value} a pending debounced write targets — BOTH captured when the
   // write is scheduled, NOT read live at flush time. A key flip (a per-allocator
   // hook remounting its key) re-runs hydration, which overwrites the live
@@ -397,6 +406,10 @@ export function useCrossTabStorage<T>(
   // ---- Deferred hydration: load from localStorage post-mount -------------
   useEffect(() => {
     if (hydration !== "deferred") return;
+    // Only the FIRST run of this effect is the initial mount hydration; a later
+    // re-run is a key-flip / enabled transition, which must always adopt.
+    const isInitialHydration = !hydratedOnceRef.current;
+    hydratedOnceRef.current = true;
     if (!enabled) {
       setIsHydrated(true);
       return;
@@ -420,9 +433,17 @@ export function useCrossTabStorage<T>(
       }
     }
     readOnlyRef.current = decoded.outcome === "readonly";
-    pendingValueRef.current = decoded.value;
-    // dirtyRef stays false — this load-driven setState is observe-without-write.
-    setValueState(decoded.value);
+    // Mount-race guard: on the initial hydration, a user mutation that already
+    // landed (dirtyRef) is the freshest intent — do NOT overwrite it with the
+    // disk read. The in-memory value stays authoritative and its own pending
+    // persist writes it through. A key-flip re-run always adopts (dirtyRef there
+    // is cleared by the persist effect before this runs, and adopting the new
+    // scope's value is required — never carry the prior scope's value, CT-01).
+    if (!(isInitialHydration && dirtyRef.current)) {
+      pendingValueRef.current = decoded.value;
+      // dirtyRef stays false — this load-driven setState is observe-without-write.
+      setValueState(decoded.value);
+    }
     setReadOnly(readOnlyRef.current);
     setIsHydrated(true);
     // Re-run when the key flips (per-allocator hooks) or enabled toggles

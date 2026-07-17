@@ -27,6 +27,17 @@
 export type TrustTier = "api_verified" | "csv_uploaded" | "self_reported";
 
 /**
+ * Phase 111 / CONSTIT-02 — badge-layer provenance union. Widens `TrustTier`
+ * with the `composite` discriminator (derived from
+ * `data_quality_flags.composite`, NOT a DB `strategy_verifications.trust_tier`
+ * value). The DB `TrustTier` union above MUST stay 3-valued — WatchlistPanel's
+ * TIER_ORDER, `Strategy["trust_tier"]`, and the watchlist tier grouping all
+ * mirror the three DB verification tiers. Only the presentation badge layer
+ * knows about the 4th `composite` identity.
+ */
+export type ProvenanceTier = TrustTier | "composite";
+
+/**
  * Per-variant slot palette. `fill` is the inner background (or `#FFFFFF`
  * for outline variants), `text` is the label colour, `border` is the
  * 1px border colour, `label` is the user-facing pill text.
@@ -57,4 +68,14 @@ export const TRUST_TIER_TOKENS = {
     border: "#B45309",
     label: "Self-reported",
   },
-} as const satisfies Record<TrustTier, TrustTierTokenSlot>;
+  // Phase 111 / CONSTIT-02: outline pill in text-primary dark navy (#1A1A2E) —
+  // a distinct 4th identity that stays inside the restrained palette without
+  // stealing the sole accent fill from `api_verified`. Both hexes are already
+  // DESIGN.md-allowlisted (Color: Surface #FFFFFF, Text primary #1A1A2E).
+  composite: {
+    fill: "#FFFFFF",
+    text: "#1A1A2E",
+    border: "#1A1A2E",
+    label: "Composite",
+  },
+} as const satisfies Record<ProvenanceTier, TrustTierTokenSlot>;

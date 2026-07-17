@@ -56,6 +56,13 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // drives the explanatory banner so the missing absolute history doesn't
     // read as a broken connection.
     equityBaselineUnknown = false,
+    // DOGFOOD-1 (Phase 110.1): the honest connected-keys signal derived
+    // server-side via isPerKeyDailiesEligibleKey (is_active && !revoked &&
+    // !disconnected). NOT `activeVenues.length > 0`, which counts
+    // soft-disconnected / revoked keys as connected and wrongly showed the
+    // "connected — no positions synced yet" copy to an allocator who
+    // disconnected their only key.
+    hasConnectedKeys = false,
   } = props;
 
   const holdingsEmpty = holdingsSummary.length === 0;
@@ -91,7 +98,19 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             Surface the banner here too so the gap reads as a data-horizon
             limit, not a missing connection. */}
         {equityBaselineUnknown && <BaselineUnknownBanner />}
-        <EmptyState hasSyncing={false} />
+        {/* DOGFOOD-1 (Phase 110.1): `hasConnectedKeys` is derived server-side
+            from the canonical isPerKeyDailiesEligibleKey predicate, NOT
+            `activeVenues.length > 0`. The venue set counts is_active keys
+            alone, so a soft-disconnected (disconnected_at != null) or
+            credential-revoked (sync_status='revoked') key would wrongly read
+            as "connected — no positions synced yet". Using the honest signal,
+            an allocator who disconnected their only key sees the "Connect a
+            key" CTA; one with a live key but no synced positions sees the
+            connected-but-empty copy. */}
+        <EmptyState
+          hasSyncing={false}
+          hasConnectedKeys={hasConnectedKeys}
+        />
       </div>
     );
   }

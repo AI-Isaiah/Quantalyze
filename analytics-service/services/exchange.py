@@ -1113,7 +1113,22 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     # fail-CLOSED default as if it were a real probe result.
     result["probe_error"] = bool(probe_error)
 
-    if has_withdraw:
+    if probe_error:
+        # DOGFOOD-3: probe_error=True means detect_permissions caught a
+        # transient exception and returned the fail-CLOSED default
+        # {read:T, trade:T, withdraw:T} (key_permissions.py:60-65). Those
+        # scopes are NOT evidence — treating them as a real WITHDRAW/TRADE
+        # grant mislabeled every network blip / WAF / exchange 5xx as
+        # "Key has withdrawal permissions". Derive an honest cause instead.
+        # read_only stays False (as derived above) so every rejection gate
+        # keeps refusing the unverifiable key; the REJECTION is unchanged —
+        # only the user-visible REASON becomes honest.
+        result["error"] = (
+            "Could not verify the key's permission scopes — the permission "
+            "probe failed. Try again in a moment."
+        )
+        result["error_code"] = "PROBE_FAILED"
+    elif has_withdraw:
         result["error"] = "Key has withdrawal permissions. Please use a read-only key."
         result["error_code"] = "WITHDRAW_SCOPE"
     elif has_trade:

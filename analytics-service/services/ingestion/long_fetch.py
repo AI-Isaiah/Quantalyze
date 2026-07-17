@@ -253,9 +253,9 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # C-1 (red-team): probe_error=True means detect_permissions() hit a
     # transient network/WAF failure and returned _FAIL_CLOSED
     # {read:T, trade:T, withdraw:T, probe_error:T}. exchange.py derives
-    # read_only=False + error_code="WITHDRAW_SCOPE" from those fail-closed
-    # defaults — NOT from real scope evidence. Treating those as a
-    # permanent scope rejection would permanently ban a legitimately
+    # read_only=False + error_code="PROBE_FAILED" from those fail-closed
+    # defaults (DOGFOOD-3) — NOT from real scope evidence. Treating those as
+    # a permanent scope rejection would permanently ban a legitimately
     # read-only key that happened to hit an exchange 502. Bail out early
     # with transient so the worker retries the whole probe.
     # Defensive: only inspect debug_context when it is actually a dict

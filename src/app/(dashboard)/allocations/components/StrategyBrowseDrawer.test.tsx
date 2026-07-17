@@ -74,6 +74,7 @@ function renderDrawer(props: {
   isOpen?: boolean;
   onClose?: () => void;
   onAdd?: (s: AddedStrategy) => void;
+  onAddOwn?: () => void;
   mandate?: AllocatorMandateForFit | null;
   fetchStrategies?: () => Promise<StrategyBrowseRow[]>;
 } = {}) {
@@ -82,6 +83,7 @@ function renderDrawer(props: {
       isOpen={props.isOpen ?? true}
       onClose={props.onClose ?? vi.fn()}
       onAdd={props.onAdd ?? vi.fn()}
+      onAddOwn={props.onAddOwn}
       allocatorMandate={
         props.mandate === undefined ? MANDATE_BINANCE_OKX : props.mandate
       }
@@ -564,5 +566,109 @@ describe("StrategyBrowseDrawer — Phase 10 Plan 05 Task 2", () => {
     // loading resets are covered by construction — same close block as the
     // neuter-verified setStrategies([]) above — and remove the in-browser
     // one-frame stale-error flash on reopen.
+  });
+});
+
+/**
+ * Phase 110 CONTRIB-05 — the "Can't find it? Add your own" escape-hatch CTA.
+ *
+ * When the drawer is handed an `onAddOwn` callback (ScenarioComposer wires it to
+ * open the ContributionWizardOverlay), the browse list surfaces a contribution
+ * CTA. Without the prop the CTA is absent — optional-prop safety for any mount
+ * that does not support contribution. The onSuccess → reopen-browse chain (so
+ * the freshly-contributed private row appears via the once-per-open refetch)
+ * lives in the ScenarioComposer wiring test.
+ */
+describe("StrategyBrowseDrawer — 'Add your own' CTA (CONTRIB-05)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("renders the CTA when onAddOwn is provided; clicking fires it exactly once", async () => {
+    const onAddOwn = vi.fn();
+    renderDrawer({ onAddOwn });
+    await flush();
+    const cta = screen.getByRole("button", {
+      name: /Can't find it\? Add your own/i,
+    });
+    expect(cta).toBeInTheDocument();
+    expect(cta).toHaveAttribute("type", "button");
+    fireEvent.click(cta);
+    expect(onAddOwn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT render the CTA when onAddOwn is absent (optional-prop safety)", async () => {
+    renderDrawer();
+    await flush();
+    expect(
+      screen.queryByRole("button", { name: /Can't find it\? Add your own/i }),
+    ).toBeNull();
+  });
+
+  it("surfaces the CTA even in the no-strategies empty state (escape hatch where it matters)", async () => {
+    const onAddOwn = vi.fn();
+    renderDrawer({ onAddOwn, fetchStrategies: async () => [] });
+    await flush();
+    expect(screen.getByText("No strategies are live yet.")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Can't find it\? Add your own/i }),
+    ).toBeInTheDocument();
+  });
+
+  // REGRESSION (PR #620 composer close-drawer e2e). The "Add your own" CTA MUST
+  // NOT live in the `browse-add-*` testid namespace the per-strategy Add buttons
+  // use. The composer-driving automation clicks "the first strategy" via
+  // `[data-testid^="browse-add-"]`.first(); the browse fetch is async, so during
+  // the loading window NO strategy row has rendered. If the CTA carried a
+  // `browse-add-`-prefixed testid (it formerly did — `browse-add-own`), that
+  // first-match locator would bind to the CTA and fire onAddOwn — closing the
+  // Browse drawer and opening the contribution wizard, so the drawer's
+  // "Close drawer" affordance vanishes and the flow times out. The WHY this
+  // encodes: an "add the first strategy" first-match over that selector must only
+  // ever resolve to a real strategy Add, never the contribute escape hatch —
+  // even mid-load. So: while strategies are still loading, zero elements match
+  // the strategy-add selector, and the CTA — though present — is excluded from it.
+  it("keeps the contribute CTA OUT of the browse-add-* selector, even while strategies load", async () => {
+    const onAddOwn = vi.fn();
+    // A fetch that never resolves → the drawer stays in its loading state with
+    // zero strategy rows, exactly the window the e2e first-match races against.
+    renderDrawer({ onAddOwn, fetchStrategies: () => new Promise(() => {}) });
+    await flush();
+
+    // The escape hatch is present (feature intact)…
+    const cta = screen.getByRole("button", {
+      name: /Can't find it\? Add your own/i,
+    });
+    expect(cta).toBeInTheDocument();
+    // …but it is NOT reachable via the strategy-add automation selector, so a
+    // first-match "add the first strategy" click cannot land on it mid-load.
+    expect(cta.getAttribute("data-testid") ?? "").not.toMatch(/^browse-add-/);
+    expect(
+      document.querySelectorAll('[data-testid^="browse-add-"]'),
+    ).toHaveLength(0);
+  });
+
+  // Companion to the above: once strategies HAVE loaded, the strategy-add
+  // selector resolves ONLY to real per-strategy Add buttons (five here), and the
+  // contribute CTA still stays out of that namespace — so a first-match click
+  // deterministically hits a strategy, never the escape hatch.
+  it("after load, browse-add-* matches only strategy Add buttons (not the CTA)", async () => {
+    const onAddOwn = vi.fn();
+    renderDrawer({ onAddOwn });
+    await flush();
+    const addButtons = document.querySelectorAll('[data-testid^="browse-add-"]');
+    expect(addButtons).toHaveLength(FIVE_STRATS.length);
+    for (const el of addButtons) {
+      expect(el.getAttribute("data-testid")).toMatch(/^browse-add-s-/);
+    }
+    expect(
+      screen
+        .getByRole("button", { name: /Can't find it\? Add your own/i })
+        .getAttribute("data-testid") ?? "",
+    ).not.toMatch(/^browse-add-/);
   });
 });

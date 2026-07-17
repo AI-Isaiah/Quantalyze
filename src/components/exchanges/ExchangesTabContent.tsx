@@ -8,11 +8,17 @@ import { AllocatorExchangeManager } from "@/components/exchanges/AllocatorExchan
 export interface ExchangesTabContentProps {
   initialKeys: ComponentProps<typeof AllocatorExchangeManager>["initialKeys"];
   activePortfolio: { id: string; name: string } | null;
+  // DOGFOOD-2: forwarded to AllocatorExchangeManager to gate the
+  // "Active Allocation auto-synced" affirmative on real holdings presence.
+  // Tri-state (FIX 2): null = the holdings head-count failed → neutral
+  // subtitle, never the affirmative-negative "no open positions yet".
+  hasHoldings: boolean | null;
 }
 
 export function ExchangesTabContent({
   initialKeys,
   activePortfolio,
+  hasHoldings,
 }: ExchangesTabContentProps) {
   return (
     <section className="space-y-6">
@@ -52,7 +58,10 @@ export function ExchangesTabContent({
         </Card>
       ) : null}
 
-      <AllocatorExchangeManager initialKeys={initialKeys} />
+      <AllocatorExchangeManager
+        initialKeys={initialKeys}
+        hasHoldings={hasHoldings}
+      />
     </section>
   );
 }

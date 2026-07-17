@@ -55,14 +55,15 @@ describe("Phase 11 / S4a — D-06 SOC-2 status banner", () => {
     );
   });
 
-  it("renders the banner with role='status' and warning-tinted left rule", () => {
+  it("renders the banner with role='status' and warning-tinted full-border envelope", () => {
     render(<SecurityPage />);
     const banner = screen
       .getByText("SOC 2 status: pre-audit, preparing for SOC 2 Type 1.")
       .closest("[role='status']") as HTMLElement;
     expect(banner).toBeTruthy();
-    expect(banner.className).toContain("border-l-4");
-    expect(banner.className).toContain("border-warning");
+    expect(banner.className).not.toContain("border-l-4");
+    expect(banner.className).toContain("rounded-md");
+    expect(banner.className).toContain("border-warning/30");
     expect(banner.className).toContain("bg-warning/5");
   });
 });

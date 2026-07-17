@@ -22,6 +22,7 @@ import {
   computeHoldingsFingerprint,
   defaultDraftFromHoldings,
   toggleHolding,
+  togglePerKeySource,
   addStrategyBrowse,
   addStrategyBridge,
   removeAddedStrategy,
@@ -156,6 +157,68 @@ describe("toggleHolding", () => {
     expect(btcOn.weightOverrides["holding:binance:BTC:spot"]).toBeCloseTo(1.0, 9);
     expect(btcOn.weightOverrides["holding:binance:ETH:spot"]).toBeCloseTo(0, 9);
     expect(sumEnabled(btcOn)).toBeCloseTo(1.0, 9);
+  });
+});
+
+describe("togglePerKeySource (CONSTIT-03 — one channel, weightless refs)", () => {
+  const KEY_REF = "key aaaaaaaa-1111-4111-8111-111111111111";
+
+  it("PK1 excludes a default-included source by writing an explicit false on the FIRST toggle (absent === included)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    // The per-key ref is ABSENT (absent → included), so the first toggle must
+    // EXCLUDE it — never a no-op flip-to-true (the toggleHolding absent=off trap).
+    const excluded = togglePerKeySource(initial, KEY_REF);
+    expect(excluded.toggleByScopeRef[KEY_REF]).toBe(false);
+  });
+
+  it("PK2 re-includes by DELETING the ref (back to absent=included), not writing true", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const excluded = togglePerKeySource(initial, KEY_REF);
+    const reincluded = togglePerKeySource(excluded, KEY_REF);
+    // Deleted, not `true` — so the ref never enters enabledIdsOf's `=== true` set.
+    expect(KEY_REF in reincluded.toggleByScopeRef).toBe(false);
+  });
+
+  it("PK3 NEVER mutates weightOverrides — added-strategy weights are byte-identical across a per-key toggle (Phase 112 fence)", () => {
+    // A draft with two added strategies (real weightOverrides summing to 1).
+    const withA = addStrategyBrowse(defaultDraftFromHoldings([]), STRAT_A);
+    const withB = addStrategyBrowse(withA, STRAT_B);
+    const before = { ...withB.weightOverrides };
+
+    const excluded = togglePerKeySource(withB, KEY_REF);
+    expect(excluded.weightOverrides).toEqual(before);
+
+    const reincluded = togglePerKeySource(excluded, KEY_REF);
+    expect(reincluded.weightOverrides).toEqual(before);
+  });
+
+  it("PK4 a re-included per-key ref does NOT inflate the enabled set feeding added-weight rescale (delete keeps it out of enabledIdsOf)", () => {
+    // Exclude then re-include the per-key ref, THEN add a strategy. The new
+    // strategy's 1/(n+1) share must be computed over the added/holding enabled
+    // set ONLY — the transient per-key ref must not have leaked in as an enabled
+    // member (which would change n and dilute the weight).
+    const seeded = addStrategyBrowse(defaultDraftFromHoldings([]), STRAT_A);
+    const cycled = togglePerKeySource(
+      togglePerKeySource(seeded, KEY_REF),
+      KEY_REF,
+    );
+    const withB = addStrategyBrowse(cycled, STRAT_B);
+    // Two added strategies, no holdings → each 0.5 (n was 1 before the second
+    // add). If the per-key ref had leaked into the enabled set n would be 2 and
+    // the new weight 1/3.
+    expect(withB.weightOverrides["uuid-1"]).toBeCloseTo(0.5, 9);
+    expect(withB.weightOverrides["uuid-2"]).toBeCloseTo(0.5, 9);
+  });
+
+  it("PK5 returns a NEW draft and preserves memberKeyIds / other fields", () => {
+    const initial = {
+      ...defaultDraftFromHoldings(HOLDINGS_2),
+      memberKeyIds: ["m1", "m2"],
+    };
+    const next = togglePerKeySource(initial, KEY_REF);
+    expect(next).not.toBe(initial);
+    expect(next.memberKeyIds).toEqual(["m1", "m2"]);
+    expect(typeof next.lastEditedAt).toBe("string");
   });
 });
 

@@ -245,11 +245,14 @@ export function ScenarioCompareTable({
                           data-testid={isWinner ? `winner-${metric.key}` : undefined}
                           className={cn(
                             "text-xs font-metric",
-                            isWinner ? "text-accent font-bold" : "text-text-secondary",
+                            isWinner ? "text-accent font-semibold" : "text-text-secondary",
                           )}
                         >
                           {formatValue(val, metric.format)}
-                          {isWinner && " ✓"}
+                          {/* Winner mark: a discrete DM Sans accent glyph (own
+                              span, own spacing) — NOT a " ✓" string glued to the
+                              mono numeric run. Drops the banned third weight. */}
+                          {isWinner && <span className="ml-1 font-sans">✓</span>}
                         </span>
                       </td>
                     );

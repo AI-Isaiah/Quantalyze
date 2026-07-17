@@ -4,8 +4,8 @@
  * Locked contract:
  *   - Verbatim D-08 sentence (byte-for-byte): "READ ONLY ONLY — keys with
  *     Trade or Withdraw permissions are refused on submission."
- *   - Composes from <WarningBanner> with locked className override
- *     "border-l-4 border-warning bg-warning/5"
+ *   - Composes from <WarningBanner> with full-border envelope className override
+ *     "rounded-md border border-warning/30 bg-warning/5"
  *   - role="note" (NOT role="alert") with aria-label
  *     "Wizard read-only key requirement"
  *   - NO dismiss control — strip is persistent across all wizard steps
@@ -41,8 +41,9 @@ describe("WithdrawalWarningStrip (S5 / D-08)", () => {
     // className tokens are present (UI-SPEC §S5 + AC #14 LOCKED).
     const root = container.firstElementChild as HTMLElement;
     expect(root).toBeTruthy();
-    expect(root.className).toContain("border-l-4");
-    expect(root.className).toContain("border-warning");
+    expect(root.className).not.toContain("border-l-4");
+    expect(root.className).toContain("rounded-md");
+    expect(root.className).toContain("border-warning/30");
     expect(root.className).toContain("bg-warning/5");
   });
 

@@ -1387,3 +1387,396 @@ describe("ScenarioComposer — LEV-02: per-strategy leverage round-trips through
     expect(body.draft.leverageOverrides).toEqual({});
   });
 });
+
+// ===========================================================================
+// Phase 112 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-02 per-key leverage at
+// Save.
+//
+// Pitfall 1: a leverage-only edit on an INCLUDED per-key ref (an api_key_id that
+// is not added, carries no toggle entry, and no weight entry) is DROPPED at Save
+// by pruneLeverageToDraftRefs (ScenarioComposer.tsx:724-728, current set =
+// addedStrategies ∪ toggleByScopeRef-keys ∪ weightOverrides-keys). Plan 02
+// extends the prune-current set with the eligible per-key api_key_ids so the
+// leverage survives. Until the per-key leverage INPUT lands (also Plan 02), the
+// leverageByRef state is driven through the hydrate channel the harness already
+// uses (open a saved draft carrying leverageOverrides) — the assertion is on the
+// SAVE PAYLOAD, not the widget.
+//
+// Test (a) is RED (the per-key ref is pruned). Test (b) is a GREEN sanitize-on-
+// read pin for api_key_id refs (T_LEV_LOAD3's extension) — a hostile persisted
+// per-key leverage clamps on read and the draft never resets (T-112-01/02).
+// ===========================================================================
+describe("ScenarioComposer — Phase 112 per-key leverage at Save (RED scaffold)", () => {
+  const PK = "pk-lev-112-a"; // an INCLUDED per-key ref (api_key_id)
+  const PK_LO = "pk-lev-112-b"; // a second per-key ref (for the -3 clamp case)
+  const STRAT_LEV = "strat-lev-112"; // an added ref (survives prune — the control)
+
+  const PK_HOLDING = {
+    ...HOLDING_BTC,
+    symbol: "BTC",
+    api_key_id: PK,
+    value_usd: 100_000,
+  };
+  const PK_HOLDINGS = [PK_HOLDING];
+  const PK_FP = computeHoldingsFingerprint(PK_HOLDINGS);
+  const PK_SERIES = Array.from({ length: 14 }, (_, i) => ({
+    date: `2026-03-${String(i + 1).padStart(2, "0")}`,
+    value: [0.002, 0.0015, 0.0025, 0.001][i % 4],
+  }));
+  const PK_APIKEY = {
+    id: PK,
+    exchange: "binance",
+    label: "Main desk",
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+
+  /** A book+gate payload whose single eligible per-key source is PK, so PK is an
+   *  INCLUDED per-key ref. */
+  function makePerKeyBookPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [PK_APIKEY],
+      holdingsSummary: PK_HOLDINGS,
+      perKeyReturnsByApiKeyId: { [PK]: PK_SERIES },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [PK],
+    });
+  }
+
+  function renderPerKeyBook() {
+    return render(
+      <ScenarioComposer
+        payload={makePerKeyBookPayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpen={(open) => {
+          registeredOpen = open;
+        }}
+      />,
+    );
+  }
+
+  function stratLevRow() {
+    return {
+      id: STRAT_LEV,
+      name: "Lev Strat 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    };
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+    registeredOpen = null;
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // (a) RED — a leverage-only edit on an INCLUDED per-key ref is pruned at Save.
+  // The saved draft carries leverage for BOTH an added ref (STRAT_LEV — survives
+  // prune, the control) and a per-key ref (PK — no toggle/weight/added entry, so
+  // dropped). The fingerprint MATCHES the live book so the open is NOT drifted:
+  // leverageByRef genuinely seeds {STRAT_LEV:3, PK:2} (the added input reading 3×
+  // proves the map hydrated, i.e. PK:2 was really present). At Save the per-key
+  // ref is pruned, so the PUT body lacks PK — the Pitfall-1 symptom.
+  it("(a) RED — a per-key-ref leverage survives Save (dropped today by pruneLeverageToDraftRefs)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Per-key levered" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPerKeyBook();
+    openRow({
+      id: SAVED_ID,
+      name: "Per-key levered",
+      draft: {
+        schema_version: SCENARIO_SCHEMA_VERSION,
+        init_holdings_fingerprint: PK_FP,
+        toggleByScopeRef: { [STRAT_LEV]: true },
+        addedStrategies: [
+          stratLevRow(),
+        ] as unknown as ScenarioDraft["addedStrategies"],
+        weightOverrides: { [STRAT_LEV]: 1 },
+        memberKeyIds: [],
+        leverageOverrides: { [STRAT_LEV]: 3, [PK]: 2 },
+        lastEditedAt: "2026-06-01T00:00:00.000Z",
+      } as ScenarioDraft,
+    });
+
+    // Non-vacuous: the added-ref leverage input reads 3× → the saved
+    // leverageOverrides genuinely seeded leverageByRef (so PK:2 is live too).
+    const added = document.getElementById(
+      `leverage-${STRAT_LEV}`,
+    ) as HTMLInputElement | null;
+    expect(added).not.toBeNull();
+    expect(added!.value).toBe("3");
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Update portfolio/i }),
+    );
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe(`/api/allocator/scenario/saved/${SAVED_ID}`);
+    expect((init as RequestInit).method).toBe("PUT");
+    const body = JSON.parse((init as RequestInit).body as string);
+
+    // Control: the added ref's leverage survives prune (proves the fold ran).
+    expect(body.draft.leverageOverrides).toHaveProperty(STRAT_LEV, 3);
+    // THE Pitfall-1 RED: the INCLUDED per-key ref's leverage must survive too —
+    // today it is pruned (absent from addedStrategies ∪ toggle ∪ weight).
+    expect(body.draft.leverageOverrides).toHaveProperty(PK, 2);
+  });
+
+  // (b) GREEN — sanitize-on-read for api_key_id refs (T_LEV_LOAD3 extension).
+  // A hostile persisted per-key leverage clamps on read (999 → MAX_LEVERAGE;
+  // -3 → 1) and the draft LOADS (never a zod-refine reset — T-112-02). Both
+  // per-key refs carry a weightOverrides entry so they survive prune, letting the
+  // Save payload directly observe the sanitized values.
+  it("(b) GREEN — a hostile persisted per-key leverage clamps on read and the draft loads (never resets)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: SAVED_ID, name: "Hostile per-key" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPerKeyBook();
+    openRow({
+      id: SAVED_ID,
+      name: "Hostile per-key",
+      draft: {
+        schema_version: SCENARIO_SCHEMA_VERSION,
+        init_holdings_fingerprint: PK_FP,
+        toggleByScopeRef: {},
+        addedStrategies: [],
+        // Both per-key refs carry weight so they survive the Save prune.
+        weightOverrides: { [PK]: 0.5, [PK_LO]: 0.5 },
+        memberKeyIds: [],
+        leverageOverrides: { [PK]: 999, [PK_LO]: -3 },
+        lastEditedAt: "2026-06-01T00:00:00.000Z",
+      } as ScenarioDraft,
+    });
+
+    // (i) The draft LOADED (not reset/deleted) — the row opened → Update primary.
+    const updateBtn = await screen.findByRole("button", {
+      name: /Update portfolio/i,
+    });
+    expect(updateBtn).toBeInTheDocument();
+
+    fireEvent.click(updateBtn);
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [, init] = saveCalls(fetchMock)[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    // (ii) hostile-in → clamped-out: 999 → MAX_LEVERAGE, -3 → 1.
+    expect(body.draft.leverageOverrides).toEqual({
+      [PK]: MAX_LEVERAGE,
+      [PK_LO]: 1,
+    });
+  });
+
+  // (c) POST-site prune (RT-03, Phase 112 red team) — the POST/new-scenario path
+  // must preserve an eligible per-key leverage-only edit exactly as the PUT path
+  // (test (a)) does. Test (a) covers the Update (PUT) prune site; postNewScenario
+  // is correct-by-reading but was untested ("test the wiring, not just the
+  // helper"). Here a FRESH (unopened) per-key book takes a leverage-only edit on
+  // the INCLUDED per-key ref PK, then a first Save → POST. PK carries no
+  // toggle/weight/added entry, so it survives the prune ONLY because
+  // postNewScenario threads `eligiblePerKeyIds` into pruneLeverageToDraftRefs —
+  // drop that arg and PK is pruned and this assertion fails (the RED-proof of the
+  // POST-site wiring).
+  it("(c) POST-site prune — a per-key leverage-only edit survives the POST (new scenario) prune (eligiblePerKeyIds threaded)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "New per-key levered" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPerKeyBook();
+
+    // A leverage-only edit on the INCLUDED per-key ref — no toggle/weight/added
+    // entry for PK, so it is prune-eligible only via `eligiblePerKeyIds`.
+    const lev = document.getElementById(
+      `leverage-${PK}`,
+    ) as HTMLInputElement | null;
+    expect(lev).not.toBeNull();
+    expect(lev!.disabled).toBe(false);
+    act(() => {
+      fireEvent.change(lev!, { target: { value: "2" } });
+    });
+    expect(lev!.value).toBe("2");
+
+    // First Save → POST a new row (never opened → primary is "Save portfolio").
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "New per-key levered" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // The eligible per-key ref's leverage survives the POST prune.
+    expect(body.draft.leverageOverrides).toHaveProperty(PK, 2);
+  });
+});
+
+// ===========================================================================
+// Phase 113 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-03/04 solved-L persistence.
+//
+// A SOLVED leverage (from Target-max-DD mode) is just a leverage value with a
+// derived provenance: it must ride the IDENTICAL setLeverageOverrides fold +
+// pruneLeverageToDraftRefs(... eligiblePerKeyIds) keep-signal as a TYPED L
+// (provenance-independent persistence — 113-RESEARCH Landmine §). Mode + target
+// are TRANSIENT UI state (founder lock): only the solved L persists, and there
+// is NO SCENARIO_SCHEMA_VERSION bump (a solved L is a new value in an existing
+// map). RED on the current tree: the mode toggle testid does not exist, so the
+// mode-flip query fails by assertion before any Save runs.
+// ===========================================================================
+describe("ScenarioComposer — Phase 113 solved-L persists at Save (RED scaffold)", () => {
+  const PK = "pk-113-save-a"; // an INCLUDED per-key ref (api_key_id)
+
+  const PK_HOLDING = {
+    ...HOLDING_BTC,
+    symbol: "BTC",
+    api_key_id: PK,
+    value_usd: 100_000,
+  };
+  const PK_HOLDINGS = [PK_HOLDING];
+  // One −5% day among zeros → sleeve base max-DD 5% → a 20% target solves to ≈4×.
+  const PK_SERIES = Array.from({ length: 14 }, (_, i) => ({
+    date: `2026-05-${String(i + 1).padStart(2, "0")}`,
+    value: i === 6 ? -0.05 : 0,
+  }));
+  const PK_APIKEY = {
+    id: PK,
+    exchange: "binance",
+    label: "Main desk",
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+
+  function makePerKeyBookPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [PK_APIKEY],
+      holdingsSummary: PK_HOLDINGS,
+      perKeyReturnsByApiKeyId: { [PK]: PK_SERIES },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [PK],
+    });
+  }
+
+  function renderPerKeyBook() {
+    return render(
+      <ScenarioComposer
+        payload={makePerKeyBookPayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // (a) RED — flip the per-key row to Target mode, commit a reachable target
+  // (producing a solved L), then Save → POST. Assert (1) the POST body's
+  // leverageOverrides[PK] equals the solved L shown in the row's leverage input
+  // (persists exactly like a typed L via the SAME prune keep-signal); (2) the
+  // payload schema_version equals the CURRENT imported SCENARIO_SCHEMA_VERSION (no
+  // bump); (3) the stringified payload carries NO transient mode/target field.
+  // RED: the mode-toggle testid does not exist → the flip query fails by assertion.
+  it("(a) RED — a solved L persists in the POST payload's leverageOverrides; no schema bump; no transient mode/target", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Solved-L per-key" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPerKeyBook();
+
+    // Flip the PK row to Target mode via the per-row mode toggle.
+    const row = document.querySelector(
+      `[data-scope-ref="${PK}"]`,
+    ) as HTMLElement | null;
+    expect(row).not.toBeNull();
+    const toggle = row!.querySelector(
+      '[data-testid="scenario-leverage-mode-toggle"]',
+    );
+    expect(toggle).not.toBeNull(); // RED — the mode toggle does not exist yet.
+    act(() => {
+      fireEvent.click(toggle as Element);
+    });
+
+    // Commit a reachable sleeve target (5% base → 20% ≈ 4×).
+    const target = document.getElementById(
+      `target-dd-${PK}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+    const solvedL = parseFloat(
+      (document.getElementById(`leverage-${PK}`) as HTMLInputElement).value,
+    );
+    expect(solvedL).toBeGreaterThan(1);
+
+    // First Save → POST a new row.
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Solved-L per-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+
+    // (1) the SOLVED L persists exactly like a typed L (same prune keep-signal).
+    expect(body.draft.leverageOverrides[PK]).toBe(solvedL);
+    // (2) no schema bump — single source of truth (imported constant).
+    expect(body.draft.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    // (3) mode + target are transient UI state — never serialized.
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("targetMaxDD");
+    expect(serialized).not.toContain("rowMode");
+  });
+});

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, type RefObject } from "react";
 import { usePathname } from "next/navigation";
-import { Sidebar } from "./Sidebar";
+import { Sidebar, type NavAction } from "./Sidebar";
 
 interface MobileSidebarDrawerProps {
   open: boolean;
@@ -18,6 +18,9 @@ interface MobileSidebarDrawerProps {
   /** Phase 09.1 Plan 11 / R5 — passed through to Sidebar so the
    *  drawer-mounted nav also surfaces the My Allocation badge. */
   flaggedCount?: number;
+  /** Phase 110 CONTRIB-01 — forwarded to the drawer's Sidebar so the
+   *  "Add a Strategy" client action works from the mobile drawer too. */
+  onNavAction?: (action: NavAction) => void;
 }
 
 /**
@@ -46,6 +49,7 @@ export function MobileSidebarDrawer({
   populatedSlugs,
   triggerRef,
   flaggedCount,
+  onNavAction,
 }: MobileSidebarDrawerProps) {
   const pathname = usePathname();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -184,6 +188,7 @@ export function MobileSidebarDrawer({
           isManager={isManager}
           variant="drawer"
           flaggedCount={flaggedCount}
+          onNavAction={onNavAction}
         />
       </div>
     </div>

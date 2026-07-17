@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, fireEvent } from "@testing-library/react";
 import { buildPrimaryMobileNav } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 
@@ -9,9 +9,12 @@ import { MobileNav } from "./MobileNav";
  * The bottom nav is single-sourced from `buildPrimaryMobileNav` in Sidebar.tsx
  * (DRY / project Rule 6) so the desktop Sidebar and the mobile bottom nav never
  * drift. These tests pin:
- *   - the role OR-logic (showsAllocatorWorkspace = isAllocator || isAdmin etc.)
- *     so an allocator never gets manager/admin-only destinations and vice-versa
- *     (T-45-01 information-disclosure mitigation in the plan threat register);
+ *   - the pure-role derivation (Phase 109: showsAllocatorWorkspace =
+ *     p.isAllocator, showsManagerWorkspace = p.isManager — is_admin no longer
+ *     OR-s in; it is an ops-overlay, and staff hold role='both') so an
+ *     allocator never gets manager-only destinations and vice-versa, and a
+ *     bare is_admin fixture surfaces only Profile (T-45-01
+ *     information-disclosure mitigation in the plan threat register);
  *   - the SC#1 allocator head — My Allocation / Risk / Bridge with DISTINCT
  *     hrefs (there is no /bridge route, verified in 45-RESEARCH Pitfall 1;
  *     Bridge deep-links the Scenario tab `/allocations?tab=scenario`, where the
@@ -58,20 +61,30 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     // Allocator must NOT get manager-only destinations.
     expect(hrefs).not.toContain("/strategies");
     expect(hrefs).not.toContain("/portfolios");
-    // Every item carries the NavItem shape.
+    // Every item carries the NavItem shape. Phase 110 (CONTRIB-01): NavItem is
+    // now a union — link items carry a string `href`, while the "Add a Strategy"
+    // action item carries a string `action` and NO href instead.
     for (const item of items) {
       expect(typeof item.label).toBe("string");
-      expect(typeof item.href).toBe("string");
       expect(typeof item.icon).toBe("function");
+      if ("action" in item && item.action) {
+        expect(typeof item.action).toBe("string");
+        expect(item.href).toBeUndefined();
+      } else {
+        expect(typeof item.href).toBe("string");
+      }
     }
   });
 
-  it("manager-only: Strategies + Portfolios + Profile; no allocator items; <=5", () => {
+  it("manager-only: Strategies + Profile; NO Portfolios; no allocator items; <=5", () => {
+    // Phase 109 review correction: Portfolios is an allocator deep-link surface
+    // (14 allocator owners / 0 manager owners in prod), not a manager one — it
+    // is in NO primary nav. Managers get Strategies only.
     const items = buildPrimaryMobileNav({ isManager: true });
     const hrefs = items.map((i) => i.href);
     expect(items.length).toBeLessThanOrEqual(5);
     expect(hrefs).toContain("/strategies");
-    expect(hrefs).toContain("/portfolios");
+    expect(hrefs).not.toContain("/portfolios");
     expect(hrefs).toContain("/profile");
     // No allocator destinations leak into a manager's bottom nav.
     expect(hrefs).not.toContain("/allocations");
@@ -79,14 +92,25 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
     expect(hrefs).not.toContain("/allocations?tab=scenario");
   });
 
-  it("admin: EXACT <=5 set — SC#1 trio + one manager dest + Profile; Portfolios/Discovery trimmed to the drawer", () => {
+  it("bare is_admin: only Profile — is_admin is an ops-overlay, not a workspace persona (Phase 109)", () => {
+    // ROLE-03: is_admin no longer OR-s into the workspace flags. An admin with
+    // no allocator/manager role surfaces NO workspace destinations in the
+    // bottom nav — only the always-present Profile item. Staff retain the
+    // workspaces via role='both' (asserted in the role='both' case below).
+    // Re-introducing `|| p.isAdmin` would relight the allocator set and fail this.
     const items = buildPrimaryMobileNav({ isAdmin: true });
+    expect(items.map((i) => i.href)).toEqual(["/profile"]);
+  });
+
+  it('role "both" (isAllocator && isManager): EXACT <=5 set — allocator head lit, Portfolios trimmed to the drawer (ROLE-05)', () => {
+    const items = buildPrimaryMobileNav({ isAllocator: true, isManager: true });
     const hrefs = items.map((i) => i.href);
-    // Pin the EXACT set + ORDER so a reorder of the priority array can't
-    // silently change which destination is dropped at the <=5 cap (WR-02).
-    // budget = CAP(5) - 1 reserved for Profile = 4 → [My Allocation, Risk,
-    // Bridge, Strategies] then Profile; Portfolios + Discovery overflow to the
-    // hamburger drawer (the full nav) by design.
+    // The allocator head lights (NOT the pre-fix !isAllocator short-circuit),
+    // via pure role. Pin the EXACT set + ORDER so a reorder of the priority
+    // array can't silently change which destination is dropped at the <=5 cap
+    // (WR-02): budget = CAP(5) - 1 reserved for Profile = 4 → [My Allocation,
+    // Risk, Bridge, Strategies] then Profile; Portfolios + Discovery overflow
+    // to the hamburger drawer (the full nav) by design.
     expect(hrefs).toEqual([
       "/allocations",
       "/allocations?tab=risk",
@@ -94,33 +118,52 @@ describe("buildPrimaryMobileNav — role branches (NAV-01)", () => {
       "/strategies",
       "/profile",
     ]);
-    // Portfolios + Discovery are INTENTIONALLY absent from the bottom nav
-    // (reachable via the drawer) — assert the drop so it stays deliberate.
+    // Discovery is INTENTIONALLY absent from the bottom nav (reachable via the
+    // drawer) — assert the drop so it stays deliberate. Portfolios is absent
+    // everywhere (allocator deep-link surface, not in any nav — Phase 109
+    // review correction).
     expect(hrefs).not.toContain("/portfolios");
     expect(hrefs).not.toContain("/discovery");
     // Distinct hrefs even when both families are present.
     expect(new Set(hrefs).size).toBe(hrefs.length);
   });
 
-  it('role "both" (isAllocator && isManager): EXACT set equals admin — allocator set lit, Portfolios trimmed', () => {
-    const items = buildPrimaryMobileNav({ isAllocator: true, isManager: true });
-    const hrefs = items.map((i) => i.href);
-    // The allocator head lights (NOT the pre-fix !isAllocator short-circuit),
-    // and the resolved set is identical to admin (same OR-logic). Pinned so a
-    // priority reorder that silently dropped a different item is caught (WR-02).
-    expect(hrefs).toEqual([
-      "/allocations",
-      "/allocations?tab=risk",
-      "/allocations?tab=scenario",
-      "/strategies",
-      "/profile",
-    ]);
-    expect(hrefs).not.toContain("/portfolios");
-  });
-
   it("no roles: only the always-present Profile item", () => {
     const items = buildPrimaryMobileNav({});
     expect(items.map((i) => i.href)).toEqual(["/profile"]);
+  });
+
+  /**
+   * Phase 110 CONTRIB-01 — the allocator "Add a Strategy" client action is the
+   * LEADING discretionary filler, so it survives the single filler slot the
+   * <=5 cap grants a pure allocator (the SC#1 primary trio still leads). It is
+   * href-less (an action, not a route) and never surfaces for a non-allocator
+   * (role-leak T-110-16).
+   */
+  it("pure allocator: surfaces the href-less 'Add a Strategy' action filler, trio still leads", () => {
+    const items = buildPrimaryMobileNav({ isAllocator: true });
+    const addItem = items.find((i) => i.label === "Add a Strategy");
+    expect(addItem).toBeDefined();
+    expect(addItem?.href).toBeUndefined();
+    expect(
+      addItem && "action" in addItem ? addItem.action : undefined,
+    ).toBe("add-strategy");
+    // The SC#1 trio still leads — the action is a filler, not a primary.
+    expect(items.slice(0, 3).map((i) => i.label)).toEqual([
+      "My Allocation",
+      "Risk",
+      "Bridge",
+    ]);
+  });
+
+  it("manager-only: does NOT surface 'Add a Strategy'", () => {
+    const items = buildPrimaryMobileNav({ isManager: true });
+    expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
+  });
+
+  it("bare is_admin: does NOT surface 'Add a Strategy'", () => {
+    const items = buildPrimaryMobileNav({ isAdmin: true });
+    expect(items.find((i) => i.label === "Add a Strategy")).toBeUndefined();
   });
 
   it("My Allocation carries the flaggedCount badge when > 0", () => {
@@ -150,12 +193,26 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     expect(within(nav).getByText("Risk")).toBeInTheDocument();
   });
 
+  it("renders 'Add a Strategy' as a <button> that fires onNavAction (CONTRIB-01)", () => {
+    pathnameMock.mockReturnValue("/allocations");
+    const onNavAction = vi.fn();
+    render(<MobileNav isAllocator onNavAction={onNavAction} />);
+    const nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    const button = within(nav).getByText("Add a Strategy").closest("button");
+    expect(button).not.toBeNull();
+    expect(button).toHaveAttribute("type", "button");
+    fireEvent.click(button!);
+    expect(onNavAction).toHaveBeenCalledWith("add-strategy");
+  });
+
   it("does NOT render a hardcoded TABS list — manager sees only their set", () => {
     pathnameMock.mockReturnValue("/strategies");
     render(<MobileNav isManager />);
     const nav = screen.getByRole("navigation", { name: "Primary mobile" });
     expect(within(nav).getByText("Strategies")).toBeInTheDocument();
-    expect(within(nav).getByText("Portfolios")).toBeInTheDocument();
+    // Portfolios is an allocator deep-link surface — not in the manager nav
+    // (Phase 109 review correction).
+    expect(within(nav).queryByText("Portfolios")).toBeNull();
     // The old role-blind stub surfaced Discovery to everyone — it must be gone
     // for a manager (Discovery is the allocator's browse surface).
     expect(within(nav).queryByText("My Allocation")).toBeNull();

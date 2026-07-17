@@ -29,15 +29,15 @@
  *     .test.ts) used by 5 routes — moving it buys nominal cohesion at the
  *     cost of the client-safety this module exists to provide.
  *
- *   - `withPublishedOrOwner` (published OR own-draft): OMITTED. The recon
- *     census found ZERO consumers — every published fetcher is
- *     unconditionally public (owner draft-preview happens on the owner
- *     dashboard via a different, ownership-scoped path, NOT on a
- *     published-OR-owner discovery query). A consumer-less helper would
- *     violate Rule 2 (mirrors B4c's removed `auditEvent()` and B20's
- *     rejected God-hook). When a genuine owner-inclusive discovery surface
- *     is first written, add it here then — a 3-line extension:
- *       `q.or(`status.eq.published,user_id.eq.${authUserId}`)`.
+ *   - `withPublishedOrOwner` (published OR own-draft): now REALIZED below.
+ *     Originally OMITTED — the recon census found ZERO consumers, and a
+ *     consumer-less helper would have violated Rule 2. Phase 110 / CONTRIB-03
+ *     wrote the first genuine owner-inclusive discovery surface (GET
+ *     /api/strategies/browse), which is exactly the "add it here then"
+ *     condition this note anticipated, so the pre-documented 3-line extension
+ *     now lives here. Its predicate mirrors the `strategies_read` RLS shape
+ *     (`published OR user_id=eq`) per locked decision D; the owner id is
+ *     session-only (from withAllocatorAuth), never a client-supplied param.
  *
  *   - `checkScopeOwnership` (`src/lib/notes/ownership.ts`): a specialised
  *     4-scope (portfolio/holding/bridge_outcome/strategy) checker whose
@@ -82,5 +82,44 @@ export function withPublishedOnly<Q>(query: Q): Q {
   return (query as { eq(column: "status", value: "published"): Q }).eq(
     "status",
     "published",
+  );
+}
+
+/**
+ * Append the OWNER-INCLUSIVE visibility predicate — `status = 'published' OR
+ * user_id = <authUserId>` — to a `strategies` query, returning the same builder
+ * so the chain continues fluently:
+ *
+ *   const { data } = await withPublishedOrOwner(
+ *     supabase.from("strategies").select("*"),
+ *     user.id,
+ *   ).order("name");
+ *
+ * This mirrors the `strategies_read` RLS policy EXACTLY (`status = 'published'
+ * OR user_id = auth.uid()`, locked decision D), so on a genuine owner-inclusive
+ * discovery surface the caller sees their OWN not-yet-published rows plus every
+ * published row, while another caller sees only published rows.
+ *
+ * First (and only) consumer: GET /api/strategies/browse (Phase 110 /
+ * CONTRIB-03). `authUserId` MUST come from the authenticated session
+ * (`withAllocatorAuth`), NEVER a request/query/body param — a caller who could
+ * name another owner would read that owner's private rows (T-110-05/07).
+ *
+ * Defence-in-depth: RLS remains the backstop; this query-builder predicate is
+ * the isolation layer that mirrors it. The `no-owner-or-on-admin-client` lint
+ * rule (CONTRIB-04) bans a raw owner-OR `.or(...user_id.eq...)` anywhere outside
+ * THIS file (exempted via the `B10 visibility:` marker), so a future admin /
+ * service-role client swap cannot silently drop the RLS backstop and leak every
+ * user's drafts (Pitfall 4).
+ */
+export function withPublishedOrOwner<Q>(query: Q, authUserId: string): Q {
+  // Same structural-cast style as withPublishedOnly: every
+  // PostgrestFilterBuilder exposes `.or(filter)` returning the same builder, so
+  // the predicate appends and the caller's exact query type — plus every
+  // downstream `.order()` / `.limit()` / `.single()` — is preserved. We use a
+  // plain `Q` (not a self-referential `Q extends { or(...): Q }` bound) to dodge
+  // the TS2589 "excessively deep" instantiation on wide builder unions.
+  return (query as { or(filter: string): Q }).or(
+    `status.eq.published,user_id.eq.${authUserId}`,
   );
 }

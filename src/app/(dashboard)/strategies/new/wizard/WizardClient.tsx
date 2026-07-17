@@ -56,6 +56,38 @@ interface InitialDraft {
 interface WizardClientProps {
   /** Initial draft row from the server (null when no draft exists yet). */
   initialDraft: InitialDraft | null;
+  /**
+   * Phase 110 / CONTRIB-01..02 — which surface mounted the wizard.
+   *
+   * `"manager"` (default) preserves the existing manager-page behavior
+   * byte-for-byte: terminal paths `router.push("/strategies")`, sell-side
+   * "Submit for review" copy, and finalize `entry_context: "manager"`
+   * (→ server status `pending_review`).
+   *
+   * `"contribution"` is the allocator inline-overlay mount: terminal paths
+   * invoke the injected `onSuccess`/`onClose` callbacks (NEVER navigate to
+   * the 109 manager-guarded `/strategies`), copy is allocator-framed, and
+   * finalize sends `entry_context: "contribution"` (→ server status
+   * `private`, owner-only, never published — plan 110-04 server side).
+   */
+  entryContext?: "manager" | "contribution";
+  /**
+   * Overrides the `?source=csv` URL detection. The manager page keys the
+   * CSV↔API branch off the route (`wizard/page.tsx:120`); the contribution
+   * overlay has no route searchParams, so it passes the branch explicitly
+   * and drives the remount with its own `key={source}` (Pitfall 3).
+   */
+  sourceOverride?: "api" | "csv";
+  /**
+   * Contribution-mode success terminal. Receives the finalized strategy id.
+   * Manager mode ignores this (it navigates to `/strategies` instead).
+   */
+  onSuccess?: (strategyId: string) => void;
+  /**
+   * Contribution-mode dismiss terminal (fail-safe redirects + 404-after-
+   * finalize). Manager mode ignores this (it navigates to `/strategies`).
+   */
+  onClose?: () => void;
 }
 
 const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4 | 5> = {
@@ -109,15 +141,27 @@ interface CsvPreview {
   last_rows: Record<string, unknown>[];
 }
 
-export function WizardClient({ initialDraft }: WizardClientProps) {
+export function WizardClient({
+  initialDraft,
+  entryContext = "manager",
+  sourceOverride,
+  onSuccess,
+  onClose,
+}: WizardClientProps) {
   const router = useRouter();
+  // Phase 110: the useSearchParams hook keeps running unconditionally (hooks
+  // rules) but contribution mode never depends on route searchParams — it
+  // passes `sourceOverride` instead (Pitfall 3). Manager mode is unchanged.
   const searchParams = useSearchParams();
+  const isContribution = entryContext === "contribution";
 
   // Phase 15: ?source=csv branch detection. Default 'api' for back-compat.
   // The query param is read once at mount; tab navigation changes are not
   // supported (the wizard expects a fresh page load on branch switch).
+  // Phase 110: `sourceOverride` wins when present (the overlay owns the toggle
+  // and remounts via key={source}); otherwise the URL drives it as before.
   const source: "api" | "csv" =
-    searchParams.get("source") === "csv" ? "csv" : "api";
+    sourceOverride ?? (searchParams.get("source") === "csv" ? "csv" : "api");
 
   // Hydration safety (fix for React #418 on `?source=csv`):
   //
@@ -354,12 +398,17 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         try {
           const loaded = await loadWizardState();
           if (!loaded?.strategyId && !loaded?.wizardSessionId) {
-            router.push("/strategies");
+            // Phase 110: contribution mode dismisses the overlay instead of
+            // navigating to the 109 manager-guarded /strategies route.
+            if (isContribution) onClose?.();
+            else router.push("/strategies");
           }
         } catch (err) {
           console.error("[wizard] bfcache restore loadWizardState threw:", err);
-          // Fail safe: redirect to prevent re-submit of an already-finalized wizard.
-          router.push("/strategies");
+          // Fail safe: dismiss/redirect to prevent re-submit of an
+          // already-finalized wizard.
+          if (isContribution) onClose?.();
+          else router.push("/strategies");
         }
       })();
     }
@@ -367,7 +416,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
     return () => {
       window.removeEventListener("pageshow", handlePageShow);
     };
-  }, [router]);
+  }, [router, isContribution, onClose]);
 
   // Phase 15 fix (2026-05-27): autosave the CSV strategy name as the user
   // types so a tab refresh/close BEFORE "Validate and continue" doesn't drop
@@ -539,18 +588,28 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         strategy_id: finalStrategyId,
       });
       clearWizardState();
-      // Wizard finalize sets status='pending_review'. The public detail
-      // page at /strategy/[id] filters status='published' (queries.ts:255)
+      // Phase 110 / CONTRIB-02: finalize terminal status is 'pending_review'
+      // in manager mode and 'private' in contribution mode (the entry_context
+      // POST field selects the server branch — plan 110-04).
+      //
+      // Contribution mode hands the finalized strategy id to the overlay's
+      // onSuccess callback and stays put — it must NEVER navigate to the 109
+      // manager-guarded /strategies route (an allocator would be bounced off).
+      if (isContribution) {
+        onSuccess?.(finalStrategyId);
+        return;
+      }
+      // Manager mode: wizard finalize sets status='pending_review'. The public
+      // detail page at /strategy/[id] filters status='published' (queries.ts:255)
       // so newly-submitted strategies 404 there. The list at /strategies
       // is what the user actually wants — their just-submitted strategy
       // appears in "My Strategies" with its pending badge. The
       // ?wizard_submitted=1 query param is reserved for a future success
       // toast on that page; harmless if unconsumed.
-      void finalStrategyId;
       router.push(`/strategies?wizard_submitted=1`);
       router.refresh();
     },
-    [wizardSessionId, router],
+    [wizardSessionId, router, isContribution, onSuccess],
   );
 
   const handleDeleteDraft = useCallback(async () => {
@@ -588,10 +647,13 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
         // 404 after finalize: draft is finalized, route to /strategies.
         if (res.status === 404 && source !== "csv") {
           // A 404 after the wizard was previously on submit step means the
-          // draft was finalized in another tab — redirect to the list page.
+          // draft was finalized in another tab — dismiss/redirect. Phase 110:
+          // contribution mode closes the overlay instead of navigating to the
+          // 109 manager-guarded /strategies route.
           clearWizardState();
           setConfirmDelete(false);
-          router.push("/strategies");
+          if (isContribution) onClose?.();
+          else router.push("/strategies");
           return;
         }
         clearWizardState();
@@ -611,7 +673,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
       console.error("[wizard] delete draft threw:", err);
       setConfirmDelete(false);
     }
-  }, [strategyId, wizardSessionId, source, router]);
+  }, [strategyId, wizardSessionId, source, router, isContribution, onClose]);
 
   const handleResume = useCallback(() => {
     if (!initialDraft) return;
@@ -824,11 +886,15 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
             )}
 
             {step === "submit" && strategyId && syncSnapshot && metadataDraft && (
+              // Phase 110: `entryContext` threads into the finalize-wizard POST
+              // as the `entry_context` field (contribution → server finalizes
+              // status='private') and branches the sell-side submit copy.
               <SubmitStep
                 strategyId={strategyId}
                 wizardSessionId={wizardSessionId}
                 snapshot={syncSnapshot}
                 metadata={metadataDraft}
+                entryContext={entryContext}
                 onSubmitted={handleSubmitSuccess}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from submit returns to the
@@ -1019,6 +1085,9 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
             )}
 
             {step === "csv_submit" && csvFmt && csvPreview && csvMetadataDraft && (
+              // Phase 110: `entryContext` threads into the csv-finalize POST as
+              // the `entry_context` field (contribution → server finalizes
+              // status='private') and branches the sell-side submit copy.
               <CsvSubmitStep
                 wizardSessionId={wizardSessionId}
                 fmt={csvFmt}
@@ -1026,6 +1095,7 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                 preview={csvPreview}
                 dailyReturnsSeries={csvDailyReturnsSeries}
                 metadata={csvMetadataDraft}
+                entryContext={entryContext}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from csv_submit returns to the
                   // review recap (the step that now precedes csv_submit).
@@ -1047,9 +1117,16 @@ export function WizardClient({ initialDraft }: WizardClientProps) {
                     strategy_id: finalStrategyId,
                   });
                   clearWizardState();
-                  // Same reasoning as handleSubmitSuccess above: pending_review
-                  // strategies aren't visible at /strategy/[id]; the list
-                  // page at /strategies is the right landing surface.
+                  // Phase 110: contribution mode (status='private') hands the
+                  // finalized id to the overlay's onSuccess and stays put —
+                  // never navigating to the 109 manager-guarded /strategies.
+                  if (isContribution) {
+                    onSuccess?.(finalStrategyId);
+                    return;
+                  }
+                  // Manager mode: same reasoning as handleSubmitSuccess above —
+                  // pending_review strategies aren't visible at /strategy/[id];
+                  // the list page at /strategies is the right landing surface.
                   router.push(`/strategies?wizard_submitted=1`);
                   router.refresh();
                 }}

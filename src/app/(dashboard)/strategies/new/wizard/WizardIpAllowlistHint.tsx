@@ -24,7 +24,7 @@ import { WarningBanner } from "@/components/ui/WarningBanner";
  */
 export function WizardIpAllowlistHint() {
   return (
-    <WarningBanner className="mt-2 border-l-4 border-warning bg-warning/5">
+    <WarningBanner className="mt-2 rounded-md border border-warning/30 bg-warning/5">
       <p
         role="note"
         aria-label="Exchange IP allowlist hint"

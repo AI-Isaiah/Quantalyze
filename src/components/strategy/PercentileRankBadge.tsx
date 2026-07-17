@@ -49,9 +49,9 @@ export function PercentileRankBadge({
       // non-colliding testid. Adds no behavior; changes nothing else.
       data-testid="percentile-rank-badge"
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-fixed-11 font-medium",
+        "inline-flex items-center gap-1.5 rounded-sm border px-2.5 py-0.5 text-fixed-11 font-medium",
         tier === "top" && "border-emerald-200 bg-emerald-50 text-emerald-700",
-        tier === "high" && "border-sky-200 bg-sky-50 text-sky-700",
+        tier === "high" && "border-accent/30 bg-accent/5 text-accent",
         tier === "mid" && "border-border bg-page text-text-secondary",
         tier === "low" && "border-amber-200 bg-amber-50 text-amber-700",
         className,

@@ -192,12 +192,17 @@ async function loginViaForm(
 }
 
 // Curated authed route floor — each anchor is a route-specific VISIBLE content
-// node a freshly-seeded allocator reliably renders (never generic chrome). The
+// node the freshly-seeded user reliably renders (never generic chrome). The
 // "My Allocation" <h1> sits above the tab-panel switch (AllocationsTabs.tsx) so
-// it is present on every ?tab= value. NB /admin is deliberately EXCLUDED:
-// seedTestAllocator stamps role='allocator' and /admin redirects a non-admin →
-// a false-green (reflow-sweep-authed.spec.ts:26-31). Admin clip coverage rides
-// the public routes + the static admin-width test (Plan 54-03).
+// it is present on every ?tab= value. This sweep spans BOTH the allocator
+// surfaces AND the standalone /strategies/new/wizard route, which is
+// manager-gated (Phase 109 ROLE-04, strategies/layout.tsx — allocators
+// contribute via the inline ContributionWizardOverlay, Phase 110 CONTRIB). A
+// pure allocator would be redirected off the wizard, so the beforeAll seeds
+// role='both' to own both surfaces in one user without redirect. NB /admin is
+// deliberately EXCLUDED: 'both' is still a non-admin and /admin redirects a
+// non-admin → a false-green (reflow-sweep-authed.spec.ts:26-31). Admin clip
+// coverage rides the public routes + the static admin-width test (Plan 54-03).
 const AUTHED_ROUTES: { path: string; anchor: string; label: string }[] = [
   { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
   { path: "/allocations?tab=overview", anchor: 'h1:has-text("My Allocation")', label: "allocations Overview" },
@@ -220,12 +225,15 @@ test.describe("no-clip sweep (VERIFY-03) — authed", () => {
       "the live authed no-clip proof runs in CI once seed env is present.",
   );
 
-  // One seeded allocator + login for the whole sweep (mirrors reflow-sweep-
-  // authed.spec.ts). The session cookie carries across page.goto navigations.
+  // One seeded role='both' user + login for the whole sweep (mirrors reflow-
+  // sweep-authed.spec.ts). role='both' owns the allocator surfaces AND the
+  // manager-gated /strategies/new/wizard route (see the AUTHED_ROUTES note),
+  // so a single user sweeps both without redirect. The session cookie carries
+  // across page.goto navigations.
   let allocator: Awaited<ReturnType<typeof seedTestAllocator>>;
 
   test.beforeAll(async () => {
-    allocator = await seedTestAllocator();
+    allocator = await seedTestAllocator({ role: "both" });
   });
 
   test.beforeEach(async ({ page }) => {

@@ -137,3 +137,113 @@ describe("Phase 108 SCEN-BB backbone gates", () => {
     expect(stripComments(realCode).join("\n").includes(tok)).toBe(true);
   });
 });
+
+/**
+ * Phase 111 (CONSTIT-04) — permanent WHOLE-REPO Data-Sources orphan gate.
+ *
+ * The v1.10 SC-3 lesson: a grep gate that scans src/ ONLY lets a deleted
+ * feature's identifiers linger in e2e/ (and tests/, scripts/) undetected. Plan
+ * 111-03 deleted the separate "Data sources" composer section and reshaped it
+ * into the unified badged CompositionList; this gate walks src/ + e2e/ + tests/
+ * + scripts/ (every source tree in the repo) so a removed identifier can never
+ * silently reappear ANYWHERE, and runs in CI on every push.
+ *
+ * Banned = ONLY identifiers 111-03 actually REMOVED (each verified 0 hits
+ * repo-wide before this gate landed):
+ *   - the `scenario-data-sources` testid prefix   (renamed → scenario-constituent-*)
+ *   - the `data-data-source-id` per-key row selector (→ data-scope-ref)
+ *   - `includeByApiKeyId`   (deleted composer useState)
+ *   - `handleDataSourceToggle` (deleted per-key toggle handler)
+ *
+ * DELIBERATELY NOT banned — these are RETAINED live identifiers in the NEW
+ * unified list and a broad `dataSource` substring would false-positive on them:
+ *   - `showDataSources` / `allDataSourcesExcluded` — load-bearing render-gating
+ *     locals in ScenarioComposer.tsx that drive per-key row rendering + the
+ *     honest all-excluded empty card (111-03 kept them by design);
+ *   - the `dataSourceLabel` helper family (RESEARCH removal map retains it).
+ * Banning those would both fail this gate on the post-reshape tree AND
+ * misrepresent the removal map — so the ban list is the four removed tokens only.
+ *
+ * Self-invalidation-proof: the banned tokens are built by string concatenation
+ * (this file's source never contiguously contains them) AND this file is
+ * excluded from the walk. A companion neutered-gate assertion proves the matcher
+ * DOES fire on a synthetic banned-token string (test-the-wiring: prove it fails
+ * when neutered), and an over-broadening guard pins that the retained live
+ * identifiers can never be swept into the ban list.
+ */
+
+const REPO_SCAN_ROOTS = ["src", "e2e", "tests", "scripts"];
+
+const ORPHAN_SCAN_FILES = REPO_SCAN_ROOTS.flatMap((r) => {
+  const root = join(process.cwd(), r);
+  return existsSync(root) ? walkSource(root) : [];
+});
+
+// Concatenated so this gate's own source can never contiguously match its bans.
+const DATA_SOURCES_ORPHANS = [
+  "scenario-data-" + "sources",
+  "data-data-" + "source-id",
+  "includeBy" + "ApiKeyId",
+  "handleDataSource" + "Toggle",
+];
+
+describe("CONSTIT-04 — Data-Sources orphan scan (whole-repo)", () => {
+  it("no removed Data-Sources identifier survives in src/, e2e/, tests/, or scripts/", () => {
+    const offenders: string[] = [];
+    for (const file of ORPHAN_SCAN_FILES) {
+      const rel = relative(process.cwd(), file);
+      if (rel.split(sep).join(sep) === SELF_REL) continue; // never scan self
+      const code = stripComments(readFileSync(file, "utf8")).join("\n");
+      const hit = DATA_SOURCES_ORPHANS.filter((tok) => code.includes(tok));
+      if (hit.length > 0) offenders.push(`${rel}: ${hit.join(", ")}`);
+    }
+    expect(
+      offenders,
+      `CONSTIT-04 regression — a removed Data-Sources identifier reappeared as live code:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("walks e2e/, tests/, and scripts/ — not just src/ (the v1.10 SC-3 whole-repo lesson)", () => {
+    const scannedRoots = new Set(
+      ORPHAN_SCAN_FILES.map((f) => relative(process.cwd(), f).split(sep)[0]),
+    );
+    // src/ is always in scope; each non-src tree that exists must be walked, or a
+    // deleted identifier could linger there undetected (exactly the SC-3 miss).
+    expect(scannedRoots.has("src")).toBe(true);
+    for (const root of ["e2e", "tests", "scripts"]) {
+      if (existsSync(join(process.cwd(), root))) {
+        expect(scannedRoots.has(root), `orphan gate must walk ${root}/`).toBe(true);
+      }
+    }
+  });
+
+  it("neutered-gate detection — the matcher DOES fire on a synthetic banned-token string", () => {
+    // Prove the gate is not vacuous: were any banned identifier reintroduced as
+    // live code, the comment-stripped includes() scan would catch it. Assert
+    // every banned token is detected in a synthetic in-memory source line.
+    for (const tok of DATA_SOURCES_ORPHANS) {
+      const synthetic = `const x = screen.getByTestId("${tok}");`;
+      expect(
+        stripComments(synthetic).join("\n").includes(tok),
+        `neutered-gate proof failed — the matcher would NOT catch a live ${tok}`,
+      ).toBe(true);
+    }
+  });
+
+  it("over-broadening guard — retained live identifiers are never swept into the ban list", () => {
+    // showDataSources / allDataSourcesExcluded / dataSourceLabel are load-bearing
+    // in the NEW unified list; a future over-broad ban (e.g. a `dataSource`
+    // substring) must never trip them. Assert no banned token matches them.
+    const retained = [
+      "show" + "DataSources",
+      "allDataSources" + "Excluded",
+      "dataSource" + "Label",
+    ];
+    for (const keep of retained) {
+      const collides = DATA_SOURCES_ORPHANS.some(
+        (tok) => keep.includes(tok) || tok.includes(keep),
+      );
+      expect(collides, `over-broad ban would trip retained identifier: ${keep}`).toBe(false);
+    }
+  });
+});

@@ -140,6 +140,7 @@ export function ProfileTabs({
             <ExchangesTabContent
               initialKeys={exchanges.initialKeys}
               activePortfolio={exchanges.activePortfolio}
+              hasHoldings={exchanges.hasHoldings}
             />
           )}
         </TabsContent>

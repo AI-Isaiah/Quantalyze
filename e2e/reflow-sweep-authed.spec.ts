@@ -23,11 +23,18 @@
  * so assertNoReflow fails loud on a 404 / login / unseeded-chrome page rather
  * than measuring against nothing (the W-02 lesson).
  *
- * NB admin routes are deliberately EXCLUDED: seedTestAllocator stamps
- * role='allocator', and src/app/(dashboard)/admin/page.tsx redirects a
- * non-admin to /discovery/crypto-sma — anchoring an admin route would
- * false-green against that redirect (Pitfall 5). Admin-table reflow is proven
- * by the sibling all-columns guards + the ResponsiveTable wrap, not here.
+ * The two wizard-spanning sweeps below (AUTHED_ROUTES, ULTRAWIDE_ROUTES) seed
+ * role='both' because the standalone /strategies/new/wizard route is
+ * manager-gated (Phase 109 ROLE-04, strategies/layout.tsx — allocators
+ * contribute via the inline ContributionWizardOverlay, Phase 110 CONTRIB); a
+ * pure allocator would be redirected off it. 'both' owns BOTH the allocator
+ * surfaces AND the manager wizard route in one user without redirect.
+ *
+ * NB admin routes are deliberately EXCLUDED: neither 'allocator' nor 'both' is
+ * an admin, and src/app/(dashboard)/admin/page.tsx redirects a non-admin to
+ * /discovery/crypto-sma — anchoring an admin route would false-green against
+ * that redirect (Pitfall 5). Admin-table reflow is proven by the sibling
+ * all-columns guards + the ResponsiveTable wrap, not here.
  *
  * FLOW-01 dual-wiring (the twice-burned trap): this spec is wired in BOTH
  * required places — (1) the `HAS_SEED_ENV` const + `test.skip` below
@@ -81,16 +88,17 @@ const AUTHED_ROUTES: {
   { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My Allocation")', label: "allocations Mandate" },
   { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
   { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
-  // De-blocked onboarding wizard (WIZARD-01) — the default ?source=api flow
-  // renders ConnectKeyStep's "Connect your exchange" <h2 id=…>. Proving this
-  // reflows at 320px is the phone-usable-wizard proof.
-  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (de-blocked)" },
+  // Manager-gated standalone onboarding wizard (Phase 109 ROLE-04) — reached
+  // here via the seeded role='both' user. The default ?source=api flow renders
+  // ConnectKeyStep's "Connect your exchange" <h2 id=…>. Proving this reflows at
+  // 320px is the phone-usable-wizard proof.
+  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (manager-gated route, role=both)" },
   // The CSV branch (?source=csv) initializes WizardClient to the csv_upload step
   // (WizardClient.tsx step-init), rendering CsvUploadStep's
   // <h2 id="wizard-csv-upload-heading">. The founder-with-a-track-record-CSV
-  // path is the whole reason the gate was removed, so its entry must also reflow
-  // at 320px — without this the sweep only proved the API branch entry.
-  { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (de-blocked)" },
+  // path must also reflow at 320px — without this the sweep only proved the API
+  // branch entry.
+  { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (manager-gated route, role=both)" },
   // Authed /security — same <main h1> ("Security practices") as the public
   // page, exercised inside the authed session.
   { path: "/security", anchor: "main h1", label: "security (authed)" },
@@ -105,12 +113,15 @@ test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — authed", () => {
       "The live authed reflow proof runs in CI / /qa once seed env is present.",
   );
 
-  // One seeded allocator + login for the whole sweep (mirrors the seeded
-  // precedents). The session cookie carries across page.goto navigations.
+  // One seeded role='both' user + login for the whole sweep (mirrors the seeded
+  // precedents). role='both' owns the allocator surfaces AND the manager-gated
+  // /strategies/new/wizard route (see the file header + AUTHED_ROUTES notes), so
+  // one user sweeps both without redirect. The session cookie carries across
+  // page.goto navigations.
   let allocator: Awaited<ReturnType<typeof seedTestAllocator>>;
 
   test.beforeAll(async () => {
-    allocator = await seedTestAllocator();
+    allocator = await seedTestAllocator({ role: "both" });
   });
 
   test.beforeEach(async ({ page }) => {
@@ -310,19 +321,23 @@ test.describe("rotate-stability (SC#4) — /allocations EquityChart, authed", ()
 // Strategies"), which a seeded allocator with no compare selection always hits.
 // Phase 54-06 / VERIFY-01 widens this from the Phase-52 IN-SCOPE allocator
 // subset (allocations + scenario/risk + /compare) to the APP-WIDE set of routes
-// a FRESHLY-SEEDED allocator (seedTestAllocator, role='allocator', NO extra
-// seed) reliably renders with a stable VISIBLE anchor — the same reachability
-// the 320px AUTHED_ROUTES sweep above already proves. Added rows:
+// a FRESHLY-SEEDED role='both' user (seedTestAllocator({ role: "both" }), NO
+// extra seed) reliably renders with a stable VISIBLE anchor — the same
+// reachability the 320px AUTHED_ROUTES sweep above already proves. Added rows:
 //   - the remaining /allocations tabs (overview/holdings/outcomes/mandate) — the
 //     "My Allocation" <h1> sits above the tab-panel switch on every ?tab= value;
-//   - the de-blocked onboarding wizard (API + CSV entries) — its step <h2 id=…>
-//     anchors, mirroring the 320px sweep (WIZARD-01 de-block proof at 2560 too);
+//   - the manager-gated onboarding wizard (API + CSV entries) — its step
+//     <h2 id=…> anchors, mirroring the 320px sweep. The standalone
+//     /strategies/new/wizard route is manager-gated (Phase 109 ROLE-04,
+//     strategies/layout.tsx; allocators contribute via the inline
+//     ContributionWizardOverlay, Phase 110 CONTRIB), so role='both' is required
+//     to reach it without redirect;
 //   - authed /security (same <main h1> as the public page, in-session).
-// ADMIN routes are deliberately EXCLUDED (see :26-31 — seedTestAllocator stamps
-// role='allocator'; /admin redirects a non-admin → a false-green). Admin
+// ADMIN routes are deliberately EXCLUDED (see :26-31 — neither 'allocator' nor
+// 'both' is an admin; /admin redirects a non-admin → a false-green). Admin
 // ultra-wide width is covered by the static admin-width.test.tsx (Plan 54-03),
 // not here. /discovery/[slug] is OMITTED: without a seedBridgeCandidate the
-// freshly-seeded allocator hits the category empty-state, not a stable
+// freshly-seeded user hits the category empty-state, not a stable
 // content-bearing layout to gate on (the axe spec seeds a bridge for that).
 const ULTRAWIDE_ROUTES: { path: string; anchor: string; label: string }[] = [
   { path: "/allocations", anchor: 'h1:has-text("My Allocation")', label: "allocations (default)" },
@@ -332,8 +347,8 @@ const ULTRAWIDE_ROUTES: { path: string; anchor: string; label: string }[] = [
   { path: "/allocations?tab=mandate", anchor: 'h1:has-text("My Allocation")', label: "allocations Mandate" },
   { path: "/allocations?tab=risk", anchor: 'h1:has-text("My Allocation")', label: "allocations Risk" },
   { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
-  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (de-blocked)" },
-  { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (de-blocked)" },
+  { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (manager-gated route, role=both)" },
+  { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (manager-gated route, role=both)" },
   { path: "/security", anchor: "main h1", label: "security (authed)" },
   { path: "/compare", anchor: 'h1:has-text("Compare Strategies")', label: "compare (empty-selection)" },
 ];
@@ -347,12 +362,14 @@ test.describe("reflow sweep @ 2560px ultra-wide — authed", () => {
       "The live ultra-wide reflow proof runs in CI once seed env is present.",
   );
 
-  // One seeded allocator + login for the whole row (mirrors the 320px sweep and
-  // the rotate-stability fold above). The session cookie carries across goto.
+  // One seeded role='both' user + login for the whole row (mirrors the 320px
+  // sweep). role='both' owns the allocator surfaces AND the manager-gated
+  // /strategies/new/wizard route (see the ULTRAWIDE_ROUTES note), so one user
+  // sweeps both without redirect. The session cookie carries across goto.
   let allocator: Awaited<ReturnType<typeof seedTestAllocator>>;
 
   test.beforeAll(async () => {
-    allocator = await seedTestAllocator();
+    allocator = await seedTestAllocator({ role: "both" });
   });
 
   test.beforeEach(async ({ page }) => {

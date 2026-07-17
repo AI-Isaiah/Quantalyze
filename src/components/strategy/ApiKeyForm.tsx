@@ -27,12 +27,18 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [passphrase, setPassphrase] = useState("");
+  // Reveal toggle for the secret. Defaults hidden; lets the user eyeball what
+  // they pasted (deribit rejects a mistyped secret as invalid_credentials, and
+  // a masked field gives no way to catch a typo). Reset alongside every secret
+  // scrub so a reopened form always starts masked.
+  const [showSecret, setShowSecret] = useState(false);
 
   // NEW-C37-06: scrub plaintext secrets and invoke the parent cancel handler.
   function handleCancel() {
     setApiKey("");
     setApiSecret("");
     setPassphrase("");
+    setShowSecret(false);
     onCancel();
   }
 
@@ -48,6 +54,7 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
       setApiKey("");
       setApiSecret("");
       setPassphrase("");
+      setShowSecret(false);
     };
   }, []);
 
@@ -71,6 +78,7 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
       setApiKey("");
       setApiSecret("");
       setPassphrase("");
+      setShowSecret(false);
     }
   }
 
@@ -100,15 +108,27 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
             required
             autoComplete="off"
           />
-          <Input
-            label="API Secret"
-            value={apiSecret}
-            onChange={(e) => setApiSecret(e.target.value)}
-            placeholder="Your API secret"
-            type="password"
-            required
-            autoComplete="off"
-          />
+          <div className="relative">
+            <Input
+              label="API Secret"
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              placeholder="Your API secret"
+              type={showSecret ? "text" : "password"}
+              required
+              autoComplete="off"
+              className="pr-16"
+            />
+            <button
+              type="button"
+              onClick={() => setShowSecret((s) => !s)}
+              aria-pressed={showSecret}
+              aria-label={showSecret ? "Hide API secret" : "Show API secret"}
+              className="absolute bottom-0 right-0 flex h-[44px] items-center px-3 text-micro font-mono uppercase tracking-[0.14em] text-text-muted hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
+            >
+              {showSecret ? "Hide" : "Show"}
+            </button>
+          </div>
           {needsPassphrase && (
             <Input
               label="Passphrase (OKX)"

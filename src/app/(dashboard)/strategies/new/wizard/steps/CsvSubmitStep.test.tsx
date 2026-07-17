@@ -214,4 +214,61 @@ describe("CsvSubmitStep — #597 part 2 asset_class forwarding", () => {
     // must NOT be silently coerced to 'crypto'.
     expect(body.metadata.asset_class).toBe("traditional");
   });
+
+  // Phase 110 / CONTRIB-02 — the csv-finalize POST body carries the
+  // entry_context routing hint. Default mount (manager) sends "manager".
+  it("sends entry_context='manager' in the csv-finalize body by default", async () => {
+    render(
+      <CsvSubmitStep
+        wizardSessionId="22222222-2222-2222-2222-222222222222"
+        fmt="daily_returns"
+        strategyName="manager default"
+        preview={PREVIEW}
+        dailyReturnsSeries={SERIES}
+        metadata={META}
+        onSubmitted={() => {}}
+        onBack={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /submit strategy/i }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { entry_context?: string };
+    expect(body.entry_context).toBe("manager");
+  });
+
+  // Contribution mount → entry_context='contribution' (→ status='private')
+  // plus allocator-framed copy: "Add to my strategies", no "Submit strategy".
+  it("sends entry_context='contribution' and shows allocator copy when entryContext='contribution'", async () => {
+    render(
+      <CsvSubmitStep
+        wizardSessionId="22222222-2222-2222-2222-222222222222"
+        fmt="daily_returns"
+        strategyName="allocator contribution"
+        preview={PREVIEW}
+        dailyReturnsSeries={SERIES}
+        metadata={META}
+        entryContext="contribution"
+        onSubmitted={() => {}}
+        onBack={() => {}}
+      />,
+    );
+
+    // Allocator-framed CTA replaces the sell-side "Submit strategy" label.
+    expect(
+      screen.getByRole("button", { name: /add to my strategies/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /submit strategy/i }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("wizard-csv-submit-cta"));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+
+    const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as { entry_context?: string };
+    expect(body.entry_context).toBe("contribution");
+  });
 });

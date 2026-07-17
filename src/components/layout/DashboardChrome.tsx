@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { MobileNav } from "@/components/layout/MobileNav";
 import { MobileTopBar } from "@/components/layout/MobileTopBar";
@@ -9,6 +9,7 @@ import { MobileSidebarDrawer } from "@/components/layout/MobileSidebarDrawer";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { LegalFooter } from "@/components/legal/LegalFooter";
 import { useFlaggedCountStore } from "@/app/(dashboard)/allocations/AllocationContext";
+import { ContributionWizardOverlay } from "@/app/(dashboard)/allocations/components/ContributionWizardOverlay";
 
 interface DashboardChromeProps {
   populatedSlugs?: string[];
@@ -45,6 +46,7 @@ export function DashboardChrome({
   children,
 }: DashboardChromeProps) {
   const pathname = usePathname();
+  const router = useRouter();
   // Plan 11 / R5 — read flaggedCount from the cross-tree store; Sidebar
   // renders the badge on "My Allocation" when > 0.
   const flaggedCount = useFlaggedCountStore();
@@ -54,6 +56,34 @@ export function DashboardChrome({
   // overlay without duplicating state.
   const [menuOpen, setMenuOpen] = useState(false);
   const hamburgerRef = useRef<HTMLButtonElement>(null);
+
+  // Phase 110 CONTRIB-01 — host the ContributionWizardOverlay at the chrome
+  // level so BOTH launch surfaces (the allocator "Add a Strategy" nav action
+  // here, and the Browse "Add your own" CTA in ScenarioComposer) mount the same
+  // reusable overlay. The overlay is trigger-agnostic — all we control is
+  // `contributeOpen`. onSuccess refreshes so a freshly-contributed private
+  // strategy shows up in server-rendered surfaces.
+  const [contributeOpen, setContributeOpen] = useState(false);
+  const openContribute = () => {
+    // Close the mobile drawer first: it owns a window-level Tab focus trap that
+    // stays armed until `menuOpen` goes false. The overlay portals to <body>
+    // (outside the drawer-inert <main>), so a still-open drawer would hijack
+    // every Tab press in the overlay — a keyboard trap (WCAG 2.1.2). Opening
+    // the overlay doesn't change the route, so the drawer's route-change
+    // auto-close never fires; close it explicitly here.
+    setMenuOpen(false);
+    setContributeOpen(true);
+  };
+  const contributionOverlay = (
+    <ContributionWizardOverlay
+      isOpen={contributeOpen}
+      onClose={() => setContributeOpen(false)}
+      onSuccess={() => {
+        setContributeOpen(false);
+        router.refresh();
+      }}
+    />
+  );
 
   // Full-bleed routes: hide sidebar + skip the centered max-w container so
   // the underlying page can claim every pixel. The match queue detail page
@@ -118,6 +148,7 @@ export function DashboardChrome({
           isManager={isManager}
           flaggedCount={flaggedCount}
           inert={menuOpen}
+          onNavAction={openContribute}
         />
         <MobileSidebarDrawer
           open={menuOpen}
@@ -128,7 +159,9 @@ export function DashboardChrome({
           populatedSlugs={populatedSlugs}
           triggerRef={hamburgerRef}
           flaggedCount={flaggedCount}
+          onNavAction={openContribute}
         />
+        {contributionOverlay}
       </div>
     );
   }
@@ -151,6 +184,7 @@ export function DashboardChrome({
           isAllocator={isAllocator}
           isManager={isManager}
           flaggedCount={flaggedCount}
+          onNavAction={openContribute}
         />
       </div>
       {/* NAV-03: inert the background <main> while the drawer is open (scoped to
@@ -187,6 +221,7 @@ export function DashboardChrome({
         isManager={isManager}
         flaggedCount={flaggedCount}
         inert={menuOpen}
+        onNavAction={openContribute}
       />
       {/* Mobile sidebar drawer — opens from the top bar hamburger.
           The desktop Sidebar above is <div className="hidden md:block">
@@ -200,7 +235,9 @@ export function DashboardChrome({
         populatedSlugs={populatedSlugs}
         triggerRef={hamburgerRef}
         flaggedCount={flaggedCount}
+        onNavAction={openContribute}
       />
+      {contributionOverlay}
     </div>
   );
 }

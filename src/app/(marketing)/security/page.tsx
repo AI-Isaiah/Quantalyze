@@ -173,7 +173,7 @@ export default function SecurityPage() {
             <div
               role="status"
               aria-live="polite"
-              className="mt-6 mb-6 rounded-lg border-l-4 border-warning bg-warning/5 px-4 py-3"
+              className="mt-6 mb-6 rounded-md border border-warning/30 bg-warning/5 px-4 py-3"
             >
               <p className="text-body leading-relaxed text-text-primary">
                 <span className="font-semibold">

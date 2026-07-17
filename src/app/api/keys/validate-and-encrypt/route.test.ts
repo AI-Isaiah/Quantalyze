@@ -12,7 +12,11 @@ import { NextRequest } from "next/server";
  * This rewrite drives the actual handler and pins its hot paths:
  *   (1) 429 + Retry-After when checkLimit fails
  *   (2) 400 when exchange / api_key / api_secret missing
- *   (3) 400 with the trading-permissions copy when validation.read_only=false
+ *   (3) 400 with an honest could-not-verify-read-only backstop (NOT a scope
+ *       claim) when validation.read_only=false with no curated cause — after
+ *       DOGFOOD-3, genuine scope rejections + probe failures arrive as curated
+ *       4xx details via the F5b forward, so this unknown-cause branch must not
+ *       assert trade/withdraw scopes it never observed
  *   (4) 400 with the propagated error.message when validateKey throws
  *   (5) happy path: {valid:true, read_only:true, ...encryptKey payload}
  *
@@ -158,8 +162,8 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect((await res.json()).error).toBe("Missing required fields");
   });
 
-  // ── (3) Non-read-only key → 400 with trading-permissions copy ──────
-  it("returns 400 with the trading-permissions copy when validation.read_only is false", async () => {
+  // ── (3) Non-read-only key, unknown cause → 400 honest backstop ─────
+  it("returns 400 with an honest could-not-verify backstop (no scope claim) when validation.read_only is false", async () => {
     mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
 
     const { POST } = await import("./route");
@@ -168,8 +172,12 @@ describe("POST /api/keys/validate-and-encrypt", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe(
-      "This key has trading or withdrawal permissions. Only read-only keys are accepted.",
+      "This key could not be verified as read-only. Only read-only keys are accepted.",
     );
+    // DOGFOOD-3 regression: a bare read_only:false 200 carries no scope
+    // evidence (it also fires on a Python fail-closed probe), so the backstop
+    // must NEVER assert trade/withdraw scopes it never observed.
+    expect(body.error).not.toMatch(/trading or withdrawal permissions/);
     // A non-read-only key must NEVER be encrypted to disk.
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });

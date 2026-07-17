@@ -1,5 +1,9 @@
 import { cn } from "@/lib/utils";
-import { TRUST_TIER_TOKENS, type TrustTier } from "@/lib/design-tokens/trust-tier";
+import {
+  TRUST_TIER_TOKENS,
+  type TrustTier,
+  type ProvenanceTier,
+} from "@/lib/design-tokens/trust-tier";
 
 /**
  * Single source-of-truth string for the CSV-uploaded trust-tier label.
@@ -20,8 +24,19 @@ export const CSV_UPLOADED_LABEL = TRUST_TIER_TOKENS.csv_uploaded.label;
  */
 export type { TrustTier };
 
+/**
+ * Re-export the badge-layer `ProvenanceTier` union (TrustTier | "composite")
+ * for CONSTIT-02 consumers that render the composite provenance variant.
+ */
+export type { ProvenanceTier };
+
 interface TrustTierLabelProps {
-  trustTier: TrustTier | null | undefined;
+  /**
+   * Phase 111 / CONSTIT-02 — widened from `TrustTier` to `ProvenanceTier` so
+   * the badge can render the 4th `composite` identity. `null`/`undefined`
+   * still render nothing (Phase 15 v0 contract, byte-for-byte preserved).
+   */
+  trustTier: ProvenanceTier | null | undefined;
   className?: string;
 }
 
@@ -38,6 +53,8 @@ interface TrustTierLabelProps {
  *                      white surface) — "CSV uploaded — verification pending"
  *   - `self_reported`: warning amber outline (#B45309 border + text on
  *                      white surface) — "Self-reported"
+ *   - `composite`:     dark-navy outline (#1A1A2E border + text on white
+ *                      surface) — "Composite" (Phase 111 / CONSTIT-02)
  *   - `null` | `undefined`: returns null (no render — preserves the
  *                           Phase 15 v0 contract).
  *

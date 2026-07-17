@@ -150,6 +150,11 @@ type ValidatedPayload = {
   aumNum: number | null;
   maxCapacityNum: number | null;
   asset_class: string;
+  // CONTRIB-02 (Phase 110) — which wizard entry finalized this draft. 'manager'
+  // (default, back-compat: today's callers send nothing) keeps the existing
+  // publish-candidate flow ('pending_review'); 'contribution' is the allocator
+  // overlay, which finalizes to an owner-only terminal status ('private').
+  entryContext: "manager" | "contribution";
 };
 
 function validatePayload(
@@ -180,6 +185,7 @@ function validatePayload(
     aum,
     max_capacity,
     asset_class,
+    entry_context,
   } = body;
 
   if (!isUuid(strategy_id)) {
@@ -271,6 +277,32 @@ function validatePayload(
       ? asset_class
       : "traditional";
 
+  // CONTRIB-02 (Phase 110) — entry_context selects the terminal-status branch.
+  // Closed set {manager, contribution}; ABSENT/null → 'manager' (back-compat:
+  // every caller before this phase sends nothing). A garbage value is a hard 400
+  // — never silently coerced. Safe by construction: BOTH reachable terminal
+  // statuses ('pending_review','private') are non-published, the admin publish
+  // queue only lists 'pending_review', and the finalize_wizard_strategy RPC
+  // RAISEs on any value outside ('pending_review','private') (server-side
+  // enforcement, T-110-10 / V5). This flag is a trusted context selector, not a
+  // client-trusted "publish=false" — the user cannot flip it to reach publication.
+  if (
+    entry_context !== undefined &&
+    entry_context !== null &&
+    entry_context !== "manager" &&
+    entry_context !== "contribution"
+  ) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "entry_context must be 'manager' or 'contribution'" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  const entryContextValidated =
+    entry_context === "contribution" ? "contribution" : "manager";
+
   // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
   // string), so the prior `as string` casts were redundant. Removing
   // them keeps the parse boundary statically verified end-to-end.
@@ -297,6 +329,7 @@ function validatePayload(
       aumNum,
       maxCapacityNum,
       asset_class: asset_class_validated,
+      entryContext: entryContextValidated,
     },
   };
 }
@@ -377,6 +410,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const validation = validatePayload(body as Record<string, unknown> | null);
   if (!validation.ok) return validation.response;
   const fields = validation.fields;
+
+  // CONTRIB-02 (Phase 110) — the contribution wizard finalizes to an owner-only
+  // 'private' terminal status; the manager flow keeps 'pending_review'. Derived
+  // ONCE here and threaded to every finalize writer (the legacy RPC + response).
+  const terminalStatus: "pending_review" | "private" =
+    fields.entryContext === "contribution" ? "private" : "pending_review";
 
   // B15 limiter-ordering — consume the rate-limit token AFTER input
   // validation (body parse + validatePayload), not before. A malformed /
@@ -612,11 +651,27 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       }
       // Route to the legacy finalize whose after() block enqueues
       // stitch_composite (memberCount re-count + enqueue) — independent of
-      // the backbone flag.
-      return await runLegacyFinalize({ supabase, user, fields });
+      // the backbone flag. terminalStatus threads the CONTRIB-02 branch: a
+      // composite contribution finalizes 'private' here (no per-source fork —
+      // locked decision), a manager composite stays 'pending_review'.
+      return await runLegacyFinalize({ supabase, user, fields, terminalStatus });
     }
     // compositeMemberCountN === 0 (CSV / no-member draft with api_key_id NULL)
     // → fall through to the existing unified-vs-legacy split byte-unchanged.
+  }
+
+  // CONTRIB-02 (Phase 110) — a single-key API contribution routes through the
+  // LEGACY finalize path, NOT the unified arm below. The unified arm delegates to
+  // process_key_long, which enqueues analytics but NEVER promotes strategies.status
+  // (only strategy_verifications advances — W1 note, 110-01). Routed there, a
+  // contribution would never reach status='private'. runLegacyFinalize calls
+  // finalize_wizard_strategy with p_terminal_status='private' AND enqueues
+  // sync_trades — exactly what a private contribution needs (owner-visible KPIs,
+  // no admin review-queue signal). The apiKeyId scope-broadening probe (above) has
+  // already run, so the contribution key is re-checked identically to the manager
+  // key. Composite contributions were already diverted in the hoist above.
+  if (fields.entryContext === "contribution") {
+    return await runLegacyFinalize({ supabase, user, fields, terminalStatus });
   }
 
   // Phase 106 Stage B (D2): single-key finalize now delegates UNCONDITIONALLY
@@ -703,30 +758,43 @@ async function runLegacyFinalize(args: {
   supabase: Awaited<ReturnType<typeof createClient>>;
   user: User;
   fields: ValidatedPayload;
+  // CONTRIB-02 (Phase 110) — the terminal status the RPC writes. Defaults to
+  // 'pending_review' (manager flow, byte-identical to pre-phase behavior); the
+  // contribution branch passes 'private'. The RPC RAISEs on anything else.
+  terminalStatus?: "pending_review" | "private";
 }): Promise<NextResponse> {
-  const { supabase, user, fields } = args;
-  // The generated types declare these RPC params as non-null primitives, but
-  // the underlying SQL function accepts nulls for leverage_range, aum, and
-  // max_capacity (per the wizard's "skip optional metadata" path). Cast each
-  // nullable arg to satisfy the typed-client contract without changing the
-  // value the DB receives.
-  const { data: finalizedId, error } = await supabase.rpc(
-    "finalize_wizard_strategy",
-    {
-      p_strategy_id: fields.strategy_id,
-      p_user_id: user.id,
-      p_name: fields.name,
-      p_description: fields.description,
-      p_category_id: fields.category_id,
-      p_strategy_types: fields.strategy_types,
-      p_subtypes: fields.subtypes,
-      p_markets: fields.markets,
-      p_supported_exchanges: fields.supported_exchanges,
-      p_leverage_range: fields.leverage_range as unknown as string,
-      p_aum: fields.aumNum as unknown as number,
-      p_max_capacity: fields.maxCapacityNum as unknown as number,
-    },
-  );
+  const { supabase, user, fields, terminalStatus = "pending_review" } = args;
+  // CONTRIB-02: the generated database.types.ts has not been regenerated for the
+  // new trailing p_terminal_status parameter (110-01 migration
+  // 20260716130500_finalize_terminal_status_param.sql), so the typed .rpc()
+  // overload would reject the extra key. Cast through unknown — the single place
+  // to delete once the types regeneration lands (mirrors the
+  // persist_csv_daily_returns cast in csv-finalize/route.ts). The underlying SQL
+  // function accepts nulls for leverage_range, aum, and max_capacity (the
+  // wizard's "skip optional metadata" path), so those ride through unchanged.
+  const { data: finalizedId, error } = await (
+    supabase.rpc as unknown as (
+      fn: "finalize_wizard_strategy",
+      rpcArgs: Record<string, unknown>,
+    ) => Promise<{
+      data: string | null;
+      error: { code?: string; message?: string } | null;
+    }>
+  )("finalize_wizard_strategy", {
+    p_strategy_id: fields.strategy_id,
+    p_user_id: user.id,
+    p_name: fields.name,
+    p_description: fields.description,
+    p_category_id: fields.category_id,
+    p_strategy_types: fields.strategy_types,
+    p_subtypes: fields.subtypes,
+    p_markets: fields.markets,
+    p_supported_exchanges: fields.supported_exchanges,
+    p_leverage_range: fields.leverage_range,
+    p_aum: fields.aumNum,
+    p_max_capacity: fields.maxCapacityNum,
+    p_terminal_status: terminalStatus,
+  });
 
   if (error) {
     console.error(
@@ -828,10 +896,21 @@ async function runLegacyFinalize(args: {
         | "enqueue_sync_trades_job";
       run: () => Promise<unknown>;
     }> = [
-      {
-        label: "notify_founder_new_strategy",
-        run: () => notifyFounderNewStrategy(canonicalName, managerName),
-      },
+      // CONTRIB-02 (Phase 110) — the admin "new strategy pending review"
+      // founder notification is SUPPRESSED for a private contribution: a
+      // 'private' row is never a review candidate (the admin publish queue keys
+      // on status='pending_review'), so signaling a review would be noise and a
+      // false publish cue. Every OTHER side effect (last_sync_at touch + the
+      // analytics enqueue) is KEPT — a contribution is a real track record and
+      // the allocator needs its KPIs in the composer (locked decision).
+      ...(terminalStatus === "private"
+        ? []
+        : [
+            {
+              label: "notify_founder_new_strategy" as const,
+              run: () => notifyFounderNewStrategy(canonicalName, managerName),
+            },
+          ]),
       // @audit-skip: denormalization timestamp. api_keys.last_sync_at
       // is a sync-state hint, not a user-visible state change. The
       // user-intent event for this flow is the finalize_wizard_strategy
@@ -974,7 +1053,9 @@ async function runLegacyFinalize(args: {
     {
       ok: true,
       strategy_id: resolvedId,
-      status: "pending_review",
+      // CONTRIB-02 — return the ACTUAL terminal status the RPC wrote ('private'
+      // on the contribution branch, 'pending_review' for the manager flow).
+      status: terminalStatus,
     },
     { headers: NO_STORE_HEADERS },
   );
@@ -1143,6 +1224,13 @@ async function unifiedFinalizeWizardHandler(args: {
   // instead of probing an opaque `Record<string, unknown>`. A backbone-
   // side rename of `verification_id` / `queued` now surfaces here as a
   // missing branch, not as a silent null/false fallback.
+  // CONTRIB-02 (Phase 110) — the two `status: "pending_review"` literals below
+  // are correct and NOT a missed branch: contributions are diverted to
+  // runLegacyFinalize in the POST handler BEFORE this unified arm, so
+  // unifiedFinalizeWizardHandler is reached ONLY by the manager flow. The unified
+  // backbone (process_key_long) never writes a 'private' terminal status, so
+  // there is no terminalStatus to thread here — this arm always terminates
+  // 'pending_review' by construction.
   const upstream = result.body;
   if (isProcessKeyOnboardResponse(upstream)) {
     if (upstream.queued) {

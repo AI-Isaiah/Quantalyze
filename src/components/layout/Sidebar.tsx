@@ -6,15 +6,40 @@ import { usePathname } from "next/navigation";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 export type IconComponent = ({ className }: { className?: string }) => React.JSX.Element;
-export interface NavItem {
+
+/** Phase 110 CONTRIB-01 — the set of client-action nav affordances. Kept a
+ *  string-literal union (currently one member) so a new action is a compile-time
+ *  addition, not a stringly-typed free-for-all. */
+export type NavAction = "add-strategy";
+
+interface NavItemBase {
   label: string;
-  href: string;
   icon: IconComponent;
   /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label. */
   badge?: number;
 }
+/** The default nav item: an href-based <Link>. Every pre-Phase-110 item. */
+export interface NavLinkItem extends NavItemBase {
+  href: string;
+  action?: never;
+}
+/**
+ * Phase 110 CONTRIB-01 — a CLIENT-ACTION nav entry that dispatches
+ * `onNavAction(action)` instead of navigating. The allocator "Add a Strategy"
+ * affordance uses this: the onboarding wizard route lives under the Phase-109
+ * manager-guarded /strategies subtree, so an href would redirect-bounce an
+ * allocator. Rendered as a `<button type="button">`, never a <Link>.
+ */
+export interface NavActionItem extends NavItemBase {
+  action: NavAction;
+  href?: never;
+}
+export type NavItem = NavLinkItem | NavActionItem;
 interface NavSubGroup { label: string; items: NavItem[] }
-interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[] }
+/** `icon` is the single section-level glyph. Light-rail redesign: Discovery
+ *  carries ONE search icon on its heading instead of repeating the magnifier on
+ *  every category row (one icon per SECTION, not per item). */
+interface NavSection { heading: string; items: NavItem[]; subGroups?: NavSubGroup[]; icon?: IconComponent }
 
 /**
  * Phase 66 CF-06 — cap the flagged-count badge's DISPLAYED text at "99+".
@@ -38,17 +63,21 @@ function buildNavSections(
   flaggedCount?: number,
   isManager?: boolean,
 ): NavSection[] {
-  // Admins see BOTH allocator AND manager surfaces (triage / demo).
-  // Allocators see the allocator workspace + the Discovery rail (their
-  // strategy-shopping surface). Managers see the manager workspace and
-  // the Discovery rail is HIDDEN — Discovery is the allocator's
-  // browse-investable-strategies surface, not the manager's. role="both"
-  // gets both workspaces; the manager flag is derived independently so
-  // it does not get nulled out the way the pre-fix `!isAllocator` short
-  // circuit did.
-  const showsAllocatorWorkspace = isAllocator || isAdmin;
-  const showsManagerWorkspace = isManager || isAdmin;
-  const showsDiscovery = isAllocator || isAdmin;
+  // Phase 109 (ROLE-01/02/03): `profiles.role` is the SOLE persona predicate;
+  // `is_admin` is an ops-overlay that gates ONLY the Admin section below —
+  // never a workspace. Staff hold role='both' (backfilled atomically in the
+  // same PR, migration 20260716120000), so an admin still lights BOTH
+  // workspaces via role, not via an `|| isAdmin` OR-in. Dropping that OR-in
+  // without the backfill would self-lock staff out of the allocator workspace
+  // (threat T-109-06) — hence the two changes are inseparable.
+  //   - Allocators see the allocator workspace + the Discovery rail (their
+  //     strategy-shopping surface).
+  //   - Managers see the manager workspace; Discovery is HIDDEN (it is the
+  //     allocator's browse-investable-strategies surface, not the manager's).
+  //   - role='both' lights both workspaces (isAllocator && isManager both true).
+  const showsAllocatorWorkspace = isAllocator;
+  const showsManagerWorkspace = isManager;
+  const showsDiscovery = isAllocator;
 
   // Bucket categories by `group` preserving first-seen order so the
   // Discovery section renders as stable sub-groups (Digital Assets → TradFi).
@@ -97,6 +126,19 @@ function buildNavSections(
       { label: "Compare", href: "/compare", icon: CompareIcon },
       { label: "Decks", href: "/decks", icon: DeckIcon },
     );
+    // Phase 110 CONTRIB-01 (ROLE-02 scoped exception) — the allocator brings a
+    // strategy to track/compose. A CLIENT ACTION (opens the
+    // ContributionWizardOverlay hosted at the DashboardChrome level), NOT an
+    // href: the wizard route sits under the Phase-109 manager-guarded
+    // /strategies subtree, so a Link would redirect-bounce the allocator. It
+    // lives INSIDE showsAllocatorWorkspace so it never leaks to a manager
+    // (T-110-16 info-disclosure). Allocator-framed copy — never the manager
+    // "publish to investors" voice.
+    workspaceItems.push({
+      label: "Add a Strategy",
+      icon: PlusIcon,
+      action: "add-strategy",
+    });
   }
   // FLOW-03 (Phase 32): the standalone "Strategy Sandbox" nav item (which
   // pointed at the now-retired Sandbox route) is removed. The example-universe
@@ -107,9 +149,14 @@ function buildNavSections(
   // (/allocations, above). The phase-32 frozen-spine guard pins this: no
   // Sandbox-route reference may reappear in this file.
   if (showsManagerWorkspace) {
+    // Phase 109 review correction: "Portfolios" is NOT a manager surface —
+    // /portfolios is an allocator feature (14 allocator owners / 0 manager
+    // owners in prod). It was mis-placed here and mis-classified as sell-side
+    // in ROLE-02. Managers get only Strategies. Portfolios stays a deep-link
+    // surface (reached via AddToPortfolio on discovery), not a primary nav item,
+    // per the v0.4.0 pivot — so it is intentionally absent from every workspace.
     workspaceItems.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
     );
   }
 
@@ -126,6 +173,10 @@ function buildNavSections(
           // heading without duplicating links.
           items: [],
           subGroups: discoveryGroups,
+          // Light-rail: the ONE search glyph lives on the section heading —
+          // the category rows below drop their (identical) per-item magnifier
+          // and indent under a hairline instead.
+          icon: SearchIcon,
         }]
       : []),
     ...(isAdmin
@@ -192,11 +243,13 @@ export function buildPrimaryMobileNav(p: {
   isAdmin?: boolean;
   flaggedCount?: number;
 }): NavItem[] {
-  // Mirror buildNavSections' role OR-logic EXACTLY (its showsAllocatorWorkspace
-  // / showsManagerWorkspace derivations) so the two navs share one source of
-  // truth and "both" lights the allocator set.
-  const showsAllocatorWorkspace = p.isAllocator || p.isAdmin;
-  const showsManagerWorkspace = p.isManager || p.isAdmin;
+  // Mirror buildNavSections' role derivation EXACTLY (Phase 109: pure role,
+  // no `|| isAdmin` OR-in) so the two navs share one source of truth. is_admin
+  // is an ops-overlay, not a workspace persona; staff hold role='both' (which
+  // sets both p.isAllocator and p.isManager), so "both" lights the allocator
+  // set via role. An admin with no allocator/manager role sees only Profile.
+  const showsAllocatorWorkspace = p.isAllocator;
+  const showsManagerWorkspace = p.isManager;
 
   // Profile is ACCOUNT — always present (mirrors buildNavSections' trailing
   // Profile item). Held aside so it survives the <=5 cap even when both the
@@ -213,6 +266,15 @@ export function buildPrimaryMobileNav(p: {
       { label: "Risk", href: "/allocations?tab=risk", icon: ShieldIcon },
       { label: "Bridge", href: "/allocations?tab=scenario", icon: BridgeIcon },
     );
+    // Phase 110 CONTRIB-01 — the allocator "Add a Strategy" client action as the
+    // LEADING discretionary filler. The SC#1 primary trio still leads (fillers
+    // only fill the budget AFTER primaries); placing it ahead of Discovery lets
+    // it survive the single filler slot a pure allocator's <=5 cap grants
+    // (Discovery overflows to the hamburger drawer, where the full nav —
+    // buildNavSections — still carries it). Href-less: it dispatches
+    // onNavAction, never navigates (see NavActionItem). Never emitted outside
+    // this allocator branch → T-110-16 role-leak pin.
+    fillers.push({ label: "Add a Strategy", icon: PlusIcon, action: "add-strategy" });
     // Discovery is a discretionary filler (allocator browse surface) — trimmed
     // first when the cap binds (admin keeps the SC trio + a manager destination).
     // Href is the canonical landing slug `/discovery/crypto-sma` (the same target
@@ -222,9 +284,11 @@ export function buildPrimaryMobileNav(p: {
     fillers.push({ label: "Discovery", href: "/discovery/crypto-sma", icon: SearchIcon });
   }
   if (showsManagerWorkspace) {
+    // Phase 109 review correction: Portfolios is an allocator (deep-link)
+    // surface, not a manager one — see buildNavSections above. Managers get
+    // only Strategies in the mobile primary nav.
     primary.push(
       { label: "Strategies", href: "/strategies", icon: BarChartIcon },
-      { label: "Portfolios", href: "/portfolios", icon: PieChartIcon },
     );
   }
 
@@ -245,6 +309,7 @@ export function Sidebar({
   isManager,
   variant = "desktop",
   flaggedCount,
+  onNavAction,
 }: {
   populatedSlugs?: string[];
   isAdmin?: boolean;
@@ -263,6 +328,11 @@ export function Sidebar({
    *  via DashboardChrome's `useFlaggedCountStore()` (no new server
    *  query). Renders as a badge on "My Allocation" when > 0. */
   flaggedCount?: number;
+  /** Phase 110 CONTRIB-01 — dispatched when a client-action nav item (e.g.
+   *  "Add a Strategy") is activated. DashboardChrome wires this to open the
+   *  ContributionWizardOverlay. Undefined on surfaces that carry no action
+   *  items (the action entry only appears in the allocator workspace). */
+  onNavAction?: (action: NavAction) => void;
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
@@ -274,39 +344,46 @@ export function Sidebar({
     <aside
       className={
         variant === "desktop"
-          ? "fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col bg-sidebar text-sidebar-text"
+          ? "fixed inset-y-0 left-0 z-30 flex w-[260px] flex-col border-r border-border bg-surface text-text-secondary"
           : // Audit 2026-05-07 G11.C.3: drawer variant lacked overflow-y-auto.
             // On 320×667 viewports with admin nav (MY WORKSPACE + 5 DISCOVERY
             // sub-groups + 5 ADMIN items + ACCOUNT) the content exceeds 100vh
             // and the bottom items are unreachable. Adding overflow-y-auto
             // lets the drawer scroll inside the overlay panel.
-            "flex h-full w-[260px] flex-col bg-sidebar text-sidebar-text overflow-y-auto"
+            "flex h-full w-[260px] flex-col border-r border-border bg-surface text-text-secondary overflow-y-auto"
       }
     >
       <div className="flex h-16 items-center px-6">
-        <Link href="/" className="text-lg font-display text-white tracking-tight">
+        <Link href="/" className="text-lg font-display text-text-primary tracking-tight">
           Quantalyze
         </Link>
       </div>
 
-      <nav aria-label="Primary" className="flex-1 overflow-y-auto px-3 pb-4">
-        {sections.map((section) => (
-          <div key={section.heading} className="mt-6 first:mt-2">
-            {/* PR #108 review: removed `text-sidebar-text/50` — Tailwind opacity
-                modifier collapses fg+bg through to the parent (#0F172A), giving
-                effective `#525D71 on #0F172A = 2.68:1` (axe color-contrast,
-                serious). Use full sidebar-text (#94A3B8) which gives 6.75:1 on
-                the same bg. Hierarchy preserved by font-semibold + tracking. */}
-            <p className="mb-2 px-3 text-fixed-10 font-semibold uppercase tracking-widest text-sidebar-text">
+      {/* flex-col so the ACCOUNT section can pin to the rail bottom (mt-auto). */}
+      <nav aria-label="Primary" className="flex flex-1 flex-col overflow-y-auto px-3 pb-4">
+        {sections.map((section) => {
+          // Light-rail: ACCOUNT is the factsheet-footer idiom — pinned to the
+          // bottom with a hairline rule above it.
+          const isAccount = section.heading === "ACCOUNT";
+          return (
+          <div
+            key={section.heading}
+            className={isAccount ? "mt-auto border-t border-border pt-4" : "mt-6 first:mt-2"}
+          >
+            {/* Factsheet eyebrow voice: mono, uppercase, wide tracking, muted
+                ink on the light surface. */}
+            <p className="mb-2 flex items-center gap-2 px-3 text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
+              {section.icon && <section.icon className="h-3.5 w-3.5 shrink-0" />}
               {section.heading}
             </p>
             {section.items.length > 0 && (
               <ul className="space-y-0.5">
                 {section.items.map((item) => (
                   <NavItemLink
-                    key={item.href}
+                    key={item.href ?? item.action}
                     item={item}
                     pathname={pathname}
+                    onNavAction={onNavAction}
                   />
                 ))}
               </ul>
@@ -316,27 +393,28 @@ export function Sidebar({
                 key={group.label}
                 className={idx === 0 ? "" : "mt-3"}
               >
-                {/* PR #108 review: removed `text-sidebar-text/35` — same
-                    alpha-collapse issue as the parent heading (1.94:1 on
-                    #0F172A, axe-flagged). Sub-group labels use full
-                    sidebar-text and rely on font-medium (vs the parent's
-                    semibold) + smaller tracking for hierarchy. */}
-                <p className="mb-1 px-3 text-fixed-10 font-medium uppercase tracking-wider text-sidebar-text">
+                {/* Sub-group labels sit one notch quieter than the section
+                    heading via TIGHTER tracking (0.1em vs 0.18em), not opacity. */}
+                <p className="mb-1 px-3 text-micro font-mono uppercase tracking-[0.14em] text-text-muted">
                   {group.label}
                 </p>
-                <ul className="space-y-0.5">
+                {/* Icon dedupe: the category rows carry no per-item icon; they
+                    indent under a hairline that visually binds them to the label. */}
+                <ul className="ml-3 space-y-0.5 border-l border-border pl-2">
                   {group.items.map((item) => (
                     <NavItemLink
                       key={item.href}
                       item={item}
                       pathname={pathname}
+                      hideIcon
                     />
                   ))}
                 </ul>
               </div>
             ))}
           </div>
-        ))}
+          );
+        })}
       </nav>
     </aside>
   );
@@ -345,45 +423,85 @@ export function Sidebar({
 function NavItemLink({
   item,
   pathname,
+  onNavAction,
+  hideIcon,
 }: {
   item: NavItem;
   pathname: string;
+  onNavAction?: (action: NavAction) => void;
+  /** Light-rail Discovery dedupe: sub-group category rows render label-only
+   *  (the single search glyph lives on the DISCOVERY heading). */
+  hideIcon?: boolean;
 }) {
-  const active = pathname === item.href || pathname.startsWith(item.href + "/");
   const badge = item.badge;
   const showBadge = typeof badge === "number" && badge > 0;
+
+  // Phase 110 CONTRIB-01 — client-action item: a <button> that dispatches
+  // onNavAction, never a route. Same visual language as a sibling nav link
+  // (icon + label, hover/focus treatment) minus the active-route state, since
+  // it navigates nowhere. w-full + text-left so the button fills the row like
+  // the <Link> rows do. The transparent 2px left border reserves the active
+  // accent-bar gutter so a link becoming active never shifts the label.
+  if (item.action) {
+    return (
+      <li>
+        <button
+          type="button"
+          onClick={() => onNavAction?.(item.action)}
+          className="flex w-full items-center gap-3 rounded-sm border-l-2 border-transparent px-3 py-2 text-left text-sm text-text-secondary transition-colors hover:bg-surface-subtle hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
+        >
+          {!hideIcon && <item.icon className="h-4 w-4 shrink-0" />}
+          <span>{item.label}</span>
+        </button>
+      </li>
+    );
+  }
+
+  const active = pathname === item.href || pathname.startsWith(item.href + "/");
   return (
     <li>
       <Link
         href={item.href}
-        // Phase 51 NAV-02 — expose the active item to AT (aria-current) and add a
-        // keyboard-only focus ring (the rail had neither). The ring is WHITE with a
-        // navy ring-offset, NOT the accent token: accent teal #1B6B5A on the dark
-        // rail measures 2.8:1 / 2.3:1 / 1.63:1 against bg-sidebar / -hover / -active,
-        // all below the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor for a focus
-        // indicator (the project LOCKS WCAG-AA). White-on-navy clears it with margin
-        // (>9:1 on every rail state). aria-current mirrors MobileNav; focus-visible
-        // (never bare focus:) per UI-SPEC §Item state contract. The active bg stays
-        // slate bg-sidebar-active (an accent FILL on the navy rail fails contrast too).
+        // Phase 51 NAV-02 — expose the active item to AT (aria-current) and a
+        // keyboard-only focus ring. Light-rail (founder decision): the ring is the
+        // ACCENT token #1B6B5A, which measures 6.36:1 on bg-surface #FFFFFF —
+        // clearing the WCAG 1.4.11 / 2.4.11 3:1 non-text-contrast floor with margin
+        // (the old white-on-navy ring would be invisible on the light surface).
+        // Active state is visually DISTINCT from hover: hover is a plain
+        // surface-subtle fill, while active adds an accent-text label AND a 2px
+        // left inset accent bar (border-l-2 border-accent). The accent label text
+        // also clears WCAG AA (6.36:1) on the light bg. focus-visible (never bare
+        // focus:) per UI-SPEC §Item state contract.
         aria-current={active ? "page" : undefined}
-        className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar ${
+        className={`flex items-center gap-3 rounded-sm border-l-2 px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface ${
           active
-            ? "bg-sidebar-active text-sidebar-text-active"
-            : "hover:bg-sidebar-hover hover:text-sidebar-text-active"
+            ? "border-accent bg-surface-subtle text-accent"
+            : "border-transparent text-text-secondary hover:bg-surface-subtle hover:text-text-primary"
         }`}
       >
-        <item.icon className="h-4 w-4 shrink-0" />
+        {!hideIcon && <item.icon className="h-4 w-4 shrink-0" />}
         <span>{item.label}</span>
         {showBadge && (
           <span
             aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
-            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-accent px-1.5 text-fixed-10 font-medium text-white"
+            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm bg-accent px-1.5 text-fixed-10 font-medium text-white"
           >
             {formatBadgeCount(badge)}
           </span>
         )}
       </Link>
     </li>
+  );
+}
+
+// Phase 110 CONTRIB-01 — the "Add a Strategy" action glyph. House style:
+// 16x16 viewBox, stroke-1.5, currentColor, no icon dependency — a plain plus
+// that reads as "add", distinct from the search/portfolio/bar glyphs.
+function PlusIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+      <path d="M8 3.5v9M3.5 8h9" />
+    </svg>
   );
 }
 
@@ -413,15 +531,6 @@ function UserIcon({ className }: { className?: string }) {
   );
 }
 
-function PieChartIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="8" cy="8" r="6" />
-      <path d="M8 2v6l4.24 4.24" />
-    </svg>
-  );
-}
-
 function PortfolioIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -435,7 +544,7 @@ function PortfolioIcon({ className }: { className?: string }) {
 function MatchIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H9zM9 9h4v4H9z" />
+      <path d="M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3zM9 9h4v4H9z" />
       <path d="M7 5h2M7 11h2M5 7v2M11 7v2" />
     </svg>
   );

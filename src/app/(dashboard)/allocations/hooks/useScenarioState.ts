@@ -42,6 +42,7 @@ import {
   scenarioStorageKey,
   clearScenarioDraft,
   toggleHolding as toggleHoldingPure,
+  togglePerKeySource as togglePerKeySourcePure,
   addStrategyBrowse as addBrowsePure,
   addStrategyBridge as addBridgePure,
   removeAddedStrategy as removePure,
@@ -90,6 +91,17 @@ export interface UseScenarioStateReturn {
   fingerprintMismatch: boolean;
   diffCount: number;
   toggleHolding: (scopeRef: string) => void;
+  /**
+   * Phase 111 / CONSTIT-03 — toggle a per-key data-source constituent (keyed by
+   * the bare `api_key_id` — a raw uuid, no prefix; the engine unit's NAME is the
+   * prefixed `key <uuid>`, but the ref is the bare uuid) through the SAME
+   * `toggleByScopeRef` channel as every other constituent, WITHOUT rescaling
+   * `weightOverrides` (per-key legs ride
+   * the raw equity-share path; the engine renormalizes). Excluding writes an
+   * explicit `false` (persists with the draft — supersedes CF-05 transient);
+   * re-including deletes the ref (absent === included).
+   */
+  togglePerKeySource: (ref: string) => void;
   addStrategyBrowse: (s: AddedStrategy) => void;
   addStrategyBridge: (holdingScopeRef: string, s: AddedStrategy) => void;
   removeAddedStrategy: (id: string) => void;
@@ -100,10 +112,16 @@ export interface UseScenarioStateReturn {
    * applied vector over the engine basis rather than the draft's `holding:`
    * toggle basis, so the mixed per-key + added path reproduces the suggestion
    * (no #528 dilution). Omitted by non-optimizer callers.
+   *
+   * WEIGHTS-01 (Phase 112) — `userExplicitRefs` names the ref(s) the user
+   * actually edited; the composer's per-key single-row writer passes the ONE
+   * edited ref so diffCount stamps a single gesture, not the whole renormalized
+   * engine basis. Omitted → every provided ref is stamped (optimizer Apply).
    */
   applyWeightOverrides: (
     weights: Record<string, number>,
     basisIds?: ReadonlyArray<string>,
+    userExplicitRefs?: ReadonlyArray<string>,
   ) => void;
   /**
    * v1.5 PERSIST-01 (review CR-01) — write the composer's APPLIED coverage
@@ -281,6 +299,12 @@ export function useScenarioState(
     },
     [setValue, baseOf],
   );
+  const togglePerKeySource = useCallback(
+    (ref: string) => {
+      setValue((prev) => togglePerKeySourcePure(baseOf(prev), ref));
+    },
+    [setValue, baseOf],
+  );
   const addStrategyBrowse = useCallback(
     (s: AddedStrategy) => {
       setValue((prev) => addBrowsePure(baseOf(prev), s));
@@ -306,8 +330,14 @@ export function useScenarioState(
     [setValue, baseOf],
   );
   const applyWeightOverrides = useCallback(
-    (weights: Record<string, number>, basisIds?: ReadonlyArray<string>) => {
-      setValue((prev) => applyWeightsPure(baseOf(prev), weights, basisIds));
+    (
+      weights: Record<string, number>,
+      basisIds?: ReadonlyArray<string>,
+      userExplicitRefs?: ReadonlyArray<string>,
+    ) => {
+      setValue((prev) =>
+        applyWeightsPure(baseOf(prev), weights, basisIds, userExplicitRefs),
+      );
     },
     [setValue, baseOf],
   );
@@ -350,9 +380,12 @@ export function useScenarioState(
   //   (c) user-explicit weight overrides via `userWeightOverrides`.
   // Toggle-off renormalization rewrites the entire weightOverrides map but NOT
   // userWeightOverrides, so it counts as exactly one toggle change (T_USE13),
-  // never N weight changes. `setWeightOverride` is the only writer of
-  // userWeightOverrides, so a pure-rebalance now counts (H-0126) — the prior
-  // "conservative zero" locked out the voluntary_modify workflow.
+  // never N weight changes. Both `setWeightOverride` (holding rebalance) and the
+  // composer's per-key `applyWeightOverrides` single-row writer stamp
+  // userWeightOverrides, so a pure-rebalance counts (H-0126) and a per-key
+  // weight edit counts as one gesture (WR-01) — the prior "conservative zero"
+  // plus the `!== true` guard locked out the voluntary_modify workflow and
+  // per-key edits respectively.
   const diffCount = useMemo(() => {
     let count = 0;
     for (const [k, v] of Object.entries(draft.toggleByScopeRef)) {
@@ -360,14 +393,39 @@ export function useScenarioState(
     }
     count += draft.addedStrategies.length;
     const userExplicit = draft.userWeightOverrides ?? {};
+    const addedIds = new Set<string>(draft.addedStrategies.map((s) => s.id));
     for (const [k, v] of Object.entries(userExplicit)) {
       // A disabled ref's user weight is not part of the committed allocation
       // (the commit path skips toggled-off refs), so it must NOT count — else a
       // weight-edit-then-toggle-off of the SAME ref double-counts (one toggle
       // change + one stale override) and the "N changes" chip over-reports.
-      if (draft.toggleByScopeRef[k] !== true) continue;
+      // WR-01 (Phase 112 review): "included" is absent-OR-true, NOT strictly
+      // === true. A per-key ref is included-by-absence (togglePerKeySource
+      // deletes the ref on re-include), so the old `!== true` guard skipped
+      // EVERY per-key weight edit — a real, savable gesture counted as zero and
+      // an unsaved per-key edit was silently wiped on the entry-mode switch.
+      // Only an explicitly excluded ref (=== false) is out.
+      if (draft.toggleByScopeRef[k] === false) continue;
+      // Added strategies each already count once via `addedStrategies.length`
+      // (the add gesture); their reweight is part of that same gesture, so it
+      // must NOT add a second count — keeps added counting byte-identical.
+      if (addedIds.has(k)) continue;
       const defaultWeight = defaultDraft.weightOverrides[k];
-      if (defaultWeight == null) continue;
+      if (defaultWeight == null) {
+        // WR-01: a per-key ref rides raw equity (no default weightOverride). A
+        // user-explicit override on it IS a change — userWeightOverrides is
+        // written only on an explicit edit, so its mere presence is one gesture.
+        // RT-04 (Phase 112 red team) — ACCEPTED honesty edge: an edit-then-retype-
+        // to-the-default-raw-equity-share still counts 1 here (unlike holdings,
+        // which compare against `defaultWeight` with 1e-9 tolerance and count 0 on
+        // revert). Comparing a per-key override to its DEFAULT raw-equity share
+        // would need `equityByApiKeyId` + the live included-set plumbed into this
+        // hook (it only sees `holdingsSummary`/`defaultDraft`), heavy plumbing for
+        // a LOW — and the draft blob genuinely differs (the userWeightOverrides
+        // entry is present), so "unsaved" is not strictly wrong. Left AS-IS.
+        count++;
+        continue;
+      }
       if (Math.abs(v - defaultWeight) > 1e-9) count++;
     }
     return count;
@@ -378,6 +436,7 @@ export function useScenarioState(
     fingerprintMismatch,
     diffCount,
     toggleHolding,
+    togglePerKeySource,
     addStrategyBrowse,
     addStrategyBridge,
     removeAddedStrategy,

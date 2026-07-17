@@ -167,7 +167,12 @@ export interface Strategy {
   aum: number | null;
   max_capacity: number | null;
   start_date: string | null;
-  status: "draft" | "pending_review" | "published" | "archived";
+  // CONTRIB-02 (Phase 110) — 'private' is the owner-only terminal status an
+  // allocator contribution finalizes to (never a publish candidate; the admin
+  // queue keys on 'pending_review'). Added to keep this closed union complete
+  // with the strategies_status_check DB constraint
+  // (20260716130000_strategies_status_private.sql).
+  status: "draft" | "pending_review" | "published" | "archived" | "private";
   is_example: boolean;
   benchmark: string;
   created_at: string;

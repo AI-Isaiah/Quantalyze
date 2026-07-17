@@ -4,11 +4,15 @@ import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
 import { DeckCard } from "@/components/deck/DeckCard";
 import { redirect } from "next/navigation";
+import { requireRolePage } from "@/lib/auth/requireRolePage";
 
 export default async function DecksPage() {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+  // Phase 109 ROLE-04 — allocator-owned surface. OUTSIDE any try/catch:
+  // the wrong-role redirect() throws NEXT_REDIRECT.
+  await requireRolePage(supabase, user, "allocator");
 
   const decks = await getDecks();
 

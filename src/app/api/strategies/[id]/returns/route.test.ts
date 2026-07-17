@@ -58,25 +58,50 @@ const STATE = vi.hoisted(() => ({
   // happy-path tests pass without rewiring. R2 flips this to 'manager' to
   // exercise the 403 gate.
   profileRole: "allocator" as "allocator" | "both" | "manager" | null,
-  // The published-existence probe resolves { id, asset_class } when true, null
-  // when false. null ⇒ 404 (unpublished / non-existent / cross-tenant under RLS).
+  // Whether a strategies row with the requested id EXISTS at all. false models a
+  // genuinely non-existent id → the probe resolves null → 404 regardless of the
+  // visibility predicate.
   publishedExists: true,
+  // CONTRIB-03 owner-inclusive probe modelling. The strategies row's own
+  // `status` and `user_id`. The mock's maybeSingle evaluates this row against
+  // the predicate the route ACTUALLY applied (`.eq("status","published")` for
+  // published-only vs `.or("status.eq.published,user_id.eq.<caller>")` for
+  // owner-inclusive), so a private row owned by the caller is visible ONLY under
+  // the owner-inclusive predicate — a genuine RED proof for the widening. The
+  // default is a published row owned by someone else, so every pre-existing
+  // (published-row) test resolves visible under BOTH predicates, unchanged.
+  strategyStatus: "published" as "published" | "private" | "pending_review",
+  strategyOwnerId: "99999999-9999-4999-8999-999999999999",
   // #597 part 2 (BLEND-01) — the asset_class the widened probe row carries. The
   // route forwards it on the 200 body (null models a strategy with no class /
   // a stale build that predates the widened select).
   publishedAssetClass: "crypto" as string | null,
+  // Phase 111 / CONSTIT-02 — the strategy_verifications rows the widened probe
+  // embed carries. The route picks the most-recent by created_at and forwards
+  // its trust_tier (null when no rows). Defaults to empty (→ trust_tier null).
+  publishedVerifications: [] as Array<{
+    trust_tier: string;
+    status: string;
+    created_at: string;
+  }>,
   // The strategy_analytics row the series read resolves. `null` models an
-  // absent analytics row → honest empty [].
+  // absent analytics row → honest empty []. data_quality_flags is the source of
+  // the server-coerced is_composite boolean (strict === true, T-111-04).
   analyticsRow: { daily_returns: [] as unknown } as
-    | { daily_returns: unknown }
+    | { daily_returns: unknown; data_quality_flags?: unknown }
     | null,
   // When set, the strategy_analytics read resolves with this error so the
   // route's 500 branch + redaction can be pinned.
   analyticsQueryError: null as { code: string; message: string } | null,
   observedFilters: {
-    // The withPublishedOnly predicate appends .eq("status","published") to the
-    // existence probe; observing it proves the published gate is real.
+    // The (legacy) withPublishedOnly predicate appends .eq("status","published")
+    // to the existence probe. After CONTRIB-03 the route uses withPublishedOrOwner
+    // instead, so this stays null and `ownerOrFilter` below carries the predicate.
     status: null as string | null,
+    // The withPublishedOrOwner predicate appends
+    // .or("status.eq.published,user_id.eq.<sessionId>") to the existence probe;
+    // observing it proves the owner-inclusive gate is real (and session-keyed).
+    ownerOrFilter: null as string | null,
     // The id the existence probe filtered on.
     strategiesEqId: null as string | null,
     // The strategy_id the analytics read filtered on.
@@ -123,11 +148,15 @@ vi.mock("@/lib/supabase/server", () => ({
         };
       }
       if (table === "strategies") {
-        // The published-existence probe:
-        //   withPublishedOnly(from('strategies').select('id').eq('id', id))
-        //     .maybeSingle()
-        // withPublishedOnly appends .eq('status','published') to the same
-        // builder, so the chain has TWO .eq calls before .maybeSingle.
+        // The owner-inclusive existence probe (CONTRIB-03):
+        //   withPublishedOrOwner(
+        //     from('strategies').select('...').eq('id', id), user.id,
+        //   ).maybeSingle()
+        // withPublishedOrOwner appends .or('status.eq.published,user_id.eq.<uid>')
+        // to the same builder, so the chain has .select, .eq('id'), .or, then
+        // .maybeSingle. (Pre-CONTRIB-03 it was withPublishedOnly →
+        // .eq('status','published'); the mock evaluates the row against WHICHEVER
+        // predicate the route applied, so the widening is a genuine RED proof.)
         STATE.strategiesQueried = true;
         const builder = {
           select: (cols: string) => {
@@ -139,12 +168,40 @@ vi.mock("@/lib/supabase/server", () => ({
             if (col === "id") STATE.observedFilters.strategiesEqId = val;
             return builder;
           },
-          maybeSingle: async () => ({
-            data: STATE.publishedExists
-              ? { id: PUBLISHED_ID, asset_class: STATE.publishedAssetClass }
-              : null,
-            error: null,
-          }),
+          or: (filter: string) => {
+            STATE.observedFilters.ownerOrFilter = filter;
+            return builder;
+          },
+          maybeSingle: async () => {
+            // No row with this id exists at all → null (genuine 404, not a
+            // visibility miss).
+            if (!STATE.publishedExists) {
+              return { data: null, error: null };
+            }
+            // Evaluate the row against the visibility predicate the route
+            // ACTUALLY applied on the builder above:
+            //   - owner-inclusive (.or observed): published OR caller owns it;
+            //   - published-only  (.eq status observed): published ONLY.
+            const callerId = STATE.authUser?.id ?? null;
+            let visible = false;
+            if (STATE.observedFilters.ownerOrFilter !== null) {
+              visible =
+                STATE.strategyStatus === "published" ||
+                STATE.strategyOwnerId === callerId;
+            } else if (STATE.observedFilters.status === "published") {
+              visible = STATE.strategyStatus === "published";
+            }
+            return {
+              data: visible
+                ? {
+                    id: PUBLISHED_ID,
+                    asset_class: STATE.publishedAssetClass,
+                    strategy_verifications: STATE.publishedVerifications,
+                  }
+                : null,
+              error: null,
+            };
+          },
         };
         return builder;
       }
@@ -218,11 +275,15 @@ beforeEach(() => {
   };
   STATE.profileRole = "allocator";
   STATE.publishedExists = true;
+  STATE.strategyStatus = "published";
+  STATE.strategyOwnerId = "99999999-9999-4999-8999-999999999999";
   STATE.publishedAssetClass = "crypto";
+  STATE.publishedVerifications = [];
   STATE.analyticsRow = { daily_returns: [] };
   STATE.analyticsQueryError = null;
   STATE.observedFilters = {
     status: null,
+    ownerOrFilter: null,
     strategiesEqId: null,
     analyticsEqStrategyId: null,
     strategiesSelect: null,
@@ -329,13 +390,66 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.asset_class).toBe("crypto");
     // The probe select was widened to include asset_class (non-vacuous — the
     // route reads it from the SAME published-gated probe, not a second query).
-    expect(STATE.observedFilters.strategiesSelect).toBe("id, asset_class");
+    // Phase 111 / CONSTIT-02 also embeds strategy_verifications on the SAME probe.
+    expect(STATE.observedFilters.strategiesSelect).toContain("asset_class");
+    expect(STATE.observedFilters.strategiesSelect).toContain("strategy_verifications");
 
     // A strategy with no class (or a stale build) → null, never fabricated.
     STATE.publishedAssetClass = null;
     const res2 = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     body = await res2.json();
     expect(body.asset_class).toBeNull();
+  });
+
+  it("R9 — CONSTIT-02: forwards trust_tier (most-recent verification) + is_composite on the 200 body", async () => {
+    STATE.publishedVerifications = [
+      { trust_tier: "self_reported", status: "pending", created_at: "2026-01-01T00:00:00Z" },
+      { trust_tier: "api_verified", status: "verified", created_at: "2026-06-01T00:00:00Z" },
+    ];
+    STATE.analyticsRow = { daily_returns: [], data_quality_flags: { composite: true } };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // most-recent created_at wins (D-04 latest-verification pick)
+    expect(body.trust_tier).toBe("api_verified");
+    expect(body.is_composite).toBe(true);
+    // The analytics read was widened to fetch data_quality_flags for the
+    // is_composite derivation.
+    expect(STATE.observedFilters.analyticsSelect).toContain("data_quality_flags");
+  });
+
+  it("R9b — CONSTIT-02: missing verification row → trust_tier null (never a 500)", async () => {
+    STATE.publishedVerifications = [];
+    STATE.analyticsRow = { daily_returns: [] };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.trust_tier).toBeNull();
+    expect(body.is_composite).toBe(false);
+  });
+
+  it("R9c — CONSTIT-02: is_composite is strict === true; malformed flags coerce to false + raw blob never ships (T-111-03/04)", async () => {
+    for (const flags of [null, {}, { composite: "true" }, { composite: 1 }]) {
+      STATE.analyticsRow = { daily_returns: [], data_quality_flags: flags };
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+      const body = await res.json();
+      expect(body.is_composite).toBe(false);
+    }
+    // Info-disclosure guard: the raw flags blob (venue detail) never reaches the
+    // client — only the boolean projection.
+    STATE.analyticsRow = {
+      daily_returns: [],
+      data_quality_flags: { composite: true, degraded_members: ["okx:BTC"] },
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    const body = await res.json();
+    expect(body.is_composite).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("data_quality_flags");
+    expect(JSON.stringify(body)).not.toContain("degraded_members");
   });
 
   it("R5 — absent analytics row → 200 + { daily_returns: [] } (honest empty)", async () => {
@@ -409,14 +523,19 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.error).toMatch(/unavailable/i);
   });
 
-  it("R8 — non-vacuity: existence probe is published-gated (withPublishedOnly) + no admin client", async () => {
+  it("R8 — non-vacuity: existence probe is owner-inclusive (withPublishedOrOwner, session-keyed) + no admin client", async () => {
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
-    // withPublishedOnly appended .eq("status","published") to the probe — the
-    // defense-in-depth published gate is observably present, NOT a vacuous
-    // "include more" filter.
-    expect(STATE.observedFilters.status).toBe("published");
+    // CONTRIB-03: withPublishedOrOwner appended
+    // .or("status.eq.published,user_id.eq.<sessionId>") to the probe — the
+    // owner-inclusive gate is observably present and keyed on the AUTHENTICATED
+    // session id (never a request param), NOT a vacuous "include more" filter.
+    expect(STATE.observedFilters.ownerOrFilter).toBe(
+      "status.eq.published,user_id.eq.00000000-0000-0000-0000-000000000001",
+    );
+    // The legacy published-only .eq("status","published") is gone.
+    expect(STATE.observedFilters.status).toBeNull();
     // The probe selects only `id` (existence check, no over-fetch).
     expect(STATE.observedFilters.strategiesSelect).toContain("id");
     // The series read selects only daily_returns.
@@ -425,5 +544,50 @@ describe("GET /api/strategies/[id]/returns", () => {
     // is NO createAdminClient mock — an admin import would resolve to nothing
     // wired and the happy path would not produce a 200. The 200 here proves
     // the RLS path is the one in use (T-29-04: admin client structurally absent).
+  });
+
+  // ── CONTRIB-03 contribute→compose loop closure ─────────────────────────────
+  // Browse became owner-inclusive (withPublishedOrOwner) so an allocator's OWN
+  // not-yet-published contribution appears in the composer Browse drawer and is
+  // addable. The returns route MUST admit that same owner-own private row, or
+  // adding it silently 404s and warm-up-gates the strategy out of the blend —
+  // the exact contribute→compose case v1.11 is built for. R10/R11 join the two
+  // sides the reviewer named ("nobody joined browse-owner-inclusive to
+  // returns-published-only"): the join is asymmetric until the probe widens.
+  it("R10 — allocator requesting THEIR OWN private strategy's returns → 200 + series (fails today: published-only 404s it)", async () => {
+    // The strategy is the caller's own contribution: status='private', owned by
+    // the authenticated allocator. Under the OLD published-only probe this row
+    // is invisible → 404 → the composer permanently warm-up-gates it. Under the
+    // owner-inclusive probe the owner sees their own row → 200 + the series.
+    STATE.strategyStatus = "private";
+    STATE.strategyOwnerId = STATE.authUser!.id;
+    const series = [
+      { date: "2026-07-10", value: 0.0012 },
+      { date: "2026-07-11", value: -0.0004 },
+    ];
+    STATE.analyticsRow = { daily_returns: series };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // The owner's own private analytics series flows through (analytics_read RLS
+    // is ALSO owner-inclusive: published OR user_id=auth.uid()).
+    expect(body.daily_returns).toEqual(series);
+  });
+
+  it("R11 — a DIFFERENT owner's private strategy still 404s (no cross-tenant existence leak)", async () => {
+    // Same private status, but owned by SOMEONE ELSE. The owner-inclusive
+    // predicate names ONLY the caller's id, so a non-owner unpublished row
+    // matches neither leg → null → 404 (never a 403-with-info oracle).
+    STATE.strategyStatus = "private";
+    STATE.strategyOwnerId = "77777777-7777-4777-8777-777777777777";
+    STATE.analyticsRow = { daily_returns: [{ date: "2026-07-10", value: 0.9 }] };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toMatch(/not found/i);
+    // No series (and no existence detail) leaks on the cross-tenant 404 path.
+    expect(JSON.stringify(body)).not.toContain("daily_returns");
   });
 });

@@ -157,6 +157,53 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(findWizardError()).toBeUndefined();
   });
 
+  // Phase 110 / CONTRIB-02 — the finalize-wizard POST body carries the
+  // entry_context routing hint. Default mount (manager) sends "manager".
+  it("sends entry_context='manager' in the finalize body by default", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ strategy_id: "strat-1" }, 200));
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(init.body as string) as { entry_context?: string };
+    expect(body.entry_context).toBe("manager");
+  });
+
+  // Contribution mount → the finalize body sends entry_context='contribution'
+  // (→ server finalizes status='private'). Contribution CTA copy is
+  // "Add to my strategies", not "Submit for review".
+  it("sends entry_context='contribution' and shows allocator copy when entryContext='contribution'", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(jsonResponse({ strategy_id: "strat-1", status: "private" }, 200));
+    render(
+      <SubmitStep
+        strategyId="strat-1"
+        wizardSessionId="session-1"
+        snapshot={SNAPSHOT}
+        metadata={METADATA}
+        entryContext="contribution"
+        onSubmitted={vi.fn()}
+        onBack={vi.fn()}
+      />,
+    );
+
+    // Allocator-framed copy — no sell-side "Submit for review".
+    expect(
+      screen.getByRole("button", { name: "Add to my strategies" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Submit for review")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const body = JSON.parse(init.body as string) as { entry_context?: string };
+    expect(body.entry_context).toBe("contribution");
+  });
+
   // H-0192: the finalize route now tags its actionable failures with a
   // WizardErrorCode (404 -> GATE_DRAFT_GONE, 403 RLS -> GUARD_BLOCKED) and
   // SubmitStep maps off that code, NOT raw HTTP status. Pre-fix these collapsed

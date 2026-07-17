@@ -23,16 +23,65 @@ import { WatchlistTabs } from "./WatchlistTabs";
 import { EmptyWatchlist } from "./EmptyWatchlist";
 import { CustomizeDrawer } from "./CustomizeDrawer";
 import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButton";
-import { formatPercent, formatNumber, formatCurrency, metricColor } from "@/lib/utils";
+import { formatPercent, formatNumber, formatCurrency } from "@/lib/utils";
 import {
   useDiscoveryPrefs,
   type DiscoveryViewPreferences,
 } from "@/lib/discovery-prefs";
 import type { Strategy, StrategyAnalytics } from "@/lib/types";
+// Type-only import — erased at compile so no server-only code from queries.ts
+// (createClient, etc.) leaks into this client bundle. The percentile VALUES are
+// produced by getPercentiles() on the server and passed down via the
+// `percentiles` prop; this component never recomputes them.
+import type { PercentileMap } from "@/lib/queries";
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
 type TableSortKey = SortKey | "name" | "six_month_return";
+
+type PercentileMetric = keyof PercentileMap[string];
+
+// Factsheet KPI-label voice (mono, micro, uppercase, wide tracking) reused for
+// every column header so the table header reads as a label, not another data
+// row. Sortable headers layer the sort color on top of this.
+const HEADER_LABEL = "text-micro font-mono uppercase tracking-[0.14em]";
+
+// Maps a sortable column to its getPercentiles() metric key. Columns absent
+// from this map (Strategy name, 6 Month, AUM) have no peer-percentile and never
+// render a suffix — honest absence rather than a fabricated rank.
+const PERCENTILE_BY_SORT_KEY: Partial<Record<TableSortKey, PercentileMetric>> = {
+  cumulative_return: "cumulative_return",
+  cagr: "cagr",
+  sharpe: "sharpe",
+  max_drawdown: "max_drawdown",
+  volatility: "volatility",
+};
+
+// --- Cell color policy (v1.11 audit finding 2: restrict color to sign) -------
+// Sign-carrying cells (returns / PnL) get the positive/negative token ONLY for a
+// finite signed value; a null/non-finite ("—") cell is never tinted, mirroring
+// the factsheet honest-absence rule.
+function signColor(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "text-text-muted";
+  return value >= 0 ? "text-positive" : "text-negative";
+}
+
+// Magnitude cells (Sharpe, CAGR) render neutral ink: the sign, when it
+// matters, already survives in the printed +/- prefix, so tinting the whole
+// column adds color without adding signal (color is a verdict, not a coat of
+// paint). A "—"/non-finite cell stays muted, never tinted.
+function magnitudeColor(value: number | null | undefined): string {
+  return value == null || !Number.isFinite(value)
+    ? "text-text-muted"
+    : "text-text-primary";
+}
+
+// Max DD is red ONLY when it is a finite negative value (a real drawdown);
+// 0 / null / non-finite render neutral rather than a blanket red column.
+function drawdownColor(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return "text-text-muted";
+  return value < 0 ? "text-negative" : "text-text-primary";
+}
 
 // Priority order (50-UI-SPEC §Dense Reshape behavior 2): Strategy > Return% >
 // CAGR > Sharpe > Max DD stay visible at every container width; Volatility,
@@ -77,6 +126,14 @@ interface StrategyTableProps {
    */
   userId?: string;
   initialWatchedSet?: Set<string>;
+  /**
+   * Category-scoped percentile ranks from getPercentiles() in lib/queries.ts,
+   * keyed by strategy id then metric. When provided, the ACTIVE sort column
+   * appends a quiet `Pnn` suffix (e.g. `P82`) per row. Undefined — or a missing
+   * entry, or a peer set too small to rank (getPercentiles returns null under 5
+   * strategies) — renders no suffix at all (honest absence, no fabricated rank).
+   */
+  percentiles?: PercentileMap;
 }
 
 // --- Range filter helper ---
@@ -122,6 +179,7 @@ export function StrategyTable({
   portfolioId = null,
   userId,
   initialWatchedSet,
+  percentiles,
 }: StrategyTableProps) {
   const reactId = useId();
   const tabIdBase = `watchlist${reactId}`;
@@ -399,15 +457,36 @@ export function StrategyTable({
     return () => window.removeEventListener("resize", measure);
   }, [density, page, viewMode, paged.length]);
 
-  // Column count for the "no rows" placeholder. Visible-always: Strategy +
-  // Return% + CAGR + Sharpe + Max DD (5). Priority-collapsed but still in the
-  // DOM (CSS @max-3xl:hidden): Volatility + 6 Month + AUM + Return spark +
-  // Underwater spark (5). Plus the per-row Details disclosure column (1) and
-  // Actions (1) = 12; +1 leading star column when userId is present.
+  // Column count for the "no rows" placeholder. Leading rank column (1) +
+  // Strategy + Return% + CAGR + Sharpe + Max DD (5). Priority-collapsed but
+  // still in the DOM (CSS @max-3xl:hidden): Volatility + 6 Month + AUM + Return
+  // spark + Underwater spark (5). Plus the per-row Details disclosure column (1)
+  // and Actions (1) = 13; +1 leading star column when userId is present.
   const showStarColumn = userId !== undefined;
-  const emptyRowColSpan = showStarColumn ? 13 : 12;
+  const emptyRowColSpan = showStarColumn ? 14 : 13;
 
   const showEmptyWatchlist = scope === "watchlist" && watchedSet.size === 0;
+
+  // Quiet Geist-Mono percentile suffix (e.g. `P82`) appended to the ACTIVE sort
+  // column only. Honest absence: no percentiles prop, no metric mapping for the
+  // sorted column, or a missing/non-finite entry → renders nothing.
+  const pctSuffix = (s: StrategyWithAnalytics, colKey: TableSortKey) => {
+    if (!percentiles || tableSortKey !== colKey) return null;
+    const metric = PERCENTILE_BY_SORT_KEY[colKey];
+    if (!metric) return null;
+    const p = percentiles[s.id]?.[metric];
+    if (p == null || !Number.isFinite(p)) return null;
+    // Clamp to 1..99: getPercentiles emits 0..100, but "P0"/"P100" are edge
+    // artifacts that read as nonsense in a rank hint. Fixed-width right-aligned
+    // span so the suffix never varies the sorted figure's position — the
+    // Numbers Contract (digits align in a column) must hold on this surface.
+    const shown = Math.min(99, Math.max(1, Math.round(p)));
+    return (
+      <span className="ml-1 inline-block min-w-[3ch] text-right align-baseline text-micro font-mono tabular-nums text-text-muted">
+        P{shown}
+      </span>
+    );
+  };
 
   return (
     <div>
@@ -469,7 +548,7 @@ export function StrategyTable({
           <div
             data-strategy-table=""
             data-density={density === "compact" ? "tight" : undefined}
-            className="relative rounded-xl border border-border bg-surface"
+            className="relative border border-border bg-surface"
           >
             {/* Density control \u2014 table-SCOPED (drives the data-density on this
                 root only, never <body>, so it cannot flip the allocator
@@ -521,10 +600,21 @@ export function StrategyTable({
               <table className="w-full text-body">
                 <thead>
                   <tr className="border-b border-border">
+                    {/* Leading rank column — the sticky-left corner (z-30). Not
+                        sortable: rank is derived from the ACTIVE sort, so sorting
+                        by it is meaningless. Its visible glyph is "#"; the
+                        accessible name is the sr-only "Rank". */}
+                    <th
+                      scope="col"
+                      className={`sticky left-0 top-0 z-30 w-14 bg-surface px-2 py-3 text-right ${HEADER_LABEL} text-text-muted`}
+                    >
+                      <span className="sr-only">Rank</span>
+                      <span aria-hidden="true">#</span>
+                    </th>
                     {showStarColumn && (
                       <th
                         scope="col"
-                        className="sticky left-0 top-0 z-30 w-11 bg-surface px-2 py-3 text-left font-medium text-text-muted"
+                        className={`sticky left-14 top-0 z-30 w-11 bg-surface px-2 py-3 text-left ${HEADER_LABEL} text-text-muted`}
                       >
                         <span className="sr-only">Watchlist</span>
                       </th>
@@ -535,11 +625,16 @@ export function StrategyTable({
                       // it is the corner cell (z-30); otherwise the name header is
                       // the corner. Sticky-left + opaque bg + a right hairline so
                       // it reads as pinned on horizontal scroll (Pattern 3).
+                      // The Strategy-name column is now the SECOND sticky column
+                      // (the leading rank column owns left-0 / the z-30 corner).
+                      // It pins to the right of the rank column (and the star
+                      // column when present) so the identity stays visible on
+                      // horizontal scroll.
                       const isFirstCol = i === 0;
                       const stickyLeft = isFirstCol
                         ? showStarColumn
-                          ? "sticky left-11 top-0 z-20 bg-surface border-r border-border"
-                          : "sticky left-0 top-0 z-30 bg-surface border-r border-border"
+                          ? "sticky left-[6.25rem] top-0 z-20 bg-surface border-r border-border"
+                          : "sticky left-14 top-0 z-20 bg-surface border-r border-border"
                         : "sticky top-0 z-20 bg-surface";
                       const sortedHere = tableSortKey === col.key;
                       return (
@@ -556,15 +651,17 @@ export function StrategyTable({
                                 : "descending"
                               : "none"
                           }
-                          className={`${stickyLeft} px-4 py-3 font-medium text-text-muted ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
+                          className={`${stickyLeft} px-4 py-3 ${col.align === "right" ? "text-right" : "text-left"} ${col.collapse ? "@max-3xl:hidden" : ""}`}
                         >
                           {/* The sort control is a real <button> so it is
                               keyboard-operable (WCAG 2.1.1) \u2014 the prior click-only
-                              <th> could not be sorted from the keyboard. */}
+                              <th> could not be sorted from the keyboard. The
+                              actively-sorted header darkens to text-text-primary
+                              so the sort target is scannable. */}
                           <button
                             type="button"
                             onClick={() => handleColumnSort(col.key)}
-                            className="-mx-1 inline-flex items-center gap-1 rounded px-1 hover:text-text-primary transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                            className={`-mx-1 inline-flex items-center gap-1 rounded px-1 transition-colors select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${HEADER_LABEL} ${sortedHere ? "text-text-primary" : "text-text-muted hover:text-text-primary"}`}
                           >
                             {col.label}
                             {sortedHere && (
@@ -574,18 +671,22 @@ export function StrategyTable({
                         </th>
                       );
                     })}
-                    <th className="sticky top-0 z-20 bg-surface px-4 py-3 text-left font-medium text-text-muted @max-3xl:hidden">Return</th>
-                    <th className="sticky top-0 z-20 bg-surface px-4 py-3 text-left font-medium text-text-muted @max-3xl:hidden">Underwater</th>
+                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @max-3xl:hidden`}>Return</th>
+                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @max-3xl:hidden`}>Underwater</th>
                     {/* Details disclosure column \u2014 surfaces the collapsed values
                         at narrow widths; the header is a screen-reader label. */}
-                    <th scope="col" className="sticky top-0 z-20 bg-surface px-4 py-3 text-left font-medium text-text-muted @3xl:hidden">
+                    <th scope="col" className={`sticky top-0 z-20 bg-surface px-4 py-3 text-left ${HEADER_LABEL} text-text-muted @3xl:hidden`}>
                       <span className="sr-only">Details</span>
                     </th>
-                    <th className="sticky top-0 z-20 bg-surface px-4 py-3 text-right font-medium text-text-muted">Actions</th>
+                    <th className={`sticky top-0 z-20 bg-surface px-4 py-3 text-right ${HEADER_LABEL} text-text-muted`}>Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {paged.map((s) => {
+                  {paged.map((s, i) => {
+                    // Rank is 1-based within the ACTIVE sort order, continuous
+                    // across pages (page 2 row 1 = #21). Re-derived every render
+                    // from the paged index, so it re-numbers when the sort flips.
+                    const rank = page * PAGE_SIZE + i + 1;
                     // Compute each collapsible cell's value ONCE so the visible
                     // cell and the relocated <details> render the IDENTICAL real
                     // value via the honest-null formatters \u2014 never a fabricated
@@ -599,8 +700,14 @@ export function StrategyTable({
                         className="group border-b border-border last:border-0 transition-colors"
                         style={{ height: "var(--row-h)" }}
                       >
+                        {/* Sticky rank cell — solid bg-surface (NOT the
+                            translucent row hover) so scrolled cells don't bleed
+                            through, matching the sticky identity column. */}
+                        <td className="sticky left-0 z-10 w-14 bg-surface px-2 py-3 text-right align-middle font-mono tabular-nums text-caption text-text-muted">
+                          #{rank}
+                        </td>
                         {showStarColumn && (
-                          <td className="sticky left-0 z-10 w-11 bg-surface px-2 py-3 align-middle">
+                          <td className="sticky left-14 z-10 w-11 bg-surface px-2 py-3 align-middle">
                             <StarToggle
                               strategyId={s.id}
                               name={s.name}
@@ -614,7 +721,7 @@ export function StrategyTable({
                             translucent hover:bg-page/50, so scrolled cells do not
                             bleed through (Pitfall 5). */}
                         <td
-                          className={`sticky z-10 bg-surface px-4 py-3 border-r border-border ${showStarColumn ? "left-11" : "left-0"}`}
+                          className={`sticky z-10 bg-surface px-4 py-3 border-r border-border ${showStarColumn ? "left-[6.25rem]" : "left-14"}`}
                         >
                           <div className="flex items-center gap-1.5">
                             <Link
@@ -640,22 +747,31 @@ export function StrategyTable({
                             <SyncBadge computedAt={s.analytics.computed_at} exchange={s.supported_exchanges?.[0]} />
                           </div>
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${metricColor(s.analytics.cumulative_return)}`}>
+                        {/* Return / 6 Month carry a sign → sign-tinted (green/red)
+                            only for a finite value. CAGR / Sharpe are magnitudes →
+                            neutral ink. Max DD is red only when finitely negative.
+                            The percentile suffix rides the ACTIVE sort column. */}
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${signColor(s.analytics.cumulative_return)}`}>
                           {formatPercent(s.analytics.cumulative_return)}
+                          {pctSuffix(s, "cumulative_return")}
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${metricColor(s.analytics.cagr)}`}>
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${magnitudeColor(s.analytics.cagr)}`}>
                           {formatPercent(s.analytics.cagr)}
+                          {pctSuffix(s, "cagr")}
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${metricColor(s.analytics.sharpe)}`}>
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${magnitudeColor(s.analytics.sharpe)}`}>
                           {formatNumber(s.analytics.sharpe)}
+                          {pctSuffix(s, "sharpe")}
                         </td>
-                        <td className="px-4 py-3 text-right font-metric tabular-nums text-negative group-hover:bg-page/50 transition-colors">
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors ${drawdownColor(s.analytics.max_drawdown)}`}>
                           {formatPercent(s.analytics.max_drawdown)}
+                          {pctSuffix(s, "max_drawdown")}
                         </td>
                         <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors @max-3xl:hidden">
                           {volatilityText}
+                          {pctSuffix(s, "volatility")}
                         </td>
-                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors @max-3xl:hidden ${metricColor(s.analytics.six_month_return)}`}>
+                        <td className={`px-4 py-3 text-right font-metric tabular-nums group-hover:bg-page/50 transition-colors @max-3xl:hidden ${signColor(s.analytics.six_month_return)}`}>
                           {sixMonthText}
                         </td>
                         <td className="px-4 py-3 text-right font-metric tabular-nums text-text-secondary group-hover:bg-page/50 transition-colors @max-3xl:hidden">
@@ -689,7 +805,7 @@ export function StrategyTable({
                               <dt className="text-text-muted">Volatility</dt>
                               <dd className="text-right font-metric tabular-nums">{volatilityText}</dd>
                               <dt className="text-text-muted">6 Month</dt>
-                              <dd className={`text-right font-metric tabular-nums ${metricColor(s.analytics.six_month_return)}`}>{sixMonthText}</dd>
+                              <dd className={`text-right font-metric tabular-nums ${signColor(s.analytics.six_month_return)}`}>{sixMonthText}</dd>
                               <dt className="text-text-muted">AUM</dt>
                               <dd className="text-right font-metric tabular-nums">{aumText}</dd>
                               <dt className="text-text-muted">Return</dt>
@@ -738,7 +854,7 @@ export function StrategyTable({
             {isOverflowing && (
               <div
                 aria-hidden="true"
-                className="pointer-events-none absolute inset-y-0 right-0 flex items-end justify-end rounded-r-xl bg-gradient-to-l from-surface to-transparent pb-3 pr-3 pl-12"
+                className="pointer-events-none absolute inset-y-0 right-0 flex items-end justify-end rounded-r-sm bg-gradient-to-l from-surface to-transparent pb-3 pr-3 pl-12"
               >
                 <span className="text-caption text-text-muted">
                   Scroll for more columns &rarr;

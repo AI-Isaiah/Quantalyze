@@ -16,6 +16,7 @@ import { getDashboardNote } from "./lib/dashboard-note-read";
 import { AllocationsTabs } from "./AllocationsTabs";
 import { AllocationProvider } from "./AllocationContext";
 import { redirect } from "next/navigation";
+import { requireRolePage } from "@/lib/auth/requireRolePage";
 import {
   maybeEmitSignup,
   maybeEmitOnboardingEvent,
@@ -48,6 +49,9 @@ export default async function MyAllocationPage() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
+  // Phase 109 ROLE-04 — allocator-owned surface. OUTSIDE any try/catch:
+  // requireRolePage's wrong-role redirect() throws NEXT_REDIRECT (redirect.md).
+  await requireRolePage(supabase, user, "allocator");
 
   // Phase 99 / 99-04 — fetch the polled dashboard payload AND the three
   // exposure reads in ONE Promise.all with the AUTHENTICATED user.id

@@ -32,6 +32,14 @@ export interface SubmitStepProps {
   wizardSessionId: string;
   snapshot: SyncPreviewSnapshot;
   metadata: MetadataDraft;
+  /**
+   * Phase 110 / CONTRIB-01..02 — mount surface. `"manager"` (default) keeps
+   * the sell-side "Submit for review" flow and finalize `entry_context:
+   * "manager"` (→ status `pending_review`). `"contribution"` shows the
+   * allocator-framed private-add copy and sends `entry_context: "contribution"`
+   * (→ status `private`, owner-only, never published — plan 110-04 server side).
+   */
+  entryContext?: "manager" | "contribution";
   onSubmitted: (strategyId: string) => void;
   onBack: () => void;
 }
@@ -41,9 +49,11 @@ export function SubmitStep({
   wizardSessionId,
   snapshot,
   metadata,
+  entryContext = "manager",
   onSubmitted,
   onBack,
 }: SubmitStepProps) {
+  const isContribution = entryContext === "contribution";
   const [submitting, setSubmitting] = useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
@@ -73,6 +83,12 @@ export function SubmitStep({
           max_capacity: metadata.maxCapacity ? Number(metadata.maxCapacity) : null,
           // #597 — asset class drives Sharpe/Sortino/vol annualization basis.
           asset_class: metadata.assetClass,
+          // Phase 110 / CONTRIB-02 — routing hint the finalize RPC branches on:
+          // "contribution" finalizes status='private' (owner-only), "manager"
+          // finalizes status='pending_review'. This is a HINT only — neither
+          // value can publish; the RPC terminal-status guard (plan 110-01
+          // T-110-02) is the real enforcement (client field can't be trusted).
+          entry_context: entryContext,
         }),
       });
 
@@ -154,7 +170,7 @@ export function SubmitStep({
       setErrorCode("KEY_NETWORK_TIMEOUT");
       setSubmitting(false);
     }
-  }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId]);
+  }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
 
   const errorEnvelope = errorCode
     ? buildEnvelope(errorCode, correlationId)
@@ -168,11 +184,12 @@ export function SubmitStep({
         id="wizard-submit-heading"
         className="font-sans text-h3 font-semibold text-text-primary"
       >
-        Review and submit
+        {isContribution ? "Review and add" : "Review and submit"}
       </h2>
       <p className="mt-2 text-body text-text-secondary">
-        The founder reviews pending strategies within 48 hours. You will receive
-        an email when your listing is approved.
+        {isContribution
+          ? "This strategy is added privately to your account. Only you can see it — it is never published or submitted for review."
+          : "The founder reviews pending strategies within 48 hours. You will receive an email when your listing is approved."}
       </p>
 
       {/* Factsheet summary in DRAFT variant — never "Verified" pre-review */}
@@ -248,7 +265,11 @@ export function SubmitStep({
           disabled={submitting}
           data-testid="wizard-submit-for-review"
         >
-          {submitting ? "Submitting..." : "Submit for review"}
+          {submitting
+            ? "Submitting..."
+            : isContribution
+              ? "Add to my strategies"
+              : "Submit for review"}
         </Button>
       </div>
     </section>
