@@ -209,6 +209,25 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── MEDIUM-2: a non-finite return value refuses (never a silent NaN curve) ────
+
+def test_non_finite_return_value_refuses_in_perf_curve_and_blend():
+    """MEDIUM-2: a PRESENT-but-NaN return (a csv gap) propagated through
+    ``(1+r).cumprod()`` / the weighted blend into a silent NaN curve with no flag.
+    Both perf_curve and blend (including the sole-key passthrough) now refuse a
+    non-finite return VALUE at ingestion."""
+    from services.allocator_equity_derive import blend_concurrent_returns
+
+    rn = pd.Series([0.10, float("nan"), 0.10], index=_DAYS[:3], name="k")
+    with pytest.raises(NavReconstructionError):
+        perf_curve(rn)
+    with pytest.raises(NavReconstructionError):
+        blend_concurrent_returns({"a": rn, "b": rn}, {"a": 1.0, "b": 1.0})
+    # The sole-key passthrough is guarded too (would otherwise copy the NaN series).
+    with pytest.raises(NavReconstructionError):
+        blend_concurrent_returns({"a": rn}, {"a": 1.0})
+
+
 # ── MEDIUM-3: day-0 total loss is distinguishable from an empty series ────────
 
 def test_perf_curve_day0_total_loss_is_distinct_from_empty():

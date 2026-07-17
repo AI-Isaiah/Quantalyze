@@ -59,6 +59,7 @@ Purity: pandas + stdlib + typing ONLY.
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -93,6 +94,12 @@ class BlendResult:
 
     blended: pd.Series | None
     flags: dict[str, Any] = field(default_factory=dict)
+
+
+def _nonfinite_count(series: pd.Series) -> int:
+    """Count non-finite (NaN / ±inf) values in a return series (MEDIUM-2). Pure
+    stdlib ``math.isfinite`` per the module's pandas+stdlib purity note."""
+    return sum(1 for v in series.to_numpy() if not math.isfinite(float(v)))
 
 
 def eligible_key_predicate(key_row: Mapping[str, Any]) -> bool:
@@ -141,6 +148,16 @@ def blend_concurrent_returns(
     if any(len(series_by_key[k]) == 0 for k in keys):
         return BlendResult(
             None, {"honest_empty": True, "reason": REASON_MISSING_SERIES}
+        )
+
+    # MEDIUM-2: a PRESENT-but-non-finite return value (csv gap → NaN) would
+    # propagate into an all-NaN blended (or sole-key) curve with no signal. Refuse
+    # non-finite return VALUES at ingestion — before the sole-key passthrough too.
+    nonfinite_keys = sum(1 for k in keys if _nonfinite_count(series_by_key[k]))
+    if nonfinite_keys:
+        raise NavReconstructionError(
+            f"blend: non-finite return value(s) in {nonfinite_keys} key series — "
+            "refusing to propagate NaN/inf into the blended curve"
         )
 
     # Sole eligible key: pass its series through untouched at weight 1.0.
@@ -407,6 +424,14 @@ def perf_curve(returns: pd.Series | None) -> pd.Series | None:
     115.1 consumer may derive a headline return from the curve."""
     if returns is None or len(returns) == 0:
         return None
+    # MEDIUM-2: a PRESENT-but-non-finite return (csv gap → NaN) would
+    # ``cumprod`` into a silent NaN curve with no flag. Refuse it here.
+    bad_days = _nonfinite_count(returns)
+    if bad_days:
+        raise NavReconstructionError(
+            f"perf_curve: {bad_days} non-finite return value(s) — refusing to "
+            "propagate NaN/inf into a displayed curve"
+        )
     factors = (1.0 + returns).cumprod()
     first = float(factors.iloc[0])
     if first == 0.0:
