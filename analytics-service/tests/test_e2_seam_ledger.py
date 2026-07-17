@@ -259,6 +259,26 @@ def test_rotation_seam_is_excluded_from_mwr_but_included_in_dietz():
     assert dietz_seam != pytest.approx(dietz_noseam, rel=1e-9)
 
 
+# ── MEDIUM-4: an out-of-period ledger day refuses (no silent Dietz clamp) ──────
+
+def test_out_of_period_ledger_entry_refuses_dietz_clamp():
+    """MEDIUM-4: a ledger entry dated outside [0, period_days] is a construction bug.
+    ``compute_modified_dietz`` would SILENTLY clamp the offset (M-0695), laundering a
+    pre-period flow into a full-weight t=0 entry and producing a plausible-wrong
+    Dietz. ``mwr_and_dietz_from_ledger`` now refuses it."""
+    from services.nav_twr import NavReconstructionError
+
+    # A flow dated 2 months BEFORE period_start -> offset < 0.
+    ledger = build_allocator_ledger(
+        {"key-X": [ExternalFlow("2026-01-01", 5000.0)]}, [], {}
+    )
+    with pytest.raises(NavReconstructionError):
+        mwr_and_dietz_from_ledger(
+            ledger, begin_value=100000.0, end_value=130000.0,
+            period_start="2026-03-01", period_days=60,
+        )
+
+
 # ── Test 6b (Finding 2): MWR must respond to end_value (terminal never dropped) ─
 
 def test_mwr_responds_to_end_value_on_withdrawal_dominant_ledger():

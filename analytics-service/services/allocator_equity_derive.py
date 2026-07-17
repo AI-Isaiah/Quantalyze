@@ -900,6 +900,21 @@ def mwr_and_dietz_from_ledger(
     start = date.fromisoformat(str(period_start))
     end_date = (start + timedelta(days=int(period_days))).isoformat()
 
+    # MEDIUM-4: an entry dated OUTSIDE [period_start, period_start + period_days] is a
+    # CONSTRUCTION bug (a mis-dated seam/flow). ``compute_modified_dietz`` would
+    # SILENTLY clamp the day offset (M-0695) — a pre-period entry launders to a
+    # full-weight t=0 flow, a post-period entry to a zero-weight one — quietly
+    # re-weighting the return. Fail loud instead (extending the known=False
+    # fail-loud discipline). Bounds carry day-offset counts only (no USD).
+    for e in ledger:
+        offset = (date.fromisoformat(e.flow.utc_day_iso) - start).days
+        if offset < 0 or offset > int(period_days):
+            raise NavReconstructionError(
+                f"allocator ledger entry dated {offset} day(s) from period_start is "
+                f"outside [0, {int(period_days)}] — a mis-dated seam/flow (refusing "
+                "the silent Modified-Dietz day clamp)"
+            )
+
     # WR-03: MWR (investor IRR) sees ONLY real-external flows; synthetic rotation
     # seams are internal capital redeployment, never an investor action.
     mwr_flows: list[dict[str, Any]] = [
