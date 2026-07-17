@@ -240,3 +240,45 @@ def test_carryin_3_datetimeindex_rejected_iso_string_accepted() -> None:
         {"key-A": good}, {"key-A": []}, {"key-A": 100_000.0}
     )
     assert "curve" in payload and isinstance(payload["curve"], list)
+
+
+# ---------------------------------------------------------------------------
+# Counter-pin — the NAIVE raw-union wiring measurably fails (mutation oracle)
+# ---------------------------------------------------------------------------
+
+
+def test_naive_rawunion_blend_reddens_exclusive_fill_offset_windows() -> None:
+    """The SAME offset-window fixture as carry-in #1/#4, but fed RAW (the whole union
+    of both keys) into ``blend_concurrent_returns`` — the pre-115.1 wiring compose
+    replaces. On the union days d0..d2 key-B has no row, so it is 0-filled at FULL
+    weight: ``exclusive_fill_days > 0`` → ``DegradeReason.EXCLUSIVE_FILL`` (BLOCKING)
+    → ``is_trustworthy`` is False.
+
+    This is the mutation oracle for carry-in #1/#4: it documents that the segment-wise
+    feeding in ``compose_allocator_equity`` — NOT the raw union — is what earns the
+    clean fixture ``is_trustworthy=True`` above. If a future edit collapsed compose
+    back to a single raw-union blend, THIS is the failure it would reproduce (no
+    monkeypatching of compose internals required).
+    """
+    from services.allocator_equity_derive import (
+        DegradeReason,
+        blend_concurrent_returns,
+    )
+
+    key_a = _key_from(0, 10, "key-A")   # d0..d9
+    key_b = _key_from(3, 7, "key-B")    # d3..d9 (exclusive lead d0..d2)
+    # Raw union — exactly what the pre-115.1 blend received (NOT segment-sliced).
+    series_by_key = {"key-A": key_a, "key-B": key_b}
+    weights_by_key = {"key-A": 100_000.0 / 150_000.0, "key-B": 50_000.0 / 150_000.0}
+
+    result = blend_concurrent_returns(series_by_key, weights_by_key)
+
+    assert result.flags["exclusive_fill_days"] == 3, (
+        "the raw union 0-fills key-B on its 3 exclusive lead days (d0..d2) at full "
+        f"weight; got exclusive_fill_days={result.flags.get('exclusive_fill_days')!r}"
+    )
+    assert DegradeReason.EXCLUSIVE_FILL in result.degrade_reasons
+    assert result.is_trustworthy is False, (
+        "the naive raw-union blend is BLOCKING (EXCLUSIVE_FILL) — proving the "
+        "segment-wise compose wiring is what earns is_trustworthy=True"
+    )
