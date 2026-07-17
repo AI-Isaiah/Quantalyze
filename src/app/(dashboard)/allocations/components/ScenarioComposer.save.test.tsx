@@ -1589,4 +1589,54 @@ describe("ScenarioComposer — Phase 112 per-key leverage at Save (RED scaffold)
       [PK_LO]: 1,
     });
   });
+
+  // (c) POST-site prune (RT-03, Phase 112 red team) — the POST/new-scenario path
+  // must preserve an eligible per-key leverage-only edit exactly as the PUT path
+  // (test (a)) does. Test (a) covers the Update (PUT) prune site; postNewScenario
+  // is correct-by-reading but was untested ("test the wiring, not just the
+  // helper"). Here a FRESH (unopened) per-key book takes a leverage-only edit on
+  // the INCLUDED per-key ref PK, then a first Save → POST. PK carries no
+  // toggle/weight/added entry, so it survives the prune ONLY because
+  // postNewScenario threads `eligiblePerKeyIds` into pruneLeverageToDraftRefs —
+  // drop that arg and PK is pruned and this assertion fails (the RED-proof of the
+  // POST-site wiring).
+  it("(c) POST-site prune — a per-key leverage-only edit survives the POST (new scenario) prune (eligiblePerKeyIds threaded)", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "New per-key levered" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPerKeyBook();
+
+    // A leverage-only edit on the INCLUDED per-key ref — no toggle/weight/added
+    // entry for PK, so it is prune-eligible only via `eligiblePerKeyIds`.
+    const lev = document.getElementById(
+      `leverage-${PK}`,
+    ) as HTMLInputElement | null;
+    expect(lev).not.toBeNull();
+    expect(lev!.disabled).toBe(false);
+    act(() => {
+      fireEvent.change(lev!, { target: { value: "2" } });
+    });
+    expect(lev!.value).toBe("2");
+
+    // First Save → POST a new row (never opened → primary is "Save portfolio").
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "New per-key levered" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+    // The eligible per-key ref's leverage survives the POST prune.
+    expect(body.draft.leverageOverrides).toHaveProperty(PK, 2);
+  });
 });
