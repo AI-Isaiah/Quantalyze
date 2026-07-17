@@ -802,7 +802,14 @@ def mwr_and_dietz_from_ledger(
         for e in ledger
         if e.provenance != LEDGER_SEAM
     ]
-    mwr = compute_mwr(mwr_flows, final_value=float(end_value), end_date=end_date)
+    # Finding 2: append the terminal value EXPLICITLY rather than relying on
+    # compute_mwr's ``final_value>0 AND net_cf<0`` heuristic — for a
+    # withdrawal-heavy ledger (net cash flow >= 0) that heuristic SILENTLY omits the
+    # terminal and the IRR ignores ending wealth (identical MWR for every
+    # end_value). Passing ``final_value=0.0`` makes the helper's own conditional
+    # append a no-op, so the terminal is present exactly once.
+    mwr_flows.append({"date": end_date, "amount": float(end_value)})
+    mwr = compute_mwr(mwr_flows, final_value=0.0, end_date=end_date)
 
     dietz_flows: list[dict[str, Any]] = [
         {

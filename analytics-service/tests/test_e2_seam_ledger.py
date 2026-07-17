@@ -248,6 +248,35 @@ def test_rotation_seam_is_excluded_from_mwr_but_included_in_dietz():
     assert dietz_seam != pytest.approx(dietz_noseam, rel=1e-9)
 
 
+# ── Test 6b (Finding 2): MWR must respond to end_value (terminal never dropped) ─
+
+def test_mwr_responds_to_end_value_on_withdrawal_dominant_ledger():
+    """Finding 2: a withdrawal-heavy ledger (cumulative withdrawals >= begin +
+    deposits) has net cash flow >= 0, so ``compute_mwr``'s own ``final_value`` append
+    heuristic (`final_value>0 AND net_cf<0`) MISFIRES and the terminal wealth is
+    dropped from the IRR entirely -> MWR identical for every ``end_value``. The
+    adapter must append the terminal EXPLICITLY. Withdrawing more than the original
+    stake after gains is a normal allocator action."""
+    import math
+
+    ledger = build_allocator_ledger(
+        {"key-X": [ExternalFlow("2026-03-15", -150000.0)]}, [], {}
+    )
+    results = {}
+    for ev in (1.0, 30000.0, 300000.0):
+        mwr, _dietz = mwr_and_dietz_from_ledger(
+            ledger, begin_value=100000.0, end_value=ev,
+            period_start="2026-03-01", period_days=60,
+        )
+        assert mwr is not None and math.isfinite(mwr)
+        results[ev] = mwr
+
+    # Three DISTINCT IRRs — the ending wealth is now visible to the solve.
+    assert len({round(v, 6) for v in results.values()}) == 3
+    # Monotone: more ending wealth -> higher IRR.
+    assert results[1.0] < results[30000.0] < results[300000.0]
+
+
 # ── Test 7 (WR-04): a block→block rotation seam resolves to a summed magnitude ─
 
 def _block_rotation_setup():
