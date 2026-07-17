@@ -888,6 +888,20 @@ LEDGER_SEAM = "seam"
 
 
 @dataclass(frozen=True)
+class LedgerScalars:
+    """The two KEPT ``portfolio_metrics`` scalars threaded from the unified ledger
+    (C4). ``computable`` is False ONLY on the fail-loud unknown-magnitude ledger (a
+    ``known=False`` seam) — this is DISTINCT from an ordinarily-uncomputable
+    individual scalar (``mwr`` / ``dietz`` may still be ``None`` when the IRR / Dietz
+    solve degenerates even though ``computable`` is True). Replaces the transposable
+    ``(mwr, dietz)`` tuple that aliased the fail-loud path with the uncomputable one."""
+
+    mwr: float | None
+    dietz: float | None
+    computable: bool
+
+
+@dataclass(frozen=True)
 class LedgerEntry:
     """One dated entry in the unified allocator cashflow ledger.
 
@@ -1054,13 +1068,15 @@ def mwr_and_dietz_from_ledger(
     end_value: float,
     period_start: str,
     period_days: int,
-) -> tuple[float | None, float | None]:
+) -> LedgerScalars:
     """Thread the unified ledger through the KEPT ``portfolio_metrics`` scalars
     (STITCH-05) — the first production caller of ``compute_mwr`` /
     ``compute_modified_dietz``.
 
     Fails loud on an unknown-magnitude ledger: ANY ``known=False`` seam entry ->
-    ``(None, None)`` (never a fabricated scalar). Otherwise the adapter converts
+    ``LedgerScalars(None, None, computable=False)`` (never a fabricated scalar; C4
+    keeps this DISTINCT from an ordinarily-uncomputable scalar). Otherwise the
+    adapter converts
     each ``ExternalFlow`` entry into the two dict shapes the KEPT helpers expect:
 
       * MWR (annualised IRR, investor perspective): a portfolio deposit is an
@@ -1083,7 +1099,7 @@ def mwr_and_dietz_from_ledger(
 
     Thread-only: the returned scalars are NOT display-wired this phase."""
     if any(not e.known for e in ledger):
-        return (None, None)
+        return LedgerScalars(None, None, computable=False)
 
     start = date.fromisoformat(str(period_start))
     end_date = (start + timedelta(days=int(period_days))).isoformat()
@@ -1132,4 +1148,4 @@ def mwr_and_dietz_from_ledger(
     dietz = compute_modified_dietz(
         float(begin_value), float(end_value), dietz_flows, int(period_days)
     )
-    return (mwr, dietz)
+    return LedgerScalars(mwr, dietz, computable=True)

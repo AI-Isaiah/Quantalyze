@@ -77,7 +77,7 @@ def test_one_ledger_single_construction_site_feeds_both_consumers():
         period_start="2026-03-01",
         period_days=60,
     )
-    assert out is not None
+    assert out.computable is True  # a known-magnitude ledger is computable (C4)
 
     # Grep-style: the module constructs a LedgerEntry in EXACTLY one place.
     src = Path(aed.__file__).read_text(encoding="utf-8")
@@ -159,7 +159,10 @@ def test_unknown_seam_flags_and_scalars_fail_loud():
         period_start="2026-03-01",
         period_days=60,
     )
-    assert out == (None, None)
+    # C4: computable=False marks the fail-loud path (distinct from an ordinarily
+    # uncomputable scalar), and both scalars are None.
+    assert out.computable is False
+    assert out.mwr is None and out.dietz is None
 
     # The $-curve truncates to the anchored (D) side with a degradation flag.
     from services.allocator_equity_derive import allocator_equity_curve
@@ -179,13 +182,15 @@ def test_unified_ledger_threads_dietz_and_mwr():
 
     begin_value, end_value = 100000.0, 130000.0
     period_start, period_days = "2026-03-01", 60
-    mwr, dietz = mwr_and_dietz_from_ledger(
+    scalars = mwr_and_dietz_from_ledger(
         ledger,
         begin_value=begin_value,
         end_value=end_value,
         period_start=period_start,
         period_days=period_days,
     )
+    assert scalars.computable is True
+    mwr, dietz = scalars.mwr, scalars.dietz
     assert mwr is not None and dietz is not None
     import math
 
@@ -243,20 +248,54 @@ def test_rotation_seam_is_excluded_from_mwr_but_included_in_dietz():
 
     begin_value, end_value = 100000.0, 130000.0
     period_start, period_days = "2026-03-01", 60
-    mwr_seam, dietz_seam = mwr_and_dietz_from_ledger(
+    seam_scalars = mwr_and_dietz_from_ledger(
         ledger_with_seam, begin_value=begin_value, end_value=end_value,
         period_start=period_start, period_days=period_days,
     )
-    mwr_noseam, dietz_noseam = mwr_and_dietz_from_ledger(
+    noseam_scalars = mwr_and_dietz_from_ledger(
         ledger_real_only, begin_value=begin_value, end_value=end_value,
         period_start=period_start, period_days=period_days,
     )
+    mwr_seam, dietz_seam = seam_scalars.mwr, seam_scalars.dietz
+    mwr_noseam, dietz_noseam = noseam_scalars.mwr, noseam_scalars.dietz
     assert None not in (mwr_seam, dietz_seam, mwr_noseam, dietz_noseam)
 
     # MWR is INVARIANT to the rotation seam — the seam never entered the IRR flows.
     assert mwr_seam == pytest.approx(mwr_noseam, rel=1e-12)
     # Modified Dietz DOES move — the seam entry is (correctly) in the Dietz flows.
     assert dietz_seam != pytest.approx(dietz_noseam, rel=1e-9)
+
+
+# ── C4: LedgerScalars.computable distinguishes fail-loud from uncomputable ─────
+
+def test_ledger_scalars_computable_distinguishes_failloud_from_computed():
+    """C4: the adapter returns a ``LedgerScalars(mwr, dietz, computable)`` instead of
+    a transposable ``(mwr, dietz)`` tuple that aliased the fail-loud unknown-magnitude
+    path with an ordinarily-uncomputable scalar. ``computable`` is False ONLY on the
+    ``known=False`` ledger; a known ledger is computable with finite scalars."""
+    from services.allocator_equity_derive import LedgerScalars
+
+    c, d, seg, per_key_equity, returns = _cd_setup()
+    # Unknown magnitude (C unanchored) -> computable False, both scalars None.
+    unknown_pke = {
+        c.key_id: replay_key_equity(c.returns, [], None),
+        d.key_id: per_key_equity[d.key_id],
+    }
+    unknown = build_allocator_ledger({}, seg.seams, unknown_pke, returns)
+    fail = mwr_and_dietz_from_ledger(
+        unknown, begin_value=100000.0, end_value=130000.0,
+        period_start="2026-03-01", period_days=60,
+    )
+    assert isinstance(fail, LedgerScalars)
+    assert fail.computable is False and fail.mwr is None and fail.dietz is None
+
+    # Known magnitude -> computable True with finite scalars.
+    known = build_allocator_ledger({}, seg.seams, per_key_equity, returns)
+    ok = mwr_and_dietz_from_ledger(
+        known, begin_value=100000.0, end_value=130000.0,
+        period_start="2026-03-01", period_days=60,
+    )
+    assert ok.computable is True and ok.mwr is not None and ok.dietz is not None
 
 
 # ── MEDIUM-4: an out-of-period ledger day refuses (no silent Dietz clamp) ──────
@@ -295,10 +334,10 @@ def test_mwr_responds_to_end_value_on_withdrawal_dominant_ledger():
     )
     results = {}
     for ev in (1.0, 30000.0, 300000.0):
-        mwr, _dietz = mwr_and_dietz_from_ledger(
+        mwr = mwr_and_dietz_from_ledger(
             ledger, begin_value=100000.0, end_value=ev,
             period_start="2026-03-01", period_days=60,
-        )
+        ).mwr
         assert mwr is not None and math.isfinite(mwr)
         results[ev] = mwr
 

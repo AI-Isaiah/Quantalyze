@@ -325,13 +325,15 @@ def test_oracle_4_seam_twr_jump_and_inline_dietz():
     # (c) inline Modified Dietz agrees with the module scalar; MWR is finite.
     begin_value, end_value = 100000.0, 130000.0
     period_start, period_days = "2026-03-01", 40
-    mwr, dietz = mwr_and_dietz_from_ledger(
+    scalars = mwr_and_dietz_from_ledger(
         ledger,
         begin_value=begin_value,
         end_value=end_value,
         period_start=period_start,
         period_days=period_days,
     )
+    assert scalars.computable is True
+    mwr, dietz = scalars.mwr, scalars.dietz
     assert mwr is not None and dietz is not None
     import math
 
@@ -477,10 +479,10 @@ def test_oracle_8_withdrawal_dominant_mwr_includes_terminal():
 
     solved = {}
     for ev in (1.0, 30000.0, 300000.0):
-        mwr, _ = mwr_and_dietz_from_ledger(
+        mwr = mwr_and_dietz_from_ledger(
             ledger, begin_value=begin, end_value=ev,
             period_start=period_start, period_days=period_days,
-        )
+        ).mwr
         assert mwr is not None and math.isfinite(mwr)
         solved[ev] = mwr
         # Independent NPV at the solved annualised rate (compute_mwr uses 365.25).
