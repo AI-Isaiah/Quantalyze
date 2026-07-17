@@ -125,24 +125,28 @@ def test_weights_are_static_not_performance_tracking():
         assert v == pytest.approx(0.6 * a_returns.iloc[i] + 0.4 * b_returns.iloc[i])
 
 
-def test_all_zero_weights_degrade_to_equal_weight_flagged():
-    """Test 5 — all-zero (or all-negative, clamped) weights degrade to equal-weight
-    with a flag; never a ZeroDivision."""
+def test_all_zero_weight_mass_is_honest_empty():
+    """Test 5 (LOW-8) — all-zero (or all-negative, clamped) weight mass has NO
+    capital basis. The old equal-weight fallback FABRICATED a populated curve; it is
+    now HONEST-EMPTY (``blended=None`` + ``REASON_ZERO_WEIGHT_MASS``), never a soft
+    flag on an invented curve. Still never a ZeroDivision."""
+    from services.allocator_equity_derive import REASON_ZERO_WEIGHT_MASS
+
     a, b = concurrent_pair()
     res = blend_concurrent_returns(
         {a.key_id: a.returns, b.key_id: b.returns},
         {a.key_id: 0.0, b.key_id: 0.0},
     )
-    assert res.flags["equal_weight_fallback"] is True
-    expected = 0.5 * 0.005 + 0.5 * (-0.002)  # 0.0015
-    for _, value in res.blended.items():
-        assert value == pytest.approx(expected, abs=1e-15)
-    # negative equity clamps to 0 → same equal-weight degrade, no crash
+    assert res.blended is None
+    assert res.flags["honest_empty"] is True
+    assert res.flags["reason"] == REASON_ZERO_WEIGHT_MASS
+    # Negative equity clamps to 0 → same honest-empty, no crash.
     res_neg = blend_concurrent_returns(
         {a.key_id: a.returns, b.key_id: b.returns},
         {a.key_id: -100.0, b.key_id: -200.0},
     )
-    assert res_neg.flags["equal_weight_fallback"] is True
+    assert res_neg.blended is None
+    assert res_neg.flags["reason"] == REASON_ZERO_WEIGHT_MASS
 
 
 def test_eligible_key_predicate_mirrors_phase35():

@@ -78,6 +78,8 @@ from services.stitch_composite import MemberWindow, windows_overlap
 # D3 honest-empty reasons (machine tokens; no USD, JSON-serializable).
 REASON_NO_KEYS = "no_eligible_keys"
 REASON_MISSING_SERIES = "d3_missing_series"
+# LOW-8 honest-empty reason: total weight mass <= 0 (no capital basis to blend on).
+REASON_ZERO_WEIGHT_MASS = "zero_weight_mass"
 
 # STITCH-04 honest-degradation reasons (machine tokens; no USD, JSON-serializable).
 REASON_NO_ANCHOR = "no_anchor"
@@ -134,8 +136,9 @@ def blend_concurrent_returns(
       * Otherwise blend over the UNION of days, 0-filling a key's missing interior
         day in the numerator only, dividing by the CONSTANT total weight mass.
       * Weights are STATIC current-equity shares; negative equity clamps to 0
-        (queries.ts L2209). All-zero mass degrades to equal-weight (flagged), never
-        a ZeroDivision.
+        (queries.ts L2209). All-zero (or all-clamped-negative) mass is HONEST-EMPTY
+        (``blended=None`` + ``REASON_ZERO_WEIGHT_MASS``) — no capital basis to blend
+        on, never a fabricated equal-weight curve (LOW-8).
 
     NEVER calls ``assert_windows_disjoint`` (Landmine L1) — overlapping siblings
     blend, they do not stitch."""
@@ -165,19 +168,22 @@ def blend_concurrent_returns(
         sole = keys[0]
         return BlendResult(
             series_by_key[sole].copy(),
-            {"sole_key": True, "weight": 1.0, "equal_weight_fallback": False},
+            {"sole_key": True, "weight": 1.0},
         )
 
     # D1: static current-equity-share weights; clamp negative equity to 0 so a
     # deeply-losing key cannot inject a negative weight (queries.ts L2209).
     raw = {k: max(0.0, float(weights_by_key.get(k, 0.0))) for k in keys}
     total = sum(raw.values())
-    equal_weight_fallback = total <= 0.0
-    if equal_weight_fallback:
-        # All-zero (or all-clamped-negative) mass → equal weight, never ZeroDivision.
-        norm = {k: 1.0 / len(keys) for k in keys}
-    else:
-        norm = {k: raw[k] / total for k in keys}
+    if total <= 0.0:
+        # LOW-8: all-zero (or all-clamped-negative) weight mass has NO capital basis
+        # — the old equal-weight fallback FABRICATED a fully-populated curve with no
+        # economic weight behind it. Honest-empty instead (like the D3 path), never
+        # a soft flag on an invented curve.
+        return BlendResult(
+            None, {"honest_empty": True, "reason": REASON_ZERO_WEIGHT_MASS}
+        )
+    norm = {k: raw[k] / total for k in keys}
 
     # Union axis (0-fill missing interior days in the numerator; constant divisor).
     # NIT (Fable, for Phase 115.1): this trusts the caller to hand a CONCURRENT block
@@ -198,7 +204,6 @@ def blend_concurrent_returns(
         blended,
         {
             "sole_key": False,
-            "equal_weight_fallback": equal_weight_fallback,
             "zero_weight_keys": sorted(k for k in keys if raw[k] == 0.0),
             "n_keys": len(keys),
         },
