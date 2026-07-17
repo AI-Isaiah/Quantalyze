@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.44.0.0] - 2026-07-17
+### v1.11 Scenario Composer v2 — Phases 109–113 (first tranche; 114–117 to follow)
+Turns the scenario composer from a position-editor with a broken role surface
+into a strategy-blend tool on the v1.10 dailies-canonical backbone: every source
+is a daily-series constituent, gated by a coherent manager/allocator role model.
+Wiring/reshape milestone — zero new deps, and the frozen `scenario.ts` engine
+(SC-3) is byte-identical throughout (proven by the permanent freeze gate on
+every phase).
+
+- **Role model (109 ROLE):** one predicate (`profiles.role`) drives nav, page
+  access, and APIs; `is_admin` is an ops overlay only (grants no marketplace
+  persona surface); staff keep access via `role='both'` (atomic backfill,
+  empty-set SQL assertion). Direct-nav to an unowned route is server-side
+  redirected via a three-branch model (a transient DB error does NOT redirect);
+  the `role × is_admin` matrix is proven redirect-loop-free.
+- **Private contribution (110 CONTRIB + 110.1 dogfooding):** an allocator
+  contributes an off-catalog strategy through the existing wizard, private by
+  default (never auto-published, never in the public catalog), and selects it
+  in the composer Browse drawer — with cross-owner isolation proven at the RLS
+  and query-builder layers and a `guard_strategies_publish_transition` trigger
+  closing the direct-PostgREST self-publish hole. Plus EmptyState / holdings /
+  fail-closed-probe honesty fixes.
+- **Unified constituents (111 CONSTIT):** every source (api-key / CSV / catalog /
+  composite) is ONE uniform weightable constituent row with a provenance badge;
+  the separate "Data Sources" section is deleted. Gated by an independent
+  numpy/pandas parity re-derivation proving the per-key daily series equals the
+  rendered blend (curve 1e-9), plus a permanent whole-repo orphan grep gate.
+- **Per-constituent weights + leverage (112 WEIGHTS):** editable equity-share
+  weights + per-row leverage on the unified rows; the blend re-derives from the
+  levered daily series (`wᵢ·Lᵢ·rᵢ`). Notional = equity × L is a derived,
+  read-only, purely-informative readout (never a weight input); Sharpe/Sortino/
+  Calmar are leverage-invariant and flagged honestly.
+- **Max-drawdown → leverage solver (113 WEIGHTS):** a per-row Target-max-DD mode
+  back-solves the implied leverage over a ruin-clamped domain against the real
+  transform (the sleeve's own max-DD, monotone unique root); the derived leverage
+  stays visible read-only, the resulting portfolio-level max-DD is shown as a
+  computed value, and infeasible/degenerate targets show honest states (never a
+  fabricated leverage or drawdown).
+
+Each phase shipped through a full review pipeline (plan-check → verify →
+code-review → adversarial red team → fix); the whole-branch pre-ship pass
+additionally caught and fixed a cross-phase integration bug (the contribute→
+compose loop: the returns route was widened to owner-inclusive so an allocator's
+own private contribution actually loads), an observability gap, role-guard
+call-site wiring tests, and comment/tooltip accuracy. Full TS suite 8367 passed;
+Python 3680 passed; coverage 86.9 / 84.8 / 82.0 / 78.4 (above the 82/80/74/72
+gate).
+
 ## [0.43.0.0] - 2026-07-15
 ### v1.10 Backbone Unification — Phases 107 + 108: leverage & scenario-planner onto the backbone
 Completes the v1.10 milestone tail. Two frontend refactors move the last two
