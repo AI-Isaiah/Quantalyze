@@ -5226,21 +5226,39 @@ describe("ScenarioComposer — Phase 37 data sources honest per-source toggle", 
       expect(perKeySwitch).toBeInTheDocument();
       expect(addedSwitch).toBeInTheDocument();
 
-      // The added weight BEFORE a per-key toggle.
-      const weightBefore = (
+      // The added weight BEFORE a per-key toggle. With CR-01 (Phase 112 review)
+      // the added row now displays its NORMALIZED blend share (same basis as the
+      // per-key rows), not the raw stored weightOverride. Book key-A $70k / key-B
+      // $30k + shared-add stored weight 1/3 → engine masses 0.7 / 0.3 / 0.3333,
+      // Σ 1.3333 → shared-add blend share 0.250.
+      const shareBefore = (
         screen.getByLabelText("Shared Add weight") as HTMLInputElement
       ).value;
+      expect(shareBefore).toBe("0.250");
 
       // Toggling a per-key source flips the shared toggleByScopeRef channel…
       fireEvent.click(perKeySwitch);
       expect(perKeySwitch).toHaveAttribute("aria-checked", "false");
 
-      // …WITHOUT perturbing any added-strategy weight (togglePerKeySource never
-      // rescales weightOverrides — weight editing is Phase 112).
-      const weightAfter = (
+      // …and the added row's DISPLAYED share honestly re-normalizes: excluding
+      // key-B shrinks the denominator to 0.7 + 0.3333 = 1.0333, so shared-add's
+      // share rises to 0.3333 / 1.0333 = 0.323. This is honest (an exclusion
+      // shrinks the blend basis), NOT a rescale of the stored weightOverride.
+      const shareExcluded = (
         screen.getByLabelText("Shared Add weight") as HTMLInputElement
       ).value;
-      expect(weightAfter).toBe(weightBefore);
+      expect(shareExcluded).toBe("0.323");
+
+      // The TRUE fence — togglePerKeySource never rescales the STORED added
+      // weightOverride (weight editing is Phase 112): re-including key-B restores
+      // the exact pre-toggle blend share. A stored-weight rescale would not
+      // round-trip.
+      fireEvent.click(perKeySwitch);
+      expect(perKeySwitch).toHaveAttribute("aria-checked", "true");
+      const shareRestored = (
+        screen.getByLabelText("Shared Add weight") as HTMLInputElement
+      ).value;
+      expect(shareRestored).toBe(shareBefore);
     });
   });
 });
@@ -5377,16 +5395,33 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     ).toBe(true);
   });
 
-  // (b) RED — typing a per-key weight renormalizes over the ENGINE-unit basis
-  // {K1,K2,A}: K1 → 0.300, and the other two scale proportionally (K2 0.4 / A 0.5
-  // over the remaining 0.7 → K2 0.3111, A 0.3889), summing to 1. Fails today: the
-  // per-key weight input does not exist.
-  it("(b) RED — typing 0.3 into K1's weight renormalizes the mixed basis: K1 0.300 / K2 0.3111 / A 0.3889, sum 1", () => {
+  // (b) — typing a per-key weight renormalizes over the ENGINE-unit basis
+  // {K1,K2,A}, sum 1. The typed value is honored and the OTHER two engine units
+  // scale proportionally by their blend share.
+  //
+  // Numbers re-derived for CR-01 (Phase 112 review). Pre-fix, addAWithWeightHalf's
+  // A edit routed through the legacy `setWeightOverride` (whose `enabledIdsOf`
+  // basis excludes the per-key units), leaving projectionState = {K1:0.6, K2:0.4,
+  // A:0.5} (raw equity vs a fraction) → blend shares 0.4 / 0.2667 / 0.3333; typing
+  // 0.3 into K1 then scaled the other two over the remaining 0.7 → 0.3111 / 0.3889.
+  // That state was the BUG: the added row's typed 0.5 was NOT the honest blend
+  // share (0.3333). Post-fix BOTH edits route through the engine basis:
+  //   1. addAWithWeightHalf (A → 0.5): pre-edit projectionState = {K1:0.6, K2:0.4,
+  //      A:0.3333 (the 1/3 default a 3rd add seeds)} → blend {K1:0.45, K2:0.30,
+  //      A:0.25}. otherSum(K1,K2)=0.75, remaining 0.5, scale 0.6667 →
+  //      vector {A:0.5, K1:0.3, K2:0.2}, sum 1. weightOverrides now K1 0.3 / K2 0.2
+  //      / A 0.5, so blend {K1:0.3, K2:0.2, A:0.5}.
+  //   2. typing 0.3 into K1: otherSum(K2,A)=0.7, remaining 0.7, scale 1.0 →
+  //      vector {K1:0.3, K2:0.2, A:0.5} (identity — K1 was already 0.3).
+  // Honest result: K1 0.300 / K2 0.200 / A 0.500, sum 1. The A=0.500 assertion is
+  // exactly CR-01's contract — the added row's typed 0.5 IS its honest blend
+  // share. RED-proof: pre-fix this yields K2 0.3111 / A 0.3889 (added edit not
+  // honored), so the new numbers fail against the `isPerKeyEdit`-gated code.
+  it("(b) — typing 0.3 into K1's weight renormalizes the mixed basis: K1 0.300 / K2 0.200 / A 0.500, sum 1", () => {
     render112();
     addAWithWeightHalf();
 
     const w1 = document.getElementById(`weight-${K1}`) as HTMLInputElement | null;
-    // RED — no per-key weight input yet.
     expect(w1).not.toBeNull();
     act(() => {
       fireEvent.change(w1!, { target: { value: "0.3" } });
@@ -5396,8 +5431,45 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     const wv2 = document.getElementById(`weight-${K2}`) as HTMLInputElement;
     const wvA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
     expect(Number(wv1.value)).toBeCloseTo(0.3, 3);
-    expect(Number(wv2.value)).toBeCloseTo(0.3111, 3);
-    expect(Number(wvA.value)).toBeCloseTo(0.3889, 3);
+    expect(Number(wv2.value)).toBeCloseTo(0.2, 3);
+    expect(Number(wvA.value)).toBeCloseTo(0.5, 3);
+    expect(
+      Number(wv1.value) + Number(wv2.value) + Number(wvA.value),
+    ).toBeCloseTo(1, 3);
+  });
+
+  // (b2) CR-01 (Phase 112 review) — editing an ADDED weight in a mixed per-key +
+  // added book honors the typed value: it renders as its blend share and the
+  // mixed {per-key + added} set sums to 1. Pre-fix, an added edit fell to the
+  // legacy `setWeightOverride`, whose `enabledIdsOf` basis excludes the per-key
+  // units, so the typed 0.5 competed against raw per-key equity dollars and
+  // rendered ~0% while the set sum drifted off 1 (CR-01 failures A/B). RED-proof:
+  // against the pre-fix `isPerKeyEdit = usePerKeySources && !addedIdSet.has(ref)`
+  // gate this fails — A's input shows ~0.001, not 0.5.
+  it("(b2) CR-01 — editing an added weight in a mixed book renders the typed value as its blend share; the mixed set sums to 1", () => {
+    render112();
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+
+    const wA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement | null;
+    expect(wA).not.toBeNull();
+    act(() => {
+      fireEvent.change(wA!, { target: { value: "0.5" } });
+    });
+
+    const wv1 = document.getElementById(`weight-${K1}`) as HTMLInputElement;
+    const wv2 = document.getElementById(`weight-${K2}`) as HTMLInputElement;
+    const wvA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    // A's typed 0.5 IS its honest blend share (not swamped by raw equity dollars).
+    expect(Number(wvA.value)).toBeCloseTo(0.5, 3);
+    // The two untouched per-key rows keep the remaining 0.5, split by their
+    // pre-edit blend shares (0.45 / 0.30 over 0.75 → 0.3 / 0.2), sum to 1.
+    expect(Number(wv1.value)).toBeCloseTo(0.3, 3);
+    expect(Number(wv2.value)).toBeCloseTo(0.2, 3);
     expect(
       Number(wv1.value) + Number(wv2.value) + Number(wvA.value),
     ).toBeCloseTo(1, 3);

@@ -1080,30 +1080,48 @@ export function ScenarioComposer({
     // in lockstep even if the downstream clamp bound ever changes.
     const clampedWeight = Math.min(1, Math.max(0, weight));
 
-    // WEIGHTS-01 (Phase 112) — weight-sum basis branch. A PER-KEY unit edit on
-    // the mixed book surface must renormalize over the SELECTED ENGINE UNIT basis
-    // (WR-01), NEVER setWeightOverride's `enabledIdsOf` basis — which excludes
-    // per-key units, so a per-key edit would leave the sum ≠ 1 across the mixed
-    // per-key + added set (Pitfall 2 / the #528 apply-back drift class, D-locked
-    // decision 3). ADDED-strategy edits keep the legacy `setWeightOverride` path
-    // byte-for-byte: their `enabledIdsOf` renormalization is correct while per-key
-    // rows ride the raw equity share, and it is the reference behavior the Wave-0
-    // mixed fixture depends on. `togglePerKeySource` stays the include/exclude
-    // channel untouched; because ALL per-key weight math now flows through this
-    // explicit engine-unit basis, the toggle's delete-on-re-include semantics no
-    // longer govern the weight — an exclusion honestly shrinks the denominator via
-    // the engine's ephemeral renorm (scenario.ts:314-319, read-only reference)
-    // while a typed weight persists in `weightOverrides` across exclude/re-include
-    // (Wave-0 pin (d)).
-    const isPerKeyEdit = usePerKeySources && !addedIdSet.has(scopeRef);
-    if (!isPerKeyEdit) {
+    // WEIGHTS-01 (Phase 112) + CR-01 (Phase 112 review) — weight-sum basis
+    // branch. In a MIXED book — one carrying at least one SELECTED per-key
+    // engine unit — EVERY weight edit (per-key AND added) must renormalize over
+    // the SELECTED ENGINE UNIT basis, NEVER setWeightOverride's `enabledIdsOf`
+    // basis. That basis (holding refs + added ids) EXCLUDES the per-key units
+    // (they are included-by-absence, never toggleByScopeRef === true), so
+    // renormalizing an ADDED edit over it makes the typed fraction compete
+    // against the raw per-key equity dollars still in projectionState: the typed
+    // 0.5 renders ~0% (CR-01 failure A), and a second added edit pushes
+    // `weightOverrides` past sum 1, silently dropping an untouched per-key row
+    // (failure B). The engine basis is exactly the basis the per-key edit
+    // already used; widening it to added edits closes the asymmetry and keeps
+    // the mixed per-key + added set at sum 1 (Pitfall 2 / the #528 apply-back
+    // drift class, D-locked decision 3).
+    //
+    // Keep the legacy `setWeightOverride` path for the NON-mixed case (no
+    // selected per-key engine unit — blank mode, or a book+gate render whose
+    // per-key returns are empty so the engine set is effectively added-only).
+    // There `enabledIdsOf` is the correct, tested basis, and a lone added unit
+    // must keep its RAW typed weight (the zero-size / >1 clamp gates read it)
+    // rather than be renormalized to 1.0 by a single-unit engine basis.
+    //
+    // `togglePerKeySource` stays the include/exclude channel untouched; because
+    // ALL mixed-book weight math now flows through this explicit engine-unit
+    // basis, the toggle's delete-on-re-include semantics no longer govern the
+    // weight — an exclusion honestly shrinks the denominator via the engine's
+    // ephemeral renorm (scenario.ts:314-319, read-only reference) while a typed
+    // weight persists in `weightOverrides` across exclude/re-include (Wave-0 pin
+    // (d)).
+    const basisIds = engineSet.strategies
+      .filter((s) => engineSet.state.selected[s.id])
+      .map((s) => s.id);
+    // Mixed book ⇔ the engine basis carries a per-key (non-added) unit. A pure
+    // added-only engine set (no per-key units) keeps the legacy path so a lone
+    // added weight is not renormalized to 1.0.
+    const isMixedPerKeyBook =
+      usePerKeySources && basisIds.some((id) => !addedIdSet.has(id));
+    if (!isMixedPerKeyBook) {
       scenario.setWeightOverride(scopeRef, clampedWeight);
       return;
     }
 
-    const basisIds = engineSet.strategies
-      .filter((s) => engineSet.state.selected[s.id])
-      .map((s) => s.id);
     const otherIds = basisIds.filter((id) => id !== scopeRef);
     const otherSum = otherIds.reduce(
       (acc, id) => acc + (blendShareByRef[id] ?? 0),
@@ -5138,7 +5156,17 @@ function CompositionList({
         )}
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;
-          const weight = draft.weightOverrides[a.id] ?? 0;
+          // CR-01 (Phase 112 review) — in a MIXED book (per-key rows present)
+          // show the NORMALIZED blend share so the added row reads the SAME
+          // basis the per-key rows do (both are engine units renormalized to
+          // sum 1); a raw `weightOverrides` value would display a different
+          // basis than the per-key rows even before an edit. Added-only (no
+          // per-key rows) keeps the raw value byte-identical — the zero-size /
+          // clamp gates and their tests read it.
+          const weight =
+            perKeySources.length > 0
+              ? (blendShareByRef[a.id] ?? draft.weightOverrides[a.id] ?? 0)
+              : (draft.weightOverrides[a.id] ?? 0);
           // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
           // from the row's `enabled` (the `selected` axis) + the threaded
           // `coverageEligible` map, exactly the two states the plan wires here:
