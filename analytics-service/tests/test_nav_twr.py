@@ -9,8 +9,9 @@ substitution that lives in ``transforms.trades_to_daily_returns_with_status``
     (``NAV_{t-1} = NAV_t - pnl_t - F_t``) — pinned to an independent numpy
     oracle and revert-proof (a sign/term mutation turns the oracle test RED);
   * chain-links a true time-weighted daily return with the flow in the
-    NUMERATOR (end-of-day convention) — cross-checked against the already
-    shipped ``portfolio_metrics.compute_twr`` scalar;
+    NUMERATOR (end-of-day convention) — cross-checked against a hand-derived
+    closed-form sub-period chain (the end-of-day flow-numerator convention of
+    the deleted forward TWR scalar, retired in Phase 114 E1 backbone absorption);
   * guards EVERY NAV denominator fail-loud (dust / negative / flow-dominated)
     — breaking the chain-link for that day and flagging
     ``complete_with_warnings`` rather than ever fabricating a number;
@@ -48,7 +49,6 @@ from services.nav_twr import (
     reconstruct_nav_and_twr,
 )
 from services.external_flows import ExternalFlow
-from services.portfolio_metrics import compute_twr
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +292,11 @@ def test_twr_edge_cases() -> None:
     assert cumulative_twr_segmented(ret3)[0] == pytest.approx(exp_cum, rel=1e-12)
 
 
-def test_twr_agrees_with_compute_twr() -> None:
+def test_twr_agrees_with_hand_derived_chain() -> None:
     """On a shared synthetic fixture the nav_twr per-day chain-linked cumulative
-    agrees with the already-shipped forward scalar ``portfolio_metrics.compute_twr``
-    (same end-of-day flow numerator convention) to fp tolerance."""
+    agrees with a hand-derived closed-form sub-period chain (the same end-of-day
+    flow-numerator convention as the retired portfolio_metrics TWR scalar,
+    deleted in Phase 114 E1 backbone absorption) to fp tolerance."""
     # Equity (end-of-day) [1000, 1100, 1050, 1200] with a +100 deposit on
     # 2026-01-03. Day 0 has zero pnl/flow so nav_twr's day-0 return is 0 and both
     # methods start from the same base.
@@ -307,16 +308,21 @@ def test_twr_agrees_with_compute_twr() -> None:
     )
     nav_twr_cum = cumulative_twr_segmented(returns)[0]
 
-    equity = pd.Series(
-        [1000.0, 1100.0, 1050.0, 1200.0], index=_days(4, "2026-01-01")
+    # Hand-derived closed-form chain from the fixture numbers, in the same style
+    # as the exp_cum expression above. End-of-day flow-numerator convention: the
+    # +100 deposit landing on 2026-01-03 is SUBTRACTED from that day's end value
+    # before the sub-period ratio is formed. This literal chain is the
+    # independent comparator that replaces the deleted forward TWR scalar.
+    eq = [1000.0, 1100.0, 1050.0, 1200.0]
+    deposit = 100.0
+    hand_derived = (
+        (eq[1] / eq[0])
+        * ((eq[2] - deposit) / eq[1])
+        * (eq[3] / eq[2])
+        - 1.0
     )
-    events = [
-        {"event_date": "2026-01-03", "event_type": "deposit", "amount": 100.0}
-    ]
-    scalar = compute_twr(equity, events)
 
-    assert scalar is not None
-    assert nav_twr_cum == pytest.approx(scalar, rel=1e-12)
+    assert nav_twr_cum == pytest.approx(hand_derived, rel=1e-12)
     assert meta["computation_status_hint"] == "complete"
 
 

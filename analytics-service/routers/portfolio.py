@@ -598,38 +598,6 @@ def _series_to_curve(series: pd.Series) -> list[dict[str, Any]]:
     ]
 
 
-def _compute_sharpe_and_vol(returns: pd.Series) -> tuple[float | None, float | None, float | None, str]:
-    """Compute annualised vol, mean_ret, sharpe + a status code.
-
-    Returns (vol, mean_ret, sharpe, sharpe_status). Status codes are
-    deliberately mutually exclusive so the data_quality channel can
-    distinguish each empty-state reason (review CR-3):
-
-      "ok"                   — sharpe is a real float.
-      "insufficient_history" — fewer than 2 samples.
-      "zero_volatility"      — vol == 0 (flat returns).
-      "nan_vol"              — vol is NaN (typically all-NaN returns).
-      "nan_mean"             — vol is finite but mean_ret is NaN.
-      "nan_sharpe"           — mean_ret/vol arithmetic produced NaN/inf.
-
-    Replaces three structurally identical implementations (audit M-0626).
-    """
-    if len(returns) <= 1:
-        return None, None, None, "insufficient_history"
-    vol = returns.std() * np.sqrt(252)
-    mean_ret = returns.mean() * 252
-    if vol is None or vol == 0 or (isinstance(vol, float) and np.isnan(vol)):
-        if vol == 0:
-            status = "zero_volatility"
-        else:
-            status = "nan_vol"
-        return _safe_float(vol), _safe_float(mean_ret), None, status
-    if mean_ret is None or (isinstance(mean_ret, float) and np.isnan(mean_ret)):
-        return _safe_float(vol), None, None, "nan_mean"
-    sharpe = _safe_float(mean_ret / vol)
-    return _safe_float(vol), _safe_float(mean_ret), sharpe, "ok" if sharpe is not None else "nan_sharpe"
-
-
 # ---------------------------------------------------------------------------
 # Internal computation helper (also callable from the cron module)
 # ---------------------------------------------------------------------------
