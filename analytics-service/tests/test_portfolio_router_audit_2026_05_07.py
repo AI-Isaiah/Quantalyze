@@ -322,6 +322,32 @@ class TestSharpeVolStatusFromBackbone:
         vol, sharpe, status = sharpe_vol_status_from_backbone(s)
         assert (vol, sharpe, status) == (None, None, "nan_vol")
 
+    def test_interior_nan_uses_skipna_basis_not_diluted(self):
+        """CR-01: the verify_strategy path feeds interior-NaN returns (a guard-NaN
+        flanked by valid returns, emitted by reconstruct_nav_and_twr on a
+        dust/negative/flow-dominated interior day). Such a series has finite std,
+        so it slips past both pre-backbone guards and reaches the pipeline. The
+        legacy helper used pandas skipna (NaN days DROPPED); the pipeline's
+        _prepare_returns fillna(0)s them, DILUTING vol/mean. The helper must
+        reproduce the skipna basis, so vol equals the dropna() oracle and is
+        strictly LARGER than the fillna(0)-diluted value it would otherwise show.
+        RED pre-fix (helper returned the diluted vol), GREEN after dropna()."""
+        idx = pd.bdate_range("2026-01-01", periods=10)
+        r = pd.Series(
+            np.random.default_rng(7).normal(0.001, 0.01, 10),
+            index=idx,
+            dtype="float64",
+        )
+        r.iloc[3] = np.nan
+        r.iloc[7] = np.nan
+        skipna_vol = r.dropna().std() * math.sqrt(252)
+        diluted_vol = r.fillna(0).std() * math.sqrt(252)
+        assert skipna_vol > diluted_vol  # the two bases genuinely differ
+        vol, _sharpe, status = sharpe_vol_status_from_backbone(r, periods_per_year=252)
+        assert status == "ok"
+        assert vol == pytest.approx(skipna_vol, rel=1e-9)
+        assert vol != pytest.approx(diluted_vol, rel=1e-9)
+
     def test_returns_status_distinguishes_zero_vol_from_history(self):
         """Audit M-0615: dashboard must distinguish empty-state reasons."""
         # Insufficient history

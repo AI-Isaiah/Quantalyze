@@ -131,6 +131,27 @@ def _fixture_f() -> pd.Series:
     return pd.Series([np.nan] * 5, index=pd.date_range("2024-01-01", periods=5, freq="D"), dtype="float64")
 
 
+def _fixture_partial_nan() -> pd.Series:
+    """(g) INTERIOR-NaN returns (finite std, len>=2 valid flanks) — the CR-01
+    divergence shape.
+
+    ``reconstruct_nav_and_twr`` leaves a guard-NaN flanked by valid returns on a
+    dust/negative/flow-dominated INTERIOR day, so ``verify_strategy`` can feed
+    exactly this shape to the helper. The legacy skipna helper DROPPED those days;
+    the backbone pipeline's ``_prepare_returns`` fillna(0) would instead fold them
+    in as 0.0-return days, diluting vol/mean. This is the one input the parity gate
+    never exercised (WR-01). NaN-carrying → parity is asserted vs a ``dropna()``
+    skipna oracle, NOT part of the rel-1e-12 clean-series set.
+    """
+    idx = pd.date_range("2024-01-01", periods=10, freq="D")
+    r = pd.Series(
+        np.random.default_rng(7).normal(0.001, 0.01, 10), index=idx, dtype="float64"
+    )
+    r.iloc[3] = np.nan
+    r.iloc[7] = np.nan  # interior break days (guard-NaN flanked by valid returns)
+    return r
+
+
 # ── Whole-tree caller census (BACKBONE-01 clause 4, post-delete sweep) ────────
 # Tokens built by concatenation so THIS file's census constants never contain the
 # literal deletion-target symbols (belt-and-suspenders with the self-exclusion of
@@ -329,6 +350,24 @@ class TestBackboneDerivationParity:
         assert status == "ok"
         _assert_rel(vol, exp_vol, msg="helper vol vs oracle")
         _assert_rel(sharpe, exp_sharpe, msg="helper sharpe vs oracle")
+
+    def test_sharpe_vol_interior_nan_matches_skipna_oracle(self):
+        # CR-01/WR-01: an INTERIOR-NaN series (finite std, valid flanks) must
+        # reproduce the LEGACY pandas-skipna basis — vol/mean over the VALID days
+        # ONLY, not the fillna(0)-diluted pipeline basis. The oracle drops the NaN
+        # days then re-derives inline (clean.std()·√252, clean.mean()·252 / vol),
+        # exactly the legacy semantics. This is RED against the pre-fix helper
+        # (which fed the full NaN-carrying series to the pipeline and diluted the
+        # statistic) and GREEN once the helper drops NaN before the pipeline call.
+        r = _fixture_partial_nan()
+        clean = r.dropna()
+        assert clean.notna().all() and len(clean) >= 2  # finite-std precondition
+        exp_vol = clean.std() * math.sqrt(PPY)
+        exp_sharpe = (clean.mean() * PPY) / exp_vol
+        vol, sharpe, status = sharpe_vol_status_from_backbone(r, periods_per_year=PPY)
+        assert status == "ok"
+        _assert_rel(vol, exp_vol, msg="interior-NaN vol vs skipna oracle")
+        _assert_rel(sharpe, exp_sharpe, msg="interior-NaN sharpe vs skipna oracle")
 
     def test_sharpe_vol_status_zero_volatility(self):
         # (b) flat all-zeros -> (0.0, None, "zero_volatility").

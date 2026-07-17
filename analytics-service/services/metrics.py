@@ -1314,6 +1314,18 @@ def sharpe_vol_status_from_backbone(
         does NOT intercept the flat-series case (``std == 0.0`` is finite, not
         NaN -> falls through to the zero_volatility branch below).
 
+    INTERIOR-NaN skipna parity: past the guards a series may still carry
+    interior NaN days with a finite std (a guard-NaN flanked by valid returns,
+    the shape reconstruct_nav_and_twr emits on a dust/negative/flow-dominated
+    interior day, reachable from verify_strategy). The legacy helper used pandas'
+    default skipna, so those days were DROPPED from vol/mean; the pipeline's
+    _prepare_returns fillna(0)s them instead, folding them in as 0.0-return days
+    and DILUTING the statistic. So the series is ``dropna()``-ed before the
+    pipeline call — restoring the skipna basis so vol/Sharpe match the legacy
+    numbers on the normal path, not just on the clean-input path. (The
+    portfolio-level call site is already NaN-free upstream, so this is a no-op
+    there; only the verify_strategy path needed the parity.)
+
     Then the backbone is called ONCE and:
       * ``vol is None`` -> ``(None, None, "nan_vol")`` (defensive belt-and-braces;
         the std guard should already have caught every NaN-vol case);
@@ -1331,7 +1343,17 @@ def sharpe_vol_status_from_backbone(
         return None, None, "insufficient_history"
     if pd.isna(returns.std()):
         return None, None, "nan_vol"
-    m = compute_all_metrics(returns, periods_per_year=periods_per_year)
+    # Legacy skipna parity: the deleted helper computed vol/mean with pandas'
+    # default skipna, so interior-NaN days (a guard-NaN flanked by valid returns,
+    # as reconstruct_nav_and_twr emits at a dust/negative/flow-dominated interior
+    # day and verify_strategy can feed here) were DROPPED from the statistic. The
+    # pipeline's _prepare_returns fillna(0)s NaN days instead, folding them in as
+    # 0.0-return days and diluting vol/Sharpe. Drop them BEFORE the pipeline to
+    # restore the skipna basis. Safe: the two guards above (len<=1, NaN std) mean
+    # a finite std here implies >= 2 finite observations survive dropna(), so
+    # compute_all_metrics cannot hit its len<2 raise.
+    clean = returns.dropna()
+    m = compute_all_metrics(clean, periods_per_year=periods_per_year)
     vol = m["volatility"]
     sharpe = m["sharpe"]
     if vol is None:
