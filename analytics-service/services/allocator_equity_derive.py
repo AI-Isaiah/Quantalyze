@@ -169,3 +169,149 @@ def blend_concurrent_returns(
             "n_keys": len(keys),
         },
     )
+
+
+# ── STITCH-06: coverage segmentation (concurrent blocks vs sequential seams) ──
+
+
+@dataclass(frozen=True)
+class Segment:
+    """A maximal run of calendar-consecutive days covered by the SAME set of keys.
+
+    ``concurrent`` is True when more than one key covers the run (the blend
+    applies); a single-key run is a genuine sequential leg. ``keys`` is the sorted
+    covering-key tuple; ``days`` is the ordered ISO day list actually covered."""
+
+    start_day: str
+    end_day: str
+    keys: tuple[str, ...]
+    concurrent: bool
+    days: tuple[str, ...]
+
+    @property
+    def n_days(self) -> int:
+        return len(self.days)
+
+
+@dataclass(frozen=True)
+class Seam:
+    """The STITCH-06 handoff contract consumed by wave 3: a genuine sequential
+    rotation where one covering-key set fully hands off to a DISJOINT next set with
+    ZERO shared coverage day. ``gap_days`` is the count of absent calendar days
+    strictly between the two boundaries (0 for an adjacent half-open handoff; > 0
+    for a real gap, whose days are NEVER zero-filled — no-invented-data)."""
+
+    prev_key: str
+    prev_last_day: str
+    next_key: str
+    next_first_day: str
+    gap_days: int
+    prev_keys: tuple[str, ...] = ()
+    next_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CoverageSegmentation:
+    segments: list[Segment]
+    seams: list[Seam]
+
+
+def _key_window(seq: int, series: pd.Series) -> MemberWindow:
+    """A per-key half-open ``MemberWindow`` derived from the series' actual first /
+    last covered day (``window_end`` exclusive = last day + 1), so the shared
+    ``windows_overlap`` predicate can be reused verbatim on live per-key coverage."""
+    days = sorted(str(d) for d in series.index)
+    start = days[0]
+    end = (pd.Timestamp(days[-1]) + pd.Timedelta(days=1)).date().isoformat()
+    return MemberWindow(seq, start, end)
+
+
+def _key_label(keys: tuple[str, ...]) -> str:
+    """The seam's ``prev_key`` / ``next_key`` scalar: the sole key for a single-key
+    rotation, else the '+'-joined covering set for a (rare) block-to-block handoff."""
+    return keys[0] if len(keys) == 1 else "+".join(keys)
+
+
+def segment_coverage(
+    series_by_key: Mapping[str, pd.Series],
+) -> CoverageSegmentation:
+    """Segment per-key coverage into concurrent blocks vs single-key legs, and emit
+    the ordered Seam list for genuine sequential rotations.
+
+    A day belongs to whichever keys have a row for it. Consecutive calendar days
+    with an IDENTICAL covering-key set form one segment; a change in the covering
+    set OR a calendar gap starts a new segment. A seam is emitted between two
+    temporally-adjacent segments IFF their covering-key sets are DISJOINT (a real
+    rotation — no shared coverage day); overlap transitions (single→concurrent→
+    single) share a key and therefore carry NO seam. Reuses
+    ``stitch_composite.windows_overlap`` for the rotation non-overlap check rather
+    than hand-rolling interval math. No equity math here — this is the pure
+    WHERE-do-synthetic-flows-apply contract for wave 3."""
+    covered: dict[str, set[str]] = {
+        k: {str(d) for d in s.index} for k, s in series_by_key.items()
+    }
+    union_days = sorted({d for days in covered.values() for d in days})
+
+    windows: dict[str, MemberWindow] = {
+        k: _key_window(i, series_by_key[k])
+        for i, k in enumerate(series_by_key)
+        if len(series_by_key[k]) > 0
+    }
+
+    segments: list[Segment] = []
+    cur_keys: frozenset[str] | None = None
+    cur_days: list[str] = []
+    prev_day: str | None = None
+    for day in union_days:
+        keys_today = frozenset(k for k in covered if day in covered[k])
+        is_gap = (
+            prev_day is not None
+            and (pd.Timestamp(day) - pd.Timestamp(prev_day)).days > 1
+        )
+        if cur_keys is None:
+            cur_keys, cur_days = keys_today, [day]
+        elif keys_today != cur_keys or is_gap:
+            segments.append(_finish_segment(cur_keys, cur_days))
+            cur_keys, cur_days = keys_today, [day]
+        else:
+            cur_days.append(day)
+        prev_day = day
+    if cur_keys is not None:
+        segments.append(_finish_segment(cur_keys, cur_days))
+
+    seams: list[Seam] = []
+    for a, b in zip(segments, segments[1:]):
+        a_keys, b_keys = set(a.keys), set(b.keys)
+        if not a_keys.isdisjoint(b_keys):
+            continue  # shared coverage → blended transition, not a rotation seam
+        # Belt-and-suspenders: a genuine rotation's key windows must NOT overlap
+        # (reuse the ONE shared half-open predicate, never inline interval math).
+        if any(
+            windows_overlap(windows[p], windows[n]) for p in a.keys for n in b.keys
+        ):
+            continue
+        gap_days = (pd.Timestamp(b.start_day) - pd.Timestamp(a.end_day)).days - 1
+        seams.append(
+            Seam(
+                prev_key=_key_label(a.keys),
+                prev_last_day=a.end_day,
+                next_key=_key_label(b.keys),
+                next_first_day=b.start_day,
+                gap_days=gap_days,
+                prev_keys=a.keys,
+                next_keys=b.keys,
+            )
+        )
+
+    return CoverageSegmentation(segments=segments, seams=seams)
+
+
+def _finish_segment(keys: frozenset[str], days: list[str]) -> Segment:
+    sorted_keys = tuple(sorted(keys))
+    return Segment(
+        start_day=days[0],
+        end_day=days[-1],
+        keys=sorted_keys,
+        concurrent=len(sorted_keys) > 1,
+        days=tuple(days),
+    )
