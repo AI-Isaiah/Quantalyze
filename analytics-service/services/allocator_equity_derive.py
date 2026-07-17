@@ -627,11 +627,39 @@ def allocator_equity_curve(
     # Rotation ownership: derive the seam classification from the anchored coverage
     # windows when the caller does not supply it, so the curve agrees with
     # ``build_allocator_ledger`` on which keys are redeployed vs still held.
+    explicit_seams = seams is not None
     if seams is None:
         seams = segment_coverage(dict(anchored)).seams
     rotated_out: set[str] = set()
     for seam in seams:
         rotated_out.update(seam.prev_keys or ())
+
+    # MEDIUM-6: a caller-passed seam list computed over a DIFFERENT key set silently
+    # double-counts — a genuinely-rotated key absent from ``rotated_out`` is carried
+    # forward (ffill) and summed on the next block, flagged BYTE-IDENTICALLY to a
+    # benign stale mark. Guard the passed-seams path:
+    #   (a) every seam-referenced key must be in ``anchored`` (a stray key means the
+    #       seams were computed over a different set) -> fail loud;
+    #   (b) cross-check against the internally-derived rotation: a key the coverage
+    #       says rotates out but the passed seams did NOT classify is an UNCLASSIFIED
+    #       truncation -> a DISTINCT non-benign flag token (not the benign carry).
+    unclassified: set[str] = set()
+    if explicit_seams:
+        seam_keys: set[str] = set()
+        for seam in seams:
+            seam_keys.update(seam.prev_keys or ())
+            seam_keys.update(seam.next_keys or ())
+        stray = seam_keys - set(anchored)
+        if stray:
+            raise NavReconstructionError(
+                f"allocator_equity_curve: passed seam(s) reference {len(stray)} "
+                "key(s) absent from the anchored set — seams computed over a "
+                "different key set (refusing a silent double-count)"
+            )
+        internal_rotated: set[str] = set()
+        for seam in segment_coverage(dict(anchored)).seams:
+            internal_rotated.update(seam.prev_keys or ())
+        unclassified = internal_rotated - rotated_out
 
     union_days = sorted({str(d) for s in anchored.values() for d in s.index})
     union_index = pd.Index(union_days)
@@ -654,12 +682,14 @@ def allocator_equity_curve(
         contrib = contrib.where(union_index >= key_first[k], 0.0).fillna(0.0)
         total = total.add(contrib, fill_value=0.0)
 
-    # Stale marks are ONLY non-rotated keys carried past their own last day.
+    # Benign stale marks are non-rotated AND non-unclassified keys carried past their
+    # own last day (an unclassified key's carry is the MEDIUM-6 double-count — kept
+    # OUT of the benign count so the two flag tokens stay distinct).
     n_tail_days_carried = sum(
         1
         for day in union_days
         for k in anchored
-        if k not in rotated_out and day > key_last[k]
+        if k not in rotated_out and k not in unclassified and day > key_last[k]
     )
     window_truncated = any(
         key_first[k] != union_days[0] or key_last[k] != union_days[-1]
@@ -669,11 +699,15 @@ def allocator_equity_curve(
     return AllocatorEquity(
         total,
         {
-            "degraded": bool(dropped) or window_truncated,
+            "degraded": bool(dropped) or window_truncated or bool(unclassified),
             "dropped_keys": dropped,
             "window_truncated": window_truncated,
             "n_tail_days_carried": n_tail_days_carried,
             "rotated_out_keys": sorted(rotated_out & set(anchored)),
+            # MEDIUM-6: a DISTINCT non-benign token — keys the coverage says rotate
+            # out but the passed seams did not classify (a potential double-count),
+            # never conflated with the benign n_tail_days_carried stale-mark carry.
+            "unclassified_truncation_keys": sorted(unclassified),
             "n_keys": len(anchored),
         },
     )

@@ -298,6 +298,51 @@ def test_rotation_seam_prev_key_stops_contributing_no_double_count():
     assert list(out2.equity) == pytest.approx(list(out.equity), abs=1e-9)
 
 
+# ── MEDIUM-6: a mismatched seams list is caught, not silently double-counted ──
+
+def test_mismatched_seams_flags_unclassified_truncation_distinctly():
+    """MEDIUM-6: a caller-passed seam list computed over a different key set would let
+    a genuinely-rotated key be carried forward (double-count), flagged BYTE-IDENTICALLY
+    to a benign stale mark. Now: a stray seam key fails loud, and a coverage-detected
+    rotation the passed seams did NOT classify gets a DISTINCT non-benign flag."""
+    from services.allocator_equity_derive import Seam, segment_coverage
+    from tests.e2_fixtures import ANCHORS, rotated_seam_pair
+
+    c, d = rotated_seam_pair()
+    pke = {
+        c.key_id: replay_key_equity(c.returns, [], ANCHORS[c.key_id]),
+        d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
+    }
+
+    # (a) Mismatched (empty) seams on a genuine C->D rotation -> distinct flag names C.
+    out = allocator_equity_curve(pke, seams=[])
+    assert out.flags["unclassified_truncation_keys"] == [c.key_id]
+    assert out.flags["degraded"] is True
+
+    # (b) The CORRECT seam list has no unclassified truncation (distinguishable).
+    seg = segment_coverage({c.key_id: c.returns, d.key_id: d.returns})
+    good = allocator_equity_curve(pke, seams=seg.seams)
+    assert good.flags["unclassified_truncation_keys"] == []
+    assert good.flags["rotated_out_keys"] == [c.key_id]
+
+    # (c) A benign concurrent stale-mark curve keeps an EMPTY distinct token while
+    # still counting the benign carry — the two tokens are distinct.
+    a = replay_key_equity(_flat_returns(), [], _ZERO_FLOW_ANCHOR)
+    b = replay_key_equity(pd.Series([0.10, 0.10], index=_DAYS[:2], name="key-B"), [], 121000.0)
+    benign = allocator_equity_curve({"key-A": a, "key-B": b})
+    assert benign.flags["unclassified_truncation_keys"] == []
+    assert benign.flags["n_tail_days_carried"] == 2
+
+    # (d) A stray seam key (absent from anchored) fails loud.
+    stray = Seam(
+        prev_key="key-Z", prev_last_day="2026-03-20", next_key=d.key_id,
+        next_first_day="2026-03-21", gap_days=0,
+        prev_keys=("key-Z",), next_keys=(d.key_id,),
+    )
+    with pytest.raises(NavReconstructionError):
+        allocator_equity_curve(pke, seams=[stray])
+
+
 # ── Guard: a withdrawal that drives equity non-positive refuses structurally ──
 
 def test_non_positive_intermediate_equity_refuses_without_leaking_usd():
