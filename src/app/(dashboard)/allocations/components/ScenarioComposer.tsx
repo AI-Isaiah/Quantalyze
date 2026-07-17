@@ -1194,17 +1194,17 @@ export function ScenarioComposer({
     );
     const remainingMass = 1 - clampedWeight;
     const vector: Record<string, number> = { [scopeRef]: clampedWeight };
-    if (otherIds.length > 0) {
-      if (otherSum <= 0) {
-        // Mirror setWeightOverride's :599-602 equal-split fallback when the other
-        // selected units carry no share mass to scale.
-        const equal = remainingMass / otherIds.length;
-        for (const id of otherIds) vector[id] = equal;
-      } else {
-        const scale = remainingMass / otherSum;
-        for (const id of otherIds) {
-          vector[id] = (blendShareByRef[id] ?? 0) * scale;
-        }
+    // otherIds is guaranteed non-empty here: the `=== 0` case already returned
+    // above. Distribute the remaining mass across the other constituents.
+    if (otherSum <= 0) {
+      // Mirror setWeightOverride's :599-602 equal-split fallback when the other
+      // selected units carry no share mass to scale.
+      const equal = remainingMass / otherIds.length;
+      for (const id of otherIds) vector[id] = equal;
+    } else {
+      const scale = remainingMass / otherSum;
+      for (const id of otherIds) {
+        vector[id] = (blendShareByRef[id] ?? 0) * scale;
       }
     }
     // The vector sums to 1 over `basisIds`, so applyWeightOverrides reproduces the
