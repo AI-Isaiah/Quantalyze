@@ -59,17 +59,24 @@ Purity: pandas + stdlib + typing ONLY.
 """
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
 
+from services.external_flows import ExternalFlow
+from services.nav_twr import NavReconstructionError
 from services.stitch_composite import MemberWindow, windows_overlap
 
 # D3 honest-empty reasons (machine tokens; no USD, JSON-serializable).
 REASON_NO_KEYS = "no_eligible_keys"
 REASON_MISSING_SERIES = "d3_missing_series"
+
+# STITCH-04 honest-degradation reasons (machine tokens; no USD, JSON-serializable).
+REASON_NO_ANCHOR = "no_anchor"
+REASON_NO_ANCHORED_KEYS = "no_anchored_keys"
 
 
 @dataclass(frozen=True)
@@ -314,4 +321,220 @@ def _finish_segment(keys: frozenset[str], days: list[str]) -> Segment:
         keys=sorted_keys,
         concurrent=len(sorted_keys) > 1,
         days=tuple(days),
+    )
+
+
+# ── STITCH-03/04: the $-equity backward-replay layer ─────────────────────────
+#
+# The perf-curve (cumprod of returns, cashflow-NEUTRAL) and the $-equity curve
+# ($, which STEPS on external cashflows) are DIFFERENT outputs. The dailies path
+# persists NO NAV column (csv_daily_returns is returns-only), so the $-curve is
+# reconstructed BACKWARD from the terminal venue anchor through the return path —
+# the SAME dated-flow convention as ``nav_twr.reconstruct_nav`` but replayed on
+# RETURNS (not the un-persisted daily P&L):
+#
+#     backward:  equity_{t-1} = (equity_t - F_t) / (1 + r_t)
+#     forward :  equity_t     = equity_{t-1} * (1 + r_t) + F_t
+#
+# ``F_t`` is the signed external flow on day ``t`` (deposit +, withdrawal −),
+# dated on its UTC day; a flow on a no-return day unions in as a valid zero-return
+# equity day (the ``nav_twr`` HIGH-1 precedent), never an orphan. No anchor ->
+# NO $-series (honest degradation, flagged) — never a fabricated base.
+
+# Self-check + guard tolerances. The backward roll is the exact inverse of the
+# forward replay, so agreement is machine-eps; the band is a relative floor.
+_SELF_CHECK_ABS = 1e-6
+_SELF_CHECK_REL = 1e-9
+
+
+@dataclass(frozen=True)
+class KeyEquity:
+    """One key's reconstructed $-equity series, or an honest degradation.
+
+    ``equity`` is the per-day $-level Series (ISO-day index), or ``None`` when the
+    key has no terminal anchor. ``reason`` is a machine token on the ``None`` path
+    (no USD magnitude — T-115-05)."""
+
+    equity: pd.Series | None
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class AllocatorEquity:
+    """The allocator-level $-equity curve summed across anchored keys.
+
+    ``equity`` is the summed $-level Series over the common anchored window, or
+    ``None`` when no key is anchored. ``flags`` carries JSON-serializable
+    bools/counts only — no USD magnitudes (T-115-05)."""
+
+    equity: pd.Series | None
+    flags: dict[str, Any] = field(default_factory=dict)
+
+
+def perf_curve(returns: pd.Series | None) -> pd.Series | None:
+    """The cashflow-NEUTRAL cumulative-return path, normalized to 1.0 on day 0.
+
+    ``perf_t = Π_{s=1..t}(1 + r_s)`` (day-0 return is absorbed into the level, so
+    ``perf_0 == 1.0``). This is deliberately the SAME normalization the $-curve's
+    ``equity_t / equity_0`` telescopes to under ZERO flows (STITCH-03 equivalence
+    pin) — the two curves are then byte-identical, and any deposit/withdrawal is
+    the ONLY thing that can separate them. Returns ``None`` on an empty series."""
+    if returns is None or len(returns) == 0:
+        return None
+    factors = (1.0 + returns).cumprod()
+    first = float(factors.iloc[0])
+    if first == 0.0:
+        return None
+    return factors / first
+
+
+def _flows_by_day(flows: Sequence[Any] | None) -> dict[str, float]:
+    """Sum signed external-flow USD per UTC day (deposit +, withdrawal −). Indexed
+    access (``flow[0]``/``flow[1]``) so a 4-field ``ExternalFlow`` and a bare
+    ``(day, usd)`` tuple both read; two flows on one day collapse to one sum —
+    mirrors ``nav_twr._flows_to_daily_usd`` without importing its pandas plumbing."""
+    sums: dict[str, float] = defaultdict(float)
+    for flow in flows or []:
+        sums[str(flow[0])] += float(flow[1])
+    return dict(sums)
+
+
+def replay_key_equity(
+    returns: pd.Series,
+    flows: Sequence[Any] | None,
+    anchor: float | None,
+) -> KeyEquity:
+    """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
+
+    ``anchor`` is the terminal (last-day) $-equity from the venue. Rolling
+    backward with ``equity_{t-1} = (equity_t - F_t)/(1 + r_t)`` and unioning every
+    flow day into the return index FIRST (HIGH-1 mirror — a flow on a no-return
+    day is a valid ``r_t == 0`` equity day, never dropped), the series is exact by
+    construction. ``anchor=None`` -> NO series + ``REASON_NO_ANCHOR`` (never a
+    fabricated base).
+
+    Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
+    ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
+    or a non-positive reconstructed intermediate equity (a withdrawal dwarfing
+    prior capital). Refusal text carries counts/day-indices ONLY — never a raw USD
+    magnitude (T-115-05 / T-73-02).
+
+    A forward/backward construction-sanity self-check (the ``nav_twr``
+    reconcile pattern) replays FORWARD and asserts byte-agreement, reddening only
+    on a roll-loop-vs-identity code divergence."""
+    if anchor is None:
+        return KeyEquity(None, REASON_NO_ANCHOR)
+
+    fbd = _flows_by_day(flows)
+    r = {str(d): float(v) for d, v in returns.items()}
+    # HIGH-1: union flow days into the return index BEFORE the roll.
+    days = sorted(set(r) | set(fbd))
+    n = len(days)
+    if n == 0:
+        return KeyEquity(None, REASON_NO_ANCHOR)
+
+    equity = [0.0] * n
+    equity[n - 1] = float(anchor)
+    for t in range(n - 1, 0, -1):
+        day_t = days[t]
+        factor = 1.0 + r.get(day_t, 0.0)
+        if factor <= 0.0:
+            # An un-replayable ≤ −100% day: the backward identity has no positive
+            # denominator. Fail loud with a day-index only (no USD).
+            raise NavReconstructionError(
+                f"allocator equity replay: non-positive return factor at "
+                f"day-index {t} of {n} — cannot roll backward through a ≤−100% day"
+            )
+        equity[t - 1] = (equity[t] - fbd.get(day_t, 0.0)) / factor
+
+    bad = sum(1 for e in equity if not (e > 0.0))
+    if bad:
+        raise NavReconstructionError(
+            f"allocator equity replay: non-positive reconstructed equity on "
+            f"{bad} of {n} day(s) — a flow dominates prior capital (refusing to "
+            "fabricate a floor)"
+        )
+
+    series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
+    _assert_forward_agreement(series, r, fbd, days)
+    return KeyEquity(series, None)
+
+
+def _assert_forward_agreement(
+    series: pd.Series,
+    r: Mapping[str, float],
+    fbd: Mapping[str, float],
+    days: Sequence[str],
+) -> None:
+    """DQ-02 construction self-check (``nav_twr.reconcile_flow_residual`` spirit):
+    replay FORWARD from day-0 and assert byte-agreement with the backward roll.
+    Reddens ONLY on a roll-vs-identity code divergence — never on an economically
+    wrong anchor (which shifts every level together). Counts/day-indices only."""
+    vals = series.to_numpy(dtype=float)
+    fwd = float(vals[0])
+    for t in range(1, len(days)):
+        fwd = fwd * (1.0 + r.get(days[t], 0.0)) + fbd.get(days[t], 0.0)
+        tol = _SELF_CHECK_ABS + _SELF_CHECK_REL * abs(float(vals[t]))
+        if abs(fwd - float(vals[t])) > tol:
+            raise NavReconstructionError(
+                "allocator equity replay: forward/backward self-check diverged at "
+                f"day-index {t} of {len(days)} — a roll-loop-vs-identity code "
+                "divergence"
+            )
+
+
+def allocator_equity_curve(
+    per_key_equity: Mapping[str, KeyEquity],
+) -> AllocatorEquity:
+    """Sum the anchored per-key $-equity curves over their COMMON anchored window.
+
+    A key with ``equity is None`` (no anchor) is DROPPED (never invented); the
+    allocator curve is emitted only over the day-window where ALL surviving
+    (anchored) keys have a level, with a ``degraded`` flag naming the dropped
+    keys. Every key unanchored -> ``None`` + honest-empty flag. The curve is the
+    exact daily sum across the surviving keys (STITCH concurrent aggregation)."""
+    anchored = {
+        k: ke.equity for k, ke in per_key_equity.items() if ke.equity is not None
+    }
+    dropped = sorted(k for k, ke in per_key_equity.items() if ke.equity is None)
+
+    if not anchored:
+        return AllocatorEquity(
+            None,
+            {
+                "honest_empty": True,
+                "reason": REASON_NO_ANCHORED_KEYS,
+                "dropped_keys": dropped,
+            },
+        )
+
+    common: set[str] | None = None
+    for series in anchored.values():
+        idx = {str(d) for d in series.index}
+        common = idx if common is None else (common & idx)
+    common_days = sorted(common or set())
+
+    if not common_days:
+        return AllocatorEquity(
+            None,
+            {
+                "honest_empty": True,
+                "reason": REASON_NO_ANCHORED_KEYS,
+                "no_common_window": True,
+                "dropped_keys": dropped,
+            },
+        )
+
+    total = pd.Series(0.0, index=common_days, name="allocator_equity")
+    for series in anchored.values():
+        for day in common_days:
+            total[day] += float(series[day])
+
+    return AllocatorEquity(
+        total,
+        {
+            "degraded": bool(dropped),
+            "dropped_keys": dropped,
+            "n_keys": len(anchored),
+        },
     )

@@ -174,9 +174,10 @@ def test_allocator_curve_is_the_daily_sum_of_anchored_keys():
 # ── Guard: a withdrawal that drives equity non-positive refuses structurally ──
 
 def test_non_positive_intermediate_equity_refuses_without_leaking_usd():
-    # A huge withdrawal on day 1 forces a non-positive reconstructed equity.
+    # A deposit dwarfing prior capital forces a non-positive reconstructed equity
+    # on the backward roll (equity_{t-1} = (equity_t - F_t)/(1+r_t) goes <= 0).
     r = _flat_returns()
-    flows = [ExternalFlow(_DEPOSIT_DAY, -1_000_000.0)]
+    flows = [ExternalFlow(_DEPOSIT_DAY, 1_000_000.0)]
     with pytest.raises(NavReconstructionError) as exc:
         replay_key_equity(r, flows, _ZERO_FLOW_ANCHOR)
     msg = str(exc.value)
