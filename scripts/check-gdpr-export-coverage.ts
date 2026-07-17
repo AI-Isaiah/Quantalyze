@@ -321,6 +321,18 @@ export const SANITIZE_PARITY_ALLOWLIST: Record<
     reason:
       "Source of the audit_log_cold_for_user projection. PRESERVE (mirrors hot audit_log). Append-only forensic archive; profiles anonymize removes PII. Purged at 7y by the audit_log_cold_purge retention cron.",
   },
+  // allocator_equity_derived: Phase 115.1 (migration 20260717233529) — the
+  // derived allocator $-equity surface. Declares `allocator_id UUID NOT NULL
+  // REFERENCES auth.users(id) ON DELETE CASCADE`, so every row is automatically
+  // erased when the auth user is deleted during sanitize (the CASCADE IS the
+  // erasure mechanism; the migration comment forbids adding a delete-guard
+  // trigger without a sanitize_in_progress exemption). The sanitize_user
+  // migration pre-dates this table, so it has no explicit matrix row. Mirrors
+  // the csv_daily_returns_per_key CASCADE-erasure allowlist pattern.
+  allocator_equity_derived: {
+    reason:
+      "Derived allocator $-equity surface (migration 20260717233529). ON DELETE CASCADE from auth.users erases every row when the user is sanitized. No explicit sanitize_user matrix row needed; mirrors the csv_daily_returns_per_key / scenarios CASCADE-erasure allowlist pattern.",
+  },
   // allocator_equity_snapshots: user-owned via allocator_id (=
   // api_keys.user_id), the f5 owner-coherence trigger keeps the
   // relationship inviolate. The sanitize_user PURGE on api_keys

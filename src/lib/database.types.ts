@@ -114,6 +114,27 @@ export type Database = {
           },
         ]
       }
+      allocator_equity_derived: {
+        Row: {
+          allocator_id: string
+          computed_at: string
+          kind: string
+          payload: Json
+        }
+        Insert: {
+          allocator_id: string
+          computed_at?: string
+          kind: string
+          payload: Json
+        }
+        Update: {
+          allocator_id?: string
+          computed_at?: string
+          kind?: string
+          payload?: Json
+        }
+        Relationships: []
+      }
       allocator_equity_snapshots: {
         Row: {
           allocator_id: string
