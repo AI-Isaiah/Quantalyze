@@ -209,6 +209,22 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── T1: replay_key_equity refuses an interior ≤−100% day (opposite of perf_curve) ─
+
+def test_replay_interior_total_loss_day_refuses():
+    """T1: replay_key_equity's interior ≤−100% refusal (factor <= 0) was UNTESTED —
+    every −1.0 test targeted perf_curve, which TOLERATES an interior −100% (it steps
+    to 0). replay has the OPPOSITE contract: the backward identity has no positive
+    denominator, so it fails loud with a day-index message and no USD leak."""
+    r = pd.Series([0.10, -1.0, 0.10], index=_DAYS[:3], name="k")
+    with pytest.raises(NavReconstructionError) as exc:
+        replay_key_equity(r, [], _ZERO_FLOW_ANCHOR)
+    msg = str(exc.value)
+    assert "day-index" in msg and "≤−100%" in msg
+    for token in ("133100", "100000", "121000"):  # no raw USD magnitude
+        assert token not in msg
+
+
 # ── C3: is_trustworthy classifies benign vs blocking degradation ──────────────
 
 def test_is_trustworthy_benign_vs_blocking_degradation():
