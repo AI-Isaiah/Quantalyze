@@ -1036,7 +1036,9 @@ def build_allocator_ledger(
         next_eq = _boundary_equity_block(
             per_key_equity, seam.next_keys, seam.next_first_day
         )
-        r_next = _seam_next_first_return(returns_by_key, per_key_equity, seam)
+        r_next = _seam_next_first_return(
+            returns_by_key, per_key_equity, seam, real_flows_by_key
+        )
         if prev_eq is None or next_eq is None or r_next is None:
             # Magnitude unknown (an unanchored boundary or a missing next-side
             # return) — flag, never fabricate. usd_signed is nan; scalars refuse.
@@ -1074,6 +1076,7 @@ def _seam_next_first_return(
     returns_by_key: Mapping[str, pd.Series] | None,
     per_key_equity: Mapping[str, KeyEquity],
     seam: Seam,
+    real_flows_by_key: Mapping[str, Sequence[Any]] | None = None,
 ) -> float | None:
     """The incoming (NEXT) block's first-day return on the seam day, weighted by each
     member's START capital (Finding 3). For a single-key rotation this is just that
@@ -1082,11 +1085,15 @@ def _seam_next_first_return(
     never fabricated).
 
     F2 (Fable): the redeployed capital earns the START-capital-weighted return
-    ``Σ sᵢ·rᵢ / Σ sᵢ`` where ``sᵢ = eqᵢ/(1+rᵢ)`` is the member's start-of-day capital
-    (``eqᵢ`` is the END-of-day equity, which already compounded ``rᵢ``). Weighting by
-    the end-of-day ``eqᵢ`` biases toward the winner and books a spurious synthetic flow
-    on a pure (zero-cash) rotation. The ``1+rᵢ > 0`` denominator is guaranteed for an
-    anchored key (replay refuses a ≤−100% day)."""
+    ``Σ sᵢ·rᵢ / Σ sᵢ``. G1 (Fable, F1+F2 composition): the member's END-of-day equity
+    ``eqᵢ`` ALREADY contains any seam-day REAL flow ``fᵢ`` into it (the replay identity
+    ``equity_t = equity_{t-1}(1+r)+F``), so the true start capital is
+    ``sᵢ = (eqᵢ − fᵢ)/(1+rᵢ)`` — NOT ``eqᵢ/(1+rᵢ)``, which over-recovers by
+    ``fᵢ/(1+rᵢ)`` and tilts the weight toward the flow-receiving member. Weighting by
+    the end-of-day ``eqᵢ`` (or an un-stripped start capital) biases toward the winner
+    and books a spurious synthetic flow on a pure (zero-cash) rotation. The
+    ``1+rᵢ > 0`` denominator is guaranteed for an anchored key (replay refuses a
+    ≤−100% day)."""
     if not returns_by_key:
         return None
     total_start = 0.0
@@ -1100,7 +1107,14 @@ def _seam_next_first_return(
         r = rmap.get(str(seam.next_first_day))
         if r is None or (1.0 + r) <= 0.0:
             return None
-        start_capital = eq / (1.0 + r)  # recover start-of-day capital from END equity
+        # G1: strip the member's seam-day real flow out of the END equity BEFORE
+        # recovering start capital (``eqᵢ`` already folded it in).
+        f_i = sum(
+            float(flow[1])
+            for flow in (real_flows_by_key or {}).get(n, [])
+            if str(flow[0]) == seam.next_first_day
+        )
+        start_capital = (eq - f_i) / (1.0 + r)
         total_start += start_capital
         weighted += start_capital * r
     if total_start == 0.0:

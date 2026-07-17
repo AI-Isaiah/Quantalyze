@@ -373,6 +373,43 @@ def test_seam_day_real_flow_booked_exactly_once():
     assert scalars.dietz == pytest.approx(10000.0 / 105000.0, abs=1e-6)
 
 
+# ── G1 (F1+F2 composition): zero-cash rotation books F=0 even with a seam-day flow ─
+
+def test_seam_zero_for_zero_cash_rotation_even_with_seam_day_flow():
+    """G1: start-capital recovery ``eq/(1+r)`` uses the END-of-day equity, which ALREADY
+    contains a member's seam-day real flow — so it over-recovers start capital and tilts
+    ``r_next`` toward the flow-receiving member, composing with F1's residual subtraction.
+    Economic pin (NOT the impl formula): a PURE zero-cash redeployment books seam=0 EVEN
+    WITH a genuine seam-day deposit present; the deposit is booked ONCE; Dietz = the
+    hand-computed 2000/105000."""
+    import pandas as pd
+
+    a = pd.Series([0.0, 0.0, 0.0], index=["2026-03-01", "2026-03-02", "2026-03-03"], name="A")
+    b = pd.Series([0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="B")
+    c = pd.Series([-0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="C")
+    # Zero-cash: B start 60k(+10%) -> 66000, +10k deposit -> 76000; C start 40k(-10%) -> 36000.
+    # 60k + 40k = 100k = A (pure redeployment); the 10k is a genuine external deposit.
+    pke = {
+        "A": replay_key_equity(a, [], 100000.0),
+        "B": replay_key_equity(b, [ExternalFlow("2026-03-04", 10000.0)], 76000.0),
+        "C": replay_key_equity(c, [], 36000.0),
+    }
+    seg = segment_coverage({"A": a, "B": b, "C": c})
+    real = {"B": [ExternalFlow("2026-03-04", 10000.0)]}
+    ledger = build_allocator_ledger(real, seg.seams, pke, {"A": a, "B": b, "C": c})
+
+    real_entries = [e.flow.usd_signed for e in ledger if e.provenance == LEDGER_REAL]
+    seam = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+    assert real_entries == [10000.0]                              # deposit booked ONCE
+    assert seam.flow.usd_signed == pytest.approx(0.0, abs=1e-6)   # pure redeployment = 0
+    # Dietz hand-computed: (112000-100000-10000)/(100000+0.5*10000) = 2000/105000.
+    scalars = mwr_and_dietz_from_ledger(
+        ledger, begin_value=100000.0, end_value=112000.0,
+        period_start="2026-03-01", period_days=6,
+    )
+    assert scalars.dietz == pytest.approx(2000.0 / 105000.0, abs=1e-9)
+
+
 # ── F2 (economic invariants): the seam return is START-capital weighted ────────
 
 def test_zero_cash_rotation_books_zero_seam_single_and_multi():
