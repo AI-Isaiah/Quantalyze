@@ -359,7 +359,21 @@ const localStorageMock = {
   },
   key: vi.fn(() => null),
 };
-vi.stubGlobal("localStorage", localStorageMock);
+// Global-stub isolation (file-scoped). Several tests below install a per-test
+// `vi.stubGlobal("fetch", …)`; `vi.clearAllMocks()` in the per-describe
+// beforeEach does NOT undo a stubGlobal, so without this the last fetch stub
+// leaks into every subsequent test. On Node 22 (CI's runtime) that leaked stub
+// deterministically corrupted the per-key weight/leverage/notional renders in
+// the Phase 37 + Phase 112 blocks (a real cross-test-pollution bug that Node 25
+// happened to mask). Re-establish the localStorage stub before each test and
+// clear ALL global stubs after each test so every test starts from a clean
+// global surface.
+beforeEach(() => {
+  vi.stubGlobal("localStorage", localStorageMock);
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 // --- Fixtures -------------------------------------------------------------
 
