@@ -254,6 +254,24 @@ def test_replay_degenerate_inputs():
     assert "non-positive reconstructed equity" in str(exc.value)
 
 
+# ── G2(a): replay refuses a non-finite FLOW amount ────────────────────────────
+
+def test_non_finite_flow_amount_refuses_in_replay():
+    """G2 (finiteness): a non-finite FLOW amount poisons the backward roll. A −inf
+    interior flow yields an INFINITE equity that passes the positivity guard (inf>0)
+    AND the forward self-check (abs(inf−inf)=nan > tol is False) with is_trustworthy=True;
+    a nan flow is silently absorbed. Now refused at ingestion, no USD leak."""
+    r = pd.Series([0.10, 0.10], index=_DAYS[:2], name="k")
+    with pytest.raises(NavReconstructionError) as exc:
+        replay_key_equity(r, [ExternalFlow(_DAYS[1], float("-inf"))], _ZERO_FLOW_ANCHOR)
+    msg = str(exc.value)
+    assert "flow" in msg
+    for token in ("133100", "100000"):
+        assert token not in msg
+    with pytest.raises(NavReconstructionError):
+        replay_key_equity(r, [ExternalFlow(_DAYS[1], float("nan"))], _ZERO_FLOW_ANCHOR)
+
+
 # ── F5: replay refuses a non-finite anchor with a data-quality message ────────
 
 def test_non_finite_anchor_refuses_with_data_quality_message():

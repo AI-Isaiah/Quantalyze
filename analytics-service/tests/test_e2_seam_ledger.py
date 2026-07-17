@@ -373,6 +373,34 @@ def test_seam_day_real_flow_booked_exactly_once():
     assert scalars.dietz == pytest.approx(10000.0 / 105000.0, abs=1e-6)
 
 
+# ── G2(b): the LedgerEntry contract — nan usd_signed ⇔ known=False ─────────────
+
+def test_ledger_entry_known_true_requires_finite_usd():
+    """G2 (LedgerEntry contract): ``nan`` usd_signed ⇔ ``known=False``. A non-finite
+    magnitude on the ``known=True`` path (e.g. a nan seam-day real flow summed into the
+    residual) must fail loud into C4's uncomputable/fail-loud channel, NOT launder as
+    ``computable=True, dietz=None``."""
+    from services.allocator_equity_derive import _ledger_entry
+    from services.nav_twr import NavReconstructionError
+
+    # Direct contract: known=True + nan raises; known=False + nan is the legit unknown.
+    with pytest.raises(NavReconstructionError):
+        _ledger_entry("2026-03-04", float("nan"), LEDGER_SEAM, known=True)
+    assert _ledger_entry("2026-03-04", float("nan"), LEDGER_SEAM, known=False).known is False
+
+    # Composed: a nan real flow reaching the ledger build fails loud (not computable=True).
+    import pandas as pd
+
+    a = pd.Series([0.0, 0.0, 0.0], index=["2026-03-01", "2026-03-02", "2026-03-03"], name="A")
+    b = pd.Series([0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="B")
+    pke = {"A": replay_key_equity(a, [], 100000.0), "B": replay_key_equity(b, [], 110000.0)}
+    seg = segment_coverage({"A": a, "B": b})
+    with pytest.raises(NavReconstructionError):
+        build_allocator_ledger(
+            {"B": [ExternalFlow("2026-03-04", float("nan"))]}, seg.seams, pke, {"A": a, "B": b}
+        )
+
+
 # ── G1 (F1+F2 composition): zero-cash rotation books F=0 even with a seam-day flow ─
 
 def test_seam_zero_for_zero_cash_rotation_even_with_seam_day_flow():

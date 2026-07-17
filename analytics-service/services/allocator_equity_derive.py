@@ -634,7 +634,18 @@ def _flows_by_day(flows: Sequence[Any] | None) -> dict[str, float]:
     mirrors ``nav_twr._flows_to_daily_usd`` without importing its pandas plumbing."""
     sums: dict[str, float] = defaultdict(float)
     for flow in flows or []:
-        sums[str(flow[0])] += float(flow[1])
+        amount = float(flow[1])
+        # G2 (Fable, same finiteness class as C1/F3/F5): a non-finite flow amount
+        # poisons the backward roll — a −inf flow builds an infinite equity that passes
+        # the positivity + forward self-check (``abs(inf−inf)=nan > tol`` is False,
+        # is_trustworthy=True), and a nan first-day flow (IN-02) is silently absorbed.
+        # Refuse it with a data-quality message (no USD leak).
+        if not math.isfinite(amount):
+            raise NavReconstructionError(
+                "allocator equity replay: non-finite external flow amount — refusing "
+                "a data-quality NaN/inf flow"
+            )
+        sums[str(flow[0])] += amount
     return dict(sums)
 
 
@@ -1128,6 +1139,16 @@ def _ledger_entry(
     """The SOLE ledger-entry construction site (one-ledger invariant — the
     STITCH-05 grep pin asserts a single construction of the entry in the
     module; every real/seam entry funnels through here)."""
+    # G2 (Fable): the LedgerEntry contract is ``nan usd_signed ⇔ known=False``. Enforce
+    # it here (the sole construction site) so a non-finite magnitude on the known=True
+    # path — e.g. a nan seam-day real flow summed into the seam residual — fails loud
+    # into C4's fail-loud channel instead of laundering as ``computable=True,
+    # dietz=None``. The known=False path legitimately carries ``nan`` (unknown seam).
+    if known and not math.isfinite(float(usd_signed)):
+        raise NavReconstructionError(
+            "allocator ledger entry: non-finite usd_signed on a known=True entry — "
+            "refusing a data-quality NaN/inf magnitude (contract: nan ⇔ known=False)"
+        )
     return LedgerEntry(ExternalFlow(day, usd_signed), provenance, known)
 
 
