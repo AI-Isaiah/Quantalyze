@@ -262,3 +262,29 @@ def test_gap_rotation_records_seam_with_gap_span():
     assert seam.prev_last_day == _iso(WINDOW_START + timedelta(days=19))  # 03-20
     assert seam.next_first_day == _iso(WINDOW_START + timedelta(days=23))  # 03-24
     assert seam.gap_days == 3
+
+
+def test_seam_requires_covering_tuples_and_derives_labels():
+    """C2 — the covering-key TUPLES are REQUIRED (no ()-default zero-rotation hole);
+    the lossy '+'-joined scalar labels are DERIVED from the tuples (never stored), so
+    they can never desync (the WR-04 class). A single-key seam labels as the sole key;
+    a block seam labels as the '+'-joined set."""
+    from services.allocator_equity_derive import Seam
+
+    # prev_keys / next_keys are required — omitting them is a TypeError.
+    with pytest.raises(TypeError):
+        Seam(prev_last_day="2026-03-20", next_first_day="2026-03-21", gap_days=0)  # type: ignore[call-arg]
+
+    single = Seam(
+        prev_last_day="2026-03-20", next_first_day="2026-03-21", gap_days=0,
+        prev_keys=("key-C",), next_keys=("key-D",),
+    )
+    assert single.prev_key == "key-C"          # derived from the sole-key tuple
+    assert single.next_key == "key-D"
+
+    block = Seam(
+        prev_last_day="2026-06-05", next_first_day="2026-06-06", gap_days=0,
+        prev_keys=("key-P", "key-Q"), next_keys=("key-R", "key-S"),
+    )
+    assert block.prev_key == "key-P+key-Q"     # derived '+'-join, cannot desync
+    assert block.next_key == "key-R+key-S"

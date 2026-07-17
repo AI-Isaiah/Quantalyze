@@ -263,15 +263,29 @@ class Seam:
     rotation where one covering-key set fully hands off to a DISJOINT next set with
     ZERO shared coverage day. ``gap_days`` is the count of absent calendar days
     strictly between the two boundaries (0 for an adjacent half-open handoff; > 0
-    for a real gap, whose days are NEVER zero-filled — no-invented-data)."""
+    for a real gap, whose days are NEVER zero-filled — no-invented-data).
 
-    prev_key: str
+    C2: the covering-key TUPLES ``prev_keys`` / ``next_keys`` are the REQUIRED source
+    of truth (no ``()`` default — an empty covering set would be a silent zero-
+    rotation hole that reintroduces the double-count). The lossy ``+``-joined scalar
+    labels ``prev_key`` / ``next_key`` are DERIVED via ``_key_label`` (``@property``),
+    never stored — so the string can never desync from the tuple (the WR-04 class)."""
+
     prev_last_day: str
-    next_key: str
     next_first_day: str
     gap_days: int
-    prev_keys: tuple[str, ...] = ()
-    next_keys: tuple[str, ...] = ()
+    prev_keys: tuple[str, ...]
+    next_keys: tuple[str, ...]
+
+    @property
+    def prev_key(self) -> str:
+        """The lossy ``+``-joined label for the previous covering set (derived)."""
+        return _key_label(self.prev_keys)
+
+    @property
+    def next_key(self) -> str:
+        """The lossy ``+``-joined label for the next covering set (derived)."""
+        return _key_label(self.next_keys)
 
 
 @dataclass(frozen=True)
@@ -361,9 +375,7 @@ def segment_coverage(
         gap_days = (pd.Timestamp(b.start_day) - pd.Timestamp(a.end_day)).days - 1
         seams.append(
             Seam(
-                prev_key=_key_label(a.keys),
                 prev_last_day=a.end_day,
-                next_key=_key_label(b.keys),
                 next_first_day=b.start_day,
                 gap_days=gap_days,
                 prev_keys=a.keys,

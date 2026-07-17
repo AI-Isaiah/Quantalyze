@@ -370,8 +370,7 @@ def test_mismatched_seams_flags_unclassified_truncation_distinctly():
 
     # (d) A stray seam key (absent from anchored) fails loud.
     stray = Seam(
-        prev_key="key-Z", prev_last_day="2026-03-20", next_key=d.key_id,
-        next_first_day="2026-03-21", gap_days=0,
+        prev_last_day="2026-03-20", next_first_day="2026-03-21", gap_days=0,
         prev_keys=("key-Z",), next_keys=(d.key_id,),
     )
     with pytest.raises(NavReconstructionError):
