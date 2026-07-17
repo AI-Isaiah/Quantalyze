@@ -62,12 +62,16 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
 
 from services.external_flows import ExternalFlow
 from services.nav_twr import NavReconstructionError
+# STITCH-05: the KEPT cashflow/IRR surface the unified backbone cannot reproduce
+# gets its first production caller via ``mwr_and_dietz_from_ledger`` (thread-only).
+from services.portfolio_metrics import compute_modified_dietz, compute_mwr
 from services.stitch_composite import MemberWindow, windows_overlap
 
 # D3 honest-empty reasons (machine tokens; no USD, JSON-serializable).
@@ -538,3 +542,165 @@ def allocator_equity_curve(
             "n_keys": len(anchored),
         },
     )
+
+
+# ── STITCH-05/06: the ONE unified cashflow ledger (real + synthetic seam) ─────
+#
+# Windowed stitching and cashflow accounting are ONE code path (the founder-locked
+# STITCH contract). Real external flows AND the synthetic rotation-seam entries
+# live in a SINGLE ordered, provenance-tagged ledger of ``ExternalFlow`` shape.
+# That SAME ledger feeds both the $-replay (a seam is a $-step, not a return) and
+# the Modified-Dietz / MWR scalar adapters — the KEPT ``portfolio_metrics``
+# cashflow surface (which the unified backbone cannot reproduce) gets its FIRST
+# production caller here. Per RESEARCH Open Question 3, the scalars are computed +
+# tested but NOT display-wired this phase (thread-only STITCH-05 scope); the
+# Phase 115.1 worker-side derivation is the consumer that surfaces them.
+#
+# L1 pin: seam synthetic flows apply ONLY at genuine rotation boundaries (the
+# ``segment_coverage`` Seam list — disjoint covering sets). A concurrent-blend day
+# NEVER receives a seam flow; it composes via the capital-weighted blend.
+
+LEDGER_REAL = "real"
+LEDGER_SEAM = "seam"
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """One dated entry in the unified allocator cashflow ledger.
+
+    ``flow`` is the ``ExternalFlow`` (deposit +, withdrawal −; a synthetic seam
+    step carries the boundary equity jump). ``provenance`` is ``LEDGER_REAL`` for
+    a genuine external flow or ``LEDGER_SEAM`` for a rotation-boundary synthetic
+    entry. ``known`` is ``False`` ONLY for a seam whose magnitude is unknowable
+    because a boundary segment is unanchored — the scalar adapters then fail loud
+    (never a fabricated number) and the flow's ``usd_signed`` is ``nan``."""
+
+    flow: ExternalFlow
+    provenance: str
+    known: bool = True
+
+
+def build_allocator_ledger(
+    real_flows_by_key: Mapping[str, Sequence[Any]],
+    seams: Sequence[Seam],
+    per_key_equity: Mapping[str, KeyEquity],
+) -> list[LedgerEntry]:
+    """Build the ONE ordered, provenance-tagged allocator cashflow ledger.
+
+    Real external flows (per key) enter tagged ``LEDGER_REAL``. Each rotation
+    ``Seam`` becomes ONE synthetic ``LEDGER_SEAM`` entry dated on the next
+    segment's first day, carrying the boundary equity JUMP
+    (``next_first_day_equity − prev_last_day_equity``) — a deposit if capital grew
+    across the handoff, a withdrawal if it shrank (STITCH-06). When a boundary
+    segment is unanchored the magnitude is UNKNOWN: the entry is flagged
+    ``known=False`` (``nan`` magnitude) so the scalar adapters fail loud rather
+    than fabricate a jump. Entries are sorted ascending by UTC day (the ccxt
+    dated-flow convention). This is the SINGLE construction site for the ledger —
+    both the $-replay and the Dietz/MWR adapters read the returned list."""
+    entries: list[LedgerEntry] = []
+
+    for key in sorted(real_flows_by_key):
+        for flow in real_flows_by_key[key]:
+            entries.append(_ledger_entry(str(flow[0]), float(flow[1]), LEDGER_REAL))
+
+    for seam in seams:
+        prev_eq = _boundary_equity(per_key_equity, seam.prev_key, seam.prev_last_day)
+        next_eq = _boundary_equity(
+            per_key_equity, seam.next_key, seam.next_first_day
+        )
+        if prev_eq is None or next_eq is None:
+            # Magnitude unknown (a boundary segment is unanchored) — flag, never
+            # fabricate. usd_signed is nan; downstream scalars refuse.
+            entries.append(
+                _ledger_entry(
+                    seam.next_first_day, float("nan"), LEDGER_SEAM, known=False
+                )
+            )
+        else:
+            entries.append(
+                _ledger_entry(
+                    seam.next_first_day, next_eq - prev_eq, LEDGER_SEAM, known=True
+                )
+            )
+
+    entries.sort(key=lambda e: e.flow.utc_day_iso)
+    return entries
+
+
+def _ledger_entry(
+    day: str, usd_signed: float, provenance: str, *, known: bool = True
+) -> LedgerEntry:
+    """The SOLE ledger-entry construction site (one-ledger invariant — the
+    STITCH-05 grep pin asserts a single construction of the entry in the
+    module; every real/seam entry funnels through here)."""
+    return LedgerEntry(ExternalFlow(day, usd_signed), provenance, known)
+
+
+def _boundary_equity(
+    per_key_equity: Mapping[str, KeyEquity], key: str, day: str
+) -> float | None:
+    """The anchored $-equity of ``key`` on ``day``, or ``None`` when that key is
+    unanchored (no $-series) or the day is absent — the caller flags the seam
+    magnitude-unknown rather than inventing a boundary level."""
+    ke = per_key_equity.get(key)
+    if ke is None or ke.equity is None:
+        return None
+    series = ke.equity
+    day = str(day)
+    if day in {str(d) for d in series.index}:
+        return float(series[day])
+    return None
+
+
+def mwr_and_dietz_from_ledger(
+    ledger: Sequence[LedgerEntry],
+    *,
+    begin_value: float,
+    end_value: float,
+    period_start: str,
+    period_days: int,
+) -> tuple[float | None, float | None]:
+    """Thread the unified ledger through the KEPT ``portfolio_metrics`` scalars
+    (STITCH-05) — the first production caller of ``compute_mwr`` /
+    ``compute_modified_dietz``.
+
+    Fails loud on an unknown-magnitude ledger: ANY ``known=False`` seam entry ->
+    ``(None, None)`` (never a fabricated scalar). Otherwise the adapter converts
+    each ``ExternalFlow`` entry into the two dict shapes the KEPT helpers expect:
+
+      * MWR (annualised IRR, investor perspective): a portfolio deposit is an
+        investment OUT of the investor's pocket, so the sign FLIPS
+        (``amount = −usd_signed``); the ``begin_value`` is prepended as the
+        initial investment at ``period_start`` and ``end_value`` is the terminal
+        inflow.
+      * Modified Dietz (portfolio perspective): ``amount = usd_signed`` directly
+        (deposit +, withdrawal −, matching ``ExternalFlow``); ``day`` is the
+        0-based offset from ``period_start``.
+
+    Thread-only: the returned scalars are NOT display-wired this phase."""
+    if any(not e.known for e in ledger):
+        return (None, None)
+
+    start = date.fromisoformat(str(period_start))
+    end_date = (start + timedelta(days=int(period_days))).isoformat()
+
+    mwr_flows: list[dict[str, Any]] = [
+        {"date": period_start, "amount": -float(begin_value)}
+    ]
+    mwr_flows += [
+        {"date": e.flow.utc_day_iso, "amount": -float(e.flow.usd_signed)}
+        for e in ledger
+    ]
+    mwr = compute_mwr(mwr_flows, final_value=float(end_value), end_date=end_date)
+
+    dietz_flows: list[dict[str, Any]] = [
+        {
+            "amount": float(e.flow.usd_signed),
+            "day": (date.fromisoformat(e.flow.utc_day_iso) - start).days,
+        }
+        for e in ledger
+    ]
+    dietz = compute_modified_dietz(
+        float(begin_value), float(end_value), dietz_flows, int(period_days)
+    )
+    return (mwr, dietz)
