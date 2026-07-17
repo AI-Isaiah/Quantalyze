@@ -5994,6 +5994,151 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
 
     expect(allWeightValues()).toEqual(weightsBefore);
   });
+
+  // -------------------------------------------------------------------------
+  // F1 (WEIGHTS-04, code-review 2026-07-17) — remove→re-add of the SAME catalog
+  // id must NOT reopen the row in stale Target mode / with a stale solve note.
+  // The fix routes handleRemoveAdded through the unified clearRowTransientState
+  // helper so a leg's per-ref leverage AND both mode/solve twins drop together.
+  // RED before the fix: handleRemoveAdded purged ONLY leverageByRef, so the
+  // re-added row reopened in data-mode="target" with the stale
+  // "Portfolio max-DD at N×" note beside a leverage that was actually purged to
+  // 1× — the value-shaped dishonesty WEIGHTS-04 forbids. Intent (Rule 9): the
+  // transient trio is ONE unit at every teardown seam; no seam may drop a twin.
+  // -------------------------------------------------------------------------
+  it("F1 remove + re-add of a Target-mode leg reopens in Leverage mode with NO stale mode/solve twin", async () => {
+    const DRAWER_ID = "cccccccc-9999-8888-7777-666666666666";
+    // A single −5% day → sleeve base max-DD 5% → target 20% back-solves to ~4×
+    // (the finding's exact "4.00×" note scenario).
+    const DRAWER_SERIES = P113_DATES.map((date, i) => ({
+      date,
+      value: i === 6 ? -0.05 : 0,
+    }));
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes(`/api/strategies/${DRAWER_ID}/returns`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: DRAWER_SERIES,
+            asset_class: "crypto",
+          }),
+        });
+      }
+      // benchmark + anything else → benign empty body.
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render113();
+
+    // Add the catalog strategy via the drawer and flush its lazy returns into the
+    // engine set so it is a real, solvable leg.
+    addStrategy({
+      id: DRAWER_ID,
+      name: "Drawer Solved Leg",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(`[data-scope-ref="${DRAWER_ID}"]`),
+      ).not.toBeNull();
+    });
+
+    // Flip the row to Target mode and commit a target → a solve line renders and
+    // sets BOTH twins (targetModeByRef + solveResultByRef).
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(DRAWER_ID)).getByTestId(
+          "scenario-leverage-mode-toggle",
+        ),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${DRAWER_ID}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+
+    // Precondition: the row IS in Target mode with a solve line present (the ok
+    // portfolio-note OR the honest-infeasible state — either sets the solve twin
+    // under test). Both twins are now populated for DRAWER_ID.
+    const preRow = rowByRef(DRAWER_ID);
+    expect(
+      within(preRow)
+        .getByTestId("scenario-leverage-mode-toggle")
+        .getAttribute("data-mode"),
+    ).toBe("target");
+    expect(
+      within(preRow).queryByTestId("scenario-target-dd-portfolio-note") ??
+        within(preRow).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+
+    // Remove the leg (the real CompositionList Remove button), then re-add the
+    // SAME catalog id.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Remove from scenario/i }),
+      );
+    });
+    addStrategy({
+      id: DRAWER_ID,
+      name: "Drawer Solved Leg",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(`[data-scope-ref="${DRAWER_ID}"]`),
+      ).not.toBeNull();
+    });
+
+    // FIX — the re-added row opens in the DEFAULT Leverage mode (mode twin
+    // cleared) with NO stale solve note, and leverage back at the 1× default (no
+    // stranded solved L). RED before the fix: data-mode="target" + stale note.
+    const reRow = rowByRef(DRAWER_ID);
+    expect(
+      within(reRow)
+        .getByTestId("scenario-leverage-mode-toggle")
+        .getAttribute("data-mode"),
+    ).toBe("leverage");
+    expect(
+      within(reRow).queryByTestId("scenario-target-dd-portfolio-note"),
+    ).toBeNull();
+    expect(
+      within(reRow).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+    expect(
+      (document.getElementById(`leverage-${DRAWER_ID}`) as HTMLInputElement)
+        .value,
+    ).toBe("1");
+
+    // STRONGER — re-flipping to Target mode shows NO stale solve line: the
+    // solveResultByRef twin was truly CLEARED, not merely hidden by the mode
+    // reset (a fresh Target-mode entry with no committed target shows no line).
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(DRAWER_ID)).getByTestId(
+          "scenario-leverage-mode-toggle",
+        ),
+      );
+    });
+    const reRow2 = rowByRef(DRAWER_ID);
+    expect(
+      within(reRow2).queryByTestId("scenario-target-dd-portfolio-note"),
+    ).toBeNull();
+    expect(
+      within(reRow2).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+  });
 });
 
 // ===========================================================================

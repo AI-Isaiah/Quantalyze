@@ -904,6 +904,35 @@ export function ScenarioComposer({
     Record<string, SolveLeverageResult>
   >({});
 
+  // WEIGHTS-04 / F1 (2026-07-17) — the SINGLE teardown path for the transient
+  // Target-mode trio (leverageByRef + the mode/solve twins). BEFORE this, four
+  // seams reset the trio by hand and handleRemoveAdded dropped only
+  // leverageByRef, leaving targetModeByRef/solveResultByRef behind — so a
+  // remove→re-add of the SAME catalog id reopened the row in stale Target mode
+  // with a stale solve note ("Portfolio max-DD at 4.00×") against a leverage
+  // that had actually been purged to 1× (a fabricated/stale value WEIGHTS-04
+  // forbids). Every seam now routes through one of these two helpers so no future
+  // seam can silently drop a twin:
+  //   • clearRowTransientState(ref) — per-ref delete from ALL THREE maps
+  //     (handleRemoveAdded re-add hygiene: the only per-ref seam).
+  //   • resetAllTransientState()    — clear ALL THREE maps (the reset/commit seam
+  //     and the two saved-scenario opens, which reseed leverage afterwards).
+  const clearRowTransientState = useCallback((ref: string) => {
+    const dropRef = <T,>(prev: Record<string, T>): Record<string, T> => {
+      if (!(ref in prev)) return prev;
+      const { [ref]: _drop, ...rest } = prev;
+      return rest;
+    };
+    setLeverageByRef(dropRef);
+    setTargetModeByRef(dropRef);
+    setSolveResultByRef(dropRef);
+  }, []);
+  const resetAllTransientState = useCallback(() => {
+    setLeverageByRef({});
+    setTargetModeByRef({});
+    setSolveResultByRef({});
+  }, []);
+
   // CONSTIT-03 (Phase 111, locked 2026-07-16) — per-key data-source
   // include/exclude now rides the ONE canonical `scenario.draft.toggleByScopeRef`
   // channel every other constituent uses (via `scenario.togglePerKeySource`),
@@ -1376,11 +1405,10 @@ export function ScenarioComposer({
     // already rehydrate-REPLACE it; reset/commit is the third seam that must drop
     // it (the exact class the WR-02 include-map clear above fixes). Every ref
     // back to the 1× default on a fresh live book.
-    setLeverageByRef({});
-    // WEIGHTS-03 — the transient Target-mode UI state rides the SAME reset seam:
-    // a fresh/reset book carries no row-level mode or solve outcome.
-    setTargetModeByRef({});
-    setSolveResultByRef({});
+    // WEIGHTS-03 / F1 — the transient Target-mode UI state rides the SAME reset
+    // seam: a fresh/reset book carries no row-level leverage, mode or solve
+    // outcome. Routed through the unified reset so no seam can drop a twin.
+    resetAllTransientState();
     // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
     // it now (on the SAME confirm that discards the draft). `reset()` re-inits
     // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
@@ -1596,14 +1624,16 @@ export function ScenarioComposer({
         // draft multipliers onto the fresh default would project it under
         // leverage it never had, and an "Update" would persist default-draft +
         // stale leverage.
+        // WEIGHTS-03 / F1 — clear the transient Target-mode UI state on open via
+        // the unified reset (mode/solve never persist, so a reopened scenario
+        // starts every row in Leverage mode), THEN reseed leverage from the saved
+        // draft. The reset's leverage clear is immediately overridden by the
+        // reseed below (direct value setter — last write wins); both twins are
+        // cleared through the one shared path so neither can be dropped.
+        resetAllTransientState();
         setLeverageByRef(
           drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
         );
-        // WEIGHTS-03 — clear the transient Target-mode UI state on open (the
-        // solved L rehydrates through leverageByRef above; mode/solve never
-        // persist, so a reopened scenario starts every row in Leverage mode).
-        setTargetModeByRef({});
-        setSolveResultByRef({});
         // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
         // newer-version blob may carry a window; seed it verbatim so the
         // read-only view recomputes at the owner's saved window. If absent (a
@@ -1651,14 +1681,14 @@ export function ScenarioComposer({
       // the SAME drift-branch rule the window below follows. Otherwise the fresh
       // default draft projects under the refused draft's multipliers, and an
       // "Update portfolio" would persist the default draft + stale leverage.
+      // WEIGHTS-03 / F1 — clear the transient Target-mode UI state on open via the
+      // unified reset (see the readonly branch above), THEN reseed leverage from
+      // the saved draft: a reopened scenario starts every row in Leverage mode;
+      // the solved L already rehydrated through leverageByRef.
+      resetAllTransientState();
       setLeverageByRef(
         drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
       );
-      // WEIGHTS-03 — clear the transient Target-mode UI state on open (see the
-      // readonly branch above): a reopened scenario starts every row in Leverage
-      // mode; the solved L already rehydrated through leverageByRef.
-      setTargetModeByRef({});
-      setSolveResultByRef({});
       // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
       // let the existing engineState memo recompute TODAY's numbers at it (no
       // stored series is replayed — no-invented-data lock).
@@ -2070,21 +2100,19 @@ export function ScenarioComposer({
         const { [id]: _dropProv, ...rest } = prev;
         return rest;
       });
-      // LEV-02 (round-2 M-2) — purge the removed leg's leverage overlay too, or
-      // it strands: leverageByRef is folded into the draft at Save
-      // (setLeverageOverrides), so a removed leg's multiplier would persist into a
-      // scenario that no longer contains the leg AND re-apply the instant the leg
-      // is re-added (breaking the seam's "starts clean" contract — the same class
-      // the addedReturnsById purge above fixes for series). Mirrors the draft
-      // mutator's toggle/weight prune (scenario-state.removeAddedStrategy).
-      setLeverageByRef((prev) => {
-        if (!(id in prev)) return prev;
-        const { [id]: _dropLev, ...rest } = prev;
-        return rest;
-      });
+      // LEV-02 (round-2 M-2) + WEIGHTS-04 / F1 — purge the removed leg's ENTIRE
+      // transient trio (leverage overlay AND the Target-mode/solve twins) via the
+      // unified reset, or it strands: leverageByRef is folded into the draft at
+      // Save (setLeverageOverrides), so a removed leg's multiplier would persist
+      // into a scenario that no longer contains the leg AND re-apply the instant
+      // the leg is re-added; the mode/solve twins (the F1 miss) would likewise
+      // reopen a re-added id in stale Target mode with a stale solve note against
+      // the purged leverage — a fabricated/stale value WEIGHTS-04 forbids. Mirrors
+      // the draft mutator's toggle/weight prune (scenario-state.removeAddedStrategy).
+      clearRowTransientState(id);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [scenario.removeAddedStrategy],
+    [scenario.removeAddedStrategy, clearRowTransientState],
   );
 
   const addedStrategyMetadataLookup = useMemo<
