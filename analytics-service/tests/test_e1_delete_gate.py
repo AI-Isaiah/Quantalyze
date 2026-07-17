@@ -42,16 +42,29 @@ METHOD EXEMPTION (allowed-but-not-required, pinned until Phase 115 / STITCH-02):
     deletion of that method will NOT break this gate (the walk uses ``<=``, not
     ``==``, against the exemption set).
 
+    The exemption is SYMBOL-SHAPE-scoped, not file-scoped (round-2 finding 2):
+    within an exempted file the twr token is allowed ONLY as the bound METHOD.
+    Two guards close the false-GREEN hole where a re-implemented module-level free
+    ``def`` of the twr symbol inside the exempted file would otherwise pass every
+    part: (1) Part A asserts the equity_reconstruction MODULE exposes no twr
+    attribute (the method is a CLASS attribute, so a module-level free def/alias
+    flips hasattr True); (2) Part B flags any def of the twr symbol that is
+    un-indented (module-level) or whose first parameter is not ``self``.
+
 INJECTION-PROVEN: this gate was proven to go RED under a live-token injection
 (a scratch ``services/*.py`` reintroducing the twr symbol), then reverted — the
-RED/GREEN pair is recorded in the plan 114-03 SUMMARY. Do NOT weaken any
-assertion to force green; a real re-entry MUST fail here.
+RED/GREEN pair is recorded in the plan 114-03 SUMMARY. The round-2 tightening was
+likewise proven RED by appending a module-level free ``def`` of the twr symbol to
+services/equity_reconstruction.py (tripping BOTH Part A hasattr and Part B
+occurrence-pattern), then reverting. Do NOT weaken any assertion to force green;
+a real re-entry MUST fail here.
 
 stdlib + pandas ONLY.
 """
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -62,6 +75,17 @@ import pytest
 # Part-B tree walk, which matches the contiguous literal).
 _TWR_SYMBOL = "compute" + "_twr"
 _SHARPE_SYMBOL = "_compute_sharpe" + "_and_vol"
+
+# Detects a DEFINITION of the twr symbol and captures its indentation + first
+# parameter. Built from the concatenated symbol via re.escape (so this file's
+# on-disk text still never carries the contiguous literal — the pattern only
+# forms at runtime). A bound METHOD is indented (inside a class body) with a
+# ``self`` first parameter; a module-level free ``def`` re-implementation is
+# un-indented and/or takes a non-``self`` first parameter. The Phase-115
+# exemption covers ONLY the bound method, so any other def-shape trips RED.
+_TWR_DEF_RE = re.compile(
+    r"^(?P<indent>[ \t]*)def[ \t]+" + re.escape(_TWR_SYMBOL) + r"[ \t]*\((?P<params>[^)]*)"
+)
 
 _GATE_ROOT = Path(__file__).resolve().parents[1]  # tests/ -> analytics-service/
 
@@ -106,6 +130,20 @@ def test_deleted_symbols_are_not_live_attributes():
         f"{_TWR_SYMBOL} re-entered routers.portfolio as a live symbol/import"
     )
 
+    # The Phase-115 exemption covers ONLY the bound EquityCurveBuilder METHOD (a
+    # CLASS attribute), so the equity_reconstruction MODULE must expose NO twr
+    # attribute. A module-level free ``def`` or an alias would make this hasattr
+    # True — closing the false-GREEN hole where a re-implemented free function
+    # inside the exempted file passed every gate part (round-2 finding 2). This is
+    # symbol-level, immune to comment/formatting tricks.
+    import services.equity_reconstruction as eqr_mod
+
+    assert not hasattr(eqr_mod, _TWR_SYMBOL), (
+        f"{_TWR_SYMBOL} re-entered services.equity_reconstruction as a MODULE-LEVEL "
+        "free function/alias — the exemption covers only the bound "
+        "EquityCurveBuilder METHOD, not a module-level symbol"
+    )
+
 
 # ── Part B — whole-tree token walk (belt-and-suspenders) ─────────────────────
 
@@ -118,6 +156,7 @@ def test_tree_walk_has_no_reentry_of_deleted_tokens():
     twr_files: set[str] = set()
     sharpe_files: set[str] = set()
     both_token_lines: list[str] = []
+    free_func_defs: list[str] = []
 
     for py in _GATE_ROOT.rglob("*.py"):
         parts = py.parts
@@ -136,6 +175,16 @@ def test_tree_walk_has_no_reentry_of_deleted_tokens():
         for line in text.splitlines():
             if "portfolio_metrics" in line and _TWR_SYMBOL in line:
                 both_token_lines.append(f"{rel}: {line.strip()}")
+            # Occurrence-pattern tightening of the file-scoped exemption
+            # (round-2 finding 2): even inside an EXEMPT file the twr token may
+            # appear ONLY as the bound METHOD. A def whose signature is
+            # un-indented (module-level) OR whose first parameter is not ``self``
+            # is a free-function re-implementation and trips RED.
+            m = _TWR_DEF_RE.match(line)
+            if m is not None:
+                first_param = m.group("params").split(",")[0].strip()
+                if m.group("indent") == "" or first_param != "self":
+                    free_func_defs.append(f"{rel}: {line.strip()}")
 
     # Neuter-guards (self-invalidation-proof): a broken walk that scans nothing —
     # or an over-narrowed one that skips the two survivor modules — must NOT pass.
@@ -158,6 +207,11 @@ def test_tree_walk_has_no_reentry_of_deleted_tokens():
     assert both_token_lines == [], (
         "a line references portfolio_metrics AND the twr token (re-import/attribute "
         f"re-entry): {both_token_lines}"
+    )
+    assert free_func_defs == [], (
+        "a module-level / non-method `def` of the deleted TWR scalar re-entered — "
+        "the exemption covers ONLY the bound EquityCurveBuilder method "
+        f"(`def <twr>(self`): {free_func_defs}"
     )
 
 

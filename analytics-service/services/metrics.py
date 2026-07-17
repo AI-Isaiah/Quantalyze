@@ -1259,8 +1259,28 @@ def total_return_from_equity(equity: pd.Series | None) -> float | None:
     The zero-first-value guard mirrors the legacy M-0698 ``begin_val=0``
     (portfolio-passed-through-zero) short-circuit: no ratio is formable, so we
     log a warning of the same shape and return None.
+
+    The single-calendar-day guard mirrors the legacy breakpoint logic: the
+    deleted forward-TWR scalar normalised the index and built
+    ``breakpoints=sorted({start}|cf_dates|{end})``; with no cash flows a series
+    whose observations all fall on ONE calendar day collapses to a single
+    breakpoint, yields no sub-period, and returned None. Duplicate-date JSONB is a
+    documented reachable shape (``_records_to_series`` does not dedupe), so this
+    returns None there rather than a spurious endpoint ratio.
+
+    INPUT CONTRACT: ``equity`` should be a float64 Series on a sorted, datetime-
+    like index (all four call sites satisfy this). The index is normalised via
+    ``pd.to_datetime(...).normalize()`` for the single-day check exactly as the
+    deleted helper did; a non-datetime-like index is the CALLER's bug and is not
+    silently coerced beyond that legacy-parity normalisation.
     """
     if equity is None or len(equity) < 2:
+        return None
+    # Legacy TWR-scalar parity: all observations on a single distinct calendar
+    # day -> no formable sub-period -> None (checked BEFORE the begin_val=0 guard
+    # so a single-day zero-first series does not emit a spurious M-0698 warning,
+    # matching the legacy loop that never ran).
+    if pd.to_datetime(equity.index).normalize().nunique() == 1:
         return None
     first = float(equity.iloc[0])
     if first == 0.0:
@@ -1279,87 +1299,74 @@ def sharpe_vol_status_from_backbone(
     returns: pd.Series,
     periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
 ) -> tuple[float | None, float | None, str]:
-    """Annualised (vol, sharpe, status) read from the unified backbone.
+    """Annualised (vol, sharpe, status) — byte-identical to the deleted Sharpe/vol helper.
 
-    Backbone-derived replacement for the deleted legacy Sharpe/vol helper at
-    its production call sites (portfolio-level Sharpe/vol, verify_strategy
-    Sharpe/vol). Reads ``volatility`` and ``sharpe`` directly out of
-    ``compute_all_metrics`` output. The ``status`` feeds the vol_status/
-    sharpe_status data-quality channel (routers/portfolio.py L1089-1090).
+    Backbone-module home for the Sharpe/vol scalars at the two production call
+    sites (portfolio-level Sharpe/vol, verify_strategy Sharpe/vol). The ``status``
+    feeds the vol_status/sharpe_status data-quality channel (routers/portfolio.py).
+
+    INPUT CONTRACT: ``returns`` must be a float64 Series on a sorted
+    ``DatetimeIndex`` (both production call sites satisfy this). vol/mean are read
+    with pandas' default skipna — a non-float dtype or unsorted index is the
+    CALLER's bug; this helper does NOT coerce (a silent ``astype``/``sort`` would
+    mask a future caller regression rather than fail loud).
+
+    WHY INLINE, NOT ``compute_all_metrics``: the vol/sharpe scalars are computed
+    DIRECTLY from the returns with the legacy pandas math (``std(ddof=1)·√ppy``,
+    ``mean·ppy``, ``mean/vol``). The unified pipeline routes through quantstats
+    ``_prepare_returns``, which carries a PRICE-detection heuristic the deleted
+    helper never had: an all-non-negative series whose ``max > 1`` is assumed to
+    be a PRICE path and silently ``pct_change``-d, which FLIPS the sign of Sharpe
+    on a young all-winning account with one >100% day (reachable via
+    verify_strategy). Computing the scalars inline reproduces the deleted helper
+    EXACTLY and sidesteps that corruption. (TWR keeps its own backbone helper,
+    ``total_return_from_equity``; only the Sharpe/vol scalars needed inline math.)
 
     The tuple is 3-wide: ``mean_ret`` is dropped from the legacy 4-tuple because
-    BOTH production call sites discard it (surgical-change rule). Status is one
-    of the REACHABLE legacy codes: ``"ok"``, ``"insufficient_history"``,
-    ``"zero_volatility"``, ``"nan_vol"``. ``status != "ok"`` always implies
-    ``sharpe is None``.
+    BOTH production call sites discard it (surgical-change rule). Status is one of
+    the REACHABLE legacy codes with the SAME boundaries as the deleted helper:
+    ``"ok"``, ``"insufficient_history"``, ``"zero_volatility"``, ``"nan_vol"``;
+    ``status != "ok"`` always implies ``sharpe is None``:
 
-    TWO pre-backbone guards short-circuit BEFORE the pipeline call. They mirror
-    the legacy short-circuits AND structurally keep a degenerate series out of
-    the full pipeline (monthly resample / mtd-ytd slices / cumprod / qs.stats.*).
-    ``compute_all_metrics`` guards ONLY ``len < 2`` (metrics.py:457, which
-    raises ValueError) — it is UNPROVEN to degrade gracefully on an all-NaN
-    ``len >= 2`` series, so feeding one in would risk a production 500 where the
-    legacy path returned a graceful data-quality status. The guards prevent that:
+      * ``len(returns) <= 1`` -> ``(None, None, "insufficient_history")``.
+      * NaN vol (``std`` is NaN: all-NaN or single non-NaN observation, since
+        pandas skipna ``std`` needs >= 2 finite values) -> ``(None, None,
+        "nan_vol")`` gracefully, WITHOUT raising (the legacy anti-500 baseline).
+      * ``vol == 0.0`` (flat returns) -> ``(0.0, None, "zero_volatility")``.
+      * else -> ``(vol, sharpe, "ok")``.
 
-      * ``len(returns) <= 1`` -> ``(None, None, "insufficient_history")`` WITHOUT
-        calling the backbone (matches the legacy short-circuit; also dodges the
-        :457 raise).
-      * ``pd.isna(returns.std())`` -> ``(None, None, "nan_vol")`` WITHOUT calling
-        the backbone. Legacy ``nan_vol`` IS exactly "vol is NaN": ``std(ddof=1)``
-        (skipna — the same call the legacy helper used) over an all-NaN series OR
-        a single non-NaN observation is NaN, and ``_safe_float(NaN) -> None``.
-        Detecting it via pandas ``std`` faithfully reproduces the legacy nan_vol
-        OUTPUT and never lets an all-NaN series reach the pipeline. This guard
-        changes nothing on the normal path (a real series has finite std) and
-        does NOT intercept the flat-series case (``std == 0.0`` is finite, not
-        NaN -> falls through to the zero_volatility branch below).
-
-    INTERIOR-NaN skipna parity: past the guards a series may still carry
-    interior NaN days with a finite std (a guard-NaN flanked by valid returns,
-    the shape reconstruct_nav_and_twr emits on a dust/negative/flow-dominated
-    interior day, reachable from verify_strategy). The legacy helper used pandas'
-    default skipna, so those days were DROPPED from vol/mean; the pipeline's
-    _prepare_returns fillna(0)s them instead, folding them in as 0.0-return days
-    and DILUTING the statistic. So the series is ``dropna()``-ed before the
-    pipeline call — restoring the skipna basis so vol/Sharpe match the legacy
-    numbers on the normal path, not just on the clean-input path. (The
-    portfolio-level call site is already NaN-free upstream, so this is a no-op
-    there; only the verify_strategy path needed the parity.)
-
-    Then the backbone is called ONCE and:
-      * ``vol is None`` -> ``(None, None, "nan_vol")`` (defensive belt-and-braces;
-        the std guard should already have caught every NaN-vol case);
-      * ``vol == 0.0`` -> ``(0.0, None, "zero_volatility")``;
-      * else -> ``(vol, sharpe, "ok")`` (sharpe is finite whenever vol is finite
-        and nonzero on real data).
+    Interior-NaN days (a guard-NaN flanked by valid returns, the shape
+    reconstruct_nav_and_twr emits on a dust/negative/flow-dominated interior day,
+    reachable via verify_strategy) are DROPPED by pandas skipna exactly as the
+    deleted helper did — vol/mean are over the valid days only.
 
     DEAD BRANCHES (documented, NOT reproduced): the legacy ``"nan_mean"`` /
     ``"nan_sharpe"`` statuses are UNREACHABLE under pandas skipna — once vol is
     finite and nonzero, the same >= 2 non-NaN observations yield a finite mean
-    and a finite mean/vol, so neither status can occur. They are deliberately not
-    synthesized here.
+    and a finite mean/vol, so neither status can occur.
     """
     if len(returns) <= 1:
         return None, None, "insufficient_history"
-    if pd.isna(returns.std()):
-        return None, None, "nan_vol"
-    # Legacy skipna parity: the deleted helper computed vol/mean with pandas'
-    # default skipna, so interior-NaN days (a guard-NaN flanked by valid returns,
-    # as reconstruct_nav_and_twr emits at a dust/negative/flow-dominated interior
-    # day and verify_strategy can feed here) were DROPPED from the statistic. The
-    # pipeline's _prepare_returns fillna(0)s NaN days instead, folding them in as
-    # 0.0-return days and diluting vol/Sharpe. Drop them BEFORE the pipeline to
-    # restore the skipna basis. Safe: the two guards above (len<=1, NaN std) mean
-    # a finite std here implies >= 2 finite observations survive dropna(), so
-    # compute_all_metrics cannot hit its len<2 raise.
-    clean = returns.dropna()
-    m = compute_all_metrics(clean, periods_per_year=periods_per_year)
-    vol = m["volatility"]
-    sharpe = m["sharpe"]
+    # Legacy pandas skipna math, computed INLINE — deliberately NOT read from
+    # compute_all_metrics. The unified pipeline routes through quantstats
+    # _prepare_returns, whose price-detection heuristic silently pct_change()s an
+    # all-non-negative series with max>1 (a young all-winning account with one
+    # >100% day, reachable via verify_strategy), flipping the Sharpe sign. pandas
+    # std()/mean() default to skipna, so interior-NaN days are dropped from the
+    # statistic exactly as the deleted helper did; an all-NaN or single-obs series
+    # yields NaN std -> "nan_vol" gracefully (no raise, matching the legacy
+    # anti-500 baseline).
+    vol = _safe_float(returns.std() * math.sqrt(periods_per_year))
+    mean_ret = returns.mean() * periods_per_year
     if vol is None:
         return None, None, "nan_vol"
     if vol == 0.0:
         return 0.0, None, "zero_volatility"
+    sharpe = _safe_float(mean_ret / vol)
+    if sharpe is None:
+        # UNREACHABLE under skipna once vol is finite/nonzero (>= 2 non-NaN obs
+        # force a finite mean/vol); folded into nan_vol as a defensive backstop.
+        return vol, None, "nan_vol"
     return vol, sharpe, "ok"
 
 

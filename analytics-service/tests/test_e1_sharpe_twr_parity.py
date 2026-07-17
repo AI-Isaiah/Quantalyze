@@ -152,6 +152,42 @@ def _fixture_partial_nan() -> pd.Series:
     return r
 
 
+def _fixture_all_nonneg_gt1() -> pd.Series:
+    """(h) ALL-non-negative returns with max > 1 — the quantstats price-detection
+    trap (round-2 Fable finding 1).
+
+    quantstats ``_prepare_returns`` assumes a series is PRICES (and silently
+    ``pct_change``-es it) when every value is >= 0 AND max > 1. A young all-winning
+    account with one >100% day (returns like [0.0, 1.2, 0.4, 0.1]) hits that
+    heuristic, so reading vol/sharpe from ``compute_all_metrics`` FLIPS the Sharpe
+    sign vs the deleted helper's plain pandas math. verify_strategy can feed this
+    shape. Parity is vs the legacy skipna scalars (std·√252, mean·252 / vol).
+    """
+    return pd.Series(
+        [0.0, 1.2, 0.4, 0.1],
+        index=pd.date_range("2024-01-01", periods=4, freq="D"),
+        dtype="float64",
+    )
+
+
+def _fixture_single_calendar_day() -> pd.Series:
+    """(i) EQUITY on a single calendar day via duplicate-date JSONB (round-2 Fable
+    finding 3).
+
+    ``routers/portfolio.py:_records_to_series`` does not dedupe, so duplicate-date
+    JSONB yields multiple observations that all normalise to ONE calendar day. The
+    deleted ``compute_twr`` built ``breakpoints=sorted({start}|{end})``; a single
+    distinct day collapses that to one breakpoint → no sub-period → None. The
+    endpoint-ratio helper would instead return 0.10, so it must special-case this
+    to None for byte-parity.
+    """
+    return pd.Series(
+        [100.0, 110.0],
+        index=pd.DatetimeIndex(["2024-01-01", "2024-01-01"]),
+        dtype="float64",
+    )
+
+
 # ── Whole-tree caller census (BACKBONE-01 clause 4, post-delete sweep) ────────
 # Tokens built by concatenation so THIS file's census constants never contain the
 # literal deletion-target symbols (belt-and-suspenders with the self-exclusion of
@@ -368,6 +404,31 @@ class TestBackboneDerivationParity:
         assert status == "ok"
         _assert_rel(vol, exp_vol, msg="interior-NaN vol vs skipna oracle")
         _assert_rel(sharpe, exp_sharpe, msg="interior-NaN sharpe vs skipna oracle")
+
+    def test_sharpe_vol_all_nonneg_max_gt1_matches_legacy_skipna(self):
+        # Round-2 finding 1: an all-non-negative series with max>1 (h) trips
+        # quantstats' price-detection heuristic inside compute_all_metrics (it
+        # pct_change()s the "prices"), flipping the Sharpe SIGN vs the deleted
+        # helper's plain pandas math. The helper must reproduce the LEGACY skipna
+        # scalars (std·√252, mean·252 / vol) — a POSITIVE Sharpe here. RED against
+        # the compute_all_metrics-backed helper (sharpe ≈ −13.7), GREEN once the
+        # helper computes the scalars inline.
+        r = _fixture_all_nonneg_gt1()
+        exp_vol = r.std() * math.sqrt(PPY)
+        exp_sharpe = (r.mean() * PPY) / exp_vol
+        assert exp_sharpe > 0  # legacy sign (mean>0, vol>0)
+        vol, sharpe, status = sharpe_vol_status_from_backbone(r, periods_per_year=PPY)
+        assert status == "ok"
+        _assert_rel(vol, exp_vol, msg="all-nonneg/max>1 vol vs legacy skipna")
+        _assert_rel(sharpe, exp_sharpe, msg="all-nonneg/max>1 sharpe vs legacy skipna")
+        assert sharpe > 0, "legacy Sharpe sign must survive (qs price-detection flips it)"
+
+    def test_total_return_from_equity_single_calendar_day_is_none(self):
+        # Round-2 finding 3: a duplicate-date equity series collapsing to ONE
+        # calendar day matched the deleted compute_twr's None (singleton
+        # breakpoint), but the endpoint-ratio helper returned 0.10. RED before the
+        # single-day guard, GREEN after.
+        assert total_return_from_equity(_fixture_single_calendar_day()) is None
 
     def test_sharpe_vol_status_zero_volatility(self):
         # (b) flat all-zeros -> (0.0, None, "zero_volatility").
