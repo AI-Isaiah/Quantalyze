@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from services.allocator_equity_derive import (
+    REASON_NO_ANCHOR,
     AllocatorEquity,
     KeyEquity,
     allocator_equity_curve,
@@ -207,6 +208,31 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["window_truncated"] is True
     assert out.flags["dropped_keys"] == []
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
+
+
+# ── T6: degenerate replay inputs (single-day, empty, non-positive anchor) ─────
+
+def test_replay_degenerate_inputs():
+    """T6: pin the three degenerate replay shapes.
+      * single-day window (n==1): the backward loop is a no-op; equity == [anchor].
+      * empty series + no flows (n==0): honest REASON_NO_ANCHOR, never fabricated.
+      * non-positive anchor: fires the non-positive-reconstructed-equity guard."""
+    # Single-day window — no-op roll, level is the anchor itself.
+    one = replay_key_equity(pd.Series([0.05], index=["2026-05-01"], name="k"), [], 90000.0)
+    assert one.equity is not None
+    assert list(one.equity.index) == ["2026-05-01"]
+    assert one.equity.iloc[0] == pytest.approx(90000.0, abs=1e-9)
+    assert one.is_trustworthy is True
+
+    # Empty series + no flows -> nothing to reconstruct -> honest REASON_NO_ANCHOR.
+    empty = replay_key_equity(pd.Series([], dtype=float), [], 90000.0)
+    assert empty.equity is None
+    assert empty.reason == REASON_NO_ANCHOR
+
+    # Non-positive anchor -> the reconstructed equity is <= 0 -> fail loud.
+    with pytest.raises(NavReconstructionError) as exc:
+        replay_key_equity(pd.Series([0.05, 0.05], index=_DAYS[:2], name="k"), [], -1000.0)
+    assert "non-positive reconstructed equity" in str(exc.value)
 
 
 # ── T1: replay_key_equity refuses an interior ≤−100% day (opposite of perf_curve) ─
