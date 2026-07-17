@@ -20,13 +20,18 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from datetime import timedelta
+
 from services.allocator_equity_derive import (
     blend_concurrent_returns,
     eligible_key_predicate,
+    segment_coverage,
 )
 from tests.e2_fixtures import (
     WINDOW_START,
     concurrent_pair,
+    make_per_key_returns,
+    rotated_seam_pair,
 )
 
 
@@ -160,3 +165,79 @@ def test_eligible_key_predicate_mirrors_phase35():
     assert not eligible_key_predicate(
         {"is_active": True, "sync_status": None, "disconnected_at": "2026-05-01"}
     )
+
+
+# ── Task 2: coverage segmentation — concurrent blocks vs sequential seams ─────
+
+def _iso(d) -> str:
+    return d.isoformat()
+
+
+def test_fully_concurrent_is_one_segment_no_seam():
+    """Test 6 — keys concurrent over the whole window → ONE concurrent segment,
+    zero seams (the whole window is a single blended block)."""
+    a, b = concurrent_pair()
+    cov = segment_coverage({a.key_id: a.returns, b.key_id: b.returns})
+    assert len(cov.segments) == 1
+    seg = cov.segments[0]
+    assert seg.concurrent is True
+    assert set(seg.keys) == {a.key_id, b.key_id}
+    assert cov.seams == []
+
+
+def test_adjacent_rotation_emits_one_seam():
+    """Test 7 — C ends day X, D begins X+1 (half-open handoff) → two sequential
+    single-key segments with exactly one seam carrying both key ids + both
+    boundary days, gap_days == 0."""
+    c, d = rotated_seam_pair()
+    cov = segment_coverage({c.key_id: c.returns, d.key_id: d.returns})
+    assert len(cov.segments) == 2
+    assert all(not s.concurrent for s in cov.segments)
+    assert len(cov.seams) == 1
+    seam = cov.seams[0]
+    c_last = _iso(WINDOW_START + timedelta(days=19))   # 2026-03-20
+    d_first = _iso(WINDOW_START + timedelta(days=20))  # 2026-03-21
+    assert seam.prev_key == c.key_id
+    assert seam.next_key == d.key_id
+    assert seam.prev_last_day == c_last
+    assert seam.next_first_day == d_first
+    assert seam.gap_days == 0
+
+
+def test_partial_overlap_blends_middle_no_seam():
+    """Test 8 — C ends X, D began X-5: the overlap days are CONCURRENT (blended),
+    the pre-overlap C-only and post-overlap D-only runs are their own segments, and
+    NO seam is emitted inside the blended transition (a seam needs zero shared
+    coverage day)."""
+    c = make_per_key_returns("key-C", WINDOW_START, 20, daily=0.003)   # 03-01..03-20
+    d_start = WINDOW_START + timedelta(days=14)                        # 03-15
+    d = make_per_key_returns("key-D", d_start, 20, daily=-0.001)       # 03-15..04-03
+    cov = segment_coverage({"key-C": c, "key-D": d})
+    tags = [(tuple(s.keys), s.concurrent) for s in cov.segments]
+    assert tags == [
+        (("key-C",), False),
+        (("key-C", "key-D"), True),
+        (("key-D",), False),
+    ]
+    assert cov.seams == []
+
+
+def test_gap_rotation_records_seam_with_gap_span():
+    """Test 9 — C ends X, D begins X+4: the gap days are ABSENT (never zero-filled)
+    and the seam records the gap span."""
+    c = make_per_key_returns("key-C", WINDOW_START, 20, daily=0.003)   # 03-01..03-20
+    d_start = WINDOW_START + timedelta(days=23)                        # 03-24
+    d = make_per_key_returns("key-D", d_start, 20, daily=-0.001)       # 03-24..04-12
+    cov = segment_coverage({"key-C": c, "key-D": d})
+    assert len(cov.segments) == 2
+    # the gap days 03-21..03-23 are in NO segment (absent, not zero-filled)
+    covered_days = {day for s in cov.segments for day in s.days}
+    assert _iso(WINDOW_START + timedelta(days=20)) not in covered_days  # 03-21
+    assert _iso(WINDOW_START + timedelta(days=22)) not in covered_days  # 03-23
+    assert len(cov.seams) == 1
+    seam = cov.seams[0]
+    assert seam.prev_key == "key-C"
+    assert seam.next_key == "key-D"
+    assert seam.prev_last_day == _iso(WINDOW_START + timedelta(days=19))  # 03-20
+    assert seam.next_first_day == _iso(WINDOW_START + timedelta(days=23))  # 03-24
+    assert seam.gap_days == 3
