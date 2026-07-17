@@ -318,6 +318,121 @@ def test_out_of_period_ledger_entry_refuses_dietz_clamp():
         )
 
 
+def test_out_of_period_ledger_entry_post_period_also_refuses():
+    """T2: MEDIUM-4 had only the pre-period (offset < 0) branch tested. A POST-period
+    entry (offset > period_days) is the symmetric construction bug that
+    compute_modified_dietz would clamp to a zero-weight flow — assert the same
+    refusal."""
+    from services.nav_twr import NavReconstructionError
+
+    # A flow ~2 months AFTER the period end (period 2026-03-01 + 30d = 2026-03-31).
+    ledger = build_allocator_ledger(
+        {"key-X": [ExternalFlow("2026-06-01", 5000.0)]}, [], {}
+    )
+    with pytest.raises(NavReconstructionError):
+        mwr_and_dietz_from_ledger(
+            ledger, begin_value=100000.0, end_value=130000.0,
+            period_start="2026-03-01", period_days=30,
+        )
+
+
+# ── T4/T5: partial + asymmetric multi-key block boundaries ────────────────────
+
+_B1 = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
+_B2 = ["2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10"]
+
+
+def test_partial_block_boundary_whole_block_refuses():
+    """T4: ``_boundary_equity_block`` returns None (seam ``known=False``) if ANY member
+    of a concurrent block is unanchored — NEVER a partial sum. Only the all-anchored
+    and single-key-unanchored shapes were tested; pin a 2-key next block with ONE
+    unanchored member."""
+    import pandas as pd
+
+    p = pd.Series([0.01] * 5, index=_B1, name="key-P")
+    q = pd.Series([0.02] * 5, index=_B1, name="key-Q")
+    r = pd.Series([-0.01] * 5, index=_B2, name="key-R")
+    s = pd.Series([0.005] * 5, index=_B2, name="key-S")
+    returns = {"key-P": p, "key-Q": q, "key-R": r, "key-S": s}
+    seg = segment_coverage(returns)
+    assert len(seg.seams) == 1
+    # R (a member of the NEXT block {R,S}) is unanchored -> whole-block magnitude UNKNOWN.
+    pke = {
+        "key-P": replay_key_equity(p, [], 50000.0),
+        "key-Q": replay_key_equity(q, [], 30000.0),
+        "key-R": replay_key_equity(r, [], None),
+        "key-S": replay_key_equity(s, [], 20000.0),
+    }
+    ledger = build_allocator_ledger({}, seg.seams, pke, returns)
+    seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+    assert seam_entry.known is False  # never a partial P+Q vs S-only sum
+
+
+def test_asymmetric_rotations_resolve_forward_identity():
+    """T5: only symmetric single→single and block→block were covered. Pin a 1-key→2-key
+    and a 2-key→1-key handoff (exercises _key_label, _seam_next_first_return capital-
+    weighting, and _boundary_equity_block in a MIXED shape)."""
+    import pandas as pd
+
+    c = pd.Series([0.003] * 5, index=_B1, name="key-C")
+    r = pd.Series([-0.01] * 5, index=_B2, name="key-R")
+    s = pd.Series([0.005] * 5, index=_B2, name="key-S")
+
+    # 1-key -> 2-key: C hands off to the {R,S} block.
+    seg = segment_coverage({"key-C": c, "key-R": r, "key-S": s})
+    assert len(seg.seams) == 1
+    seam = seg.seams[0]
+    assert seam.prev_keys == ("key-C",) and seam.next_keys == ("key-R", "key-S")
+    assert seam.prev_key == "key-C" and seam.next_key == "key-R+key-S"
+    pke = {
+        "key-C": replay_key_equity(c, [], 50000.0),
+        "key-R": replay_key_equity(r, [], 40000.0),
+        "key-S": replay_key_equity(s, [], 20000.0),
+    }
+    ledger = build_allocator_ledger(
+        {}, seg.seams, pke, {"key-C": c, "key-R": r, "key-S": s}
+    )
+    entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+    assert entry.known is True
+    c_last = float(pke["key-C"].equity.iloc[-1])
+    r_first = float(pke["key-R"].equity.iloc[0])
+    s_first = float(pke["key-S"].equity.iloc[0])
+    seam_day = seam.next_first_day
+    r_blend = (
+        r_first * float(r.loc[seam_day]) + s_first * float(s.loc[seam_day])
+    ) / (r_first + s_first)
+    assert entry.flow.usd_signed == pytest.approx(
+        (r_first + s_first) - c_last * (1.0 + r_blend), abs=1e-6
+    )
+
+    # 2-key -> 1-key: the {P,Q} block hands off to single D.
+    p = pd.Series([0.01] * 5, index=_B1, name="key-P")
+    q = pd.Series([0.02] * 5, index=_B1, name="key-Q")
+    dd = pd.Series([-0.001] * 5, index=_B2, name="key-D")
+    seg2 = segment_coverage({"key-P": p, "key-Q": q, "key-D": dd})
+    assert len(seg2.seams) == 1
+    seam2 = seg2.seams[0]
+    assert seam2.prev_keys == ("key-P", "key-Q") and seam2.next_keys == ("key-D",)
+    assert seam2.prev_key == "key-P+key-Q" and seam2.next_key == "key-D"
+    pke2 = {
+        "key-P": replay_key_equity(p, [], 50000.0),
+        "key-Q": replay_key_equity(q, [], 30000.0),
+        "key-D": replay_key_equity(dd, [], 60000.0),
+    }
+    ledger2 = build_allocator_ledger(
+        {}, seg2.seams, pke2, {"key-P": p, "key-Q": q, "key-D": dd}
+    )
+    entry2 = next(e for e in ledger2 if e.provenance == LEDGER_SEAM)
+    assert entry2.known is True
+    p_last = float(pke2["key-P"].equity.iloc[-1])
+    q_last = float(pke2["key-Q"].equity.iloc[-1])
+    d_first = float(pke2["key-D"].equity.iloc[0])
+    r_d = float(dd.loc[seam2.next_first_day])
+    assert entry2.flow.usd_signed == pytest.approx(
+        d_first - (p_last + q_last) * (1.0 + r_d), abs=1e-6
+    )
+
+
 # ── Test 6b (Finding 2): MWR must respond to end_value (terminal never dropped) ─
 
 def test_mwr_responds_to_end_value_on_withdrawal_dominant_ledger():
