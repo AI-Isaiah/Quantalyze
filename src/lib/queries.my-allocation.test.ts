@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { StrategyForBuilder } from "./scenario";
+import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 
 /**
  * Tests for the My Allocation query helpers added in PR 1 of the
@@ -119,6 +120,15 @@ const state = vi.hoisted(() => ({
     date: string;
     daily_return: number;
   }>,
+  // Phase 115.1 — the NEW keyed derived-curve surface (BACKBONE-03 else-branch).
+  // One JSONB row per (allocator_id, kind); the display row is kind='equity_curve'.
+  // Seeded ONLY by the 115.1 repoint pins; absent for every legacy fixture so the
+  // SAFETY fallback (no derived row → legacy render) is exercised unchanged.
+  allocatorEquityDerived: [] as Array<{
+    allocator_id: string;
+    kind: string;
+    payload: Record<string, unknown>;
+  }>,
 }));
 
 function resetState() {
@@ -133,6 +143,7 @@ function resetState() {
   state.allocatorEquitySnapshots = [];
   state.allocatorHoldings = [];
   state.csvDailyReturns = [];
+  state.allocatorEquityDerived = [];
   chainAudit.entries.length = 0;
 }
 
@@ -242,6 +253,10 @@ function buildChain(table: string) {
       case "csv_daily_returns":
         return applyFilters(
           state.csvDailyReturns as Array<Record<string, unknown>>,
+        );
+      case "allocator_equity_derived":
+        return applyFilters(
+          state.allocatorEquityDerived as Array<Record<string, unknown>>,
         );
       default:
         return [];
@@ -2522,5 +2537,156 @@ describe("getMyAllocationDashboard — CONSTIT-02 provenance threading", () => {
     // the venue-detail degraded_members must not appear anywhere in the payload
     expect(JSON.stringify(row)).not.toContain("degraded_members");
     expect(JSON.stringify(row)).not.toContain("okx:BTC");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 115.1 — E2 equity display-repoint (BACKBONE-03 else-branch)
+//
+// The allocator $-equity DISPLAY moves OFF legacy `value_usd` snapshots ONTO the
+// new keyed `allocator_equity_derived` surface — BUT only when a trustworthy
+// derived row exists. The SAFETY pin below (never redden) proves the fallback
+// contract: with NO derived row, equityDailyPoints renders byte-identically to
+// the legacy snapshot path, so the prod cutover is safe even though all 517 prod
+// allocator keys currently have ZERO per-key csv_daily_returns (A1 census).
+//
+// Pins 2/3 are RED until plan 05 wires the derived read + `equityCurveSource`.
+// ---------------------------------------------------------------------------
+
+const P1151_PORTFOLIO = {
+  id: "real-1",
+  user_id: "user-1",
+  name: "Active Allocation",
+  description: null,
+  created_at: "2024-06-01T00:00:00Z",
+  is_test: false,
+};
+
+// A clean, TRUSTWORTHY snapshot fixture (no pre_terminus_balance_unknown flag) so
+// partitionTrustworthyEquitySnapshots keeps every row — the legacy render is the
+// full fixture, making the deep-equal reference unambiguous.
+const P1151_SNAPSHOTS = [
+  {
+    allocator_id: "user-1",
+    asof: "2026-03-10",
+    value_usd: 10_000,
+    breakdown: null,
+    source: "exchange_primary" as const,
+    history_depth_months: 24,
+    pre_terminus_balance_unknown: false,
+  },
+  {
+    allocator_id: "user-1",
+    asof: "2026-03-11",
+    value_usd: 10_100,
+    breakdown: null,
+    source: "exchange_primary" as const,
+    history_depth_months: 24,
+    pre_terminus_balance_unknown: false,
+  },
+  {
+    allocator_id: "user-1",
+    asof: "2026-03-13",
+    value_usd: 10_250,
+    breakdown: null,
+    source: "exchange_primary" as const,
+    history_depth_months: 24,
+    pre_terminus_balance_unknown: false,
+  },
+];
+
+// The reference legacy rendering — exactly what queries.ts:2409 produces today
+// (the f7 forward-fill adapter over {asof, value_usd}).
+function legacyExpectedDailyPoints() {
+  return equitySnapshotsToDailyPoints(
+    P1151_SNAPSHOTS.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
+  );
+}
+
+// A DENSE derived curve per the phase-wide interfaces contract — dense so the
+// derived path's direct `curve.map` (NO forward-fill adapter) is the exact series.
+const P1151_DERIVED_CURVE = [
+  { date: "2026-03-10", equity_usd: 100_500.5 },
+  { date: "2026-03-11", equity_usd: 100_900.25 },
+  { date: "2026-03-12", equity_usd: 101_010.1 },
+  { date: "2026-03-13", equity_usd: 101_400.75 },
+];
+
+function derivedRow(isTrustworthy: boolean) {
+  return {
+    allocator_id: "user-1",
+    kind: "equity_curve",
+    payload: {
+      curve: P1151_DERIVED_CURVE,
+      flags: [],
+      degrade_reasons: [],
+      is_trustworthy: isTrustworthy,
+      scalars: { mwr: 0.12, dietz: 0.11, computable: true },
+      inputs: { n_keys: 2, anchor_asof: "2026-03-13", composed_at: "2026-03-13T00:00:00Z" },
+    } as Record<string, unknown>,
+  };
+}
+
+describe("115.1 equity display-repoint", () => {
+  beforeEach(resetState);
+  // Guard against the CI Node-gap leaked-stub class (reference_ci_node22_vs_local_node25):
+  // this block stubs no globals, but keep the discipline so a future addition can't leak.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("SAFETY (never redden): no derived row → equityDailyPoints is byte-identical to the legacy snapshot render", async () => {
+    // No allocator_equity_derived row seeded — the fallback branch (and the
+    // CURRENT pre-repoint code, which does not read the table at all) must render
+    // the legacy path. An unexpected read of the table returns empty (the mock's
+    // rowsFor default / seeded-empty case), never throws.
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // The load-bearing invariant: display series == legacy render, byte-for-byte.
+    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+
+    // These stay snapshot-sourced FOREVER (the repoint touches only the $-curve
+    // producer, never the warm-up count / history depth / baseline-unknown gate).
+    expect(result.snapshotCount).toBe(3);
+    expect(result.minHistoryDepthMonths).toBe(24);
+    expect(result.equityBaselineUnknown).toBe(false);
+  });
+
+  it("RED (plan 05): a trustworthy derived row repoints equityDailyPoints onto the curve (NO forward-fill adapter) and marks the source 'derived'", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    state.allocatorEquityDerived = [derivedRow(true)];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // Fails now (no read, no field): the provenance indicator is missing.
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("derived");
+    // The derived path maps the dense curve DIRECTLY — no snapshot forward-fill.
+    expect(result.equityDailyPoints).toEqual(
+      P1151_DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
+    );
+  });
+
+  it("RED (plan 05): an untrustworthy derived row falls back to the legacy render and marks the source 'legacy'", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    state.allocatorEquityDerived = [derivedRow(false)];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    // Fails now: the provenance indicator is missing.
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("legacy");
+    // is_trustworthy=false → the derived curve is NOT rendered; legacy stands.
+    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
   });
 });
