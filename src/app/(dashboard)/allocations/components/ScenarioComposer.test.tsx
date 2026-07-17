@@ -6212,6 +6212,147 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
     const state = within(rowByRef(K1)).getByTestId("scenario-target-dd-state");
     expect(state.textContent).toMatch(/unreachable at .*×/i);
   });
+
+  // -------------------------------------------------------------------------
+  // RT113-01 (Fable red team, 2026-07-17) — SAME class as F1 at a DIFFERENT
+  // seam: excluding (toggle-off) a solved Target-mode row left its
+  // "Portfolio max-DD at N×" note rendering UNCONDITIONALLY while the mode
+  // toggle + target input were DISABLED, so the note stranded a portfolio-DD
+  // computed for a book the excluded leg is no longer in (e.g. +0.00% after a
+  // drawdown leg is toggled out) that the user could not clear without
+  // re-including. Fix: gate renderSolveState on inclusion. Exclusion is
+  // REVERSIBLE (unlike removal) — the twins are NOT cleared, so re-include
+  // restores the note recomputed against the live full-book DD. Covers BOTH a
+  // per-key row (:5470) and an added row (:5604).
+  // -------------------------------------------------------------------------
+  it("RT113-01 excluding a solved Target-mode PER-KEY row hides its solve note; re-include restores it", () => {
+    render113();
+    // Flip K1 to Target mode and commit a target → the solve line renders.
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-portfolio-note") ??
+        within(rowByRef(K1)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+
+    // Exclude K1 (its include switch) → the solve note is GONE (RED before the
+    // fix: it lingered, claiming a portfolio-DD "at N×" without K1 in the book).
+    act(() => {
+      fireEvent.click(within(rowByRef(K1)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-portfolio-note"),
+    ).toBeNull();
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+
+    // Re-include → the note reappears (recomputed against the live full-book DD;
+    // the solved L persisted via leverageByRef — exclusion is reversible).
+    act(() => {
+      fireEvent.click(within(rowByRef(K1)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(K1)).queryByTestId("scenario-target-dd-portfolio-note") ??
+        within(rowByRef(K1)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+  });
+
+  it("RT113-01 excluding a solved Target-mode ADDED row hides its solve note; re-include restores it", async () => {
+    const DRAWER_ID = "dddddddd-5555-4444-3333-222222222222";
+    const DRAWER_SERIES = P113_DATES.map((date, i) => ({
+      date,
+      value: i === 6 ? -0.05 : 0,
+    }));
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).includes(`/api/strategies/${DRAWER_ID}/returns`)) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            daily_returns: DRAWER_SERIES,
+            asset_class: "crypto",
+          }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render113();
+    addStrategy({
+      id: DRAWER_ID,
+      name: "Drawer Excl Leg",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelector(`[data-scope-ref="${DRAWER_ID}"]`),
+      ).not.toBeNull();
+    });
+
+    // Flip the added row to Target mode and commit a target → solve line renders.
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(DRAWER_ID)).getByTestId(
+          "scenario-leverage-mode-toggle",
+        ),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${DRAWER_ID}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId(
+        "scenario-target-dd-portfolio-note",
+      ) ??
+        within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+
+    // Toggle the added row OFF → its solve note is GONE (RED before the fix).
+    act(() => {
+      fireEvent.click(within(rowByRef(DRAWER_ID)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId(
+        "scenario-target-dd-portfolio-note",
+      ),
+    ).toBeNull();
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
+    ).toBeNull();
+
+    // Toggle back ON → the note reappears.
+    act(() => {
+      fireEvent.click(within(rowByRef(DRAWER_ID)).getByRole("switch"));
+    });
+    expect(
+      within(rowByRef(DRAWER_ID)).queryByTestId(
+        "scenario-target-dd-portfolio-note",
+      ) ??
+        within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
+    ).not.toBeNull();
+  });
 });
 
 // ===========================================================================

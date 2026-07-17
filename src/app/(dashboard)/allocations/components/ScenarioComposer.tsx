@@ -5291,6 +5291,18 @@ function CompositionList({
   // value, no semantic color on the dash — DESIGN.md Numbers Contract).
   const renderSolveState = (ref: string) => {
     if (targetModeByRef[ref] !== true) return null;
+    // RT113-01 — an EXCLUDED row shows NO solve note. The mode toggle + target
+    // input are DISABLED while excluded, so a lingering "Portfolio max-DD at N×"
+    // note would strand a value computed for a book the row is no longer in
+    // (e.g. +0.00% with a drawdown leg toggled out) that the user cannot clear or
+    // refresh without re-including — the value-shaped ambiguity WEIGHTS-04 bars.
+    // Inclusion mirrors the toggle's own predicate at both call sites
+    // (draft.toggleByScopeRef[ref] !== false). Exclusion is REVERSIBLE, so the
+    // transient twins are deliberately NOT cleared (the solved L persists via
+    // leverageByRef): re-including reopens the gate and the note recomputes
+    // against the live full-book DD (scenarioMetrics.max_drawdown) with the row
+    // back in the book.
+    if (draft.toggleByScopeRef[ref] === false) return null;
     const result = solveResultByRef[ref];
     if (!result) return null;
     if (result.ok) {
