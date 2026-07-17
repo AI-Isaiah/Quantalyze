@@ -336,6 +336,43 @@ def test_out_of_period_ledger_entry_post_period_also_refuses():
         )
 
 
+# ── F1 (economic invariant): a seam-day real flow is booked EXACTLY once ───────
+
+def test_seam_day_real_flow_booked_exactly_once():
+    """F1: ``next_eq`` ALREADY contains a REAL external flow dated the seam day into a
+    next-block member, so the forward-identity residual double-books it unless the
+    seam subtracts seam-day next-block real flows. Economic pin (NOT the impl formula):
+    the $10k deposit appears ONCE in the ledger and Dietz equals the independently
+    hand-computed true value 10000/105000, not the doubled 0.0."""
+    import pandas as pd
+
+    a = pd.Series([0.0, 0.0, 0.0], index=["2026-03-01", "2026-03-02", "2026-03-03"], name="A")
+    b = pd.Series([0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="B")
+    # B: zero-cash redeployment of A's 100k + a genuine 10k deposit on the seam day
+    # -> B first-day (end) equity 120000 = 100000*1.1 + 10000.
+    pke = {
+        "A": replay_key_equity(a, [], 100000.0),
+        "B": replay_key_equity(b, [ExternalFlow("2026-03-04", 10000.0)], 120000.0),
+    }
+    seg = segment_coverage({"A": a, "B": b})
+    real = {"B": [ExternalFlow("2026-03-04", 10000.0)]}
+    ledger = build_allocator_ledger(real, seg.seams, pke, {"A": a, "B": b})
+
+    real_entries = [e.flow.usd_signed for e in ledger if e.provenance == LEDGER_REAL]
+    seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+    assert real_entries == [10000.0]                       # booked once as LEDGER_REAL
+    assert seam_entry.flow.usd_signed == pytest.approx(0.0, abs=1e-6)  # pure redeploy = 0
+    assert sum(real_entries) + seam_entry.flow.usd_signed == pytest.approx(10000.0, abs=1e-6)
+
+    # Dietz = the hand-computed truth (deposit at the period midpoint, w=0.5):
+    #   (120000 - 100000 - 10000) / (100000 + 0.5*10000) = 10000/105000.
+    scalars = mwr_and_dietz_from_ledger(
+        ledger, begin_value=100000.0, end_value=120000.0,
+        period_start="2026-03-01", period_days=6,
+    )
+    assert scalars.dietz == pytest.approx(10000.0 / 105000.0, abs=1e-6)
+
+
 # ── T4/T5: partial + asymmetric multi-key block boundaries ────────────────────
 
 _B1 = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]

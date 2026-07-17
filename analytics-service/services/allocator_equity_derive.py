@@ -1003,7 +1003,19 @@ def build_allocator_ledger(
             # Finding 3: forward-identity flow — strip the redeployed capital's
             # first-day return out of the synthetic flow (it is performance, not
             # cash movement).
-            seam_usd = next_eq - prev_eq * (1.0 + r_next)
+            # F1 (Fable): ``next_eq`` ALREADY contains any REAL external flow dated the
+            # seam day into a next-block member (each next key's replayed first-day
+            # equity folds its own same-day flow in), and those flows are booked ONCE
+            # as LEDGER_REAL above. Subtract them from the residual so the seam carries
+            # ONLY the non-return, non-real-flow redeployment magnitude — never
+            # double-booking a seam-day real deposit/withdrawal.
+            seam_day_real = sum(
+                float(flow[1])
+                for k in seam.next_keys
+                for flow in real_flows_by_key.get(k, [])
+                if str(flow[0]) == seam.next_first_day
+            )
+            seam_usd = next_eq - prev_eq * (1.0 + r_next) - seam_day_real
             entries.append(
                 _ledger_entry(seam.next_first_day, seam_usd, LEDGER_SEAM, known=True)
             )
