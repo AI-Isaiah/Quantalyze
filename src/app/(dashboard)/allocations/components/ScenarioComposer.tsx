@@ -5122,6 +5122,24 @@ interface CompositionListProps {
   coverageEligible: Record<string, boolean>;
 }
 
+// WEIGHTS-04 (Phase 113) — the honest failure copy for a `!ok` solve. Mirrors
+// the reason enum's TSDoc contract in solve-leverage.ts (the single source of the
+// pinned copy). `unreachable` interpolates the domain-ceiling leverage.
+function solveReasonCopy(
+  result: Extract<SolveLeverageResult, { ok: false }>,
+): string {
+  switch (result.reason) {
+    case "unreachable":
+      return `Unreachable at ${(result.ceiling ?? MAX_LEVERAGE).toFixed(2)}×`;
+    case "no-drawdown":
+      return "No drawdown in this series";
+    case "insufficient-history":
+      return "Insufficient history to model drawdown";
+    case "degenerate":
+      return "Series can't be modeled (data quality)";
+  }
+}
+
 function CompositionList({
   draft,
   perKeySources,
@@ -5134,6 +5152,11 @@ function CompositionList({
   totalBookEquity,
   leverageByRef,
   onSetLeverage,
+  targetModeByRef,
+  onSetTargetMode,
+  onCommitTarget,
+  solveResultByRef,
+  portfolioMaxDrawdown,
   onRemoveAdded,
   coverageEligible,
 }: CompositionListProps) {
@@ -5154,6 +5177,100 @@ function CompositionList({
     }
     const notional = share * totalBookEquity * (leverageByRef[ref] ?? 1);
     return Number.isFinite(notional) ? formatCurrency(notional) : "—";
+  };
+
+  // WEIGHTS-03/04 (Phase 113) — the shared Target-max-DD row surface. ONE
+  // definition, rendered identically into BOTH row types (per-key + added):
+  // WEIGHTS-03 is per-row and Phase 112 gave both a leverage input.
+
+  // The per-row mode toggle: Leverage (default) ⇄ Target max-DD. `data-mode`
+  // exposes the current mode; disabled mirrors the row's inputs (excluded rows).
+  const renderModeToggle = (
+    ref: string,
+    labelText: string,
+    disabled: boolean,
+  ) => {
+    const isTarget = targetModeByRef[ref] === true;
+    return (
+      <button
+        type="button"
+        data-testid="scenario-leverage-mode-toggle"
+        data-mode={isTarget ? "target" : "leverage"}
+        aria-label={`${labelText} — input mode (currently ${
+          isTarget ? "Target max-drawdown" : "Leverage"
+        }); switch to ${isTarget ? "Leverage" : "Target max-drawdown"}`}
+        disabled={disabled}
+        onClick={() => onSetTargetMode(ref, !isTarget)}
+        className="shrink-0 rounded border border-border bg-surface px-2 py-1 font-metric text-fixed-11 uppercase tracking-wider text-text-muted transition-colors hover:border-accent disabled:opacity-50"
+      >
+        {isTarget ? "Target DD" : "Leverage"}
+      </button>
+    );
+  };
+
+  // The Target-mode drawdown input (percent). Uncontrolled + solve-on-COMMIT
+  // (blur / Enter) — never per keystroke (Pitfall 5). The title/label copy is
+  // load-bearing: the target is THIS constituent's OWN standalone max drawdown
+  // (the sleeve), not the portfolio's.
+  const renderTargetInput = (
+    ref: string,
+    labelText: string,
+    disabled: boolean,
+  ) => (
+    <>
+      <label className="sr-only" htmlFor={`target-dd-${ref}`}>
+        {labelText} target max drawdown (percent) — this constituent&apos;s own
+        standalone drawdown, not the portfolio&apos;s
+      </label>
+      <input
+        id={`target-dd-${ref}`}
+        type="number"
+        step="0.1"
+        min="0"
+        max="100"
+        disabled={disabled}
+        title="Target this constituent's OWN standalone max drawdown (the sleeve, not the portfolio). Commits on blur/Enter and back-solves the leverage."
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            onCommitTarget(ref, Number((e.target as HTMLInputElement).value));
+          }
+        }}
+        onBlur={(e) => onCommitTarget(ref, Number(e.target.value))}
+        className="w-16 rounded border border-accent bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+      />
+    </>
+  );
+
+  // The honest solve-state line under the row controls (WEIGHTS-04). ok → the
+  // COMPUTED full-book portfolio max-DD at the solved L (never "solved"); failure
+  // → the reason copy + an em-dash where a derived value would sit (no fabricated
+  // value, no semantic color on the dash — DESIGN.md Numbers Contract).
+  const renderSolveState = (ref: string) => {
+    if (targetModeByRef[ref] !== true) return null;
+    const result = solveResultByRef[ref];
+    if (!result) return null;
+    if (result.ok) {
+      return (
+        <p
+          data-testid="scenario-target-dd-portfolio-note"
+          className="mt-2 text-fixed-11 text-text-muted"
+        >
+          Portfolio max-DD at {result.leverage.toFixed(2)}× (computed for the
+          whole book):{" "}
+          <span className="font-metric">
+            {formatPercent(portfolioMaxDrawdown, 2)}
+          </span>
+        </p>
+      );
+    }
+    return (
+      <p
+        data-testid="scenario-target-dd-state"
+        className="mt-2 text-fixed-11 text-text-muted"
+      >
+        {solveReasonCopy(result)} <span className="font-metric">—</span>
+      </p>
+    );
   };
   // Whether ANY included row carries a non-1× leverage — gates the honest
   // leverage-invariance caveat (Sharpe/Sortino/Calmar do not shift with leverage).
@@ -5204,10 +5321,11 @@ function CompositionList({
               key={k.id}
               data-scope-ref={k.id}
               data-testid="scenario-constituent-perkey"
-              className={`flex items-center justify-between gap-3 rounded-md border border-border p-3 ${
+              className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
                 included ? "" : "opacity-50 line-through"
               }`}
             >
+              <div className="flex w-full items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <button
                   type="button"
@@ -5271,6 +5389,12 @@ function CompositionList({
                   onChange={(e) => onSetWeight(k.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* WEIGHTS-03 — per-row mode toggle + (Target mode) drawdown
+                    input. In Target mode the leverage input below is READ-ONLY
+                    (never disabled — the derived L stays visible). */}
+                {renderModeToggle(k.id, labelText, !included)}
+                {targetModeByRef[k.id] === true &&
+                  renderTargetInput(k.id, labelText, !included)}
                 <label className="sr-only" htmlFor={`leverage-${k.id}`}>
                   {labelText} leverage
                 </label>
@@ -5282,10 +5406,11 @@ function CompositionList({
                   max={MAX_LEVERAGE}
                   value={(leverageByRef[k.id] ?? 1).toString()}
                   disabled={!included}
+                  readOnly={targetModeByRef[k.id] === true}
                   title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
                   aria-label={`${labelText} leverage multiplier`}
                   onChange={(e) => onSetLeverage(k.id, Number(e.target.value))}
-                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
                     never a weight input. Em-dash when non-derivable. */}
@@ -5297,6 +5422,8 @@ function CompositionList({
                   {notionalText(k.id)}
                 </span>
               </div>
+              </div>
+              {renderSolveState(k.id)}
             </li>
           );
         })}
@@ -5339,10 +5466,11 @@ function CompositionList({
               key={a.id}
               data-scope-ref={a.id}
               data-testid="scenario-constituent-added"
-              className={`flex items-center justify-between gap-3 rounded-md border border-border p-3 ${
+              className={`flex flex-col gap-2 rounded-md border border-border p-3 ${
                 enabled ? "" : "opacity-50 line-through"
               }`}
             >
+              <div className="flex w-full items-center justify-between gap-3">
               <div className="flex min-w-0 items-center gap-3">
                 <button
                   type="button"
@@ -5387,6 +5515,12 @@ function CompositionList({
                   onChange={(e) => onSetWeight(a.id, Number(e.target.value))}
                   className="w-20 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
                 />
+                {/* WEIGHTS-03 — per-row mode toggle + (Target mode) drawdown
+                    input; the leverage input below goes READ-ONLY in Target mode
+                    (never disabled — the derived L stays visible). */}
+                {renderModeToggle(a.id, a.name, !enabled)}
+                {targetModeByRef[a.id] === true &&
+                  renderTargetInput(a.id, a.name, !enabled)}
                 <label className="sr-only" htmlFor={`leverage-${a.id}`}>
                   {a.name} leverage
                 </label>
@@ -5398,10 +5532,11 @@ function CompositionList({
                   max={MAX_LEVERAGE}
                   value={(leverageByRef[a.id] ?? 1).toString()}
                   disabled={!enabled}
+                  readOnly={targetModeByRef[a.id] === true}
                   title="Leverage multiplier (1× = unlevered; excludes borrow cost)"
                   aria-label={`${a.name} leverage multiplier`}
                   onChange={(e) => onSetLeverage(a.id, Number(e.target.value))}
-                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50"
+                  className="w-16 rounded border border-border bg-surface px-2 py-1 text-right font-mono text-xs disabled:opacity-50 read-only:bg-surface-muted read-only:text-text-muted"
                 />
                 {/* WEIGHTS-00 notional — DERIVED read-only text (equity × L),
                     never a weight input. Em-dash when non-derivable. */}
@@ -5421,6 +5556,8 @@ function CompositionList({
                   ×
                 </button>
               </div>
+              </div>
+              {renderSolveState(a.id)}
             </li>
           );
         })}
