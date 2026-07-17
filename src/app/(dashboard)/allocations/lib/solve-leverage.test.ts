@@ -19,20 +19,20 @@
  * own math) and additionally proves a perturbed L breaks the match.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   solveLeverageForMaxDD,
   DD_TOL,
   L_TOL,
   type SolveLeverageResult,
 } from "./solve-leverage";
+import * as scenarioModule from "@/lib/scenario";
 import {
   buildDateMapCache,
   computeScenario,
   type StrategyForBuilder,
   type ScenarioState,
 } from "@/lib/scenario";
-import { MAX_LEVERAGE } from "@/lib/leverage";
 
 // --- Deterministic fixtures ------------------------------------------------
 
@@ -263,5 +263,73 @@ describe("solveLeverageForMaxDD — Phase 113 Wave-0 RED scaffold", () => {
         .max_drawdown!,
     );
     expect(Math.abs(perturbed - target)).toBeGreaterThan(DD_TOL);
+  });
+});
+
+describe("solveLeverageForMaxDD — Plan 113-02 honest states + input gate + eval budget", () => {
+  // T-113-02 (Tampering) — a non-finite / ≤0 / ≥1 target is an HONEST `degenerate`
+  // refusal: never a throw, never a clamp into a fabricated leverage. The UI
+  // validates first; this is the fail-loud backstop for a poisoned target.
+  it("rejects non-finite / ≤0 / ≥1 targets as 'degenerate' without throwing (T-113-02)", () => {
+    const s = makeStrategy([0, 0, 0, 0, 0, -0.05, 0, 0, 0, 0, 0, 0]);
+    for (const bad of [NaN, Infinity, -Infinity, 0, -0.05, 1, 1.5]) {
+      let result!: SolveLeverageResult;
+      expect(() => {
+        result = solveLeverageForMaxDD(solveArgs(s, bad));
+      }).not.toThrow();
+      expect(asErr(result).reason).toBe("degenerate");
+    }
+  });
+
+  // Pitfall 3 (clamp-and-lie) — NO infeasible branch may carry a `leverage` /
+  // `sleeveMaxDD` field. Asserted structurally via the `in` operator (the type-level
+  // guarantee the em-dash UI relies on), across a degenerate AND an unreachable case.
+  it("carries NO leverage/sleeveMaxDD field on any infeasible branch (Pitfall 3)", () => {
+    const s = makeStrategy([0, 0, 0, 0, 0, -0.05, 0, 0, 0, 0, 0, 0]);
+
+    const degenerate = solveLeverageForMaxDD(solveArgs(s, NaN));
+    expect("leverage" in degenerate).toBe(false);
+    expect("sleeveMaxDD" in degenerate).toBe(false);
+
+    // `unreachable` carries a `ceiling` (a domain fact) but still no leverage value.
+    const unreachable = solveLeverageForMaxDD(
+      solveArgs(s, 0.2, { maxLeverage: 2.5 }),
+    );
+    expect("leverage" in unreachable).toBe(false);
+    expect("sleeveMaxDD" in unreachable).toBe(false);
+    expect(asErr(unreachable).ceiling).toBe(2.5);
+  });
+
+  // Honest ≠ refusal — an all-negative series is NOT degenerate. Every day −0.01 →
+  // a monotone decline whose levered max-DD is finite; a 20% target is reachable by
+  // levering up (≈2×) and MUST return a finite ok leverage, not a fabricated fail.
+  it("solves an all-negative series normally → a finite ok leverage (not a refusal)", () => {
+    const s = makeStrategy(Array.from({ length: 12 }, () => -0.01));
+    const result = solveLeverageForMaxDD(solveArgs(s, 0.2));
+    expect(result.ok).toBe(true);
+    const ok = asOk(result);
+    expect(Number.isFinite(ok.leverage)).toBe(true);
+    expect(ok.leverage).toBeGreaterThan(0);
+    // …and it honestly reproduces the target within tolerance.
+    expect(Math.abs(Math.abs(ok.sleeveMaxDD) - 0.2)).toBeLessThanOrEqual(DD_TOL);
+  });
+
+  // Eval-budget pin (research envelope: ~50–70 computeScenario calls/solve). A
+  // wrapping spy on the imported engine binding counts ONE full solve on the ruin
+  // fixture (exercises BOTH the ruin-predicate bisect AND the solve bisect). `> 0`
+  // proves the spy actually intercepts the solver's calls; `≤ 70` guards against an
+  // accidental unbounded-loop regression.
+  it("evaluates ≤ 70 computeScenario calls for one full solve (ruin path)", () => {
+    const s = makeStrategy([0, 0, 0, 0, -0.3, 0, 0, 0, 0, 0, 0, 0]);
+    const args = solveArgs(s, 0.5); // build the dateMapCache BEFORE spying
+    const spy = vi.spyOn(scenarioModule, "computeScenario");
+    try {
+      const result = solveLeverageForMaxDD(args);
+      expect(result.ok).toBe(true);
+      expect(spy.mock.calls.length).toBeGreaterThan(0);
+      expect(spy.mock.calls.length).toBeLessThanOrEqual(70);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -1,11 +1,11 @@
 /**
- * Phase 113 (WEIGHTS-03/04) — max-drawdown → leverage solver CONTRACT.
+ * Phase 113 (WEIGHTS-03/04) — max-drawdown → leverage solver.
  *
- * ⭐ WAVE-0 SKELETON (Plan 113-00). This module is the interface-first contract
- * that Plans 113-01 / 113-02 implement against. The body is a deliberate stub —
- * it returns `{ ok: false, reason: "unimplemented" }` unconditionally — so every
- * Phase-113 RED test fails by ASSERTION (never a crash / import error) on the
- * current tree. Do NOT add solver logic here in Plan 00.
+ * ⭐ IMPLEMENTED (Plan 113-01 core + Plan 113-02 hardening). A per-solve-memoized,
+ * ruin-clamped MONOTONE smallest-L bisect over the byte-frozen engine's sleeve
+ * `r→L·r` transform. Every failure path is an HONEST discriminated reason (never
+ * a fabricated leverage/drawdown, never a silent clamp — WEIGHTS-04). The Wave-0
+ * scaffolding variant is gone; a `grep` gate keeps it from ever returning.
  *
  * ## What the implemented solver will do (founder lock 2026-07-17)
  * Given a per-row max-drawdown TARGET, back-solve the leverage `L` that makes the
@@ -44,18 +44,24 @@ import { MAX_LEVERAGE } from "@/lib/leverage";
  *   the target within {@link DD_TOL}. `sleeveMaxDD` is the engine's NEGATIVE
  *   fraction at the solved `leverage`.
  * - `{ ok: false }` — an HONEST failure (WEIGHTS-04). Never a fabricated
- *   leverage. `reason` enumerates the honest state:
+ *   leverage/drawdown. `reason` enumerates the honest state; the pinned UI copy
+ *   in each entry is the contract Plan 113-03 renders (DESIGN.md Numbers Contract
+ *   — the derived-L cell shows an em-dash `—`, never a value-shaped lie):
  *     · `"unreachable"`       — target exceeds the sleeve's max-DD at the domain
  *                               ceiling (ruin / MAX_LEVERAGE). `ceiling` carries
  *                               the ceiling `L` that was evaluated.
+ *                               UI copy: "Unreachable at {ceiling}×".
  *     · `"no-drawdown"`       — the series has no drawdown at any `L` (flat) →
  *                               a positive target is not applicable.
+ *                               UI copy: "No drawdown in this series".
  *     · `"insufficient-history"` — fewer than the engine's 10-observation floor
  *                               (`max_drawdown` null).
- *     · `"degenerate"`        — the series cannot be modeled even at 1×
- *                               (ruin / non-finite at L=1 → `max_drawdown` null).
- *     · `"unimplemented"`     — ⚠️ WAVE-0-ONLY scaffolding. Plan 113-02 DELETES
- *                               this variant (a grep gate keeps it from shipping).
+ *                               UI copy: "Insufficient history to model drawdown".
+ *     · `"degenerate"`        — the series cannot be modeled (ruin / non-finite at
+ *                               L=1 → `max_drawdown` null) OR the target itself is
+ *                               non-finite / ≤0 / ≥1 (the T-113-02 input gate —
+ *                               an honest refusal, never a clamp).
+ *                               UI copy: "Series can't be modeled (data quality)".
  */
 export type SolveLeverageResult =
   | { ok: true; leverage: number; sleeveMaxDD: number }
@@ -65,8 +71,7 @@ export type SolveLeverageResult =
         | "unreachable"
         | "no-drawdown"
         | "insufficient-history"
-        | "degenerate"
-        | "unimplemented";
+        | "degenerate";
       ceiling?: number;
     };
 
@@ -89,9 +94,9 @@ export const L_TOL = 1e-2;
  * `targetMaxDD` (a positive magnitude). See the module TSDoc for the founder
  * lock and the sign convention.
  *
- * WAVE-0 STUB — returns `{ ok: false, reason: "unimplemented" }` unconditionally.
- * Plans 113-01 / 113-02 implement the ruin-clamped monotone bisect over
- * `computeScenario`.
+ * Implemented as a ruin-clamped monotone smallest-L bisect over `computeScenario`
+ * (Plan 113-01 core + Plan 113-02 hardening). Returns an honest discriminated
+ * reason on every infeasible/degenerate path — never a fabricated leverage.
  *
  * @param args.strategies    the engine strategy set (frozen-engine input)
  * @param args.engineState   the live scenario state; the solver derives the
