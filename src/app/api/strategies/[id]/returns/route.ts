@@ -46,7 +46,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { createClient } from "@/lib/supabase/server";
-import { withPublishedOnly } from "@/lib/visibility";
+import { withPublishedOrOwner } from "@/lib/visibility";
 import { withAllocatorAuth, type AllocatorUser } from "@/lib/api/withAllocatorAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { captureToSentry } from "@/lib/sentry-capture";
@@ -152,13 +152,26 @@ export async function GET(
       }
 
       const supabase = await createClient();
-      // Published-existence probe (defense-in-depth over RLS): a row that is
-      // unpublished, non-existent, or cross-tenant (not readable under RLS)
-      // resolves to null → 404. We do NOT reveal whether the id exists for
-      // another tenant (T-29-01 / existence-oracle mitigation — 404, not 403).
-      // `status='published'` (via withPublishedOnly + the analytics_read RLS
-      // policy) covers BOTH verified AND example published rows — `is_example`
-      // is a flag, not a separate gate.
+      // Owner-inclusive existence probe (defense-in-depth over RLS): a row that
+      // is non-existent, or cross-tenant (another owner's unpublished row, not
+      // readable under RLS) resolves to null → 404. We do NOT reveal whether the
+      // id exists for another tenant (T-29-01 / existence-oracle mitigation —
+      // 404, not 403).
+      // CONTRIB-03 loop closure — the probe mirrors the Browse route EXACTLY:
+      // `withPublishedOrOwner(..., user.id)` appends
+      // `status.eq.published,user_id.eq.<sessionId>` (mirroring the
+      // `strategies_read` RLS shape). Browse became owner-inclusive so an
+      // allocator's OWN not-yet-published contribution appears in the drawer;
+      // this probe MUST admit that same owner-own private row or adding it
+      // silently 404s and warm-up-gates out of the blend (the exact contribute→
+      // compose case v1.11 is built for). `published` still covers BOTH verified
+      // AND example published rows for every OTHER caller — `is_example` is a
+      // flag, not a separate gate. Cross-tenant isolation is preserved: another
+      // owner's private row matches neither leg → null → 404 (no existence
+      // leak). The `analytics_read` RLS policy is ALSO owner-inclusive
+      // (`published OR user_id=auth.uid()`, rls_policies.sql:36-42), so the
+      // series read below serves the owner's own private analytics too.
+      // `user.id` is session-only (withAllocatorAuth), NEVER a request param.
       // #597 part 2 (BLEND-01) — widen the probe to also read `asset_class`. It
       // is public classification data (rendered on public factsheets since #597)
       // and stays behind the SAME published-only gate, so this reveals nothing
@@ -169,11 +182,12 @@ export async function GET(
       // (D-04: trust_tier lives only on strategy_verifications). The rows are
       // picked most-recent-first in JS below (mirrors queries.ts:465-478),
       // avoiding a second round-trip. Public metadata; no new disclosure surface.
-      const { data: strat, error: probeError } = await withPublishedOnly(
+      const { data: strat, error: probeError } = await withPublishedOrOwner(
         supabase
           .from("strategies")
           .select("id, asset_class, strategy_verifications (trust_tier, status, created_at)")
           .eq("id", id),
+        user.id,
       ).maybeSingle();
       if (probeError) {
         // error-absent ≠ legit-absent: a PostgREST error (e.g. asset_class column
