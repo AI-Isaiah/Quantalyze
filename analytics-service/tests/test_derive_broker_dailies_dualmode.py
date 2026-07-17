@@ -1146,3 +1146,61 @@ class TestCashSettlementSeriesPersist:
         _n2, csv_payload, on_conflict = csv_upserts[0]
         assert on_conflict == "strategy_id,date"
         assert sorted(r["date"] for r in csv_payload) == ["2024-05-01", "2024-05-02"]
+
+
+# ── Phase 115 (E2 / STITCH-01): deribit key-mode parity ─────────────────────
+# The dual-mode key-mode upsert is VENUE-AGNOSTIC below the native branch: a
+# deribit allocator key (native-ledger path) and a ccxt allocator key both land
+# the SAME per-key payload shape (api_key_id + allocator_id=user_id + strategy_id
+# None, on_conflict='api_key_id,date'). This co-locates a deribit key-mode case
+# beside the ccxt ones so a future edit that forks the two upsert shapes reddens
+# HERE. Reuses the native-ledger harness from test_mtm_single_key (the deribit
+# branch mocks combine_native_ledger, not combine_realized_and_funding).
+
+
+class TestKeyModeDeribitParity:
+    """A deribit allocator key produces the IDENTICAL per-key upsert shape as a
+    ccxt allocator key — the dogfooding-gap consumer for an all-deribit allocator."""
+
+    @pytest.mark.asyncio
+    async def test_deribit_key_mode_matches_ccxt_key_mode_shape(self) -> None:
+        from tests.test_mtm_single_key import (
+            _apply,
+            _base_patches,
+            _cash_series,
+            _ctx,
+            _recording_ledger,
+            _report,
+        )
+
+        ctx, capture = _ctx(strategy_row=None, key_mode=True)
+        ctx.key_row = {
+            "id": "key-drb-parity",
+            "user_id": "alloc-parity",
+            "exchange": "deribit",
+        }
+        ledger_mock, _calls = _recording_ledger([_report(has_option_activity=False)])
+        combine = MagicMock(
+            return_value=(_cash_series(), {"used_heuristic_capital": False})
+        )
+        with _apply(_base_patches(
+            ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
+        )):
+            result = await run_derive_broker_dailies_job(
+                {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-drb-parity"}
+            )
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _name, payload, on_conflict = csv_upserts[0]
+        # SAME per-key arbiter + payload shape as the ccxt key-mode case above
+        # (TestKeyMode.test_key_mode_upserts_api_key_shape_and_conflict_target).
+        assert on_conflict == "api_key_id,date"
+        for row in payload:
+            assert row["api_key_id"] == "key-drb-parity"
+            assert row["allocator_id"] == "alloc-parity"
+            assert row["strategy_id"] is None
+        # Key-mode owns no strategy row: no compute enqueue, no strategy_analytics.
+        assert [c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"] == []
+        assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []
