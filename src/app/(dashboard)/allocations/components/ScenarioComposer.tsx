@@ -2805,10 +2805,15 @@ export function ScenarioComposer({
   // it writes NOTHING to leverageByRef (Pitfall 3 — no fabricated L); the row's
   // solve-state line renders the reason + an em-dash.
   function handleTargetCommit(scopeRef: string, targetPct: number) {
+    // RT113-02 — the target-DD out-of-range message, extracted so a valid commit
+    // clears ONLY this specific range error (below), never an unrelated
+    // commitError tenant (the leverage-clamp banner or handleCommit's AUM/size/
+    // empty errors). The shared banner follows a last-gesture convention, but an
+    // infeasible target commit is a no-op that must not evict another row's banner.
+    const TARGET_DD_RANGE_ERROR =
+      "Enter a max-drawdown target above 0% and below 100% — the previous value was kept.";
     if (!Number.isFinite(targetPct) || targetPct <= 0 || targetPct >= 100) {
-      setCommitError(
-        "Enter a max-drawdown target above 0% and below 100% — the previous value was kept.",
-      );
+      setCommitError(TARGET_DD_RANGE_ERROR);
       return;
     }
     const result = solveLeverageForMaxDD({
@@ -2819,14 +2824,14 @@ export function ScenarioComposer({
       ref: scopeRef,
       targetMaxDD: targetPct / 100,
     });
-    // F3 — a valid (in-range) target clears any PRIOR range-error banner up front,
-    // whether the solve is feasible OR an honest-infeasible refusal. The
-    // infeasible reason renders from the row's own solve-state line
-    // (solveResultByRef), NOT the commit-error banner; leaving a stale range error
-    // beside the honest infeasible state would show two contradictory messages.
-    // The range banner is set ONLY for actually-out-of-range input (the guard
-    // above), so clearing it here never suppresses a genuine range error.
-    setCommitError(null);
+    // F3 + RT113-02 — a valid (in-range) target clears ONLY a PRIOR target-range
+    // banner, whether the solve is feasible OR an honest-infeasible refusal, so
+    // the infeasible state never sits beside a stale range error (F3). Scoped to
+    // the target-range message (not setCommitError(null)) so an infeasible no-op
+    // commit does NOT evict an UNRELATED banner tenant — the leverage-clamp
+    // message or a handleCommit AUM/size/empty error (RT113-02). The infeasible
+    // reason itself renders from the row's own solve-state line, never the banner.
+    setCommitError((prev) => (prev === TARGET_DD_RANGE_ERROR ? null : prev));
     setSolveResultByRef((prev) => ({ ...prev, [scopeRef]: result }));
     if (result.ok) {
       handleLeverageChange(scopeRef, Math.round(result.leverage * 1000) / 1000);

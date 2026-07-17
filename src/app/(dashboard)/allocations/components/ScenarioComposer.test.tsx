@@ -6353,6 +6353,53 @@ describe("ScenarioComposer — Phase 113 Target max-DD mode (RED scaffold)", () 
         within(rowByRef(DRAWER_ID)).queryByTestId("scenario-target-dd-state"),
     ).not.toBeNull();
   });
+
+  // -------------------------------------------------------------------------
+  // RT113-02 (Fable red team, 2026-07-17) — F3's setCommitError(null) fired on
+  // EVERY in-range target commit including an INFEASIBLE no-op, wiping unrelated
+  // shared-banner tenants (the leverage-clamp message, handleCommit's AUM/size/
+  // empty errors). Scoped fix (option a): a valid target commit clears ONLY a
+  // prior TARGET-RANGE error, never an unrelated banner. F3 intent survives (a
+  // stale range error is still cleared beside the honest infeasible state).
+  // -------------------------------------------------------------------------
+  it("RT113-02 an infeasible target commit preserves an unrelated leverage-clamp banner (clears only a stale target-range error)", () => {
+    render113();
+    // Over-max leverage on K2 (Leverage mode) → the shared clamp banner.
+    const k2Lev = document.getElementById(
+      `leverage-${K2}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(k2Lev, { target: { value: "50" } });
+    });
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /Leverage clamped/i,
+    );
+
+    // Flip K1 to Target and commit an INFEASIBLE 99% (writes nothing to the book).
+    act(() => {
+      fireEvent.click(
+        within(rowByRef(K1)).getByTestId("scenario-leverage-mode-toggle"),
+      );
+    });
+    const target = document.getElementById(
+      `target-dd-${K1}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "99" } });
+      fireEvent.blur(target);
+    });
+
+    // The UNRELATED clamp banner MUST survive (RED before the scoping fix: F3's
+    // unconditional clear wiped it although the K1 gesture changed nothing).
+    expect(screen.getByTestId("scenario-commit-error").textContent).toMatch(
+      /Leverage clamped/i,
+    );
+    // The honest infeasible reason still renders in the row's OWN solve-state
+    // line (never needs the shared commit-error banner).
+    expect(
+      within(rowByRef(K1)).getByTestId("scenario-target-dd-state").textContent,
+    ).toMatch(/unreachable at .*×/i);
+  });
 });
 
 // ===========================================================================
