@@ -192,6 +192,28 @@ describe("FactsheetBody — degenerate render matrix (BODY-03)", () => {
       expect(html).not.toContain("Infinity");
     });
   }
+
+  // Regression — DistributionPanels axis-tick keys. On a degenerate blend the
+  // quantile box-plot's axis ticks collapse to a single value (0), so keying the
+  // tick <g> by `t.value` produced duplicate keys ("xt-0") — a React "two
+  // children with the same key" console.error that can omit/duplicate ticks.
+  // Keys are now index-based; assert the degenerate render emits no duplicate-key
+  // warning. (RED before the index-key fix, GREEN after.)
+  it("emits no React duplicate-key warning on the degenerate blend (axis ticks collapse to one value)", () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      renderBlend([]); // safe-empty → degenerate quantiles → ticks collapse to 0
+      const dupKeyWarnings = errSpy.mock.calls.filter((args) =>
+        args.some(
+          (a) =>
+            typeof a === "string" && /two children with the same key/i.test(a),
+        ),
+      );
+      expect(dupKeyWarnings).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
 });
 
 describe("FactsheetBody — api-only panels absent on the csv blend (BODY-04)", () => {
