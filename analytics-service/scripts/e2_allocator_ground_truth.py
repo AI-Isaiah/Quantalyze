@@ -142,22 +142,31 @@ def parse_members(items: list[str]) -> list[tuple[str, float]]:
 
 
 def compute_anchor_consistency(
-    derived_terminal: float, live_equity: float, tol: float
+    derived_terminal: float, live_equity: float, tol: float, *, degraded: bool = False
 ) -> dict[str, Any]:
     """The anchor-consistency verdict — drift as a PCT + a bool (T-115-11: the
     verdict never needs raw USD; the raw figures live only in the founder-run
-    sanitized JSON, never in a log). Non-positive derived terminal fails loud."""
+    sanitized JSON, never in a log). Non-positive derived terminal fails loud.
+
+    LOW-7: the derived $-curve carries a ``degraded`` flag (a dropped/unanchored key,
+    a truncated window, a stale-mark carry) that the OLD verdict ignored — a
+    within-tolerance-but-DEGRADED reconcile was stamped clean. The verdict now
+    REQUIRES ``within_tol AND not degraded``; the raw drift-in-band bool is surfaced
+    separately as ``drift_within_tol`` so the evidence still shows both."""
     if not (derived_terminal > 0.0):
         raise GroundTruthSkip(
             "derived terminal equity is non-positive — cannot form a drift ratio "
             "(the persisted anchors or csv_daily_returns are incomplete)"
         )
     drift_pct = (live_equity - derived_terminal) / derived_terminal
+    within_tol = abs(drift_pct) <= tol
     return {
         "derived_terminal": float(derived_terminal),
         "live_equity": float(live_equity),
         "drift_pct": float(drift_pct),
-        "within_same_day_tolerance": bool(abs(drift_pct) <= tol),
+        "drift_within_tol": bool(within_tol),
+        "degraded": bool(degraded),
+        "within_same_day_tolerance": bool(within_tol and not degraded),
         "tolerance": float(tol),
     }
 
@@ -368,9 +377,13 @@ async def run(
     derived_terminal, flags = derive_terminal_equity(series_by_key, anchors_by_key)
     evidence["derive_flags"] = flags
 
-    # 5. Anchor-consistency verdict + non-gating old-store evidence.
+    # 5. Anchor-consistency verdict + non-gating old-store evidence. LOW-7: a
+    # degraded derived curve is NOT a clean reconcile even within tolerance.
     evidence["anchor_consistency"] = compute_anchor_consistency(
-        derived_terminal, live_equity, same_day_drift_tol
+        derived_terminal,
+        live_equity,
+        same_day_drift_tol,
+        degraded=bool(flags.get("degraded")),
     )
     evidence["old_store_evidence"] = _old_store_evidence(allocator_id, derived_terminal)
     return evidence
