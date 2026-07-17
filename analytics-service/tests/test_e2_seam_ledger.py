@@ -373,6 +373,66 @@ def test_seam_day_real_flow_booked_exactly_once():
     assert scalars.dietz == pytest.approx(10000.0 / 105000.0, abs=1e-6)
 
 
+# ── F2 (economic invariants): the seam return is START-capital weighted ────────
+
+def test_zero_cash_rotation_books_zero_seam_single_and_multi():
+    """F2: a PURE (zero external cash) rotation must book F=0 IDENTICALLY, regardless
+    of the next-side per-key returns (winner/loser mix). This is the invariant the
+    end-of-day-equity weighting bug violated (it booked a synthetic −$941 on a
+    zero-cash rotation). NOT the impl formula."""
+    import pandas as pd
+
+    a = pd.Series([0.0, 0.0, 0.0], index=["2026-03-01", "2026-03-02", "2026-03-03"], name="A")
+    # SINGLE -> SINGLE zero-cash: A's 100k continues as B (B first-day = 100k*1.05).
+    b1 = pd.Series([0.05, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="B")
+    seg1 = segment_coverage({"A": a, "B": b1})
+    pke1 = {"A": replay_key_equity(a, [], 100000.0), "B": replay_key_equity(b1, [], 105000.0)}
+    led1 = build_allocator_ledger({}, seg1.seams, pke1, {"A": a, "B": b1})
+    assert next(e for e in led1 if e.provenance == LEDGER_SEAM).flow.usd_signed == pytest.approx(0.0, abs=1e-6)
+
+    # MULTI-key incoming, winner/loser mix: 100k -> B start 60k (+10%) / C start 40k (-10%).
+    b = pd.Series([0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="B")
+    c = pd.Series([-0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="C")
+    seg = segment_coverage({"A": a, "B": b, "C": c})
+    pke = {
+        "A": replay_key_equity(a, [], 100000.0),
+        "B": replay_key_equity(b, [], 66000.0),   # start 60k * 1.10
+        "C": replay_key_equity(c, [], 36000.0),   # start 40k * 0.90
+    }
+    led = build_allocator_ledger({}, seg.seams, pke, {"A": a, "B": b, "C": c})
+    assert next(e for e in led if e.provenance == LEDGER_SEAM).flow.usd_signed == pytest.approx(0.0, abs=1e-6)
+
+
+def test_multi_key_seam_magnitude_is_start_capital_weighted():
+    """F2: the redeployed capital earns the START-capital-weighted next-side return
+    ``Σ sᵢ·rᵢ / Σ sᵢ`` with ``sᵢ = eqᵢ/(1+rᵢ)`` (recovered from the same data), NOT the
+    end-of-day-equity weighting. Derived INDEPENDENTLY here (hand start capital), never
+    via the module's ``_seam_next_first_return``. Non-zero-cash block (net +10k deposit)."""
+    import pandas as pd
+
+    a = pd.Series([0.0, 0.0, 0.0], index=["2026-03-01", "2026-03-02", "2026-03-03"], name="A")
+    b = pd.Series([0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="B")
+    c = pd.Series([-0.10, 0.0, 0.0], index=["2026-03-04", "2026-03-05", "2026-03-06"], name="C")
+    # B start 60k -> 66000; C start 50k -> 45000; next start 110k vs prev 100k (net +10k).
+    pke = {
+        "A": replay_key_equity(a, [], 100000.0),
+        "B": replay_key_equity(b, [], 66000.0),
+        "C": replay_key_equity(c, [], 45000.0),
+    }
+    seg = segment_coverage({"A": a, "B": b, "C": c})
+    led = build_allocator_ledger({}, seg.seams, pke, {"A": a, "B": b, "C": c})
+    seam = next(e for e in led if e.provenance == LEDGER_SEAM)
+
+    # Independent hand derivation from START capital sᵢ = eqᵢ/(1+rᵢ).
+    prev_eq = 100000.0
+    b_first, c_first = 66000.0, 45000.0
+    next_eq = b_first + c_first
+    s_b, s_c = b_first / 1.10, c_first / 0.90       # 60000, 50000
+    r_blend = (s_b * 0.10 + s_c * (-0.10)) / (s_b + s_c)
+    expected = next_eq - prev_eq * (1.0 + r_blend)
+    assert seam.flow.usd_signed == pytest.approx(expected, abs=1e-6)
+
+
 # ── T4/T5: partial + asymmetric multi-key block boundaries ────────────────────
 
 _B1 = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
@@ -435,9 +495,10 @@ def test_asymmetric_rotations_resolve_forward_identity():
     r_first = float(pke["key-R"].equity.iloc[0])
     s_first = float(pke["key-S"].equity.iloc[0])
     seam_day = seam.next_first_day
-    r_blend = (
-        r_first * float(r.loc[seam_day]) + s_first * float(s.loc[seam_day])
-    ) / (r_first + s_first)
+    # F2: START-capital weighting sᵢ = eqᵢ/(1+rᵢ) (hand-derived, independent).
+    r_ret, s_ret = float(r.loc[seam_day]), float(s.loc[seam_day])
+    s_r, s_s = r_first / (1.0 + r_ret), s_first / (1.0 + s_ret)
+    r_blend = (s_r * r_ret + s_s * s_ret) / (s_r + s_s)
     assert entry.flow.usd_signed == pytest.approx(
         (r_first + s_first) - c_last * (1.0 + r_blend), abs=1e-6
     )
@@ -548,12 +609,13 @@ def test_block_to_block_seam_resolves_known_with_summed_magnitude():
     s_first = float(per_key_equity["key-S"].equity.iloc[0])
     prev_block = p_last + q_last   # {P,Q} equity at the boundary (their last day)
     next_block = r_first + s_first  # {R,S} equity at the boundary (their first day)
-    # Finding 3 (block form): the incoming block's first-day return is the
-    # equity-weighted blend of R and S on the seam day; F strips it off prev_block.
+    # F2 (block form): the incoming block's first-day return is the START-capital-
+    # weighted blend of R and S, sᵢ = eqᵢ/(1+rᵢ) (hand-derived, independent).
     seam_day = seam.next_first_day
     r_next = float(series["key-R"].loc[seam_day])
     s_next = float(series["key-S"].loc[seam_day])
-    r_blend = (r_first * r_next + s_first * s_next) / next_block
+    s_r, s_s = r_first / (1.0 + r_next), s_first / (1.0 + s_next)
+    r_blend = (s_r * r_next + s_s * s_next) / (s_r + s_s)
     assert seam_entry.flow.usd_signed == pytest.approx(
         next_block - prev_block * (1.0 + r_blend), abs=1e-6
     )

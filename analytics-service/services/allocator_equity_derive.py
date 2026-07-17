@@ -1029,14 +1029,21 @@ def _seam_next_first_return(
     per_key_equity: Mapping[str, KeyEquity],
     seam: Seam,
 ) -> float | None:
-    """The incoming (NEXT) block's first-day return on the seam day, capital-weighted
-    by each member's first-day equity share (Finding 3). For a single-key rotation
-    this is just that key's return on ``next_first_day``. Returns ``None`` if
-    ``returns_by_key`` is absent or any next-side return / equity is missing (the seam
-    magnitude is then unknown — never fabricated)."""
+    """The incoming (NEXT) block's first-day return on the seam day, weighted by each
+    member's START capital (Finding 3). For a single-key rotation this is just that
+    key's return on ``next_first_day``. Returns ``None`` if ``returns_by_key`` is absent
+    or any next-side return / equity is missing (the seam magnitude is then unknown —
+    never fabricated).
+
+    F2 (Fable): the redeployed capital earns the START-capital-weighted return
+    ``Σ sᵢ·rᵢ / Σ sᵢ`` where ``sᵢ = eqᵢ/(1+rᵢ)`` is the member's start-of-day capital
+    (``eqᵢ`` is the END-of-day equity, which already compounded ``rᵢ``). Weighting by
+    the end-of-day ``eqᵢ`` biases toward the winner and books a spurious synthetic flow
+    on a pure (zero-cash) rotation. The ``1+rᵢ > 0`` denominator is guaranteed for an
+    anchored key (replay refuses a ≤−100% day)."""
     if not returns_by_key:
         return None
-    total_eq = 0.0
+    total_start = 0.0
     weighted = 0.0
     for n in seam.next_keys:
         eq = _boundary_equity(per_key_equity, n, seam.next_first_day)
@@ -1045,13 +1052,14 @@ def _seam_next_first_return(
             return None
         rmap = {str(day): float(val) for day, val in rser.items()}
         r = rmap.get(str(seam.next_first_day))
-        if r is None:
+        if r is None or (1.0 + r) <= 0.0:
             return None
-        total_eq += eq
-        weighted += eq * r
-    if total_eq == 0.0:
+        start_capital = eq / (1.0 + r)  # recover start-of-day capital from END equity
+        total_start += start_capital
+        weighted += start_capital * r
+    if total_start == 0.0:
         return None
-    return weighted / total_eq
+    return weighted / total_start
 
 
 def _ledger_entry(
