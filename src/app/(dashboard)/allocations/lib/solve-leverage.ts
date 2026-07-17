@@ -179,10 +179,28 @@ export function solveLeverageForMaxDD(args: {
     return { ok: false, reason: "degenerate" };
   }
 
-  // Ruin-clamped domain ceiling. Task 2 tightens this to the last PROVEN
-  // non-ruined L via a monotone ruin-predicate bisect; until then the explicit
-  // maxLeverage override (or MAX_LEVERAGE) bounds the domain.
-  const L_max = maxLeverage ?? MAX_LEVERAGE;
+  // Ruin-clamped domain ceiling. `ruinedAt(L)` is `ddAt(L) === null` — valid ONLY
+  // now that the short-circuits above proved n≥10 AND non-ruin at 1×, so an
+  // in-domain null can mean nothing but ruin. Ruin is a MONOTONE up-set in L (the
+  // binding down-day term `1 + L·r` with r<0 is strictly decreasing, so once
+  // ruined every larger L is ruined — research §"Ruin boundary IS monotone"), so
+  // the smallest ruinous L is a clean monotone bisect. `L_max` = the LAST PROVEN
+  // non-ruined trial (`lo`); using it as the ceiling is the ε-margin — we never
+  // sample above it, so the reachability check + solve stay inside the non-null
+  // domain (Pitfall 2: no scan into the ruin/null region).
+  const ruinedAt = (L: number): boolean => ddAt(L) === null;
+  const ceil = maxLeverage ?? MAX_LEVERAGE;
+  let L_max = ceil;
+  if (ruinedAt(ceil)) {
+    let lo = 1; // proven non-ruined (ddAt(1) non-null short-circuit above)
+    let hi = ceil; // proven ruined
+    while (hi - lo > 1e-2) {
+      const mid = (lo + hi) / 2;
+      if (ruinedAt(mid)) hi = mid;
+      else lo = mid;
+    }
+    L_max = lo;
+  }
 
   // Reachability pre-check at the ceiling. |dd| is monotone non-decreasing in L on
   // the sleeve (a single series, `portDaily = L·r`, until ruin) → a UNIQUE root,
