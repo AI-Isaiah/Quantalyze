@@ -60,6 +60,7 @@ Purity: pandas + stdlib + typing ONLY.
 from __future__ import annotations
 
 import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -102,6 +103,23 @@ def _nonfinite_count(series: pd.Series) -> int:
     """Count non-finite (NaN / ±inf) values in a return series (MEDIUM-2). Pure
     stdlib ``math.isfinite`` per the module's pandas+stdlib purity note."""
     return sum(1 for v in series.to_numpy() if not math.isfinite(float(v)))
+
+
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _assert_iso_day_index(index: Any, context: str) -> None:
+    """Fail loud (C-idx) if any index label is not a bare ``YYYY-MM-DD`` string. The
+    whole module keys days via ``str(d)`` (the ``csv_daily_returns`` /
+    ``reconstruct_symbol_returns`` day-key shape). A ``DatetimeIndex`` stringifies to
+    ``'YYYY-MM-DD 00:00:00'`` and would SILENTLY MISALIGN flow days vs return days in
+    the ``set(r) | set(fbd)`` union — enforce the ISO-day contract at the boundary."""
+    for d in index:
+        if not (isinstance(d, str) and _ISO_DAY_RE.match(d)):
+            raise NavReconstructionError(
+                f"{context}: index label {d!r} is not a 'YYYY-MM-DD' day string — "
+                "refusing a non-ISO-day index that would misalign flow/return days"
+            )
 
 
 def eligible_key_predicate(key_row: Mapping[str, Any]) -> bool:
@@ -293,6 +311,10 @@ def segment_coverage(
     ``stitch_composite.windows_overlap`` for the rotation non-overlap check rather
     than hand-rolling interval math. No equity math here — this is the pure
     WHERE-do-synthetic-flows-apply contract for wave 3."""
+    # C-idx: enforce the ISO-day-string index contract at the boundary (a
+    # DatetimeIndex would misalign the ``str(d)`` day keys below).
+    for k, s in series_by_key.items():
+        _assert_iso_day_index(s.index, f"segment_coverage[{k}]")
     covered: dict[str, set[str]] = {
         k: {str(d) for d in s.index} for k, s in series_by_key.items()
     }
@@ -502,6 +524,9 @@ def replay_key_equity(
     on a roll-loop-vs-identity code divergence."""
     if anchor is None:
         return KeyEquity(None, REASON_NO_ANCHOR)
+
+    # C-idx: enforce the ISO-day-string index contract before any day keying.
+    _assert_iso_day_index(returns.index, "allocator equity replay")
 
     # C1: refuse a non-finite return VALUE at ingestion (a csv-gap NaN) with a
     # DATA-QUALITY diagnostic. Without this, a NaN return sails past the ≤−100%

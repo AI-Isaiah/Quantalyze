@@ -209,6 +209,24 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── C-idx: a non-ISO-day (Datetime) index fails loud at the module boundary ────
+
+def test_datetime_index_fails_loud_at_module_boundary():
+    """C-idx: the core keys days via ``str(d)``. A DatetimeIndex stringifies to
+    'YYYY-MM-DD 00:00:00' and would SILENTLY misalign flow days vs return days.
+    replay_key_equity and segment_coverage now reject a non-ISO-day index."""
+    from services.allocator_equity_derive import segment_coverage
+
+    dt_r = pd.Series([0.10, 0.10], index=pd.to_datetime(["2026-05-01", "2026-05-02"]), name="k")
+    with pytest.raises(NavReconstructionError):
+        replay_key_equity(dt_r, [], _ZERO_FLOW_ANCHOR)
+    with pytest.raises(NavReconstructionError):
+        segment_coverage({"k": dt_r})
+    # An ISO-day-string index is accepted (the contract shape).
+    iso_r = pd.Series([0.10, 0.10], index=["2026-05-01", "2026-05-02"], name="k")
+    assert replay_key_equity(iso_r, [], _ZERO_FLOW_ANCHOR).equity is not None
+
+
 # ── C1: replay_key_equity refuses a non-finite return with a data-quality error ─
 
 def test_replay_non_finite_return_refuses_with_data_quality_error():
