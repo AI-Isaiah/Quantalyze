@@ -209,6 +209,55 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── C3: is_trustworthy classifies benign vs blocking degradation ──────────────
+
+def test_is_trustworthy_benign_vs_blocking_degradation():
+    """C3: benign degradation (window-truncation, stale-mark carry, classified
+    rotation) keeps ``is_trustworthy`` True so a normal multi-key allocator's live
+    gate stays meaningful; a BLOCKING signal (dropped key, unclassified rotation,
+    out-of-window flow) flips it False so a consumer refuses."""
+    from services.allocator_equity_derive import DegradeReason, segment_coverage
+    from tests.e2_fixtures import ANCHORS, rotated_seam_pair
+
+    # BENIGN: two anchored keys, unequal windows (window-truncation + stale mark).
+    a = replay_key_equity(_flat_returns(), [], _ZERO_FLOW_ANCHOR)
+    b = replay_key_equity(pd.Series([0.10, 0.10], index=_DAYS[:2], name="key-B"), [], 121000.0)
+    benign = allocator_equity_curve({"key-A": a, "key-B": b})
+    assert benign.flags["window_truncated"] is True
+    assert benign.is_trustworthy is True
+    assert DegradeReason.WINDOW_TRUNCATED in benign.degrade_reasons
+
+    # BLOCKING: a dropped (unanchored) key.
+    dropped = allocator_equity_curve(
+        {"key-A": a, "key-B": replay_key_equity(_flat_returns(), [], None)}
+    )
+    assert dropped.is_trustworthy is False
+    assert DegradeReason.DROPPED_KEY in dropped.degrade_reasons
+
+    # BLOCKING: an unclassified rotation (mismatched empty seams on a real rotation).
+    c, d = rotated_seam_pair()
+    pke = {
+        c.key_id: replay_key_equity(c.returns, [], ANCHORS[c.key_id]),
+        d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
+    }
+    unclass = allocator_equity_curve(pke, seams=[])
+    assert unclass.is_trustworthy is False
+    assert DegradeReason.UNCLASSIFIED_ROTATION in unclass.degrade_reasons
+    # The CORRECT seam list is a benign classified rotation -> trustworthy.
+    good = allocator_equity_curve(pke, seams=segment_coverage(
+        {c.key_id: c.returns, d.key_id: d.returns}).seams)
+    assert good.is_trustworthy is True
+    assert DegradeReason.CLASSIFIED_ROTATION in good.degrade_reasons
+
+    # BLOCKING on a KeyEquity: an out-of-window flow.
+    ke = replay_key_equity(
+        pd.Series([0.10, 0.10, 0.10], index=_DAYS[:3], name="k"),
+        [ExternalFlow("2020-01-01", 100.0)], _ZERO_FLOW_ANCHOR,
+    )
+    assert ke.is_trustworthy is False
+    assert DegradeReason.OUT_OF_WINDOW_FLOW in ke.degrade_reasons
+
+
 # ── C-idx: a non-ISO-day (Datetime) index fails loud at the module boundary ────
 
 def test_datetime_index_fails_loud_at_module_boundary():

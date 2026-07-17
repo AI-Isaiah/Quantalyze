@@ -142,17 +142,24 @@ def parse_members(items: list[str]) -> list[tuple[str, float]]:
 
 
 def compute_anchor_consistency(
-    derived_terminal: float, live_equity: float, tol: float, *, degraded: bool = False
+    derived_terminal: float,
+    live_equity: float,
+    tol: float,
+    *,
+    trustworthy: bool = True,
 ) -> dict[str, Any]:
     """The anchor-consistency verdict — drift as a PCT + a bool (T-115-11: the
     verdict never needs raw USD; the raw figures live only in the founder-run
     sanitized JSON, never in a log). Non-positive derived terminal fails loud.
 
-    LOW-7: the derived $-curve carries a ``degraded`` flag (a dropped/unanchored key,
-    a truncated window, a stale-mark carry) that the OLD verdict ignored — a
-    within-tolerance-but-DEGRADED reconcile was stamped clean. The verdict now
-    REQUIRES ``within_tol AND not degraded``; the raw drift-in-band bool is surfaced
-    separately as ``drift_within_tol`` so the evidence still shows both."""
+    C3/LOW-7: the verdict gates on the curve's ``is_trustworthy`` (C3 classified-
+    degradation), NOT the blunt ``degraded`` bool. code-reviewer found the old
+    ``not degraded`` gate read False for EVERY normal multi-key allocator because a
+    BENIGN ``window_truncated`` folds into ``degraded``. ``is_trustworthy`` is False
+    only for BLOCKING degradation (a dropped key, an unclassified rotation, an
+    out-of-window flow) — so a benign window-truncation no longer blocks WHILE a
+    genuine (blocking) degradation still does. ``drift_within_tol`` is surfaced
+    separately so the evidence shows both signals."""
     if not (derived_terminal > 0.0):
         raise GroundTruthSkip(
             "derived terminal equity is non-positive — cannot form a drift ratio "
@@ -165,21 +172,23 @@ def compute_anchor_consistency(
         "live_equity": float(live_equity),
         "drift_pct": float(drift_pct),
         "drift_within_tol": bool(within_tol),
-        "degraded": bool(degraded),
-        "within_same_day_tolerance": bool(within_tol and not degraded),
+        "trustworthy": bool(trustworthy),
+        "within_same_day_tolerance": bool(within_tol and trustworthy),
         "tolerance": float(tol),
     }
 
 
 def derive_terminal_equity(
     series_by_key: dict[str, Any], anchors_by_key: dict[str, float]
-) -> tuple[float, dict[str, Any]]:
+) -> tuple[float, dict[str, Any], bool]:
     """Run the ``allocator_equity_derive`` CORE over the persisted per-key series
-    + anchors and return ``(derived_terminal, flags)``.
+    + anchors and return ``(derived_terminal, flags, is_trustworthy)``.
 
     Uses ONLY the pure core (backward $-replay per key + the common-window sum) —
     no store, no snapshots, no legacy TWR-scalar helper (additive-only). Fails
-    loud if the summed curve is honest-empty (never fabricates a terminal)."""
+    loud if the summed curve is honest-empty (never fabricates a terminal). C3:
+    ``is_trustworthy`` is the curve's classified-degradation verdict the anchor gate
+    consumes (benign window-truncation True; a blocking degradation False)."""
     from services.allocator_equity_derive import (
         allocator_equity_curve,
         replay_key_equity,
@@ -196,7 +205,7 @@ def derive_terminal_equity(
             f"(flags={curve.flags}) — nothing to reconcile against live equity"
         )
     terminal = float(curve.equity.iloc[-1])
-    return terminal, dict(curve.flags)
+    return terminal, dict(curve.flags), curve.is_trustworthy
 
 
 # ---------------------------------------------------------------------------
@@ -374,16 +383,19 @@ async def run(
         )
 
     # 4. Derive the terminal with the core (no store / snapshots / legacy TWR helper).
-    derived_terminal, flags = derive_terminal_equity(series_by_key, anchors_by_key)
+    derived_terminal, flags, trustworthy = derive_terminal_equity(
+        series_by_key, anchors_by_key
+    )
     evidence["derive_flags"] = flags
 
-    # 5. Anchor-consistency verdict + non-gating old-store evidence. LOW-7: a
-    # degraded derived curve is NOT a clean reconcile even within tolerance.
+    # 5. Anchor-consistency verdict + non-gating old-store evidence. C3/LOW-7: a
+    # BLOCKING-degraded (untrustworthy) derived curve is NOT a clean reconcile even
+    # within tolerance; a benign window-truncation does not block a normal allocator.
     evidence["anchor_consistency"] = compute_anchor_consistency(
         derived_terminal,
         live_equity,
         same_day_drift_tol,
-        degraded=bool(flags.get("degraded")),
+        trustworthy=trustworthy,
     )
     evidence["old_store_evidence"] = _old_store_evidence(allocator_id, derived_terminal)
     return evidence

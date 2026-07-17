@@ -12,25 +12,27 @@ from scripts.e2_allocator_ground_truth import (
 )
 
 
-def test_degraded_curve_within_tolerance_is_not_a_clean_reconcile():
-    """LOW-7: the derived $-curve's ``degraded`` flag (dropped/unanchored key,
-    truncated window, stale-mark carry) was IGNORED by the verdict — a
-    within-tolerance-but-degraded reconcile was stamped clean. The verdict now
-    requires ``within_tol AND not degraded`` while still surfacing the raw
-    drift-in-band bool separately."""
-    # Clean: within tolerance and NOT degraded -> verdict clean.
-    clean = compute_anchor_consistency(100_000.0, 101_000.0, 0.02, degraded=False)
+def test_untrustworthy_curve_within_tolerance_is_not_a_clean_reconcile():
+    """C3/LOW-7: the verdict gates on the curve's ``is_trustworthy`` (classified
+    degradation), not the blunt ``degraded`` bool. A BENIGN window-truncation
+    (trustworthy) within tolerance stays clean — the old ``not degraded`` gate wrongly
+    blocked EVERY normal multi-key allocator; a BLOCKING degradation (untrustworthy) is
+    not clean. The raw drift-in-band bool is surfaced separately."""
+    # Trustworthy + within tolerance -> verdict clean.
+    clean = compute_anchor_consistency(100_000.0, 101_000.0, 0.02, trustworthy=True)
     assert clean["drift_within_tol"] is True
-    assert clean["degraded"] is False
+    assert clean["trustworthy"] is True
     assert clean["within_same_day_tolerance"] is True
 
-    # Degraded: same in-band drift, but a degraded curve is NOT a clean reconcile.
-    degraded = compute_anchor_consistency(100_000.0, 101_000.0, 0.02, degraded=True)
-    assert degraded["drift_within_tol"] is True          # drift still in band
-    assert degraded["degraded"] is True
-    assert degraded["within_same_day_tolerance"] is False  # but no longer clean
+    # Untrustworthy (blocking degradation): same in-band drift, but NOT a clean reconcile.
+    untrustworthy = compute_anchor_consistency(
+        100_000.0, 101_000.0, 0.02, trustworthy=False
+    )
+    assert untrustworthy["drift_within_tol"] is True          # drift still in band
+    assert untrustworthy["trustworthy"] is False
+    assert untrustworthy["within_same_day_tolerance"] is False  # but not clean
 
-    # Default (no degraded arg) preserves the pure drift-in-band verdict.
+    # Default preserves the pure drift-in-band verdict (trustworthy by default).
     default = compute_anchor_consistency(100_000.0, 101_000.0, 0.02)
     assert default["within_same_day_tolerance"] is True
 

@@ -65,6 +65,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from enum import Enum
 from typing import Any
 
 import pandas as pd
@@ -76,15 +77,57 @@ from services.nav_twr import NavReconstructionError
 from services.portfolio_metrics import compute_modified_dietz, compute_mwr
 from services.stitch_composite import MemberWindow, windows_overlap
 
-# D3 honest-empty reasons (machine tokens; no USD, JSON-serializable).
-REASON_NO_KEYS = "no_eligible_keys"
-REASON_MISSING_SERIES = "d3_missing_series"
-# LOW-8 honest-empty reason: total weight mass <= 0 (no capital basis to blend on).
-REASON_ZERO_WEIGHT_MASS = "zero_weight_mass"
+class DegradeReason(str, Enum):
+    """C3: the CLOSED set of degradation signals every producer emits (a ``str``
+    enum so it JSON-serializes as its token and compares equal to the legacy string).
+    CLASSIFIED benign vs blocking so a consumer can honor the fail-loud signal via
+    ``is_trustworthy`` instead of re-implementing the stringly-typed ``flags`` policy
+    (the MEDIUM-6 / LOW-7 class). Do NOT grow a display-policy engine here — 115.1
+    refines nuance; this is the minimal correct/suspect split.
 
-# STITCH-04 honest-degradation reasons (machine tokens; no USD, JSON-serializable).
-REASON_NO_ANCHOR = "no_anchor"
-REASON_NO_ANCHORED_KEYS = "no_anchored_keys"
+    BENIGN — informational; the curve/blend/replay number is still CORRECT:
+    """
+
+    # ── BENIGN (curve is correct) ──
+    WINDOW_TRUNCATED = "window_truncated"
+    STALE_MARK_CARRY = "stale_mark_carry"
+    CLASSIFIED_ROTATION = "classified_rotation"
+    # honest-empty tokens (no data — a HONEST signal, never a fabricated number)
+    NO_KEYS = "no_eligible_keys"
+    MISSING_SERIES = "d3_missing_series"
+    ZERO_WEIGHT_MASS = "zero_weight_mass"
+    NO_ANCHOR = "no_anchor"
+    NO_ANCHORED_KEYS = "no_anchored_keys"
+    # ── BLOCKING (number is SUSPECT — a consumer must refuse) ──
+    UNCLASSIFIED_ROTATION = "unclassified_rotation"
+    EXCLUSIVE_FILL = "exclusive_fill"
+    OUT_OF_WINDOW_FLOW = "out_of_window_flow"
+    DROPPED_KEY = "dropped_key"
+
+
+# The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
+_BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
+    {
+        DegradeReason.UNCLASSIFIED_ROTATION,
+        DegradeReason.EXCLUSIVE_FILL,
+        DegradeReason.OUT_OF_WINDOW_FLOW,
+        DegradeReason.DROPPED_KEY,
+    }
+)
+
+
+def _is_trustworthy(reasons: frozenset[DegradeReason]) -> bool:
+    """True iff NO blocking degradation reason is present (a benign window-truncation
+    / stale-mark / honest-empty does NOT block; a suspect number does)."""
+    return not (reasons & _BLOCKING_REASONS)
+
+
+# Backwards-compatible aliases (the enum members ARE these strings).
+REASON_NO_KEYS = DegradeReason.NO_KEYS
+REASON_MISSING_SERIES = DegradeReason.MISSING_SERIES
+REASON_ZERO_WEIGHT_MASS = DegradeReason.ZERO_WEIGHT_MASS
+REASON_NO_ANCHOR = DegradeReason.NO_ANCHOR
+REASON_NO_ANCHORED_KEYS = DegradeReason.NO_ANCHORED_KEYS
 
 
 @dataclass(frozen=True)
@@ -93,10 +136,16 @@ class BlendResult:
 
     ``blended`` is the capital-weighted daily-return Series, or ``None`` on the D3
     honest-empty degrade (never a half-blend). ``flags`` carries JSON-serializable
-    bools/counts only — no USD magnitudes."""
+    bools/counts only — no USD magnitudes. ``degrade_reasons`` is the CLOSED
+    ``DegradeReason`` set (C3); ``is_trustworthy`` is False iff any is BLOCKING."""
 
     blended: pd.Series | None
     flags: dict[str, Any] = field(default_factory=dict)
+    degrade_reasons: frozenset[DegradeReason] = field(default_factory=frozenset)
+
+    @property
+    def is_trustworthy(self) -> bool:
+        return _is_trustworthy(self.degrade_reasons)
 
 
 def _nonfinite_count(series: pd.Series) -> int:
@@ -162,13 +211,19 @@ def blend_concurrent_returns(
     blend, they do not stitch."""
     keys = list(series_by_key.keys())
     if not keys:
-        return BlendResult(None, {"honest_empty": True, "reason": REASON_NO_KEYS})
+        return BlendResult(
+            None,
+            {"honest_empty": True, "reason": REASON_NO_KEYS},
+            frozenset({DegradeReason.NO_KEYS}),
+        )
 
     # D3 all-or-nothing: any eligible key with an empty series collapses the whole
     # blend to the honest-empty baseline (never a single-key / half-basis curve).
     if any(len(series_by_key[k]) == 0 for k in keys):
         return BlendResult(
-            None, {"honest_empty": True, "reason": REASON_MISSING_SERIES}
+            None,
+            {"honest_empty": True, "reason": REASON_MISSING_SERIES},
+            frozenset({DegradeReason.MISSING_SERIES}),
         )
 
     # MEDIUM-2: a PRESENT-but-non-finite return value (csv gap → NaN) would
@@ -199,7 +254,9 @@ def blend_concurrent_returns(
         # economic weight behind it. Honest-empty instead (like the D3 path), never
         # a soft flag on an invented curve.
         return BlendResult(
-            None, {"honest_empty": True, "reason": REASON_ZERO_WEIGHT_MASS}
+            None,
+            {"honest_empty": True, "reason": REASON_ZERO_WEIGHT_MASS},
+            frozenset({DegradeReason.ZERO_WEIGHT_MASS}),
         )
     norm = {k: raw[k] / total for k in keys}
 
@@ -224,6 +281,9 @@ def blend_concurrent_returns(
         1 for day in union_days if any(day not in series_by_key[k].index for k in keys)
     )
     blended = pd.Series(values, index=union_days, name="allocator_blend")
+    reasons = (
+        frozenset({DegradeReason.EXCLUSIVE_FILL}) if exclusive_fill_days else frozenset()
+    )
     return BlendResult(
         blended,
         {
@@ -232,6 +292,7 @@ def blend_concurrent_returns(
             "exclusive_fill_days": exclusive_fill_days,
             "n_keys": len(keys),
         },
+        reasons,
     )
 
 
@@ -427,11 +488,18 @@ class KeyEquity:
     ``equity`` is the per-day $-level Series (ISO-day index), or ``None`` when the
     key has no terminal anchor. ``reason`` is a machine token on the ``None`` path
     (no USD magnitude — T-115-05). ``flags`` carries JSON-serializable bools/counts
-    (e.g. ``out_of_window_flows``) — no USD magnitudes."""
+    (e.g. ``out_of_window_flows``) — no USD magnitudes. ``degrade_reasons`` is the
+    CLOSED ``DegradeReason`` set (C3); ``is_trustworthy`` is False iff any is
+    BLOCKING (e.g. an out-of-window flow)."""
 
     equity: pd.Series | None
     reason: str | None = None
     flags: dict[str, Any] = field(default_factory=dict)
+    degrade_reasons: frozenset[DegradeReason] = field(default_factory=frozenset)
+
+    @property
+    def is_trustworthy(self) -> bool:
+        return _is_trustworthy(self.degrade_reasons)
 
 
 @dataclass(frozen=True)
@@ -440,10 +508,19 @@ class AllocatorEquity:
 
     ``equity`` is the summed $-level Series over the common anchored window, or
     ``None`` when no key is anchored. ``flags`` carries JSON-serializable
-    bools/counts only — no USD magnitudes (T-115-05)."""
+    bools/counts only — no USD magnitudes (T-115-05). ``degrade_reasons`` is the
+    CLOSED ``DegradeReason`` set (C3); ``is_trustworthy`` is False iff any is BLOCKING
+    (a dropped key or an unclassified rotation — the number is suspect). A BENIGN
+    window-truncation / stale-mark carry does NOT block, so the live gate stays
+    meaningful for a normal multi-key allocator (the LOW-7 fix)."""
 
     equity: pd.Series | None
     flags: dict[str, Any] = field(default_factory=dict)
+    degrade_reasons: frozenset[DegradeReason] = field(default_factory=frozenset)
+
+    @property
+    def is_trustworthy(self) -> bool:
+        return _is_trustworthy(self.degrade_reasons)
 
 
 def perf_curve(returns: pd.Series | None) -> pd.Series | None:
@@ -535,7 +612,9 @@ def replay_key_equity(
     reconcile pattern) replays FORWARD and asserts byte-agreement, reddening only
     on a roll-loop-vs-identity code divergence."""
     if anchor is None:
-        return KeyEquity(None, REASON_NO_ANCHOR)
+        return KeyEquity(
+            None, REASON_NO_ANCHOR, degrade_reasons=frozenset({DegradeReason.NO_ANCHOR})
+        )
 
     # C-idx: enforce the ISO-day-string index contract before any day keying.
     _assert_iso_day_index(returns.index, "allocator equity replay")
@@ -558,7 +637,9 @@ def replay_key_equity(
     days = sorted(set(r) | set(fbd))
     n = len(days)
     if n == 0:
-        return KeyEquity(None, REASON_NO_ANCHOR)
+        return KeyEquity(
+            None, REASON_NO_ANCHOR, degrade_reasons=frozenset({DegradeReason.NO_ANCHOR})
+        )
 
     # MEDIUM-5: a flow dated OUTSIDE the return window [first, last] silently extends
     # the reconstructed curve with a fabricated point (a typo-year / out-of-window
@@ -596,7 +677,12 @@ def replay_key_equity(
     series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
     _assert_forward_agreement(series, r, fbd, days)
     flags = {"out_of_window_flows": out_of_window_flows} if out_of_window_flows else {}
-    return KeyEquity(series, None, flags)
+    reasons = (
+        frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
+        if out_of_window_flows
+        else frozenset()
+    )
+    return KeyEquity(series, None, flags, degrade_reasons=reasons)
 
 
 def _assert_forward_agreement(
@@ -671,6 +757,7 @@ def allocator_equity_curve(
                 "reason": REASON_NO_ANCHORED_KEYS,
                 "dropped_keys": dropped,
             },
+            frozenset({DegradeReason.NO_ANCHORED_KEYS}),
         )
 
     # Rotation ownership: derive the seam classification from the anchored coverage
@@ -744,6 +831,23 @@ def allocator_equity_curve(
         key_first[k] != union_days[0] or key_last[k] != union_days[-1]
         for k in anchored
     )
+    rotated_out_present = sorted(rotated_out & set(anchored))
+
+    # C3: the CLOSED reason set — BENIGN (window-truncation, stale-mark carry,
+    # classified rotation) vs BLOCKING (a dropped key, an unclassified rotation).
+    # ``is_trustworthy`` = no blocking reason, so a normal multi-key allocator with a
+    # benign window-truncation stays trustworthy (the LOW-7 gate fix).
+    reasons: set[DegradeReason] = set()
+    if dropped:
+        reasons.add(DegradeReason.DROPPED_KEY)
+    if window_truncated:
+        reasons.add(DegradeReason.WINDOW_TRUNCATED)
+    if n_tail_days_carried:
+        reasons.add(DegradeReason.STALE_MARK_CARRY)
+    if rotated_out_present:
+        reasons.add(DegradeReason.CLASSIFIED_ROTATION)
+    if unclassified:
+        reasons.add(DegradeReason.UNCLASSIFIED_ROTATION)
 
     return AllocatorEquity(
         total,
@@ -752,13 +856,14 @@ def allocator_equity_curve(
             "dropped_keys": dropped,
             "window_truncated": window_truncated,
             "n_tail_days_carried": n_tail_days_carried,
-            "rotated_out_keys": sorted(rotated_out & set(anchored)),
+            "rotated_out_keys": rotated_out_present,
             # MEDIUM-6: a DISTINCT non-benign token — keys the coverage says rotate
             # out but the passed seams did not classify (a potential double-count),
             # never conflated with the benign n_tail_days_carried stale-mark carry.
             "unclassified_truncation_keys": sorted(unclassified),
             "n_keys": len(anchored),
         },
+        frozenset(reasons),
     )
 
 
