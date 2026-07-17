@@ -1640,3 +1640,143 @@ describe("ScenarioComposer — Phase 112 per-key leverage at Save (RED scaffold)
     expect(body.draft.leverageOverrides).toHaveProperty(PK, 2);
   });
 });
+
+// ===========================================================================
+// Phase 113 · Plan 00 (Wave 0 RED scaffold) — WEIGHTS-03/04 solved-L persistence.
+//
+// A SOLVED leverage (from Target-max-DD mode) is just a leverage value with a
+// derived provenance: it must ride the IDENTICAL setLeverageOverrides fold +
+// pruneLeverageToDraftRefs(... eligiblePerKeyIds) keep-signal as a TYPED L
+// (provenance-independent persistence — 113-RESEARCH Landmine §). Mode + target
+// are TRANSIENT UI state (founder lock): only the solved L persists, and there
+// is NO SCENARIO_SCHEMA_VERSION bump (a solved L is a new value in an existing
+// map). RED on the current tree: the mode toggle testid does not exist, so the
+// mode-flip query fails by assertion before any Save runs.
+// ===========================================================================
+describe("ScenarioComposer — Phase 113 solved-L persists at Save (RED scaffold)", () => {
+  const PK = "pk-113-save-a"; // an INCLUDED per-key ref (api_key_id)
+
+  const PK_HOLDING = {
+    ...HOLDING_BTC,
+    symbol: "BTC",
+    api_key_id: PK,
+    value_usd: 100_000,
+  };
+  const PK_HOLDINGS = [PK_HOLDING];
+  // One −5% day among zeros → sleeve base max-DD 5% → a 20% target solves to ≈4×.
+  const PK_SERIES = Array.from({ length: 14 }, (_, i) => ({
+    date: `2026-05-${String(i + 1).padStart(2, "0")}`,
+    value: i === 6 ? -0.05 : 0,
+  }));
+  const PK_APIKEY = {
+    id: PK,
+    exchange: "binance",
+    label: "Main desk",
+    is_active: true,
+    sync_status: null,
+    last_sync_at: null,
+    account_balance_usdt: null,
+    created_at: "2026-01-01T00:00:00Z",
+    sync_error: null,
+    last_429_at: null,
+    disconnected_at: null,
+  };
+
+  function makePerKeyBookPayload(): MyAllocationDashboardPayload {
+    return makePayload({
+      apiKeys: [PK_APIKEY],
+      holdingsSummary: PK_HOLDINGS,
+      perKeyReturnsByApiKeyId: { [PK]: PK_SERIES },
+      perKeyDailiesGateSatisfied: true,
+      eligibleApiKeyIds: [PK],
+    });
+  }
+
+  function renderPerKeyBook() {
+    return render(
+      <ScenarioComposer
+        payload={makePerKeyBookPayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  beforeEach(() => {
+    lsStore.clear();
+    vi.clearAllMocks();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.stubGlobal("localStorage", localStorageMock);
+  });
+
+  // (a) RED — flip the per-key row to Target mode, commit a reachable target
+  // (producing a solved L), then Save → POST. Assert (1) the POST body's
+  // leverageOverrides[PK] equals the solved L shown in the row's leverage input
+  // (persists exactly like a typed L via the SAME prune keep-signal); (2) the
+  // payload schema_version equals the CURRENT imported SCENARIO_SCHEMA_VERSION (no
+  // bump); (3) the stringified payload carries NO transient mode/target field.
+  // RED: the mode-toggle testid does not exist → the flip query fails by assertion.
+  it("(a) RED — a solved L persists in the POST payload's leverageOverrides; no schema bump; no transient mode/target", async () => {
+    const fetchMock = makeFetchMock(() => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: NEW_ID, name: "Solved-L per-key" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPerKeyBook();
+
+    // Flip the PK row to Target mode via the per-row mode toggle.
+    const row = document.querySelector(
+      `[data-scope-ref="${PK}"]`,
+    ) as HTMLElement | null;
+    expect(row).not.toBeNull();
+    const toggle = row!.querySelector(
+      '[data-testid="scenario-leverage-mode-toggle"]',
+    );
+    expect(toggle).not.toBeNull(); // RED — the mode toggle does not exist yet.
+    act(() => {
+      fireEvent.click(toggle as Element);
+    });
+
+    // Commit a reachable sleeve target (5% base → 20% ≈ 4×).
+    const target = document.getElementById(
+      `target-dd-${PK}`,
+    ) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(target, { target: { value: "20" } });
+      fireEvent.blur(target);
+    });
+    const solvedL = parseFloat(
+      (document.getElementById(`leverage-${PK}`) as HTMLInputElement).value,
+    );
+    expect(solvedL).toBeGreaterThan(1);
+
+    // First Save → POST a new row.
+    fireEvent.click(screen.getByRole("button", { name: /^Save portfolio$/i }));
+    fireEvent.change(screen.getByPlaceholderText(/Name this portfolio/i), {
+      target: { value: "Solved-L per-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(saveCalls(fetchMock)).toHaveLength(1);
+    });
+    const [url, init] = saveCalls(fetchMock)[0];
+    expect(url).toBe("/api/allocator/scenario/saved");
+    expect((init as RequestInit).method).toBe("POST");
+    const body = JSON.parse((init as RequestInit).body as string);
+
+    // (1) the SOLVED L persists exactly like a typed L (same prune keep-signal).
+    expect(body.draft.leverageOverrides[PK]).toBe(solvedL);
+    // (2) no schema bump — single source of truth (imported constant).
+    expect(body.draft.schema_version).toBe(SCENARIO_SCHEMA_VERSION);
+    // (3) mode + target are transient UI state — never serialized.
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain("targetMaxDD");
+    expect(serialized).not.toContain("rowMode");
+  });
+});
