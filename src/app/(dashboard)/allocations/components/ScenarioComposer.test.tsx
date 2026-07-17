@@ -5475,6 +5475,52 @@ describe("ScenarioComposer — Phase 112 per-key weights + leverage (RED scaffol
     ).toBeCloseTo(1, 3);
   });
 
+  // (RT-02) [Phase 112 red team] — with EVERY per-key source excluded, the added
+  // row's DISPLAY basis must equal the EDIT basis. No selected per-key engine unit
+  // remains → the edit path (legacy setWeightOverride) stores the RAW typed 0.5, so
+  // the input must DISPLAY 0.5 — never the normalized 1.000 the old
+  // `perKeySources.length > 0` display switch showed (a controlled-input desync
+  // where re-typing the displayed 1.000 silently overwrote the 0.5). RED-proof:
+  // pre-fix the added input reads 1.000, not 0.500.
+  it("(RT-02) — all per-key excluded + one added: the added input DISPLAYS the raw typed 0.5, not a normalized 1.000", () => {
+    render112();
+    addStrategy({
+      id: A_ID,
+      name: "Strat A 112",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    // Exclude BOTH per-key sources → no selected per-key engine unit remains.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K1} in projection`,
+        }),
+      );
+      fireEvent.click(
+        screen.getByRole("switch", {
+          name: `Include Binance — ${K2} in projection`,
+        }),
+      );
+    });
+    const wA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    act(() => {
+      fireEvent.change(wA, { target: { value: "0.5" } });
+    });
+    // Display basis == edit basis: raw 0.5, NOT the normalized 1.000.
+    const shownA = document.getElementById(`weight-${A_ID}`) as HTMLInputElement;
+    expect(Number(shownA.value)).toBeCloseTo(0.5, 3);
+    // Re-typing the displayed value reproduces the stored value (no snap-drift).
+    act(() => {
+      fireEvent.change(shownA, { target: { value: shownA.value } });
+    });
+    expect(
+      Number(
+        (document.getElementById(`weight-${A_ID}`) as HTMLInputElement).value,
+      ),
+    ).toBeCloseTo(0.5, 3);
+  });
+
   // (c) RED — setting K1's leverage to 2 re-derives the blend (wᵢ·Lᵢ·rᵢ), moving a
   // projection-derived KPI vs the 1× baseline. Fails today: the per-key leverage
   // input does not exist.

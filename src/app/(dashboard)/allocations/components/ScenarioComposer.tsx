@@ -1114,9 +1114,12 @@ export function ScenarioComposer({
       .map((s) => s.id);
     // Mixed book ⇔ the engine basis carries a per-key (non-added) unit. A pure
     // added-only engine set (no per-key units) keeps the legacy path so a lone
-    // added weight is not renormalized to 1.0.
-    const isMixedPerKeyBook =
-      usePerKeySources && basisIds.some((id) => !addedIdSet.has(id));
+    // added weight is not renormalized to 1.0. RT-02 (Phase 112 red team): read
+    // the SHARED `isMixedPerKeyBook` memo — the identical condition the added-row
+    // DISPLAY basis reads — so the edit basis and the display basis can never
+    // diverge (the old inline `usePerKeySources && basisIds.some(...)` and the
+    // display's weaker `perKeySources.length > 0` desynced when all per-key
+    // sources were excluded).
     if (!isMixedPerKeyBook) {
       scenario.setWeightOverride(scopeRef, clampedWeight);
       return;
@@ -2421,6 +2424,26 @@ export function ScenarioComposer({
     }
     return out;
   }, [engineSet.strategies, projectionState]);
+
+  // RT-02 (Phase 112 red team) — the ONE mixing condition, computed once and
+  // shared by BOTH the weight EDIT path (handleWeightChange's `isMixedPerKeyBook`)
+  // and the added-row DISPLAY basis (threaded to CompositionList). A "mixed book"
+  // is one whose SELECTED engine basis actually carries a per-key (non-added) unit
+  // — NOT merely `perKeySources.length > 0`, which is true even when every per-key
+  // source is excluded. The weaker `perKeySources.length > 0` display switch made
+  // the added input show `blendShareByRef` (a normalized 1.000 when the added row
+  // is the sole selected unit) while the edit path stored the RAW typed value —
+  // a controlled-input desync where the box snapped to a value that did not
+  // reproduce on re-type. Deriving both from this single boolean keeps display
+  // basis == edit basis in every selection state.
+  const isMixedPerKeyBook = useMemo(
+    () =>
+      usePerKeySources &&
+      engineSet.strategies.some(
+        (s) => projectionState.selected[s.id] && !addedIdSet.has(s.id),
+      ),
+    [usePerKeySources, engineSet.strategies, projectionState, addedIdSet],
+  );
   const dateMapCache = useMemo(
     // Reads ONLY strategies.daily_returns — key on the referentially-stable
     // `engineSet.strategies` (=== activeAdapterOutput.strategies) so a
@@ -4583,6 +4606,7 @@ export function ScenarioComposer({
         <CompositionList
           draft={scenario.draft}
           perKeySources={usePerKeySources ? dataSourceKeys : EMPTY_PER_KEY_SOURCES}
+          mixedPerKeyBook={isMixedPerKeyBook}
           onTogglePerKey={scenario.togglePerKeySource}
           addedProvenanceByRef={addedProvenanceByRef}
           onToggle={scenario.toggleHolding}
@@ -4931,6 +4955,16 @@ interface CompositionListProps {
    * they live on the Holdings tab).
    */
   perKeySources: PerKeySource[];
+  /**
+   * RT-02 (Phase 112 red team) — TRUE ⇔ the SELECTED engine basis carries a
+   * per-key (non-added) unit (the exact `isMixedPerKeyBook` condition the weight
+   * EDIT path uses). The added-row weight input reads its display basis from THIS
+   * — normalized blend share when mixed, raw stored weight otherwise — so the
+   * displayed value always matches what an edit would store. Deliberately NOT
+   * `perKeySources.length > 0`, which stays true even when every per-key source
+   * is excluded (the desync bug).
+   */
+  mixedPerKeyBook: boolean;
   /** CONSTIT-03 — toggle a per-key source through the shared toggleByScopeRef
    *  channel (never rescales weightOverrides). */
   onTogglePerKey: (ref: string) => void;
@@ -4975,6 +5009,7 @@ interface CompositionListProps {
 function CompositionList({
   draft,
   perKeySources,
+  mixedPerKeyBook,
   onTogglePerKey,
   addedProvenanceByRef,
   onToggle,
@@ -5156,17 +5191,20 @@ function CompositionList({
         )}
         {draft.addedStrategies.map((a) => {
           const enabled = draft.toggleByScopeRef[a.id] !== false;
-          // CR-01 (Phase 112 review) — in a MIXED book (per-key rows present)
-          // show the NORMALIZED blend share so the added row reads the SAME
-          // basis the per-key rows do (both are engine units renormalized to
-          // sum 1); a raw `weightOverrides` value would display a different
-          // basis than the per-key rows even before an edit. Added-only (no
-          // per-key rows) keeps the raw value byte-identical — the zero-size /
-          // clamp gates and their tests read it.
-          const weight =
-            perKeySources.length > 0
-              ? (blendShareByRef[a.id] ?? draft.weightOverrides[a.id] ?? 0)
-              : (draft.weightOverrides[a.id] ?? 0);
+          // CR-01 (Phase 112 review) — in a MIXED book (a SELECTED per-key engine
+          // unit exists) show the NORMALIZED blend share so the added row reads the
+          // SAME basis the per-key rows do (both are engine units renormalized to
+          // sum 1); a raw `weightOverrides` value would display a different basis
+          // than the per-key rows even before an edit. Added-only keeps the raw
+          // value byte-identical — the zero-size / clamp gates and their tests read
+          // it. RT-02 (Phase 112 red team): switch on the SHARED `mixedPerKeyBook`
+          // (the exact edit-path condition), NOT `perKeySources.length > 0` — the
+          // latter stayed true when every per-key source was excluded, so the
+          // display showed a normalized 1.000 while the edit path stored the raw
+          // typed value (a controlled-input desync).
+          const weight = mixedPerKeyBook
+            ? (blendShareByRef[a.id] ?? draft.weightOverrides[a.id] ?? 0)
+            : (draft.weightOverrides[a.id] ?? 0);
           // Phase 58 COVERAGE-02 — three-state chip, derived (NOT re-computed)
           // from the row's `enabled` (the `selected` axis) + the threaded
           // `coverageEligible` map, exactly the two states the plan wires here:
