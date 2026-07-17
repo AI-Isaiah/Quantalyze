@@ -1237,6 +1237,110 @@ def compute_all_metrics(
     )
 
 
+def total_return_from_equity(equity: pd.Series | None) -> float | None:
+    """Endpoint-ratio total return of an equity series (backbone module home).
+
+    Returns ``eq.iloc[-1] / eq.iloc[0] - 1`` (a decimal, e.g. 0.10 for +10%), or
+    None when there is no formable ratio (``equity`` is None / fewer than 2
+    observations / a zero first value). This is the backbone-blessed replacement
+    for the deleted portfolio_metrics TWR scalar at its four ``events=[]`` call
+    sites in routers/portfolio.py (per-strategy equity, portfolio cumprod,
+    benchmark cumprod, verify_strategy cumprod).
+
+    On a ``(1+r).cumprod()`` series whose first value is ``(1 + r_0)`` this
+    endpoint ratio intentionally PRESERVES the legacy day-0-exclusion semantics
+    (the byte-identical mandate of Phase 114 / BACKBONE-01): the forward TWR
+    scalar excludes day-0's return. Do NOT swap in ``compute_all_metrics``'s
+    ``cumulative_return`` (which is ``Π(1+r)-1`` over ALL days INCLUDING day 0);
+    that differs from the deleted TWR scalar by exactly the ``(1 + r_0)`` factor
+    and the 114-01 golden-parity oracle ASSERTS that divergence — reading
+    cumulative_return would shift displayed numbers.
+
+    The zero-first-value guard mirrors the legacy M-0698 ``begin_val=0``
+    (portfolio-passed-through-zero) short-circuit: no ratio is formable, so we
+    log a warning of the same shape and return None.
+    """
+    if equity is None or len(equity) < 2:
+        return None
+    first = float(equity.iloc[0])
+    if first == 0.0:
+        # M-0698 shape: a zero begin-value means the series passed through 0 (a
+        # blow-up/recover event); no ratio is formable, so the forward TWR scalar
+        # is undefined for this series.
+        logger.warning(
+            "total_return_from_equity: begin_val=0 (series at zero); "
+            "no formable endpoint ratio — returning None",
+        )
+        return None
+    return _safe_float(float(equity.iloc[-1]) / first - 1.0)
+
+
+def sharpe_vol_status_from_backbone(
+    returns: pd.Series,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+) -> tuple[float | None, float | None, str]:
+    """Annualised (vol, sharpe, status) read from the unified backbone.
+
+    Backbone-derived replacement for the deleted legacy Sharpe/vol helper at
+    its production call sites (portfolio-level Sharpe/vol, verify_strategy
+    Sharpe/vol). Reads ``volatility`` and ``sharpe`` directly out of
+    ``compute_all_metrics`` output. The ``status`` feeds the vol_status/
+    sharpe_status data-quality channel (routers/portfolio.py L1089-1090).
+
+    The tuple is 3-wide: ``mean_ret`` is dropped from the legacy 4-tuple because
+    BOTH production call sites discard it (surgical-change rule). Status is one
+    of the REACHABLE legacy codes: ``"ok"``, ``"insufficient_history"``,
+    ``"zero_volatility"``, ``"nan_vol"``. ``status != "ok"`` always implies
+    ``sharpe is None``.
+
+    TWO pre-backbone guards short-circuit BEFORE the pipeline call. They mirror
+    the legacy short-circuits AND structurally keep a degenerate series out of
+    the full pipeline (monthly resample / mtd-ytd slices / cumprod / qs.stats.*).
+    ``compute_all_metrics`` guards ONLY ``len < 2`` (metrics.py:457, which
+    raises ValueError) — it is UNPROVEN to degrade gracefully on an all-NaN
+    ``len >= 2`` series, so feeding one in would risk a production 500 where the
+    legacy path returned a graceful data-quality status. The guards prevent that:
+
+      * ``len(returns) <= 1`` -> ``(None, None, "insufficient_history")`` WITHOUT
+        calling the backbone (matches the legacy short-circuit; also dodges the
+        :457 raise).
+      * ``pd.isna(returns.std())`` -> ``(None, None, "nan_vol")`` WITHOUT calling
+        the backbone. Legacy ``nan_vol`` IS exactly "vol is NaN": ``std(ddof=1)``
+        (skipna — the same call the legacy helper used) over an all-NaN series OR
+        a single non-NaN observation is NaN, and ``_safe_float(NaN) -> None``.
+        Detecting it via pandas ``std`` faithfully reproduces the legacy nan_vol
+        OUTPUT and never lets an all-NaN series reach the pipeline. This guard
+        changes nothing on the normal path (a real series has finite std) and
+        does NOT intercept the flat-series case (``std == 0.0`` is finite, not
+        NaN -> falls through to the zero_volatility branch below).
+
+    Then the backbone is called ONCE and:
+      * ``vol is None`` -> ``(None, None, "nan_vol")`` (defensive belt-and-braces;
+        the std guard should already have caught every NaN-vol case);
+      * ``vol == 0.0`` -> ``(0.0, None, "zero_volatility")``;
+      * else -> ``(vol, sharpe, "ok")`` (sharpe is finite whenever vol is finite
+        and nonzero on real data).
+
+    DEAD BRANCHES (documented, NOT reproduced): the legacy ``"nan_mean"`` /
+    ``"nan_sharpe"`` statuses are UNREACHABLE under pandas skipna — once vol is
+    finite and nonzero, the same >= 2 non-NaN observations yield a finite mean
+    and a finite mean/vol, so neither status can occur. They are deliberately not
+    synthesized here.
+    """
+    if len(returns) <= 1:
+        return None, None, "insufficient_history"
+    if pd.isna(returns.std()):
+        return None, None, "nan_vol"
+    m = compute_all_metrics(returns, periods_per_year=periods_per_year)
+    vol = m["volatility"]
+    sharpe = m["sharpe"]
+    if vol is None:
+        return None, None, "nan_vol"
+    if vol == 0.0:
+        return 0.0, None, "zero_volatility"
+    return vol, sharpe, "ok"
+
+
 def compute_risk_of_ruin(
     win_rate: float,
     payoff_ratio: float,

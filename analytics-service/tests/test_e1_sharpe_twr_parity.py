@@ -54,8 +54,14 @@ import pytest
 from routers.portfolio import _compute_sharpe_and_vol
 from services.portfolio_metrics import compute_twr
 
-# Backbone (survivor) — the unified metrics pipeline that must reproduce them.
-from services.metrics import compute_all_metrics
+# Backbone (survivor) — the unified metrics pipeline that must reproduce them,
+# plus the plan-114-02 backbone-module replacement helpers under test.
+import services.metrics as metrics_mod
+from services.metrics import (
+    compute_all_metrics,
+    sharpe_vol_status_from_backbone,
+    total_return_from_equity,
+)
 
 # Numeric parity tolerance. Same math, different op order → agreement to ~1e-16
 # in practice; 1e-12 leaves headroom for float reassociation but is orders of
@@ -318,3 +324,74 @@ class TestBackboneDerivationParity:
         # And the divergence is EXACTLY the (1+r_0) factor: re-including day 0 in the
         # endpoint-ratio reproduces cumulative_return.
         _assert_rel((1 + legacy_twr) * (1 + r0) - 1, cum_ret, msg="(1+r_0) reconciliation")
+
+    # ── plan-114-02 helper wiring pins (PERMANENT) ────────────────────────────
+    # These prove the new backbone-module replacement helpers equal the SAME
+    # inline oracle the legacy symbols were pinned to — so ``new ≡ oracle ≡
+    # legacy`` transitively, with no reference to the deletion targets.
+
+    def test_total_return_from_equity_matches_endpoint_oracle(self):
+        # On the cumprod of (a)/(d) and on the non-unit equity fixture (e), the
+        # helper equals the legacy endpoint-ratio oracle at rel 1e-12.
+        for r in (_fixture_a(), _fixture_d()):
+            eq = (1 + r).cumprod()
+            exp = eq.iloc[-1] / eq.iloc[0] - 1
+            _assert_rel(total_return_from_equity(eq), exp, msg="helper TWR vs endpoint oracle")
+        eq_e = _fixture_e()
+        exp_e = eq_e.iloc[-1] / eq_e.iloc[0] - 1
+        _assert_rel(total_return_from_equity(eq_e), exp_e, msg="helper TWR on non-unit equity")
+
+    def test_total_return_from_equity_none_guards(self):
+        # 1-point series -> None; a zero first value -> None (no formable ratio).
+        one_pt = pd.Series([1.0], index=pd.date_range("2024-01-01", periods=1, freq="D"))
+        assert total_return_from_equity(one_pt) is None
+        assert total_return_from_equity(None) is None
+        zero_first = pd.Series([0.0, 1.0, 2.0], index=pd.date_range("2024-01-01", periods=3, freq="D"))
+        assert total_return_from_equity(zero_first) is None
+
+    def test_sharpe_vol_status_ok_matches_oracle(self):
+        # (a) -> (vol, sharpe, "ok") matching the inline oracle at rel 1e-12.
+        r = _fixture_a()
+        exp_vol = r.std() * math.sqrt(PPY)
+        exp_sharpe = (r.mean() * PPY) / exp_vol
+        vol, sharpe, status = sharpe_vol_status_from_backbone(r, periods_per_year=PPY)
+        assert status == "ok"
+        _assert_rel(vol, exp_vol, msg="helper vol vs oracle")
+        _assert_rel(sharpe, exp_sharpe, msg="helper sharpe vs oracle")
+
+    def test_sharpe_vol_status_zero_volatility(self):
+        # (b) flat all-zeros -> (0.0, None, "zero_volatility").
+        assert sharpe_vol_status_from_backbone(_fixture_b(), periods_per_year=PPY) == (
+            0.0, None, "zero_volatility",
+        )
+
+    def test_sharpe_vol_status_insufficient_history(self):
+        # (c) 1-sample -> (None, None, "insufficient_history").
+        assert sharpe_vol_status_from_backbone(_fixture_c(), periods_per_year=PPY) == (
+            None, None, "insufficient_history",
+        )
+
+    def test_sharpe_vol_status_degenerate_all_nan_no_raise(self):
+        # BLOCKER-fix b: (f) DEGENERATE all-NaN len>=2 -> EXACTLY
+        # (None, None, "nan_vol") and DOES NOT RAISE (the anti-500 proof matching
+        # the legacy graceful baseline pinned in 114-01). A pipeline raise here
+        # would surface as a pytest ERROR, failing this test loudly.
+        assert sharpe_vol_status_from_backbone(_fixture_f(), periods_per_year=PPY) == (
+            None, None, "nan_vol",
+        )
+
+    def test_degenerate_paths_never_call_the_backbone(self, monkeypatch):
+        # BLOCKER-fix (structural, not incidental): patch compute_all_metrics to
+        # RAISE, then prove the degenerate paths (c) 1-sample and (f) all-NaN
+        # STILL return the graceful tuples — i.e. they provably never reach the
+        # pipeline. monkeypatch auto-restores after the test.
+        def _boom(*_a, **_k):  # pragma: no cover - must never be invoked here
+            raise AssertionError("compute_all_metrics must NOT be called on degenerate input")
+
+        monkeypatch.setattr(metrics_mod, "compute_all_metrics", _boom)
+        assert sharpe_vol_status_from_backbone(_fixture_c(), periods_per_year=PPY) == (
+            None, None, "insufficient_history",
+        )
+        assert sharpe_vol_status_from_backbone(_fixture_f(), periods_per_year=PPY) == (
+            None, None, "nan_vol",
+        )
