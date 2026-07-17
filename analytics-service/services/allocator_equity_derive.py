@@ -510,29 +510,40 @@ def _assert_forward_agreement(
 
 def allocator_equity_curve(
     per_key_equity: Mapping[str, KeyEquity],
+    seams: Sequence[Seam] | None = None,
 ) -> AllocatorEquity:
     """Sum the anchored per-key $-equity curves over the UNION of their windows.
 
     A key with ``equity is None`` (no anchor) is DROPPED (never invented). The
     allocator curve spans the UNION of every surviving (anchored) key's day index;
-    on each union day the portfolio $-equity is the SUM of each key's level that
-    day. A still-held key whose OWN window has ended keeps its last-known level
-    CARRIED FORWARD (last-observation-carried-forward) for the remaining union
-    days — the allocator's live equity, which the ground-truth gate reconciles the
-    terminal against, is the sum of every key's last-known ``value_usd`` anchor, so
-    the terminal here MUST be ``Σ_k anchor_k``, never a rolled-back intersection
-    level. A key contributes 0 on union days BEFORE its own window opens (not yet
-    held). Interior absent days inside a key's own window carry the prior level.
+    on each union day the portfolio $-equity is the SUM of each key's level that day.
+
+    OWNERSHIP AT A ROTATION (Finding 1 — the discriminator is the seam list):
+      * A key that is ROTATED OUT at a seam (it appears in some seam's
+        ``prev_keys``) hands its capital to the NEXT block — ``build_allocator_ledger``
+        already books that jump as an internal redeployment. So a rotated-out key
+        STOPS contributing after its own last day: 0 thereafter, NEVER a stale
+        carry-forward. Carrying it forward would DOUBLE-COUNT the redeployed capital
+        (it would show as the prev key's level AND inside the next block).
+      * A NON-rotated still-held key whose OWN window has ended keeps its last-known
+        level CARRIED FORWARD (last-observation-carried-forward) — the WR-01 case: the
+        allocator's live equity, which the ground-truth gate reconciles the terminal
+        against, is the sum of every still-held key's last-known ``value_usd`` anchor,
+        so the terminal MUST be ``Σ_k anchor_k``, never a rolled-back intersection.
+
+    The seam classification is taken from ``seams`` when supplied (pass the SAME list
+    ``build_allocator_ledger`` consumed, for guaranteed curve/ledger agreement) or
+    DERIVED internally from the anchored coverage windows otherwise — either way the
+    ownership semantics match the ledger by construction. A key contributes 0 on
+    union days BEFORE its own window opens (not yet held); interior absent days inside
+    a key's own window carry the prior level.
 
     WR-01: the OLD implementation summed only over the INTERSECTION of the anchored
-    indices, so two anchored keys with DIFFERENT windows silently dropped the
-    non-overlapping tails with ``degraded=False`` — the caller could not tell the
-    terminal was a rolled-back level. Now, whenever any surviving key's window is a
-    strict SUBSET of the union (a dropped key OR unequal per-key windows), the
-    result is flagged ``degraded=True`` with ``window_truncated`` and a
-    carried-tail-day count. The truncation/staleness is NEVER silent.
-
-    Every key unanchored -> ``None`` + honest-empty flag."""
+    indices, silently dropping non-overlapping tails with ``degraded=False``. Now,
+    whenever any surviving key's window is a strict SUBSET of the union, the result is
+    flagged ``degraded=True`` with ``window_truncated``, a non-rotated stale-mark
+    tail-day count, and the ``rotated_out_keys`` list (so a consumer can distinguish a
+    stale mark from a rotation). Every key unanchored -> ``None`` + honest-empty."""
     anchored = {
         k: ke.equity for k, ke in per_key_equity.items() if ke.equity is not None
     }
@@ -548,6 +559,15 @@ def allocator_equity_curve(
             },
         )
 
+    # Rotation ownership: derive the seam classification from the anchored coverage
+    # windows when the caller does not supply it, so the curve agrees with
+    # ``build_allocator_ledger`` on which keys are redeployed vs still held.
+    if seams is None:
+        seams = segment_coverage(dict(anchored)).seams
+    rotated_out: set[str] = set()
+    for seam in seams:
+        rotated_out.update(seam.prev_keys or ())
+
     union_days = sorted({str(d) for s in anchored.values() for d in s.index})
     union_index = pd.Index(union_days)
 
@@ -560,25 +580,25 @@ def allocator_equity_curve(
         key_first[k] = days_sorted[0]
         key_last[k] = days_sorted[-1]
         # Reindex onto the union, carrying the last-known level forward across any
-        # interior gap AND past the key's own last day (a still-held stale mark);
-        # 0 before the key opens (not yet part of the portfolio).
-        contrib = (
-            pd.Series(day_map)
-            .reindex(union_days)
-            .ffill()
-            .where(union_index >= key_first[k], 0.0)
-            .fillna(0.0)
-        )
+        # interior gap. 0 before the key opens (not yet part of the portfolio).
+        contrib = pd.Series(day_map).reindex(union_days).ffill()
+        if k in rotated_out:
+            # Rotated OUT: real level within its window, 0 after its last day (the
+            # capital is redeployed into the next block — no stale carry-forward).
+            contrib = contrib.where(union_index <= key_last[k], 0.0)
+        contrib = contrib.where(union_index >= key_first[k], 0.0).fillna(0.0)
         total = total.add(contrib, fill_value=0.0)
 
-    # A surviving key whose window is a strict subset of the union means the curve
-    # carries a stale mark (or a dropped key was excluded) — flag, never silent.
+    # Stale marks are ONLY non-rotated keys carried past their own last day.
+    n_tail_days_carried = sum(
+        1
+        for day in union_days
+        for k in anchored
+        if k not in rotated_out and day > key_last[k]
+    )
     window_truncated = any(
         key_first[k] != union_days[0] or key_last[k] != union_days[-1]
         for k in anchored
-    )
-    n_tail_days_carried = sum(
-        1 for day in union_days for k in anchored if day > key_last[k]
     )
 
     return AllocatorEquity(
@@ -588,6 +608,7 @@ def allocator_equity_curve(
             "dropped_keys": dropped,
             "window_truncated": window_truncated,
             "n_tail_days_carried": n_tail_days_carried,
+            "rotated_out_keys": sorted(rotated_out & set(anchored)),
             "n_keys": len(anchored),
         },
     )

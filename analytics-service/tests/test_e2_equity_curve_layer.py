@@ -209,6 +209,44 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── Test 8 (Finding 1): a rotated-out key stops contributing, no double-count ─
+
+def test_rotation_seam_prev_key_stops_contributing_no_double_count():
+    """Finding 1: a key on the PREV side of a rotation seam hands its capital to the
+    next block (``build_allocator_ledger`` books the jump as internal redeployment).
+    It must STOP contributing after its own last day — carrying its stale mark
+    forward (the benign concurrent WR-01 case) would DOUBLE-COUNT the redeployed
+    capital: it would appear both as the prev key's carried level AND inside the next
+    block. Uses the frozen C->D rotation fixture (C 50k Mar1-20 -> D 60k Mar21-Apr9)."""
+    from services.allocator_equity_derive import segment_coverage
+    from tests.e2_fixtures import ANCHORS, rotated_seam_pair
+
+    c, d = rotated_seam_pair()
+    pke = {
+        c.key_id: replay_key_equity(c.returns, [], ANCHORS[c.key_id]),
+        d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
+    }
+    seg = segment_coverage({c.key_id: c.returns, d.key_id: d.returns})
+    seam_day = seg.seams[0].next_first_day
+    d_first = float(pke[d.key_id].equity.iloc[0])
+
+    # Default path: the curve derives the seam classification internally.
+    out = allocator_equity_curve(pke)
+    # On the seam day C has rotated out -> curve == D's first level alone, NOT
+    # C_last(50000) + D_first (the old ~111151 double-count).
+    assert out.equity[seam_day] == pytest.approx(d_first, abs=1e-6)
+    assert out.equity[seam_day] != pytest.approx(50000.0 + d_first, abs=1.0)
+    # Terminal == D's anchor alone (C's capital BECAME D; it is not still held).
+    assert out.equity.iloc[-1] == pytest.approx(60000.0, abs=1e-6)
+    assert out.equity.iloc[-1] != pytest.approx(110000.0, abs=1.0)
+    assert out.flags["rotated_out_keys"] == [c.key_id]
+
+    # Explicit-seams path yields the identical curve (caller may pass the same seam
+    # list build_allocator_ledger uses, for guaranteed ledger/curve agreement).
+    out2 = allocator_equity_curve(pke, seams=seg.seams)
+    assert list(out2.equity) == pytest.approx(list(out.equity), abs=1e-9)
+
+
 # ── Guard: a withdrawal that drives equity non-positive refuses structurally ──
 
 def test_non_positive_intermediate_equity_refuses_without_leaking_usd():
