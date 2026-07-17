@@ -1,0 +1,243 @@
+{
+  "candidates": [
+    {
+      "rank": 1,
+      "reasons": [
+        "Diversifies the book (correlation +0.01 with existing strategies)",
+        "Comfortably above the minimum track record we screen for",
+        "Capacity headroom for the ticket size"
+      ],
+      "score": 85.2191780822,
+      "score_breakdown": {
+        "capacity_fit": 0.96,
+        "mandate_fit_score": 1.0,
+        "portfolio_fit": 0.9,
+        "preference_fit": 0.8111111111,
+        "raw": {
+          "corr_with_portfolio": 0.0115183828,
+          "data_completeness": 1.0,
+          "dd_improvement": 0.0,
+          "manager_aum": 6250000,
+          "mandate_fit_raw": {
+            "correlation_ceiling": 1.0,
+            "liquidity_preference": 1.0,
+            "max_weight": 1.0,
+            "style_exclusions_honored": true
+          },
+          "max_drawdown_pct": -0.17,
+          "sharpe": 2.0,
+          "sharpe_lift": -229264101.0986631,
+          "ticket_concentration": 0.008,
+          "track_record_days": 400
+        },
+        "track_record": 0.5479452055
+      },
+      "score_error": false,
+      "strategy_id": "cand-5"
+    },
+    {
+      "rank": 2,
+      "reasons": [
+        "Diversifies the book (correlation +0.02 with existing strategies)",
+        "Comfortably above the minimum track record we screen for",
+        "Capacity headroom for the ticket size"
+      ],
+      "score": 74.3307369927,
+      "score_breakdown": {
+        "capacity_fit": 0.9583333333,
+        "mandate_fit_score": 1.0,
+        "portfolio_fit": 0.6234139728,
+        "preference_fit": 0.8222222222,
+        "raw": {
+          "corr_with_portfolio": 0.0195001152,
+          "data_completeness": 1.0,
+          "dd_improvement": 0.0,
+          "manager_aum": 6000000,
+          "mandate_fit_raw": {
+            "correlation_ceiling": 1.0,
+            "liquidity_preference": 1.0,
+            "max_weight": 1.0,
+            "style_exclusions_honored": true
+          },
+          "max_drawdown_pct": -0.16,
+          "sharpe": 1.9,
+          "sharpe_lift": -229264106.13224056,
+          "ticket_concentration": 0.0083333333,
+          "track_record_days": 400
+        },
+        "track_record": 0.5479452055
+      },
+      "score_error": false,
+      "strategy_id": "cand-4"
+    },
+    {
+      "rank": 3,
+      "reasons": [
+        "Diversifies the book (correlation +0.02 with existing strategies)",
+        "Comfortably above the minimum track record we screen for",
+        "Capacity headroom for the ticket size"
+      ],
+      "score": 66.6595389054,
+      "score_breakdown": {
+        "capacity_fit": 0.9565217391,
+        "mandate_fit_score": 1.0,
+        "portfolio_fit": 0.4273133684,
+        "preference_fit": 0.8333333333,
+        "raw": {
+          "corr_with_portfolio": 0.0245929453,
+          "data_completeness": 1.0,
+          "dd_improvement": 0.0,
+          "manager_aum": 5750000,
+          "mandate_fit_raw": {
+            "correlation_ceiling": 1.0,
+            "liquidity_preference": 1.0,
+            "max_weight": 1.0,
+            "style_exclusions_honored": true
+          },
+          "max_drawdown_pct": -0.15,
+          "sharpe": 1.8,
+          "sharpe_lift": -229264109.8387344,
+          "ticket_concentration": 0.0086956522,
+          "track_record_days": 400
+        },
+        "track_record": 0.5479452055
+      },
+      "score_error": false,
+      "strategy_id": "cand-3"
+    },
+    {
+      "rank": 4,
+      "reasons": [
+        "Diversifies the book (correlation +0.03 with existing strategies)",
+        "Comfortably above the minimum track record we screen for",
+        "Capacity headroom for the ticket size"
+      ],
+      "score": 62.1600063111,
+      "score_breakdown": {
+        "capacity_fit": 0.9545454545,
+        "mandate_fit_score": 1.0,
+        "portfolio_fit": 0.3105661603,
+        "preference_fit": 0.8444444444,
+        "raw": {
+          "corr_with_portfolio": 0.026019334,
+          "data_completeness": 1.0,
+          "dd_improvement": 0.0,
+          "manager_aum": 5500000,
+          "mandate_fit_raw": {
+            "correlation_ceiling": 1.0,
+            "liquidity_preference": 1.0,
+            "max_weight": 1.0,
+            "style_exclusions_honored": true
+          },
+          "max_drawdown_pct": -0.14,
+          "sharpe": 1.7,
+          "sharpe_lift": -229264112.90541586,
+          "ticket_concentration": 0.0090909091,
+          "track_record_days": 400
+        },
+        "track_record": 0.5479452055
+      },
+      "score_error": false,
+      "strategy_id": "cand-2"
+    },
+    {
+      "rank": 5,
+      "reasons": [
+        "Diversifies the book (correlation +0.02 with existing strategies)",
+        "Comfortably above the minimum track record we screen for",
+        "Capacity headroom for the ticket size"
+      ],
+      "score": 60.1577546416,
+      "score_breakdown": {
+        "capacity_fit": 0.9523809524,
+        "mandate_fit_score": 1.0,
+        "portfolio_fit": 0.2563215568,
+        "preference_fit": 0.8555555556,
+        "raw": {
+          "corr_with_portfolio": 0.0233061113,
+          "data_completeness": 1.0,
+          "dd_improvement": 0.0,
+          "manager_aum": 5250000,
+          "mandate_fit_raw": {
+            "correlation_ceiling": 1.0,
+            "liquidity_preference": 1.0,
+            "max_weight": 1.0,
+            "style_exclusions_honored": true
+          },
+          "max_drawdown_pct": -0.13,
+          "sharpe": 1.6,
+          "sharpe_lift": -229264116.4609539,
+          "ticket_concentration": 0.0095238095,
+          "track_record_days": 400
+        },
+        "track_record": 0.5479452055
+      },
+      "score_error": false,
+      "strategy_id": "cand-1"
+    },
+    {
+      "rank": 6,
+      "reasons": [
+        "Diversifies the book (correlation +0.02 with existing strategies)",
+        "Comfortably above the minimum track record we screen for",
+        "Capacity headroom for the ticket size"
+      ],
+      "score": 59.6438009781,
+      "score_breakdown": {
+        "capacity_fit": 0.95,
+        "mandate_fit_score": 1.0,
+        "portfolio_fit": 0.2393655724,
+        "preference_fit": 0.8666666667,
+        "raw": {
+          "corr_with_portfolio": 0.0166622882,
+          "data_completeness": 1.0,
+          "dd_improvement": 0.0,
+          "manager_aum": 5000000,
+          "mandate_fit_raw": {
+            "correlation_ceiling": 1.0,
+            "liquidity_preference": 1.0,
+            "max_weight": 1.0,
+            "style_exclusions_honored": true
+          },
+          "max_drawdown_pct": -0.12,
+          "sharpe": 1.5,
+          "sharpe_lift": -229264121.4949526,
+          "ticket_concentration": 0.01,
+          "track_record_days": 400
+        },
+        "track_record": 0.5479452055
+      },
+      "score_error": false,
+      "strategy_id": "cand-0"
+    }
+  ],
+  "effective_preferences": {
+    "correlation_ceiling": null,
+    "excluded_exchanges": [],
+    "liquidity_preference": null,
+    "mandate_archetype": null,
+    "max_aum_concentration": 0.2,
+    "max_drawdown_tolerance": 0.3,
+    "max_weight": null,
+    "min_sharpe": 0.5,
+    "min_track_record_days": 180,
+    "preferred_markets": [],
+    "preferred_strategy_types": [],
+    "scoring_weight_overrides": null,
+    "style_exclusions": [],
+    "target_ticket_size_usd": 50000.0
+  },
+  "effective_thresholds": {
+    "max_drawdown_tolerance": 0.3,
+    "min_sharpe": 0.5,
+    "min_track_record_days": 180
+  },
+  "engine_version": "v2.1.0",
+  "excluded": [],
+  "excluded_total": 0,
+  "filter_relaxed": false,
+  "mode": "personalized",
+  "relaxed_overrides": null,
+  "source_strategy_count": 6,
+  "weights_version": "v2.0.0"
+}
