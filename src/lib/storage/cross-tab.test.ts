@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, act } from "@testing-library/react";
+import { renderHook, render, act } from "@testing-library/react";
+import * as React from "react";
 import {
   useCrossTabStorage,
   consumeStorageRecoveryFlag,
@@ -106,6 +107,35 @@ describe("useCrossTabStorage — hydration", () => {
   it("empty storage hydrates to the initial value", () => {
     const { result } = renderHook(() => useCrossTabStorage(opts()));
     expect(result.current.value).toEqual({ v: "default" });
+  });
+
+  it("mount-race guard: a user mutation that lands before the deferred hydration flushes is NOT clobbered by the disk read", () => {
+    // Repro of the CI-only flake (ScenarioComposer shard-2 under 4-core
+    // contention): React can defer the mount's passive hydration effect past a
+    // synchronously-dispatched user event. A ref callback runs during commit —
+    // BEFORE passive effects — so mutating there reproduces the exact ordering
+    // (setValue lands, THEN the deferred hydration runs). Without the dirtyRef
+    // guard the hydration overwrites the edit back to the persisted disk value;
+    // the user's toggle/weight/leverage silently reverts. The freshest intent
+    // (the in-memory edit) must win.
+    lsStore.set(KEY, JSON.stringify({ v: "persisted" }));
+    const seen: string[] = [];
+    function Probe() {
+      const { value, setValue } = useCrossTabStorage(opts());
+      seen.push(value.v);
+      // A layout effect fires during commit, BEFORE passive effects (the
+      // deferred hydration is a passive `useEffect`), so mutating here lands the
+      // edit ahead of the hydration flush — the exact ordering the CI race hits.
+      React.useLayoutEffect(() => {
+        setValue({ v: "user-edit" });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return null;
+    }
+    act(() => {
+      render(React.createElement(Probe));
+    });
+    expect(seen.at(-1)).toBe("user-edit");
   });
 });
 
