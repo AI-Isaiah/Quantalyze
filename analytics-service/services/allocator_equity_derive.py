@@ -322,6 +322,18 @@ def blend_concurrent_returns(
         for k in keys:
             r += norm[k] * float(series_by_key[k].get(day, 0.0))
         values.append(r)
+    # F4 (Fable, 115.1 CARRY-IN — DO NOT "fix" here): this counts ANY union day where
+    # a key lacks a row, so it OVER-COUNTS pure INTERIOR partial-missing days (which
+    # the constant-divisor 0-fill is documented safe for) as well as the exclusive
+    # lead/tail days it means to flag. Distinguishing interior-gap from exclusive-tail
+    # REQUIRES the segment-wise blend wiring deferred to 115.1 (HIGH-1) — it cannot be
+    # done here without segment_coverage. CONSEQUENCE: EXCLUSIVE_FILL is BLOCKING, so a
+    # realistic non-coextensive multi-key allocator would read is_trustworthy=False on a
+    # merely-interior gap — the never-green-gate (LOW-7) class rebuilt on the blend
+    # surface. This is DORMANT today (the blend's is_trustworthy is not display-wired).
+    # 115.1 MUST make this exclusive-ONLY (compute exclusive lead/tail via
+    # segment_coverage) BEFORE gating any display/refusal on it, else it over-refuses
+    # CORRECT curves.
     exclusive_fill_days = sum(
         1 for day in union_days if any(day not in series_by_key[k].index for k in keys)
     )
