@@ -210,6 +210,25 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── T3: two flows on one UTC day collapse to their sum (_flows_by_day) ─────────
+
+def test_multi_flow_same_day_collapses_to_sum():
+    """T3: ``_flows_by_day`` sums multiple flows on one UTC day — documented but
+    unfixtured. Three flows on the SAME interior day (deposit + withdrawal + deposit,
+    net +7000) must reconstruct byte-identically to a SINGLE +7000 flow on that day."""
+    r = _flat_returns()
+    day = _DAYS[1]
+    multi = replay_key_equity(
+        r,
+        [ExternalFlow(day, 10000.0), ExternalFlow(day, -5000.0), ExternalFlow(day, 2000.0)],
+        _ZERO_FLOW_ANCHOR,
+    )
+    single = replay_key_equity(r, [ExternalFlow(day, 7000.0)], _ZERO_FLOW_ANCHOR)
+    assert multi.equity is not None and single.equity is not None
+    for d in _DAYS:
+        assert multi.equity[d] == pytest.approx(float(single.equity[d]), abs=1e-9), d
+
+
 # ── T6: degenerate replay inputs (single-day, empty, non-positive anchor) ─────
 
 def test_replay_degenerate_inputs():
