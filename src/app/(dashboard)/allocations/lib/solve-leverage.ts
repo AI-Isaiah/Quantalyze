@@ -33,7 +33,9 @@
  * (the exact drift SC-3 exists to prevent).
  */
 
+import { computeScenario } from "@/lib/scenario";
 import type { StrategyForBuilder, ScenarioState } from "@/lib/scenario";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 
 /**
  * Discriminated result of a max-DD → leverage solve.
@@ -110,8 +112,118 @@ export function solveLeverageForMaxDD(args: {
   targetMaxDD: number;
   maxLeverage?: number;
 }): SolveLeverageResult {
-  // Reference the args so the contract signature is exercised without engine
-  // math (SC-3 — no cumulative-product / peak-trough loop in this module).
-  void args;
-  return { ok: false, reason: "unimplemented" };
+  const {
+    strategies,
+    engineState,
+    dateMapCache,
+    periodsPerYear,
+    ref,
+    targetMaxDD,
+    maxLeverage,
+  } = args;
+
+  // The SLEEVE state at leverage L: exactly ONE selected constituent at weight 1,
+  // so the frozen engine reduces the blend to `portDaily = L·rᵢ` (founder lock
+  // 2026-07-17) — its `max_drawdown` IS this sleeve's standalone levered max-DD.
+  // We restrict `selected`/`weights` to `ref` (do NOT spread engineState.selected)
+  // and carry `startDates` + `window` verbatim so a non-spanning row degrades
+  // honestly through the engine's own null path rather than via local heuristics.
+  const sleeveStateAt = (L: number): ScenarioState => ({
+    selected: { [ref]: true },
+    weights: { [ref]: 1 },
+    startDates: engineState.startDates,
+    window: engineState.window,
+    leverage: { [ref]: L },
+  });
+
+  // Per-solve memoized engine eval. `max_drawdown` is annualization-invariant, so
+  // `periodsPerYear` only rides along for signature fidelity. Key by L.toFixed(4)
+  // so the bisect's repeated trials collapse to one computeScenario call each
+  // (research §budget: ~30-35 calls/solve). The ONLY drawdown source is the frozen
+  // engine — no local cumulative/peak loop here (SC-3 / Don't-Hand-Roll).
+  const ddCache = new Map<string, number | null>();
+  const ddAt = (L: number): number | null => {
+    const key = L.toFixed(4);
+    const hit = ddCache.get(key);
+    if (hit !== undefined) return hit;
+    const dd = computeScenario(
+      strategies,
+      sleeveStateAt(L),
+      dateMapCache,
+      periodsPerYear,
+    ).max_drawdown;
+    ddCache.set(key, dd);
+    return dd;
+  };
+
+  // Fail-loud backstop (T-113-02). The UI validates the target before calling;
+  // this NEVER clamps — an out-of-range target is an honest degenerate refusal.
+  if (
+    !Number.isFinite(targetMaxDD) ||
+    targetMaxDD <= 0 ||
+    targetMaxDD >= 1
+  ) {
+    return { ok: false, reason: "degenerate" };
+  }
+
+  // Degenerate short-circuits, in order. At L=0 every scaled return is 0, so the
+  // series can only draw down 0 — the SOLE way `ddAt(0)` is null is the engine's
+  // n<10 floor. That makes it the clean discriminator for insufficient history.
+  if (ddAt(0) === null) {
+    return { ok: false, reason: "insufficient-history" };
+  }
+  // With ddAt(0) non-null (n≥10), a null at 1× means ruin at ≤1× (a catastrophic
+  // |r|≥1 day flips cumulative wealth ≤0). Founder table: a data-quality refusal —
+  // do NOT solve below the 1× ruin point.
+  if (ddAt(1) === null) {
+    return { ok: false, reason: "degenerate" };
+  }
+
+  // Ruin-clamped domain ceiling. Task 2 tightens this to the last PROVEN
+  // non-ruined L via a monotone ruin-predicate bisect; until then the explicit
+  // maxLeverage override (or MAX_LEVERAGE) bounds the domain.
+  const L_max = maxLeverage ?? MAX_LEVERAGE;
+
+  // Reachability pre-check at the ceiling. |dd| is monotone non-decreasing in L on
+  // the sleeve (a single series, `portDaily = L·r`, until ruin) → a UNIQUE root,
+  // so the ROADMAP's grid-scan-then-bisect degenerates to a plain monotone bisect
+  // (founder lock: no non-monotone-portfolio machinery here). A null at the ceiling
+  // is defended as degenerate rather than NaN-propagating through Math.abs(null)
+  // (Pitfall 2 / fail-loud); Task 2's clamp keeps L_max inside the non-null domain.
+  const ddCeil = ddAt(L_max);
+  if (ddCeil === null) {
+    return { ok: false, reason: "degenerate" };
+  }
+  if (Math.abs(ddCeil) < targetMaxDD) {
+    // Shallower than the target even at the ceiling: honest, never clamp-and-lie.
+    return ddCeil === 0
+      ? { ok: false, reason: "no-drawdown" }
+      : { ok: false, reason: "unreachable", ceiling: L_max };
+  }
+
+  // Monotone bisect for the SMALLEST L with |ddAt(L)| ≥ target. Invariant:
+  // `lo` has |dd| < target, `hi` has |dd| ≥ target. lo=0 is always valid
+  // (|ddAt(0)| = 0 < target since target > 0); hi=L_max is valid by the
+  // reachability pre-check above. On any flat interval (5dp engine rounding
+  // plateaus) `hi` converges to the lower end — exactly the founder's smallest-L
+  // semantics. Iterate to width ≤ 1e-4 (≤ ~17 evals over a width-10 domain).
+  let lo = 0;
+  let hi = L_max;
+  while (hi - lo > 1e-4) {
+    const mid = (lo + hi) / 2;
+    const ddMid = ddAt(mid);
+    if (ddMid === null) {
+      // Defensive: never loop on Math.abs(null). Every in-domain eval is
+      // pre-checked non-null, so a null here is a genuine degeneracy (Pitfall 2).
+      return { ok: false, reason: "degenerate" };
+    }
+    if (Math.abs(ddMid) >= targetMaxDD) hi = mid;
+    else lo = mid;
+  }
+
+  const sleeveMaxDD = ddAt(hi);
+  if (sleeveMaxDD === null) {
+    return { ok: false, reason: "degenerate" };
+  }
+  return { ok: true, leverage: hi, sleeveMaxDD };
 }
