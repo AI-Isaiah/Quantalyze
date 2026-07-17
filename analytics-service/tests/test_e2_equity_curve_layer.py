@@ -209,6 +209,22 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── MEDIUM-3: day-0 total loss is distinguishable from an empty series ────────
+
+def test_perf_curve_day0_total_loss_is_distinct_from_empty():
+    """MEDIUM-3: ``perf_curve`` returned ``None`` for BOTH an empty series and a
+    day-0 −100% (``1 + r_0 == 0``), conflating no-data with a total wipeout. An
+    interior −100% still normalizes to 0; only day-0 breaks the divisor. Now day-0
+    total loss fails loud, distinct from the empty-series ``None``."""
+    assert perf_curve(pd.Series([], dtype=float)) is None  # no-data still None
+    with pytest.raises(NavReconstructionError):
+        perf_curve(pd.Series([-1.0, 0.10], index=_DAYS[:2]))
+    # An INTERIOR −100% still normalizes (steps to 0), never raised.
+    interior = perf_curve(pd.Series([0.10, -1.0, 0.10], index=_DAYS[:3]))
+    assert interior is not None
+    assert float(interior.iloc[1]) == pytest.approx(0.0, abs=1e-12)
+
+
 # ── MEDIUM-5: an out-of-window flow is flagged, not silently unioned ──────────
 
 def test_out_of_window_flow_is_flagged_not_silently_unioned():

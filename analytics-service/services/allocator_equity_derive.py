@@ -410,7 +410,15 @@ def perf_curve(returns: pd.Series | None) -> pd.Series | None:
     factors = (1.0 + returns).cumprod()
     first = float(factors.iloc[0])
     if first == 0.0:
-        return None
+        # MEDIUM-3: ``(1 + r_0) == 0`` is a day-0 TOTAL LOSS, NOT a no-data series —
+        # the old code returned ``None`` for BOTH, conflating them. An INTERIOR
+        # −100% day still normalizes (its cumprod steps to 0, divided by a nonzero
+        # ``first``); only a day-0 wipeout breaks the divisor. Fail loud, distinct
+        # from the empty-series ``None``.
+        raise NavReconstructionError(
+            "perf_curve: day-0 total loss (1 + r_0 == 0) — cannot normalize to "
+            "perf_0 == 1.0; distinct from the empty-series no-data case"
+        )
     return factors / first
 
 
