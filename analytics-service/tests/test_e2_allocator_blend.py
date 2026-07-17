@@ -23,13 +23,10 @@ import pytest
 from services.allocator_equity_derive import (
     blend_concurrent_returns,
     eligible_key_predicate,
-    segment_coverage,
 )
 from tests.e2_fixtures import (
     WINDOW_START,
     concurrent_pair,
-    make_per_key_returns,
-    rotated_seam_pair,
 )
 
 
