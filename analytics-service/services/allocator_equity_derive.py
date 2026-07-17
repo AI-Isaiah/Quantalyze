@@ -654,19 +654,31 @@ def build_allocator_ledger(
     real_flows_by_key: Mapping[str, Sequence[Any]],
     seams: Sequence[Seam],
     per_key_equity: Mapping[str, KeyEquity],
+    returns_by_key: Mapping[str, pd.Series] | None = None,
 ) -> list[LedgerEntry]:
     """Build the ONE ordered, provenance-tagged allocator cashflow ledger.
 
     Real external flows (per key) enter tagged ``LEDGER_REAL``. Each rotation
-    ``Seam`` becomes ONE synthetic ``LEDGER_SEAM`` entry dated on the next
-    segment's first day, carrying the boundary equity JUMP
-    (``next_first_day_equity − prev_last_day_equity``) — a deposit if capital grew
-    across the handoff, a withdrawal if it shrank (STITCH-06). When a boundary
-    segment is unanchored the magnitude is UNKNOWN: the entry is flagged
-    ``known=False`` (``nan`` magnitude) so the scalar adapters fail loud rather
-    than fabricate a jump. Entries are sorted ascending by UTC day (the ccxt
-    dated-flow convention). This is the SINGLE construction site for the ledger —
-    both the $-replay and the Dietz/MWR adapters read the returned list."""
+    ``Seam`` becomes ONE synthetic ``LEDGER_SEAM`` entry dated on the next segment's
+    first day, carrying the boundary equity JUMP — a deposit if capital grew across
+    the handoff, a withdrawal if it shrank (STITCH-06).
+
+    SEAM MAGNITUDE (Finding 3 — the module's own forward identity):
+    ``next_eq`` is the next block's END-of-first-day level, so it ALREADY contains
+    that day's return ``r_next`` on the redeployed capital. The convention-consistent
+    synthetic flow is therefore ``F = next_eq − prev_eq·(1 + r_next)`` — the module
+    identity ``equity_t = equity_{t-1}·(1 + r_t) + F_t`` solved for ``F`` at the seam.
+    The naive ``next_eq − prev_eq`` folded ``prev_eq·r_next`` of first-day P&L on the
+    redeployed capital INTO the flow, dropping it from performance (Dietz numerator).
+    ``r_next`` is the next block's first-day return, capital-weighted across a
+    multi-key incoming block (``_seam_next_first_return``); it needs
+    ``returns_by_key`` (the per-key daily-return series). When a boundary segment is
+    unanchored OR the next-side return is unavailable (no ``returns_by_key``) the
+    magnitude is UNKNOWN: the entry is flagged ``known=False`` (``nan``) so the scalar
+    adapters fail loud rather than fabricate a jump.
+
+    Entries are sorted ascending by UTC day. This is the SINGLE construction site for
+    the ledger — both the $-replay and the Dietz/MWR adapters read the returned list."""
     entries: list[LedgerEntry] = []
 
     for key in sorted(real_flows_by_key):
@@ -676,33 +688,64 @@ def build_allocator_ledger(
     for seam in seams:
         # WR-04: resolve boundary equity by SUMMING the constituent keys' levels
         # (``seam.prev_keys`` / ``seam.next_keys``), NEVER the '+'-joined scalar
-        # label (``seam.prev_key`` "A+B" is never a real per-key entry -> the old
-        # ``get("A+B")`` returned None and stranded a knowable block-to-block seam
-        # to ``known=False``). A single-key rotation is the 1-member sum (identical
-        # to the prior behaviour); a concurrent-block rotation now resolves.
+        # label. A single-key rotation is the 1-member sum; a concurrent-block
+        # rotation now resolves.
         prev_eq = _boundary_equity_block(
             per_key_equity, seam.prev_keys, seam.prev_last_day
         )
         next_eq = _boundary_equity_block(
             per_key_equity, seam.next_keys, seam.next_first_day
         )
-        if prev_eq is None or next_eq is None:
-            # Magnitude unknown (a boundary segment is unanchored) — flag, never
-            # fabricate. usd_signed is nan; downstream scalars refuse.
+        r_next = _seam_next_first_return(returns_by_key, per_key_equity, seam)
+        if prev_eq is None or next_eq is None or r_next is None:
+            # Magnitude unknown (an unanchored boundary or a missing next-side
+            # return) — flag, never fabricate. usd_signed is nan; scalars refuse.
             entries.append(
                 _ledger_entry(
                     seam.next_first_day, float("nan"), LEDGER_SEAM, known=False
                 )
             )
         else:
+            # Finding 3: forward-identity flow — strip the redeployed capital's
+            # first-day return out of the synthetic flow (it is performance, not
+            # cash movement).
+            seam_usd = next_eq - prev_eq * (1.0 + r_next)
             entries.append(
-                _ledger_entry(
-                    seam.next_first_day, next_eq - prev_eq, LEDGER_SEAM, known=True
-                )
+                _ledger_entry(seam.next_first_day, seam_usd, LEDGER_SEAM, known=True)
             )
 
     entries.sort(key=lambda e: e.flow.utc_day_iso)
     return entries
+
+
+def _seam_next_first_return(
+    returns_by_key: Mapping[str, pd.Series] | None,
+    per_key_equity: Mapping[str, KeyEquity],
+    seam: Seam,
+) -> float | None:
+    """The incoming (NEXT) block's first-day return on the seam day, capital-weighted
+    by each member's first-day equity share (Finding 3). For a single-key rotation
+    this is just that key's return on ``next_first_day``. Returns ``None`` if
+    ``returns_by_key`` is absent or any next-side return / equity is missing (the seam
+    magnitude is then unknown — never fabricated)."""
+    if not returns_by_key:
+        return None
+    total_eq = 0.0
+    weighted = 0.0
+    for n in seam.next_keys:
+        eq = _boundary_equity(per_key_equity, n, seam.next_first_day)
+        rser = returns_by_key.get(n)
+        if eq is None or rser is None:
+            return None
+        rmap = {str(day): float(val) for day, val in rser.items()}
+        r = rmap.get(str(seam.next_first_day))
+        if r is None:
+            return None
+        total_eq += eq
+        weighted += eq * r
+    if total_eq == 0.0:
+        return None
+    return weighted / total_eq
 
 
 def _ledger_entry(

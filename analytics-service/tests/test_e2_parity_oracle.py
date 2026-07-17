@@ -306,14 +306,20 @@ def test_oracle_4_seam_twr_jump_and_inline_dietz():
     assert len(seg.seams) == 1
 
     real = {c.key_id: [ExternalFlow("2026-03-10", 10000.0)]}
-    ledger = build_allocator_ledger(real, seg.seams, per_key_equity)
+    returns = {c.key_id: c.returns, d.key_id: d.returns}
+    ledger = build_allocator_ledger(real, seg.seams, per_key_equity, returns)
     assert {e.provenance for e in ledger} == {LEDGER_REAL, LEDGER_SEAM}
 
-    # (b) inline boundary-jump == the ledger's synthetic seam entry.
+    # (b) Finding 3: the ledger's seam entry == the FORWARD-IDENTITY flow, derived
+    # independently from equity_t = equity_{t-1}*(1+r_t) + F_t over the concatenated
+    # curve (F = d_first - c_last*(1 + r_seam)), NOT the naive d_first - c_last.
     seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
     c_last = float(per_key_equity[c.key_id].equity.iloc[-1])
     d_first = float(per_key_equity[d.key_id].equity.iloc[0])
-    assert seam_entry.flow.usd_signed == pytest.approx(d_first - c_last, abs=1e-6)
+    r_seam = float(d.returns.iloc[0])
+    assert seam_entry.flow.usd_signed == pytest.approx(
+        d_first - c_last * (1.0 + r_seam), abs=1e-6
+    )
 
     # (c) inline Modified Dietz agrees with the module scalar; MWR is finite.
     begin_value, end_value = 100000.0, 130000.0
@@ -335,7 +341,11 @@ def test_oracle_4_seam_twr_jump_and_inline_dietz():
     # the known fixture constant. No expected value is read off the module.
     inline_c_eq = _inline_backward_equity(c.returns, [], ANCHORS[c.key_id])
     inline_d_eq = _inline_backward_equity(d.returns, [], ANCHORS[d.key_id])
-    inline_seam = float(inline_d_eq.iloc[0]) - float(inline_c_eq.iloc[-1])
+    # Finding 3: forward-identity seam flow (strip the redeployed capital's first-day
+    # return), re-derived inline from the independent backward-replay levels.
+    inline_seam = float(inline_d_eq.iloc[0]) - float(inline_c_eq.iloc[-1]) * (
+        1.0 + float(d.returns.iloc[0])
+    )
     start = date.fromisoformat(period_start)
     inline_flows = [
         {"amount": 10000.0, "day": (date.fromisoformat("2026-03-10") - start).days},

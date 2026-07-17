@@ -50,15 +50,16 @@ def _cd_setup():
         c.key_id: replay_key_equity(c.returns, [], ANCHORS[c.key_id]),
         d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
     }
-    return c, d, seg, per_key_equity
+    # ``series`` doubles as returns_by_key for the Finding-3 forward-identity seam.
+    return c, d, seg, per_key_equity, series
 
 
 # ── Test 1 (STITCH-05): ONE ledger, one construction site ────────────────────
 
 def test_one_ledger_single_construction_site_feeds_both_consumers():
-    c, d, seg, per_key_equity = _cd_setup()
+    c, d, seg, per_key_equity, returns = _cd_setup()
     real = {c.key_id: [ExternalFlow("2026-03-10", 10000.0)]}
-    ledger = build_allocator_ledger(real, seg.seams, per_key_equity)
+    ledger = build_allocator_ledger(real, seg.seams, per_key_equity, returns)
 
     assert isinstance(ledger, list)
     assert all(isinstance(e, LedgerEntry) for e in ledger)
@@ -88,16 +89,21 @@ def test_one_ledger_single_construction_site_feeds_both_consumers():
 # ── Test 2 (STITCH-06): seam magnitude == the boundary equity jump ───────────
 
 def test_seam_entry_magnitude_is_the_boundary_equity_jump():
-    c, d, seg, per_key_equity = _cd_setup()
-    ledger = build_allocator_ledger({}, seg.seams, per_key_equity)
+    c, d, seg, per_key_equity, returns = _cd_setup()
+    ledger = build_allocator_ledger({}, seg.seams, per_key_equity, returns)
     seam_entries = [e for e in ledger if e.provenance == LEDGER_SEAM]
     assert len(seam_entries) == 1
     entry = seam_entries[0]
 
     c_last = float(per_key_equity[c.key_id].equity.iloc[-1])   # C's last-day equity
     d_first = float(per_key_equity[d.key_id].equity.iloc[0])   # D's first-day equity
+    # Finding 3: the seam is the NON-return part of the boundary jump — derive it
+    # from the module's forward identity equity_t = equity_{t-1}(1+r_t)+F_t over the
+    # concatenated curve: F = d_first - c_last*(1 + r_seam), NOT the naive d_first -
+    # c_last (which would fold D's first-day P&L on the redeployed capital into F).
+    r_seam = float(d.returns.iloc[0])  # D's return on its (the next block's) first day
     assert entry.known is True
-    assert entry.flow.usd_signed == pytest.approx(d_first - c_last, abs=1e-6)
+    assert entry.flow.usd_signed == pytest.approx(d_first - c_last * (1.0 + r_seam), abs=1e-6)
     # Dated on the NEXT segment's first day.
     assert entry.flow.utc_day_iso == seg.seams[0].next_first_day
 
@@ -105,8 +111,8 @@ def test_seam_entry_magnitude_is_the_boundary_equity_jump():
 # ── Test 3 (STITCH-06): TWR clean across the seam, $-curve steps by the seam ──
 
 def test_twr_is_clean_across_the_seam_and_dollar_curve_steps():
-    c, d, seg, per_key_equity = _cd_setup()
-    ledger = build_allocator_ledger({}, seg.seams, per_key_equity)
+    c, d, seg, per_key_equity, returns = _cd_setup()
+    ledger = build_allocator_ledger({}, seg.seams, per_key_equity, returns)
     entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
 
     import pandas as pd
@@ -121,22 +127,27 @@ def test_twr_is_clean_across_the_seam_and_dollar_curve_steps():
     # The seam magnitude never appears as a per-day return term.
     assert entry.flow.usd_signed not in set(c.returns.tolist() + d.returns.tolist())
 
-    # The $-curve steps by EXACTLY the seam entry at the rotation boundary.
+    # The $-curve steps by the forward-identity seam flow at the rotation boundary
+    # (Finding 3): F = d_first - c_last*(1 + r_seam), stripping the redeployed
+    # capital's first-day return out of the flow.
     c_last = float(per_key_equity[c.key_id].equity.iloc[-1])
     d_first = float(per_key_equity[d.key_id].equity.iloc[0])
-    assert (d_first - c_last) == pytest.approx(entry.flow.usd_signed, abs=1e-6)
+    r_seam = float(d.returns.iloc[0])
+    assert (d_first - c_last * (1.0 + r_seam)) == pytest.approx(
+        entry.flow.usd_signed, abs=1e-6
+    )
 
 
 # ── Test 4 (STITCH-06): unknown seam -> fail loud, never fabricated ──────────
 
 def test_unknown_seam_flags_and_scalars_fail_loud():
-    c, d, seg, _ = _cd_setup()
+    c, d, seg, _, returns = _cd_setup()
     # Prev segment (C) unanchored -> seam magnitude is UNKNOWN.
     per_key_equity = {
         c.key_id: replay_key_equity(c.returns, [], None),      # no anchor
         d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
     }
-    ledger = build_allocator_ledger({}, seg.seams, per_key_equity)
+    ledger = build_allocator_ledger({}, seg.seams, per_key_equity, returns)
     seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
     assert seam_entry.known is False  # magnitude-unknown, flagged
 
@@ -162,9 +173,9 @@ def test_unknown_seam_flags_and_scalars_fail_loud():
 # ── Test 5 (STITCH-05): the unified ledger threads Dietz + MWR ────────────────
 
 def test_unified_ledger_threads_dietz_and_mwr():
-    c, d, seg, per_key_equity = _cd_setup()
+    c, d, seg, per_key_equity, returns = _cd_setup()
     real = {c.key_id: [ExternalFlow("2026-03-10", 10000.0)]}
-    ledger = build_allocator_ledger(real, seg.seams, per_key_equity)
+    ledger = build_allocator_ledger(real, seg.seams, per_key_equity, returns)
 
     begin_value, end_value = 100000.0, 130000.0
     period_start, period_days = "2026-03-01", 60
@@ -219,11 +230,11 @@ def test_rotation_seam_is_excluded_from_mwr_but_included_in_dietz():
     assert MWR is INVARIANT to the seam (the seam is not an investor cash flow),
     while Modified Dietz DOES change (the boundary jump enters the Dietz
     denominator / ΣF numerator by design). Pins the WR-03 exclusion."""
-    c, d, seg, per_key_equity = _cd_setup()
+    c, d, seg, per_key_equity, returns = _cd_setup()
     real = {c.key_id: [ExternalFlow("2026-03-10", 10000.0)]}
 
-    ledger_with_seam = build_allocator_ledger(real, seg.seams, per_key_equity)
-    ledger_real_only = build_allocator_ledger(real, [], per_key_equity)
+    ledger_with_seam = build_allocator_ledger(real, seg.seams, per_key_equity, returns)
+    ledger_real_only = build_allocator_ledger(real, [], per_key_equity, returns)
 
     # Sanity: the only difference between the two ledgers is the seam entry.
     assert any(e.provenance == LEDGER_SEAM for e in ledger_with_seam)
@@ -308,13 +319,13 @@ def test_block_to_block_seam_resolves_known_with_summed_magnitude():
     with magnitude == the SUMMED-block equity jump (WR-04). The OLD code looked up
     the '+'-joined ``"key-P+key-Q"`` label (never a real key) -> None -> the seam
     was stranded to ``known=False`` despite a knowable magnitude."""
-    _series, seg, per_key_equity = _block_rotation_setup()
+    series, seg, per_key_equity = _block_rotation_setup()
     assert len(seg.seams) == 1, "block rotation must produce exactly one seam"
     seam = seg.seams[0]
     assert seam.prev_keys == ("key-P", "key-Q")
     assert seam.next_keys == ("key-R", "key-S")
 
-    ledger = build_allocator_ledger({}, seg.seams, per_key_equity)
+    ledger = build_allocator_ledger({}, seg.seams, per_key_equity, series)
     seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
 
     # The magnitude is now KNOWN (not stranded to False by the joined-label lookup).
@@ -326,4 +337,39 @@ def test_block_to_block_seam_resolves_known_with_summed_magnitude():
     s_first = float(per_key_equity["key-S"].equity.iloc[0])
     prev_block = p_last + q_last   # {P,Q} equity at the boundary (their last day)
     next_block = r_first + s_first  # {R,S} equity at the boundary (their first day)
-    assert seam_entry.flow.usd_signed == pytest.approx(next_block - prev_block, abs=1e-6)
+    # Finding 3 (block form): the incoming block's first-day return is the
+    # equity-weighted blend of R and S on the seam day; F strips it off prev_block.
+    seam_day = seam.next_first_day
+    r_next = float(series["key-R"].loc[seam_day])
+    s_next = float(series["key-S"].loc[seam_day])
+    r_blend = (r_first * r_next + s_first * s_next) / next_block
+    assert seam_entry.flow.usd_signed == pytest.approx(
+        next_block - prev_block * (1.0 + r_blend), abs=1e-6
+    )
+
+
+# ── Test 8 (Finding 3): seam flow satisfies the forward identity, not the jump ─
+
+def test_seam_flow_satisfies_forward_identity_not_naive_jump():
+    """Finding 3: derive the seam flow INDEPENDENTLY from the module's own forward
+    identity ``equity_t = equity_{t-1}·(1 + r_t) + F_t`` over the concatenated C||D
+    curve and assert the ledger's seam entry equals it. ``next_eq`` (D's END-of-first-
+    day level) already contains D's first-day return on the redeployed capital, so the
+    naive ``next_eq − prev_eq`` over-books the flow by ``prev_eq·r_seam`` (dropping
+    that first-day P&L from performance). Proven gap on the C->D fixture: −$50."""
+    c, d, seg, per_key_equity, returns = _cd_setup()
+    ledger = build_allocator_ledger({}, seg.seams, per_key_equity, returns)
+    seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+
+    c_last = float(per_key_equity[c.key_id].equity.iloc[-1])   # equity_{prev_last}
+    d_first = float(per_key_equity[d.key_id].equity.iloc[0])   # equity_{next_first}
+    r_seam = float(d.returns.iloc[0])                          # r on next_first_day
+
+    # Independent forward-identity solve for F (NOT the naive next_eq - prev_eq).
+    forward_identity_F = d_first - c_last * (1.0 + r_seam)
+    assert seam_entry.flow.usd_signed == pytest.approx(forward_identity_F, abs=1e-9)
+
+    # The naive jump would over-book the flow by exactly prev_eq * r_seam.
+    naive_F = d_first - c_last
+    assert seam_entry.flow.usd_signed != pytest.approx(naive_F, abs=1e-3)
+    assert (naive_F - forward_identity_F) == pytest.approx(c_last * r_seam, abs=1e-9)
