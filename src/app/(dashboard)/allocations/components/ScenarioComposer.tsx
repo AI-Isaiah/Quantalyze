@@ -2926,9 +2926,10 @@ export function ScenarioComposer({
   // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
   // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
   // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
-  // unit carries the RAW api_key_id as its `name` from
-  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts: `key <uuid>`), so
-  // without this map the gantt would show a raw UUID. This is the ONE place the
+  // unit carries the PREFIXED `key <uuid>` as its `name` from
+  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts:146 — the unit's `id`
+  // is the bare api_key_id; its `name` is `key ${apiKeyId}`), so without this
+  // map the gantt would show that raw token. This is the ONE place the
   // per-key row name is resolved before rows reach CoverageTimeline (which only
   // renders `row.name` — it never derives labels). No second label formatter.
   const apiKeyLabelById = useMemo(() => {
@@ -5477,7 +5478,7 @@ function CompositionList({
                     never a weight input. Em-dash when non-derivable. */}
                 <span
                   data-testid="scenario-constituent-notional"
-                  title="Notional = equity × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
                   className="w-20 text-right font-mono text-xs text-text-muted"
                 >
                   {notionalText(k.id)}
@@ -5603,7 +5604,7 @@ function CompositionList({
                     never a weight input. Em-dash when non-derivable. */}
                 <span
                   data-testid="scenario-constituent-notional"
-                  title="Notional = equity × leverage — derived, informative only (minimum-investment check); never a weight input"
+                  title="Notional = equity × blend share × leverage — derived, informative only (minimum-investment check); never a weight input"
                   className="w-20 text-right font-mono text-xs text-text-muted"
                 >
                   {notionalText(a.id)}

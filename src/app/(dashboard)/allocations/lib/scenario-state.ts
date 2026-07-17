@@ -404,8 +404,10 @@ export function toggleHolding(
 }
 
 /**
- * Phase 111 / CONSTIT-03 — toggle a PER-KEY data source (an `api_key <uuid>`
- * constituent) on/off through the ONE `toggleByScopeRef` channel every other
+ * Phase 111 / CONSTIT-03 — toggle a PER-KEY data-source constituent (keyed by
+ * the bare `api_key_id`, a raw uuid with NO prefix; the engine unit's NAME is
+ * the prefixed `key <uuid>`, but the ref/id every consumer keys on is the bare
+ * uuid) on/off through the ONE `toggleByScopeRef` channel every other
  * constituent uses. Distinct from `toggleHolding` in exactly one way: per-key
  * units ride the RAW equity-share weight path (the engine renormalizes over the
  * selected set — Pitfall 1) and carry NO `weightOverrides` entry, so this mutator

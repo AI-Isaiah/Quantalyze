@@ -1116,7 +1116,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
     if probe_error:
         # DOGFOOD-3: probe_error=True means detect_permissions caught a
         # transient exception and returned the fail-CLOSED default
-        # {read:T, trade:T, withdraw:T} (key_permissions.py:56-59). Those
+        # {read:T, trade:T, withdraw:T} (key_permissions.py:60-65). Those
         # scopes are NOT evidence — treating them as a real WITHDRAW/TRADE
         # grant mislabeled every network blip / WAF / exchange 5xx as
         # "Key has withdrawal permissions". Derive an honest cause instead.

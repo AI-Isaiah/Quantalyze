@@ -92,9 +92,11 @@ export interface UseScenarioStateReturn {
   diffCount: number;
   toggleHolding: (scopeRef: string) => void;
   /**
-   * Phase 111 / CONSTIT-03 — toggle a per-key data-source constituent
-   * (`api_key <uuid>` ref) through the SAME `toggleByScopeRef` channel as every
-   * other constituent, WITHOUT rescaling `weightOverrides` (per-key legs ride
+   * Phase 111 / CONSTIT-03 — toggle a per-key data-source constituent (keyed by
+   * the bare `api_key_id` — a raw uuid, no prefix; the engine unit's NAME is the
+   * prefixed `key <uuid>`, but the ref is the bare uuid) through the SAME
+   * `toggleByScopeRef` channel as every other constituent, WITHOUT rescaling
+   * `weightOverrides` (per-key legs ride
    * the raw equity-share path; the engine renormalizes). Excluding writes an
    * explicit `false` (persists with the draft — supersedes CF-05 transient);
    * re-including deletes the ref (absent === included).
