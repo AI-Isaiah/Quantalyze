@@ -185,10 +185,13 @@ def test_unified_ledger_threads_dietz_and_mwr():
     # those shapes inline and assert byte-agreement.
     start = date.fromisoformat(period_start)
     end_date = (start + timedelta(days=period_days)).isoformat()
+    # WR-03: the MWR IRR sees ONLY real-external flows — a synthetic rotation seam
+    # is internal capital, never an investor action, so it is EXCLUDED here too.
     expected_mwr_flows = [{"date": period_start, "amount": -begin_value}]
     expected_mwr_flows += [
         {"date": e.flow.utc_day_iso, "amount": -float(e.flow.usd_signed)}
         for e in ledger
+        if e.provenance != LEDGER_SEAM
     ]
     expected_mwr = compute_mwr(
         expected_mwr_flows, final_value=end_value, end_date=end_date
@@ -206,3 +209,92 @@ def test_unified_ledger_threads_dietz_and_mwr():
 
     assert mwr == pytest.approx(expected_mwr, rel=1e-12)
     assert dietz == pytest.approx(expected_dietz, rel=1e-12)
+
+
+# ── Test 6 (WR-03): a rotation seam is invisible to MWR but moves Dietz ───────
+
+def test_rotation_seam_is_excluded_from_mwr_but_included_in_dietz():
+    """A pure (equal-capital) rotation seam is INTERNAL redeployment — it must not
+    enter the investor IRR. Build the same ledger WITH and WITHOUT the seam and
+    assert MWR is INVARIANT to the seam (the seam is not an investor cash flow),
+    while Modified Dietz DOES change (the boundary jump enters the Dietz
+    denominator / ΣF numerator by design). Pins the WR-03 exclusion."""
+    c, d, seg, per_key_equity = _cd_setup()
+    real = {c.key_id: [ExternalFlow("2026-03-10", 10000.0)]}
+
+    ledger_with_seam = build_allocator_ledger(real, seg.seams, per_key_equity)
+    ledger_real_only = build_allocator_ledger(real, [], per_key_equity)
+
+    # Sanity: the only difference between the two ledgers is the seam entry.
+    assert any(e.provenance == LEDGER_SEAM for e in ledger_with_seam)
+    assert all(e.provenance == LEDGER_REAL for e in ledger_real_only)
+    assert len(ledger_with_seam) == len(ledger_real_only) + 1
+
+    begin_value, end_value = 100000.0, 130000.0
+    period_start, period_days = "2026-03-01", 60
+    mwr_seam, dietz_seam = mwr_and_dietz_from_ledger(
+        ledger_with_seam, begin_value=begin_value, end_value=end_value,
+        period_start=period_start, period_days=period_days,
+    )
+    mwr_noseam, dietz_noseam = mwr_and_dietz_from_ledger(
+        ledger_real_only, begin_value=begin_value, end_value=end_value,
+        period_start=period_start, period_days=period_days,
+    )
+    assert None not in (mwr_seam, dietz_seam, mwr_noseam, dietz_noseam)
+
+    # MWR is INVARIANT to the rotation seam — the seam never entered the IRR flows.
+    assert mwr_seam == pytest.approx(mwr_noseam, rel=1e-12)
+    # Modified Dietz DOES move — the seam entry is (correctly) in the Dietz flows.
+    assert dietz_seam != pytest.approx(dietz_noseam, rel=1e-9)
+
+
+# ── Test 7 (WR-04): a block→block rotation seam resolves to a summed magnitude ─
+
+def _block_rotation_setup():
+    """Concurrent block {P,Q} rotates into a DISJOINT concurrent block {R,S} — an
+    adjacent half-open handoff (P,Q window ends the day before R,S begins). All
+    four keys anchored, so the block-to-block seam magnitude is KNOWABLE (the sum
+    of each block's member equities at the boundary)."""
+    import pandas as pd
+
+    days1 = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
+    days2 = ["2026-06-06", "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-10"]
+    p = pd.Series([0.01] * 5, index=days1, name="key-P")
+    q = pd.Series([0.02] * 5, index=days1, name="key-Q")
+    r = pd.Series([-0.01] * 5, index=days2, name="key-R")
+    s = pd.Series([0.005] * 5, index=days2, name="key-S")
+    series = {"key-P": p, "key-Q": q, "key-R": r, "key-S": s}
+    seg = segment_coverage(series)
+    per_key_equity = {
+        "key-P": replay_key_equity(p, [], 50000.0),
+        "key-Q": replay_key_equity(q, [], 30000.0),
+        "key-R": replay_key_equity(r, [], 40000.0),
+        "key-S": replay_key_equity(s, [], 20000.0),
+    }
+    return series, seg, per_key_equity
+
+
+def test_block_to_block_seam_resolves_known_with_summed_magnitude():
+    """A concurrent-block → concurrent-block rotation seam resolves ``known=True``
+    with magnitude == the SUMMED-block equity jump (WR-04). The OLD code looked up
+    the '+'-joined ``"key-P+key-Q"`` label (never a real key) -> None -> the seam
+    was stranded to ``known=False`` despite a knowable magnitude."""
+    _series, seg, per_key_equity = _block_rotation_setup()
+    assert len(seg.seams) == 1, "block rotation must produce exactly one seam"
+    seam = seg.seams[0]
+    assert seam.prev_keys == ("key-P", "key-Q")
+    assert seam.next_keys == ("key-R", "key-S")
+
+    ledger = build_allocator_ledger({}, seg.seams, per_key_equity)
+    seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+
+    # The magnitude is now KNOWN (not stranded to False by the joined-label lookup).
+    assert seam_entry.known is True
+
+    p_last = float(per_key_equity["key-P"].equity.iloc[-1])
+    q_last = float(per_key_equity["key-Q"].equity.iloc[-1])
+    r_first = float(per_key_equity["key-R"].equity.iloc[0])
+    s_first = float(per_key_equity["key-S"].equity.iloc[0])
+    prev_block = p_last + q_last   # {P,Q} equity at the boundary (their last day)
+    next_block = r_first + s_first  # {R,S} equity at the boundary (their first day)
+    assert seam_entry.flow.usd_signed == pytest.approx(next_block - prev_block, abs=1e-6)

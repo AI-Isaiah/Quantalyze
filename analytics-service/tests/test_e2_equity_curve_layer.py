@@ -171,6 +171,44 @@ def test_allocator_curve_is_the_daily_sum_of_anchored_keys():
         ), day
 
 
+# ── Test 7 (WR-01): unequal anchored windows span the UNION, not the ∩ ────────
+
+def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
+    """Two ANCHORED keys with DIFFERENT windows: the allocator curve must span the
+    UNION (each key's last-known mark carried forward past its own last day), so the
+    terminal == Σ of each key's OWN anchor — NOT the rolled-back intersection level
+    the old ∩-only sum produced. The truncation is flagged, never silent (WR-01)."""
+    # key-A: +10% over the full 4-day window, anchor 133100 -> [100k,110k,121k,133.1k].
+    a = replay_key_equity(_flat_returns(), [], _ZERO_FLOW_ANCHOR)
+    # key-B: +10% over only the FIRST TWO days, anchor 121000 -> [110k,121k]. B's
+    # window ends 2026-05-02, two days BEFORE A's — the WR-01 unequal-window case.
+    b_returns = pd.Series([0.10, 0.10], index=_DAYS[:2], name="key-B")
+    b = replay_key_equity(b_returns, [], 121000.0)
+    assert list(b.equity.index) == _DAYS[:2]
+    assert b.equity.iloc[-1] == pytest.approx(121000.0, abs=1e-6)  # B's own anchor
+
+    out = allocator_equity_curve({"key-A": a, "key-B": b})
+    assert out.equity is not None
+    # Curve spans the UNION (all four days), not the 2-day intersection.
+    assert list(out.equity.index) == _DAYS
+
+    # Terminal == Σ of each key's OWN anchor (A's 133100 + B's carried-forward 121000).
+    assert out.equity.iloc[-1] == pytest.approx(133100.0 + 121000.0, abs=1e-6)
+    # It is NOT the old rolled-back intersection terminal (A@day1 + B@day1 = 231000).
+    assert out.equity.iloc[-1] != pytest.approx(231000.0, abs=1.0)
+
+    # Per-day: A summed with B's actual level (days 0-1) then B carried forward.
+    expected = [210000.0, 231000.0, 242000.0, 254100.0]
+    for day, exp in zip(_DAYS, expected):
+        assert out.equity[day] == pytest.approx(exp, abs=1e-6), day
+
+    # The truncation/staleness is FLAGGED, never silent.
+    assert out.flags["degraded"] is True
+    assert out.flags["window_truncated"] is True
+    assert out.flags["dropped_keys"] == []
+    assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
+
+
 # ── Guard: a withdrawal that drives equity non-positive refuses structurally ──
 
 def test_non_positive_intermediate_equity_refuses_without_leaking_usd():

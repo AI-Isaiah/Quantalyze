@@ -111,11 +111,10 @@ def _inline_normalized_cumprod(returns: pd.Series) -> pd.Series:
 
 
 def _inline_modified_dietz(
-    ledger: list,
+    flows: list[dict[str, float]],
     *,
     begin_value: float,
     end_value: float,
-    period_start: str,
     period_days: int,
 ) -> float:
     """Modified Dietz recomputed FROM SCRATCH in the test body (never
@@ -124,14 +123,15 @@ def _inline_modified_dietz(
         (V_end − V_begin − ΣF) / (V_begin + Σ w_i·F_i),  w_i = (D − day_i)/D
 
     with the day index clamped to ``[0, D]`` (the module's documented M-0695
-    clamp). This is the oracle's independent scalar."""
-    start = date.fromisoformat(period_start)
+    clamp). ``flows`` are ``{"amount", "day"}`` dicts the caller builds
+    INDEPENDENTLY (IN-01: the seam magnitude on the expected side is re-derived from
+    the inline backward replay, NOT read off the module ledger's ``usd_signed``), so
+    no expected-side value transits the module under test."""
     total_cf = 0.0
     weighted_cf = 0.0
-    for entry in ledger:
-        amount = float(entry.flow.usd_signed)
-        day = (date.fromisoformat(entry.flow.utc_day_iso) - start).days
-        day = min(max(day, 0), period_days)
+    for cf in flows:
+        amount = float(cf["amount"])
+        day = min(max(int(cf["day"]), 0), period_days)
         weight = (period_days - day) / period_days
         total_cf += amount
         weighted_cf += weight * amount
@@ -216,6 +216,42 @@ def test_oracle_2_blend_cumulative_return_equals_backbone():
     assert backbone_cumret == pytest.approx(inline_cumret, rel=1e-9)
 
 
+def test_oracle_2b_curve_excludes_day0_pins_backbone_relationship():
+    """WR-02: the perf-curve deliberately DROPS the day-0 return (``perf_0 == 1.0``,
+    the Phase-114 forward-TWR display convention), while the backbone
+    ``cumulative_return`` INCLUDES day 0. Pin the exact relationship
+    ``(1 + backbone_cumret) == (1 + r_0) · perf_terminal`` and prove that reading a
+    headline return OFF the curve disagrees with the backbone by exactly ``(1+r_0)``
+    — so a headline cumulative return must be sourced from the backbone, never the
+    curve. (Oracle 3's zero-flow pin cannot catch this: both curves drop day-0
+    identically; only this perf-curve-vs-backbone pin does.)"""
+    a, _ = concurrent_pair()
+    r = a.returns
+    r0 = float(r.iloc[0])
+
+    perf = perf_curve(r)
+    assert perf is not None
+    perf_terminal = float(perf.iloc[-1])
+
+    dt_series = pd.Series(
+        r.to_numpy(dtype=float),
+        index=pd.to_datetime(list(r.index)),
+        name="key-a",
+    )
+    backbone_cumret = compute_all_metrics(dt_series).metrics_json["cumulative_return"]
+
+    # The exact, intentional day-0 relationship.
+    assert (1.0 + backbone_cumret) == pytest.approx(
+        (1.0 + r0) * perf_terminal, rel=1e-12
+    )
+    # Reading cumret off the curve is WRONG — smaller by exactly (1 + r_0).
+    curve_cumret = perf_terminal - 1.0
+    assert curve_cumret != pytest.approx(backbone_cumret, rel=1e-9)
+    assert (1.0 + backbone_cumret) / (1.0 + curve_cumret) == pytest.approx(
+        1.0 + r0, rel=1e-12
+    )
+
+
 # ---------------------------------------------------------------------------
 # Oracle 3 — zero-flow equivalence (perf-curve == normalized $-curve).
 # ---------------------------------------------------------------------------
@@ -294,11 +330,24 @@ def test_oracle_4_seam_twr_jump_and_inline_dietz():
 
     assert math.isfinite(mwr)
 
+    # IN-01: the EXPECTED-side seam magnitude is re-derived from an INLINE backward
+    # replay (independent of the module ledger's usd_signed); the real deposit is
+    # the known fixture constant. No expected value is read off the module.
+    inline_c_eq = _inline_backward_equity(c.returns, [], ANCHORS[c.key_id])
+    inline_d_eq = _inline_backward_equity(d.returns, [], ANCHORS[d.key_id])
+    inline_seam = float(inline_d_eq.iloc[0]) - float(inline_c_eq.iloc[-1])
+    start = date.fromisoformat(period_start)
+    inline_flows = [
+        {"amount": 10000.0, "day": (date.fromisoformat("2026-03-10") - start).days},
+        {
+            "amount": inline_seam,
+            "day": (date.fromisoformat(seg.seams[0].next_first_day) - start).days,
+        },
+    ]
     inline_dietz = _inline_modified_dietz(
-        ledger,
+        inline_flows,
         begin_value=begin_value,
         end_value=end_value,
-        period_start=period_start,
         period_days=period_days,
     )
     assert dietz == pytest.approx(inline_dietz, abs=1e-9)

@@ -382,7 +382,21 @@ def perf_curve(returns: pd.Series | None) -> pd.Series | None:
     ``perf_0 == 1.0``). This is deliberately the SAME normalization the $-curve's
     ``equity_t / equity_0`` telescopes to under ZERO flows (STITCH-03 equivalence
     pin) — the two curves are then byte-identical, and any deposit/withdrawal is
-    the ONLY thing that can separate them. Returns ``None`` on an empty series."""
+    the ONLY thing that can separate them. Returns ``None`` on an empty series.
+
+    DAY-0 CONVENTION (WR-02 — the Phase-114 BACKBONE-01 precedent, decisive here):
+    normalizing to ``perf_0 == 1.0`` divides OUT the day-0 factor ``(1 + r_0)``, so
+    this curve's total growth is ``Π_{s≥1}(1 + r_s)`` — the SAME day-0-exclusion the
+    deleted forward-TWR scalar (now ``metrics.total_return_from_equity``, an
+    endpoint ratio over ``(1+r).cumprod()``) preserves byte-for-byte. The canonical
+    backbone ``metrics.compute_all_metrics(...).cumulative_return`` is
+    ``Π_{ALL days}(1 + r) − 1`` (INCLUDING day 0, metrics.py:1254), so
+    ``(1 + backbone_cumret) == (1 + r_0) × perf_curve_terminal`` EXACTLY. This
+    divergence is INTENTIONAL and pinned (parity oracle
+    ``test_oracle_2b_curve_excludes_day0_pins_backbone_relationship``): a headline
+    cumulative RETURN must ALWAYS be sourced from the backbone scalar, NEVER read
+    off this perf-curve or the normalized $-curve (both drop day-0 identically). No
+    115.1 consumer may derive a headline return from the curve."""
     if returns is None or len(returns) == 0:
         return None
     factors = (1.0 + returns).cumprod()
@@ -416,6 +430,13 @@ def replay_key_equity(
     day is a valid ``r_t == 0`` equity day, never dropped), the series is exact by
     construction. ``anchor=None`` -> NO series + ``REASON_NO_ANCHOR`` (never a
     fabricated base).
+
+    IN-02 caveat: the HIGH-1 union guarantee holds for INTERIOR flow days. A flow
+    dated on the EARLIEST union day ``days[0]`` is folded into the reconstructed
+    base ``equity[0]`` — the backward loop subtracts ``F_t`` only for ``t ≥ 1`` —
+    so a first-day flow does NOT separately move the base. It is self-consistent
+    (the forward self-check absorbs it identically) and correct for level
+    reconstruction, but has no distinguishable effect on ``equity[0]``.
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -490,13 +511,28 @@ def _assert_forward_agreement(
 def allocator_equity_curve(
     per_key_equity: Mapping[str, KeyEquity],
 ) -> AllocatorEquity:
-    """Sum the anchored per-key $-equity curves over their COMMON anchored window.
+    """Sum the anchored per-key $-equity curves over the UNION of their windows.
 
-    A key with ``equity is None`` (no anchor) is DROPPED (never invented); the
-    allocator curve is emitted only over the day-window where ALL surviving
-    (anchored) keys have a level, with a ``degraded`` flag naming the dropped
-    keys. Every key unanchored -> ``None`` + honest-empty flag. The curve is the
-    exact daily sum across the surviving keys (STITCH concurrent aggregation)."""
+    A key with ``equity is None`` (no anchor) is DROPPED (never invented). The
+    allocator curve spans the UNION of every surviving (anchored) key's day index;
+    on each union day the portfolio $-equity is the SUM of each key's level that
+    day. A still-held key whose OWN window has ended keeps its last-known level
+    CARRIED FORWARD (last-observation-carried-forward) for the remaining union
+    days — the allocator's live equity, which the ground-truth gate reconciles the
+    terminal against, is the sum of every key's last-known ``value_usd`` anchor, so
+    the terminal here MUST be ``Σ_k anchor_k``, never a rolled-back intersection
+    level. A key contributes 0 on union days BEFORE its own window opens (not yet
+    held). Interior absent days inside a key's own window carry the prior level.
+
+    WR-01: the OLD implementation summed only over the INTERSECTION of the anchored
+    indices, so two anchored keys with DIFFERENT windows silently dropped the
+    non-overlapping tails with ``degraded=False`` — the caller could not tell the
+    terminal was a rolled-back level. Now, whenever any surviving key's window is a
+    strict SUBSET of the union (a dropped key OR unequal per-key windows), the
+    result is flagged ``degraded=True`` with ``window_truncated`` and a
+    carried-tail-day count. The truncation/staleness is NEVER silent.
+
+    Every key unanchored -> ``None`` + honest-empty flag."""
     anchored = {
         k: ke.equity for k, ke in per_key_equity.items() if ke.equity is not None
     }
@@ -512,33 +548,46 @@ def allocator_equity_curve(
             },
         )
 
-    common: set[str] | None = None
-    for series in anchored.values():
-        idx = {str(d) for d in series.index}
-        common = idx if common is None else (common & idx)
-    common_days = sorted(common or set())
+    union_days = sorted({str(d) for s in anchored.values() for d in s.index})
+    union_index = pd.Index(union_days)
 
-    if not common_days:
-        return AllocatorEquity(
-            None,
-            {
-                "honest_empty": True,
-                "reason": REASON_NO_ANCHORED_KEYS,
-                "no_common_window": True,
-                "dropped_keys": dropped,
-            },
+    key_first: dict[str, str] = {}
+    key_last: dict[str, str] = {}
+    total = pd.Series(0.0, index=union_days, name="allocator_equity")
+    for k, series in anchored.items():
+        day_map = {str(d): float(v) for d, v in series.items()}
+        days_sorted = sorted(day_map)
+        key_first[k] = days_sorted[0]
+        key_last[k] = days_sorted[-1]
+        # Reindex onto the union, carrying the last-known level forward across any
+        # interior gap AND past the key's own last day (a still-held stale mark);
+        # 0 before the key opens (not yet part of the portfolio).
+        contrib = (
+            pd.Series(day_map)
+            .reindex(union_days)
+            .ffill()
+            .where(union_index >= key_first[k], 0.0)
+            .fillna(0.0)
         )
+        total = total.add(contrib, fill_value=0.0)
 
-    total = pd.Series(0.0, index=common_days, name="allocator_equity")
-    for series in anchored.values():
-        for day in common_days:
-            total[day] += float(series[day])
+    # A surviving key whose window is a strict subset of the union means the curve
+    # carries a stale mark (or a dropped key was excluded) — flag, never silent.
+    window_truncated = any(
+        key_first[k] != union_days[0] or key_last[k] != union_days[-1]
+        for k in anchored
+    )
+    n_tail_days_carried = sum(
+        1 for day in union_days for k in anchored if day > key_last[k]
+    )
 
     return AllocatorEquity(
         total,
         {
-            "degraded": bool(dropped),
+            "degraded": bool(dropped) or window_truncated,
             "dropped_keys": dropped,
+            "window_truncated": window_truncated,
+            "n_tail_days_carried": n_tail_days_carried,
             "n_keys": len(anchored),
         },
     )
@@ -604,9 +653,17 @@ def build_allocator_ledger(
             entries.append(_ledger_entry(str(flow[0]), float(flow[1]), LEDGER_REAL))
 
     for seam in seams:
-        prev_eq = _boundary_equity(per_key_equity, seam.prev_key, seam.prev_last_day)
-        next_eq = _boundary_equity(
-            per_key_equity, seam.next_key, seam.next_first_day
+        # WR-04: resolve boundary equity by SUMMING the constituent keys' levels
+        # (``seam.prev_keys`` / ``seam.next_keys``), NEVER the '+'-joined scalar
+        # label (``seam.prev_key`` "A+B" is never a real per-key entry -> the old
+        # ``get("A+B")`` returned None and stranded a knowable block-to-block seam
+        # to ``known=False``). A single-key rotation is the 1-member sum (identical
+        # to the prior behaviour); a concurrent-block rotation now resolves.
+        prev_eq = _boundary_equity_block(
+            per_key_equity, seam.prev_keys, seam.prev_last_day
+        )
+        next_eq = _boundary_equity_block(
+            per_key_equity, seam.next_keys, seam.next_first_day
         )
         if prev_eq is None or next_eq is None:
             # Magnitude unknown (a boundary segment is unanchored) — flag, never
@@ -634,6 +691,27 @@ def _ledger_entry(
     STITCH-05 grep pin asserts a single construction of the entry in the
     module; every real/seam entry funnels through here)."""
     return LedgerEntry(ExternalFlow(day, usd_signed), provenance, known)
+
+
+def _boundary_equity_block(
+    per_key_equity: Mapping[str, KeyEquity], keys: tuple[str, ...], day: str
+) -> float | None:
+    """The summed boundary $-equity of a (possibly multi-key) segment on ``day``:
+    ``Σ_k _boundary_equity(k, day)`` over the segment's constituent ``keys`` (WR-04).
+
+    A single-key rotation is the 1-member sum. A concurrent-block rotation sums the
+    block members' levels — the keys live at that boundary. Returns ``None`` if ANY
+    member is unanchored / absent that day (the WHOLE boundary magnitude is unknown;
+    never a partial sum) or if ``keys`` is empty (no resolvable block)."""
+    if not keys:
+        return None
+    total = 0.0
+    for k in keys:
+        lvl = _boundary_equity(per_key_equity, k, day)
+        if lvl is None:
+            return None
+        total += lvl
+    return total
 
 
 def _boundary_equity(
@@ -672,10 +750,19 @@ def mwr_and_dietz_from_ledger(
         investment OUT of the investor's pocket, so the sign FLIPS
         (``amount = −usd_signed``); the ``begin_value`` is prepended as the
         initial investment at ``period_start`` and ``end_value`` is the terminal
-        inflow.
+        inflow. WR-03: ONLY ``LEDGER_REAL`` (real-external) flows enter the
+        IRR — a ``LEDGER_SEAM`` entry is the SAME capital redeployed from one key to
+        the next (internal), NOT money entering/leaving the investor's pocket, and
+        its magnitude is largely independent-anchor reconciliation noise; injecting
+        it as an investor cash flow corrupts the IRR. Rotation seams are EXCLUDED.
       * Modified Dietz (portfolio perspective): ``amount = usd_signed`` directly
         (deposit +, withdrawal −, matching ``ExternalFlow``); ``day`` is the
-        0-based offset from ``period_start``.
+        0-based offset from ``period_start``. Seam entries ARE kept here (both
+        provenances): Modified-Dietz subtracts ΣF from the return NUMERATOR, so
+        including the boundary jump REMOVES it from performance (the same reason
+        TWR stays clean across a rotation) — the portfolio-perspective return is not
+        credited/debited for an internal redeployment. This asymmetry with MWR is
+        intentional: Dietz is portfolio-return-clean, MWR is investor-action-clean.
 
     Thread-only: the returned scalars are NOT display-wired this phase."""
     if any(not e.known for e in ledger):
@@ -684,12 +771,15 @@ def mwr_and_dietz_from_ledger(
     start = date.fromisoformat(str(period_start))
     end_date = (start + timedelta(days=int(period_days))).isoformat()
 
+    # WR-03: MWR (investor IRR) sees ONLY real-external flows; synthetic rotation
+    # seams are internal capital redeployment, never an investor action.
     mwr_flows: list[dict[str, Any]] = [
         {"date": period_start, "amount": -float(begin_value)}
     ]
     mwr_flows += [
         {"date": e.flow.utc_day_iso, "amount": -float(e.flow.usd_signed)}
         for e in ledger
+        if e.provenance != LEDGER_SEAM
     ]
     mwr = compute_mwr(mwr_flows, final_value=float(end_value), end_date=end_date)
 
