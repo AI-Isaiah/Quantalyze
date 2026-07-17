@@ -373,3 +373,25 @@ def test_seam_flow_satisfies_forward_identity_not_naive_jump():
     naive_F = d_first - c_last
     assert seam_entry.flow.usd_signed != pytest.approx(naive_F, abs=1e-3)
     assert (naive_F - forward_identity_F) == pytest.approx(c_last * r_seam, abs=1e-9)
+
+
+def test_seam_without_next_side_return_is_magnitude_unknown():
+    """Finding 3 fail-loud: the forward-identity seam needs the incoming block's
+    first-day return. When ``returns_by_key`` is absent, a next-side key is missing
+    from it, or its series lacks the seam-day return, the magnitude is UNKNOWN ->
+    ``known=False`` (never fabricated)."""
+    c, d, seg, per_key_equity, returns = _cd_setup()
+    seam_day = seg.seams[0].next_first_day
+
+    def _seam_known(returns_by_key):
+        ledger = build_allocator_ledger({}, seg.seams, per_key_equity, returns_by_key)
+        return next(e for e in ledger if e.provenance == LEDGER_SEAM).known
+
+    # (a) no returns_by_key at all.
+    assert _seam_known(None) is False
+    # (b) the next key (D) is absent from returns_by_key.
+    assert _seam_known({c.key_id: c.returns}) is False
+    # (c) returns present but D's series lacks the seam-day return.
+    assert _seam_known({c.key_id: c.returns, d.key_id: d.returns.drop(seam_day)}) is False
+    # Control: the full returns resolve a KNOWN seam.
+    assert _seam_known(returns) is True
