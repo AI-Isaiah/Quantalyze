@@ -4,7 +4,7 @@ dogfooding gap: an eligible deribit allocator key must produce per-key
 the EXISTING Phase-36 blend (``queries.ts`` ``liveBaselineMetricsFromPerKeyDailies``)
 renders shape + KPIs for an all-deribit allocator. Today all-deribit allocators
 get NOTHING: the legacy ``allocator_equity_snapshots`` store carves out deribit
-(``equity_reconstruction.py``:2097) and — per the 115-01 A1 census — 364/364
+(``equity_reconstruction.py``:2084) and — per the 115-01 A1 census — 364/364
 eligible deribit allocator keys on TEST have ZERO per-key csv_daily_returns rows.
 
 VERIFY-FIRST characterization (Task 1). Three tests pin the exact failure layer

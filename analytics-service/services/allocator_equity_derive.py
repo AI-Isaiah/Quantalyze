@@ -23,17 +23,30 @@ decisions canonically:
          series the WHOLE allocator degrades to the honest-empty baseline, never a
          mixed-annualization-basis half-blend (queries.ts L2105-2112, L2266-2275).
 
-PARTIALLY-MISSING DAYS (the exact TS choice, replicated)
---------------------------------------------------------
-On a union day where a subset of keys lacks a row, the TS engine 0-FILLS that key's
-return in the NUMERATOR only and keeps the divisor at the CONSTANT full weight mass
-(``strategyReturns[s.id] = map.get(d) ?? 0`` at scenario.ts L407-409, then
-``portDaily[i] = r / activeWeightSum`` at scenario.ts L430 where ``activeWeightSum``
-sums the whole member mass every day on the allocator's absent-window path). We
-replicate this exactly: ``blended_r_t = Σ_i w_i · r_i,t(0-filled) / Σ_i w_i``. The
-0-fill can never leak past a key's own coverage because segmentation (below) keeps
-genuinely sequential runs in their OWN single-key segments — the blend is only ever
-handed a concurrent block.
+PARTIALLY-MISSING DAYS (constant-divisor 0-fill; the TS PRESENT-window path)
+---------------------------------------------------------------------------
+On a union day where a subset of keys lacks a row, we 0-FILL that key's return in the
+NUMERATOR only and keep the divisor at the CONSTANT full weight mass:
+``blended_r_t = Σ_i w_i · r_i,t(0-filled) / Σ_i w_i``.
+
+D2 (attribution): this matches the TS engine's PRESENT-window path only
+(``strategyReturns[s.id] = map.get(d) ?? 0`` + a constant divisor, scenario.ts
+L411-415). The TS engine ALSO has an ABSENT-window path that RENORMALIZES the divisor
+to exclude not-yet-started keys (scenario.ts L407-409 excludes absent members from
+``activeWeightSum``). This module does NOT replicate that absent-window renorm — it
+always uses the constant divisor — which is exactly the source of the HIGH-1
+divergence below. So this is a deliberate NON-replication, not "the TS exactly."
+
+D1 (scope of the guarantee): the constant-divisor 0-fill is safe for INTERIOR
+partial-missing days. It is NOT structurally prevented here from a key's EXCLUSIVE
+lead/tail day: ``blend_concurrent_returns`` receives the RAW union and is NOT wired to
+``segment_coverage`` (only ``allocator_equity_curve`` is). An exclusive lead/tail day
+IS 0-filled at full weight in THIS module and is SURFACED (never prevented here) via
+the ``exclusive_fill_days`` flag / ``DegradeReason.EXCLUSIVE_FILL``. The structural
+prevention — feeding the blend one ``Segment`` at a time so only genuine concurrent
+blocks reach it — is the Phase-115.1 wiring (see the HIGH-1 comment in
+``blend_concurrent_returns``); do NOT delete the ``exclusive_fill_days`` guard as
+"redundant" until that wiring lands.
 
 BINDING INVARIANTS
 ------------------
@@ -206,6 +219,15 @@ def blend_concurrent_returns(
         (queries.ts L2209). All-zero (or all-clamped-negative) mass is HONEST-EMPTY
         (``blended=None`` + ``REASON_ZERO_WEIGHT_MASS``) — no capital basis to blend
         on, never a fabricated equal-weight curve (LOW-8).
+      * A non-coextensive key's EXCLUSIVE lead/tail day is 0-filled at full weight
+        (see the module docstring D1) and surfaced via the ``exclusive_fill_days``
+        flag / ``DegradeReason.EXCLUSIVE_FILL`` (a BLOCKING signal — ``is_trustworthy``
+        is False) — never silently absorbed.
+
+    Raises:
+      NavReconstructionError — a PRESENT-but-non-finite return VALUE (NaN/inf, a csv
+      gap) in ANY key series (MEDIUM-2). This runs BEFORE the sole-key passthrough, so
+      a sole-key NaN series is refused too, never copied through.
 
     NEVER calls ``assert_windows_disjoint`` (Landmine L1) — overlapping siblings
     blend, they do not stitch."""
@@ -729,7 +751,8 @@ def allocator_equity_curve(
         level CARRIED FORWARD (last-observation-carried-forward) — the WR-01 case: the
         allocator's live equity, which the ground-truth gate reconciles the terminal
         against, is the sum of every still-held key's last-known ``value_usd`` anchor,
-        so the terminal MUST be ``Σ_k anchor_k``, never a rolled-back intersection.
+        so the terminal MUST be ``Σ_{still-held k} anchor_k`` (rotated-out keys
+        contribute 0 at the terminal), never a rolled-back intersection.
 
     The seam classification is taken from ``seams`` when supplied (pass the SAME list
     ``build_allocator_ledger`` consumed, for guaranteed curve/ledger agreement) or
@@ -741,9 +764,13 @@ def allocator_equity_curve(
     WR-01: the OLD implementation summed only over the INTERSECTION of the anchored
     indices, silently dropping non-overlapping tails with ``degraded=False``. Now,
     whenever any surviving key's window is a strict SUBSET of the union, the result is
-    flagged ``degraded=True`` with ``window_truncated``, a non-rotated stale-mark
-    tail-day count, and the ``rotated_out_keys`` list (so a consumer can distinguish a
-    stale mark from a rotation). Every key unanchored -> ``None`` + honest-empty."""
+    flagged ``degraded=True``. The degraded-path ``flags`` carry: ``window_truncated``
+    (bool), ``n_tail_days_carried`` (benign non-rotated stale-mark days),
+    ``rotated_out_keys`` (benign classified rotations), ``unclassified_truncation_keys``
+    (MEDIUM-6 — a coverage-detected rotation the passed seams did NOT classify; a
+    BLOCKING signal), and ``dropped_keys``. The closed ``degrade_reasons`` set +
+    ``is_trustworthy`` (C3) classify these benign-vs-blocking so a consumer can honor
+    them without re-reading the dict. Every key unanchored -> ``None`` + honest-empty."""
     anchored = {
         k: ke.equity for k, ke in per_key_equity.items() if ke.equity is not None
     }
