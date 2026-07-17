@@ -118,7 +118,7 @@ import { InfoBanner } from "@/components/ui/InfoBanner";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
 import { methodologyLine, shortestHistoryName } from "@/lib/scenario-history";
 import { MAX_LEVERAGE, sanitizeLeverageMap } from "@/lib/leverage";
-import { formatCurrency } from "@/lib/utils";
+import { formatCurrency, formatPercent } from "@/lib/utils";
 import { Button } from "@/components/ui/Button";
 import {
   computeHoldingsFingerprint,
@@ -139,6 +139,10 @@ import {
   mergeAddedIntoPerKeySet,
 } from "../lib/scenario-adapter";
 import { buildHoldingRef } from "../lib/holding-outcome-adapter";
+import {
+  solveLeverageForMaxDD,
+  type SolveLeverageResult,
+} from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
@@ -884,6 +888,22 @@ export function ScenarioComposer({
   // decision (default 1.0 when a ref is absent).
   const [leverageByRef, setLeverageByRef] = useState<Record<string, number>>({});
 
+  // WEIGHTS-03 (Phase 113) — TRANSIENT per-row Target-max-DD UI state (founder
+  // lock 2026-07-17). `targetModeByRef[ref] === true` ⇒ the row is in Target mode
+  // (absent/false = the DEFAULT Leverage mode); `solveResultByRef[ref]` is the
+  // last solve outcome for the row's honest state line. Both are pure UI state —
+  // NEVER folded into the draft, NEVER serialized (no SCENARIO_SCHEMA_VERSION
+  // bump): only the SOLVED L persists, and it rides the existing leverageByRef
+  // path indistinguishably from a typed L. Reset alongside leverageByRef at every
+  // session-bleed seam (reset/commit + the two saved-scenario opens) so a stale
+  // mode/solve can never carry across a fresh open.
+  const [targetModeByRef, setTargetModeByRef] = useState<
+    Record<string, boolean>
+  >({});
+  const [solveResultByRef, setSolveResultByRef] = useState<
+    Record<string, SolveLeverageResult>
+  >({});
+
   // CONSTIT-03 (Phase 111, locked 2026-07-16) — per-key data-source
   // include/exclude now rides the ONE canonical `scenario.draft.toggleByScopeRef`
   // channel every other constituent uses (via `scenario.togglePerKeySource`),
@@ -1357,6 +1377,10 @@ export function ScenarioComposer({
     // it (the exact class the WR-02 include-map clear above fixes). Every ref
     // back to the 1× default on a fresh live book.
     setLeverageByRef({});
+    // WEIGHTS-03 — the transient Target-mode UI state rides the SAME reset seam:
+    // a fresh/reset book carries no row-level mode or solve outcome.
+    setTargetModeByRef({});
+    setSolveResultByRef({});
     // UNIFY-02 — if a dirty-draft mode switch parked a pending segment, apply
     // it now (on the SAME confirm that discards the draft). `reset()` re-inits
     // the draft from `holdingsSummary`, which itself depends on `entryMode`, so
@@ -1575,6 +1599,11 @@ export function ScenarioComposer({
         setLeverageByRef(
           drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
         );
+        // WEIGHTS-03 — clear the transient Target-mode UI state on open (the
+        // solved L rehydrates through leverageByRef above; mode/solve never
+        // persist, so a reopened scenario starts every row in Leverage mode).
+        setTargetModeByRef({});
+        setSolveResultByRef({});
         // v1.5 PERSIST-01 — seed the coverage window from the saved draft. A
         // newer-version blob may carry a window; seed it verbatim so the
         // read-only view recomputes at the owner's saved window. If absent (a
@@ -1625,6 +1654,11 @@ export function ScenarioComposer({
       setLeverageByRef(
         drifted ? {} : sanitizeLeverageMap(decoded.value.leverageOverrides),
       );
+      // WEIGHTS-03 — clear the transient Target-mode UI state on open (see the
+      // readonly branch above): a reopened scenario starts every row in Leverage
+      // mode; the solved L already rehydrated through leverageByRef.
+      setTargetModeByRef({});
+      setSolveResultByRef({});
       // v1.5 PERSIST-01 — seed the coverage window from the reopened draft, then
       // let the existing engineState memo recompute TODAY's numbers at it (no
       // stored series is replayed — no-invented-data lock).
@@ -2713,6 +2747,56 @@ export function ScenarioComposer({
       computeScenario(engineSet.strategies, engineState, dateMapCache, blendBasis),
     [engineSet, engineState, dateMapCache, blendBasis],
   );
+
+  // WEIGHTS-03 (Phase 113) — flip a row between Leverage (default) and Target
+  // max-DD mode. Flipping OFF (back to Leverage) drops the row's solve outcome:
+  // the derived L is now a normal Phase-112 leverage the allocator hand-tweaks,
+  // so no stale honest-state line should linger.
+  function handleSetTargetMode(scopeRef: string, on: boolean) {
+    setTargetModeByRef((prev) => ({ ...prev, [scopeRef]: on }));
+    if (!on) {
+      setSolveResultByRef((prev) => {
+        if (!(scopeRef in prev)) return prev;
+        const { [scopeRef]: _drop, ...rest } = prev;
+        return rest;
+      });
+    }
+  }
+
+  // WEIGHTS-03/04 (Phase 113) — the ONE-SHOT solve-on-commit handler (founder
+  // lock: the SOLE `solveLeverageForMaxDD` call site — no effect/subscription
+  // re-solves on other edits). Mirrors handleLeverageChange's fail-loud shape:
+  // an out-of-range target (non-finite / ≤0 / ≥100) is an HONEST refusal that
+  // keeps the prior value — NEVER a clamp, because a clamped target would solve
+  // for a value the allocator never typed (T-113-05). The solver runs over the
+  // MEMOIZED engine inputs (engineSet.strategies / engineState / dateMapCache /
+  // blendBasis) — zero rebuilt caches, zero new computeScenario call sites. On a
+  // reachable solve the derived L (3dp-rounded — the round shifts dd by ≪ DD_TOL)
+  // routes through handleLeverageChange, so a solved L IS a leverage on the exact
+  // same clamp + message + persistence path as a typed one. On any honest failure
+  // it writes NOTHING to leverageByRef (Pitfall 3 — no fabricated L); the row's
+  // solve-state line renders the reason + an em-dash.
+  function handleTargetCommit(scopeRef: string, targetPct: number) {
+    if (!Number.isFinite(targetPct) || targetPct <= 0 || targetPct >= 100) {
+      setCommitError(
+        "Enter a max-drawdown target above 0% and below 100% — the previous value was kept.",
+      );
+      return;
+    }
+    const result = solveLeverageForMaxDD({
+      strategies: engineSet.strategies,
+      engineState,
+      dateMapCache,
+      periodsPerYear: blendBasis,
+      ref: scopeRef,
+      targetMaxDD: targetPct / 100,
+    });
+    setSolveResultByRef((prev) => ({ ...prev, [scopeRef]: result }));
+    if (result.ok) {
+      setCommitError(null);
+      handleLeverageChange(scopeRef, Math.round(result.leverage * 1000) / 1000);
+    }
+  }
 
   // Phase 57 Plan 03 (WINDOW-02/03, ADR §"UI state machine") — the pure
   // coverage-eligibility axis. For each SELECTED strategy (the manual subset),
@@ -4628,6 +4712,11 @@ export function ScenarioComposer({
           totalBookEquity={totalBookEquity}
           leverageByRef={leverageByRef}
           onSetLeverage={handleLeverageChange}
+          targetModeByRef={targetModeByRef}
+          onSetTargetMode={handleSetTargetMode}
+          onCommitTarget={handleTargetCommit}
+          solveResultByRef={solveResultByRef}
+          portfolioMaxDrawdown={scenarioMetrics.max_drawdown}
           onRemoveAdded={handleRemoveAdded}
           coverageEligible={coverageEligible}
         />
@@ -5007,6 +5096,20 @@ interface CompositionListProps {
   /** R4 — ref → leverage multiplier (default 1.0 when absent). */
   leverageByRef: Record<string, number>;
   onSetLeverage: (scopeRef: string, leverage: number) => void;
+  /**
+   * WEIGHTS-03 (Phase 113) — TRANSIENT per-row Target-max-DD UI wiring.
+   * `targetModeByRef[ref] === true` ⇒ the row is in Target mode (absent/false =
+   * the DEFAULT Leverage mode). `onSetTargetMode` flips the mode; `onCommitTarget`
+   * runs the one-shot solve on blur/Enter (percent units). `solveResultByRef[ref]`
+   * drives the honest state line; `portfolioMaxDrawdown` is the full-book computed
+   * max-DD (the existing scenarioMetrics memo) shown for the solved L — a COMPUTED
+   * readout, never "solved", em-dash when null.
+   */
+  targetModeByRef: Record<string, boolean>;
+  onSetTargetMode: (scopeRef: string, on: boolean) => void;
+  onCommitTarget: (scopeRef: string, targetPct: number) => void;
+  solveResultByRef: Record<string, SolveLeverageResult>;
+  portfolioMaxDrawdown: number | null;
   onRemoveAdded: (id: string) => void;
   /**
    * Phase 58 COVERAGE-02 — the coverage-eligibility axis (the `coverageEligible`
