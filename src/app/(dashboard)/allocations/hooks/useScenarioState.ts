@@ -413,6 +413,14 @@ export function useScenarioState(
         // WR-01: a per-key ref rides raw equity (no default weightOverride). A
         // user-explicit override on it IS a change — userWeightOverrides is
         // written only on an explicit edit, so its mere presence is one gesture.
+        // RT-04 (Phase 112 red team) — ACCEPTED honesty edge: an edit-then-retype-
+        // to-the-default-raw-equity-share still counts 1 here (unlike holdings,
+        // which compare against `defaultWeight` with 1e-9 tolerance and count 0 on
+        // revert). Comparing a per-key override to its DEFAULT raw-equity share
+        // would need `equityByApiKeyId` + the live included-set plumbed into this
+        // hook (it only sees `holdingsSummary`/`defaultDraft`), heavy plumbing for
+        // a LOW — and the draft blob genuinely differs (the userWeightOverrides
+        // entry is present), so "unsaved" is not strictly wrong. Left AS-IS.
         count++;
         continue;
       }
