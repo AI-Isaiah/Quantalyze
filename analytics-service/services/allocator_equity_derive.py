@@ -503,6 +503,18 @@ def replay_key_equity(
     if anchor is None:
         return KeyEquity(None, REASON_NO_ANCHOR)
 
+    # C1: refuse a non-finite return VALUE at ingestion (a csv-gap NaN) with a
+    # DATA-QUALITY diagnostic. Without this, a NaN return sails past the ≤−100%
+    # factor guard (``nan <= 0`` is False), poisons the roll, and trips the
+    # MISATTRIBUTED "a flow dominates prior capital" refusal downstream. Mirrors the
+    # perf_curve / blend MEDIUM-2 refusal (no USD leak).
+    bad_returns = _nonfinite_count(returns)
+    if bad_returns:
+        raise NavReconstructionError(
+            f"allocator equity replay: {bad_returns} non-finite return value(s) — "
+            "refusing a data-quality NaN/inf (distinct from the flow-dominance guard)"
+        )
+
     fbd = _flows_by_day(flows)
     r = {str(d): float(v) for d, v in returns.items()}
     # HIGH-1: union flow days into the return index BEFORE the roll.

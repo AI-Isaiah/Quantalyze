@@ -209,6 +209,23 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── C1: replay_key_equity refuses a non-finite return with a data-quality error ─
+
+def test_replay_non_finite_return_refuses_with_data_quality_error():
+    """C1: replay_key_equity (the fn the ground-truth harness runs over persisted
+    csv_daily_returns) had NO finiteness guard. A NaN return sailed past the ≤−100%
+    factor check and tripped the MISATTRIBUTED 'a flow dominates prior capital'
+    refusal. It now fails with a data-quality diagnostic instead — no USD leak."""
+    rn = pd.Series([0.10, float("nan"), 0.10], index=_DAYS[:3], name="k")
+    with pytest.raises(NavReconstructionError) as exc:
+        replay_key_equity(rn, [], _ZERO_FLOW_ANCHOR)
+    msg = str(exc.value)
+    assert "non-finite" in msg
+    assert "flow dominates" not in msg  # NOT the misattributed guard
+    for token in ("133100", "100000"):  # no raw USD magnitude
+        assert token not in msg
+
+
 # ── MEDIUM-2: a non-finite return value refuses (never a silent NaN curve) ────
 
 def test_non_finite_return_value_refuses_in_perf_curve_and_blend():
