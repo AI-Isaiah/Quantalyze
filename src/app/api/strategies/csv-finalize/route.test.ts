@@ -109,6 +109,7 @@ vi.mock("next/server", async () => {
 
 import { NextRequest } from "next/server";
 import { POST } from "@/app/api/strategies/csv-finalize/route";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 const VALID_SESSION = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
 const VALID_SERIES = [{ date: "2024-01-01", daily_return: 0.01 }];
@@ -206,6 +207,47 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     const body = await res.json();
     expect(body.ok).toBe(false);
     expect(body.code).toBe("CSV_FINALIZE_FAIL");
+    // F-OBS — the finalize RPC failure is captured to Sentry (not console.error
+    // only), so a systematic contribution-finalize outage is alertable. Mirrors
+    // this file's own L811 metadata-update convention.
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "22023" }),
+      expect.objectContaining({
+        tags: expect.objectContaining({
+          surface: "csv-finalize",
+          step: "finalize-rpc",
+          flow: "contribution",
+        }),
+      }),
+    );
+    consoleErr.mockRestore();
+  });
+
+  it("F-OBS — contribution finalize returns a NON-UUID (contract violation) → 422 + Sentry capture", async () => {
+    // The RPC returns 200 + a non-uuid strategy id — a return-shape contract
+    // violation. The handler must still fail closed (422, no orphaned success)
+    // AND alert: a silently drifted SQL return shape is worth a Sentry signal.
+    rpcMock.mockResolvedValueOnce({ data: "not-a-uuid", error: null });
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await POST(
+      makeRequest(validBody({ entry_context: "contribution" })),
+    );
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.code).toBe("CSV_FINALIZE_FAIL");
+    // No orphaned downstream write on the contract-violation path.
+    expect(rpcCall("persist_csv_daily_returns")).toBeUndefined();
+    // Captured with a synthesized Error (no rpc error object) + the
+    // contract_violation flag so the alert distinguishes this from a RAISE.
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+      expect.any(Error),
+      expect.objectContaining({
+        tags: expect.objectContaining({ step: "finalize-rpc", flow: "contribution" }),
+        extra: expect.objectContaining({ contract_violation: true }),
+      }),
+    );
     consoleErr.mockRestore();
   });
 

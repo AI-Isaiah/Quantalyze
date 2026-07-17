@@ -1339,6 +1339,33 @@ async function contributionCsvFinalizeHandler(args: {
       error?.code,
       error?.message,
     );
+    // CONTRIB-02 observability — pair the console.error with captureToSentry so
+    // a systematic contribution-finalize outage is alertable, mirroring this
+    // file's own convention (L811 metadata-update, and the shared fan-out
+    // helpers). The finalize RPC is MORE load-bearing than the metadata UPDATE
+    // that already got the pairing, yet was the one backend call in this handler
+    // with no alert. Two distinct failure shapes:
+    //   - error present: the RPC RAISEd (migration drift on p_terminal_status,
+    //     an RLS regression, or the SQL fn's guard on an unexpected status);
+    //   - !isUuid(newStrategyId): the RPC returned 200 + a non-uuid — a contract
+    //     violation worth its own alert (the SQL fn's return shape drifted).
+    // The user still gets the honest 422 below unchanged; this is alerting only.
+    captureToSentry(
+      error ??
+        new Error(
+          `finalize_csv_strategy returned a non-uuid strategy id (${String(
+            newStrategyId,
+          )})`,
+        ),
+      {
+        tags: { surface: "csv-finalize", step: "finalize-rpc", flow: "contribution" },
+        extra: {
+          correlation_id: args.correlationId,
+          rpc_error_code: error?.code ?? null,
+          contract_violation: error ? false : true,
+        },
+      },
+    );
     return NextResponse.json(
       {
         ok: false,
