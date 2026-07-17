@@ -163,6 +163,12 @@ def blend_concurrent_returns(
         norm = {k: raw[k] / total for k in keys}
 
     # Union axis (0-fill missing interior days in the numerator; constant divisor).
+    # NIT (Fable, for Phase 115.1): this trusts the caller to hand a CONCURRENT block
+    # (``segment_coverage`` clips to it). A key whose window extends past the block's
+    # overlap would contribute 0%-return days on its exclusive tail here (a fabricated
+    # flat day), and a zero-weight key adds nothing but still widens the union. When
+    # 115.1 wires the real per-key crawl, gate the input on a shared-window / non-zero
+    # active-mass check upstream rather than 0-filling exclusive days into the blend.
     union_days = sorted({d for k in keys for d in series_by_key[k].index})
     values: list[float] = []
     for day in union_days:

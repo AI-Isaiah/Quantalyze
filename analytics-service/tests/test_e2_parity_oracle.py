@@ -39,7 +39,7 @@ on pandas).
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import pytest
@@ -47,6 +47,7 @@ import pytest
 from services.allocator_equity_derive import (
     LEDGER_REAL,
     LEDGER_SEAM,
+    allocator_equity_curve,
     blend_concurrent_returns,
     build_allocator_ledger,
     mwr_and_dietz_from_ledger,
@@ -386,3 +387,113 @@ def test_oracle_5_corruption_canary_fails_loud():
         _assert_module_equity_matches_inline(
             a.returns, corrupted, full, ANCHORS[a.key_id]
         )
+
+
+# ---------------------------------------------------------------------------
+# Oracle 6 — allocator_equity_curve over a rotation (Finding 1 had ZERO coverage).
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_6_rotation_curve_no_double_count_of_redeployed_capital():
+    """Finding 1 oracle: the allocator $-curve must NOT carry a rotated-out key's
+    capital past the seam. Re-derive the expected curve INLINE — a rotated key does
+    not overlap the next, so the portfolio is C's inline backward-replay levels over
+    C's window then D's over D's window (a plain concat, independent of the module's
+    curve assembly). Assert the module curve matches day-by-day and that the seam-day
+    value is D_first alone, never the doubled C_last + D_first."""
+    c, d = rotated_seam_pair()
+    pke = {
+        c.key_id: replay_key_equity(c.returns, [], ANCHORS[c.key_id]),
+        d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
+    }
+    seg = segment_coverage({c.key_id: c.returns, d.key_id: d.returns})
+
+    inline_c = _inline_backward_equity(c.returns, [], ANCHORS[c.key_id])
+    inline_d = _inline_backward_equity(d.returns, [], ANCHORS[d.key_id])
+    expected = pd.concat([inline_c, inline_d])
+
+    out = allocator_equity_curve(pke)  # module derives the seam classification
+    assert list(map(str, out.equity.index)) == list(map(str, expected.index))
+    for day in expected.index:
+        assert out.equity[str(day)] == pytest.approx(float(expected[day]), abs=1e-6), day
+
+    seam_day = seg.seams[0].next_first_day
+    assert out.equity[seam_day] == pytest.approx(float(inline_d.iloc[0]), abs=1e-6)
+    assert out.equity[seam_day] != pytest.approx(
+        float(inline_c.iloc[-1]) + float(inline_d.iloc[0]), abs=1.0
+    )
+    assert out.flags["rotated_out_keys"] == [c.key_id]
+
+
+# ---------------------------------------------------------------------------
+# Oracle 7 — the seam flow from the forward identity (Finding 3, independent).
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_7_seam_flow_equals_forward_identity_over_inline_curve():
+    """Finding 3 oracle: re-derive the seam flow from the module's forward identity
+    ``equity_next = equity_prev·(1 + r_next) + F`` over an INLINE-built concatenated
+    curve and assert the ledger's seam entry equals it — never the naive
+    ``next_eq − prev_eq`` (which drops the redeployed capital's first-day P&L)."""
+    c, d = rotated_seam_pair()
+    pke = {
+        c.key_id: replay_key_equity(c.returns, [], ANCHORS[c.key_id]),
+        d.key_id: replay_key_equity(d.returns, [], ANCHORS[d.key_id]),
+    }
+    seg = segment_coverage({c.key_id: c.returns, d.key_id: d.returns})
+    returns = {c.key_id: c.returns, d.key_id: d.returns}
+    ledger = build_allocator_ledger({}, seg.seams, pke, returns)
+    seam_entry = next(e for e in ledger if e.provenance == LEDGER_SEAM)
+
+    inline_c = _inline_backward_equity(c.returns, [], ANCHORS[c.key_id])
+    inline_d = _inline_backward_equity(d.returns, [], ANCHORS[d.key_id])
+    r_next = float(d.returns.iloc[0])
+    expected_F = float(inline_d.iloc[0]) - float(inline_c.iloc[-1]) * (1.0 + r_next)
+    assert seam_entry.flow.usd_signed == pytest.approx(expected_F, abs=1e-6)
+
+    naive = float(inline_d.iloc[0]) - float(inline_c.iloc[-1])
+    assert seam_entry.flow.usd_signed != pytest.approx(naive, abs=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Oracle 8 — withdrawal-dominant MWR includes the terminal (Finding 2, independent).
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_8_withdrawal_dominant_mwr_includes_terminal():
+    """Finding 2 oracle: a withdrawal-dominant ledger's MWR must satisfy the IRR
+    defining equation WITH the terminal present. Re-evaluate the NPV of the investor
+    cashflows (begin outflow, withdrawal inflow, terminal wealth) at the solved
+    annualised rate FROM SCRATCH and assert it is zero, and that the rate varies with
+    ``end_value`` (the terminal is no longer invisible)."""
+    import math
+
+    ledger = build_allocator_ledger(
+        {"key-X": [ExternalFlow("2026-03-15", -150000.0)]}, [], {}
+    )
+    begin, period_start, period_days = 100000.0, "2026-03-01", 60
+    end_date = date.fromisoformat(period_start) + timedelta(days=period_days)
+    t0 = date.fromisoformat(period_start)
+
+    solved = {}
+    for ev in (1.0, 30000.0, 300000.0):
+        mwr, _ = mwr_and_dietz_from_ledger(
+            ledger, begin_value=begin, end_value=ev,
+            period_start=period_start, period_days=period_days,
+        )
+        assert mwr is not None and math.isfinite(mwr)
+        solved[ev] = mwr
+        # Independent NPV at the solved annualised rate (compute_mwr uses 365.25).
+        flows = [
+            (t0, -begin),                                   # investor invests
+            (date.fromisoformat("2026-03-15"), 150000.0),   # withdrawal -> investor
+            (end_date, ev),                                 # terminal wealth
+        ]
+        npv = sum(
+            amt / (1.0 + mwr) ** ((dd - t0).days / 365.25) for dd, amt in flows
+        )
+        assert npv == pytest.approx(0.0, abs=1e-2)
+
+    # Distinct, monotone rates: ending wealth is visible to the solve.
+    assert len({round(v, 6) for v in solved.values()}) == 3
+    assert solved[1.0] < solved[30000.0] < solved[300000.0]
