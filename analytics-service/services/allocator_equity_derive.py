@@ -186,12 +186,15 @@ def blend_concurrent_returns(
     norm = {k: raw[k] / total for k in keys}
 
     # Union axis (0-fill missing interior days in the numerator; constant divisor).
-    # NIT (Fable, for Phase 115.1): this trusts the caller to hand a CONCURRENT block
-    # (``segment_coverage`` clips to it). A key whose window extends past the block's
-    # overlap would contribute 0%-return days on its exclusive tail here (a fabricated
-    # flat day), and a zero-weight key adds nothing but still widens the union. When
-    # 115.1 wires the real per-key crawl, gate the input on a shared-window / non-zero
-    # active-mass check upstream rather than 0-filling exclusive days into the blend.
+    # HIGH-1 (interim, Fable): ``.get(day, 0.0)`` 0-fills a key's row on a union day
+    # OUTSIDE that key's own coverage (an exclusive lead/tail of a non-coextensive
+    # key), blended at FULL weight — a fabricated flat 0% day that silently
+    # dilutes/halves the blend. The docstring only defends this for INTERIOR
+    # partial-missing days. The STRUCTURAL fix (feed the blend one Segment at a time,
+    # via ``segment_coverage``, so interior-gap vs exclusive-tail is distinguishable)
+    # is Phase-115.1 wiring work — NOT built here. INTERIM: emit an
+    # ``exclusive_fill_days`` count so the fabrication is no longer invisible; 115.1
+    # refuses when nonzero.
     union_days = sorted({d for k in keys for d in series_by_key[k].index})
     values: list[float] = []
     for day in union_days:
@@ -199,12 +202,16 @@ def blend_concurrent_returns(
         for k in keys:
             r += norm[k] * float(series_by_key[k].get(day, 0.0))
         values.append(r)
+    exclusive_fill_days = sum(
+        1 for day in union_days if any(day not in series_by_key[k].index for k in keys)
+    )
     blended = pd.Series(values, index=union_days, name="allocator_blend")
     return BlendResult(
         blended,
         {
             "sole_key": False,
             "zero_weight_keys": sorted(k for k in keys if raw[k] == 0.0),
+            "exclusive_fill_days": exclusive_fill_days,
             "n_keys": len(keys),
         },
     )

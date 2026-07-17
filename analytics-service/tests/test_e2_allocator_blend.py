@@ -125,6 +125,23 @@ def test_weights_are_static_not_performance_tracking():
         assert v == pytest.approx(0.6 * a_returns.iloc[i] + 0.4 * b_returns.iloc[i])
 
 
+def test_non_coextensive_blend_flags_exclusive_fill_days():
+    """HIGH-1 (interim): a key blended on a union day OUTSIDE its own coverage is
+    0-filled at full weight (a fabricated flat 0% day that dilutes the blend). The
+    structural fix (segment-wise blend) is 115.1 work; the INTERIM makes the
+    fabrication visible via an ``exclusive_fill_days`` count so 115.1 can refuse."""
+    a = pd.Series([0.01, 0.01, 0.01, 0.01], index=[str(d) for d in range(1, 5)], name="a")
+    b = pd.Series([0.02, 0.02], index=[str(d) for d in range(1, 3)], name="b")
+    res = blend_concurrent_returns({"a": a, "b": b}, {"a": 1.0, "b": 1.0})
+    assert res.blended is not None
+    # b lacks a row on 2 union days -> the exclusive 0-fill is no longer invisible.
+    assert res.flags["exclusive_fill_days"] == 2
+    # A coextensive blend has zero exclusive fills.
+    b_full = pd.Series([0.02, 0.02, 0.02, 0.02], index=a.index, name="b")
+    res_full = blend_concurrent_returns({"a": a, "b": b_full}, {"a": 1.0, "b": 1.0})
+    assert res_full.flags["exclusive_fill_days"] == 0
+
+
 def test_all_zero_weight_mass_is_honest_empty():
     """Test 5 (LOW-8) — all-zero (or all-negative, clamped) weight mass has NO
     capital basis. The old equal-weight fallback FABRICATED a populated curve; it is
