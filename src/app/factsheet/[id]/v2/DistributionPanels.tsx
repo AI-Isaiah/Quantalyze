@@ -293,8 +293,8 @@ export function QuantileBoxPlotPanel() {
           P95 {pctSigned(q.p95)}
         </text>
         {/* Axis ticks */}
-        {ticks.map(t => (
-          <g key={`xt-${t.value}`}>
+        {ticks.map((t, i) => (
+          <g key={`xt-${i}`}>
             <line x1={X(t.value)} y1={VB_H - PAD.bottom + 4} x2={X(t.value)} y2={VB_H - PAD.bottom} stroke="var(--color-text-muted)" strokeWidth={1} />
             <text
               x={X(t.value)}
@@ -378,8 +378,8 @@ export function CorrelationStripPanel() {
         aria-label="Cross-asset correlations between strategy and major benchmarks"
       >
         {/* Top tick band */}
-        {ticks.map(t => (
-          <g key={`tk-${t}`}>
+        {ticks.map((t, i) => (
+          <g key={`tk-${i}`}>
             <line
               x1={X(t)}
               y1={PAD.top - 6}
