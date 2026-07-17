@@ -209,6 +209,22 @@ def test_unequal_windows_span_union_and_terminal_is_sum_of_anchors():
     assert out.flags["n_tail_days_carried"] == 2  # B stale on the last two union days
 
 
+# ── MEDIUM-5: an out-of-window flow is flagged, not silently unioned ──────────
+
+def test_out_of_window_flow_is_flagged_not_silently_unioned():
+    """MEDIUM-5: a flow dated OUTSIDE the return window [first, last] (typo year /
+    out-of-window transfer) silently extended the reconstructed curve with a
+    fabricated point and no signal. It still unions in (the HIGH-1 pre-window shape
+    is legitimate) but is now COUNTED so the extension is never invisible."""
+    r = pd.Series([0.10, 0.10, 0.10], index=_DAYS[:3], name="k")
+    ke = replay_key_equity(r, [ExternalFlow("2020-01-01", 100.0)], 1000.0)
+    assert "2020-01-01" in [str(x) for x in ke.equity.index]  # behavior preserved
+    assert ke.flags.get("out_of_window_flows") == 1           # but now flagged
+    # An in-window-only flow set carries no out-of-window flag.
+    ke2 = replay_key_equity(r, [ExternalFlow(_DAYS[1], 50.0)], 1000.0)
+    assert ke2.flags.get("out_of_window_flows", 0) == 0
+
+
 # ── Test 8 (Finding 1): a rotated-out key stops contributing, no double-count ─
 
 def test_rotation_seam_prev_key_stops_contributing_no_double_count():

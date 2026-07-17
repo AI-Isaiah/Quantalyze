@@ -363,10 +363,12 @@ class KeyEquity:
 
     ``equity`` is the per-day $-level Series (ISO-day index), or ``None`` when the
     key has no terminal anchor. ``reason`` is a machine token on the ``None`` path
-    (no USD magnitude — T-115-05)."""
+    (no USD magnitude — T-115-05). ``flags`` carries JSON-serializable bools/counts
+    (e.g. ``out_of_window_flows``) — no USD magnitudes."""
 
     equity: pd.Series | None
     reason: str | None = None
+    flags: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -464,6 +466,17 @@ def replay_key_equity(
     if n == 0:
         return KeyEquity(None, REASON_NO_ANCHOR)
 
+    # MEDIUM-5: a flow dated OUTSIDE the return window [first, last] silently extends
+    # the reconstructed curve with a fabricated point (a typo-year / out-of-window
+    # transfer). We do NOT drop it (the HIGH-1 pre-window no-trade-day union is a
+    # legitimate shape) but COUNT it so the extension is never invisible — a 115.1
+    # consumer can refuse when nonzero. Return-day window bounds the check.
+    ret_days = sorted(r)
+    out_of_window_flows = 0
+    if ret_days:
+        lo, hi = ret_days[0], ret_days[-1]
+        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi)
+
     equity = [0.0] * n
     equity[n - 1] = float(anchor)
     for t in range(n - 1, 0, -1):
@@ -488,7 +501,8 @@ def replay_key_equity(
 
     series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
     _assert_forward_agreement(series, r, fbd, days)
-    return KeyEquity(series, None)
+    flags = {"out_of_window_flows": out_of_window_flows} if out_of_window_flows else {}
+    return KeyEquity(series, None, flags)
 
 
 def _assert_forward_agreement(
