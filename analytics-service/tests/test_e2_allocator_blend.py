@@ -125,6 +125,21 @@ def test_weights_are_static_not_performance_tracking():
         assert v == pytest.approx(0.6 * a_returns.iloc[i] + 0.4 * b_returns.iloc[i])
 
 
+def test_non_finite_weight_refuses_loud():
+    """F3: the module refused non-finite RETURNS but LAUNDERED non-finite WEIGHTS. A
+    NaN value_usd -> max(0.0, nan)=0.0 silently DROPPED the key (blended==pure other,
+    is_trustworthy=True); an inf weight -> inf/inf=nan poisoned the curve to NaN,
+    is_trustworthy=True. Both now fail loud (mirroring the non-finite-return refusal)."""
+    from services.nav_twr import NavReconstructionError
+
+    r = pd.Series([0.01, 0.01], index=["2026-03-01", "2026-03-02"], name="x")
+    with pytest.raises(NavReconstructionError) as exc:
+        blend_concurrent_returns({"A": r, "B": r}, {"A": float("nan"), "B": 1.0})
+    assert "weight" in str(exc.value)
+    with pytest.raises(NavReconstructionError):
+        blend_concurrent_returns({"A": r, "B": r}, {"A": float("inf"), "B": 1.0})
+
+
 def test_non_coextensive_blend_flags_exclusive_fill_days():
     """HIGH-1 (interim): a key blended on a union day OUTSIDE its own coverage is
     0-filled at full weight (a fabricated flat 0% day that dilutes the blend). The

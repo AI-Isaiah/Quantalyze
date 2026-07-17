@@ -258,6 +258,20 @@ def blend_concurrent_returns(
             "refusing to propagate NaN/inf into the blended curve"
         )
 
+    # F3 (Fable): refuse a non-finite WEIGHT (a NaN/inf ``value_usd`` from holdings).
+    # ``max(0.0, nan) == 0.0`` would SILENTLY drop the key (blended == pure other,
+    # is_trustworthy=True); ``inf/inf == nan`` would poison ``norm`` and emit an all-NaN
+    # curve with is_trustworthy=True — the module would emit the poison it refuses on
+    # return input. Runs BEFORE the sole-key passthrough so a sole key is covered too.
+    bad_weights = sum(
+        1 for k in keys if not math.isfinite(float(weights_by_key.get(k, 0.0)))
+    )
+    if bad_weights:
+        raise NavReconstructionError(
+            f"blend: non-finite weight(s) for {bad_weights} key(s) — refusing a "
+            "NaN/inf value_usd (would silently drop a key or poison the blended curve)"
+        )
+
     # Sole eligible key: pass its series through untouched at weight 1.0.
     if len(keys) == 1:
         sole = keys[0]
@@ -636,6 +650,17 @@ def replay_key_equity(
     if anchor is None:
         return KeyEquity(
             None, REASON_NO_ANCHOR, degrade_reasons=frozenset({DegradeReason.NO_ANCHOR})
+        )
+
+    # F5 (Fable, same finiteness class as C1/F3): refuse a non-finite anchor. Without
+    # this, ``anchor=inf`` builds an INFINITE equity series that passes the forward
+    # self-check (``abs(inf−inf)=nan > tol`` is False) with is_trustworthy=True, and
+    # ``anchor=nan`` trips the MISATTRIBUTED flow-dominance guard. Data-quality message,
+    # no USD leak.
+    if not math.isfinite(float(anchor)):
+        raise NavReconstructionError(
+            "allocator equity replay: non-finite anchor — refusing a data-quality "
+            "NaN/inf terminal equity (distinct from the flow-dominance guard)"
         )
 
     # C-idx: enforce the ISO-day-string index contract before any day keying.

@@ -254,6 +254,25 @@ def test_replay_degenerate_inputs():
     assert "non-positive reconstructed equity" in str(exc.value)
 
 
+# ── F5: replay refuses a non-finite anchor with a data-quality message ────────
+
+def test_non_finite_anchor_refuses_with_data_quality_message():
+    """F5 (fold into F3): ``anchor=inf`` sailed through replay (infinite equity series,
+    is_trustworthy=True — the forward self-check passes because abs(inf−inf)=nan > tol
+    is False), and ``anchor=nan`` was refused but with the MISATTRIBUTED flow-dominance
+    message. Both now fail loud with a data-quality anchor message, no USD leak."""
+    r = pd.Series([0.01, 0.01], index=_DAYS[:2], name="k")
+    with pytest.raises(NavReconstructionError) as exc:
+        replay_key_equity(r, [], float("inf"))
+    msg = str(exc.value)
+    assert "anchor" in msg and "flow dominates" not in msg
+    for token in ("133100", "100000"):
+        assert token not in msg
+    with pytest.raises(NavReconstructionError) as exc2:
+        replay_key_equity(r, [], float("nan"))
+    assert "anchor" in str(exc2.value) and "flow dominates" not in str(exc2.value)
+
+
 # ── T1: replay_key_equity refuses an interior ≤−100% day (opposite of perf_curve) ─
 
 def test_replay_interior_total_loss_day_refuses():
