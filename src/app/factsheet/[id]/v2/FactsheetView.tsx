@@ -887,10 +887,13 @@ function KpiStrip() {
                 with a `break-words` wrap allowance; combined with the cell's
                 `min-w-0`, a long value wraps within its grid track instead of
                 being clipped or ellipsized. The type is NEVER shrunk below the
-                DESIGN.md `text-h2` minimum. The LABEL <p> above KEEPS its pinned
-                bounded-label clip (short labels only). */}
+                DESIGN.md `text-h2` minimum. `leading-tight` (not `leading-none`)
+                gives a wrapped 2-line value readable inter-line spacing without
+                changing the `text-h2` size token or the single-line look of
+                normal values. The LABEL <p> above KEEPS its pinned bounded-label
+                clip (short labels only). */}
             <p
-              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-none break-words"
+              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-tight break-words"
               style={{
                 color:
                   it.tone === "positive"

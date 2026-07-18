@@ -605,11 +605,14 @@ describe("FactsheetView KPI strip — UIFIX-03 (117-03): CUM RETURN extreme valu
     expect(valueEl.className).not.toContain("text-ellipsis");
 
     // (c) Type never shrunk below the DESIGN.md text-h2 minimum — the value keeps
-    //     its mono tabular text-h2 leading-none and gains NO smaller type token.
+    //     its mono tabular text-h2 and gains NO smaller type token. Phase-117
+    //     IN-03: leading-tight (not leading-none) so a value wrapped by break-words
+    //     gets readable inter-line spacing without changing the text-h2 size token.
     expect(valueEl.className).toContain("font-mono");
     expect(valueEl.className).toContain("tabular-nums");
     expect(valueEl.className).toContain("text-h2");
-    expect(valueEl.className).toContain("leading-none");
+    expect(valueEl.className).toContain("leading-tight");
+    expect(valueEl.className).not.toContain("leading-none");
     expect(valueEl.className).not.toMatch(
       /\btext-(h3|base|sm|xs|caption|micro|fixed-13)\b/,
     );
