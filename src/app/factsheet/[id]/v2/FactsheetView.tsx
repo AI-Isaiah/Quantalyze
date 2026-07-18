@@ -871,7 +871,7 @@ function KpiStrip() {
         {items.map(it => (
           <div
             key={it.label}
-            className="px-3 py-3 sm:px-4 sm:py-4"
+            className="px-3 py-3 sm:px-4 sm:py-4 min-w-0"
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
             <p
@@ -880,8 +880,17 @@ function KpiStrip() {
             >
               {it.label}
             </p>
+            {/* UIFIX-03 (117-03): the VALUE cell renders extreme/high-leverage
+                magnitudes IN FULL — a truncated number reads as a different
+                number (Numbers-Contract integrity). The truncation trio
+                (`whitespace-nowrap overflow-hidden text-ellipsis`) is replaced
+                with a `break-words` wrap allowance; combined with the cell's
+                `min-w-0`, a long value wraps within its grid track instead of
+                being clipped or ellipsized. The type is NEVER shrunk below the
+                DESIGN.md `text-h2` minimum. The LABEL <p> above KEEPS its pinned
+                bounded-label clip (short labels only). */}
             <p
-              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-none whitespace-nowrap overflow-hidden text-ellipsis"
+              className="mt-1.5 sm:mt-2 font-mono tabular-nums text-h2 leading-none break-words"
               style={{
                 color:
                   it.tone === "positive"

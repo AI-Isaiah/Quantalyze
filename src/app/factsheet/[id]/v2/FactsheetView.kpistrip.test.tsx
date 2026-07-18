@@ -138,8 +138,13 @@ describe("FactsheetView KPI strip — @container + fluid-type migration (52-06 /
       // VALUE cell: fixed glyph advance so the column aligns under the fluid tier.
       expect(valueEl.className).toContain("font-mono");
       expect(valueEl.className).toContain("tabular-nums");
-      // VALUE cell keeps whitespace-nowrap (no wrap mid-number).
-      expect(valueEl.className).toContain("whitespace-nowrap");
+      // UIFIX-03 (117-03) SUPERSEDES the old `no wrap mid-number` value pin: an
+      // extreme high-leverage magnitude must render IN FULL, so the value cell
+      // now carries a `break-words` wrap allowance and NONE of the truncation
+      // trio (a truncated number reads as a different number — Numbers Contract).
+      // Only the LABEL below keeps its bounded-label clip.
+      expect(valueEl.className).toContain("break-words");
+      expect(valueEl.className).not.toContain("whitespace-nowrap");
       // LABEL cell: the legitimate bounded-label clip is preserved (AUDIT :647).
       expect(labelEl.className).toContain("text-ellipsis");
       expect(labelEl.className).toContain("whitespace-nowrap");
