@@ -2648,6 +2648,12 @@ describe("115.1 equity display-repoint", () => {
 
     // The load-bearing invariant: display series == legacy render, byte-for-byte.
     expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+    // Neuter gap: the no-row case must ALSO stamp the source 'legacy' (only the
+    // derived/untrusted pins asserted the source before) — a repoint that
+    // defaulted to 'derived' on an absent row would mislabel the legacy render.
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("legacy");
 
     // These stay snapshot-sourced FOREVER (the repoint touches only the $-curve
     // producer, never the warm-up count / history depth / baseline-unknown gate).

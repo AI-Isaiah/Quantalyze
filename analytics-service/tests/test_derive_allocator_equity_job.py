@@ -464,6 +464,84 @@ async def test_pin_m3_malformed_usd_signed_permanent_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pin_structural_refusal_permanent_scrubbed_failed() -> None:
+    """Neuter gap: a STRUCTURAL compose refusal (the frozen core's loud asserts —
+    here a ≤−100% return factor that replay_key_equity cannot roll through) must
+    return FAILED / error_kind='permanent' with a SCRUBBED message, never an
+    infinite transient retry and never a raw USD magnitude leak."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_allocator_inputs()
+    # Taint key-A's series with a -1.0 day (factor 1 + (-1) = 0 ≤ 0 → the core's
+    # non-positive-return-factor refusal fires during per-key replay).
+    for r in seed["csv_daily_returns"]:
+        if r["api_key_id"] == "key-A" and r["date"] == "2026-03-02":
+            r["daily_return"] = -1.0
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-refuse", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent", (
+        f"a structural refusal is non-retryable; got {result.error_kind!r}"
+    )
+    assert "structural" in (result.error_message or "").lower()
+    # No raw USD anchor magnitude (100000 / 50000) leaked into the message.
+    assert "100000" not in (result.error_message or "")
+    assert "50000" not in (result.error_message or "")
+    # No poison equity_curve upsert on a structural failure.
+    assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == []
+
+
+@pytest.mark.asyncio
+async def test_pin_orphan_key_inputs_cleanup_scoped() -> None:
+    """Neuter gap: a key_inputs row for a revoked/absent key is an ORPHAN — the
+    compose job deletes EXACTLY that row, scoped to (allocator_id, kind). The
+    eligible key_inputs rows and the freshly-upserted equity_curve row survive
+    (a mis-scoped delete predicate would wipe live rows)."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_allocator_inputs()  # key-A + key-B eligible, with returns + anchors
+    # Add an orphan key_inputs row for a key absent from api_keys (not eligible).
+    seed[DERIVED_TABLE].append(
+        {
+            "allocator_id": "alloc-1",
+            "kind": "key_inputs:key-GONE",
+            "payload": {"flows": [], "anchor_usd": 999_999.0, "venue": "binance"},
+        }
+    )
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-orphan", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    # EXACTLY the orphan kind was deleted (scoped to allocator + that kind).
+    ki_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and str(d[1].get("kind", "")).startswith("key_inputs:")
+    ]
+    assert len(ki_deletes) == 1, f"exactly one orphan key_inputs delete; got {fake.deletes!r}"
+    assert ki_deletes[0][1].get("kind") == "key_inputs:key-GONE"
+    assert ki_deletes[0][1].get("allocator_id") == "alloc-1"
+    # The eligible key_inputs rows were NOT deleted; the equity_curve row was upserted.
+    assert not any(
+        d[1].get("kind") in ("key_inputs:key-A", "key_inputs:key-B")
+        for d in fake.deletes
+    ), f"eligible key_inputs must survive; got {fake.deletes!r}"
+    assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])], (
+        "the equity_curve row must still be upserted alongside orphan cleanup"
+    )
+
+
+@pytest.mark.asyncio
 async def test_pin_m1_nonfinite_flow_in_jsonb_permanent_failed() -> None:
     """M1: a non-finite usd_signed persisted in key_inputs JSONB must be rejected
     by validate_flow_shape on reconstruction → permanent FAILED (never a silent
