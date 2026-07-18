@@ -6030,10 +6030,33 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             error_kind="permanent",
         )
 
-    # ── 5. Single-row ATOMIC upsert of the display row (never the legacy
-    #      store — the fake-PostgREST raise pin enforces this forever). Zero
-    #      eligible keys / zero returns still upsert the honest untrustworthy
-    #      payload: an honest empty-curve row beats a stale one. ──
+    # ── 5. B2 root cause: an EMPTY curve is NOT a renderable series. A
+    #      zero-anchored-keys / zero-weight-mass compose (every prod allocator
+    #      today) returns curve=[] with is_trustworthy=True (the honest-empty
+    #      tokens are BENIGN in the frozen core). Upserting it would blank the
+    #      dashboard while suppressing the legacy render (which has real data),
+    #      and a later structurally-empty recompute would leave a STALE
+    #      trustworthy row (L1). Instead DELETE any existing equity_curve row →
+    #      degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
+    #      case). The frontend extractTrustworthyDerivedCurve is the paired
+    #      last-line defense (B2a). ──
+    if not (payload.get("curve") or []):
+        def _delete_curve() -> None:
+            supabase.table("allocator_equity_derived").delete().eq(
+                "allocator_id", allocator_id
+            ).eq("kind", "equity_curve").execute()
+
+        await db_execute(_delete_curve)
+        logger.info(
+            "derive_allocator_equity: empty compose for allocator %s "
+            "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
+            "stale equity_curve row, degrading to the legacy fallback (Option B)",
+            allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # ── 5b. Single-row ATOMIC upsert of the NON-EMPTY display row (never the
+    #      legacy store — the fake-PostgREST raise pin enforces this forever). ──
     def _upsert_curve() -> None:
         supabase.table("allocator_equity_derived").upsert(
             {

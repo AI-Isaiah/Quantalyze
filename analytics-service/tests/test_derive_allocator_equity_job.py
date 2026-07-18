@@ -60,6 +60,7 @@ class _FakeTable:
         self._store = store
         self._filters: list[tuple[str, Any]] = []
         self._like: list[tuple[str, str]] = []
+        self._is_delete = False
 
     # --- write ops: refuse the legacy store, record on the derived surface ------
     def _guard_legacy(self, op: str) -> None:
@@ -85,6 +86,9 @@ class _FakeTable:
 
     def delete(self, **kw: Any) -> "_FakeTable":
         self._guard_legacy("delete")
+        # Record a chainable delete whose eq-filters are captured on .execute()
+        # so a test can assert exactly which (allocator_id, kind) row was deleted.
+        self._is_delete = True
         return self
 
     # --- read chain -------------------------------------------------------------
@@ -118,6 +122,17 @@ class _FakeTable:
             def __init__(self, data: list[dict]) -> None:
                 self.data = data
 
+        if self._is_delete:
+            matched = self._rows()
+            self._store.deletes.append(
+                (self._name, dict(self._filters), len(matched))
+            )
+            # Reflect the delete in the in-memory store so a later read sees it gone.
+            remaining = [
+                r for r in self._store.rows.get(self._name, []) if r not in matched
+            ]
+            self._store.rows[self._name] = remaining
+            return _R(matched)
         return _R(self._rows())
 
 
@@ -125,6 +140,7 @@ class _FakeSupabase:
     def __init__(self, rows: dict[str, list[dict]]) -> None:
         self.rows = rows
         self.upserts: list[tuple[str, Any, Any]] = []
+        self.deletes: list[tuple[str, dict, int]] = []
 
     def table(self, name: str) -> _FakeTable:
         return _FakeTable(name, self)
@@ -293,6 +309,75 @@ async def test_pin7_key_mode_epilogue_enqueues_owner_scoped_compose() -> None:
     assert target == "alloc-owner", (
         "compose enqueue must target ctx.key_row['user_id'] (authoritative owner), "
         f"NEVER the job-payload allocator_id; got {target!r}"
+    )
+
+
+def _seed_zero_anchored_with_stale_curve() -> dict[str, list[dict]]:
+    """An allocator with an eligible key but ZERO per-key returns and ZERO
+    key_inputs → the compose core emits an EMPTY curve (NO_ANCHORED_KEYS, benign
+    → is_trustworthy True). A STALE (allocator_id,'equity_curve') display row is
+    already present from an earlier compose. B2: the empty recompose must DELETE
+    that stale row (degrade to the clean no-row legacy fallback), never upsert an
+    empty trustworthy curve that blanks the dashboard."""
+    alloc = "alloc-empty"
+    api_keys = [
+        {
+            "id": "key-Z", "user_id": alloc, "is_active": True,
+            "sync_status": "connected", "disconnected_at": None,
+        },
+    ]
+    stale_curve = {
+        "allocator_id": alloc,
+        "kind": "equity_curve",
+        "payload": {
+            "curve": [{"date": "2026-01-01", "equity_usd": 12345.0}],
+            "is_trustworthy": True,
+            "degrade_reasons": [],
+            "scalars": {"mwr": 0.1, "dietz": 0.1, "computable": True},
+        },
+    }
+    return {
+        "csv_daily_returns": [],
+        DERIVED_TABLE: [stale_curve],
+        LEGACY_TABLE: [],
+        "api_keys": api_keys,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pin_b2_empty_compose_deletes_stale_curve_no_upsert() -> None:
+    """B2 (root cause): a zero-anchored-keys / empty-curve compose must NOT upsert
+    an empty equity_curve row and MUST delete any existing one, so the dashboard
+    degrades to the clean no-row legacy fallback (never a blank chart labeled
+    'derived', never a stale trustworthy row surviving a structurally-empty
+    recompute — this also closes L1)."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_zero_anchored_with_stale_curve())
+    job = {"id": "j-empty", "kind": "derive_allocator_equity", "allocator_id": "alloc-empty"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    # NO equity_curve upsert on an empty compose.
+    curve_upserts = [
+        u for u in fake.upserts
+        if u[0] == DERIVED_TABLE and _is_equity_curve_upsert(u[1])
+    ]
+    assert curve_upserts == [], (
+        f"empty compose must NOT upsert an equity_curve row; got {fake.upserts!r}"
+    )
+    # The stale equity_curve row was deleted (scoped to this allocator + kind).
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == "alloc-empty"
+    ]
+    assert len(curve_deletes) == 1, (
+        f"empty compose must DELETE the stale equity_curve row; got {fake.deletes!r}"
     )
 
 
