@@ -46,6 +46,17 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
     (Q1 worker contract), so the branch takes only `api_key`. No proxy is wired
     here (the phase-121 static-IP egress seam is threaded later).
     """
+    # IN-01: an empty/whitespace-only Bearer token cannot authenticate.
+    # SfoxClient.__init__ raises ValueError("… non-empty api_key") on an empty
+    # token (sfox_client.py:108); constructed BELOW the try/finally that
+    # ValueError would escape the fail-closed mapping and surface as an unhandled
+    # FastAPI 500 (an 8-space token arrives here as "" after analytics-client's
+    # trimCredential). Guard up front and fail CLOSED with the SAME AUTH_FAILED
+    # string a bad ccxt key emits, so the TS classifyKeyValidationError maps it to
+    # KEY_AUTH_FAILED — matching this function's documented fail-closed contract
+    # rather than leaking a raw 500. Keeps the ctor's non-empty invariant intact.
+    if not api_key or not api_key.strip():
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
     client = SfoxClient(api_key=api_key, base_url=SFOX_PROD_BASE_URL)
     try:
         await client.get_balances()

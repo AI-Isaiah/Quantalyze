@@ -208,6 +208,38 @@ async def test_sfox_non_auth_failure_fails_closed(exchange_router, status):
     client.aclose.assert_awaited_once()
 
 
+@pytest.mark.parametrize("token", ["", "   ", "\t\n"])
+async def test_sfox_empty_or_blank_token_fails_closed_not_500(exchange_router, token):
+    """IN-01 regression: an empty/whitespace-only Bearer token must fail CLOSED
+    with the honest AUTH_FAILED mapping (400 → KEY_AUTH_FAILED), NOT leak
+    SfoxClient.__init__'s ValueError as an unhandled 500.
+
+    WHY (Rule 9): an 8-space token passes the TS `length < 8` gate and is trimmed
+    to "" at analytics-client's trimCredential, arriving here empty. Pre-fix the
+    client was constructed BEFORE the try/finally, so the ctor's non-empty-key
+    ValueError escaped the fail-closed mapping and surfaced as an opaque 500
+    (degraded UX + Sentry noise, and the docstring's fail-closed claim silently
+    did not cover this path). The guard now short-circuits BEFORE construction —
+    so the client is NEVER built (nothing to leak) and the user sees the same
+    KEY_AUTH_FAILED a bad ccxt key produces. Must never be a 500, never valid:true.
+    """
+    router = exchange_router
+    client = _make_client()
+    client.get_balances.return_value = []
+    factory = _install_sfox_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req(router, api_key=token))
+
+    assert ei.value.status_code == 400
+    # byte-identical AUTH_FAILED string → KEY_AUTH_FAILED, not an opaque 500
+    assert ei.value.detail == EXPECTED_AUTH_DETAIL
+    assert "authentication failed" in ei.value.detail.lower()
+    # Guarded BEFORE construction: no client, no session, no get_balances call.
+    factory.assert_not_called()
+    client.get_balances.assert_not_awaited()
+
+
 async def test_sfox_aclose_awaited_even_when_get_balances_raises(exchange_router):
     """aclose() runs on the failure path (finally), not only on success."""
     from services.sfox_client import SfoxApiError
