@@ -58,12 +58,27 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (typeof api_secret !== "string" || api_secret.length < 8) {
+  // SECURITY-SENSITIVE carve-out (119-CONTEXT Q1, LOCKED): sFOX authenticates with a
+  // SINGLE Bearer token and carries NO api_secret (118-RESEARCH confirmed). For sfox
+  // ONLY, the token is stored as api_key and the absent secret is normalized to "".
+  // This relaxes the secret presence/length requirement for exactly one exchange —
+  // every ccxt exchange (binance/okx/bybit/deribit) keeps the byte-identical <8-char
+  // KEY_INVALID_FORMAT rejection below. Security-reviewed (T-119-08/09/11). The empty
+  // secret flows through the SAME trim/validate/encrypt chokepoint
+  // (analytics-client.ts:169; trimCredential("") === ""), not a parallel path.
+  // Matches this file's existing `exchange.toLowerCase() === "okx"` convention.
+  const isSfox = exchange.toLowerCase() === "sfox";
+
+  if (!isSfox && (typeof api_secret !== "string" || api_secret.length < 8)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
+
+  // sfox: absent/empty secret → ""; ccxt: already a validated string above (no-op).
+  const apiSecretNormalized: string =
+    typeof api_secret === "string" ? api_secret : "";
 
   if (
     exchange.toLowerCase() === "okx" &&
@@ -82,7 +97,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (api_key.length > 512 || api_secret.length > 512) {
+  if (api_key.length > 512 || apiSecretNormalized.length > 512) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Key or secret too long" },
       { status: 400, headers: NO_STORE_HEADERS },
@@ -172,7 +187,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const validation = await validateKey(
       exchangeNormalized,
       api_key,
-      api_secret,
+      apiSecretNormalized,
       passphraseOrNull ?? undefined,
     );
 
@@ -207,7 +222,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const encrypted = await encryptKey(
       exchangeNormalized,
       api_key,
-      api_secret,
+      apiSecretNormalized,
       passphraseOrNull ?? undefined,
     );
 
