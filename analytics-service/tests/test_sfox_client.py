@@ -40,6 +40,7 @@ import pytest
 
 from services.sfox_client import (
     SFOX_PROD_BASE_URL,
+    SFOX_REQUEST_TIMEOUT_S,
     SFOX_SANDBOX_BASE_URL,
     SfoxApiError,
     SfoxClient,
@@ -250,6 +251,22 @@ async def test_aclose_is_idempotent():
     await client._ensure_session()
     await client.aclose()
     await client.aclose()  # second call must not raise
+
+
+async def test_session_has_bounded_request_timeout_not_aiohttp_default():
+    """F2 (worker-wedge): the owned session must carry an EXPLICIT bounded
+    ClientTimeout, not aiohttp's implicit total=300s. A 5-minute hang on the
+    sequential worker blows the ~90s healthz budget (the v1.11 wedge class).
+    Pins the configured total to SFOX_REQUEST_TIMEOUT_S (30s) and, explicitly,
+    that it is NOT the 300s default."""
+    client = SfoxClient(api_key=API_KEY)
+    session = await client._ensure_session()
+    try:
+        assert session.timeout.total == SFOX_REQUEST_TIMEOUT_S
+        assert SFOX_REQUEST_TIMEOUT_S == 30.0
+        assert session.timeout.total != 300
+    finally:
+        await client.aclose()
 
 
 async def test_read_after_aclose_fails_loud_no_session_reopen():

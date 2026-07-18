@@ -56,6 +56,15 @@ SFOX_SANDBOX_BASE_URL = "https://api.staging.sfox.com"
 # a logged leak instead of wedging the sequential worker loop.
 SFOX_CLOSE_TIMEOUT_S = float(os.getenv("SFOX_CLOSE_TIMEOUT_S", "10"))
 
+# Total per-request transport timeout (seconds). aiohttp's IMPLICIT default is
+# total=300s — a hung sFOX response would block the SEQUENTIAL worker for up to
+# 5 minutes, far past the ~90s healthz budget (the v1.11 worker-wedge failure
+# class). 30s is comfortably above sFOX's normal read latency yet well under the
+# healthz budget, so a stalled upstream fails loud fast instead of wedging the
+# loop. The adapter OWNS the session, so this transport bound belongs here (not
+# phase-120 crawl orchestration, which layers its own asyncio.wait_for on top).
+SFOX_REQUEST_TIMEOUT_S = float(os.getenv("SFOX_REQUEST_TIMEOUT_S", "30"))
+
 # Per-endpoint-path minimum interval between requests (seconds). The transactions
 # endpoint is a documented 1 req / 10 s; every other authed endpoint is treated as
 # tightly rate-limited (analogous to ccxt enableRateLimit=True). Set by Task 2.
@@ -122,7 +131,13 @@ class SfoxClient:
         if self._session is None:
             # trust_env stays False by design: the ONLY proxy source is the
             # explicit ctor arg threaded per-request (phase-121 seam).
-            self._session = aiohttp.ClientSession(trust_env=False)
+            # Explicit ClientTimeout (F2): bound each request at
+            # SFOX_REQUEST_TIMEOUT_S instead of aiohttp's implicit total=300s,
+            # so a hung upstream cannot wedge the sequential worker.
+            self._session = aiohttp.ClientSession(
+                trust_env=False,
+                timeout=aiohttp.ClientTimeout(total=SFOX_REQUEST_TIMEOUT_S),
+            )
         return self._session
 
     async def _rate_gate(self, path: str) -> None:
