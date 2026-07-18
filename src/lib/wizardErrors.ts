@@ -20,6 +20,14 @@ export type WizardErrorCode =
   | "KEY_NOT_READ_ONLY"
   | "KEY_PROBE_FAILED"
   | "KEY_INVALID_SIGNATURE"
+  // DOGFOOD (2026-07-18): the exchange authenticated the request and rejected
+  // the whole credential pair (e.g. Deribit error 13004 invalid_credentials).
+  // Distinct from KEY_INVALID_SIGNATURE — that copy asserts "the key was
+  // accepted, only the signature was wrong", which is FALSE here: the exchange
+  // never accepted the credentials, so either the key OR the secret (or both)
+  // is wrong / regenerated / whitespace-mangled. Honest copy, no unobserved
+  // "which half" claim (mirrors the KEY_NOT_READ_ONLY DOGFOOD-3 discipline).
+  | "KEY_AUTH_FAILED"
   | "KEY_INVALID_FORMAT"
   | "KEY_IP_ALLOWLIST"
   | "KEY_RATE_LIMIT"
@@ -186,6 +194,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Re-copy the secret from your exchange API Management page.",
       "If you cannot find it (some exchanges only show it once at creation), create a new read-only key.",
       "Paste the fresh secret here.",
+    ],
+    docsHref: "/security#regenerate-key",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  KEY_AUTH_FAILED: {
+    title: "The exchange rejected these credentials.",
+    cause:
+      "The exchange could not authenticate this key and secret (e.g. Deribit returns invalid_credentials). The exchange never accepted the pair, so the key or the secret is wrong, was regenerated, or was copied with extra whitespace.",
+    fix: [
+      "Open your exchange API Management page and confirm this key still exists and is enabled.",
+      "Re-copy BOTH values with no leading or trailing spaces — on Deribit the key is the ClientId and the secret is the ClientSecret.",
+      "If the secret was only shown once at creation, create a fresh read-only key and paste both values here.",
     ],
     docsHref: "/security#regenerate-key",
     actions: ["clear_and_retry", "request_call"],
@@ -805,6 +826,75 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
       // wizard error mapper. UNKNOWN flags the misuse if it ever does.
       return "UNKNOWN";
   }
+}
+
+/**
+ * Classify a caught key-validation exception message into a stable wizard error
+ * code + HTTP status. SINGLE source of truth for the wizard's key-entry routes
+ * (`create-with-key` and `composite/add-key`, which fed byte-identical inline
+ * copies before this was extracted) so the exchange-rejection → user-copy
+ * mapping is defined ONCE and can never drift between the single-key and
+ * multi-key ("+ Add another key") paths.
+ *
+ * The HTTP status distinguishes client faults (400) from upstream faults
+ * (502/503) so dashboards/SLO consumers can tell 'bad key' from
+ * 'analytics-service unavailable' (H-0310). The raw `message` is NEVER returned
+ * to the client — callers forward ONLY the returned `code` (H-0305).
+ */
+export function classifyKeyValidationError(message: string): {
+  code: WizardErrorCode;
+  status: number;
+} {
+  const lower = message.toLowerCase();
+  if (lower.includes("signature") || lower.includes("invalid secret")) {
+    // Client supplied a wrong secret — their fault, 400.
+    return { code: "KEY_INVALID_SIGNATURE", status: 400 };
+  }
+  if (
+    // DOGFOOD (2026-07-18): the exchange AUTHENTICATED the request and rejected
+    // the whole credential pair — the worker maps this to a stable
+    // "Authentication failed. Check your API key and secret." detail
+    // (services/exchange.py AUTH_FAILED arm; e.g. Deribit error 13004
+    // invalid_credentials, testnet:false). Pre-fix this matched NONE of the
+    // branches and fell through to the terminal UNKNOWN 500 ("something went
+    // wrong, team notified"), hiding a plain wrong-key from the founder. Client
+    // fault (bad/regenerated/whitespace-mangled key) → 400 with actionable
+    // copy — NOT KEY_INVALID_SIGNATURE, whose copy falsely asserts "the key was
+    // accepted, only the signature was wrong". Kept AFTER the signature branch
+    // so a true signature mismatch keeps its more specific code.
+    lower.includes("authentication failed") ||
+    lower.includes("invalid_credentials")
+  ) {
+    return { code: "KEY_AUTH_FAILED", status: 400 };
+  }
+  if (lower.includes("ip") && lower.includes("allow")) {
+    // Exchange IP-allowlist rejection — upstream policy, 502.
+    return { code: "KEY_IP_ALLOWLIST", status: 502 };
+  }
+  if (lower.includes("rate") || lower.includes("429")) {
+    // Exchange or Railway rate-limit — upstream throttle, 503.
+    return { code: "KEY_RATE_LIMIT", status: 503 };
+  }
+  if (lower.includes("timeout") || lower.includes("etimedout")) {
+    // Network timeout reaching analytics-service — upstream unavailable, 502.
+    return { code: "KEY_NETWORK_TIMEOUT", status: 502 };
+  }
+  if (
+    // FIX 3 facet b (Phase 110.1 / DOGFOOD-3): the Python probe fail-closed
+    // ("Could not verify the key's permission scopes…") is a TRANSIENT upstream
+    // blip, not a client fault or a terminal 500. Map to a retryable 5xx with a
+    // retry-flavored code so the wizard offers a clear-and-retry path.
+    lower.includes("could not verify") ||
+    lower.includes("permission scope") ||
+    lower.includes("probe")
+  ) {
+    return { code: "KEY_PROBE_FAILED", status: 503 };
+  }
+  if (lower.includes("trading") || lower.includes("withdraw")) {
+    // Should have been caught by the read_only check upstream; defensive 400.
+    return { code: "KEY_HAS_TRADING_PERMS", status: 400 };
+  }
+  return { code: "UNKNOWN", status: 500 };
 }
 
 /**

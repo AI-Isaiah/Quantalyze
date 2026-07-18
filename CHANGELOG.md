@@ -33,6 +33,20 @@ edge cases — each with a non-tautological regression test. Frozen `scenario.ts
 (SC-3) stays byte-identical; `EquityChart.tsx` carved out for additive provenance
 only. Migration applies to prod on merge.
 
+**Dogfood — key-connect resilience** (surfaced live connecting a Deribit key):
+- **Credential whitespace**: `validateKey`/`encryptKey` now `.trim()` the
+  api_key/api_secret at the single client chokepoint (not the OKX passphrase).
+  A trailing space/newline from a paste made the exchange reject an otherwise
+  correct key (reproduced: Deribit `13004 invalid_credentials`); validate and
+  encrypt trim identically so the stored ciphertext still authenticates on sync.
+- **Honest auth-failure copy**: a genuine exchange auth rejection
+  (`"Authentication failed"` / `invalid_credentials`) now maps to a new
+  `KEY_AUTH_FAILED` (400, "the exchange rejected these credentials") instead of
+  the terminal `UNKNOWN`/500 "something went wrong". The classifier was extracted
+  to one shared `classifyKeyValidationError`, so the single-key (`create-with-key`)
+  and multi-key (`composite/add-key`, "+ Add another key") paths can no longer
+  drift — both gain the honest code.
+
 ## [0.44.0.1] - 2026-07-17
 ### Fix — DistributionPanels duplicate axis-tick keys
 QA of the blank-slate Scenario composer surfaced a React "two children with the

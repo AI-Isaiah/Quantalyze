@@ -379,6 +379,40 @@ describe("POST /api/strategies/create-with-key — P467 scope-rejection paths", 
     expect(rpcMock).not.toHaveBeenCalled();
     consoleErr.mockRestore();
   });
+
+  // DOGFOOD (2026-07-18) — a genuine exchange auth rejection. The worker's
+  // AUTH_FAILED arm (services/exchange.py) raises HTTP 400 with the STABLE
+  // detail "Authentication failed. Check your API key and secret." for e.g.
+  // Deribit error 13004 invalid_credentials (testnet:false, a live production
+  // account). Pre-fix that detail matched NO catch-classifier branch and fell
+  // through to code=UNKNOWN status=500 — the terminal "something went wrong,
+  // our team has been notified" screen — hiding a plain wrong/regenerated key
+  // from the founder. This FAILS against that: it must surface the actionable
+  // client-fault KEY_AUTH_FAILED at 400, and must NOT borrow
+  // KEY_INVALID_SIGNATURE (whose copy falsely asserts the key was accepted).
+  it("(h) regression: worker 'Authentication failed' (Deribit invalid_credentials) → KEY_AUTH_FAILED 400, not UNKNOWN/500", async () => {
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error("Authentication failed. Check your API key and secret."),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Client fault (bad credentials) — a 400 the user can act on, NOT the
+    // terminal 500 UNKNOWN.
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_AUTH_FAILED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(json.code).not.toBe("KEY_INVALID_SIGNATURE");
+    // Fail-closed: rejected before any encryption or DB insert.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
 });
 
 /**
