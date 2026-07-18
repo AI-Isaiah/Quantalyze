@@ -233,6 +233,22 @@ async def test_non_json_2xx_body_raises():
         await client.aclose()
 
 
+async def test_non_json_2xx_raises_with_shape_violation_status_zero():
+    """F4: a 2xx whose body isn't JSON (e.g. an HTML gateway page behind a 200) is a
+    SHAPE/contract violation, not an HTTP error — it must raise with status==0, the
+    same sentinel the list/envelope guards use. This keeps status==0 uniformly
+    meaning 'shape violation' so a phase-119 classifier keyed on it cannot misread a
+    200-wrapped HTML page as a real HTTP status. Fails against the pre-F4 code that
+    carried the real 200 into the error."""
+    resp = _stub_response(200, "<html>gateway timeout</html>")
+    with _patch_request(resp):
+        client = SfoxClient(api_key=API_KEY)
+        with pytest.raises(SfoxApiError) as excinfo:
+            await client.get_balances()
+        await client.aclose()
+    assert excinfo.value.status == 0
+
+
 async def test_non_list_balances_payload_raises():
     """get_balances is a bare array per docs; a non-list 2xx payload raises
     (never coerce a dict/error-object into a balance list)."""

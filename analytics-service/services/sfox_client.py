@@ -226,7 +226,13 @@ class SfoxClient:
             return json.loads(raw)
         except (ValueError, TypeError):
             # Non-JSON 2xx body — fail loud, never coerce (T-118-04, no invented data).
-            raise SfoxApiError(status, "sFOX returned a non-JSON 2xx body") from None
+            # Raise with status=0, NOT the real 2xx status (F4): a 2xx body that
+            # isn't JSON is a shape/contract violation, not an HTTP error. This keeps
+            # status==0 UNIFORMLY meaning "shape/contract violation" (matching the
+            # list/envelope guards below), so a phase-119 classifier keyed on
+            # status==0 doesn't misread an HTML gateway page behind a 200 as a
+            # legitimate HTTP status.
+            raise SfoxApiError(0, "sFOX returned a non-JSON 2xx body") from None
 
     # -- Read methods (four, read-only by construction) ---------------------
 
