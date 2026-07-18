@@ -111,13 +111,26 @@ class TestHandlerKeyModeDeribitPath:
             assert "daily_return" in row and "date" in row
 
         # NO strategy-only side effects (per-key reads are Phase 36):
-        # no compute_analytics_from_csv enqueue.
+        # no compute_analytics_from_csv enqueue (strategy-keyed → strategy_id
+        # NULL garbage). The 115.1 Option-B epilogue DOES enqueue the allocator-
+        # scoped derive_allocator_equity compose for the key owner — that is the
+        # correct owner-scoped follow-on, proven separately by pin 7.
         enqueues = [
             c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"
         ]
-        assert enqueues == [], (
+        assert [
+            c for c in enqueues if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == [], (
             "key-mode deribit must NOT enqueue compute_analytics_from_csv; "
             f"got {enqueues!r}"
+        )
+        # The one enqueue that DOES fire is the owner-scoped compose (never a
+        # job-payload allocator_id — it is the derive's authoritative key owner).
+        compose = [
+            c for c in enqueues if c[1].get("p_kind") == "derive_allocator_equity"
+        ]
+        assert len(compose) == 1 and compose[0][1].get("p_allocator_id") == "alloc-deribit-1", (
+            f"epilogue must enqueue one owner-scoped compose; got {enqueues!r}"
         )
         # No strategy_analytics stamp (there is no per-key analytics row).
         assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []

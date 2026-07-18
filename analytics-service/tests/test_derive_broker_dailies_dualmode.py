@@ -208,11 +208,17 @@ class TestKeyMode:
 
         assert result.outcome == DispatchOutcome.DONE
         # NO compute_analytics_from_csv enqueue (Pitfall 4 — that path is
-        # strategy-keyed and would read strategy_id NULL → garbage).
+        # strategy-keyed and would read strategy_id NULL → garbage). The 115.1
+        # Option-B epilogue DOES enqueue the allocator-scoped
+        # derive_allocator_equity compose (owner-scoped, correct — pinned in
+        # test_derive_allocator_equity_job.py pin 7); only the forbidden
+        # strategy-keyed CSV enqueue must be absent here.
         enqueues = [
             c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"
         ]
-        assert enqueues == [], (
+        assert [
+            c for c in enqueues if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == [], (
             f"key-mode must NOT enqueue compute_analytics_from_csv; got {enqueues!r}"
         )
         # NO strategy_analytics stamp (there is no per-key analytics row).
@@ -1201,6 +1207,11 @@ class TestKeyModeDeribitParity:
             assert row["api_key_id"] == "key-drb-parity"
             assert row["allocator_id"] == "alloc-parity"
             assert row["strategy_id"] is None
-        # Key-mode owns no strategy row: no compute enqueue, no strategy_analytics.
-        assert [c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"] == []
+        # Key-mode owns no strategy row: no strategy-keyed compute_analytics_from_csv
+        # enqueue, no strategy_analytics. The 115.1 Option-B epilogue's allocator-
+        # scoped derive_allocator_equity compose enqueue IS expected (owner-scoped).
+        _km_enq = [c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"]
+        assert [
+            c for c in _km_enq if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == []
         assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []

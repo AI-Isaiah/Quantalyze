@@ -136,8 +136,20 @@ class _FakeSupabase:
 def _seed_allocator_inputs() -> dict[str, list[dict]]:
     """Two eligible per-key inputs for one allocator: dense csv_daily_returns plus
     the Option-B ``key_inputs:<api_key_id>`` rows (flows + anchor) the compose job
-    reads. Hand-derivable; no I/O."""
+    reads, plus the two eligible ``api_keys`` rows the compose job filters through
+    the ONE shared ``eligible_key_predicate`` (is_active, non-revoked, connected).
+    Hand-derivable; no I/O."""
     alloc = "alloc-1"
+    api_keys = [
+        {
+            "id": "key-A", "user_id": alloc, "is_active": True,
+            "sync_status": "connected", "disconnected_at": None,
+        },
+        {
+            "id": "key-B", "user_id": alloc, "is_active": True,
+            "sync_status": "connected", "disconnected_at": None,
+        },
+    ]
     csv = []
     for i in range(3):
         day = f"2026-03-0{i + 1}"
@@ -165,7 +177,12 @@ def _seed_allocator_inputs() -> dict[str, list[dict]]:
             },
         },
     ]
-    return {"csv_daily_returns": csv, DERIVED_TABLE: derived, LEGACY_TABLE: []}
+    return {
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+        "api_keys": api_keys,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -280,9 +297,64 @@ async def test_pin7_key_mode_epilogue_enqueues_owner_scoped_compose() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pin 8 — null-anchor honesty (T-115.1-16) — the epilogue never fabricates an
+# anchor. When the live equity read is flagged untrustworthy (balance_error /
+# equity is None), the persisted key_inputs row carries anchor_usd: null —
+# NEVER a heuristic value — so the compose core honestly DROPS the key.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pin8_epilogue_persists_null_anchor_on_untrustworthy_read() -> None:
+    """The key-mode epilogue persists a ``key_inputs:<api_key_id>`` row whose
+    ``anchor_usd`` is ``None`` when the live equity read is untrustworthy. The
+    dual-mode harness stubs ``fetch_account_equity_and_upnl_usd`` via a MagicMock
+    exchange whose ``fetch_balance`` never resolves cleanly → ``balance_error`` is
+    truthy → the epilogue MUST persist a null anchor (never a fabricated one).
+
+    MUTATION-FALSIFIABLE: an epilogue that back-fills a heuristic anchor (e.g. an
+    allocator_holdings value_usd sum) instead of null reddens the ``is None``
+    assertion.
+    """
+    from services.job_worker import run_derive_broker_dailies_job
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-9", "exchange": "binance", "user_id": "alloc-owner"},
+        strategy_row=None,
+    )
+    job = {"id": "j-key", "kind": "derive_broker_dailies", "api_key_id": "key-9"}
+    patches = _patches(ctx, key_mode=True, returns=_two_day_returns())
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        await run_derive_broker_dailies_job(job)
+
+    ki_upserts = [
+        u for u in capture["upserts"]
+        if u[0] == DERIVED_TABLE and _is_key_inputs_upsert(u[1])
+    ]
+    assert len(ki_upserts) == 1, (
+        f"epilogue must persist exactly one key_inputs row; got {capture['upserts']!r}"
+    )
+    row = _rows_of(ki_upserts[0][1])[0]
+    assert row["kind"] == "key_inputs:key-9"
+    payload = row["payload"]
+    assert payload["anchor_usd"] is None, (
+        "an untrustworthy equity read must persist anchor_usd: null (never a "
+        f"heuristic anchor); got {payload['anchor_usd']!r}"
+    )
+    assert payload["venue"] == "binance"
+    assert isinstance(payload["flows"], list)
+
+
+# ---------------------------------------------------------------------------
 # helpers — tolerant of the exact upsert payload shape plan 04 chooses (a single
 # dict row or a one-element list); assert on the CONTRACT fields, not the wrapper.
 # ---------------------------------------------------------------------------
+
+
+def _is_key_inputs_upsert(payload: Any) -> bool:
+    return any(
+        str(r.get("kind", "")).startswith("key_inputs:") for r in _rows_of(payload)
+    )
 
 
 def _rows_of(payload: Any) -> list[dict]:
