@@ -3003,9 +3003,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # enqueue hiccup must never fail an already-done per-key derive.
         try:
             def _enqueue_compose(target: str = allocator_id) -> None:
+                # p_strategy_id is passed EXPLICITLY as NULL — it is the RPC's
+                # first positional param and has NO SQL DEFAULT, so a PostgREST
+                # named-notation call that omits it cannot resolve the overload
+                # ("function does not exist") and the compose would never enqueue.
+                # Every SQL caller mirrors this (`p_strategy_id := NULL`); the
+                # allocator-scoped inflight dedup (allocator_id,kind) makes a
+                # collision benign, so no p_idempotency_key is required here.
                 ctx.supabase.rpc(
                     "enqueue_compute_job",
                     {
+                        "p_strategy_id": None,
                         "p_allocator_id": target,
                         "p_kind": "derive_allocator_equity",
                     },

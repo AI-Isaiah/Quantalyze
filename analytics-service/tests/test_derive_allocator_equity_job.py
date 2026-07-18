@@ -297,6 +297,56 @@ async def test_pin7_key_mode_epilogue_enqueues_owner_scoped_compose() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Pin 7b — enqueue named-notation completeness (B1, 115.1-close). The
+# ``enqueue_compute_job`` RPC's FIRST positional param ``p_strategy_id`` has NO
+# SQL DEFAULT, so a PostgREST named-notation call that OMITS it cannot resolve
+# the overload → "function does not exist" → the surrounding try/except swallows
+# it as a warning → the compose job is NEVER enqueued → the whole derived-equity
+# feature is silently dead. Every SQL caller passes ``p_strategy_id := NULL``
+# explicitly (see the migration's own cron body); the Python epilogue must too.
+# MUTATION-FALSIFIABLE: drop ``p_strategy_id`` from the payload → RED.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pin7b_compose_enqueue_passes_p_strategy_id_null() -> None:
+    """The key-mode epilogue's ``derive_allocator_equity`` enqueue must include an
+    explicit ``p_strategy_id`` key (value ``None`` → SQL NULL) so PostgREST can
+    resolve the ``enqueue_compute_job`` overload whose first positional param has
+    no default. Omitting it makes the RPC unresolvable and the feature dead."""
+    from services.job_worker import run_derive_broker_dailies_job
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-1", "exchange": "binance", "user_id": "alloc-owner"},
+        strategy_row=None,
+    )
+    job = {"id": "j-key", "kind": "derive_broker_dailies", "api_key_id": "key-1"}
+    patches = _patches(ctx, key_mode=True, returns=_two_day_returns())
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        await run_derive_broker_dailies_job(job)
+
+    compose_enqueues = [
+        c
+        for c in capture["rpc_calls"]
+        if c[0] == "enqueue_compute_job"
+        and c[1].get("p_kind") == "derive_allocator_equity"
+    ]
+    assert len(compose_enqueues) == 1, (
+        f"expected exactly one compose enqueue; got {capture['rpc_calls']!r}"
+    )
+    payload = compose_enqueues[0][1]
+    assert "p_strategy_id" in payload, (
+        "the compose enqueue must pass p_strategy_id explicitly (=None → SQL NULL) "
+        "so the no-default first positional param resolves the PostgREST overload; "
+        f"got {payload!r}"
+    )
+    assert payload["p_strategy_id"] is None, (
+        f"p_strategy_id must be None (SQL NULL), never a value; got {payload['p_strategy_id']!r}"
+    )
+    assert payload.get("p_allocator_id") == "alloc-owner"
+
+
+# ---------------------------------------------------------------------------
 # Pin 8 — null-anchor honesty (T-115.1-16) — the epilogue never fabricates an
 # anchor. When the live equity read is flagged untrustworthy (balance_error /
 # equity is None), the persisted key_inputs row carries anchor_usd: null —
