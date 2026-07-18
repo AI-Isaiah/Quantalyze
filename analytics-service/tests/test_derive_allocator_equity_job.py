@@ -823,6 +823,35 @@ async def test_pin_orphan_key_inputs_cleanup_scoped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pin_f4b_corrupt_value_scrubbed_of_raw_numeric() -> None:
+    """F4b: a corrupt persisted value whose float() ValueError echoes the raw value
+    (`could not convert string to float: '987654.32abc'`) must NOT leak that numeric
+    magnitude into error_message (admin-only, but the T-115-05 no-raw-USD rule)."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_allocator_inputs()
+    for row in seed[DERIVED_TABLE]:
+        if row["kind"] == "key_inputs:key-A":
+            row["payload"]["flows"] = [
+                {"utc_day_iso": "2026-03-02", "usd_signed": "987654.32abc"}
+            ]
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-leak", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+    msg = result.error_message or ""
+    assert "987654" not in msg and "987654.32" not in msg, (
+        f"the scrubbed message must not leak the raw numeric magnitude; got {msg!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_pin_m1_nonfinite_flow_in_jsonb_permanent_failed() -> None:
     """M1: a non-finite usd_signed persisted in key_inputs JSONB must be rejected
     by validate_flow_shape on reconstruction → permanent FAILED (never a silent

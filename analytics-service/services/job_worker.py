@@ -6018,7 +6018,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # F2: DELETE the stale equity_curve row first so a structurally-failed
         # recompute degrades to legacy instead of leaving a stale trustworthy row.
         await _delete_equity_curve_row()
+        import re
+
+        # F4b: the corrupt-input ValueError/TypeError echoes the raw value
+        # (`could not convert string to float: '987654.32abc'`, `got 1e26`), and
+        # scrub_freeform_string (the shared key=value/JWT scrubber) does NOT redact
+        # bare numerics. Locally redact any numeric magnitude here (the T-115-05
+        # no-raw-USD rule) — scoped to this corrupt-input path so the shared scrub /
+        # the structural NavReconstructionError day-indices are untouched.
         scrubbed = str(scrub_freeform_string(str(exc)))
+        scrubbed = re.sub(r"\d[\d.,]*(?:[eE][-+]?\d+)?", "<redacted-num>", scrubbed)
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
