@@ -119,6 +119,14 @@ class SfoxClient:
         self._clock = _clock
         self._sleep = _sleep
         self._last_request_at: dict[str, float] = {}
+        # Serialize the rate-gate read+sleep+stamp so concurrent coroutines cannot
+        # both read the same stale `last`, sleep in parallel, and fire inside the
+        # window (F3). Phase 120 is explicitly handed the cursors to drive crawls,
+        # so accidental concurrency WILL be exercised; a per-instance lock makes the
+        # 1 req/10s invariant STRUCTURAL (WR-03 philosophy) rather than relying on
+        # strictly-serial call sites — the difference between a held key and a
+        # 429/ban on the founder's real credential.
+        self._rate_lock = asyncio.Lock()
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         # The closed state is TERMINAL — refuse to reopen (WR-01). Without this,
@@ -149,14 +157,18 @@ class SfoxClient:
         layer). Never parallel-fan-out; the adapter is serial by construction.
         """
         interval = SFOX_RATE_LIMITS.get(path, SFOX_DEFAULT_RATE_INTERVAL_S)
-        last = self._last_request_at.get(path)
-        now = self._clock()
-        if last is not None:
-            wait = interval - (now - last)
-            if wait > 0:
-                await self._sleep(wait)
-                now = self._clock()
-        self._last_request_at[path] = now
+        # The whole read+sleep+stamp is the critical section: holding the lock
+        # ACROSS the sleep is what forces a second concurrent call to observe the
+        # first's stamp (and wait a full interval) instead of racing it (F3).
+        async with self._rate_lock:
+            last = self._last_request_at.get(path)
+            now = self._clock()
+            if last is not None:
+                wait = interval - (now - last)
+                if wait > 0:
+                    await self._sleep(wait)
+                    now = self._clock()
+            self._last_request_at[path] = now
 
     async def _request(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """Single HTTP chokepoint: Bearer auth, explicit proxy, rate gate, fail-loud parse.

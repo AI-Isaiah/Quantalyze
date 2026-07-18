@@ -467,6 +467,40 @@ async def test_transactions_rate_gate_enforces_10s():
     assert max(sleeps) >= 10.0
 
 
+async def test_rate_gate_serializes_concurrent_same_endpoint_calls():
+    """F3 (prevents a 429/ban on the founder's real key): two concurrent calls to
+    the SAME endpoint must be serialized by the gate lock, so the second observes
+    the first's stamp and waits a full interval — not race it inside the window.
+
+    The tell: with the lock, the two gate-sleeps START at DISTINCT clock values
+    (the second cannot enter the critical section until the first has stamped);
+    WITHOUT the lock both read the same stale `last` and start their sleeps at the
+    SAME clock value. `fake_sleep` yields the event loop (await asyncio.sleep(0)) so
+    the two gathered coroutines actually interleave at the sleep await point."""
+    import asyncio as _asyncio
+
+    clock = _FakeClock()
+    sleep_start_clocks: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleep_start_clocks.append(clock.t)
+        await _asyncio.sleep(0)  # yield so the sibling coroutine can interleave
+        clock.t += d
+
+    with _patch_request(_stub_response(200, "[]")):
+        client = SfoxClient(api_key=API_KEY, _clock=clock, _sleep=fake_sleep)
+        # Prime the endpoint so BOTH concurrent calls hit the gate (last is set).
+        await client.get_balances()  # stamps last=1000, no sleep (first call)
+        await _asyncio.gather(client.get_balances(), client.get_balances())
+        await client.aclose()
+
+    # Both concurrent calls slept (each waited a full 1s default interval)...
+    assert len(sleep_start_clocks) == 2
+    # ...and critically, at DISTINCT, monotonically increasing clocks — proving the
+    # second waited behind the first's stamp. Without the lock this is [1000, 1000].
+    assert sleep_start_clocks == [1000.0, 1001.0]
+
+
 async def test_other_endpoints_use_smaller_default_interval():
     """Non-transactions endpoints enforce a smaller default interval (1s), proving
     the gate is per-endpoint-path, not a single global 10s throttle."""
