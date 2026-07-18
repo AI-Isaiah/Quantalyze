@@ -6,9 +6,18 @@ import {
   useRef,
   useCallback,
   useEffect,
+  useLayoutEffect,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+
+// SSR-safe layout effect. Measuring must happen BEFORE paint on the client
+// (useLayoutEffect) so the bubble never mispaints on open (WR-01), but
+// useLayoutEffect warns during server render — fall back to useEffect on the
+// server, where this "use client" component's effects never run anyway (open
+// starts false, so the portal is not emitted on the server).
+const useIsomorphicLayoutEffect =
+  typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
 /**
  * Lightweight accessible tooltip — no external dependency.
@@ -22,12 +31,16 @@ import { createPortal } from "react-dom";
  * `getBoundingClientRect()`, so it renders FULLY outside any `overflow-*`
  * ancestor (KPI strips, tables) instead of being clipped. It is centered on the
  * trigger, then CLAMPED horizontally so an edge-adjacent bubble stays on-screen,
- * and placed ABOVE the trigger by default, FLIPPING below when there is
- * insufficient room above. At `z-[210]` it clears the `z-[200]` body-portaled
- * Dialog/drawer overlays it can appear within. Scroll/resize listeners keep it
- * pinned while open and are torn down on close/unmount (SSR-safe: the portal is
- * gated behind the open flag + a `typeof document` guard, so nothing touches the
- * DOM on the server).
+ * and placed ABOVE the trigger by default, TOP-anchored, FLIPPING below when the
+ * bubble's REAL measured height would overflow the viewport top (WR-02) — the
+ * top edge is therefore always clamped on-screen. The measurement runs in a
+ * layout effect so the first paint is already correct (WR-01: no one-frame
+ * top-left / stale-coordinate flash), and the bubble stays `visibility:hidden`
+ * until it has been measured & positioned. At `z-[210]` it clears the `z-[200]`
+ * body-portaled Dialog/drawer overlays it can appear within. Scroll/resize
+ * listeners keep it pinned while open and are torn down on close/unmount
+ * (SSR-safe: the portal is gated behind the open flag + a `typeof document`
+ * guard, so nothing touches the DOM on the server).
  *
  * Design system: DM Sans 13px, #1A1A2E text on white surface, 1px #E2E8F0
  * border, 6px radius, subtle shadow.
@@ -45,23 +58,28 @@ interface TooltipProps {
 const BUBBLE_WIDTH = 224; // w-56
 const VIEWPORT_MARGIN = 8; // keep this gutter from each viewport edge
 const TRIGGER_GAP = 8; // gap between trigger and bubble
-// Conservative bubble-height estimate used only to decide the above/below flip
-// (the exact rendered height is not needed — anchoring the bubble's BOTTOM edge
-// covers the default placement without it).
+// Fallback bubble-height estimate, used ONLY before the real bubble has been
+// laid out (offsetHeight === 0). Once the bubble is in the DOM its measured
+// height drives the flip decision (WR-02), so this never underestimates real
+// wrapped 2-sentence content after the first layout pass.
 const ESTIMATED_BUBBLE_HEIGHT = 80;
 
-type BubblePos = { left: number; top?: number; bottom?: number };
+type BubblePos = { left: number; top: number };
 
 export function Tooltip({ content, children, className }: TooltipProps) {
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<BubblePos | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The component owns this ref; the trigger wrapper is attached through the
-  // `setTriggerEl` callback ref below (never a returned RefObject — the
-  // react-compiler-safe idiom from useTapPin.ts).
+  // The component owns these refs; the trigger wrapper and the portaled bubble
+  // are attached through the `setTriggerEl` / `setBubbleEl` callback refs below
+  // (never a returned RefObject — the react-compiler-safe idiom from useTapPin.ts).
   const triggerRef = useRef<HTMLElement | null>(null);
   const setTriggerEl = useCallback((el: HTMLElement | null) => {
     triggerRef.current = el;
+  }, []);
+  const bubbleRef = useRef<HTMLElement | null>(null);
+  const setBubbleEl = useCallback((el: HTMLElement | null) => {
+    bubbleRef.current = el;
   }, []);
   const id = useId();
 
@@ -102,20 +120,33 @@ export function Tooltip({ content, children, className }: TooltipProps) {
     const rawLeft = rect.left + rect.width / 2 - BUBBLE_WIDTH / 2;
     const maxLeft = window.innerWidth - BUBBLE_WIDTH - VIEWPORT_MARGIN;
     const left = Math.min(Math.max(rawLeft, VIEWPORT_MARGIN), maxLeft);
-    // Vertical: above by default (anchor the bubble's bottom edge above the
-    // trigger top); flip below when there is not enough room above.
-    if (rect.top < ESTIMATED_BUBBLE_HEIGHT + TRIGGER_GAP + VIEWPORT_MARGIN) {
-      setPos({ left, top: rect.bottom + TRIGGER_GAP });
-    } else {
-      setPos({ left, bottom: window.innerHeight - rect.top + TRIGGER_GAP });
-    }
+    // Vertical (WR-02): drive the above/below flip with the REAL measured bubble
+    // height (not a fixed 80px estimate that underestimates a wrapped 2-sentence
+    // narrative). TOP-anchor BOTH placements so the top edge is explicitly
+    // clamped on-screen. Prefer above — the bubble's top there is
+    // `rect.top - gap - height`; if that would render above the viewport top
+    // (< VIEWPORT_MARGIN), flip below (`rect.bottom + gap`) so the first lines
+    // are never clipped at the viewport edge.
+    const bubbleH = bubbleRef.current?.offsetHeight || ESTIMATED_BUBBLE_HEIGHT;
+    const aboveTop = rect.top - TRIGGER_GAP - bubbleH;
+    const top =
+      aboveTop >= VIEWPORT_MARGIN ? aboveTop : rect.bottom + TRIGGER_GAP;
+    setPos({ left, top });
   }, []);
 
   // Listener discipline (ContributionWizardOverlay shape): register on open,
   // reposition on scroll/resize, tear down on close AND unmount. `capture: true`
-  // on scroll so an ancestor overflow-container scroll also repositions.
-  useEffect(() => {
-    if (!open) return;
+  // on scroll so an ancestor overflow-container scroll also repositions. A LAYOUT
+  // effect (WR-01) so the measure + setPos commit BEFORE the browser paints —
+  // otherwise the portal paints one frame at the body's top-left (undefined
+  // insets) or the previous open's stale coordinates, then snaps.
+  useIsomorphicLayoutEffect(() => {
+    if (!open) {
+      // WR-01: drop stale coordinates on close so a reopen starts from an
+      // unmeasured (hidden) state and never flashes the previous position.
+      setPos(null);
+      return;
+    }
     reposition();
     window.addEventListener("scroll", reposition, true);
     window.addEventListener("resize", reposition);
@@ -141,13 +172,17 @@ export function Tooltip({ content, children, className }: TooltipProps) {
         typeof document !== "undefined" &&
         createPortal(
           <span
+            ref={setBubbleEl}
             id={id}
             role="tooltip"
             className="fixed z-[210] w-56 rounded-md border bg-white px-3 py-2 text-fixed-13 leading-snug shadow-sm pointer-events-none"
             style={{
               left: pos?.left,
               top: pos?.top,
-              bottom: pos?.bottom,
+              // WR-01: keep the bubble unpainted until it has been measured &
+              // positioned (the layout effect above measures before paint), so
+              // it never flashes at the body's top-left or a stale position.
+              visibility: pos ? undefined : "hidden",
               color: "#1A1A2E",
               borderColor: "#E2E8F0",
               fontFamily: "var(--font-body)",

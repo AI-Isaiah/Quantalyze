@@ -243,3 +243,112 @@ describe("UIFIX-01: portaled positioning", () => {
     expect(innerTrigger.getAttribute("aria-describedby")).toBeNull();
   });
 });
+
+// WR-01 / WR-02 (phase 117 review-fix) — the portal must be MEASURED before it
+// paints and TOP-clamped on-screen. Two intertwined defects in one measure pass:
+//   WR-02: the flip-to-below decision used a fixed 80px height estimate. A real
+//     2-sentence narrative in a w-56 (224px) box wraps to ~110-160px, so a
+//     trigger just above the old 96px threshold was placed ABOVE and grew past
+//     top:0 — clipping the first lines at the viewport edge (re-introducing the
+//     clip UIFIX-01 exists to kill). The fix measures the REAL bubble height
+//     (offsetHeight via a ref) to drive the flip AND top-anchors both placements
+//     so the top edge is explicitly clamped >= VIEWPORT_MARGIN.
+//   WR-01: `pos` started null and was set in a POST-paint passive effect, so the
+//     first frame painted at the body top-left (undefined insets) / a stale prior
+//     position, then snapped. The fix measures in a LAYOUT effect (before paint)
+//     and keeps the bubble `visibility:hidden` until positioned.
+// jsdom can't observe a one-frame mispaint, so these pin the load-bearing,
+// checkable consequences: the measured-height flip and the on-screen top clamp.
+// Both are RED on the pre-fix estimate-80 / bottom-anchored tree.
+describe("WR-01/WR-02: measured-height flip + top clamp (never above the viewport top)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  const openVia = (wrapper: HTMLElement) => {
+    fireEvent.mouseEnter(wrapper);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+  };
+
+  const mockRect = (top: number, height = 16): DOMRect =>
+    ({
+      left: 400,
+      right: 416,
+      top,
+      bottom: top + height,
+      width: 16,
+      height,
+      x: 400,
+      y: top,
+      toJSON: () => ({}),
+    }) as DOMRect;
+
+  it("WR-02: a top-region trigger flips BELOW using the REAL (measured) bubble height, not the 80px estimate", () => {
+    // rect.top = 100 sits ABOVE the pre-fix flip threshold (80 + 8 + 8 = 96), so
+    // the estimate-80 code placed the bubble ABOVE (bottom-anchored). But a real
+    // 150px bubble there has its top edge at 100 - 8 - 150 = -58px — clipped
+    // above the viewport. Measuring 150px must flip it BELOW instead.
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(mockRect(100));
+    const hSpy = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockReturnValue(150);
+    try {
+      render(
+        <Tooltip content="A two-sentence narrative that wraps to many lines. It is much taller than eighty pixels.">
+          <button>info</button>
+        </Tooltip>,
+      );
+      openVia(screen.getByText("info").parentElement!.parentElement!);
+
+      const bubble = screen.getByRole("tooltip");
+      const top = parseFloat(bubble.style.top);
+      // Flipped BELOW: top-anchored at rect.bottom + TRIGGER_GAP = 116 + 8.
+      expect(top).toBeCloseTo(124);
+      // Fully on-screen — never above the viewport top edge.
+      expect(top).toBeGreaterThanOrEqual(0);
+      // Top-anchored: the pre-fix `bottom` anchor is gone.
+      expect(bubble.style.bottom).toBe("");
+    } finally {
+      hSpy.mockRestore();
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("WR-01/WR-02: a mid-viewport trigger places the (measured) bubble ABOVE, top-anchored, on-screen, and visible only once measured", () => {
+    // rect.top = 500 with a real 150px bubble → placed ABOVE at
+    // 500 - 8 - 150 = 342px (>= VIEWPORT_MARGIN), top-anchored.
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue(mockRect(500));
+    const hSpy = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockReturnValue(150);
+    try {
+      render(
+        <Tooltip content="A two-sentence narrative that wraps to many lines. It is much taller than eighty pixels.">
+          <button>info</button>
+        </Tooltip>,
+      );
+      openVia(screen.getByText("info").parentElement!.parentElement!);
+
+      const bubble = screen.getByRole("tooltip");
+      const top = parseFloat(bubble.style.top);
+      expect(top).toBeCloseTo(342); // above, top-anchored
+      expect(top).toBeGreaterThanOrEqual(8); // >= VIEWPORT_MARGIN, never off the top
+      expect(bubble.style.bottom).toBe(""); // top-anchored, not bottom-anchored
+      // WR-01: measured before paint → positioned → not left hidden.
+      expect(bubble.style.visibility).not.toBe("hidden");
+    } finally {
+      hSpy.mockRestore();
+      rectSpy.mockRestore();
+    }
+  });
+});
