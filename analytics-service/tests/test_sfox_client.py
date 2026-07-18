@@ -168,6 +168,24 @@ async def test_error_message_scrubs_api_key():
     assert API_KEY not in str(excinfo.value)
 
 
+async def test_error_message_scrubs_bare_api_key_echo():
+    """WR-02: a BARE echo of the raw key — no denylisted `key=` prefix, no JWT shape,
+    and (as here) no `:`/`=`/`.` punctuation so scrub_freeform_string's fast-path
+    returns it VERBATIM — must still not survive into str(exc). The prior test used an
+    `api_key=<key>` body that the pattern denylist happens to catch, masking this gap.
+    Fixed by redacting self._api_key by value at the chokepoint before the freeform
+    scrub. Fails against the pre-WR-02 code."""
+    # Body is exactly the punctuation-free key: hits the redact fast-path passthrough.
+    resp = _stub_response(403, API_KEY)
+    with _patch_request(resp):
+        client = SfoxClient(api_key=API_KEY)
+        with pytest.raises(SfoxApiError) as excinfo:
+            await client.get_balances()
+        await client.aclose()
+    assert API_KEY not in str(excinfo.value)
+    assert "[REDACTED]" in str(excinfo.value)
+
+
 async def test_non_json_2xx_body_raises():
     """Fail-loud (T-118-04, no invented data): a 2xx with a non-JSON body raises
     rather than silently coercing to an empty/garbage payload."""

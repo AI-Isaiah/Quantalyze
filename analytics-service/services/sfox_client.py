@@ -173,8 +173,16 @@ class SfoxClient:
                     await maybe
 
         if status < 200 or status >= 300:
-            # Scrub before the text can reach any log/Sentry surface (T-118-01).
-            raise SfoxApiError(status, scrub_freeform_string(raw))
+            # Redact the KNOWN secret by value first (WR-02, belt-and-suspenders):
+            # scrub_freeform_string is pattern-based (denylisted key=value / JWT /
+            # bearer shapes) and its fast-path returns punctuation-free bodies
+            # verbatim — so a bare echo of the raw api_key (sFOX keys are typically
+            # punctuation-free alphanumerics) would otherwise pass through unscrubbed
+            # into str(SfoxApiError) and any log/Sentry surface. Replacing the literal
+            # value does not depend on the upstream echoing it in a recognized shape.
+            safe = raw.replace(self._api_key, "[REDACTED]")
+            # Then the freeform scrub before the text can reach any surface (T-118-01).
+            raise SfoxApiError(status, scrub_freeform_string(safe))
         try:
             return json.loads(raw)
         except (ValueError, TypeError):
