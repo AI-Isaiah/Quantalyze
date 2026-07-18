@@ -5910,7 +5910,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     from services.allocator_equity_compose import compose_allocator_equity
     from services.allocator_equity_derive import eligible_key_predicate
-    from services.external_flows import ExternalFlow
+    from services.external_flows import ExternalFlow, validate_flow_shape
     from services.nav_twr import NavReconstructionError
     from services.redact import scrub_freeform_string
 
@@ -5945,6 +5945,22 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             or []
         )
 
+    def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
+        # M3: a corrupt PERSISTED value (a NULL daily_return → float(None)
+        # TypeError, a non-numeric usd_signed, a non-finite flow rejected by
+        # validate_flow_shape) is NON-retryable — retrying re-reads the same poison
+        # DB row FOREVER as transient `unknown` (the T-74-02 class). Dispose it as a
+        # permanent scrubbed FAILED so the admin sees a terminal state, not an
+        # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: corrupt persisted input — " + scrubbed
+            ),
+            error_kind="permanent",
+        )
+
     csv_rows = await db_execute(_load_returns)
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
@@ -5952,13 +5968,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         if k in eligible_ids:
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
-    for k, rws in _grouped.items():
-        rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
-        returns_by_key[k] = pd.Series(
-            [float(x["daily_return"]) for x in rws_sorted],
-            index=[str(x["date"]) for x in rws_sorted],
-            dtype="float64",
-        )
+    try:
+        for k, rws in _grouped.items():
+            rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
+            returns_by_key[k] = pd.Series(
+                [float(x["daily_return"]) for x in rws_sorted],
+                index=[str(x["date"]) for x in rws_sorted],
+                dtype="float64",
+            )
+    except (ValueError, TypeError, KeyError) as exc:
+        return _permanent_corrupt_input(exc)
 
     # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
     def _load_key_inputs() -> list[dict[str, Any]]:
@@ -5976,24 +5995,36 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     flows_by_key: dict[str, list[ExternalFlow]] = {}
     anchors_by_key: dict[str, float | None] = {}
     orphan_kinds: list[str] = []
-    for row in ki_rows:
-        kind = str(row.get("kind", ""))
-        api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
-        if api_key_id not in eligible_ids:
-            # A key that is no longer eligible (revoked / disconnected / deleted)
-            # keeps a stale key_inputs row — cheap bounded orphan cleanup below.
-            orphan_kinds.append(kind)
-            continue
-        payload = row.get("payload") or {}
-        flows_by_key[api_key_id] = [
-            ExternalFlow(
-                utc_day_iso=str(_f["utc_day_iso"]),
-                usd_signed=float(_f["usd_signed"]),
-            )
-            for _f in (payload.get("flows") or [])
-        ]
-        _anchor = payload.get("anchor_usd")
-        anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
+    # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
+    # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
+    # value would otherwise escape as a transient `unknown` and retry forever. M1:
+    # each reconstructed ExternalFlow is shape-validated (validate_flow_shape) so a
+    # non-finite usd_signed in JSONB is REJECTED here, never sailing into the core
+    # as a silent NaN. Both dispose as a permanent scrubbed FAILED.
+    try:
+        for row in ki_rows:
+            kind = str(row.get("kind", ""))
+            api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
+            if api_key_id not in eligible_ids:
+                # A key that is no longer eligible (revoked / disconnected /
+                # deleted) keeps a stale key_inputs row — bounded orphan cleanup
+                # below.
+                orphan_kinds.append(kind)
+                continue
+            payload = row.get("payload") or {}
+            flows_by_key[api_key_id] = [
+                validate_flow_shape(
+                    ExternalFlow(
+                        utc_day_iso=str(_f["utc_day_iso"]),
+                        usd_signed=float(_f["usd_signed"]),
+                    )
+                )
+                for _f in (payload.get("flows") or [])
+            ]
+            _anchor = payload.get("anchor_usd")
+            anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
+    except (ValueError, TypeError, KeyError) as exc:
+        return _permanent_corrupt_input(exc)
 
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.

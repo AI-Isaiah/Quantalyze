@@ -381,6 +381,115 @@ async def test_pin_b2_empty_compose_deletes_stale_curve_no_upsert() -> None:
     )
 
 
+def _seed_malformed_daily_return() -> dict[str, list[dict]]:
+    """One eligible key whose csv_daily_returns carries a NULL daily_return — a
+    corrupt DB value. ``float(None)`` raises TypeError; without a guard that lands
+    OUTSIDE the compose NavReconstructionError catch and is retried FOREVER as
+    transient `unknown` (the T-74-02 class). M3: it must be a permanent FAILED."""
+    alloc = "alloc-bad"
+    api_keys = [
+        {
+            "id": "key-M", "user_id": alloc, "is_active": True,
+            "sync_status": "connected", "disconnected_at": None,
+        },
+    ]
+    csv = [
+        {"api_key_id": "key-M", "allocator_id": alloc, "date": "2026-03-01", "daily_return": 0.004},
+        # Corrupt: a NULL daily_return that float() cannot coerce.
+        {"api_key_id": "key-M", "allocator_id": alloc, "date": "2026-03-02", "daily_return": None},
+    ]
+    derived = [
+        {
+            "allocator_id": alloc,
+            "kind": "key_inputs:key-M",
+            "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance"},
+        },
+    ]
+    return {
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+        "api_keys": api_keys,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pin_m3_malformed_daily_return_permanent_failed() -> None:
+    """M3: a malformed DB value (NULL daily_return → float(None) TypeError) parsed
+    OUTSIDE the compose catch must land a PERMANENT FAILED with a scrubbed message,
+    NOT an infinite transient `unknown` retry (the T-74-02 poison-retry class)."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_malformed_daily_return())
+    job = {"id": "j-bad", "kind": "derive_allocator_equity", "allocator_id": "alloc-bad"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED", (
+        f"a malformed daily_return must FAIL permanently, not retry; got {result.outcome!r}"
+    )
+    assert result.error_kind == "permanent", (
+        f"must be permanent (corrupt input, non-retryable); got {result.error_kind!r}"
+    )
+    # No poison equity_curve upsert on a structural parse failure.
+    assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == []
+
+
+@pytest.mark.asyncio
+async def test_pin_m3_malformed_usd_signed_permanent_failed() -> None:
+    """M3/M1: a malformed key_inputs flow (non-coercible usd_signed) reconstructing
+    an ExternalFlow from JSONB must be a permanent FAILED, not an infinite retry."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_allocator_inputs()
+    # Corrupt one key's persisted flow: usd_signed is a non-numeric string.
+    for row in seed[DERIVED_TABLE]:
+        if row["kind"] == "key_inputs:key-A":
+            row["payload"]["flows"] = [
+                {"utc_day_iso": "2026-03-02", "usd_signed": "not-a-number"}
+            ]
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-badflow", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+
+
+@pytest.mark.asyncio
+async def test_pin_m1_nonfinite_flow_in_jsonb_permanent_failed() -> None:
+    """M1: a non-finite usd_signed persisted in key_inputs JSONB must be rejected
+    by validate_flow_shape on reconstruction → permanent FAILED (never a silent
+    NaN sailing into the core)."""
+    import math
+
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_allocator_inputs()
+    for row in seed[DERIVED_TABLE]:
+        if row["kind"] == "key_inputs:key-A":
+            row["payload"]["flows"] = [
+                {"utc_day_iso": "2026-03-02", "usd_signed": math.inf}
+            ]
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-inf", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+
+
 # ---------------------------------------------------------------------------
 # Pin 7b — enqueue named-notation completeness (B1, 115.1-close). The
 # ``enqueue_compute_job`` RPC's FIRST positional param ``p_strategy_id`` has NO
