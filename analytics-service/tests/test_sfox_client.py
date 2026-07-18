@@ -197,3 +197,189 @@ async def test_aclose_is_idempotent():
     await client._ensure_session()
     await client.aclose()
     await client.aclose()  # second call must not raise
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — paginated read methods + per-endpoint rate gate
+#
+# Regression gates — WHY each case matters (Rule 9):
+#   - wire param names: sFOX documents `from`/`to`/`limit`/`after`/`offset`/`types`
+#     (transactions), `page_size`/`last_seen_id` (trades), `start_date`/`end_date`/
+#     `interval` (balance history). The Python signature uses `from_ms` (from is a
+#     keyword) but the BYTES on the wire must be the documented names — an invented
+#     param name silently returns the wrong window and phase-120 reconstruction
+#     stitches garbage. Asserted on the mocked request `params` kwarg.
+#   - envelope handling: trades and balance_history wrap the payload in `{data:[...]}`;
+#     balances and transactions are bare arrays. A missing `data` key is a real API
+#     contract break and must fail loud, never coerce to an empty series (no invented data).
+#   - cursor plumbing: phase 120 drives crawls with `after`/`last_seen_id`; if the
+#     cursor does not land verbatim in the request, pagination breaks at the seam.
+#   - transactions rate gate (T-118-03 / FLIPRETRY-01 at the client layer): the
+#     documented 1 req/10s limit MUST be enforced in _request. A second immediate
+#     call must sleep >= ~10s. This is the exact v1.11 wedge lesson — an unbounded
+#     un-gated crawl on the sequential worker loop stalls healthz. Proven with an
+#     injected clock so the suite still runs in milliseconds.
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Controllable monotonic clock for rate-gate tests (no real sleeping)."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+
+    def __call__(self) -> float:
+        return self.t
+
+
+async def test_get_transactions_endpoint_and_wire_params():
+    """Transactions GET the documented path with EXACTLY the documented wire param
+    names (from/to/limit/after/offset/types); only provided ones are sent."""
+    resp = _stub_response(200, json.dumps([{"id": 1, "account_balance": "100"}]))
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        out = await client.get_transactions(
+            from_ms=1000, to_ms=2000, after="12345", offset=5, types="deposit"
+        )
+        await client.aclose()
+
+    assert out == [{"id": 1, "account_balance": "100"}]
+    args, kwargs = mock_req.call_args
+    assert args[0] == "GET"
+    assert args[1] == f"{SFOX_PROD_BASE_URL}/v1/account/transactions"
+    assert kwargs["params"] == {
+        "from": 1000,
+        "to": 2000,
+        "limit": 250,
+        "after": "12345",
+        "offset": 5,
+        "types": "deposit",
+    }
+
+
+async def test_get_transactions_omits_unset_params():
+    """Only provided params reach the wire — a bare call sends just the default limit."""
+    resp = _stub_response(200, "[]")
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        await client.get_transactions()
+        await client.aclose()
+    _, kwargs = mock_req.call_args
+    assert kwargs["params"] == {"limit": 250}
+
+
+async def test_get_transactions_limit_over_max_raises_before_request():
+    """Documented max limit is 1000; a larger limit raises ValueError BEFORE any
+    request is issued (no wasted rate-limited round-trip)."""
+    with _patch_request(_stub_response(200, "[]")) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        with pytest.raises(ValueError):
+            await client.get_transactions(limit=1001)
+        await client.aclose()
+    mock_req.assert_not_called()
+
+
+async def test_get_trades_endpoint_params_and_envelope():
+    """Trades GET /v1/account/trades with page_size/last_seen_id and unwrap the
+    documented {data:[...]} envelope to the inner list."""
+    resp = _stub_response(200, json.dumps({"data": [{"trade_id": 7}]}))
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        out = await client.get_trades(page_size=100, last_seen_id="67890")
+        await client.aclose()
+
+    assert out == [{"trade_id": 7}]
+    args, kwargs = mock_req.call_args
+    assert args[1] == f"{SFOX_PROD_BASE_URL}/v1/account/trades"
+    assert kwargs["params"] == {"page_size": 100, "last_seen_id": "67890"}
+
+
+async def test_get_trades_missing_data_envelope_raises():
+    """A trades payload with no `data` key is a contract break — fail loud."""
+    resp = _stub_response(200, json.dumps({"unexpected": []}))
+    with _patch_request(resp):
+        client = SfoxClient(api_key=API_KEY)
+        with pytest.raises(SfoxApiError):
+            await client.get_trades()
+        await client.aclose()
+
+
+async def test_get_balance_history_endpoint_params_and_envelope():
+    """Balance history GET /v1/account/balance/history with start_date (required),
+    end_date (optional), interval; unwraps {data:[{timestamp,usd_value}]}."""
+    resp = _stub_response(
+        200, json.dumps({"data": [{"timestamp": 1, "usd_value": "42"}]})
+    )
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        out = await client.get_balance_history(
+            start_date_ms=111, end_date_ms=222, interval=3600
+        )
+        await client.aclose()
+
+    assert out == [{"timestamp": 1, "usd_value": "42"}]
+    args, kwargs = mock_req.call_args
+    assert args[1] == f"{SFOX_PROD_BASE_URL}/v1/account/balance/history"
+    assert kwargs["params"] == {"start_date": 111, "end_date": 222, "interval": 3600}
+
+
+async def test_get_balance_history_default_interval_daily():
+    """Interval defaults to daily (86400s); end_date omitted is not sent."""
+    resp = _stub_response(200, json.dumps({"data": []}))
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        await client.get_balance_history(start_date_ms=111)
+        await client.aclose()
+    _, kwargs = mock_req.call_args
+    assert kwargs["params"] == {"start_date": 111, "interval": 86400}
+
+
+async def test_get_balance_history_bad_interval_raises_before_request():
+    """interval must be 3600 or 86400; anything else raises ValueError pre-request."""
+    with _patch_request(_stub_response(200, json.dumps({"data": []}))) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        with pytest.raises(ValueError):
+            await client.get_balance_history(start_date_ms=111, interval=60)
+        await client.aclose()
+    mock_req.assert_not_called()
+
+
+async def test_transactions_rate_gate_enforces_10s():
+    """T-118-03 / FLIPRETRY-01: a second immediate transactions call must sleep
+    >= ~10s. The strict 1 req/10s limit lives in _request, not the call site."""
+    clock = _FakeClock()
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+        clock.t += d
+
+    with _patch_request(_stub_response(200, "[]")):
+        client = SfoxClient(
+            api_key=API_KEY, _clock=clock, _sleep=fake_sleep
+        )
+        await client.get_transactions()
+        await client.get_transactions()
+        await client.aclose()
+
+    assert sleeps, "second transactions call did not hit the rate gate"
+    assert max(sleeps) >= 10.0
+
+
+async def test_other_endpoints_use_smaller_default_interval():
+    """Non-transactions endpoints enforce a smaller default interval (1s), proving
+    the gate is per-endpoint-path, not a single global 10s throttle."""
+    clock = _FakeClock()
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+        clock.t += d
+
+    with _patch_request(_stub_response(200, "[]")):
+        client = SfoxClient(api_key=API_KEY, _clock=clock, _sleep=fake_sleep)
+        await client.get_balances()
+        await client.get_balances()
+        await client.aclose()
+
+    assert sleeps == [1.0]
