@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxClient, SfoxApiError, SFOX_PROD_BASE_URL
 from services.db import get_supabase, db_execute, one, rows
@@ -34,13 +34,16 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
     scope endpoint, so we NEVER emit a probed ``{read, trade, withdraw}`` triple
     or claim an observed read-only scope (A1 — no invented data).
 
-    Error mapping:
+    Error mapping (F4 — every arm fails CLOSED; NEVER returns {"valid": true},
+    and only a genuine 401/403 blames the user's credentials):
       * 401/403 → HTTPException(400, AUTH_FAILED_DETAIL) — the exact same string
-        the ccxt AUTH_FAILED arm emits, so the TS classifyKeyValidationError
-        maps it to KEY_AUTH_FAILED with zero TS edits.
-      * anything else (status==0 transport/shape, 429, 5xx) → fail CLOSED with a
-        generic 500; NEVER return {"valid": true}, and NEVER mislabel a
-        transport blip as a bad key.
+        the ccxt AUTH_FAILED arm emits → TS classifyKeyValidationError maps it to
+        KEY_AUTH_FAILED with zero TS edits.
+      * 429 → HTTPException(400, RATE_LIMITED_DETAIL) — the SAME shared string the
+        ccxt RateLimitExceeded arm emits → KEY_RATE_LIMIT. A throttle is upstream,
+        not a bad key (recreates the 110.1 honesty fix for sFOX).
+      * 5xx or status==0 (transport/shape) → HTTPException(400, NETWORK_ERROR_DETAIL)
+        — the SAME shared string the ccxt NetworkError arm emits, mapped identically.
 
     `api_secret` is intentionally ignored: sFOX auth is a single Bearer token
     (Q1 worker contract), so the branch takes only `api_key`. No proxy is wired
@@ -64,14 +67,22 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
     except SfoxApiError as e:
         if e.status in (401, 403):
             raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
-        logger.exception(
-            "validate_key: sFOX validation failed closed — SfoxApiError(status=%s)",
-            e.status,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Key validation failed. Please check your credentials.",
-        )
+        if e.status == 429:
+            # F4: a throttle is an UPSTREAM condition, not bad credentials —
+            # recreates the 110.1 honesty fix the ccxt path already made. Emit the
+            # SAME shared RATE_LIMITED_DETAIL the ccxt RateLimitExceeded arm emits,
+            # so classifyKeyValidationError maps it to KEY_RATE_LIMIT (not the
+            # misleading "check your credentials"). Fails CLOSED (never valid:true);
+            # logged at WARNING (not exception) since a throttle is not Sentry-grade.
+            logger.warning("validate_key: sFOX rate-limited (status=429)")
+            raise HTTPException(status_code=400, detail=RATE_LIMITED_DETAIL)
+        # 5xx (exchange down) or status==0 (transport/shape blip): an UPSTREAM /
+        # transport problem, never the user's key. Same shared NETWORK_ERROR_DETAIL
+        # the ccxt NetworkError arm emits so the TS classifier maps it identically.
+        # Still fails CLOSED; WARNING-level (mirrors the ccxt transient arms) so a
+        # transient blip no longer spams Sentry via logger.exception.
+        logger.warning("validate_key: sFOX transient upstream failure (status=%s)", e.status)
+        raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
     finally:
         await client.aclose()
 

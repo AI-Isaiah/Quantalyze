@@ -25,6 +25,23 @@ logger = logging.getLogger("quantalyze.analytics")
 # contract cannot drift from one site (a reword here must update the TS matcher).
 AUTH_FAILED_DETAIL = "Authentication failed. Check your API key and secret."
 
+# Shared UPSTREAM-transient detail strings. Like AUTH_FAILED_DETAIL, these are
+# the single source of truth for two cross-language contracts: the ccxt arms in
+# validate_key_permissions below AND the non-ccxt sFOX branch in
+# routers/exchange.py (F4) both emit THESE constants, so a sFOX 429 / 5xx is
+# classified BYTE-IDENTICALLY to the equivalent ccxt failure by
+# classifyKeyValidationError (src/lib/wizardErrors.ts) — never misreported as a
+# credential problem. RATE_LIMITED_DETAIL contains "rate" → KEY_RATE_LIMIT.
+RATE_LIMITED_DETAIL = (
+    "Exchange rate-limited the validation request. Wait a moment "
+    "and try again — repeated failures may indicate a missing "
+    "read scope."
+)
+NETWORK_ERROR_DETAIL = (
+    "Network error reaching the exchange. Check connectivity "
+    "and try again."
+)
+
 
 # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — per-call transient data-quality
 # flags. Callers (job_worker / reconcile) read these via
@@ -1043,11 +1060,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             "validate_key_permissions: ccxt.RateLimitExceeded on %s — exc_class=%s scrubbed=%s",
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
-        result["error"] = (
-            "Exchange rate-limited the validation request. Wait a moment "
-            "and try again — repeated failures may indicate a missing "
-            "read scope."
-        )
+        result["error"] = RATE_LIMITED_DETAIL
         result["error_code"] = "RATE_LIMITED"
         return result
     except ccxt.ExchangeNotAvailable as exc:
@@ -1069,10 +1082,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             "validate_key_permissions: ccxt.NetworkError on %s — exc_class=%s scrubbed=%s",
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
-        result["error"] = (
-            "Network error reaching the exchange. Check connectivity "
-            "and try again."
-        )
+        result["error"] = NETWORK_ERROR_DETAIL
         result["error_code"] = "NETWORK_UNAVAILABLE"
         return result
     except Exception as exc:  # noqa: BLE001

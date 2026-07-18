@@ -16,10 +16,11 @@ Regression gates — WHY each case matters (Rule 9):
     string so the cross-language TS `classifyKeyValidationError` returns
     `KEY_AUTH_FAILED` with ZERO TS edits. A reworded detail silently breaks
     that classification — the test pins the literal.
-  - fail-CLOSED on non-auth failure: a transport/shape blip (status==0), 429 or
-    5xx must NEVER return {"valid": true} and must NOT be mislabelled an auth
-    failure (would tell the user to fix a key that is fine). Pinned to a 500
-    whose detail does not contain "authentication failed".
+  - fail-CLOSED + HONEST on non-auth failure (F4): a transport/shape blip
+    (status==0) or 5xx maps to the shared ccxt NETWORK_ERROR_DETAIL and a 429 to
+    the shared RATE_LIMITED_DETAIL — a 400 that fails CLOSED (never {"valid":
+    true}) and never blames the user's credentials (no "authentication failed" /
+    "check your credentials"). Only a genuine 401/403 is an auth failure.
   - aclose on EVERY path: the adapter owns an aiohttp session; a missed aclose
     on any branch leaks a session (Sentry "Unclosed client session"). Asserted
     on success + every failure.
@@ -190,10 +191,42 @@ async def test_sfox_auth_failure_maps_to_exact_auth_string(exchange_router, stat
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("status", [0, 429, 500])
-async def test_sfox_non_auth_failure_fails_closed(exchange_router, status):
-    """status==0 (transport/shape), 429, 5xx -> 500 fail-closed; detail must NOT
-    contain 'authentication failed' (never mislabel a blip as a bad key)."""
+async def test_sfox_rate_limit_maps_to_rate_limited_detail_not_credentials(exchange_router):
+    """F4: a sFOX 429 is an UPSTREAM throttle, not bad credentials. It must fail
+    CLOSED with the SHARED ccxt RATE_LIMITED_DETAIL (→ KEY_RATE_LIMIT), NEVER the
+    old 500 "check your credentials" (which the 110.1 fix already killed for
+    ccxt). WHY (Rule 9): mislabelling a throttle as a bad key tells the founder to
+    regenerate a credential that is perfectly fine."""
+    from services.exchange import RATE_LIMITED_DETAIL
+    from services.sfox_client import SfoxApiError
+
+    router = exchange_router
+    client = _make_client(get_balances_side_effect=SfoxApiError(429, "slow down"))
+    _install_sfox_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req(router))
+
+    assert ei.value.status_code == 400
+    assert ei.value.detail == RATE_LIMITED_DETAIL
+    # honesty anti-assertions: never a 500, never "check your credentials".
+    assert ei.value.status_code != 500
+    assert "authentication failed" not in ei.value.detail.lower()
+    assert "check your credentials" not in ei.value.detail.lower()
+    # classifier contract: the shared detail routes to KEY_RATE_LIMIT via "rate".
+    assert "rate" in RATE_LIMITED_DETAIL.lower()
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("status", [0, 500, 502, 503])
+async def test_sfox_transient_upstream_maps_to_network_detail_not_credentials(
+    exchange_router, status
+):
+    """F4: a sFOX 5xx (exchange down) or status==0 (transport/shape blip) is an
+    UPSTREAM failure, not a bad key. It must fail CLOSED with the SHARED ccxt
+    NETWORK_ERROR_DETAIL, mapped identically to the ccxt NetworkError arm, NEVER
+    the old 500 "check your credentials"."""
+    from services.exchange import NETWORK_ERROR_DETAIL
     from services.sfox_client import SfoxApiError
 
     router = exchange_router
@@ -203,9 +236,25 @@ async def test_sfox_non_auth_failure_fails_closed(exchange_router, status):
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(router))
 
-    assert ei.value.status_code == 500
+    assert ei.value.status_code == 400
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    # honesty anti-assertions: never a 500, never blame the credentials.
+    assert ei.value.status_code != 500
     assert "authentication failed" not in ei.value.detail.lower()
+    assert "check your credentials" not in ei.value.detail.lower()
     client.aclose.assert_awaited_once()
+
+
+def test_sfox_transient_details_are_the_shared_ccxt_constants():
+    """F4 no-drift guard: the sfox branch must reuse the SAME hoisted constants
+    the ccxt arms emit (single source of truth, like AUTH_FAILED_DETAIL), so a
+    reword updates BOTH paths at once and the TS classifier maps them identically.
+    Pins that both constants are non-empty and rate-limit copy carries the "rate"
+    keyword classifyKeyValidationError matches on."""
+    from services.exchange import NETWORK_ERROR_DETAIL, RATE_LIMITED_DETAIL
+
+    assert RATE_LIMITED_DETAIL and NETWORK_ERROR_DETAIL
+    assert "rate" in RATE_LIMITED_DETAIL.lower()
 
 
 @pytest.mark.parametrize("token", ["", "   ", "\t\n"])
