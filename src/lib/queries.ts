@@ -2390,7 +2390,10 @@ export function extractTrustworthyDerivedCurve(
     const point = raw as Record<string, unknown>;
     const date = point.date;
     const equityUsd = point.equity_usd;
-    if (typeof date !== "string" || date.length === 0) return null;
+    // F4a: require a strict YYYY-MM-DD calendar day — a non-empty but malformed
+    // date string (e.g. "not-a-date", "2026/03/10") would otherwise reach
+    // parseISO / the SVG x-scale as a NaN coordinate. Degrade to legacy instead.
+    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
     if (typeof equityUsd !== "number" || !Number.isFinite(equityUsd)) {
       return null;
     }

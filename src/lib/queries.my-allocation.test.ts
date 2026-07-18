@@ -2840,5 +2840,26 @@ describe("115.1 equity display-repoint", () => {
         curve: [{ date: "", equity_usd: 100 }],
       }),
     ).toBeNull();
+    // F4a: a non-empty but MALFORMED date string (not YYYY-MM-DD) must degrade to
+    // legacy — a garbage date would otherwise reach parseISO/SVG as NaN coords.
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [{ date: "not-a-date", equity_usd: 100 }],
+      }),
+    ).toBeNull();
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [{ date: "2026/03/10", equity_usd: 100 }],
+      }),
+    ).toBeNull();
+    // A well-formed YYYY-MM-DD date still passes.
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      }),
+    ).toEqual([{ date: "2026-03-10", value: 100 }]);
   });
 });
