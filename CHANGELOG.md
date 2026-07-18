@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.45.0.0] - 2026-07-18
+### v1.11 Scenario Composer v2 — tail (Phases 114–117; completes the milestone)
+Second and final v1.11 tranche, landing on the v1.10 dailies-canonical backbone.
+
+- **114 — E1 backbone absorption**: Sharpe/TWR now derive from the unified
+  backbone (`total_return_from_equity` + `sharpe_vol_status_from_backbone`);
+  `compute_twr` / `_compute_sharpe_and_vol` deleted behind a golden-parity gate.
+- **115 — allocator-equity core**: one unified cashflow ledger with rotation-aware
+  blending, backward `$`-equity replay, and Dietz/MWR threading (STITCH-01..06).
+  Hardened through specialist + red-team rounds — no LOCF double-count, MWR keeps
+  the terminal value, seam P&L booked once, non-finite returns/weights/flows fail
+  loud, all-zero weight mass is honest-empty. Test oracles pin economics
+  (invariants), not the module's own formulas.
+- **115.1 — E2 derived-equity display repoint**: new `allocator_equity_derived`
+  table + `derive_allocator_equity` compute kind + recurring per-key fan-out;
+  allocator `$`-equity renders derived-if-trustworthy-ELSE-legacy with an honest
+  provenance indicator. Derived path ships DORMANT (falls back to legacy) until
+  two founder-gated ops run — intentional safety.
+- **116 — ADDALLOC**: context-aware header — Overview "+ Allocation" opens the
+  contribution wizard inline (no nav), Scenario "+ Strategy" opens the strategy
+  browser; the 0-portfolio Simulate-Impact remedy deep-links connect-exchange
+  instead of the manager-only `/portfolios` dead-end.
+- **117 — UIFIX**: Tooltip portals to `document.body` (escapes overflow clips,
+  viewport-clamped), clip-proof inset focus rings at 6 overflow sites, and the
+  CUM RETURN KPI renders extreme magnitudes untruncated.
+
+Closing Fable red team on the composed state fixed a focus-steal (non-memoized
+overlay `onClose` re-pulled focus on the 30s poll), completed the focus-ring fix
+(`outline-none` so the UA outline can't clip), and two minor Tooltip/provenance
+edge cases — each with a non-tautological regression test. Frozen `scenario.ts`
+(SC-3) stays byte-identical; `EquityChart.tsx` carved out for additive provenance
+only. Migration applies to prod on merge.
+
 ## [0.44.0.1] - 2026-07-17
 ### Fix — DistributionPanels duplicate axis-tick keys
 QA of the blank-slate Scenario composer surfaced a React "two children with the
