@@ -1026,6 +1026,63 @@ async def test_pin_m2_dust_equity_persists_null_anchor() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pin_f3_dropped_nonfinite_flow_nulls_anchor() -> None:
+    """F3: M1 SKIPS a non-finite flow (JSONB can't hold NaN/Inf), but a dropped flow
+    means the reconstructed $-level is MIS-LEVELED. Persisting a trustworthy anchor
+    would read trustworthy over a silently mis-leveled curve. So if ANY flow is
+    dropped, null that key's anchor → the key degrades honestly (compose DROPS it).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from services.external_flows import ExternalFlow
+    from services.job_worker import run_derive_broker_dailies_job
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-f3", "exchange": "binance", "user_id": "alloc-owner"},
+        strategy_row=None,
+    )
+    job = {"id": "j-key", "kind": "derive_broker_dailies", "api_key_id": "key-f3"}
+    patches = _patches(ctx, key_mode=True, returns=_two_day_returns())
+    # A trustworthy positive equity read — so ONLY the dropped flow can null it.
+    equity_patch = patch(
+        "services.exchange.fetch_account_equity_and_upnl_usd",
+        new=AsyncMock(return_value=(100_000.0, False, 0.0, False)),
+    )
+    # Inject a non-finite flow into the crawl output.
+    transfers_patch = patch(
+        "services.ccxt_flow_fetch.fetch_ccxt_transfers",
+        new=AsyncMock(return_value=[]),
+    )
+    price_patch = patch(
+        "services.job_worker._resolve_ccxt_flow_price_index",
+        new=AsyncMock(return_value={}),
+    )
+    flows_patch = patch(
+        "services.ccxt_flows.ccxt_rows_to_dated_flows",
+        new=MagicMock(
+            return_value=[ExternalFlow("2024-05-01", float("inf"))]
+        ),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], equity_patch, transfers_patch, price_patch, flows_patch:
+        await run_derive_broker_dailies_job(job)
+
+    ki = [
+        u for u in capture["upserts"]
+        if u[0] == DERIVED_TABLE and _is_key_inputs_upsert(u[1])
+    ]
+    assert len(ki) == 1, f"expected one key_inputs upsert; got {capture['upserts']!r}"
+    payload = _rows_of(ki[0][1])[0]["payload"]
+    # The non-finite flow was NOT persisted (M1) AND the anchor is nulled (F3).
+    assert payload["flows"] == [], (
+        f"a non-finite flow must not be persisted; got {payload['flows']!r}"
+    )
+    assert payload["anchor_usd"] is None, (
+        "a dropped non-finite flow must null the anchor so the key degrades honestly "
+        f"(F3); got {payload['anchor_usd']!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_pin_m2_negative_equity_persists_null_anchor() -> None:
     """M2: a NEGATIVE live equity must persist a null anchor — a negative anchor
     sails past the (balance_error or None) guard and makes replay_key_equity raise

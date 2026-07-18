@@ -2820,12 +2820,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         #         equity would make replay_key_equity raise non-positive-equity,
         #         permanently FAILING the WHOLE allocator compose. Both → null, not a
         #         permanent fail / a trustworthy near-zero curve basis.
+        #   F3  — if ANY flow was DROPPED as non-finite above, the backward replay
+        #         mis-levels the reconstructed curve with NO degrade signal. Null the
+        #         anchor so the key degrades honestly (compose DROPS it) rather than
+        #         reading trustworthy over a silently mis-leveled curve.
         _anchor_untrustworthy = (
             balance_error
             or equity is None
             or not math.isfinite(float(equity))
             or abs(equity) <= DUST_NAV_FLOOR
             or equity <= 0.0
+            or _skipped_nonfinite_flows > 0
         )
         _anchor_usd: float | None = None if _anchor_untrustworthy else float(equity)
         _key_inputs_payload = {
