@@ -72,6 +72,10 @@ const composerHarness = vi.hoisted(() => ({
   // The host's onBrowseClosed prop (fired when the drawer closes so the host can
   // restore focus). Captured so tests can drive a close.
   captureBrowseClosed: null as null | (() => void),
+  // The host's onBrowseHandoff prop (fired on the composer's Browse → "Add your
+  // own" modal-to-modal handoff, which does NOT fire onBrowseClosed). Captured so
+  // the WR-01 focus-theft test can drive the handoff.
+  captureBrowseHandoff: null as null | (() => void),
   // Spy standing in for the composer's imperative "open Browse" function.
   browseOpenSpy: vi.fn(),
 }));
@@ -145,9 +149,11 @@ vi.mock("./components/ScenarioComposer", () => ({
     onScenarioSaved?: () => void;
     onRegisterOpenBrowse?: (open: () => void) => void;
     onBrowseClosed?: () => void;
+    onBrowseHandoff?: () => void;
   }) => {
     composerHarness.captureRegister = props.onRegisterOpenBrowse ?? null;
     composerHarness.captureBrowseClosed = props.onBrowseClosed ?? null;
+    composerHarness.captureBrowseHandoff = props.onBrowseHandoff ?? null;
     if (composerHarness.registerImmediately && props.onRegisterOpenBrowse) {
       props.onRegisterOpenBrowse(composerHarness.browseOpenSpy);
     }
@@ -284,6 +290,7 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     composerHarness.registerImmediately = true;
     composerHarness.captureRegister = null;
     composerHarness.captureBrowseClosed = null;
+    composerHarness.captureBrowseHandoff = null;
     composerHarness.browseOpenSpy.mockReset();
     vi.mocked(useRouter).mockReturnValue({
       replace: mockReplace,
@@ -473,6 +480,35 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     expect(document.activeElement).toBe(btn);
 
     // A subsequent in-composer close (no prior header click) must NOT steal focus.
+    (document.activeElement as HTMLElement | null)?.blur();
+    act(() => {
+      composerHarness.captureBrowseClosed?.();
+    });
+    expect(document.activeElement).not.toBe(btn);
+  });
+
+  it("T_ADDALLOC_S5 no focus theft after a handoff: header-open → onAddOwn handoff → a later in-composer close does not steal focus (WR-01)", async () => {
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("scenario-composer-body");
+
+    // Header-initiated Browse open — this arms the header focus-return flag.
+    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
+    fireEvent.click(btn);
+    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
+
+    // The user hands off Browse → "Add your own": the composer closes Browse and
+    // opens the contribute wizard WITHOUT firing onBrowseClosed (a modal-to-modal
+    // transition), but signals the handoff so the host disarms its flag.
+    expect(composerHarness.captureBrowseHandoff).not.toBeNull();
+    act(() => {
+      composerHarness.captureBrowseHandoff?.();
+    });
+
+    // Later, an independently in-composer-initiated Browse open + close fires
+    // onBrowseClosed. Move focus off the header button first so a steal would be
+    // observable. Without the WR-01 fix, the stale-armed flag yanks focus back to
+    // the "+ Strategy" button; with the fix, the handoff disarmed it.
     (document.activeElement as HTMLElement | null)?.blur();
     act(() => {
       composerHarness.captureBrowseClosed?.();

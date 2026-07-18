@@ -515,6 +515,20 @@ export function AllocationsTabs(
     }
   }, []);
 
+  // Phase 116 review WR-01 — the composer's Browse → "Add your own" handoff
+  // (onAddOwn) closes Browse WITHOUT firing onBrowseClosed — a modal-to-modal
+  // transition, not a close. So a header-initiated Browse the user hands off to
+  // the contribute wizard would leave headerBrowseTriggeredRef armed
+  // indefinitely; a LATER, independently in-composer-initiated Browse close then
+  // fires onBrowseClosed, sees the stale flag, and yanks focus to the header
+  // "+ Strategy" button — violating "an in-composer close does not steal focus."
+  // The host cannot observe the composer-internal handoff on its own, so the
+  // composer signals it here (onBrowseHandoff); we disarm the flag so only a
+  // genuine header-initiated close returns focus.
+  const handleBrowseHandoff = useCallback(() => {
+    headerBrowseTriggeredRef.current = false;
+  }, []);
+
   // Guard against a stale pending Browse-open (or focus-return flag) re-firing
   // on a later scenario remount: clear them whenever we leave the scenario tab.
   //
@@ -970,6 +984,7 @@ export function AllocationsTabs(
               {...props}
               onRegisterOpenBrowse={handleRegisterOpenBrowse}
               onBrowseClosed={handleBrowseClosed}
+              onBrowseHandoff={handleBrowseHandoff}
             />
           ) : (
             <ScenarioStub
@@ -1020,10 +1035,12 @@ function ScenarioTabContent({
   // `payload=` prop below (and the compare-panel narrow).
   onRegisterOpenBrowse,
   onBrowseClosed,
+  onBrowseHandoff,
   ...props
 }: MyAllocationDashboardPayload & {
   onRegisterOpenBrowse?: (open: () => void) => void;
   onBrowseClosed?: () => void;
+  onBrowseHandoff?: () => void;
 }) {
   const [savedRows, setSavedRows] = useState<SavedScenarioListRow[]>([]);
   // A hard list-load failure (non-2xx or thrown fetch). Distinct from "no saved
@@ -1131,6 +1148,7 @@ function ScenarioTabContent({
         onScenarioSaved={handleMutated}
         onRegisterOpenBrowse={onRegisterOpenBrowse}
         onBrowseClosed={onBrowseClosed}
+        onBrowseHandoff={onBrowseHandoff}
       />
 
       <SavedScenariosList

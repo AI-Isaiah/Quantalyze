@@ -724,6 +724,53 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
     expect(onBrowseClosed).toHaveBeenCalledTimes(1);
   });
 
+  it("T_C_ADDALLOC_BROWSE3 onAddOwn (wizard handoff) fires onBrowseHandoff so the host can disarm its focus-return flag (WR-01)", () => {
+    let capturedOnClose: (() => void) | null = null;
+    let capturedOnAddOwn: (() => void) | null = null;
+    vi.mocked(StrategyBrowseDrawer).mockImplementation(((props: {
+      isOpen: boolean;
+      onClose?: () => void;
+      onAddOwn?: () => void;
+    }) => {
+      capturedOnClose = props.onClose ?? null;
+      capturedOnAddOwn = props.onAddOwn ?? null;
+      return props.isOpen ? <div data-testid="browse-drawer-mock" /> : null;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any);
+
+    const onBrowseHandoff = vi.fn();
+    const onBrowseClosed = vi.fn();
+    let openBrowse: (() => void) | null = null;
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+        onRegisterOpenBrowse={(open) => {
+          openBrowse = open;
+        }}
+        onBrowseClosed={onBrowseClosed}
+        onBrowseHandoff={onBrowseHandoff}
+      />,
+    );
+
+    // Open Browse → "Add your own": the composer fires onBrowseHandoff (WR-01
+    // wiring) so a header-initiated open's focus-return is disarmed, and does
+    // NOT fire onBrowseClosed (the handoff is not a close).
+    act(() => openBrowse!());
+    expect(capturedOnAddOwn).not.toBeNull();
+    act(() => capturedOnAddOwn!());
+    expect(onBrowseHandoff).toHaveBeenCalledTimes(1);
+    expect(onBrowseClosed).not.toHaveBeenCalled();
+
+    // A genuine close still fires onBrowseClosed (and not another handoff).
+    act(() => openBrowse!());
+    expect(capturedOnClose).not.toBeNull();
+    act(() => capturedOnClose!());
+    expect(onBrowseClosed).toHaveBeenCalledTimes(1);
+    expect(onBrowseHandoff).toHaveBeenCalledTimes(1);
+  });
+
   // -------------------------------------------------------------------------
   // T_C2 — Normal path renders KpiStrip / charts / composition / footer
   // -------------------------------------------------------------------------

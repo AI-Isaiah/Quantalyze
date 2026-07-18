@@ -358,6 +358,16 @@ export interface ScenarioComposerProps {
    * transition, not a close). Optional — absent hosts keep their focus behavior.
    */
   onBrowseClosed?: () => void;
+  /**
+   * Phase 116 review WR-01 — fired on the Browse → "Add your own" handoff
+   * (onAddOwn): Browse closes and the contribute wizard opens. This is a
+   * modal-to-modal transition that deliberately does NOT fire onBrowseClosed
+   * (see above), so the host cannot otherwise observe it. A host that returns
+   * focus to a header trigger on a header-initiated Browse close uses this to
+   * disarm that pending focus-return, so a LATER in-composer Browse close does
+   * not steal focus to the trigger. Optional — absent hosts keep their behavior.
+   */
+  onBrowseHandoff?: () => void;
   /** Legacy callback API. When `useInternalCommitDrawer === false`, the
    *  composer fires this callback INSTEAD of opening its own
    *  ScenarioCommitDrawer — host owns the commit-confirmation surface.
@@ -780,6 +790,7 @@ export function ScenarioComposer({
   onScenarioSaved,
   onRegisterOpenBrowse,
   onBrowseClosed,
+  onBrowseHandoff,
 }: ScenarioComposerProps) {
   const {
     holdingsSummary: rawHoldingsSummary,
@@ -3664,6 +3675,11 @@ export function ScenarioComposer({
           onAddOwn={() => {
             setBrowseOpen(false);
             setContributeOpen(true);
+            // Phase 116 review WR-01 — modal-to-modal handoff (Browse → wizard),
+            // NOT a close, so onBrowseClosed intentionally does not fire. Signal
+            // the host so a header-initiated Browse open disarms its focus-return
+            // flag instead of leaving it armed for a later in-composer close.
+            onBrowseHandoff?.();
           }}
           allocatorMandate={allocatorMandate}
         />
@@ -4923,6 +4939,11 @@ export function ScenarioComposer({
         onAddOwn={() => {
           setBrowseOpen(false);
           setContributeOpen(true);
+          // Phase 116 review WR-01 — modal-to-modal handoff (Browse → wizard),
+          // NOT a close, so onBrowseClosed intentionally does not fire. Signal
+          // the host so a header-initiated Browse open disarms its focus-return
+          // flag instead of leaving it armed for a later in-composer close.
+          onBrowseHandoff?.();
         }}
         allocatorMandate={allocatorMandate}
       />
