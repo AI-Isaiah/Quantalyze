@@ -183,6 +183,85 @@ class SfoxClient:
             raise SfoxApiError(0, "sFOX /v1/user/balance did not return a list")
         return payload
 
+    async def get_transactions(
+        self,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int = 250,
+        after: str | None = None,
+        offset: int | None = None,
+        types: str | None = None,
+    ) -> list[dict]:
+        """GET /v1/account/transactions — SINGLE PAGE of the typed ledger.
+
+        `account_balance` (running) + typed deposit/withdraw/buy/sell actions are
+        the phase-120 cashflow/TWR oracle. `from_ms`/`to_ms` are the Python names
+        for the `from`/`to` WIRE params (`from` is a keyword). Cursors (`after` id /
+        `offset`) are EXPOSED, not auto-crawled — phase 120 owns crawl orchestration
+        with asyncio.wait_for bounds (FLIPRETRY-01). A bare call returns sFOX's
+        default window (last 24h) per docs.
+        """
+        if limit > _TRANSACTIONS_MAX_LIMIT:
+            raise ValueError(
+                f"sFOX transactions limit max is {_TRANSACTIONS_MAX_LIMIT}, got {limit}"
+            )
+        params = {
+            "from": from_ms,
+            "to": to_ms,
+            "limit": limit,
+            "after": after,
+            "offset": offset,
+            "types": types,
+        }
+        payload = await self._request("GET", "/v1/account/transactions", params)
+        if not isinstance(payload, list):
+            raise SfoxApiError(0, "sFOX /v1/account/transactions did not return a list")
+        return payload
+
+    async def get_trades(
+        self, page_size: int = 100, last_seen_id: str | None = None
+    ) -> list[dict]:
+        """GET /v1/account/trades — SINGLE PAGE of fills. Unwraps the documented
+        {data:[...]} envelope. `last_seen_id` is the exposed pagination cursor
+        (phase 120 drives the crawl; no auto-loop here)."""
+        params = {"page_size": page_size, "last_seen_id": last_seen_id}
+        payload = await self._request("GET", "/v1/account/trades", params)
+        return self._unwrap_data(payload, "/v1/account/trades")
+
+    async def get_balance_history(
+        self,
+        start_date_ms: int,
+        end_date_ms: int | None = None,
+        interval: int = 86400,
+    ) -> list[dict]:
+        """GET /v1/account/balance/history — the daily (86400s) or hourly (3600s)
+        `usd_value` equity series (the load-bearing phase-120 primary series).
+        `start_date` is required; unwraps the documented {data:[{timestamp,usd_value}]}
+        envelope."""
+        if interval not in _VALID_BALANCE_HISTORY_INTERVALS:
+            raise ValueError(
+                "sFOX balance-history interval must be one of "
+                f"{_VALID_BALANCE_HISTORY_INTERVALS}, got {interval}"
+            )
+        params = {
+            "start_date": start_date_ms,
+            "end_date": end_date_ms,
+            "interval": interval,
+        }
+        payload = await self._request("GET", "/v1/account/balance/history", params)
+        return self._unwrap_data(payload, "/v1/account/balance/history")
+
+    @staticmethod
+    def _unwrap_data(payload: Any, path: str) -> list[dict]:
+        """Unwrap a documented {data:[...]} envelope, fail-loud on a missing key or
+        a non-list `data` (contract break — never coerce to an empty series)."""
+        if not isinstance(payload, dict) or "data" not in payload:
+            raise SfoxApiError(0, f"sFOX {path} response missing 'data' envelope")
+        data = payload["data"]
+        if not isinstance(data, list):
+            raise SfoxApiError(0, f"sFOX {path} 'data' was not a list")
+        return data
+
     async def aclose(self) -> None:
         """Bounded, idempotent close of the owned session (mirrors aclose_exchange).
 
