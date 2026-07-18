@@ -258,6 +258,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "process_key_long": 30 * 60,   # Phase 19 / BACKBONE-09 — 30 min ceiling supports 90-day OKX archive backfill
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
+    "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
 }
 
 # FIX-2 (Fable): the single-key MTM SECOND pass is a FULL-HISTORY crawl that runs
@@ -2941,6 +2942,92 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             "heuristic_capital=%s) — key-mode, no CSV-analytics enqueue",
             len(rows_payload), api_key_id, allocator_id, venue,
             len(realized), len(funding), meta.get("used_heuristic_capital"),
+        )
+
+        # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
+        # This derive ALREADY crawled the real external flows and read the live
+        # account equity anchor above (deribit: the native ledger crawl +
+        # account_state.collapsed_equity_usd; ccxt: fetch_ccxt_transfers +
+        # fetch_account_equity_and_upnl_usd). Persist those ALREADY-FETCHED
+        # inputs onto the NEW keyed surface as kind='key_inputs:<api_key_id>' so
+        # the crawl-free `derive_allocator_equity` compose job never has to
+        # decrypt the key or hit the exchange a SECOND time — then enqueue that
+        # compose job for the AUTHORITATIVE owner. Self-healing: any key refresh
+        # re-composes the whole allocator with zero added exchange I/O.
+        _flows_payload = [
+            {"utc_day_iso": _f.utc_day_iso, "usd_signed": float(_f.usd_signed)}
+            for _f in (external_flows or [])
+        ]
+        # DERIVATIVE-NOTIONAL TRAP (T-115.1-16): the anchor is the venue's own
+        # LIVE total-equity read (`equity` above) — deribit's collapsed native
+        # equity or the ccxt fetch_account_equity_and_upnl_usd NAV — NOT an
+        # allocator_holdings sum, and NEVER a blind value_usd sum (value_usd on a
+        # derivative is NOTIONAL contract size, not equity). An untrustworthy read
+        # (balance_error truthy or equity is None) persists an honest null anchor,
+        # never a heuristic fallback; the compose core then honestly DROPS the key.
+        _anchor_usd: float | None = (
+            None if (balance_error or equity is None) else float(equity)
+        )
+        _key_inputs_payload = {
+            "flows": _flows_payload,
+            "anchor_usd": _anchor_usd,
+            "anchor_asof": datetime.now(timezone.utc).isoformat(),
+            "venue": venue,
+        }
+
+        def _persist_key_inputs(
+            payload: dict[str, Any] = _key_inputs_payload,
+            kind: str = "key_inputs:" + api_key_id,
+        ) -> None:
+            ctx.supabase.table("allocator_equity_derived").upsert(
+                {
+                    "allocator_id": allocator_id,
+                    "kind": kind,
+                    "payload": payload,
+                    "computed_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="allocator_id,kind",
+            ).execute()
+
+        # Transient DB errors BUBBLE (the job retries; the csv upsert above is
+        # idempotent, and the compose enqueue below is dedup-safe) — no silent
+        # swallow, no outcome downgrade.
+        await db_execute(_persist_key_inputs)
+
+        # Enqueue the crawl-free compose for the AUTHORITATIVE owner — read from
+        # ctx.key_row['user_id'] via `allocator_id`, NEVER a job-payload
+        # allocator_id (T-115.1-02 / T-115-16 owner-spoof pin). A one-inflight
+        # dedup collision is benign (the enqueue RPC is idempotent); a hard
+        # enqueue failure is logged and swallowed — the per-key inputs are already
+        # persisted and the next key refresh re-enqueues cleanly, so a compose
+        # enqueue hiccup must never fail an already-done per-key derive.
+        try:
+            def _enqueue_compose(target: str = allocator_id) -> None:
+                ctx.supabase.rpc(
+                    "enqueue_compute_job",
+                    {
+                        "p_allocator_id": target,
+                        "p_kind": "derive_allocator_equity",
+                    },
+                ).execute()
+
+            await db_execute(_enqueue_compose)
+        except Exception as _enq_exc:  # noqa: BLE001
+            logger.warning(
+                "derive_broker_dailies: compose enqueue for allocator %s failed "
+                "(api_key %s) — per-key inputs persisted; next key refresh "
+                "re-enqueues: %s",
+                allocator_id, api_key_id, _enq_exc,
+            )
+
+        # Log carries NO USD magnitudes (T-115-05): key/allocator/venue + counts +
+        # an anchor-present bool only.
+        logger.info(
+            "derive_broker_dailies: Option-B epilogue persisted key_inputs + "
+            "enqueued compose for api_key %s (allocator %s venue=%s n_flows=%d "
+            "anchor_present=%s)",
+            api_key_id, allocator_id, venue, len(_flows_payload),
+            _anchor_usd is not None,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
@@ -5788,6 +5875,182 @@ async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
+    """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
+    $-equity compose.
+
+    Assembles the frozen P115 core's inputs entirely from the DB — per-key
+    ``csv_daily_returns`` (the dense per-key return axis) and the
+    ``kind='key_inputs:<api_key_id>'`` rows the key-mode derive epilogue already
+    persisted (real external flows + the live equity anchor it already fetched) —
+    calls the pure ``compose_allocator_equity`` composition layer, and atomically
+    upserts EXACTLY ONE ``(allocator_id, 'equity_curve')`` display row onto the
+    NEW keyed surface. It NEVER decrypts a key, NEVER touches an exchange, and
+    NEVER writes ``allocator_equity_snapshots`` (BACKBONE-03 two-writers race —
+    the legacy store stays untouched; T-115.1-13).
+
+    ``allocator_id`` is the QUEUE target written by the SECDEF enqueue RPC (the
+    owner-spoof surface is the epilogue enqueue, already pinned to
+    ``key_row['user_id']``). Eligibility is the ONE shared predicate
+    (``eligible_key_predicate``); a key that has returns but no ``key_inputs``
+    row (or a null anchor) is honestly DROPPED by the compose core, never
+    fabricated. Structural compose refusals (the core's loud asserts) →
+    permanent FAILED with a scrubbed message (T-74-02 class); DB/network faults
+    bubble transient.
+    """
+    import pandas as pd
+
+    from services.allocator_equity_compose import compose_allocator_equity
+    from services.allocator_equity_derive import eligible_key_predicate
+    from services.external_flows import ExternalFlow
+    from services.nav_twr import NavReconstructionError
+    from services.redact import scrub_freeform_string
+
+    allocator_id = job["allocator_id"]
+    supabase = get_supabase()
+
+    # ── 1. Eligible key set — the ONE predicate, never inlined. ──────────────
+    def _load_keys() -> list[dict[str, Any]]:
+        return (
+            supabase.table("api_keys")
+            .select("id,is_active,sync_status,disconnected_at")
+            .eq("user_id", allocator_id)
+            .execute()
+            .data
+            or []
+        )
+
+    key_rows = await db_execute(_load_keys)
+    eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
+
+    # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
+    #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
+    #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
+    #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
+    def _load_returns() -> list[dict[str, Any]]:
+        return (
+            supabase.table("csv_daily_returns")
+            .select("api_key_id,date,daily_return")
+            .eq("allocator_id", allocator_id)
+            .execute()
+            .data
+            or []
+        )
+
+    csv_rows = await db_execute(_load_returns)
+    _grouped: dict[str, list[dict[str, Any]]] = {}
+    for r in csv_rows:
+        k = r.get("api_key_id")
+        if k in eligible_ids:
+            _grouped.setdefault(k, []).append(r)
+    returns_by_key: dict[str, pd.Series] = {}
+    for k, rws in _grouped.items():
+        rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
+        returns_by_key[k] = pd.Series(
+            [float(x["daily_return"]) for x in rws_sorted],
+            index=[str(x["date"]) for x in rws_sorted],
+            dtype="float64",
+        )
+
+    # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return (
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
+    flows_by_key: dict[str, list[ExternalFlow]] = {}
+    anchors_by_key: dict[str, float | None] = {}
+    orphan_kinds: list[str] = []
+    for row in ki_rows:
+        kind = str(row.get("kind", ""))
+        api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
+        if api_key_id not in eligible_ids:
+            # A key that is no longer eligible (revoked / disconnected / deleted)
+            # keeps a stale key_inputs row — cheap bounded orphan cleanup below.
+            orphan_kinds.append(kind)
+            continue
+        payload = row.get("payload") or {}
+        flows_by_key[api_key_id] = [
+            ExternalFlow(
+                utc_day_iso=str(_f["utc_day_iso"]),
+                usd_signed=float(_f["usd_signed"]),
+            )
+            for _f in (payload.get("flows") or [])
+        ]
+        _anchor = payload.get("anchor_usd")
+        anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
+
+    # A key with returns but no key_inputs row → anchor None (compose honestly
+    # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
+    for k in returns_by_key:
+        anchors_by_key.setdefault(k, None)
+        flows_by_key.setdefault(k, [])
+
+    for _orphan_kind in orphan_kinds:
+        def _delete_orphan(_k: str = _orphan_kind) -> None:
+            supabase.table("allocator_equity_derived").delete().eq(
+                "allocator_id", allocator_id
+            ).eq("kind", _k).execute()
+
+        await db_execute(_delete_orphan)
+
+    # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
+    try:
+        payload = compose_allocator_equity(
+            returns_by_key, flows_by_key, anchors_by_key
+        )
+    except NavReconstructionError as exc:
+        # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
+        # DatetimeIndex slip, the segment-wise EXCLUSIVE_FILL canary, an
+        # unpriceable flow). Retrying cannot help → permanent FAILED with a
+        # scrubbed message (the T-74-02 DoS class; the core errors carry
+        # counts/day-indices only, still scrubbed for defence in depth).
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: compose refused a structural input — "
+                + scrubbed
+            ),
+            error_kind="permanent",
+        )
+
+    # ── 5. Single-row ATOMIC upsert of the display row (never the legacy
+    #      store — the fake-PostgREST raise pin enforces this forever). Zero
+    #      eligible keys / zero returns still upsert the honest untrustworthy
+    #      payload: an honest empty-curve row beats a stale one. ──
+    def _upsert_curve() -> None:
+        supabase.table("allocator_equity_derived").upsert(
+            {
+                "allocator_id": allocator_id,
+                "kind": "equity_curve",
+                "payload": payload,
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="allocator_id,kind",
+        ).execute()
+
+    await db_execute(_upsert_curve)
+
+    # Log carries NO USD magnitudes (T-115-05): allocator + counts + trust bool.
+    logger.info(
+        "derive_allocator_equity: composed equity_curve for allocator %s "
+        "(eligible_keys=%d returns_keys=%d curve_len=%d orphans_cleaned=%d "
+        "trustworthy=%s) — crawl-free compose (Option B)",
+        allocator_id, len(eligible_ids), len(returns_by_key),
+        len(payload.get("curve", [])), len(orphan_kinds),
+        payload.get("is_trustworthy"),
+    )
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -5839,6 +6102,11 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         handler = run_compute_intro_snapshot_job
     elif kind == "rescore_allocator":
         handler = run_rescore_allocator_job
+    elif kind == "derive_allocator_equity":
+        # Phase 115.1 / RD-3 Option B — crawl-free, decryption-free allocator
+        # $-equity compose: DB reads (per-key dailies + persisted key_inputs) →
+        # compose_allocator_equity → single-row equity_curve upsert.
+        handler = run_derive_allocator_equity_job
     elif kind == "poll_allocator_positions":
         handler = run_poll_allocator_positions_job
     elif kind == "reconstruct_allocator_history":
