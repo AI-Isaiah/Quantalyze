@@ -2978,14 +2978,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # derivative is NOTIONAL contract size, not equity). An untrustworthy read
         # (balance_error truthy or equity is None) persists an honest null anchor,
         # never a heuristic fallback; the compose core then honestly DROPS the key.
-        # M1: a non-finite equity (NaN/Inf) must never be serialized into JSONB —
-        # persist a null anchor honestly (the compose core then DROPS the key). The
-        # DUST_NAV_FLOOR / non-positive clauses (M2) are added below.
-        _anchor_usd: float | None = (
-            None
-            if (balance_error or equity is None or not math.isfinite(float(equity)))
-            else float(equity)
+        # The anchor is trustworthy ONLY when it is a material, positive, finite
+        # venue-equity read. Persist a null anchor (compose core then DROPS the key)
+        # on every other case:
+        #   M1  — non-finite (NaN/Inf) would poison the JSONB upsert;
+        #   M2  — dust (|equity| <= DUST_NAV_FLOOR) is immaterial (mirrors the
+        #         function's materiality contract at :2651-2655) and a NON-POSITIVE
+        #         equity would make replay_key_equity raise non-positive-equity,
+        #         permanently FAILING the WHOLE allocator compose. Both → null, not a
+        #         permanent fail / a trustworthy near-zero curve basis.
+        _anchor_untrustworthy = (
+            balance_error
+            or equity is None
+            or not math.isfinite(float(equity))
+            or abs(equity) <= DUST_NAV_FLOOR
+            or equity <= 0.0
         )
+        _anchor_usd: float | None = None if _anchor_untrustworthy else float(equity)
         _key_inputs_payload = {
             "flows": _flows_payload,
             "anchor_usd": _anchor_usd,
@@ -3051,9 +3060,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         logger.info(
             "derive_broker_dailies: Option-B epilogue persisted key_inputs + "
             "enqueued compose for api_key %s (allocator %s venue=%s n_flows=%d "
-            "anchor_present=%s)",
+            "skipped_nonfinite_flows=%d anchor_present=%s)",
             api_key_id, allocator_id, venue, len(_flows_payload),
-            _anchor_usd is not None,
+            _skipped_nonfinite_flows, _anchor_usd is not None,
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
