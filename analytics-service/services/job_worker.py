@@ -48,7 +48,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -2847,8 +2847,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _anchor_null_reason = "dust"
         elif _skipped_nonfinite_flows > 0:
             _anchor_null_reason = "flow_drop"
+        # equity is provably non-None when _anchor_null_reason is None (the
+        # `equity is None` branch above stamps "balance_error"); the explicit
+        # `equity is not None` is a mypy narrowing that changes no runtime path.
         _anchor_usd: float | None = (
-            None if _anchor_null_reason is not None else float(equity)
+            float(equity)
+            if _anchor_null_reason is None and equity is not None
+            else None
         )
         _key_inputs_payload = {
             "flows": _flows_payload,
@@ -6002,13 +6007,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     # ── 1. Eligible key set — the ONE predicate, never inlined. ──────────────
     def _load_keys() -> list[dict[str, Any]]:
-        return (
+        return cast(
+            list[dict[str, Any]],
             supabase.table("api_keys")
             .select("id,is_active,sync_status,disconnected_at")
             .eq("user_id", allocator_id)
             .execute()
             .data
-            or []
+            or [],
         )
 
     key_rows = await db_execute(_load_keys)
@@ -6019,13 +6025,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
     #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
     def _load_returns() -> list[dict[str, Any]]:
-        return (
+        return cast(
+            list[dict[str, Any]],
             supabase.table("csv_daily_returns")
             .select("api_key_id,date,daily_return")
             .eq("allocator_id", allocator_id)
             .execute()
             .data
-            or []
+            or [],
         )
 
     async def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
@@ -6060,7 +6067,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")
-        if k in eligible_ids:
+        if k is not None and k in eligible_ids:
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
     try:
@@ -6076,7 +6083,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
     def _load_key_inputs() -> list[dict[str, Any]]:
-        return (
+        return cast(
+            list[dict[str, Any]],
             supabase.table("allocator_equity_derived")
             .select("kind,payload")
             .eq("allocator_id", allocator_id)

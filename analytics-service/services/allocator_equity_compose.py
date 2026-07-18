@@ -68,7 +68,10 @@ def _current_equity_weights(
     anchored keys (negative equity clamps to 0, mirroring the core / queries.ts). On
     an all-zero mass the raw (all-zero) map is returned so the core emits the honest
     ZERO_WEIGHT_MASS degrade rather than a fabricated equal-weight curve."""
-    raw = {k: max(0.0, float(anchors_by_key[k])) for k in keys}
+    raw = {
+        k: (max(0.0, float(v)) if (v := anchors_by_key[k]) is not None else 0.0)
+        for k in keys
+    }
     total = sum(raw.values())
     if total <= 0.0:
         return raw
@@ -80,7 +83,7 @@ def compose_allocator_equity(
     flows_by_key: Mapping[str, list[ExternalFlow]],
     anchors_by_key: Mapping[str, float | None],
     null_anchor_reasons: Mapping[str, str] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Compose the allocator display-row payload from real per-key inputs.
 
     See the module docstring for the four carry-ins. Returns the phase-wide contract:
