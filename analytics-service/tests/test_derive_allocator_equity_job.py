@@ -312,6 +312,125 @@ async def test_pin7_key_mode_epilogue_enqueues_owner_scoped_compose() -> None:
     )
 
 
+def _seed_poison_with_stale_curve() -> dict[str, list[dict]]:
+    """One eligible key whose returns carry a ≤−100% (-1.0) day → the frozen core's
+    non-positive-return-factor refusal fires (structural, permanent). A STALE
+    trustworthy equity_curve row is present (e.g. the pre-liquidation curve). F2:
+    the permanent failure must DELETE that stale row so the dashboard degrades to
+    legacy instead of rendering the frozen pre-liquidation curve as trustworthy
+    forever."""
+    alloc = "alloc-poison"
+    api_keys = [
+        {"id": "key-P", "user_id": alloc, "is_active": True,
+         "sync_status": "connected", "disconnected_at": None},
+    ]
+    csv = [
+        {"api_key_id": "key-P", "allocator_id": alloc, "date": "2026-03-01", "daily_return": 0.004},
+        {"api_key_id": "key-P", "allocator_id": alloc, "date": "2026-03-02", "daily_return": -1.0},
+    ]
+    derived = [
+        {"allocator_id": alloc, "kind": "key_inputs:key-P",
+         "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance"}},
+        {"allocator_id": alloc, "kind": "equity_curve",
+         "payload": {"curve": [{"date": "2026-02-01", "equity_usd": 500_000.0}],
+                     "is_trustworthy": True, "degrade_reasons": [],
+                     "scalars": {"mwr": 0.5, "dietz": 0.5, "computable": True}}},
+    ]
+    return {
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+        "api_keys": api_keys,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pin_f2_permanent_failure_deletes_stale_curve() -> None:
+    """F2: a poison structural input → permanent FAILED → the stale equity_curve
+    row is DELETED (degrade to legacy), never left rendering as trustworthy."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_poison_with_stale_curve())
+    job = {"id": "j-poison", "kind": "derive_allocator_equity", "allocator_id": "alloc-poison"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == "alloc-poison"
+    ]
+    assert len(curve_deletes) == 1, (
+        f"a permanent failure must delete the stale equity_curve row (F2); got {fake.deletes!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_f2_corrupt_input_permanent_deletes_stale_curve() -> None:
+    """F2: the M3 corrupt-input permanent disposition also deletes the stale row."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_poison_with_stale_curve()
+    # Swap the poison for a corrupt (NULL) daily_return → the M3 permanent path.
+    seed["csv_daily_returns"][1]["daily_return"] = None
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-corrupt", "kind": "derive_allocator_equity", "allocator_id": "alloc-poison"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "FAILED"
+    assert result.error_kind == "permanent"
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+    ]
+    assert len(curve_deletes) == 1, (
+        f"the M3 corrupt-input permanent path must delete the stale row; got {fake.deletes!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_f2_transient_error_preserves_curve() -> None:
+    """F2: a TRANSIENT error (bubbles/retries) must KEEP the equity_curve row — only
+    a PERMANENT disposition deletes. A generic RuntimeError from the compose call
+    propagates (classified transient by the dispatcher), and no delete fires."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_allocator_inputs())
+    # Add a stale equity_curve row.
+    fake.rows[DERIVED_TABLE].append(
+        {"allocator_id": "alloc-1", "kind": "equity_curve",
+         "payload": {"curve": [{"date": "2026-01-01", "equity_usd": 1.0}],
+                     "is_trustworthy": True}}
+    )
+    job = {"id": "j-transient", "kind": "derive_allocator_equity", "allocator_id": "alloc-1"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake), patch(
+        "services.allocator_equity_compose.compose_allocator_equity",
+        side_effect=RuntimeError("transient blip"),
+    ):
+        with pytest.raises(RuntimeError, match="transient blip"):
+            await run_derive_allocator_equity_job(job)
+
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+    ]
+    assert curve_deletes == [], (
+        f"a transient error must PRESERVE the equity_curve row; got {fake.deletes!r}"
+    )
+
+
 def _seed_partial_backfill() -> dict[str, list[dict]]:
     """Two eligible keys but only key-A has any inputs (returns + key_inputs);
     key-B has NEITHER a returns series NOR a key_inputs row (its derive has not

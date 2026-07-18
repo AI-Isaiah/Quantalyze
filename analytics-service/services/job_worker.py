@@ -6003,13 +6003,16 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             or []
         )
 
-    def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
+    async def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
         # M3: a corrupt PERSISTED value (a NULL daily_return → float(None)
         # TypeError, a non-numeric usd_signed, a non-finite flow rejected by
         # validate_flow_shape) is NON-retryable — retrying re-reads the same poison
         # DB row FOREVER as transient `unknown` (the T-74-02 class). Dispose it as a
         # permanent scrubbed FAILED so the admin sees a terminal state, not an
         # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
+        # F2: DELETE the stale equity_curve row first so a structurally-failed
+        # recompute degrades to legacy instead of leaving a stale trustworthy row.
+        await _delete_equity_curve_row()
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -6035,7 +6038,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 dtype="float64",
             )
     except (ValueError, TypeError, KeyError) as exc:
-        return _permanent_corrupt_input(exc)
+        return await _permanent_corrupt_input(exc)
 
     # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
     def _load_key_inputs() -> list[dict[str, Any]]:
@@ -6084,7 +6087,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
     except (ValueError, TypeError, KeyError) as exc:
-        return _permanent_corrupt_input(exc)
+        return await _permanent_corrupt_input(exc)
 
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
@@ -6136,9 +6139,13 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
         # DatetimeIndex slip, the segment-wise EXCLUSIVE_FILL canary, an
-        # unpriceable flow). Retrying cannot help → permanent FAILED with a
-        # scrubbed message (the T-74-02 DoS class; the core errors carry
-        # counts/day-indices only, still scrubbed for defence in depth).
+        # unpriceable flow, a ≤−100% liquidation day). Retrying cannot help →
+        # permanent FAILED with a scrubbed message (the T-74-02 DoS class; the core
+        # errors carry counts/day-indices only, still scrubbed for defence in
+        # depth). F2: DELETE the stale equity_curve row first — otherwise a
+        # post-liquidation poison input would leave the frozen pre-liquidation curve
+        # rendering as trustworthy FOREVER; degrade to legacy instead.
+        await _delete_equity_curve_row()
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
