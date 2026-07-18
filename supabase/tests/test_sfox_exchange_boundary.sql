@@ -56,32 +56,51 @@ END $$;
 
 -- ==========================================================================
 -- 2. compute_jobs.exchange — admit 'sfox', still admit NULL, reject a bogus value
---    compute_jobs has no user_id; kind is NOT NULL (FK to compute_job_kinds).
+--    compute_jobs has no user_id, but two UNRELATED guards constrain the fixture:
+--      * compute_jobs_kind_target_coherence — kind='sync_trades' requires a
+--        non-null strategy_id (and null portfolio/allocator/api_key). So we seed
+--        a strategy and stamp strategy_id on every row.
+--      * compute_jobs_one_inflight_per_kind_strategy — a partial unique index
+--        forbids two inflight (pending) sync_trades jobs for the same strategy,
+--        so we DELETE each row before inserting the next.
+--    Both are pre-existing constraints (NOT touched by this migration) — the
+--    fixture must satisfy them so the arm under test is the EXCHANGE check alone.
 -- ==========================================================================
 DO $$
 DECLARE
+  v_owner uuid := gen_random_uuid();
+  v_strat uuid := gen_random_uuid();
   v_bogus_rejected boolean := false;
   v_sfox_id uuid := gen_random_uuid();
   v_null_id uuid := gen_random_uuid();
 BEGIN
-  -- (a) 'sfox' is ADMITTED.
-  INSERT INTO public.compute_jobs (id, kind, exchange, status)
-    VALUES (v_sfox_id, 'sync_trades', 'sfox', 'pending');
+  INSERT INTO auth.users (id, email)
+    VALUES (v_owner, 'sfox-cj-' || v_owner || '@invalid.local');
+  INSERT INTO public.profiles (id, display_name)
+    VALUES (v_owner, 'sfox-cj') ON CONFLICT (id) DO NOTHING;
+  INSERT INTO public.strategies (id, user_id, name, source)
+    VALUES (v_strat, v_owner, 'sfox-cj-strat', 'sfox');
+
+  -- (a) 'sfox' is ADMITTED (delete before (b): one-inflight-per-kind-strategy).
+  INSERT INTO public.compute_jobs (id, kind, exchange, status, strategy_id)
+    VALUES (v_sfox_id, 'sync_trades', 'sfox', 'pending', v_strat);
   IF NOT EXISTS (SELECT 1 FROM public.compute_jobs WHERE id = v_sfox_id AND exchange = 'sfox') THEN
     RAISE EXCEPTION 'SFOX-04 (2a): compute_jobs did not admit exchange=sfox';
   END IF;
+  DELETE FROM public.compute_jobs WHERE id = v_sfox_id;
 
   -- (b) NULL exchange still admitted (nullable form preserved).
-  INSERT INTO public.compute_jobs (id, kind, exchange, status)
-    VALUES (v_null_id, 'sync_trades', NULL, 'pending');
+  INSERT INTO public.compute_jobs (id, kind, exchange, status, strategy_id)
+    VALUES (v_null_id, 'sync_trades', NULL, 'pending', v_strat);
   IF NOT EXISTS (SELECT 1 FROM public.compute_jobs WHERE id = v_null_id AND exchange IS NULL) THEN
     RAISE EXCEPTION 'SFOX-04 (2b): compute_jobs rejected a NULL exchange — nullable form lost';
   END IF;
+  DELETE FROM public.compute_jobs WHERE id = v_null_id;
 
-  -- (c) a bogus value is STILL REJECTED.
+  -- (c) a bogus value is STILL REJECTED (the exchange CHECK fires regardless of target).
   BEGIN
-    INSERT INTO public.compute_jobs (id, kind, exchange, status)
-      VALUES (gen_random_uuid(), 'sync_trades', 'notanexchange', 'pending');
+    INSERT INTO public.compute_jobs (id, kind, exchange, status, strategy_id)
+      VALUES (gen_random_uuid(), 'sync_trades', 'notanexchange', 'pending', v_strat);
   EXCEPTION WHEN check_violation THEN
     v_bogus_rejected := true;
   END;
@@ -89,7 +108,10 @@ BEGIN
     RAISE EXCEPTION 'SFOX-04 (2c): compute_jobs_exchange_check admitted a bogus exchange value';
   END IF;
 
-  DELETE FROM public.compute_jobs WHERE id IN (v_sfox_id, v_null_id);
+  DELETE FROM public.compute_jobs WHERE strategy_id = v_strat;
+  DELETE FROM public.strategies WHERE user_id = v_owner;
+  DELETE FROM public.profiles WHERE id = v_owner;
+  DELETE FROM auth.users WHERE id = v_owner;
 
   RAISE NOTICE 'SFOX-04 Part 2: compute_jobs.exchange admits sfox + NULL / rejects bogus OK.';
 END $$;
