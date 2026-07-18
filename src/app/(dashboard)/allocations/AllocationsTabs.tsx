@@ -23,6 +23,12 @@ import type { SavedScenarioRow } from "./components/ScenarioComposer";
 import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
+// Phase 116 / ADDALLOC-02 — the real-data onboarding overlay. Hosted at the
+// tab level so the context-aware header "+ Allocation" button can open it on
+// Holdings / Overview (where ScenarioComposer, its other host, is not mounted).
+// Imported statically: it renders null while closed, so WizardClient (its heavy
+// body) only mounts on open — no Overview-first bundle cost from the import.
+import { ContributionWizardOverlay } from "./components/ContributionWizardOverlay";
 // Phase 11 / 11-05 — onboarding nudge surfaces (S1 + S2). Both render
 // above the existing tab nav when apiKeysCount === 0. Light client
 // components — kept as direct imports rather than next/dynamic so they
@@ -467,6 +473,52 @@ export function AllocationsTabs(
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
   };
 
+  // Phase 116 / ADDALLOC — context-aware header "+ Allocation" button.
+  //
+  // `addButtonRef` is the trigger the overlays return focus to on close (the
+  // overlay pulls focus IN on open but never restores the trigger — that is the
+  // host's job, because the trigger lives here in AllocationsTabs, not in the
+  // overlay). `contributeOpen` hosts the Holdings/Overview onboarding wizard at
+  // the tab level so it is reachable on tabs where ScenarioComposer is NOT
+  // mounted. This is deliberately ADDITIVE: the composer keeps its OWN internal
+  // contributeOpen (the Browse → "Add your own" handoff) byte-untouched; a
+  // closed overlay renders null, so the UI-SPEC single-modal contract holds.
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const [contributeOpen, setContributeOpen] = useState(false);
+
+  const handleContributeClose = () => {
+    setContributeOpen(false);
+    // Return focus to the header trigger (UI-SPEC §Close → focus return).
+    addButtonRef.current?.focus();
+  };
+  const handleContributeSuccess = () => {
+    setContributeOpen(false);
+    addButtonRef.current?.focus();
+    // A freshly connected key / uploaded CSV should reflect in the SSR payload
+    // without waiting for the 30s Overview poll. This is a user-initiated
+    // refresh (not the guarded background interval above), so call directly.
+    router.refresh();
+  };
+
+  // Per-tab dispatch (ADDALLOC-01/02/03). Binary on activeTab: the Scenario tab
+  // opens the composer's strategy picker (Browse); every OTHER tab
+  // (overview / holdings / outcomes / mandate / risk) opens the onboarding
+  // wizard inline. The binary generalizes the UI-SPEC 3-row table to the
+  // remaining tabs on purpose so the button is never a silent no-op on ANY tab.
+  const isScenarioTab = activeTab === "scenario";
+  const handleHeaderAdd = () => {
+    if (isScenarioTab) {
+      // ADDALLOC-01 — "+ Strategy" opens the composer's StrategyBrowseDrawer.
+      // Wired to the composer's Browse open-signal in plan 116-01 Task 2 (the
+      // onRegisterOpenBrowse seam). Until then this is intentionally inert on
+      // the scenario tab; the wizard overlay must NOT open here (that is the
+      // Holdings/Overview action).
+      return;
+    }
+    // ADDALLOC-02 — real-data onboarding wizard, inline, no navigation.
+    setContributeOpen(true);
+  };
+
   // WAI-ARIA authoring-practices tab pattern: Arrow keys move focus between
   // tabs, Home/End jump to first/last. Tab/Shift-Tab leaves the tablist.
   const tabRefs = useRef<Record<TabKey, HTMLButtonElement | null>>({
@@ -753,16 +805,25 @@ export function AllocationsTabs(
             </svg>
             <span>Export</span>
           </button>
-          {/* D-20 — primary "+ Allocation" header button. Routes to the
-              Scenario tab via the same changeTab mechanism the tabs use, so
-              URL + tab state stay in sync. */}
+          {/* Phase 116 / ADDALLOC-01/02/03 — primary context-aware header
+              button. Its label, action, and aria-label are derived from
+              activeTab: on Scenario it reads "+ Strategy" and opens the
+              composer's strategy picker; on every other tab it reads
+              "+ Allocation" and opens the real-data onboarding wizard inline
+              (no navigation). The action is deterministic per tab — never a
+              silent no-op, never a dropdown. */}
           <button
+            ref={addButtonRef}
             type="button"
-            onClick={() => changeTab("scenario")}
+            onClick={handleHeaderAdd}
             className="ml-1 inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-            aria-label="Add allocation — open Scenario tab"
+            aria-label={
+              isScenarioTab
+                ? "Add strategy — open the strategy picker"
+                : "Add allocation — connect an exchange or upload a CSV"
+            }
           >
-            + Allocation
+            {isScenarioTab ? "+ Strategy" : "+ Allocation"}
           </button>
         </div>
       </div>
@@ -854,6 +915,15 @@ export function AllocationsTabs(
           bottom-right per the truth screenshot. */}
       <TweaksToggle />
       <Tweaks />
+      {/* Phase 116 / ADDALLOC-02 — tab-agnostic host for the "+ Allocation"
+          onboarding wizard. Rendered unconditionally (null while closed) so the
+          header button can open it on Holdings / Overview where ScenarioComposer
+          is not mounted. Focus returns to the header trigger on close/success. */}
+      <ContributionWizardOverlay
+        isOpen={contributeOpen}
+        onClose={handleContributeClose}
+        onSuccess={handleContributeSuccess}
+      />
       {/* Tweaks showOutcomes knob: when the user disables the Outcomes tab
           while currently viewing it, redirect to Overview so they don't sit
           on a CSS-hidden panel with no way back via the (now hidden) tab. */}

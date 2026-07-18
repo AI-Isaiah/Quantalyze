@@ -476,19 +476,29 @@ describe("AllocationsTabs — scenario panel v2 branching (Plan 06b Task 2)", ()
   });
 
   // -------------------------------------------------------------------------
-  // T_AT9 — Sentinel: + Allocation chip routes to scenario tab; activates
-  //                   composer not stub.
+  // T_AT9 — Sentinel (Phase 116 rewrite): the header chip's accessible name
+  //         states the REAL per-tab action. The retired routes-to-scenario
+  //         mislabel is gone; on the default (overview) tab the button
+  //         connects an exchange / uploads a CSV, and its accessible name no
+  //         longer mentions the Scenario tab.
+  //         (No click here — this file's harness does not mock
+  //         ContributionWizardOverlay, so a click would mount the real
+  //         WizardClient. The dispatch/overlay wiring is covered by
+  //         AllocationsTabs.addalloc.test.tsx. The literal retired phrase is
+  //         intentionally NOT spelled out so the whole-repo mislabel grep gate
+  //         stays at 0 hits — the substring assertion below is the sentinel.)
   // -------------------------------------------------------------------------
-  it("T_AT9 '+ Allocation' chip routes to scenario tab → ScenarioComposer renders", async () => {
+  it("T_AT9 header chip states the real action on overview; the routes-to-scenario mislabel is gone", () => {
     setSearchParams("");
     render(<AllocationsTabs {...STUB_PROPS} />);
-    const addChip = screen.getByRole("button", {
-      name: /Add allocation — open Scenario tab/i,
+    // The corrected accessible name is present on the default (overview) tab.
+    const btn = screen.getByRole("button", {
+      name: /Add allocation — connect an exchange or upload a CSV/i,
     });
-    fireEvent.click(addChip);
-    expect(mockReplace).toHaveBeenCalled();
-    const url = String(mockReplace.mock.calls[0][0]);
-    expect(url).toContain("tab=scenario");
+    expect(btn).toBeInTheDocument();
+    // The stale mislabel routed the button to the Scenario tab — its accessible
+    // name must no longer mention "Scenario tab" on the Holdings/Overview action.
+    expect(btn.getAttribute("aria-label")).not.toContain("Scenario tab");
   });
 
   // -------------------------------------------------------------------------
