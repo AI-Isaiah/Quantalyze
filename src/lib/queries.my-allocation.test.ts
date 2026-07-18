@@ -2744,4 +2744,95 @@ describe("115.1 equity display-repoint", () => {
     ).toBe("legacy");
     expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
   });
+
+  it("B2 (empty curve): is_trustworthy=true but curve is [] → legacy fallback (never a blank chart labeled 'derived')", async () => {
+    // A zero-anchored-keys allocator (every prod allocator today) composes
+    // { curve: [], is_trustworthy: true, degrade_reasons: ['no_anchored_keys'] }
+    // — the honest-empty tokens are BENIGN in the frozen core. An extractor that
+    // returned [] here would stamp equityCurveSource='derived' and BLANK the chart
+    // while suppressing the legacy render (which has real data). The last-line
+    // defense: an empty points array degrades to null → legacy.
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    state.allocatorEquityDerived = [
+      {
+        allocator_id: "user-1",
+        kind: "equity_curve",
+        payload: {
+          curve: [],
+          flags: [],
+          degrade_reasons: ["no_anchored_keys"],
+          is_trustworthy: true,
+          scalars: { mwr: null, dietz: null, computable: false },
+        } as Record<string, unknown>,
+      },
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("legacy");
+    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+  });
+
+  it("MALFORMED (T-115.1-18): is_trustworthy present-but-non-boolean → legacy fallback", async () => {
+    // The trust gate is a strict `=== true`, so a truthy-but-non-boolean flag
+    // (e.g. the string "true" from a drifted writer) must NOT be honored.
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    state.allocatorEquityDerived = [
+      {
+        allocator_id: "user-1",
+        kind: "equity_curve",
+        payload: {
+          curve: P1151_DERIVED_CURVE,
+          is_trustworthy: "true",
+        } as unknown as Record<string, unknown>,
+      },
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("legacy");
+    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+  });
+
+  it("MALFORMED (T-115.1-18): a curve point missing `date` or `equity_usd`, or a non-object point → legacy fallback", async () => {
+    // Each malformed point shape must poison the whole derived curve to legacy —
+    // extractTrustworthyDerivedCurve returns null on the first bad point.
+    const { extractTrustworthyDerivedCurve } = await import("./queries");
+    // point missing `date`
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [{ equity_usd: 100 }],
+      }),
+    ).toBeNull();
+    // point missing `equity_usd`
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [{ date: "2026-03-10" }],
+      }),
+    ).toBeNull();
+    // non-object point
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [42],
+      }),
+    ).toBeNull();
+    // empty date string
+    expect(
+      extractTrustworthyDerivedCurve({
+        is_trustworthy: true,
+        curve: [{ date: "", equity_usd: 100 }],
+      }),
+    ).toBeNull();
+  });
 });

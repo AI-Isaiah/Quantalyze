@@ -2396,7 +2396,13 @@ export function extractTrustworthyDerivedCurve(
     }
     points.push({ date, value: equityUsd });
   }
-  return points;
+  // B2 (115.1-close): an EMPTY curve is not a renderable series. A zero-anchored-
+  // keys allocator (every prod allocator today) composes { curve: [],
+  // is_trustworthy: true } — the honest-empty tokens are BENIGN in the frozen
+  // core. Returning [] here would keep `[] ?? legacy === []` and stamp the source
+  // "derived", blanking the chart while suppressing the legacy render that has
+  // real data. Degrade an empty curve to null → legacy fallback.
+  return points.length > 0 ? points : null;
 }
 
 /**
