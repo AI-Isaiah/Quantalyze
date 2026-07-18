@@ -107,6 +107,8 @@ function basePayload(
     lastSyncAt: null,
     hasSyncing: false,
     equityDailyPoints: [],
+    equityCurveSource: "legacy",
+    derivedCurveComputedAt: null,
     minHistoryDepthMonths: null,
     equityBaselineUnknown: false,
     activeVenues: [],

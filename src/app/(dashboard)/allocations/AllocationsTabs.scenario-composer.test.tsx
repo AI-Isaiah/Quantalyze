@@ -206,6 +206,8 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   lastSyncAt: null,
   hasSyncing: false,
   equityDailyPoints: [],
+  equityCurveSource: "legacy",
+  derivedCurveComputedAt: null,
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
   activeVenues: [],
