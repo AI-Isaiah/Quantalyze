@@ -2954,10 +2954,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # decrypt the key or hit the exchange a SECOND time — then enqueue that
         # compose job for the AUTHORITATIVE owner. Self-healing: any key refresh
         # re-composes the whole allocator with zero added exchange I/O.
-        _flows_payload = [
-            {"utc_day_iso": _f.utc_day_iso, "usd_signed": float(_f.usd_signed)}
-            for _f in (external_flows or [])
-        ]
+        import math
+
+        # M1: Postgres JSONB rejects NaN/Inf, so a non-finite float would fail the
+        # key_inputs upsert and bubble as a transient error → re-crawl loop. These
+        # flows already passed the honest core, so a non-finite here is corruption:
+        # SKIP it honestly (the drop is visible via the count log below), never
+        # persist poison.
+        _flows_payload = []
+        _skipped_nonfinite_flows = 0
+        for _f in (external_flows or []):
+            _usd = float(_f.usd_signed)
+            if not math.isfinite(_usd):
+                _skipped_nonfinite_flows += 1
+                continue
+            _flows_payload.append(
+                {"utc_day_iso": _f.utc_day_iso, "usd_signed": _usd}
+            )
         # DERIVATIVE-NOTIONAL TRAP (T-115.1-16): the anchor is the venue's own
         # LIVE total-equity read (`equity` above) — deribit's collapsed native
         # equity or the ccxt fetch_account_equity_and_upnl_usd NAV — NOT an
@@ -2965,8 +2978,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # derivative is NOTIONAL contract size, not equity). An untrustworthy read
         # (balance_error truthy or equity is None) persists an honest null anchor,
         # never a heuristic fallback; the compose core then honestly DROPS the key.
+        # M1: a non-finite equity (NaN/Inf) must never be serialized into JSONB —
+        # persist a null anchor honestly (the compose core then DROPS the key). The
+        # DUST_NAV_FLOOR / non-positive clauses (M2) are added below.
         _anchor_usd: float | None = (
-            None if (balance_error or equity is None) else float(equity)
+            None
+            if (balance_error or equity is None or not math.isfinite(float(equity)))
+            else float(equity)
         )
         _key_inputs_payload = {
             "flows": _flows_payload,

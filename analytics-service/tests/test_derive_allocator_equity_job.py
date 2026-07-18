@@ -590,6 +590,95 @@ async def test_pin8_epilogue_persists_null_anchor_on_untrustworthy_read() -> Non
 
 
 # ---------------------------------------------------------------------------
+# Epilogue anchor-materiality gate (M1 finiteness / M2 dust+non-positive) +
+# the paired POSITIVE-anchor neuter gap. The persisted key_inputs anchor_usd
+# must be a trustworthy, MATERIAL, POSITIVE, FINITE venue-equity read — else
+# NULL (never a poison JSONB, never a permanent-fail-inducing non-positive
+# anchor). Drives the ccxt equity read via a patched
+# fetch_account_equity_and_upnl_usd (returns (equity, balance_error, upnl,
+# upnl_unreadable)).
+# ---------------------------------------------------------------------------
+
+
+async def _run_key_epilogue_with_equity_read(equity: object, balance_error: bool = False):
+    """Run the key-mode derive with a patched live equity read; return the capture."""
+    from unittest.mock import AsyncMock, patch
+
+    from services.job_worker import run_derive_broker_dailies_job
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-eq", "exchange": "binance", "user_id": "alloc-owner"},
+        strategy_row=None,
+    )
+    job = {"id": "j-key", "kind": "derive_broker_dailies", "api_key_id": "key-eq"}
+    patches = _patches(ctx, key_mode=True, returns=_two_day_returns())
+    equity_patch = patch(
+        "services.exchange.fetch_account_equity_and_upnl_usd",
+        new=AsyncMock(return_value=(equity, balance_error, 0.0, False)),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], equity_patch:
+        await run_derive_broker_dailies_job(job)
+    return capture
+
+
+def _persisted_anchor(capture: dict):
+    ki = [
+        u for u in capture["upserts"]
+        if u[0] == DERIVED_TABLE and _is_key_inputs_upsert(u[1])
+    ]
+    assert len(ki) == 1, f"expected one key_inputs upsert; got {capture['upserts']!r}"
+    return _rows_of(ki[0][1])[0]["payload"]["anchor_usd"]
+
+
+@pytest.mark.asyncio
+async def test_pin_positive_anchor_persists_the_live_nav() -> None:
+    """Neuter gap (paired positive for pin 8): a TRUSTWORTHY material positive live
+    equity read persists that EXACT NAV as anchor_usd — proving the anchor is the
+    equity read itself (the derivative-notional trap: NOT a value_usd/holdings sum)."""
+    capture = await _run_key_epilogue_with_equity_read(123_456.78, balance_error=False)
+    assert _persisted_anchor(capture) == 123_456.78, (
+        "a trustworthy positive equity read must persist as the anchor verbatim"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_m1_nonfinite_equity_persists_null_anchor() -> None:
+    """M1: a non-finite live equity (inf/NaN) must NOT be serialized into JSONB
+    (Postgres rejects NaN/Inf → persist fails → transient re-crawl loop). Persist a
+    null anchor honestly instead."""
+    import math
+
+    for bad in (math.inf, -math.inf, math.nan):
+        capture = await _run_key_epilogue_with_equity_read(bad, balance_error=False)
+        assert _persisted_anchor(capture) is None, (
+            f"a non-finite equity ({bad!r}) must persist anchor_usd null, not poison JSONB"
+        )
+
+
+@pytest.mark.asyncio
+async def test_pin_m2_dust_equity_persists_null_anchor() -> None:
+    """M2: a dust equity (|equity| <= DUST_NAV_FLOOR=$1000) is immaterial — the
+    epilogue must persist a null anchor, consistent with the function's materiality
+    contract (:2651-2655), never a trustworthy near-zero curve basis."""
+    capture = await _run_key_epilogue_with_equity_read(500.0, balance_error=False)
+    assert _persisted_anchor(capture) is None, (
+        "a dust equity must persist anchor_usd null (materiality contract)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_m2_negative_equity_persists_null_anchor() -> None:
+    """M2: a NEGATIVE live equity must persist a null anchor — a negative anchor
+    sails past the (balance_error or None) guard and makes replay_key_equity raise
+    non-positive-equity, permanently FAILING the WHOLE allocator compose. Anchor
+    null degrades that one key honestly instead."""
+    capture = await _run_key_epilogue_with_equity_read(-50_000.0, balance_error=False)
+    assert _persisted_anchor(capture) is None, (
+        "a negative equity must persist anchor_usd null, never a permanent-fail anchor"
+    )
+
+
+# ---------------------------------------------------------------------------
 # helpers — tolerant of the exact upsert payload shape plan 04 chooses (a single
 # dict row or a one-element list); assert on the CONTRACT fields, not the wrapper.
 # ---------------------------------------------------------------------------
