@@ -5963,6 +5963,18 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     allocator_id = job["allocator_id"]
     supabase = get_supabase()
 
+    async def _delete_equity_curve_row() -> None:
+        # Degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
+        # case). Shared by the empty-compose (B2), incomplete-compose (F1b), and
+        # permanent-failure (F2) paths so a structurally-failed / partial / empty
+        # recompute can never leave a STALE trustworthy row rendering as "derived".
+        def _del() -> None:
+            supabase.table("allocator_equity_derived").delete().eq(
+                "allocator_id", allocator_id
+            ).eq("kind", "equity_curve").execute()
+
+        await db_execute(_del)
+
     # ── 1. Eligible key set — the ONE predicate, never inlined. ──────────────
     def _load_keys() -> list[dict[str, Any]]:
         return (
@@ -6040,6 +6052,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     ki_rows = await db_execute(_load_key_inputs)
     flows_by_key: dict[str, list[ExternalFlow]] = {}
     anchors_by_key: dict[str, float | None] = {}
+    key_inputs_ids: set[str] = set()
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -6057,6 +6070,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
                 # below.
                 orphan_kinds.append(kind)
                 continue
+            key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
             flows_by_key[api_key_id] = [
                 validate_flow_shape(
@@ -6085,6 +6099,34 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ).eq("kind", _k).execute()
 
         await db_execute(_delete_orphan)
+
+    # ── 3b. F1(b) ELIGIBLE-SET RECONCILIATION (the backfill-window closer). ──
+    # The compose can only see keys that have EITHER a returns series OR a
+    # key_inputs row. During the founder-gated backfill the FIRST key's compose
+    # runs while sibling keys still have zero rows (all 517 prod keys start empty),
+    # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
+    # allocator's capital (a transient 1-of-N-capital curve labeled "Derived",
+    # suppressing a legacy curve that included every key). If ANY eligible key is
+    # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
+    # equity_curve row (degrade to legacy) rather than compose a silently-partial
+    # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
+    # here — it is visible to the compose core, which classifies it
+    # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
+    # the strictly-invisible key (no returns AND no key_inputs — its derive has not
+    # run yet). Self-healing: each sibling derive re-enqueues the compose.
+    missing_ids = eligible_ids - (set(returns_by_key) | key_inputs_ids)
+    if missing_ids:
+        await _delete_equity_curve_row()
+        logger.info(
+            "derive_allocator_equity: INCOMPLETE compose for allocator %s "
+            "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
+            "an eligible key has neither returns nor key_inputs (backfill window); "
+            "deleted any stale equity_curve row, degrading to legacy until every "
+            "sibling derives (Option B, self-healing)",
+            allocator_id, len(eligible_ids), len(returns_by_key),
+            len(key_inputs_ids), len(missing_ids),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
 
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
     try:
@@ -6118,12 +6160,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      case). The frontend extractTrustworthyDerivedCurve is the paired
     #      last-line defense (B2a). ──
     if not (payload.get("curve") or []):
-        def _delete_curve() -> None:
-            supabase.table("allocator_equity_derived").delete().eq(
-                "allocator_id", allocator_id
-            ).eq("kind", "equity_curve").execute()
-
-        await db_execute(_delete_curve)
+        await _delete_equity_curve_row()
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "

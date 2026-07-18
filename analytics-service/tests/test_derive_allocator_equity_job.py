@@ -312,6 +312,108 @@ async def test_pin7_key_mode_epilogue_enqueues_owner_scoped_compose() -> None:
     )
 
 
+def _seed_partial_backfill() -> dict[str, list[dict]]:
+    """Two eligible keys but only key-A has any inputs (returns + key_inputs);
+    key-B has NEITHER a returns series NOR a key_inputs row (its derive has not
+    run yet — the backfill window). A stale equity_curve row is present. F1(b): a
+    trustworthy 1-of-2-capital curve must NOT be composed over this subset."""
+    alloc = "alloc-partial"
+    api_keys = [
+        {"id": "key-A", "user_id": alloc, "is_active": True,
+         "sync_status": "connected", "disconnected_at": None},
+        {"id": "key-B", "user_id": alloc, "is_active": True,
+         "sync_status": "connected", "disconnected_at": None},
+    ]
+    csv = [
+        {"api_key_id": "key-A", "allocator_id": alloc, "date": f"2026-03-0{i+1}",
+         "daily_return": 0.004}
+        for i in range(3)
+    ]
+    derived = [
+        {"allocator_id": alloc, "kind": "key_inputs:key-A",
+         "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance"}},
+        {"allocator_id": alloc, "kind": "equity_curve",
+         "payload": {"curve": [{"date": "2026-01-01", "equity_usd": 1.0}],
+                     "is_trustworthy": True, "degrade_reasons": [],
+                     "scalars": {"mwr": 0.1, "dietz": 0.1, "computable": True}}},
+    ]
+    return {
+        "csv_daily_returns": csv,
+        DERIVED_TABLE: derived,
+        LEGACY_TABLE: [],
+        "api_keys": api_keys,
+    }
+
+
+@pytest.mark.asyncio
+async def test_pin_f1b_partial_backfill_refuses_and_degrades() -> None:
+    """F1(b): an allocator with 2 eligible keys where one key is absent from BOTH
+    the returns and key_inputs maps (backfill window) → the compose is INCOMPLETE
+    and must refuse: delete the equity_curve row (degrade to legacy), NEVER compose
+    a trustworthy 1-of-2-capital curve."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_partial_backfill())
+    job = {"id": "j-partial", "kind": "derive_allocator_equity", "allocator_id": "alloc-partial"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    # NO trustworthy partial curve upserted.
+    assert [u for u in fake.upserts if _is_equity_curve_upsert(u[1])] == [], (
+        f"a partial (incomplete) compose must NOT upsert a curve; got {fake.upserts!r}"
+    )
+    # The stale equity_curve row is deleted → legacy fallback.
+    curve_deletes = [
+        d for d in fake.deletes
+        if d[0] == DERIVED_TABLE and d[1].get("kind") == "equity_curve"
+        and d[1].get("allocator_id") == "alloc-partial"
+    ]
+    assert len(curve_deletes) == 1, (
+        f"an incomplete compose must delete the stale equity_curve row; got {fake.deletes!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pin_f1b_key_inputs_only_key_is_not_missing() -> None:
+    """F1(b) boundary: a key WITH a key_inputs row but NO returns is VISIBLE to the
+    compose core (anchored-without-returns → DROPPED_KEY via B3), so it must NOT trip
+    the missing-key refusal — the compose proceeds (and degrades honestly via B3),
+    not via the F1(b) backfill-window delete."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    seed = _seed_partial_backfill()
+    # Give key-B a key_inputs row (anchor, no returns) → now BOTH keys are visible.
+    seed[DERIVED_TABLE].append(
+        {"allocator_id": "alloc-partial", "kind": "key_inputs:key-B",
+         "payload": {"flows": [], "anchor_usd": 50_000.0, "venue": "okx"}}
+    )
+    fake = _FakeSupabase(seed)
+    job = {"id": "j-vis", "kind": "derive_allocator_equity", "allocator_id": "alloc-partial"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    # key-B is anchored-without-returns → DROPPED_KEY → the composed curve is
+    # untrustworthy (B3), and since key-A DOES have a curve it is a NON-empty
+    # untrustworthy upsert (NOT the F1b backfill delete).
+    curve_upserts = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve_upserts) == 1, (
+        f"a key_inputs-only key is visible → compose proceeds; got {fake.upserts!r}"
+    )
+    payload = _extract_payload(curve_upserts[0][1])
+    assert payload["is_trustworthy"] is False, (
+        "a key with an anchor but no returns must render the curve untrustworthy (B3)"
+    )
+    assert "dropped_key" in payload["degrade_reasons"]
+
+
 @pytest.mark.asyncio
 async def test_pin_f1a_short_key_persists_key_inputs_and_enqueues() -> None:
     """F1(a): a key-mode derive that hits the <2-non-NaN-days short-circuit must
