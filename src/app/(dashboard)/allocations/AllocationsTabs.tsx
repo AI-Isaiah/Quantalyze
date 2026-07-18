@@ -516,11 +516,22 @@ export function AllocationsTabs(
   }, []);
 
   // Guard against a stale pending Browse-open (or focus-return flag) re-firing
-  // on a later scenario remount: clear both whenever we leave the scenario tab.
+  // on a later scenario remount: clear them whenever we leave the scenario tab.
+  //
+  // Phase 116 review WR-02 — ALSO null the composer's registered open-Browse
+  // setter. ScenarioComposer unmounts when activeTab !== "scenario", so its
+  // registered `() => setBrowseOpen(true)` closure points at a dead instance.
+  // Leaving it non-null lets a "+ Strategy" click in the remount's
+  // pre-registration window take the truthy-ref branch, call the dead setter
+  // (a no-op on the unmounted component), and NOT set pendingBrowseOpenRef — so
+  // the click is swallowed with no drawer opening: exactly the silent no-op
+  // ADDALLOC-03 forbids. Nulling it (symmetric with the two refs above) makes
+  // such a click fall through to the pending-drain path instead.
   useEffect(() => {
     if (activeTab !== "scenario") {
       pendingBrowseOpenRef.current = false;
       headerBrowseTriggeredRef.current = false;
+      composerBrowseOpenRef.current = null;
     }
   }, [activeTab]);
 

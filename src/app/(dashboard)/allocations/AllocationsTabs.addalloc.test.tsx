@@ -419,6 +419,46 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("T_ADDALLOC_S6 scenario round-trip: a '+ Strategy' click before re-registration on remount drains via pending, not the stale unmounted setter (WR-02)", async () => {
+    // First visit: the composer registers its imperative Browse-open setter, so
+    // composerBrowseOpenRef points at THIS composer instance's setter.
+    setSearchParams("tab=scenario");
+    const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("scenario-composer-body");
+    expect(composerHarness.captureRegister).not.toBeNull();
+
+    // Leave the scenario tab → the composer unmounts. Simulate the remount's
+    // dynamic-import loading window on the return trip: the next mount will NOT
+    // re-register immediately.
+    composerHarness.registerImmediately = false;
+    setSearchParams("tab=holdings");
+    rerender(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("holdings-body");
+
+    // Return to scenario. The composer remounts but has not yet re-registered
+    // its Browse-open setter (pre-registration window). Clear the shared spy's
+    // call history so the next assertion reads only clicks from THIS window.
+    composerHarness.browseOpenSpy.mockReset();
+    setSearchParams("tab=scenario");
+    rerender(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("scenario-composer-body");
+
+    // Click "+ Strategy" in the pre-registration window. Without the WR-02 fix,
+    // composerBrowseOpenRef still holds the UNMOUNTED instance's setter, so the
+    // click takes the truthy-ref branch, calls the dead spy, and never sets the
+    // pending flag — the click is swallowed. With the fix the ref was nulled on
+    // leave, so the click falls through to the pending-drain path.
+    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
+    fireEvent.click(btn);
+    expect(composerHarness.browseOpenSpy).not.toHaveBeenCalled();
+
+    // Registration arrives (composer chunk finishes) → the pending click drains.
+    act(() => {
+      composerHarness.captureRegister?.(composerHarness.browseOpenSpy);
+    });
+    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
+  });
+
   it("T_ADDALLOC_S4 focus return: a header-initiated Browse close returns focus; a non-header close does not steal it", async () => {
     setSearchParams("tab=scenario");
     render(<AllocationsTabs {...STUB_PROPS} />);
