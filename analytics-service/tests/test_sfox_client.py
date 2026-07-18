@@ -142,6 +142,41 @@ def test_read_only_surface_no_write_methods(forbidden):
     assert not hasattr(SfoxClient, forbidden)
 
 
+def test_request_chokepoint_has_no_method_parameter():
+    """WR-03 (structural): read-only is enforced at the ONE place that talks to the
+    network. _request must expose NO `method` parameter, so there is no code path —
+    internal or phase-119 — to coerce a write (POST /v1/orders) through the generic
+    request seam. The verb is hardcoded to GET inside _request."""
+    import inspect
+
+    params = inspect.signature(SfoxClient._request).parameters
+    assert "method" not in params, "_request must not accept a caller-supplied HTTP verb"
+
+
+@pytest.mark.parametrize(
+    "invoke, body",
+    [
+        (lambda c: c.get_balances(), "[]"),
+        (lambda c: c.get_transactions(), "[]"),
+        (lambda c: c.get_trades(), '{"data": []}'),
+        (lambda c: c.get_balance_history(start_date_ms=111), '{"data": []}'),
+    ],
+    ids=["balances", "transactions", "trades", "balance_history"],
+)
+async def test_every_read_method_issues_a_get(invoke, body):
+    """WR-03: every read method must put a GET on the wire. The verb is asserted on
+    the mocked request call (args[0]) for ALL four paths — not just the URL — so a
+    regression that lets any read issue a non-GET is caught at the seam. Each case
+    uses the shape its method parses (bare array vs {data:[...]} envelope)."""
+    resp = _stub_response(200, body)
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        await invoke(client)
+        await client.aclose()
+    args, _ = mock_req.call_args
+    assert args[0] == "GET"
+
+
 async def test_non_2xx_raises_sfox_api_error_with_status():
     """Fail-loud: a non-2xx raises SfoxApiError carrying the HTTP status. 401 must
     stay distinguishable for phase-119 KEY_AUTH_FAILED mapping."""

@@ -143,13 +143,17 @@ class SfoxClient:
                 now = self._clock()
         self._last_request_at[path] = now
 
-    async def _request(
-        self, method: str, path: str, params: dict[str, Any] | None = None
-    ) -> Any:
+    async def _request(self, path: str, params: dict[str, Any] | None = None) -> Any:
         """Single HTTP chokepoint: Bearer auth, explicit proxy, rate gate, fail-loud parse.
 
         Every read method funnels through here so auth, proxy threading, the rate
         gate, and secret-scrubbed error handling exist in exactly one place.
+
+        The HTTP verb is HARDCODED to GET (WR-03): read-only is enforced
+        STRUCTURALLY at the one place that talks to the network, not merely by the
+        absence of public write methods. There is no `method` parameter, so no
+        internal or future (phase-119) call site can coerce this adapter into a
+        write (POST /v1/orders etc.) through the generic request path.
         """
         await self._rate_gate(path)
         session = await self._ensure_session()
@@ -159,7 +163,7 @@ class SfoxClient:
         query = {k: v for k, v in (params or {}).items() if v is not None}
 
         resp = await session.request(
-            method, url, headers=headers, params=query, proxy=self._proxy
+            "GET", url, headers=headers, params=query, proxy=self._proxy
         )
         try:
             status = resp.status
@@ -193,7 +197,7 @@ class SfoxClient:
 
     async def get_balances(self) -> list[dict]:
         """GET /v1/user/balance — current per-asset balance snapshot (bare array)."""
-        payload = await self._request("GET", "/v1/user/balance")
+        payload = await self._request("/v1/user/balance")
         if not isinstance(payload, list):
             raise SfoxApiError(0, "sFOX /v1/user/balance did not return a list")
         return payload
@@ -228,7 +232,7 @@ class SfoxClient:
             "offset": offset,
             "types": types,
         }
-        payload = await self._request("GET", "/v1/account/transactions", params)
+        payload = await self._request("/v1/account/transactions", params)
         if not isinstance(payload, list):
             raise SfoxApiError(0, "sFOX /v1/account/transactions did not return a list")
         return payload
@@ -240,7 +244,7 @@ class SfoxClient:
         {data:[...]} envelope. `last_seen_id` is the exposed pagination cursor
         (phase 120 drives the crawl; no auto-loop here)."""
         params = {"page_size": page_size, "last_seen_id": last_seen_id}
-        payload = await self._request("GET", "/v1/account/trades", params)
+        payload = await self._request("/v1/account/trades", params)
         return self._unwrap_data(payload, "/v1/account/trades")
 
     async def get_balance_history(
@@ -263,7 +267,7 @@ class SfoxClient:
             "end_date": end_date_ms,
             "interval": interval,
         }
-        payload = await self._request("GET", "/v1/account/balance/history", params)
+        payload = await self._request("/v1/account/balance/history", params)
         return self._unwrap_data(payload, "/v1/account/balance/history")
 
     @staticmethod
