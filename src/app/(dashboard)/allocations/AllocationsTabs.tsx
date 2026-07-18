@@ -323,13 +323,15 @@ const TAB_LABELS: Record<TabKey, string> = {
 
 // Tab-button class strings — pulled out of the render JSX so the active /
 // inactive delta isn't hidden in two ~200-char ternary branches that share
-// ~90% of their characters. The full strings below are byte-identical to
-// the previous inlined versions so the Tailwind class order matches the
-// dashboard-parity contract.
+// ~90% of their characters. Phase 117 / UIFIX-02 repointed the focus idiom off
+// the trailing `focus-visible:outline*` (which paints OUTSIDE the border edge →
+// clipped by the strip's `overflow-x-auto` on mobile, and by the tabs' own
+// `-mb-[10px]` overhang) onto the CLIP-PROOF inset ring; every other token stays
+// byte-identical to the prior inlined versions (dashboard-parity Tailwind order).
 const TAB_BUTTON_ACTIVE =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 const TAB_BUTTON_INACTIVE =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 
 const TAB_COUNT_BADGE_ACTIVE =
   "rounded-sm bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";

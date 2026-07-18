@@ -494,7 +494,7 @@ export function CorrelationsMatrixPanel() {
           scrollable-region-focusable (serious) once it actually overflows —
           the same class CI run 28609918423 caught on the daily calendar. */}
       <div
-        className="overflow-x-auto"
+        className="overflow-x-auto focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
         role="region"
         aria-label="Correlation matrix: chart scrolls horizontally. Swipe or use arrow keys to see more columns."
         tabIndex={0}

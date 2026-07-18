@@ -1034,7 +1034,9 @@ function SectionNav() {
                 aria-current={isActive ? "location" : undefined}
                 className={
                   // pointer-coarse: bump tap target to 44px min-height per WCAG 2.5.5.
-                  "inline-flex items-center px-2 py-1 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent pointer-coarse:min-h-[44px] pointer-coarse:px-3 " +
+                  // UIFIX-02: clip-proof inset ring — a positive-offset outline paints
+                  // OUTSIDE the anchor and is clipped by the nav's overflow-x-auto.
+                  "inline-flex items-center px-2 py-1 rounded-sm focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent pointer-coarse:min-h-[44px] pointer-coarse:px-3 " +
                   (isActive
                     ? "text-text-primary border-b-2 border-accent"
                     : "text-text-muted hover:bg-surface-subtle hover:text-text-primary")
