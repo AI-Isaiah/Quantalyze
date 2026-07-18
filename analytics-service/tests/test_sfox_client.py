@@ -32,6 +32,7 @@ Regression gates — WHY each case matters (Rule 9):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -220,6 +221,33 @@ async def test_error_message_scrubs_bare_api_key_echo():
         await client.aclose()
     assert API_KEY not in str(excinfo.value)
     assert "[REDACTED]" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        aiohttp.ClientError(f"connect failed for {API_KEY}"),
+        asyncio.TimeoutError(),
+    ],
+    ids=["client_error", "timeout"],
+)
+async def test_transport_error_maps_to_sfox_api_error_no_key_leak(raised):
+    """F5 (phase-119 needs typed failures): a raw aiohttp.ClientError / the F2
+    ClientTimeout (asyncio.TimeoutError) from the network call must be mapped to the
+    module's typed SfoxApiError — never propagate raw and bypass the fail-loud
+    contract. status==0 marks it a non-HTTP (transport) failure, distinguishable from
+    an auth 401/403. The api_key must not leak even in the pathological case where an
+    upstream error string echoes it (belt-and-suspenders redact). Fails against the
+    pre-F5 code that let the raw exception escape."""
+    with patch.object(
+        aiohttp.ClientSession, "request", new=AsyncMock(side_effect=raised)
+    ):
+        client = SfoxClient(api_key=API_KEY)
+        with pytest.raises(SfoxApiError) as excinfo:
+            await client.get_balances()
+        await client.aclose()
+    assert excinfo.value.status == 0
+    assert API_KEY not in str(excinfo.value)
 
 
 async def test_non_json_2xx_body_raises():

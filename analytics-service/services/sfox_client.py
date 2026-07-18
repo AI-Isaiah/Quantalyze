@@ -197,19 +197,32 @@ class SfoxClient:
         # aiohttp rejects None-valued params; drop unset ones before sending.
         query = {k: v for k, v in (params or {}).items() if v is not None}
 
-        resp = await session.request(
-            "GET", url, headers=headers, params=query, proxy=self._proxy
-        )
         try:
-            status = resp.status
-            raw = await resp.text()
-        finally:
-            # Release the connection regardless of parse outcome.
-            release = getattr(resp, "release", None)
-            if release is not None:
-                maybe = release()
-                if asyncio.iscoroutine(maybe):
-                    await maybe
+            resp = await session.request(
+                "GET", url, headers=headers, params=query, proxy=self._proxy
+            )
+            try:
+                status = resp.status
+                raw = await resp.text()
+            finally:
+                # Release the connection regardless of parse outcome.
+                release = getattr(resp, "release", None)
+                if release is not None:
+                    maybe = release()
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            # Map transport-level failures (DNS/TLS/reset + the F2 ClientTimeout)
+            # onto the module's typed fail-loud contract (F5, mirrors
+            # exchange.py's ccxt.NetworkError arm): callers — phase 119 — see a
+            # SfoxApiError, never a raw aiohttp/asyncio exception. status=0
+            # (non-HTTP failure) keeps it distinguishable from an auth 401/403.
+            # A transport error won't embed the token, but redact-by-value +
+            # scrub anyway (belt-and-suspenders, matching the non-2xx path).
+            safe = str(exc).replace(self._api_key, "[REDACTED]")
+            raise SfoxApiError(
+                0, f"sFOX request transport error: {scrub_freeform_string(safe)}"
+            ) from exc
 
         if status < 200 or status >= 300:
             # Redact the KNOWN secret by value first (WR-02, belt-and-suspenders):
