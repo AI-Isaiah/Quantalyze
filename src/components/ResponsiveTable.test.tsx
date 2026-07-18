@@ -118,4 +118,36 @@ describe("[A11Y-02] ResponsiveTable — overflow wrapper + scroll hint", () => {
     const region = screen.getByRole("region");
     expect(within(region).getByTestId("wrapped-child")).toBeInTheDocument();
   });
+
+  // Phase 117 / UIFIX-02 — clip-proof focus indicator (WCAG 2.4.7).
+  //
+  // WHY: this shared `role="region" tabIndex={0}` scroll box is focusable and
+  // lives inside panels that are themselves `overflow-hidden`. Relying on the
+  // browser DEFAULT outline (or any positive-offset outline) means the focus
+  // ring paints OUTSIDE the box and the ancestor overflow CLIPS it — the ring
+  // vanishes at exactly the tables that scroll (MetricsColumn worst-drawdowns,
+  // StressWindowsPanel, every other consumer). The INSET box-shadow ring paints
+  // INSIDE the box → always within the viewport → never clipped. This is the
+  // CENTRAL fix that covers all ResponsiveTable consumers at once.
+  it("[UIFIX-02] the scroll region carries a clip-proof inset focus ring (not a clipped outline)", () => {
+    render(
+      <ResponsiveTable>
+        <table>
+          <tbody>
+            <tr>
+              <td>cell</td>
+            </tr>
+          </tbody>
+        </table>
+      </ResponsiveTable>,
+    );
+    const region = screen.getByRole("region");
+    // Inset ring draws inside the element bounds → immune to ancestor clipping.
+    expect(region).toHaveClass("focus-visible:ring-2");
+    expect(region).toHaveClass("focus-visible:ring-inset");
+    expect(region).toHaveClass("focus-visible:ring-accent");
+    // A 20%-opacity accent ring fails the WCAG 1.4.11 ≥3:1 non-text-contrast
+    // floor the UI-SPEC binds this fix to — full-opacity accent only.
+    expect(region.className).not.toContain("ring-accent/20");
+  });
 });

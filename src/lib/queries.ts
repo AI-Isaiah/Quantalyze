@@ -1695,6 +1695,33 @@ export interface MyAllocationDashboardPayload {
    */
   equityDailyPoints: DailyPoint[];
   /**
+   * Phase 115.1 / BACKBONE-02 (RD-1 + RD-2). Provenance of `equityDailyPoints`:
+   *   - `"derived"`: the series came from the NEW keyed `allocator_equity_derived`
+   *     surface (worker-side flow-aware $-curve), used ONLY when a row exists AND
+   *     its `payload.is_trustworthy === true` AND `payload.curve` is well-formed.
+   *   - `"legacy"`: the series came from the legacy `allocator_equity_snapshots`
+   *     `value_usd` path via `equitySnapshotsToDailyPoints` (the pre-115.1
+   *     rendering, byte-unchanged).
+   *
+   * This is repointed at the ONE producer site (`derivePhase07Fields`) so ALL
+   * downstream consumers — the equity chart, the V2 Overview factsheet
+   * (`buildAllocatorPortfolioFactsheetPayload`), and the ScenarioComposer
+   * baseline — deliberately share the SAME basis (RD-1: one producer, all
+   * consumers). The legacy fallback is LOAD-BEARING until the founder-gated
+   * per-key backfill runs: all 517 prod allocator keys currently have zero
+   * per-key rows, so a hard cutover would blank every dashboard (the A1 census
+   * safety invariant). The UI renders an honest provenance indicator off this
+   * field — a legacy-fallback curve is NEVER presented as `api_verified`-grade
+   * (RD-2 / DESIGN.md Numbers Contract honesty).
+   */
+  equityCurveSource: "derived" | "legacy";
+  /**
+   * Phase 115.1 / RD-2. `computed_at` of the derived row when
+   * `equityCurveSource === "derived"`, else null. Feeds the derived-path
+   * provenance indicator (a muted freshness stamp); null on the legacy path.
+   */
+  derivedCurveComputedAt: string | null;
+  /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
    * NULL (e.g., pure CoinGecko-fallback data). Drives the venue-
@@ -2332,6 +2359,56 @@ export function buildPerKeyReturnsByApiKeyId(
 }
 
 /**
+ * Phase 115.1 / BACKBONE-02 (RD-1). The derived-curve trust gate + malformed-
+ * payload defence for the $-equity display repoint.
+ *
+ * Returns the derived $-curve as `DailyPoint[]` ONLY when the row is present,
+ * `payload.is_trustworthy === true`, AND `payload.curve` is a well-formed dense
+ * array of `{ date: string, equity_usd: finite number }`. Any other shape —
+ * absent row, untrustworthy flag, non-array curve, a single malformed/NaN point
+ * — returns `null`, which drives the LEGACY fallback at the producer site. This
+ * is the safety invariant: a corrupt worker-written JSONB payload must degrade
+ * to the legacy snapshot render, never crash SSR and never surface a NaN
+ * coordinate to the chart (T-115.1-18). The JSONB is worker-written but treated
+ * as an UNTRUSTED shape here (the DB→SSR trust boundary).
+ *
+ * The derived curve is already dense per the interfaces contract, so it maps
+ * DIRECTLY to `{ date, value }` — NO `equitySnapshotsToDailyPoints` forward-fill
+ * adapter, NO `new Date()` re-parsing.
+ */
+export function extractTrustworthyDerivedCurve(
+  payload: unknown,
+): DailyPoint[] | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.is_trustworthy !== true) return null;
+  const curve = p.curve;
+  if (!Array.isArray(curve)) return null;
+  const points: DailyPoint[] = [];
+  for (const raw of curve) {
+    if (raw === null || typeof raw !== "object") return null;
+    const point = raw as Record<string, unknown>;
+    const date = point.date;
+    const equityUsd = point.equity_usd;
+    // F4a: require a strict YYYY-MM-DD calendar day — a non-empty but malformed
+    // date string (e.g. "not-a-date", "2026/03/10") would otherwise reach
+    // parseISO / the SVG x-scale as a NaN coordinate. Degrade to legacy instead.
+    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    if (typeof equityUsd !== "number" || !Number.isFinite(equityUsd)) {
+      return null;
+    }
+    points.push({ date, value: equityUsd });
+  }
+  // B2 (115.1-close): an EMPTY curve is not a renderable series. A zero-anchored-
+  // keys allocator (every prod allocator today) composes { curve: [],
+  // is_trustworthy: true } — the honest-empty tokens are BENIGN in the frozen
+  // core. Returning [] here would keep `[] ?? legacy === []` and stamp the source
+  // "derived", blanking the chart while suppressing the legacy render that has
+  // real data. Degrade an empty curve to null → legacy fallback.
+  return points.length > 0 ? points : null;
+}
+
+/**
  * Phase 07 / 07-03: compute the Phase 07 payload derivations shared by
  * both branches (portfolio-exists and !portfolio). The dashboard function
  * is the only production caller.
@@ -2373,6 +2450,14 @@ export function derivePhase07Fields(
   // threaded through so both payload branches surface it via the `...phase07`
   // spread.
   equityBaselineUnknown: boolean,
+  // Phase 115.1 / BACKBONE-02 (RD-1). The row read from the NEW keyed
+  // `allocator_equity_derived` surface (kind='equity_curve'), or null when
+  // absent / the table is missing pre-migration. Threaded in so the ONE
+  // producer site below can gate the $-equity series onto the derived curve
+  // when trustworthy, else fall back to the legacy snapshot render. Null is
+  // the SAFETY default (legacy render) — every prod allocator hits this until
+  // the founder-gated backfill runs.
+  derivedEquityRow: { payload: unknown; computed_at: string | null } | null,
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -2382,6 +2467,8 @@ export function derivePhase07Fields(
   | "lastSyncAt"
   | "hasSyncing"
   | "equityDailyPoints"
+  | "equityCurveSource"
+  | "derivedCurveComputedAt"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -2405,10 +2492,30 @@ export function derivePhase07Fields(
   const lastSyncAt = freshness.lastSyncAt;
   const hasSyncing = freshness.syncing;
 
-  // f7 adapter: DailyPoint[] for EquityCurve/DrawdownChart parallel-prop.
-  const equityDailyPoints = equitySnapshotsToDailyPoints(
-    equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
+  // Phase 115.1 / BACKBONE-02 (RD-1) — the ONE producer site for the allocator
+  // $-equity display series (chart + V2 factsheet + composer baseline all read
+  // this). Repoint rule (the safety invariant, verbatim): a derived row that
+  // exists AND is `is_trustworthy` AND carries a well-formed dense curve →
+  // render the derived curve (already dense — mapped DIRECTLY, NO forward-fill
+  // adapter). ELSE the legacy `equitySnapshotsToDailyPoints(...)` render,
+  // byte-unchanged. A malformed/untrusted/absent derived row degrades to legacy
+  // (see extractTrustworthyDerivedCurve) — never crashes SSR, never renders NaN.
+  // The legacy fallback is load-bearing until the founder-gated per-key backfill
+  // runs (all 517 prod keys currently have zero per-key rows — the A1 census).
+  const derivedCurve = extractTrustworthyDerivedCurve(
+    derivedEquityRow?.payload ?? null,
   );
+  // f7 adapter (legacy path): DailyPoint[] for EquityCurve/DrawdownChart
+  // parallel-prop.
+  const equityDailyPoints =
+    derivedCurve ??
+    equitySnapshotsToDailyPoints(
+      equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
+    );
+  const equityCurveSource: "derived" | "legacy" =
+    derivedCurve !== null ? "derived" : "legacy";
+  const derivedCurveComputedAt =
+    derivedCurve !== null ? (derivedEquityRow?.computed_at ?? null) : null;
 
   // f9: min non-null history_depth_months across snapshots. Null when
   // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
@@ -2472,6 +2579,8 @@ export function derivePhase07Fields(
     lastSyncAt,
     hasSyncing,
     equityDailyPoints,
+    equityCurveSource,
+    derivedCurveComputedAt,
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -2577,6 +2686,14 @@ export const getMyAllocationDashboard = cache(
       // read under the tenant boundary (T-36-03-01). The .eq("allocator_id",
       // userId) is the explicit ownership gate (defence-in-depth atop RLS).
       phase36PerKeyDailiesRes,
+      // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity curve row from
+      // the NEW keyed `allocator_equity_derived` surface. Resolves to
+      // `{ payload, computed_at }` or null. NON-FATAL by design (never
+      // assertOk'd below): the derived curve is an ADDITIVE enhancement over the
+      // legacy snapshot render, so any read failure degrades to the legacy
+      // fallback (the prod-cutover SAFETY invariant) rather than blanking a
+      // working dashboard.
+      phase115DerivedRow,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -2662,6 +2779,41 @@ export const getMyAllocationDashboard = cache(
         )
         .order("date", { ascending: true })
         .limit(20000),
+      // Phase 115.1 / BACKBONE-02 (RD-1) — one JSONB row per
+      // (allocator_id, kind); the display row is kind='equity_curve'. USER
+      // client + owner RLS + explicit `.eq("allocator_id", userId)` (the
+      // phase36 T-36-03-01 pattern: RLS is the tenant boundary, the .eq is
+      // defence-in-depth; the admin client would bypass RLS). PGRST205 (table
+      // missing from the PostgREST schema cache on a pre-migration env) is
+      // swallowed to null so the SAFETY fallback renders the legacy curve —
+      // exactly the cutover-safe semantics. Any OTHER read failure also
+      // degrades to legacy (non-fatal enhancement) but logs a breadcrumb so a
+      // real fault stays observable.
+      (async (): Promise<{
+        payload: unknown;
+        computed_at: string | null;
+      } | null> => {
+        const res = await supabase
+          .from("allocator_equity_derived")
+          .select("payload, computed_at")
+          .eq("allocator_id", userId)
+          .eq("kind", "equity_curve")
+          .maybeSingle();
+        if (res.error) {
+          const code = (res.error as { code?: string }).code;
+          if (code !== "PGRST205") {
+            console.error(
+              "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (falling back to legacy curve):",
+              res.error,
+            );
+          }
+          return null;
+        }
+        return (res.data ?? null) as {
+          payload: unknown;
+          computed_at: string | null;
+        } | null;
+      })(),
     ]);
 
     // G-1 fix — normalize outcomes once, use in both !portfolio and
@@ -2860,6 +3012,9 @@ export const getMyAllocationDashboard = cache(
       snapshotCount,
       holdingsRows,
       equityBaselineUnknown,
+      // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity row (or null)
+      // threaded into the ONE producer site so the repoint gates there.
+      phase115DerivedRow,
     );
 
     // Phase 09 / D-07 + D-08 + D-11 + finding f5

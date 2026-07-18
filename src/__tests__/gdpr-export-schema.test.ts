@@ -134,6 +134,9 @@ describe("gdpr-export schema validation — NEW-C16-01 order columns exist", () 
       allocator_preferences: "updated_at",
       portfolio_strategies: "added_at",
       allocator_equity_snapshots: "asof",
+      // Phase 115.1: allocator_equity_derived PK (allocator_id, kind), no `id`
+      // column — orders by `kind` (NOT NULL, unique within an allocator's rows).
+      allocator_equity_derived: "kind",
       investor_attestations: "attested_at",
       organization_members: "joined_at",
       // csv_daily_returns is NOT here: the Phase 35 per-key-axis migration

@@ -1237,6 +1237,139 @@ def compute_all_metrics(
     )
 
 
+def total_return_from_equity(equity: pd.Series | None) -> float | None:
+    """Endpoint-ratio total return of an equity series (backbone module home).
+
+    Returns ``eq.iloc[-1] / eq.iloc[0] - 1`` (a decimal, e.g. 0.10 for +10%), or
+    None when there is no formable ratio (``equity`` is None / fewer than 2
+    observations / a zero first value). This is the backbone-blessed replacement
+    for the deleted portfolio_metrics TWR scalar at its four ``events=[]`` call
+    sites in routers/portfolio.py (per-strategy equity, portfolio cumprod,
+    benchmark cumprod, verify_strategy cumprod).
+
+    On a ``(1+r).cumprod()`` series whose first value is ``(1 + r_0)`` this
+    endpoint ratio intentionally PRESERVES the legacy day-0-exclusion semantics
+    (the byte-identical mandate of Phase 114 / BACKBONE-01): the forward TWR
+    scalar excludes day-0's return. Do NOT swap in ``compute_all_metrics``'s
+    ``cumulative_return`` (which is ``Π(1+r)-1`` over ALL days INCLUDING day 0);
+    that differs from the deleted TWR scalar by exactly the ``(1 + r_0)`` factor
+    and the 114-01 golden-parity oracle ASSERTS that divergence — reading
+    cumulative_return would shift displayed numbers.
+
+    The zero-first-value guard mirrors the legacy M-0698 ``begin_val=0``
+    (portfolio-passed-through-zero) short-circuit: no ratio is formable, so we
+    log a warning of the same shape and return None.
+
+    The single-calendar-day guard mirrors the legacy breakpoint logic: the
+    deleted forward-TWR scalar normalised the index and built
+    ``breakpoints=sorted({start}|cf_dates|{end})``; with no cash flows a series
+    whose observations all fall on ONE calendar day collapses to a single
+    breakpoint, yields no sub-period, and returned None. Duplicate-date JSONB is a
+    documented reachable shape (``_records_to_series`` does not dedupe), so this
+    returns None there rather than a spurious endpoint ratio.
+
+    INPUT CONTRACT: ``equity`` should be a float64 Series on a sorted, datetime-
+    like index (all four call sites satisfy this). The index is normalised via
+    ``pd.to_datetime(...).normalize()`` for the single-day check exactly as the
+    deleted helper did; a non-datetime-like index is the CALLER's bug and is not
+    silently coerced beyond that legacy-parity normalisation.
+    """
+    if equity is None or len(equity) < 2:
+        return None
+    # Legacy TWR-scalar parity: all observations on a single distinct calendar
+    # day -> no formable sub-period -> None (checked BEFORE the begin_val=0 guard
+    # so a single-day zero-first series does not emit a spurious M-0698 warning,
+    # matching the legacy loop that never ran).
+    if pd.to_datetime(equity.index).normalize().nunique() == 1:
+        return None
+    first = float(equity.iloc[0])
+    if first == 0.0:
+        # M-0698 shape: a zero begin-value means the series passed through 0 (a
+        # blow-up/recover event); no ratio is formable, so the forward TWR scalar
+        # is undefined for this series.
+        logger.warning(
+            "total_return_from_equity: begin_val=0 (series at zero); "
+            "no formable endpoint ratio — returning None",
+        )
+        return None
+    return _safe_float(float(equity.iloc[-1]) / first - 1.0)
+
+
+def sharpe_vol_status_from_backbone(
+    returns: pd.Series,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+) -> tuple[float | None, float | None, str]:
+    """Annualised (vol, sharpe, status) — byte-identical to the deleted Sharpe/vol helper.
+
+    Backbone-module home for the Sharpe/vol scalars at the two production call
+    sites (portfolio-level Sharpe/vol, verify_strategy Sharpe/vol). The ``status``
+    feeds the vol_status/sharpe_status data-quality channel (routers/portfolio.py).
+
+    INPUT CONTRACT: ``returns`` must be a float64 Series on a sorted
+    ``DatetimeIndex`` (both production call sites satisfy this). vol/mean are read
+    with pandas' default skipna — a non-float dtype or unsorted index is the
+    CALLER's bug; this helper does NOT coerce (a silent ``astype``/``sort`` would
+    mask a future caller regression rather than fail loud).
+
+    WHY INLINE, NOT ``compute_all_metrics``: the vol/sharpe scalars are computed
+    DIRECTLY from the returns with the legacy pandas math (``std(ddof=1)·√ppy``,
+    ``mean·ppy``, ``mean/vol``). The unified pipeline routes through quantstats
+    ``_prepare_returns``, which carries a PRICE-detection heuristic the deleted
+    helper never had: an all-non-negative series whose ``max > 1`` is assumed to
+    be a PRICE path and silently ``pct_change``-d, which FLIPS the sign of Sharpe
+    on a young all-winning account with one >100% day (reachable via
+    verify_strategy). Computing the scalars inline reproduces the deleted helper
+    EXACTLY and sidesteps that corruption. (TWR keeps its own backbone helper,
+    ``total_return_from_equity``; only the Sharpe/vol scalars needed inline math.)
+
+    The tuple is 3-wide: ``mean_ret`` is dropped from the legacy 4-tuple because
+    BOTH production call sites discard it (surgical-change rule). Status is one of
+    the REACHABLE legacy codes with the SAME boundaries as the deleted helper:
+    ``"ok"``, ``"insufficient_history"``, ``"zero_volatility"``, ``"nan_vol"``;
+    ``status != "ok"`` always implies ``sharpe is None``:
+
+      * ``len(returns) <= 1`` -> ``(None, None, "insufficient_history")``.
+      * NaN vol (``std`` is NaN: all-NaN or single non-NaN observation, since
+        pandas skipna ``std`` needs >= 2 finite values) -> ``(None, None,
+        "nan_vol")`` gracefully, WITHOUT raising (the legacy anti-500 baseline).
+      * ``vol == 0.0`` (flat returns) -> ``(0.0, None, "zero_volatility")``.
+      * else -> ``(vol, sharpe, "ok")``.
+
+    Interior-NaN days (a guard-NaN flanked by valid returns, the shape
+    reconstruct_nav_and_twr emits on a dust/negative/flow-dominated interior day,
+    reachable via verify_strategy) are DROPPED by pandas skipna exactly as the
+    deleted helper did — vol/mean are over the valid days only.
+
+    DEAD BRANCHES (documented, NOT reproduced): the legacy ``"nan_mean"`` /
+    ``"nan_sharpe"`` statuses are UNREACHABLE under pandas skipna — once vol is
+    finite and nonzero, the same >= 2 non-NaN observations yield a finite mean
+    and a finite mean/vol, so neither status can occur.
+    """
+    if len(returns) <= 1:
+        return None, None, "insufficient_history"
+    # Legacy pandas skipna math, computed INLINE — deliberately NOT read from
+    # compute_all_metrics. The unified pipeline routes through quantstats
+    # _prepare_returns, whose price-detection heuristic silently pct_change()s an
+    # all-non-negative series with max>1 (a young all-winning account with one
+    # >100% day, reachable via verify_strategy), flipping the Sharpe sign. pandas
+    # std()/mean() default to skipna, so interior-NaN days are dropped from the
+    # statistic exactly as the deleted helper did; an all-NaN or single-obs series
+    # yields NaN std -> "nan_vol" gracefully (no raise, matching the legacy
+    # anti-500 baseline).
+    vol = _safe_float(returns.std() * math.sqrt(periods_per_year))
+    mean_ret = returns.mean() * periods_per_year
+    if vol is None:
+        return None, None, "nan_vol"
+    if vol == 0.0:
+        return 0.0, None, "zero_volatility"
+    sharpe = _safe_float(mean_ret / vol)
+    if sharpe is None:
+        # UNREACHABLE under skipna once vol is finite/nonzero (>= 2 non-NaN obs
+        # force a finite mean/vol); folded into nan_vol as a defensive backstop.
+        return vol, None, "nan_vol"
+    return vol, sharpe, "ok"
+
+
 def compute_risk_of_ruin(
     win_rate: float,
     payoff_ratio: float,

@@ -7,6 +7,7 @@ import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
 import { isSupportedExchange } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -353,48 +354,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const message = err instanceof Error ? err.message : "Validation failed";
     console.error("[strategies/create-with-key] caught exception:", message);
 
-    // Classify into a stable wizardErrors code so the client never sees the
-    // raw Railway message. HTTP status distinguishes client faults (400) from
-    // upstream faults (502/503) so dashboards/SLO consumers can tell 'bad key'
-    // from 'analytics-service unavailable' (H-0310).
-    const lower = message.toLowerCase();
-    let code = "UNKNOWN";
-    let status = 500;
-    if (lower.includes("signature") || lower.includes("invalid secret")) {
-      // Client supplied a wrong secret — their fault, 400.
-      code = "KEY_INVALID_SIGNATURE";
-      status = 400;
-    } else if (lower.includes("ip") && lower.includes("allow")) {
-      // Exchange IP-allowlist rejection — upstream policy, 502.
-      code = "KEY_IP_ALLOWLIST";
-      status = 502;
-    } else if (lower.includes("rate") || lower.includes("429")) {
-      // Exchange or Railway rate-limit — upstream throttle, 503.
-      code = "KEY_RATE_LIMIT";
-      status = 503;
-    } else if (lower.includes("timeout") || lower.includes("etimedout")) {
-      // Network timeout reaching analytics-service — upstream unavailable, 502.
-      code = "KEY_NETWORK_TIMEOUT";
-      status = 502;
-    } else if (
-      // FIX 3 facet b (Phase 110.1 / DOGFOOD-3): the Python probe fail-closed
-      // ("Could not verify the key's permission scopes…") is a TRANSIENT
-      // upstream blip, not a client fault or a 500 "something went wrong, team
-      // notified". Map it to a retryable 5xx with a retry-flavored code
-      // (mirrors the route's H-0310 5xx-for-upstream convention) so the wizard
-      // offers a clear-and-retry path instead of the terminal UNKNOWN copy.
-      lower.includes("could not verify") ||
-      lower.includes("permission scope") ||
-      lower.includes("probe")
-    ) {
-      code = "KEY_PROBE_FAILED";
-      status = 503;
-    } else if (lower.includes("trading") || lower.includes("withdraw")) {
-      // Should have been caught by the read_only check above; defensive 400.
-      code = "KEY_HAS_TRADING_PERMS";
-      status = 400;
-    }
-
+    // Classify into a stable wizardErrors code so the client never sees the raw
+    // Railway message (H-0305). The mapping is the SHARED
+    // classifyKeyValidationError (src/lib/wizardErrors.ts) — the SAME one
+    // composite/add-key uses — so the single-key and "+ Add another key" paths
+    // can never drift, and its HTTP status distinguishes client faults (400)
+    // from upstream faults (502/503) for SLO consumers (H-0310).
+    const { code, status } = classifyKeyValidationError(message);
     return NextResponse.json({ code }, { status, headers: NO_STORE_HEADERS });
   }
 });

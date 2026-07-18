@@ -1,9 +1,25 @@
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import "@testing-library/jest-dom/vitest";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import DrawdownChart, { deriveSnapshotDrawdowns } from "./DrawdownChart";
+import EquityChartWidget from "./EquityChart";
+import { TweaksProvider } from "../../context/TweaksContext";
+
+// CustomRangePicker / chart chrome consume next/navigation transitively — stub
+// so the widget mounts under jsdom without a router context.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+}));
 
 /**
  * Phase 07 / 07-03 — parallel-prop test coverage for the f7 equityDailyPoints
@@ -152,5 +168,181 @@ describe("deriveSnapshotDrawdowns — WR-01 boundary regression", () => {
 
   it("empty input returns empty array", () => {
     expect(deriveSnapshotDrawdowns([])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 115.1 / RD-2 — EquityChartWidget provenance indicator render states.
+//
+// The producer (queries.ts:derivePhase07Fields) decides derived-vs-legacy and
+// stamps `equityCurveSource`; the widget renders an HONEST indicator off it.
+// These pins prove: (1) a derived-trustworthy source renders the derived label,
+// (2) a legacy source renders the plainer legacy label and NEVER the
+// api_verified-grade treatment (the RD-2 honesty invariant).
+// ---------------------------------------------------------------------------
+
+// A Map-backed localStorage stub (jsdom's shim is partial) so TweaksProvider
+// hydrates cleanly. Registered via vi.stubGlobal so vi.unstubAllGlobals() in
+// afterEach fully removes it — the Node-22 leaked-stub class
+// (reference_ci_node22_vs_local_node25).
+function makeLocalStorageStub(): Storage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+    clear: () => {
+      store.clear();
+    },
+    key: () => null,
+    length: 0,
+  } as Storage;
+}
+
+// A positive-anchored dense series so the inner chart mounts (not warm-up).
+function makeSeries(n: number, start = 100_000): DailyPoint[] {
+  const pts: DailyPoint[] = [];
+  const d = new Date(Date.UTC(2026, 0, 1));
+  let v = start;
+  for (let i = 0; i < n; i++) {
+    pts.push({ date: d.toISOString().slice(0, 10), value: v });
+    v *= 1.002;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
+
+describe("EquityChartWidget — equity provenance indicator (115.1 / RD-2)", () => {
+  afterEach(() => {
+    // Node-22 leaked-stub hygiene: fully undo the localStorage stub.
+    vi.unstubAllGlobals();
+  });
+
+  function renderWidget(data: Record<string, unknown>) {
+    vi.stubGlobal("localStorage", makeLocalStorageStub());
+    return render(
+      <TweaksProvider>
+        <EquityChartWidget
+          data={data as unknown as WidgetProps["data"]}
+          timeframe="1YTD"
+          width={6}
+          height={4}
+        />
+      </TweaksProvider>,
+    );
+  }
+
+  it("derived source → renders the derived provenance label", () => {
+    const { getByTestId } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+      equityCurveSource: "derived",
+      derivedCurveComputedAt: "2026-03-13T00:00:00Z",
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance).toHaveAttribute("data-source", "derived");
+    expect(provenance.textContent).toMatch(/Derived from per-key returns/i);
+    // L2 (hydration safety): on the first render `now` is null (SSR/CSR parity —
+    // the minute-tick effect defers via setTimeout(0), not yet fired here). The
+    // toLocaleString() title is GATED on now !== null exactly like the visible
+    // freshness text, so it must be ABSENT in this state — an ungated title emits
+    // a timezone-dependent string that differs server(UTC)-vs-client → a hydration
+    // attribute mismatch. Pre-fix (ungated) this attribute was present → RED.
+    expect(provenance).not.toHaveAttribute("title");
+  });
+
+  it("legacy source → renders the legacy label and is NEVER api_verified-styled", () => {
+    const { getByTestId, queryByText } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+      equityCurveSource: "legacy",
+      derivedCurveComputedAt: null,
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance).toHaveAttribute("data-source", "legacy");
+    expect(provenance.textContent).toMatch(/Broker snapshot history/i);
+    // The HARD RULE (RD-2): a legacy-fallback curve must not read as
+    // verified-grade — no api_verified label anywhere on the surface.
+    expect(queryByText(/api[\s_-]?verified/i)).toBeNull();
+    expect(provenance.textContent).not.toMatch(/Derived from per-key/i);
+  });
+
+  it("absent source field → defaults to the legacy label (warm-up / first-connect safety)", () => {
+    const { getByTestId } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance).toHaveAttribute("data-source", "legacy");
+    expect(provenance.textContent).toMatch(/Broker snapshot history/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3 — the minute-tick re-render gate must advance the derived-curve
+// provenance freshness stamp, not just the sync stamp.
+//
+// The gate returned `prev` (skipping the re-render) unless the lastSyncAt
+// relative-time BUCKET changed. But the 115.1 provenance stamp derives from a
+// DIFFERENT timestamp (derivedCurveComputedAt). With stale keys (lastSyncAt
+// bucket flips slowly) and a just-recomputed curve, the provenance label froze
+// for up to ~24h. The fix also watches the provenance bucket in the gate.
+// ---------------------------------------------------------------------------
+describe("EquityChartWidget — provenance freshness minute-tick gate (Finding 3)", () => {
+  // Pin the wall clock so the relative-time buckets are deterministic.
+  const FIXED_NOW = Date.UTC(2026, 5, 1, 12, 0, 0);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    // Node-22 leaked-stub hygiene (mirrors the provenance describe above).
+    vi.unstubAllGlobals();
+  });
+
+  function renderWidget(data: Record<string, unknown>) {
+    vi.stubGlobal("localStorage", makeLocalStorageStub());
+    return render(
+      <TweaksProvider>
+        <EquityChartWidget
+          data={data as unknown as WidgetProps["data"]}
+          timeframe="1YTD"
+          width={6}
+          height={4}
+        />
+      </TweaksProvider>,
+    );
+  }
+
+  it("advances the derived provenance stamp when its bucket flips even though the sync bucket is stable", () => {
+    const { getByTestId } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+      equityCurveSource: "derived",
+      // ~70s ago → "1m ago" now, "2m ago" after a 60s tick (bucket flips).
+      derivedCurveComputedAt: new Date(FIXED_NOW - 70_000).toISOString(),
+      // 5h ago → "5h ago" bucket is STABLE across a single 60s tick.
+      lastSyncAt: new Date(FIXED_NOW - 5 * 3_600_000).toISOString(),
+      allKeysStale: true,
+    });
+
+    // Flush the setTimeout(0) that lifts `now` off null → first freshness paint.
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance.textContent).toMatch(/updated 1m ago/i);
+
+    // 60s later the SYNC bucket is unchanged (5h ago → 5h ago) but the DERIVED
+    // bucket flips (1m → 2m). The pre-fix gate watched only lastSyncAt, returned
+    // `prev`, froze `now`, and the stamp stuck at "1m ago". With the fix the gate
+    // also watches the provenance bucket, so `now` advances and the stamp updates.
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(provenance.textContent).toMatch(/updated 2m ago/i);
   });
 });

@@ -96,15 +96,18 @@ export function OptimizerPanel({ prefetch }: { prefetch: OptimizerPrefetch }) {
     return (
       <Card>
         {heading}
-        <p className="mt-3 text-small text-text-secondary">
-          Optimizer suggestions need a portfolio to optimize against. Create one
-          to see which strategies would improve it.
+        <p className="mt-3 text-small font-medium text-text-primary">
+          Simulate Impact needs a live portfolio
+        </p>
+        <p className="mt-1 text-small text-text-secondary">
+          Connect a read-only exchange API key to build your allocation, then
+          Simulate Impact models new strategies against it.
         </p>
         <Link
-          href="/portfolios"
+          href="/profile?tab=exchanges"
           className="mt-4 inline-flex items-center justify-center rounded-lg border border-border bg-white px-3 py-1.5 text-caption font-medium text-text-primary transition-colors hover:bg-page"
         >
-          Create portfolio →
+          Connect Exchange →
         </Link>
       </Card>
     );

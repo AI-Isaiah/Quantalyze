@@ -397,3 +397,66 @@ describe("AnalyticsUpstreamError", () => {
     expect(caught).not.toBeInstanceOf(mod.AnalyticsUpstreamError);
   });
 });
+
+// DOGFOOD (2026-07-18) — credential whitespace normalization. Reproduced live:
+// a CORRECT Deribit production key with a trailing space+newline on the secret
+// makes the exchange return 13004 invalid_credentials → the user reads "my
+// correct key is broken". validateKey/encryptKey now .trim() api_key/api_secret
+// (the single chokepoint every key-entry route funnels through). These pin that
+// the trimmed value is what actually hits the wire, so validate and encrypt
+// normalise identically (stored ciphertext == validated credential).
+describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whitespace", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  async function okFetch(json: Record<string, unknown>) {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    return fetchMock;
+  }
+
+  function sentBody(fetchMock: ReturnType<typeof vi.fn>) {
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    return JSON.parse(init.body as string) as Record<string, unknown>;
+  }
+
+  it("validateKey trims a trailing space+newline off key and secret before the wire", async () => {
+    const fetchMock = await okFetch({ valid: true, read_only: true });
+    const mod = await import("./analytics-client");
+    await mod.validateKey("deribit", "  GeSKFf5E ", "secret-value\n");
+    const body = sentBody(fetchMock);
+    expect(body.api_key).toBe("GeSKFf5E");
+    expect(body.api_secret).toBe("secret-value");
+  });
+
+  it("encryptKey trims IDENTICALLY, so stored ciphertext == validated credential", async () => {
+    const fetchMock = await okFetch({
+      api_key_encrypted: "ct",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek",
+      nonce: null,
+      kek_version: 1,
+    });
+    const mod = await import("./analytics-client");
+    await mod.encryptKey("deribit", " GeSKFf5E\t", " secret-value ");
+    const body = sentBody(fetchMock);
+    expect(body.api_key).toBe("GeSKFf5E");
+    expect(body.api_secret).toBe("secret-value");
+  });
+
+  it("does NOT trim the OKX passphrase (user-chosen, whitespace may be significant)", async () => {
+    const fetchMock = await okFetch({ valid: true, read_only: true });
+    const mod = await import("./analytics-client");
+    await mod.validateKey("okx", " k ", " s ", " pass phrase ");
+    const body = sentBody(fetchMock);
+    expect(body.api_key).toBe("k");
+    expect(body.passphrase).toBe(" pass phrase ");
+  });
+});

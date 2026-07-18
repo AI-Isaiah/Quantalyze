@@ -611,6 +611,20 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
   // ------------------------------------------------------------------
   // Directly owned (has a user-id column)
   // ------------------------------------------------------------------
+  // Phase 115.1 (migration 20260717233529): allocator_equity_derived is
+  // user-owned via allocator_id (= api_keys.user_id at derive time). It stores
+  // the derived allocator $-equity curve PLUS per-key real flows + USD magnitudes
+  // (payload.curve[].equity_usd, key_inputs:<id> flows) — the same sensitivity
+  // class as allocator_equity_snapshots.value_usd, which is already exported.
+  // GDPR Art. 15 requires it be part of the user's export. Erasure is the
+  // ON DELETE CASCADE from auth.users (the sanitize path), so the sanitize_user
+  // matrix needs no explicit row — recorded in SANITIZE_PARITY_ALLOWLIST in
+  // scripts/check-gdpr-export-coverage.ts (mirrors the scenarios/scenario_shares
+  // CASCADE-erasure allowlist pattern). The table has NO `id` column (PK is
+  // (allocator_id, kind)), so it carries an ORDER_COLUMN_OVERRIDES entry (`kind`,
+  // NOT NULL + unique within an allocator's rows) — without it getOrderColumn's
+  // `.order("id")` fallback would raise 42703 and 500 the export (NEW-C16-01).
+  { kind: "direct", table: "allocator_equity_derived", user_column: "allocator_id" },
   // Phase 07 (migration 070): allocator_equity_snapshots is user-owned via
   // allocator_id (= api_keys.user_id, enforced by the same owner-coherence
   // trigger as allocator_holdings). Per-day equity history is personal data —
@@ -955,6 +969,12 @@ export const USER_EXPORT_TABLES: readonly UserExportTable[] = [
  * cannot reproduce the 42703 these overrides exist to prevent.
  */
 export const ORDER_COLUMN_OVERRIDES: Readonly<Record<string, string>> = {
+  // Phase 115.1: allocator_equity_derived PK (allocator_id, kind), NO `id`
+  // column. Order by `kind` — NOT NULL and unique among the rows the export
+  // returns (they are all one allocator's, and (allocator_id, kind) is the PK),
+  // so the ORDER BY is total and deterministic. Without this override the `id`
+  // fallback raises Postgres 42703 → partial export → HTTP 500 (NEW-C16-01).
+  allocator_equity_derived: "kind",
   user_app_roles: "granted_at",
   user_favorites: "created_at",
   allocator_preferences: "updated_at",

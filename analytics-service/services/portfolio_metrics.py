@@ -1,4 +1,10 @@
-"""Portfolio performance metrics: TWR, MWR, Modified Dietz, period returns.
+"""Portfolio performance metrics: MWR, Modified Dietz, period returns.
+
+The cashflow/IRR path (money-weighted return, Modified Dietz, period returns)
+the unified backbone (``services.metrics.compute_all_metrics``) cannot reproduce
+— BACKBONE-01. The former forward TWR scalar and the Sharpe/vol helper were
+absorbed into the backbone and deleted in Phase 114 (E1); the scenario/allocator
+Sharpe and TWR now derive from that one backbone.
 
 Uses 252 trading days for annualisation (matching services/metrics.py).
 """
@@ -55,100 +61,6 @@ def _parse_date(value: Any) -> pd.Timestamp:
         # tz-naive like the equity index this module compares against.
         ts = ts.tz_localize(None)
     return ts.normalize()
-
-
-# ---------------------------------------------------------------------------
-# Time-Weighted Return (TWR)
-# ---------------------------------------------------------------------------
-
-def compute_twr(equity: pd.Series, events: list[dict[str, Any]]) -> float | None:
-    """Compute time-weighted return by chaining sub-period returns.
-
-    Cash flow events must have keys:
-      - event_date: ISO date string
-      - event_type: "deposit" | "withdrawal"
-      - amount: positive float
-
-    Day-0 deposits (same date as the first equity observation) are skipped
-    because there is no prior equity value to form a ratio.
-
-    Returns the total TWR as a decimal (e.g. 0.10 for +10%), or None if the
-    series is too short or all sub-periods produce invalid results.
-    """
-    if equity is None or len(equity) < 2:
-        return None
-
-    # Normalise the equity index to date-only timestamps.
-    eq = equity.copy()
-    eq.index = pd.to_datetime(eq.index).normalize()
-
-    # Build a set of cash-flow dates (normalised), excluding day-0 events.
-    start_date = eq.index[0]
-    cf_dates: set[pd.Timestamp] = set()
-    for ev in events:
-        ev_date = _parse_date(ev.get("event_date", "")).normalize()
-        if ev_date > start_date:
-            cf_dates.add(ev_date)
-
-    # Build breakpoints: [start, cf_date_1, cf_date_2, …, end].
-    breakpoints = sorted({start_date} | cf_dates | {eq.index[-1]})
-
-    sub_returns: list[float] = []
-    for i in range(len(breakpoints) - 1):
-        t0 = breakpoints[i]
-        t1 = breakpoints[i + 1]
-
-        # Value just before the cash flow at t1 (use the last observation ≤ t1).
-        mask = (eq.index >= t0) & (eq.index <= t1)
-        segment = eq[mask]
-        if len(segment) < 2:
-            # M-0698: too few observations to form an interior return; skip.
-            logger.debug(
-                "compute_twr: dropping sub-period %s->%s (only %d observation(s) in range)",
-                t0.date(), t1.date(), len(segment),
-            )
-            continue
-
-        begin_val = float(segment.iloc[0])
-        end_val = float(segment.iloc[-1])
-
-        # Subtract any cash flows that arrived ON t1 (inflows inflate end-value).
-        cf_adjustment = 0.0
-        for ev in events:
-            ev_date = _parse_date(ev.get("event_date", "")).normalize()
-            if ev_date == t1:
-                signed = float(ev.get("amount", 0))
-                if ev.get("event_type") == "withdrawal":
-                    signed = -signed
-                cf_adjustment += signed
-
-        # End value before the cash flow = end_val - cf_adjustment.
-        end_before_cf = end_val - cf_adjustment
-
-        if begin_val == 0:
-            # M-0698: a zero begin-value means the portfolio passed through 0
-            # (a meaningful blow-up/recover event). We cannot form a ratio, so
-            # the sub-period is skipped — but warn so the resulting TWR being
-            # computed from a strict subset of sub-periods is visible in logs.
-            logger.warning(
-                "compute_twr: sub-period %s->%s has begin_val=0 (portfolio at zero); "
-                "skipping — TWR will be computed from a strict subset of sub-periods",
-                t0.date(), t1.date(),
-            )
-            continue  # Cannot compute a ratio; skip this sub-period.
-
-        sub_r = (end_before_cf / begin_val) - 1.0
-        sub_returns.append(sub_r)
-
-    if not sub_returns:
-        return None
-
-    twr = 1.0
-    for r in sub_returns:
-        twr *= (1.0 + r)
-    twr -= 1.0
-
-    return _safe_float(twr)
 
 
 # ---------------------------------------------------------------------------

@@ -135,6 +135,8 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   lastSyncAt: null,
   hasSyncing: false,
   equityDailyPoints: [],
+  equityCurveSource: "legacy",
+  derivedCurveComputedAt: null,
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
   activeVenues: [],
@@ -222,6 +224,38 @@ async function expectOnlyVisibleBodyAsync(
     expect(screen.queryByTestId(other)).not.toBeInTheDocument();
   }
 }
+
+describe("AllocationsTabs — Phase 117 / UIFIX-02 clip-proof tab focus ring", () => {
+  beforeEach(() => {
+    resetRouterMocks();
+  });
+
+  // WHY (Rule 9 — intent): the tab strip is `overflow-x-auto` on mobile and the
+  // buttons hang `-mb-[10px]` below it. The UA default `outline` paints OUTSIDE
+  // the border edge, so the overflow container CLIPS it at the strip edge — a
+  // keyboard user tabbing through the tabs sees no focus indicator (WCAG 2.4.7).
+  // The fix is two tokens working together: `focus-visible:outline-none`
+  // SUPPRESSES the UA outline (so nothing paints outside to be clipped), and the
+  // INSET box-shadow ring paints INSIDE the button → never clipped. So the
+  // correct idiom CONTAINS `outline-none` (suppression) but must NOT reintroduce
+  // an outset outline (`outline-2` / `outline-offset` / `outline-accent`).
+  // Full-opacity `ring-accent` (NOT `ring-accent/20`) clears WCAG 1.4.11.
+  it("[UIFIX-02] a rendered tab button carries the inset ring tokens AND suppresses the clip-prone UA outline", () => {
+    setSearchParams("");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const overviewTab = screen.getByRole("tab", { name: "Overview" });
+    expect(overviewTab.className).toContain("focus-visible:ring-2");
+    expect(overviewTab.className).toContain("focus-visible:ring-inset");
+    expect(overviewTab.className).toContain("focus-visible:ring-accent");
+    // The UA outline must be suppressed so it can't paint outside and clip.
+    expect(overviewTab.className).toContain("focus-visible:outline-none");
+    // But no OUTSET outline idiom may be reintroduced (only `-none` is allowed).
+    expect(overviewTab.className).not.toMatch(
+      /focus-visible:outline-(?!none)(offset|2|4|accent|\[)/,
+    );
+    expect(overviewTab.className).not.toContain("ring-accent/20");
+  });
+});
 
 describe("AllocationsTabs — Phase 09.1 D-04 / D-05 / D-06", () => {
   beforeEach(() => {

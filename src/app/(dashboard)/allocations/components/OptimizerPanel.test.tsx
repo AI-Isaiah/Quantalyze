@@ -87,7 +87,7 @@ function prefetch(overrides: Partial<OptimizerPrefetch> = {}): OptimizerPrefetch
 }
 
 describe("OptimizerPanel", () => {
-  it("0-portfolio gate: honest copy + Create portfolio link, no optimizer mount", () => {
+  it("0-portfolio gate: honest connect-exchange remedy (secondary), no /portfolios dead-end, no optimizer mount", () => {
     render(
       <OptimizerPanel
         prefetch={prefetch({
@@ -99,13 +99,26 @@ describe("OptimizerPanel", () => {
         })}
       />,
     );
+    // Honest copy names WHY the affordance is inert (ADDALLOC-04, Rule-9 intent).
+    expect(
+      screen.getByText("Simulate Impact needs a live portfolio"),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(
-        "Optimizer suggestions need a portfolio to optimize against. Create one to see which strategies would improve it.",
+        "Connect a read-only exchange API key to build your allocation, then Simulate Impact models new strategies against it.",
       ),
     ).toBeInTheDocument();
-    const create = screen.getByRole("link", { name: /Create portfolio/i });
-    expect(create).toHaveAttribute("href", "/portfolios");
+    // The one clickable remedy deep-links the canonical allocator onboarding path.
+    const connect = screen.getByRole("link", { name: /Connect Exchange/i });
+    expect(connect).toHaveAttribute("href", "/profile?tab=exchanges");
+    // The manager-only /portfolios dead-end (ROLE-02 redirect()-bounce) is gone.
+    expect(
+      screen.queryByRole("link", { name: /Create portfolio/i }),
+    ).not.toBeInTheDocument();
+    // Secondary (non-accent) treatment — the remedy must not compete with the
+    // primary header CTA (UI-SPEC §Color).
+    expect(connect.className).toContain("border-border");
+    expect(connect.className).not.toContain("bg-accent");
     // No optimizer states leak in.
     expect(screen.queryByText(/Run Optimizer/i)).not.toBeInTheDocument();
   });

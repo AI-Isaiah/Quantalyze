@@ -2024,6 +2024,13 @@ function EquityChartWidgetInner({
   const stale = d.allKeysStale ?? false;
   const lastSyncAt = d.lastSyncAt ?? null;
   const hasBenchmark = !!benchmark && benchmark.length > 0;
+  // Phase 115.1 / RD-2 — honest provenance of the equity series. Defaults to
+  // "legacy" when the field is absent (first-connect / warm-up payloads omit
+  // the equity leaves). The derived path is NEVER given the accent
+  // `api_verified` treatment — both labels render in muted steady-state copy so
+  // a legacy-fallback curve can't read as verified-grade (DESIGN.md honesty).
+  const equityCurveSource = d.equityCurveSource ?? "legacy";
+  const derivedCurveComputedAt = d.derivedCurveComputedAt ?? null;
 
   // `now` is null on first render to keep SSR/CSR output identical. The
   // minute tick gates on label change: when the resolved relative-time
@@ -2036,11 +2043,28 @@ function EquityChartWidgetInner({
     function advance() {
       setNow((prev) => {
         const next = Date.now();
-        if (!lastSyncAt || prev === null) return next;
-        return formatRelativeTime(lastSyncAt, prev) ===
-          formatRelativeTime(lastSyncAt, next)
-          ? prev
-          : next;
+        if (prev === null) return next;
+        // The tick must advance when ANY live relative-time label it drives would
+        // change bucket. Two labels ride this `now`: the sync stamp (lastSyncAt)
+        // AND the 115.1 derived-curve provenance stamp (derivedCurveComputedAt).
+        // Watching only lastSyncAt froze the provenance label for up to ~24h when
+        // keys were stale (its bucket flips slowly) but the derived curve had just
+        // been recomputed — a fresh "just now" stamp stuck reading stale.
+        const watchProvenance =
+          equityCurveSource === "derived" && derivedCurveComputedAt !== null;
+        // Nothing with a live relative-time label to watch → advance (preserves
+        // the original !lastSyncAt fast-path).
+        if (!lastSyncAt && !watchProvenance) return next;
+        const syncChanged =
+          !!lastSyncAt &&
+          formatRelativeTime(lastSyncAt, prev) !==
+            formatRelativeTime(lastSyncAt, next);
+        const provenanceChanged =
+          equityCurveSource === "derived" &&
+          derivedCurveComputedAt !== null &&
+          formatRelativeTime(derivedCurveComputedAt, prev) !==
+            formatRelativeTime(derivedCurveComputedAt, next);
+        return syncChanged || provenanceChanged ? next : prev;
       });
     }
     // setTimeout(0) defers the first set out of the render commit phase
@@ -2051,11 +2075,26 @@ function EquityChartWidgetInner({
       clearTimeout(tick);
       clearInterval(interval);
     };
-  }, [lastSyncAt]);
+  }, [lastSyncAt, derivedCurveComputedAt, equityCurveSource]);
   // B14 / NEW-C09-04 (H-1226): pass the minute-tick `now` (null on first
   // render) so the resolved relative-time copy updates live; the shared
   // `syncStampLabel` owns the never-synced / stale / fresh copy rules.
   const syncStampCopy = syncStampLabel(lastSyncAt, stale, now);
+
+  // Phase 115.1 / RD-2 — muted provenance copy for the equity series. Derived:
+  // an honest description of the basis + a muted relative freshness stamp gated
+  // on `now` (SSR/CSR parity, mirroring syncStampLabel's nowMs===null branch).
+  // Legacy: the plainer "broker snapshot history" phrasing. Neither carries the
+  // accent/`api_verified` treatment — a legacy-fallback curve is never dressed
+  // as verified-grade.
+  const provenanceLabel =
+    equityCurveSource === "derived"
+      ? "Derived from per-key returns + flows"
+      : "Broker snapshot history";
+  const provenanceFreshness =
+    equityCurveSource === "derived" && derivedCurveComputedAt && now !== null
+      ? formatRelativeTime(derivedCurveComputedAt, now)
+      : null;
 
   const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
   const [customRange, setCustomRange] = useState<CustomRange | null>(null);
@@ -2192,6 +2231,31 @@ function EquityChartWidgetInner({
                 label={o.label}
               />
             ))}
+          </div>
+          {/* Phase 115.1 / RD-2 — honest provenance of the equity series.
+              Muted micro copy per DESIGN.md (steady-state, honest-empty). The
+              legacy fallback is DELIBERATELY not accent/`api_verified`-styled:
+              a broker-snapshot curve must never read as verified-grade. */}
+          <div
+            data-testid="equity-provenance"
+            data-source={equityCurveSource}
+            className="text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted"
+            title={
+              // L2: gate the toLocaleString() title on `now !== null` exactly
+              // like the visible provenanceFreshness text below. toLocaleString is
+              // timezone/locale-dependent, so an UNGATED title renders a different
+              // string on the server (UTC) vs the client → a hydration attribute
+              // mismatch. On the first render (now === null, SSR/CSR parity) the
+              // title is absent; it appears after mount.
+              equityCurveSource === "derived" &&
+              derivedCurveComputedAt &&
+              now !== null
+                ? new Date(derivedCurveComputedAt).toLocaleString()
+                : undefined
+            }
+          >
+            {provenanceLabel}
+            {provenanceFreshness ? ` · updated ${provenanceFreshness}` : ""}
           </div>
         </div>
         <div

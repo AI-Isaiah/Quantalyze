@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import {
   formatKeyError,
   gateFailureToWizardError,
+  classifyKeyValidationError,
   WIZARD_ERROR_COPY,
   CSV_RULE_LABELS,
   CSV_UPLOAD_STEP_HEADINGS,
@@ -557,5 +558,48 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
         .map((o) => `  ${o.code} @ ${o.file}`)
         .join("\n")}`,
     ).toEqual([]);
+  });
+});
+
+describe("classifyKeyValidationError — shared key-entry error mapping", () => {
+  // The single source of truth for BOTH create-with-key and composite/add-key.
+  // Each case pins (message → code + status) so the "+ Add another key" path can
+  // never drift from the single-key path.
+  const cases: Array<[string, WizardErrorCode, number]> = [
+    ["Invalid signature for request", "KEY_INVALID_SIGNATURE", 400],
+    ["invalid secret provided", "KEY_INVALID_SIGNATURE", 400],
+    // DOGFOOD (2026-07-18): the worker's stable AUTH_FAILED detail + the raw
+    // Deribit 13004 phrase. Both must land on the actionable 400, NOT UNKNOWN.
+    ["Authentication failed. Check your API key and secret.", "KEY_AUTH_FAILED", 400],
+    ['deribit {"error":{"code":13004,"message":"invalid_credentials"}}', "KEY_AUTH_FAILED", 400],
+    ["Your IP is not on the allowlist", "KEY_IP_ALLOWLIST", 502],
+    ["Rate limit exceeded", "KEY_RATE_LIMIT", 503],
+    ["429 Too Many Requests", "KEY_RATE_LIMIT", 503],
+    ["connect ETIMEDOUT 10.0.0.1:443", "KEY_NETWORK_TIMEOUT", 502],
+    ["Could not verify the key's permission scopes", "KEY_PROBE_FAILED", 503],
+    ["This key has trading permissions", "KEY_HAS_TRADING_PERMS", 400],
+    ["some totally unclassified upstream string", "UNKNOWN", 500],
+  ];
+
+  for (const [message, code, status] of cases) {
+    it(`maps ${JSON.stringify(message.slice(0, 40))} → ${code} (${status})`, () => {
+      expect(classifyKeyValidationError(message)).toEqual({ code, status });
+    });
+  }
+
+  it("orders signature BEFORE auth-failed so a true signature mismatch keeps its specific code", () => {
+    // A message carrying BOTH tokens must resolve to the more specific signature
+    // code, never the broader auth-failed one.
+    expect(
+      classifyKeyValidationError("signature mismatch: authentication failed").code,
+    ).toBe("KEY_INVALID_SIGNATURE");
+  });
+
+  it("does NOT mislabel FastAPI's generic 'invalid authentication credentials' 401 as KEY_AUTH_FAILED", () => {
+    // The underscore form (invalid_credentials) is the exchange fault; the
+    // spaced form is a server/service-key misconfig — it must not borrow the
+    // user-facing bad-key copy.
+    const { code } = classifyKeyValidationError("Invalid authentication credentials");
+    expect(code).not.toBe("KEY_AUTH_FAILED");
   });
 });

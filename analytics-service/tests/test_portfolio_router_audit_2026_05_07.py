@@ -9,7 +9,15 @@ the audit fix pass:
   - alert dedup select-then-insert respects existing rows (H-1070)
   - _build_normalized_weights helper (M-0624)
   - _series_to_curve helper (M-0625)
-  - _compute_sharpe_and_vol helper + status codes (M-0626, M-0615)
+  - sharpe_vol_status_from_backbone status codes (M-0626, M-0615) — the legacy
+    router Sharpe/vol helper was DELETED in Phase 114
+    (E1 backbone absorption, BACKBONE-01); its status-code intent is PORTED to
+    the backbone-module helper services.metrics.sharpe_vol_status_from_backbone
+    (3-tuple: vol, sharpe, status — mean_ret dropped, both call sites discarded
+    it). Every REACHABLE status is pinned (ok, insufficient_history,
+    zero_volatility, nan_vol); nan_mean/nan_sharpe are proven-unreachable dead
+    branches under pandas skipna (Phase 114-02) and are deliberately NOT
+    asserted.
   - _redact_credentials never leaks raw secrets to logs (M-0628, C-0214)
   - PortfolioOptimizerRequest validator rejects NaN/Inf/negative (H-0589)
   - matching candidate sort + NaN-safe idxmax (H-0570, H-0587)
@@ -39,12 +47,12 @@ from routers import portfolio as portfolio_mod
 from routers.portfolio import (
     _build_normalized_weights,
     _check_verify_strategy_email_rate,
-    _compute_sharpe_and_vol,
     _generate_alerts,
     _records_to_series,
     _redact_credentials,
     _series_to_curve,
 )
+from services.metrics import sharpe_vol_status_from_backbone
 
 
 # ---------------------------------------------------------------------------
@@ -265,13 +273,21 @@ class TestSeriesToCurve:
 
 
 # ---------------------------------------------------------------------------
-# _compute_sharpe_and_vol (M-0626, M-0615)
+# sharpe_vol_status_from_backbone (M-0626, M-0615)
+#
+# PORTED from the deleted legacy router Sharpe/vol helper (Phase 114
+# E1 backbone absorption). The backbone-module helper returns a 3-tuple
+# (vol, sharpe, status) — mean_ret was dropped because both production call
+# sites discarded it. Status-code intent is preserved for EVERY reachable code
+# (ok, insufficient_history, zero_volatility, nan_vol). nan_mean/nan_sharpe are
+# proven-unreachable dead branches under pandas skipna (114-02) and are NOT
+# asserted here.
 # ---------------------------------------------------------------------------
 
-class TestComputeSharpeAndVol:
+class TestSharpeVolStatusFromBackbone:
     def test_single_observation_insufficient_history(self):
         s = pd.Series([0.01], index=pd.DatetimeIndex(["2026-01-01"]))
-        vol, mean_ret, sharpe, status = _compute_sharpe_and_vol(s)
+        vol, sharpe, status = sharpe_vol_status_from_backbone(s)
         assert status == "insufficient_history"
         assert vol is None
         assert sharpe is None
@@ -279,7 +295,7 @@ class TestComputeSharpeAndVol:
     def test_flat_series_zero_volatility(self):
         idx = pd.DatetimeIndex(["2026-01-01", "2026-01-02", "2026-01-03"])
         s = pd.Series([0.0, 0.0, 0.0], index=idx)
-        vol, mean_ret, sharpe, status = _compute_sharpe_and_vol(s)
+        vol, sharpe, status = sharpe_vol_status_from_backbone(s)
         assert status == "zero_volatility"
         assert sharpe is None
 
@@ -289,19 +305,57 @@ class TestComputeSharpeAndVol:
             np.random.normal(0.001, 0.01, 100),
             index=pd.bdate_range("2026-01-01", periods=100),
         )
-        vol, mean_ret, sharpe, status = _compute_sharpe_and_vol(s)
+        vol, sharpe, status = sharpe_vol_status_from_backbone(s)
         assert status == "ok"
         assert sharpe is not None
         assert math.isfinite(sharpe)
+
+    def test_all_nan_returns_nan_vol_without_raising(self):
+        """BLOCKER follow-through: an all-NaN, len>=2 series slips past
+        compute_all_metrics's len<2-only guard, so the helper's pre-backbone
+        pd.isna(std) guard must return (None, None, "nan_vol") WITHOUT raising
+        (anti-500). This is the reachable status the legacy suite never covered;
+        adding it makes the ported suite exercise every REACHABLE code, not just
+        the three the legacy tests hit."""
+        idx = pd.DatetimeIndex(["2026-01-01", "2026-01-02", "2026-01-03"])
+        s = pd.Series([np.nan, np.nan, np.nan], index=idx)
+        vol, sharpe, status = sharpe_vol_status_from_backbone(s)
+        assert (vol, sharpe, status) == (None, None, "nan_vol")
+
+    def test_interior_nan_uses_skipna_basis_not_diluted(self):
+        """CR-01: the verify_strategy path feeds interior-NaN returns (a guard-NaN
+        flanked by valid returns, emitted by reconstruct_nav_and_twr on a
+        dust/negative/flow-dominated interior day). Such a series has finite std,
+        so it slips past both pre-backbone guards and reaches the pipeline. The
+        legacy helper used pandas skipna (NaN days DROPPED); the pipeline's
+        _prepare_returns fillna(0)s them, DILUTING vol/mean. The helper must
+        reproduce the skipna basis, so vol equals the dropna() oracle and is
+        strictly LARGER than the fillna(0)-diluted value it would otherwise show.
+        RED pre-fix (helper returned the diluted vol), GREEN after dropna()."""
+        idx = pd.bdate_range("2026-01-01", periods=10)
+        r = pd.Series(
+            np.random.default_rng(7).normal(0.001, 0.01, 10),
+            index=idx,
+            dtype="float64",
+        )
+        r.iloc[3] = np.nan
+        r.iloc[7] = np.nan
+        skipna_vol = r.dropna().std() * math.sqrt(252)
+        diluted_vol = r.fillna(0).std() * math.sqrt(252)
+        assert skipna_vol > diluted_vol  # the two bases genuinely differ
+        vol, _sharpe, status = sharpe_vol_status_from_backbone(r, periods_per_year=252)
+        assert status == "ok"
+        assert vol == pytest.approx(skipna_vol, rel=1e-9)
+        assert vol != pytest.approx(diluted_vol, rel=1e-9)
 
     def test_returns_status_distinguishes_zero_vol_from_history(self):
         """Audit M-0615: dashboard must distinguish empty-state reasons."""
         # Insufficient history
         s1 = pd.Series([0.01], index=pd.DatetimeIndex(["2026-01-01"]))
-        _, _, _, st1 = _compute_sharpe_and_vol(s1)
+        _, _, st1 = sharpe_vol_status_from_backbone(s1)
         # Zero vol (multi-day flat)
         s2 = pd.Series([0.0] * 3, index=pd.bdate_range("2026-01-01", periods=3))
-        _, _, _, st2 = _compute_sharpe_and_vol(s2)
+        _, _, st2 = sharpe_vol_status_from_backbone(s2)
         assert st1 != st2
 
 

@@ -221,7 +221,20 @@ const FROZEN_ISLANDS: string[] = [
   // neuter witnesses).
   "src/hooks/useBreakpoint.ts",
   "src/app/(dashboard)/allocations/lib/montecarlo.worker.ts",
-  "src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx",
+  // v1.11 Phase 115.1 (RD-2 / BACKBONE-02): `EquityChart.tsx` is REMOVED from the
+  // frozen set. Same category as the scenario.ts / #597 compute.ts / Phase-90
+  // TimeSeriesChart.tsx / Phase-103 factsheet-context.tsx carve-outs above — a
+  // deliberate, reviewed ADDITIVE edit, NOT a v1.4 VISUAL restyle reshape and NOT
+  // an interaction-spine change. 115.1 adds an HONEST equity-curve provenance
+  // indicator (the `data-source` <div> reading the payload's `equityCurveSource` +
+  // `derivedCurveComputedAt`, with a `now`-gated freshness suffix and title for
+  // SSR/CSR hydration parity). The locked touch/interaction math spine (the
+  // TouchTooltip/useTapPin path, the MC worker contract) is UNTOUCHED — the added
+  // markup is display-only and inert to the tap-pin/tooltip geometry. The reviewed
+  // behavior is pinned by its OWN suite: the "EquityChartWidget — equity provenance
+  // indicator (115.1 / RD-2)" block in equity-curve.equitydailypoints.test.tsx
+  // (derived/legacy/absent-source labels + the L2 now-gated-title hydration pin).
+  // TouchTooltip.tsx + useTapPin.ts STAY FROZEN below.
   "src/components/charts/TouchTooltip.tsx",
   "src/hooks/useTapPin.ts",
   // Phase 54 (BP-03): the 3 factsheet chart-internal SVGs are off-globbed from

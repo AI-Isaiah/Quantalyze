@@ -21,6 +21,11 @@ import { join, relative, resolve } from "node:path";
  *        context, same CTA label is intentional)
  *   - src/app/(dashboard)/allocations/components/OnboardingBanner.tsx
  *       (Phase 11 / Plan 05 forward-compat — banner ships in Plan 05)
+ *   - src/app/(dashboard)/allocations/components/OptimizerPanel.tsx
+ *       (Phase 116 / ADDALLOC-04 — the 0-portfolio Simulate-Impact remedy
+ *        carries distinct "Simulate Impact needs a live portfolio" copy and
+ *        deep-links the allocator connect-exchange path; different empty
+ *        context, same CTA label is intentional — mirrors ScenarioComposer)
  *
  * Implementation uses node:fs (readdirSync, readFileSync, statSync)
  * only. Subprocess invocations are forbidden by security hooks; this
@@ -52,6 +57,7 @@ describe("EmptyState reuse mandate (D-10) — no duplicate Connect Exchange CTA 
       "src/app/(dashboard)/allocations/EmptyState.tsx",
       "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
       "src/app/(dashboard)/allocations/components/OnboardingBanner.tsx",
+      "src/app/(dashboard)/allocations/components/OptimizerPanel.tsx",
     ]);
     const offenders = files.filter((p) => {
       if (allowList.has(p)) return false;

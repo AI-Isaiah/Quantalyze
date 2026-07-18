@@ -28,8 +28,13 @@ from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
-from services.metrics import _safe_float, sanitize_metrics
-from services.portfolio_metrics import compute_twr, compute_mwr, compute_period_returns
+from services.metrics import (
+    _safe_float,
+    sanitize_metrics,
+    sharpe_vol_status_from_backbone,
+    total_return_from_equity,
+)
+from services.portfolio_metrics import compute_mwr, compute_period_returns
 from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
 from services.portfolio_risk import (
     compute_attribution,
@@ -593,38 +598,6 @@ def _series_to_curve(series: pd.Series) -> list[dict[str, Any]]:
     ]
 
 
-def _compute_sharpe_and_vol(returns: pd.Series) -> tuple[float | None, float | None, float | None, str]:
-    """Compute annualised vol, mean_ret, sharpe + a status code.
-
-    Returns (vol, mean_ret, sharpe, sharpe_status). Status codes are
-    deliberately mutually exclusive so the data_quality channel can
-    distinguish each empty-state reason (review CR-3):
-
-      "ok"                   — sharpe is a real float.
-      "insufficient_history" — fewer than 2 samples.
-      "zero_volatility"      — vol == 0 (flat returns).
-      "nan_vol"              — vol is NaN (typically all-NaN returns).
-      "nan_mean"             — vol is finite but mean_ret is NaN.
-      "nan_sharpe"           — mean_ret/vol arithmetic produced NaN/inf.
-
-    Replaces three structurally identical implementations (audit M-0626).
-    """
-    if len(returns) <= 1:
-        return None, None, None, "insufficient_history"
-    vol = returns.std() * np.sqrt(252)
-    mean_ret = returns.mean() * 252
-    if vol is None or vol == 0 or (isinstance(vol, float) and np.isnan(vol)):
-        if vol == 0:
-            status = "zero_volatility"
-        else:
-            status = "nan_vol"
-        return _safe_float(vol), _safe_float(mean_ret), None, status
-    if mean_ret is None or (isinstance(mean_ret, float) and np.isnan(mean_ret)):
-        return _safe_float(vol), None, None, "nan_mean"
-    sharpe = _safe_float(mean_ret / vol)
-    return _safe_float(vol), _safe_float(mean_ret), sharpe, "ok" if sharpe is not None else "nan_sharpe"
-
-
 # ---------------------------------------------------------------------------
 # Internal computation helper (also callable from the cron module)
 # ---------------------------------------------------------------------------
@@ -808,7 +781,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
 
         # Compute TWR per strategy
         for sid, eq in strategy_equity.items():
-            twr = compute_twr(eq, [])
+            twr = total_return_from_equity(eq)
             if twr is not None:
                 strategy_twrs[sid] = twr
 
@@ -832,8 +805,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         )
 
         # Portfolio TWR
-        portfolio_twr = compute_twr(
-            (1 + portfolio_returns_series).cumprod(), []
+        portfolio_twr = total_return_from_equity(
+            (1 + portfolio_returns_series).cumprod()
         )
 
         # Period returns
@@ -945,7 +918,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 b_aligned = benchmark_rets.reindex(aligned.index).dropna()
                 if len(aligned) >= 30:
                     corr = _safe_float(float(aligned.corr(b_aligned)))
-                    btc_twr = compute_twr((1 + b_aligned).cumprod(), [])
+                    btc_twr = total_return_from_equity((1 + b_aligned).cumprod())
                     benchmark_comparison = {
                         "symbol": "BTC",
                         "correlation": corr,
@@ -982,7 +955,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Portfolio-level sharpe and volatility. Track WHY the metric is None
         # so the dashboard can show the right empty-state instead of conflating
         # "insufficient history" with "flat vol" with "broken compute".
-        vol, _mean_ret, sharpe, sharpe_status = _compute_sharpe_and_vol(portfolio_returns_series)
+        vol, sharpe, sharpe_status = sharpe_vol_status_from_backbone(portfolio_returns_series)
         vol_status = "insufficient_history" if sharpe_status == "insufficient_history" else "ok"
 
         running_max = cumulative.cummax()
@@ -2298,12 +2271,15 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
         cumulative = (1 + returns).cumprod()
         equity_curve = _series_to_curve(cumulative)
 
-        # TWR
-        twr = compute_twr(cumulative, [])
+        # TWR — the forward TWR scalar now derives from the equity endpoint ratio
+        # via total_return_from_equity (Phase 114 / BACKBONE-01).
+        twr = total_return_from_equity(cumulative)
 
-        # Annualized sharpe + vol — extracted into helper so the three router
-        # callsites + services/portfolio_optimizer don't drift apart.
-        _vol, _mean_ret, sharpe, _sharpe_status = _compute_sharpe_and_vol(returns)
+        # Annualized sharpe + vol now derive from the unified backbone
+        # compute_all_metrics via sharpe_vol_status_from_backbone (Phase 114 /
+        # BACKBONE-01), so the router call sites read the one backbone instead of
+        # a private helper that could drift apart.
+        _vol, sharpe, _sharpe_status = sharpe_vol_status_from_backbone(returns)
 
         matched_strategy_id: str | None = None
         # Distinguish FOUR outcomes the previous code collapsed:

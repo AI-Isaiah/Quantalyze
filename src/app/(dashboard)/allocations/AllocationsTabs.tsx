@@ -23,6 +23,12 @@ import type { SavedScenarioRow } from "./components/ScenarioComposer";
 import { TweaksProvider, useTweakValue } from "./context/TweaksContext";
 import { TweaksToggle } from "./components/TweaksToggle";
 import { Tweaks } from "./components/Tweaks";
+// Phase 116 / ADDALLOC-02 — the real-data onboarding overlay. Hosted at the
+// tab level so the context-aware header "+ Allocation" button can open it on
+// Holdings / Overview (where ScenarioComposer, its other host, is not mounted).
+// Imported statically: it renders null while closed, so WizardClient (its heavy
+// body) only mounts on open — no Overview-first bundle cost from the import.
+import { ContributionWizardOverlay } from "./components/ContributionWizardOverlay";
 // Phase 11 / 11-05 — onboarding nudge surfaces (S1 + S2). Both render
 // above the existing tab nav when apiKeysCount === 0. Light client
 // components — kept as direct imports rather than next/dynamic so they
@@ -317,13 +323,15 @@ const TAB_LABELS: Record<TabKey, string> = {
 
 // Tab-button class strings — pulled out of the render JSX so the active /
 // inactive delta isn't hidden in two ~200-char ternary branches that share
-// ~90% of their characters. The full strings below are byte-identical to
-// the previous inlined versions so the Tailwind class order matches the
-// dashboard-parity contract.
+// ~90% of their characters. Phase 117 / UIFIX-02 repointed the focus idiom off
+// the trailing `focus-visible:outline*` (which paints OUTSIDE the border edge →
+// clipped by the strip's `overflow-x-auto` on mobile, and by the tabs' own
+// `-mb-[10px]` overhang) onto the CLIP-PROOF inset ring; every other token stays
+// byte-identical to the prior inlined versions (dashboard-parity Tailwind order).
 const TAB_BUTTON_ACTIVE =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 const TAB_BUTTON_INACTIVE =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent";
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 
 const TAB_COUNT_BADGE_ACTIVE =
   "rounded-sm bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";
@@ -465,6 +473,135 @@ export function AllocationsTabs(
     else params.set("tab", key);
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+
+  // Phase 116 / ADDALLOC — context-aware header "+ Allocation" button.
+  //
+  // `addButtonRef` is the trigger the overlays return focus to on close (the
+  // overlay pulls focus IN on open but never restores the trigger — that is the
+  // host's job, because the trigger lives here in AllocationsTabs, not in the
+  // overlay). `contributeOpen` hosts the Holdings/Overview onboarding wizard at
+  // the tab level so it is reachable on tabs where ScenarioComposer is NOT
+  // mounted. This is deliberately ADDITIVE: the composer keeps its OWN internal
+  // contributeOpen (the Browse → "Add your own" handoff) byte-untouched; a
+  // closed overlay renders null, so the UI-SPEC single-modal contract holds.
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const [contributeOpen, setContributeOpen] = useState(false);
+
+  // Phase 116 / ADDALLOC-01 — the "+ Strategy" (scenario tab) dispatch signals
+  // the composer's StrategyBrowseDrawer to open. The composer registers an
+  // imperative open fn here (onRegisterOpenBrowse); we store it and call it on
+  // click. Because ScenarioComposer is dynamic-imported (scenario-tab-only), a
+  // click can land BEFORE registration during the chunk-load window —
+  // pendingBrowseOpenRef records that so handleRegisterOpenBrowse drains it
+  // (ADDALLOC-03: no silent no-op during the loading window).
+  // headerBrowseTriggeredRef marks a header-initiated open so a subsequent
+  // Browse close returns focus to the header button (while an in-composer Browse
+  // close does not steal focus).
+  const composerBrowseOpenRef = useRef<(() => void) | null>(null);
+  const pendingBrowseOpenRef = useRef(false);
+  const headerBrowseTriggeredRef = useRef(false);
+
+  const handleRegisterOpenBrowse = useCallback((open: () => void) => {
+    composerBrowseOpenRef.current = open;
+    if (pendingBrowseOpenRef.current) {
+      pendingBrowseOpenRef.current = false;
+      open();
+    }
+  }, []);
+
+  const handleBrowseClosed = useCallback(() => {
+    if (headerBrowseTriggeredRef.current) {
+      headerBrowseTriggeredRef.current = false;
+      addButtonRef.current?.focus();
+    }
+  }, []);
+
+  // Phase 116 review WR-01 — the composer's Browse → "Add your own" handoff
+  // (onAddOwn) closes Browse WITHOUT firing onBrowseClosed — a modal-to-modal
+  // transition, not a close. So a header-initiated Browse the user hands off to
+  // the contribute wizard would leave headerBrowseTriggeredRef armed
+  // indefinitely; a LATER, independently in-composer-initiated Browse close then
+  // fires onBrowseClosed, sees the stale flag, and yanks focus to the header
+  // "+ Strategy" button — violating "an in-composer close does not steal focus."
+  // The host cannot observe the composer-internal handoff on its own, so the
+  // composer signals it here (onBrowseHandoff); we disarm the flag so only a
+  // genuine header-initiated close returns focus.
+  const handleBrowseHandoff = useCallback(() => {
+    headerBrowseTriggeredRef.current = false;
+  }, []);
+
+  // Guard against a stale pending Browse-open (or focus-return flag) re-firing
+  // on a later scenario remount: clear them whenever we leave the scenario tab.
+  //
+  // Phase 116 review WR-02 — ALSO null the composer's registered open-Browse
+  // setter. ScenarioComposer unmounts when activeTab !== "scenario", so its
+  // registered `() => setBrowseOpen(true)` closure points at a dead instance.
+  // Leaving it non-null lets a "+ Strategy" click in the remount's
+  // pre-registration window take the truthy-ref branch, call the dead setter
+  // (a no-op on the unmounted component), and NOT set pendingBrowseOpenRef — so
+  // the click is swallowed with no drawer opening: exactly the silent no-op
+  // ADDALLOC-03 forbids. Nulling it (symmetric with the two refs above) makes
+  // such a click fall through to the pending-drain path instead.
+  useEffect(() => {
+    if (activeTab !== "scenario") {
+      pendingBrowseOpenRef.current = false;
+      headerBrowseTriggeredRef.current = false;
+      composerBrowseOpenRef.current = null;
+    }
+  }, [activeTab]);
+
+  // Memoized so their identities stay stable across the Overview tab's 30s
+  // router.refresh() poll (which re-renders AllocationsTabs). A new handler
+  // identity would re-run ContributionWizardOverlay's open-effect ([isOpen,
+  // onClose]) and yank `panelRef.current?.focus()` away from the user's input
+  // mid-typing every 30s. `setContributeOpen` (state setter) and `addButtonRef`
+  // (a ref) are stable, so neither belongs in deps; `router` does.
+  const handleContributeClose = useCallback(() => {
+    setContributeOpen(false);
+    // Return focus to the header trigger (UI-SPEC §Close → focus return).
+    addButtonRef.current?.focus();
+  }, []);
+  const handleContributeSuccess = useCallback(() => {
+    setContributeOpen(false);
+    addButtonRef.current?.focus();
+    // A freshly connected key / uploaded CSV should reflect in the SSR payload
+    // without waiting for the 30s Overview poll. This is a user-initiated
+    // refresh (not the guarded background interval above), so call directly.
+    router.refresh();
+  }, [router]);
+
+  // Per-tab dispatch (ADDALLOC-01/02/03). Binary on activeTab: the Scenario tab
+  // opens the composer's strategy picker (Browse); every OTHER tab
+  // (overview / holdings / outcomes / mandate / risk) opens the onboarding
+  // wizard inline. The binary generalizes the UI-SPEC 3-row table to the
+  // remaining tabs on purpose so the button is never a silent no-op on ANY tab.
+  const isScenarioTab = activeTab === "scenario";
+  const handleHeaderAdd = () => {
+    if (isScenarioTab) {
+      // ADDALLOC-01 — "+ Strategy" opens the composer's StrategyBrowseDrawer.
+      if (!isUiV2) {
+        // Rollback surface: the ScenarioStub (not the composer) is mounted, so
+        // there is no Browse drawer to signal. Rather than a silent no-op
+        // (changeTab to the tab we are already on), open the onboarding wizard
+        // so "+ Strategy" still performs a real add-a-strategy action
+        // (ADDALLOC-03: never a silent no-op, even on this degraded path). The
+        // ScenarioStub predates ADDALLOC and is otherwise out of its scope.
+        setContributeOpen(true);
+        return;
+      }
+      headerBrowseTriggeredRef.current = true;
+      if (composerBrowseOpenRef.current) {
+        composerBrowseOpenRef.current();
+      } else {
+        // Click landed during the composer's dynamic-import load window; drain
+        // it when registration arrives (handleRegisterOpenBrowse).
+        pendingBrowseOpenRef.current = true;
+      }
+      return;
+    }
+    // ADDALLOC-02 — real-data onboarding wizard, inline, no navigation.
+    setContributeOpen(true);
   };
 
   // WAI-ARIA authoring-practices tab pattern: Arrow keys move focus between
@@ -753,16 +890,25 @@ export function AllocationsTabs(
             </svg>
             <span>Export</span>
           </button>
-          {/* D-20 — primary "+ Allocation" header button. Routes to the
-              Scenario tab via the same changeTab mechanism the tabs use, so
-              URL + tab state stay in sync. */}
+          {/* Phase 116 / ADDALLOC-01/02/03 — primary context-aware header
+              button. Its label, action, and aria-label are derived from
+              activeTab: on Scenario it reads "+ Strategy" and opens the
+              composer's strategy picker; on every other tab it reads
+              "+ Allocation" and opens the real-data onboarding wizard inline
+              (no navigation). The action is deterministic per tab — never a
+              silent no-op, never a dropdown. */}
           <button
+            ref={addButtonRef}
             type="button"
-            onClick={() => changeTab("scenario")}
+            onClick={handleHeaderAdd}
             className="ml-1 inline-flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-white hover:bg-accent/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-            aria-label="Add allocation — open Scenario tab"
+            aria-label={
+              isScenarioTab
+                ? "Add strategy — open the strategy picker"
+                : "Add allocation — connect an exchange or upload a CSV"
+            }
           >
-            + Allocation
+            {isScenarioTab ? "+ Strategy" : "+ Allocation"}
           </button>
         </div>
       </div>
@@ -840,7 +986,14 @@ export function AllocationsTabs(
             // Phase 23 / PERSIST-03+04 — the composer + the saved-scenarios
             // list + the in-tab compare panel, wired together on the V2
             // scenario path. The ScenarioStub rollback path below is untouched.
-            <ScenarioTabContent {...props} />
+            // Phase 116 / ADDALLOC-01 — thread the header "+ Strategy" Browse
+            // seam down to the composer.
+            <ScenarioTabContent
+              {...props}
+              onRegisterOpenBrowse={handleRegisterOpenBrowse}
+              onBrowseClosed={handleBrowseClosed}
+              onBrowseHandoff={handleBrowseHandoff}
+            />
           ) : (
             <ScenarioStub
               flaggedHoldings={props.flaggedHoldings}
@@ -854,6 +1007,15 @@ export function AllocationsTabs(
           bottom-right per the truth screenshot. */}
       <TweaksToggle />
       <Tweaks />
+      {/* Phase 116 / ADDALLOC-02 — tab-agnostic host for the "+ Allocation"
+          onboarding wizard. Rendered unconditionally (null while closed) so the
+          header button can open it on Holdings / Overview where ScenarioComposer
+          is not mounted. Focus returns to the header trigger on close/success. */}
+      <ContributionWizardOverlay
+        isOpen={contributeOpen}
+        onClose={handleContributeClose}
+        onSuccess={handleContributeSuccess}
+      />
       {/* Tweaks showOutcomes knob: when the user disables the Outcomes tab
           while currently viewing it, redirect to Overview so they don't sit
           on a CSS-hidden panel with no way back via the (now hidden) tab. */}
@@ -875,7 +1037,19 @@ export function AllocationsTabs(
 // A dedicated sub-component (not inline in the conditional branch) keeps these
 // hooks unconditional — the V2/ScenarioStub gate lives one level up, so this
 // component's hooks never run on the rollback path.
-function ScenarioTabContent(props: MyAllocationDashboardPayload) {
+function ScenarioTabContent({
+  // Phase 116 / ADDALLOC-01 — Browse seam threaded from AllocationsTabs down to
+  // ScenarioComposer. Destructured out so `props` stays a clean payload for the
+  // `payload=` prop below (and the compare-panel narrow).
+  onRegisterOpenBrowse,
+  onBrowseClosed,
+  onBrowseHandoff,
+  ...props
+}: MyAllocationDashboardPayload & {
+  onRegisterOpenBrowse?: (open: () => void) => void;
+  onBrowseClosed?: () => void;
+  onBrowseHandoff?: () => void;
+}) {
   const [savedRows, setSavedRows] = useState<SavedScenarioListRow[]>([]);
   // A hard list-load failure (non-2xx or thrown fetch). Distinct from "no saved
   // scenarios" — an unloaded list must NOT masquerade as an empty list (a
@@ -980,6 +1154,9 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
         allocatorMandate={props.mandate}
         onRegisterOpen={handleRegisterOpen}
         onScenarioSaved={handleMutated}
+        onRegisterOpenBrowse={onRegisterOpenBrowse}
+        onBrowseClosed={onBrowseClosed}
+        onBrowseHandoff={onBrowseHandoff}
       />
 
       <SavedScenariosList

@@ -48,7 +48,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 import ccxt
 from cryptography.fernet import InvalidToken
@@ -258,6 +258,7 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "process_key_long": 30 * 60,   # Phase 19 / BACKBONE-09 — 30 min ceiling supports 90-day OKX archive backfill
     "derive_broker_dailies": 15 * 60,  # full-history realized PnL + funding fetch (mirrors sync_trades envelope)
     "stitch_composite": 20 * 60,  # Phase 86 / COMP-02 — N-member fan-out (worst case 2× crawl per key when MTM open)
+    "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
 }
 
 # FIX-2 (Fable): the single-key MTM SECOND pass is a FULL-HISTORY crawl that runs
@@ -1940,8 +1941,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         fetch_funding_bybit,
     )
 
-    # Dated external flows feed ONLY the core's F_t term (deribit branch sets them
-    # from the ledger crawl; other venues have no dated-flow adapter yet → None).
+    # Dated external flows feed ONLY the core's F_t term. Both venue paths now set
+    # them: the deribit branch from the native ledger crawl (:2519), the ccxt
+    # branch via fetch_ccxt_transfers → ccxt_rows_to_dated_flows (:2612). This
+    # stays None only until whichever branch runs (a safe pre-fetch default).
     external_flows: list[ExternalFlow] | None = None
     # CRITICAL-1: the ccxt else-branch sets this to the venue retention floor the
     # flow fetch was capped at; the DQ-02 terminus evidence gate (below) reads it
@@ -2768,6 +2771,163 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         if _coverage_flags.get("flow_coverage_incomplete"):
             meta["flow_coverage_incomplete"] = True
 
+    async def _run_key_mode_compose_epilogue() -> None:
+        # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
+        # This derive ALREADY crawled the real external flows and read the live
+        # account equity anchor above (deribit: the native ledger crawl +
+        # account_state.collapsed_equity_usd; ccxt: fetch_ccxt_transfers +
+        # fetch_account_equity_and_upnl_usd). Persist those ALREADY-FETCHED
+        # inputs onto the NEW keyed surface as kind='key_inputs:<api_key_id>' so
+        # the crawl-free `derive_allocator_equity` compose job never has to
+        # decrypt the key or hit the exchange a SECOND time — then enqueue that
+        # compose job for the AUTHORITATIVE owner. Self-healing: any key refresh
+        # re-composes the whole allocator with zero added exchange I/O.
+        #
+        # F1(a): this runs for BOTH the >=2-day path AND the <2-day short-circuit
+        # (an idle/short key with real capital must still land its anchored
+        # key_inputs row so the compose core sees it — anchored-without-returns →
+        # DROPPED_KEY → untrustworthy — instead of silently vanishing from a
+        # "Derived" curve that understates its capital). The anchor + flows are
+        # already fetched above, so this is I/O-cheap.
+        import math
+
+        # M1: Postgres JSONB rejects NaN/Inf, so a non-finite float would fail the
+        # key_inputs upsert and bubble as a transient error → re-crawl loop. These
+        # flows already passed the honest core, so a non-finite here is corruption:
+        # SKIP it honestly (the drop is visible via the count log below), never
+        # persist poison.
+        _flows_payload = []
+        _skipped_nonfinite_flows = 0
+        for _f in (external_flows or []):
+            _usd = float(_f.usd_signed)
+            if not math.isfinite(_usd):
+                _skipped_nonfinite_flows += 1
+                continue
+            _flows_payload.append(
+                {"utc_day_iso": _f.utc_day_iso, "usd_signed": _usd}
+            )
+        # DERIVATIVE-NOTIONAL TRAP (T-115.1-16): the anchor is the venue's own
+        # LIVE total-equity read (`equity` above) — deribit's collapsed native
+        # equity or the ccxt fetch_account_equity_and_upnl_usd NAV — NOT an
+        # allocator_holdings sum, and NEVER a blind value_usd sum (value_usd on a
+        # derivative is NOTIONAL contract size, not equity). An untrustworthy read
+        # (balance_error truthy or equity is None) persists an honest null anchor,
+        # never a heuristic fallback; the compose core then honestly DROPS the key.
+        # The anchor is trustworthy ONLY when it is a material, positive, finite
+        # venue-equity read. Persist a null anchor (compose core then DROPS the key)
+        # on every other case:
+        #   M1  — non-finite (NaN/Inf) would poison the JSONB upsert;
+        #   M2  — dust (|equity| <= DUST_NAV_FLOOR) is immaterial (mirrors the
+        #         function's materiality contract at :2651-2655) and a NON-POSITIVE
+        #         equity would make replay_key_equity raise non-positive-equity,
+        #         permanently FAILING the WHOLE allocator compose. Both → null, not a
+        #         permanent fail / a trustworthy near-zero curve basis.
+        #   F3  — if ANY flow was DROPPED as non-finite above, the backward replay
+        #         mis-levels the reconstructed curve with NO degrade signal. Null the
+        #         anchor so the key degrades honestly (compose DROPS it) rather than
+        #         reading trustworthy over a silently mis-leveled curve.
+        #
+        # F1a×F3/M2 seam: STAMP anchor_null_reason so the compose core can tell a
+        # DUST null (materiality — silently omit, never pin the allocator to legacy)
+        # apart from a REAL-CAPITAL read failure (balance_error/nonpositive/
+        # nonfinite/flow_drop — degrade to legacy). Without the token a null-anchor
+        # key that is ALSO absent from the returns axis (the <2-day / never-traded
+        # idle key) falls into NONE of compose's B3 buckets → invisible → a
+        # trustworthy partial curve. Order matters: nonpositive is checked BEFORE
+        # dust so a small NEGATIVE equity (|equity| <= DUST but a real-capital
+        # problem) degrades rather than being silently omitted as dust.
+        _anchor_null_reason: str | None = None
+        if balance_error or equity is None:
+            _anchor_null_reason = "balance_error"
+        elif not math.isfinite(float(equity)):
+            _anchor_null_reason = "nonfinite"
+        elif equity <= 0.0:
+            _anchor_null_reason = "nonpositive"
+        elif abs(equity) <= DUST_NAV_FLOOR:
+            _anchor_null_reason = "dust"
+        elif _skipped_nonfinite_flows > 0:
+            _anchor_null_reason = "flow_drop"
+        # equity is provably non-None when _anchor_null_reason is None (the
+        # `equity is None` branch above stamps "balance_error"); the explicit
+        # `equity is not None` is a mypy narrowing that changes no runtime path.
+        _anchor_usd: float | None = (
+            float(equity)
+            if _anchor_null_reason is None and equity is not None
+            else None
+        )
+        _key_inputs_payload = {
+            "flows": _flows_payload,
+            "anchor_usd": _anchor_usd,
+            # A present/real anchor carries no reason token (None); a null anchor
+            # records WHY so compose can gate dust-omit vs real-failure-degrade.
+            "anchor_null_reason": _anchor_null_reason,
+            "anchor_asof": datetime.now(timezone.utc).isoformat(),
+            "venue": venue,
+        }
+
+        def _persist_key_inputs(
+            payload: dict[str, Any] = _key_inputs_payload,
+            kind: str = "key_inputs:" + api_key_id,
+        ) -> None:
+            ctx.supabase.table("allocator_equity_derived").upsert(
+                {
+                    "allocator_id": allocator_id,
+                    "kind": kind,
+                    "payload": payload,
+                    "computed_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="allocator_id,kind",
+            ).execute()
+
+        # Transient DB errors BUBBLE (the job retries; the csv upsert is
+        # idempotent, and the compose enqueue below is dedup-safe) — no silent
+        # swallow, no outcome downgrade.
+        await db_execute(_persist_key_inputs)
+
+        # Enqueue the crawl-free compose for the AUTHORITATIVE owner — read from
+        # ctx.key_row['user_id'] via `allocator_id`, NEVER a job-payload
+        # allocator_id (T-115.1-02 / T-115-16 owner-spoof pin). A one-inflight
+        # dedup collision is benign (the enqueue RPC is idempotent); a hard
+        # enqueue failure is logged and swallowed — the per-key inputs are already
+        # persisted and the next key refresh re-enqueues cleanly, so a compose
+        # enqueue hiccup must never fail an already-done per-key derive.
+        try:
+            def _enqueue_compose(target: str = allocator_id) -> None:
+                # p_strategy_id is passed EXPLICITLY as NULL — it is the RPC's
+                # first positional param and has NO SQL DEFAULT, so a PostgREST
+                # named-notation call that omits it cannot resolve the overload
+                # ("function does not exist") and the compose would never enqueue.
+                # Every SQL caller mirrors this (`p_strategy_id := NULL`); the
+                # allocator-scoped inflight dedup (allocator_id,kind) makes a
+                # collision benign, so no p_idempotency_key is required here.
+                ctx.supabase.rpc(
+                    "enqueue_compute_job",
+                    {
+                        "p_strategy_id": None,
+                        "p_allocator_id": target,
+                        "p_kind": "derive_allocator_equity",
+                    },
+                ).execute()
+
+            await db_execute(_enqueue_compose)
+        except Exception as _enq_exc:  # noqa: BLE001
+            logger.warning(
+                "derive_broker_dailies: compose enqueue for allocator %s failed "
+                "(api_key %s) — per-key inputs persisted; next key refresh "
+                "re-enqueues: %s",
+                allocator_id, api_key_id, _enq_exc,
+            )
+
+        # Log carries NO USD magnitudes (T-115-05): key/allocator/venue + counts +
+        # an anchor-present bool only.
+        logger.info(
+            "derive_broker_dailies: Option-B epilogue persisted key_inputs + "
+            "enqueued compose for api_key %s (allocator %s venue=%s n_flows=%d "
+            "skipped_nonfinite_flows=%d anchor_present=%s)",
+            api_key_id, allocator_id, venue, len(_flows_payload),
+            _skipped_nonfinite_flows, _anchor_usd is not None,
+        )
+
     if int(returns.notna().sum()) < 2:
         # Brand-new / inactive account: not enough history to compile a
         # factsheet (compute_all_metrics needs >=2 days). MEDIUM-2: gate on the
@@ -2787,6 +2947,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "no strategy_analytics stamp",
                 api_key_id, len(realized), len(funding),
             )
+            # F1(a): STILL persist the Option-B key_inputs (anchor + flows already
+            # fetched) and enqueue the compose. An idle/short key with real capital
+            # must be visible to the compose core (anchored-without-returns →
+            # DROPPED_KEY → untrustworthy → legacy fallback), never silently absent
+            # from a "Derived" curve that understates its capital. No csv_daily_
+            # returns / strategy_analytics write here — only the key_inputs surface.
+            await _run_key_mode_compose_epilogue()
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
         # Strategy-mode: stamp a TERMINAL 'failed' status so the wizard's
@@ -2942,6 +3109,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             len(rows_payload), api_key_id, allocator_id, venue,
             len(realized), len(funding), meta.get("used_heuristic_capital"),
         )
+        # F1(a): the SAME Option-B epilogue the <2-day short-circuit runs (one
+        # helper, so the two key-mode exits can never drift on the persist/enqueue
+        # contract).
+        await _run_key_mode_compose_epilogue()
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     logger.info(
@@ -5788,6 +5959,304 @@ async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
+    """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
+    $-equity compose.
+
+    Assembles the frozen P115 core's inputs entirely from the DB — per-key
+    ``csv_daily_returns`` (the dense per-key return axis) and the
+    ``kind='key_inputs:<api_key_id>'`` rows the key-mode derive epilogue already
+    persisted (real external flows + the live equity anchor it already fetched) —
+    calls the pure ``compose_allocator_equity`` composition layer, and atomically
+    upserts EXACTLY ONE ``(allocator_id, 'equity_curve')`` display row onto the
+    NEW keyed surface. It NEVER decrypts a key, NEVER touches an exchange, and
+    NEVER writes ``allocator_equity_snapshots`` (BACKBONE-03 two-writers race —
+    the legacy store stays untouched; T-115.1-13).
+
+    ``allocator_id`` is the QUEUE target written by the SECDEF enqueue RPC (the
+    owner-spoof surface is the epilogue enqueue, already pinned to
+    ``key_row['user_id']``). Eligibility is the ONE shared predicate
+    (``eligible_key_predicate``); a key that has returns but no ``key_inputs``
+    row (or a null anchor) is honestly DROPPED by the compose core, never
+    fabricated. Structural compose refusals (the core's loud asserts) →
+    permanent FAILED with a scrubbed message (T-74-02 class); DB/network faults
+    bubble transient.
+    """
+    import pandas as pd
+
+    from services.allocator_equity_compose import compose_allocator_equity
+    from services.allocator_equity_derive import eligible_key_predicate
+    from services.external_flows import ExternalFlow, validate_flow_shape
+    from services.nav_twr import NavReconstructionError
+    from services.redact import scrub_freeform_string
+
+    allocator_id = job["allocator_id"]
+    supabase = get_supabase()
+
+    async def _delete_equity_curve_row() -> None:
+        # Degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
+        # case). Shared by the empty-compose (B2), incomplete-compose (F1b), and
+        # permanent-failure (F2) paths so a structurally-failed / partial / empty
+        # recompute can never leave a STALE trustworthy row rendering as "derived".
+        def _del() -> None:
+            supabase.table("allocator_equity_derived").delete().eq(
+                "allocator_id", allocator_id
+            ).eq("kind", "equity_curve").execute()
+
+        await db_execute(_del)
+
+    # ── 1. Eligible key set — the ONE predicate, never inlined. ──────────────
+    def _load_keys() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("api_keys")
+            .select("id,is_active,sync_status,disconnected_at")
+            .eq("user_id", allocator_id)
+            .execute()
+            .data
+            or [],
+        )
+
+    key_rows = await db_execute(_load_keys)
+    eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
+
+    # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
+    #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
+    #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
+    #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
+    def _load_returns() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("csv_daily_returns")
+            .select("api_key_id,date,daily_return")
+            .eq("allocator_id", allocator_id)
+            .execute()
+            .data
+            or [],
+        )
+
+    async def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
+        # M3: a corrupt PERSISTED value (a NULL daily_return → float(None)
+        # TypeError, a non-numeric usd_signed, a non-finite flow rejected by
+        # validate_flow_shape) is NON-retryable — retrying re-reads the same poison
+        # DB row FOREVER as transient `unknown` (the T-74-02 class). Dispose it as a
+        # permanent scrubbed FAILED so the admin sees a terminal state, not an
+        # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
+        # F2: DELETE the stale equity_curve row first so a structurally-failed
+        # recompute degrades to legacy instead of leaving a stale trustworthy row.
+        await _delete_equity_curve_row()
+        import re
+
+        # F4b: the corrupt-input ValueError/TypeError echoes the raw value
+        # (`could not convert string to float: '987654.32abc'`, `got 1e26`), and
+        # scrub_freeform_string (the shared key=value/JWT scrubber) does NOT redact
+        # bare numerics. Locally redact any numeric magnitude here (the T-115-05
+        # no-raw-USD rule) — scoped to this corrupt-input path so the shared scrub /
+        # the structural NavReconstructionError day-indices are untouched.
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        scrubbed = re.sub(r"\d[\d.,]*(?:[eE][-+]?\d+)?", "<redacted-num>", scrubbed)
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: corrupt persisted input — " + scrubbed
+            ),
+            error_kind="permanent",
+        )
+
+    csv_rows = await db_execute(_load_returns)
+    _grouped: dict[str, list[dict[str, Any]]] = {}
+    for r in csv_rows:
+        k = r.get("api_key_id")
+        if k is not None and k in eligible_ids:
+            _grouped.setdefault(k, []).append(r)
+    returns_by_key: dict[str, pd.Series] = {}
+    try:
+        for k, rws in _grouped.items():
+            rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
+            returns_by_key[k] = pd.Series(
+                [float(x["daily_return"]) for x in rws_sorted],
+                index=[str(x["date"]) for x in rws_sorted],
+                dtype="float64",
+            )
+    except (ValueError, TypeError, KeyError) as exc:
+        return await _permanent_corrupt_input(exc)
+
+    # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
+    flows_by_key: dict[str, list[ExternalFlow]] = {}
+    anchors_by_key: dict[str, float | None] = {}
+    # F1a×F3/M2 seam: WHY the epilogue nulled an anchor ('dust' vs a real-capital
+    # read failure). Threaded into compose so a null-anchor key ALSO absent from the
+    # returns axis is gated dust-omit vs real-failure-degrade (never silently
+    # omitted → a trustworthy partial curve).
+    null_anchor_reasons: dict[str, str] = {}
+    key_inputs_ids: set[str] = set()
+    orphan_kinds: list[str] = []
+    # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
+    # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
+    # value would otherwise escape as a transient `unknown` and retry forever. M1:
+    # each reconstructed ExternalFlow is shape-validated (validate_flow_shape) so a
+    # non-finite usd_signed in JSONB is REJECTED here, never sailing into the core
+    # as a silent NaN. Both dispose as a permanent scrubbed FAILED.
+    try:
+        for row in ki_rows:
+            kind = str(row.get("kind", ""))
+            api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
+            if api_key_id not in eligible_ids:
+                # A key that is no longer eligible (revoked / disconnected /
+                # deleted) keeps a stale key_inputs row — bounded orphan cleanup
+                # below.
+                orphan_kinds.append(kind)
+                continue
+            key_inputs_ids.add(api_key_id)
+            payload = row.get("payload") or {}
+            flows_by_key[api_key_id] = [
+                validate_flow_shape(
+                    ExternalFlow(
+                        utc_day_iso=str(_f["utc_day_iso"]),
+                        usd_signed=float(_f["usd_signed"]),
+                    )
+                )
+                for _f in (payload.get("flows") or [])
+            ]
+            _anchor = payload.get("anchor_usd")
+            anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
+            if _anchor is None:
+                # Capture the reason token (absent on legacy pre-fix rows → None →
+                # compose treats it as the SAFE non-dust/degrade default).
+                _reason = payload.get("anchor_null_reason")
+                if isinstance(_reason, str) and _reason:
+                    null_anchor_reasons[api_key_id] = _reason
+    except (ValueError, TypeError, KeyError) as exc:
+        return await _permanent_corrupt_input(exc)
+
+    # A key with returns but no key_inputs row → anchor None (compose honestly
+    # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
+    for k in returns_by_key:
+        anchors_by_key.setdefault(k, None)
+        flows_by_key.setdefault(k, [])
+
+    for _orphan_kind in orphan_kinds:
+        def _delete_orphan(_k: str = _orphan_kind) -> None:
+            supabase.table("allocator_equity_derived").delete().eq(
+                "allocator_id", allocator_id
+            ).eq("kind", _k).execute()
+
+        await db_execute(_delete_orphan)
+
+    # ── 3b. F1(b) ELIGIBLE-SET RECONCILIATION (the backfill-window closer). ──
+    # The compose can only see keys that have EITHER a returns series OR a
+    # key_inputs row. During the founder-gated backfill the FIRST key's compose
+    # runs while sibling keys still have zero rows (all 517 prod keys start empty),
+    # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
+    # allocator's capital (a transient 1-of-N-capital curve labeled "Derived",
+    # suppressing a legacy curve that included every key). If ANY eligible key is
+    # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
+    # equity_curve row (degrade to legacy) rather than compose a silently-partial
+    # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
+    # here — it is visible to the compose core, which classifies it
+    # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
+    # the strictly-invisible key (no returns AND no key_inputs — its derive has not
+    # run yet). Self-healing: each sibling derive re-enqueues the compose.
+    missing_ids = eligible_ids - (set(returns_by_key) | key_inputs_ids)
+    if missing_ids:
+        await _delete_equity_curve_row()
+        logger.info(
+            "derive_allocator_equity: INCOMPLETE compose for allocator %s "
+            "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
+            "an eligible key has neither returns nor key_inputs (backfill window); "
+            "deleted any stale equity_curve row, degrading to legacy until every "
+            "sibling derives (Option B, self-healing)",
+            allocator_id, len(eligible_ids), len(returns_by_key),
+            len(key_inputs_ids), len(missing_ids),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
+    try:
+        payload = compose_allocator_equity(
+            returns_by_key, flows_by_key, anchors_by_key, null_anchor_reasons
+        )
+    except NavReconstructionError as exc:
+        # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
+        # DatetimeIndex slip, the segment-wise EXCLUSIVE_FILL canary, an
+        # unpriceable flow, a ≤−100% liquidation day). Retrying cannot help →
+        # permanent FAILED with a scrubbed message (the T-74-02 DoS class; the core
+        # errors carry counts/day-indices only, still scrubbed for defence in
+        # depth). F2: DELETE the stale equity_curve row first — otherwise a
+        # post-liquidation poison input would leave the frozen pre-liquidation curve
+        # rendering as trustworthy FOREVER; degrade to legacy instead.
+        await _delete_equity_curve_row()
+        scrubbed = str(scrub_freeform_string(str(exc)))
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: compose refused a structural input — "
+                + scrubbed
+            ),
+            error_kind="permanent",
+        )
+
+    # ── 5. B2 root cause: an EMPTY curve is NOT a renderable series. A
+    #      zero-anchored-keys / zero-weight-mass compose (every prod allocator
+    #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
+    #      tokens: NO_ANCHORED_KEYS/ZERO_WEIGHT_MASS) OR False (all keys DROPPED_KEY
+    #      post-B3); this branch keys on EMPTINESS, not on the trust flag, so both
+    #      empty shapes degrade the same. Upserting it would blank the dashboard
+    #      while suppressing the legacy render (which has real data), and a later
+    #      structurally-empty recompute would leave a STALE trustworthy row (L1).
+    #      Instead DELETE any existing equity_curve row → degrade to the clean
+    #      no-row legacy fallback (the SAFETY pin's no-row case). The frontend
+    #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
+    if not (payload.get("curve") or []):
+        await _delete_equity_curve_row()
+        logger.info(
+            "derive_allocator_equity: empty compose for allocator %s "
+            "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
+            "stale equity_curve row, degrading to the legacy fallback (Option B)",
+            allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    # ── 5b. Single-row ATOMIC upsert of the NON-EMPTY display row (never the
+    #      legacy store — the fake-PostgREST raise pin enforces this forever). ──
+    def _upsert_curve() -> None:
+        supabase.table("allocator_equity_derived").upsert(
+            {
+                "allocator_id": allocator_id,
+                "kind": "equity_curve",
+                "payload": payload,
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="allocator_id,kind",
+        ).execute()
+
+    await db_execute(_upsert_curve)
+
+    # Log carries NO USD magnitudes (T-115-05): allocator + counts + trust bool.
+    logger.info(
+        "derive_allocator_equity: composed equity_curve for allocator %s "
+        "(eligible_keys=%d returns_keys=%d curve_len=%d orphans_cleaned=%d "
+        "trustworthy=%s) — crawl-free compose (Option B)",
+        allocator_id, len(eligible_ids), len(returns_by_key),
+        len(payload.get("curve", [])), len(orphan_kinds),
+        payload.get("is_trustworthy"),
+    )
+    return DispatchResult(outcome=DispatchOutcome.DONE)
+
+
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
@@ -5839,6 +6308,11 @@ async def dispatch(job: dict[str, Any]) -> DispatchResult:
         handler = run_compute_intro_snapshot_job
     elif kind == "rescore_allocator":
         handler = run_rescore_allocator_job
+    elif kind == "derive_allocator_equity":
+        # Phase 115.1 / RD-3 Option B — crawl-free, decryption-free allocator
+        # $-equity compose: DB reads (per-key dailies + persisted key_inputs) →
+        # compose_allocator_equity → single-row equity_curve upsert.
+        handler = run_derive_allocator_equity_job
     elif kind == "poll_allocator_positions":
         handler = run_poll_allocator_positions_job
     elif kind == "reconstruct_allocator_history":

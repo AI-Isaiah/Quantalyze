@@ -430,7 +430,10 @@ describe("DOGFOOD-1 — derivePhase07Fields.hasConnectedKeys uses isPerKeyDailie
   });
 
   const derive = (apiKeys: Key[]) =>
-    derivePhase07Fields(apiKeys, NO_SNAPSHOTS, 0, NO_HOLDINGS, false);
+    // Phase 115.1 — the 6th arg is the derived $-equity row; null here (no
+    // derived surface) exercises the legacy fallback, orthogonal to the
+    // hasConnectedKeys derivation under test.
+    derivePhase07Fields(apiKeys, NO_SNAPSHOTS, 0, NO_HOLDINGS, false, null);
 
   it("a live is_active key → hasConnectedKeys=true", () => {
     expect(derive([key({})]).hasConnectedKeys).toBe(true);

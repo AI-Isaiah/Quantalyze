@@ -195,6 +195,32 @@ describe("POST /api/strategies/composite/add-key — read-only enforcement (T-88
     consoleErr.mockRestore();
   });
 
+  // DOGFOOD (2026-07-18) — the "+ Add another key" (multi-key) path. This route
+  // shares classifyKeyValidationError with create-with-key, so a genuine
+  // exchange auth rejection (Deribit 13004 invalid_credentials → the worker's
+  // "Authentication failed…" detail) must surface the actionable KEY_AUTH_FAILED
+  // 400 HERE too, not the terminal UNKNOWN/500 the founder originally saw when
+  // adding a second key. Pins that the shared classifier is actually WIRED in.
+  it("regression: worker 'Authentication failed' (Deribit invalid_credentials) → KEY_AUTH_FAILED 400, not UNKNOWN/500", async () => {
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error("Authentication failed. Check your API key and secret."),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_AUTH_FAILED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
   it("accepts a read-only key: encrypts then calls add_wizard_composite_key", async () => {
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));

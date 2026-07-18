@@ -1,0 +1,1279 @@
+"""Canonical allocator equity derivation — pure blend + coverage segmentation.
+
+Phase 115 (E2), STITCH-01 (this module's blend half) + STITCH-06 seam contract
+(the segmentation half). Pure, I/O-free functions: callers inject every series
+and weight; nothing here touches supabase, the network, or the filesystem, so the
+downstream plan-03 $-ledger core and the Phase 115.1 worker-side display
+derivation both build on a hermetically testable foundation.
+
+WHY THIS MODULE EXISTS
+----------------------
+Python must OWN the canonical allocator blend so the match engine, the factsheet,
+and the live-baseline UI converge on one derivation. The Phase-36 TypeScript blend
+in ``src/lib/queries.ts::liveBaselineMetricsFromPerKeyDailies`` (L2135-2256) is the
+display-era SEMANTIC PRECEDENT — not the owner. This module ports its three
+decisions canonically:
+
+  * D1 — one "strategy" per ``api_key_id`` from its ``csv_daily_returns`` series;
+         WEIGHT = that key's STATIC share of CURRENT equity (from holdings), NOT a
+         time-varying / performance-tracking weight (queries.ts L2155-2210).
+  * D2 — AUM stays from holdings; only the curve SHAPE + KPIs come from the blend.
+         AUM is NOT this module's concern (the $-ledger is plan-03 / STITCH-03/04).
+  * D3 — the blend is ALL-OR-NOTHING: if any eligible key has an EMPTY per-key
+         series the WHOLE allocator degrades to the honest-empty baseline, never a
+         mixed-annualization-basis half-blend (queries.ts L2105-2112, L2266-2275).
+
+PARTIALLY-MISSING DAYS (constant-divisor 0-fill; the TS PRESENT-window path)
+---------------------------------------------------------------------------
+On a union day where a subset of keys lacks a row, we 0-FILL that key's return in the
+NUMERATOR only and keep the divisor at the CONSTANT full weight mass:
+``blended_r_t = Σ_i w_i · r_i,t(0-filled) / Σ_i w_i``.
+
+D2 (attribution): this matches the TS engine's PRESENT-window path only
+(``strategyReturns[s.id] = map.get(d) ?? 0`` + a constant divisor, scenario.ts
+L411-415). The TS engine ALSO has an ABSENT-window path that RENORMALIZES the divisor
+to exclude not-yet-started keys (scenario.ts L407-409 excludes absent members from
+``activeWeightSum``). This module does NOT replicate that absent-window renorm — it
+always uses the constant divisor — which is exactly the source of the HIGH-1
+divergence below. So this is a deliberate NON-replication, not "the TS exactly."
+
+D1 (scope of the guarantee): the constant-divisor 0-fill is safe for INTERIOR
+partial-missing days. It is NOT structurally prevented here from a key's EXCLUSIVE
+lead/tail day: ``blend_concurrent_returns`` receives the RAW union and is NOT wired to
+``segment_coverage`` (only ``allocator_equity_curve`` is). An exclusive lead/tail day
+IS 0-filled at full weight in THIS module and is SURFACED (never prevented here) via
+the ``exclusive_fill_days`` flag / ``DegradeReason.EXCLUSIVE_FILL``. The structural
+prevention — feeding the blend one ``Segment`` at a time so only genuine concurrent
+blocks reach it — is the Phase-115.1 wiring (see the HIGH-1 comment in
+``blend_concurrent_returns``); do NOT delete the ``exclusive_fill_days`` guard as
+"redundant" until that wiring lands.
+
+BINDING INVARIANTS
+------------------
+  * ADDITIVE ONLY. This module NEVER reads, writes, or upserts
+    ``allocator_equity_snapshots`` and never imports the writer arm of
+    ``equity_reconstruction`` (Pitfall 5 — two writers racing the same table). The
+    legacy store keeps sole ownership of its table; STITCH-02 (its physical
+    retirement) is DEFERRED because the reader census did not clear. See
+    ``.planning/phases/115-e2-allocator-equity-reconstruction-scope-gated-verify-first/115-STITCH-02-DEFERRAL.md``.
+    Residual readers pinning the store alive: R1 (match.py per-SYMBOL breakdown),
+    R2 (compare per-symbol adapter), R3-partial (getMyAllocationDashboard
+    breakdown / provenance fields), R5 (GDPR export manifest), R6 (SQL enqueue +
+    pg_cron + compute_job_kinds constraints).
+  * Landmine L1. Concurrent sibling keys compose via the CAPITAL-WEIGHTED BLEND,
+    NEVER via ``stitch_composite.assert_windows_disjoint`` /
+    ``stitch_clipped_series`` (those RAISE ``CompositeOverlapError`` on overlap BY
+    DESIGN). Only the window VOCABULARY (``windows_overlap``, half-open
+    ``[start, end)``) is reused, and only for SEQUENTIAL rotation boundaries.
+  * No raw USD in logs/exceptions (T-115-03 / T-73-02). Weights are ratios (fine);
+    equity magnitudes never enter a log or raise string. Flags carry bools/counts.
+
+Purity: pandas + stdlib + typing ONLY.
+"""
+from __future__ import annotations
+
+import math
+import re
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import date, timedelta
+from enum import Enum
+from typing import Any
+
+import pandas as pd
+
+from services.external_flows import ExternalFlow
+from services.nav_twr import NavReconstructionError
+# STITCH-05: the KEPT cashflow/IRR surface the unified backbone cannot reproduce
+# gets its first production caller via ``mwr_and_dietz_from_ledger`` (thread-only).
+from services.portfolio_metrics import compute_modified_dietz, compute_mwr
+from services.stitch_composite import MemberWindow, windows_overlap
+
+class DegradeReason(str, Enum):
+    """C3: the CLOSED set of degradation signals every producer emits (a ``str``
+    enum so it JSON-serializes as its token and compares equal to the legacy string).
+    CLASSIFIED benign vs blocking so a consumer can honor the fail-loud signal via
+    ``is_trustworthy`` instead of re-implementing the stringly-typed ``flags`` policy
+    (the MEDIUM-6 / LOW-7 class). Do NOT grow a display-policy engine here — 115.1
+    refines nuance; this is the minimal correct/suspect split.
+
+    BENIGN — informational; the curve/blend/replay number is still CORRECT:
+    """
+
+    # ── BENIGN (curve is correct) ──
+    WINDOW_TRUNCATED = "window_truncated"
+    STALE_MARK_CARRY = "stale_mark_carry"
+    CLASSIFIED_ROTATION = "classified_rotation"
+    # honest-empty tokens (no data — a HONEST signal, never a fabricated number)
+    NO_KEYS = "no_eligible_keys"
+    MISSING_SERIES = "d3_missing_series"
+    ZERO_WEIGHT_MASS = "zero_weight_mass"
+    NO_ANCHOR = "no_anchor"
+    NO_ANCHORED_KEYS = "no_anchored_keys"
+    # ── BLOCKING (number is SUSPECT — a consumer must refuse) ──
+    UNCLASSIFIED_ROTATION = "unclassified_rotation"
+    EXCLUSIVE_FILL = "exclusive_fill"
+    OUT_OF_WINDOW_FLOW = "out_of_window_flow"
+    DROPPED_KEY = "dropped_key"
+
+
+# The BLOCKING subset: any of these present -> ``is_trustworthy`` is False.
+_BLOCKING_REASONS: frozenset[DegradeReason] = frozenset(
+    {
+        DegradeReason.UNCLASSIFIED_ROTATION,
+        DegradeReason.EXCLUSIVE_FILL,
+        DegradeReason.OUT_OF_WINDOW_FLOW,
+        DegradeReason.DROPPED_KEY,
+    }
+)
+
+
+def _is_trustworthy(reasons: frozenset[DegradeReason]) -> bool:
+    """True iff NO blocking degradation reason is present (a benign window-truncation
+    / stale-mark / honest-empty does NOT block; a suspect number does)."""
+    return not (reasons & _BLOCKING_REASONS)
+
+
+# Backwards-compatible aliases (the enum members ARE these strings).
+REASON_NO_KEYS = DegradeReason.NO_KEYS
+REASON_MISSING_SERIES = DegradeReason.MISSING_SERIES
+REASON_ZERO_WEIGHT_MASS = DegradeReason.ZERO_WEIGHT_MASS
+REASON_NO_ANCHOR = DegradeReason.NO_ANCHOR
+REASON_NO_ANCHORED_KEYS = DegradeReason.NO_ANCHORED_KEYS
+
+
+@dataclass(frozen=True)
+class BlendResult:
+    """The canonical concurrent-blend output.
+
+    ``blended`` is the capital-weighted daily-return Series, or ``None`` on the D3
+    honest-empty degrade (never a half-blend). ``flags`` carries JSON-serializable
+    bools/counts only — no USD magnitudes. ``degrade_reasons`` is the CLOSED
+    ``DegradeReason`` set (C3); ``is_trustworthy`` is False iff any is BLOCKING."""
+
+    blended: pd.Series | None
+    flags: dict[str, Any] = field(default_factory=dict)
+    degrade_reasons: frozenset[DegradeReason] = field(default_factory=frozenset)
+
+    @property
+    def is_trustworthy(self) -> bool:
+        return _is_trustworthy(self.degrade_reasons)
+
+
+def _nonfinite_count(series: pd.Series) -> int:
+    """Count non-finite (NaN / ±inf) values in a return series (MEDIUM-2). Pure
+    stdlib ``math.isfinite`` per the module's pandas+stdlib purity note."""
+    return sum(1 for v in series.to_numpy() if not math.isfinite(float(v)))
+
+
+_ISO_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _assert_iso_day_index(index: Any, context: str) -> None:
+    """Fail loud (C-idx) if any index label is not a bare ``YYYY-MM-DD`` string. The
+    whole module keys days via ``str(d)`` (the ``csv_daily_returns`` /
+    ``reconstruct_symbol_returns`` day-key shape). A ``DatetimeIndex`` stringifies to
+    ``'YYYY-MM-DD 00:00:00'`` and would SILENTLY MISALIGN flow days vs return days in
+    the ``set(r) | set(fbd)`` union — enforce the ISO-day contract at the boundary."""
+    for d in index:
+        if not (isinstance(d, str) and _ISO_DAY_RE.match(d)):
+            raise NavReconstructionError(
+                f"{context}: index label {d!r} is not a 'YYYY-MM-DD' day string — "
+                "refusing a non-ISO-day index that would misalign flow/return days"
+            )
+
+
+def eligible_key_predicate(key_row: Mapping[str, Any]) -> bool:
+    """The role-agnostic eligibility predicate, byte-identical to the phase35
+    backfill dispatch filter (``scripts/phase35_backfill_enqueue.py``):
+
+        is_active = true AND sync_status IS DISTINCT FROM 'revoked'
+        AND disconnected_at IS NULL
+
+    Mirrored here so the Phase 115.1 display derivation reuses ONE eligibility
+    definition. A credential-revoked / soft-disconnected allocator key keeps
+    ``is_active = true`` (rows persist for audit continuity) but is NOT eligible —
+    the backfill never derives a series for it, so counting it would pin the D3
+    gate to the honest-empty baseline forever (queries.ts L2277-2299)."""
+    is_active = bool(key_row.get("is_active"))
+    sync_status = key_row.get("sync_status")
+    disconnected_at = key_row.get("disconnected_at")
+    # IS DISTINCT FROM 'revoked' — NULL/anything-but-'revoked' passes.
+    return is_active and sync_status != "revoked" and disconnected_at is None
+
+
+def blend_concurrent_returns(
+    series_by_key: Mapping[str, pd.Series],
+    weights_by_key: Mapping[str, float],
+) -> BlendResult:
+    """Capital-weighted blend of CONCURRENT per-key daily-return series (D1/D2/D3).
+
+    Contract (mirrors ``liveBaselineMetricsFromPerKeyDailies``):
+      * D3 gate FIRST — no keys, or any key with an EMPTY series → honest-empty
+        (``blended=None`` + ``honest_empty`` flag + machine ``reason``).
+      * Sole eligible non-empty key → passes through as its own series, weight 1.0.
+      * Otherwise blend over the UNION of days, 0-filling a key's missing interior
+        day in the numerator only, dividing by the CONSTANT total weight mass.
+      * Weights are STATIC current-equity shares; negative equity clamps to 0
+        (queries.ts L2209). All-zero (or all-clamped-negative) mass is HONEST-EMPTY
+        (``blended=None`` + ``REASON_ZERO_WEIGHT_MASS``) — no capital basis to blend
+        on, never a fabricated equal-weight curve (LOW-8).
+      * A non-coextensive key's EXCLUSIVE lead/tail day is 0-filled at full weight
+        (see the module docstring D1) and surfaced via the ``exclusive_fill_days``
+        flag / ``DegradeReason.EXCLUSIVE_FILL`` (a BLOCKING signal — ``is_trustworthy``
+        is False) — never silently absorbed.
+
+    Raises:
+      NavReconstructionError — a PRESENT-but-non-finite return VALUE (NaN/inf, a csv
+      gap) in ANY key series (MEDIUM-2). This runs BEFORE the sole-key passthrough, so
+      a sole-key NaN series is refused too, never copied through.
+
+    NEVER calls ``assert_windows_disjoint`` (Landmine L1) — overlapping siblings
+    blend, they do not stitch."""
+    keys = list(series_by_key.keys())
+    if not keys:
+        return BlendResult(
+            None,
+            {"honest_empty": True, "reason": REASON_NO_KEYS},
+            frozenset({DegradeReason.NO_KEYS}),
+        )
+
+    # D3 all-or-nothing: any eligible key with an empty series collapses the whole
+    # blend to the honest-empty baseline (never a single-key / half-basis curve).
+    if any(len(series_by_key[k]) == 0 for k in keys):
+        return BlendResult(
+            None,
+            {"honest_empty": True, "reason": REASON_MISSING_SERIES},
+            frozenset({DegradeReason.MISSING_SERIES}),
+        )
+
+    # MEDIUM-2: a PRESENT-but-non-finite return value (csv gap → NaN) would
+    # propagate into an all-NaN blended (or sole-key) curve with no signal. Refuse
+    # non-finite return VALUES at ingestion — before the sole-key passthrough too.
+    nonfinite_keys = sum(1 for k in keys if _nonfinite_count(series_by_key[k]))
+    if nonfinite_keys:
+        raise NavReconstructionError(
+            f"blend: non-finite return value(s) in {nonfinite_keys} key series — "
+            "refusing to propagate NaN/inf into the blended curve"
+        )
+
+    # F3 (Fable): refuse a non-finite WEIGHT (a NaN/inf ``value_usd`` from holdings).
+    # ``max(0.0, nan) == 0.0`` would SILENTLY drop the key (blended == pure other,
+    # is_trustworthy=True); ``inf/inf == nan`` would poison ``norm`` and emit an all-NaN
+    # curve with is_trustworthy=True — the module would emit the poison it refuses on
+    # return input. Runs BEFORE the sole-key passthrough so a sole key is covered too.
+    bad_weights = sum(
+        1 for k in keys if not math.isfinite(float(weights_by_key.get(k, 0.0)))
+    )
+    if bad_weights:
+        raise NavReconstructionError(
+            f"blend: non-finite weight(s) for {bad_weights} key(s) — refusing a "
+            "NaN/inf value_usd (would silently drop a key or poison the blended curve)"
+        )
+
+    # Sole eligible key: pass its series through untouched at weight 1.0.
+    if len(keys) == 1:
+        sole = keys[0]
+        # F6 (Fable): a sole key with zero/non-positive weight is HONEST-EMPTY, matching
+        # the multi-key LOW-8 zero-mass path — otherwise ONE zero-capital key yields a
+        # full trustworthy curve while TWO yield honest-empty (an inconsistency).
+        if max(0.0, float(weights_by_key.get(sole, 0.0))) <= 0.0:
+            return BlendResult(
+                None,
+                {"honest_empty": True, "reason": REASON_ZERO_WEIGHT_MASS},
+                frozenset({DegradeReason.ZERO_WEIGHT_MASS}),
+            )
+        return BlendResult(
+            series_by_key[sole].copy(),
+            {"sole_key": True, "weight": 1.0},
+        )
+
+    # D1: static current-equity-share weights; clamp negative equity to 0 so a
+    # deeply-losing key cannot inject a negative weight (queries.ts L2209).
+    raw = {k: max(0.0, float(weights_by_key.get(k, 0.0))) for k in keys}
+    total = sum(raw.values())
+    if total <= 0.0:
+        # LOW-8: all-zero (or all-clamped-negative) weight mass has NO capital basis
+        # — the old equal-weight fallback FABRICATED a fully-populated curve with no
+        # economic weight behind it. Honest-empty instead (like the D3 path), never
+        # a soft flag on an invented curve.
+        return BlendResult(
+            None,
+            {"honest_empty": True, "reason": REASON_ZERO_WEIGHT_MASS},
+            frozenset({DegradeReason.ZERO_WEIGHT_MASS}),
+        )
+    norm = {k: raw[k] / total for k in keys}
+
+    # Union axis (0-fill missing interior days in the numerator; constant divisor).
+    # HIGH-1 (interim, Fable): ``.get(day, 0.0)`` 0-fills a key's row on a union day
+    # OUTSIDE that key's own coverage (an exclusive lead/tail of a non-coextensive
+    # key), blended at FULL weight — a fabricated flat 0% day that silently
+    # dilutes/halves the blend. The docstring only defends this for INTERIOR
+    # partial-missing days. The STRUCTURAL fix (feed the blend one Segment at a time,
+    # via ``segment_coverage``, so interior-gap vs exclusive-tail is distinguishable)
+    # is Phase-115.1 wiring work — NOT built here. INTERIM: emit an
+    # ``exclusive_fill_days`` count so the fabrication is no longer invisible; 115.1
+    # refuses when nonzero.
+    union_days = sorted({d for k in keys for d in series_by_key[k].index})
+    values: list[float] = []
+    for day in union_days:
+        r = 0.0
+        for k in keys:
+            r += norm[k] * float(series_by_key[k].get(day, 0.0))
+        values.append(r)
+    # F4 (Fable, 115.1 CARRY-IN — DO NOT "fix" here): this counts ANY union day where
+    # a key lacks a row, so it OVER-COUNTS pure INTERIOR partial-missing days (which
+    # the constant-divisor 0-fill is documented safe for) as well as the exclusive
+    # lead/tail days it means to flag. Distinguishing interior-gap from exclusive-tail
+    # REQUIRES the segment-wise blend wiring deferred to 115.1 (HIGH-1) — it cannot be
+    # done here without segment_coverage. CONSEQUENCE: EXCLUSIVE_FILL is BLOCKING, so a
+    # realistic non-coextensive multi-key allocator would read is_trustworthy=False on a
+    # merely-interior gap — the never-green-gate (LOW-7) class rebuilt on the blend
+    # surface. This is DORMANT today (the blend's is_trustworthy is not display-wired).
+    # 115.1 MUST make this exclusive-ONLY (compute exclusive lead/tail via
+    # segment_coverage) BEFORE gating any display/refusal on it, else it over-refuses
+    # CORRECT curves.
+    exclusive_fill_days = sum(
+        1 for day in union_days if any(day not in series_by_key[k].index for k in keys)
+    )
+    blended = pd.Series(values, index=union_days, name="allocator_blend")
+    reasons = (
+        frozenset({DegradeReason.EXCLUSIVE_FILL}) if exclusive_fill_days else frozenset()
+    )
+    return BlendResult(
+        blended,
+        {
+            "sole_key": False,
+            "zero_weight_keys": sorted(k for k in keys if raw[k] == 0.0),
+            "exclusive_fill_days": exclusive_fill_days,
+            "n_keys": len(keys),
+        },
+        reasons,
+    )
+
+
+# ── STITCH-06: coverage segmentation (concurrent blocks vs sequential seams) ──
+
+
+@dataclass(frozen=True)
+class Segment:
+    """A maximal run of calendar-consecutive days covered by the SAME set of keys.
+
+    ``concurrent`` is True when more than one key covers the run (the blend
+    applies); a single-key run is a genuine sequential leg. ``keys`` is the sorted
+    covering-key tuple; ``days`` is the ordered ISO day list actually covered."""
+
+    start_day: str
+    end_day: str
+    keys: tuple[str, ...]
+    concurrent: bool
+    days: tuple[str, ...]
+
+    @property
+    def n_days(self) -> int:
+        return len(self.days)
+
+
+@dataclass(frozen=True)
+class Seam:
+    """The STITCH-06 handoff contract consumed by wave 3: a genuine sequential
+    rotation where one covering-key set fully hands off to a DISJOINT next set with
+    ZERO shared coverage day. ``gap_days`` is the count of absent calendar days
+    strictly between the two boundaries (0 for an adjacent half-open handoff; > 0
+    for a real gap, whose days are NEVER zero-filled — no-invented-data).
+
+    C2: the covering-key TUPLES ``prev_keys`` / ``next_keys`` are the REQUIRED source
+    of truth (no ``()`` default — an empty covering set would be a silent zero-
+    rotation hole that reintroduces the double-count). The lossy ``+``-joined scalar
+    labels ``prev_key`` / ``next_key`` are DERIVED via ``_key_label`` (``@property``),
+    never stored — so the string can never desync from the tuple (the WR-04 class)."""
+
+    prev_last_day: str
+    next_first_day: str
+    gap_days: int
+    prev_keys: tuple[str, ...]
+    next_keys: tuple[str, ...]
+
+    @property
+    def prev_key(self) -> str:
+        """The lossy ``+``-joined label for the previous covering set (derived)."""
+        return _key_label(self.prev_keys)
+
+    @property
+    def next_key(self) -> str:
+        """The lossy ``+``-joined label for the next covering set (derived)."""
+        return _key_label(self.next_keys)
+
+
+@dataclass(frozen=True)
+class CoverageSegmentation:
+    segments: list[Segment]
+    seams: list[Seam]
+
+
+def _key_window(seq: int, series: pd.Series) -> MemberWindow:
+    """A per-key half-open ``MemberWindow`` derived from the series' actual first /
+    last covered day (``window_end`` exclusive = last day + 1), so the shared
+    ``windows_overlap`` predicate can be reused verbatim on live per-key coverage."""
+    days = sorted(str(d) for d in series.index)
+    start = days[0]
+    end = (pd.Timestamp(days[-1]) + pd.Timedelta(days=1)).date().isoformat()
+    return MemberWindow(seq, start, end)
+
+
+def _key_label(keys: tuple[str, ...]) -> str:
+    """The seam's ``prev_key`` / ``next_key`` scalar: the sole key for a single-key
+    rotation, else the '+'-joined covering set for a (rare) block-to-block handoff."""
+    return keys[0] if len(keys) == 1 else "+".join(keys)
+
+
+def segment_coverage(
+    series_by_key: Mapping[str, pd.Series],
+) -> CoverageSegmentation:
+    """Segment per-key coverage into concurrent blocks vs single-key legs, and emit
+    the ordered Seam list for genuine sequential rotations.
+
+    A day belongs to whichever keys have a row for it. Consecutive calendar days
+    with an IDENTICAL covering-key set form one segment; a change in the covering
+    set OR a calendar gap starts a new segment. A seam is emitted between two
+    temporally-adjacent segments IFF their covering-key sets are DISJOINT (a real
+    rotation — no shared coverage day); overlap transitions (single→concurrent→
+    single) share a key and therefore carry NO seam. Reuses
+    ``stitch_composite.windows_overlap`` for the rotation non-overlap check rather
+    than hand-rolling interval math. No equity math here — this is the pure
+    WHERE-do-synthetic-flows-apply contract for wave 3."""
+    # C-idx: enforce the ISO-day-string index contract at the boundary (a
+    # DatetimeIndex would misalign the ``str(d)`` day keys below).
+    for k, s in series_by_key.items():
+        _assert_iso_day_index(s.index, f"segment_coverage[{k}]")
+    covered: dict[str, set[str]] = {
+        k: {str(d) for d in s.index} for k, s in series_by_key.items()
+    }
+    union_days = sorted({d for days in covered.values() for d in days})
+
+    windows: dict[str, MemberWindow] = {
+        k: _key_window(i, series_by_key[k])
+        for i, k in enumerate(series_by_key)
+        if len(series_by_key[k]) > 0
+    }
+
+    segments: list[Segment] = []
+    cur_keys: frozenset[str] | None = None
+    cur_days: list[str] = []
+    prev_day: str | None = None
+    for day in union_days:
+        keys_today = frozenset(k for k in covered if day in covered[k])
+        is_gap = (
+            prev_day is not None
+            and (pd.Timestamp(day) - pd.Timestamp(prev_day)).days > 1
+        )
+        if cur_keys is None:
+            cur_keys, cur_days = keys_today, [day]
+        elif keys_today != cur_keys or is_gap:
+            segments.append(_finish_segment(cur_keys, cur_days))
+            cur_keys, cur_days = keys_today, [day]
+        else:
+            cur_days.append(day)
+        prev_day = day
+    if cur_keys is not None:
+        segments.append(_finish_segment(cur_keys, cur_days))
+
+    seams: list[Seam] = []
+    for a, b in zip(segments, segments[1:]):
+        a_keys, b_keys = set(a.keys), set(b.keys)
+        if not a_keys.isdisjoint(b_keys):
+            continue  # shared coverage → blended transition, not a rotation seam
+        # Belt-and-suspenders: a genuine rotation's key windows must NOT overlap
+        # (reuse the ONE shared half-open predicate, never inline interval math).
+        if any(
+            windows_overlap(windows[p], windows[n]) for p in a.keys for n in b.keys
+        ):
+            continue
+        gap_days = (pd.Timestamp(b.start_day) - pd.Timestamp(a.end_day)).days - 1
+        seams.append(
+            Seam(
+                prev_last_day=a.end_day,
+                next_first_day=b.start_day,
+                gap_days=gap_days,
+                prev_keys=a.keys,
+                next_keys=b.keys,
+            )
+        )
+
+    return CoverageSegmentation(segments=segments, seams=seams)
+
+
+def _finish_segment(keys: frozenset[str], days: list[str]) -> Segment:
+    sorted_keys = tuple(sorted(keys))
+    return Segment(
+        start_day=days[0],
+        end_day=days[-1],
+        keys=sorted_keys,
+        concurrent=len(sorted_keys) > 1,
+        days=tuple(days),
+    )
+
+
+# ── STITCH-03/04: the $-equity backward-replay layer ─────────────────────────
+#
+# The perf-curve (cumprod of returns, cashflow-NEUTRAL) and the $-equity curve
+# ($, which STEPS on external cashflows) are DIFFERENT outputs. The dailies path
+# persists NO NAV column (csv_daily_returns is returns-only), so the $-curve is
+# reconstructed BACKWARD from the terminal venue anchor through the return path —
+# the SAME dated-flow convention as ``nav_twr.reconstruct_nav`` but replayed on
+# RETURNS (not the un-persisted daily P&L):
+#
+#     backward:  equity_{t-1} = (equity_t - F_t) / (1 + r_t)
+#     forward :  equity_t     = equity_{t-1} * (1 + r_t) + F_t
+#
+# ``F_t`` is the signed external flow on day ``t`` (deposit +, withdrawal −),
+# dated on its UTC day; a flow on a no-return day unions in as a valid zero-return
+# equity day (the ``nav_twr`` HIGH-1 precedent), never an orphan. No anchor ->
+# NO $-series (honest degradation, flagged) — never a fabricated base.
+
+# Self-check + guard tolerances. The backward roll is the exact inverse of the
+# forward replay, so agreement is machine-eps; the band is a relative floor.
+_SELF_CHECK_ABS = 1e-6
+_SELF_CHECK_REL = 1e-9
+
+
+@dataclass(frozen=True)
+class KeyEquity:
+    """One key's reconstructed $-equity series, or an honest degradation.
+
+    ``equity`` is the per-day $-level Series (ISO-day index), or ``None`` when the
+    key has no terminal anchor. ``reason`` is a machine token on the ``None`` path
+    (no USD magnitude — T-115-05). ``flags`` carries JSON-serializable bools/counts
+    (e.g. ``out_of_window_flows``) — no USD magnitudes. ``degrade_reasons`` is the
+    CLOSED ``DegradeReason`` set (C3); ``is_trustworthy`` is False iff any is
+    BLOCKING (e.g. an out-of-window flow)."""
+
+    equity: pd.Series | None
+    reason: str | None = None
+    flags: dict[str, Any] = field(default_factory=dict)
+    degrade_reasons: frozenset[DegradeReason] = field(default_factory=frozenset)
+
+    @property
+    def is_trustworthy(self) -> bool:
+        return _is_trustworthy(self.degrade_reasons)
+
+
+@dataclass(frozen=True)
+class AllocatorEquity:
+    """The allocator-level $-equity curve summed across anchored keys.
+
+    ``equity`` is the summed $-level Series over the common anchored window, or
+    ``None`` when no key is anchored. ``flags`` carries JSON-serializable
+    bools/counts only — no USD magnitudes (T-115-05). ``degrade_reasons`` is the
+    CLOSED ``DegradeReason`` set (C3); ``is_trustworthy`` is False iff any is BLOCKING
+    (a dropped key or an unclassified rotation — the number is suspect). A BENIGN
+    window-truncation / stale-mark carry does NOT block, so the live gate stays
+    meaningful for a normal multi-key allocator (the LOW-7 fix)."""
+
+    equity: pd.Series | None
+    flags: dict[str, Any] = field(default_factory=dict)
+    degrade_reasons: frozenset[DegradeReason] = field(default_factory=frozenset)
+
+    @property
+    def is_trustworthy(self) -> bool:
+        return _is_trustworthy(self.degrade_reasons)
+
+
+def perf_curve(returns: pd.Series | None) -> pd.Series | None:
+    """The cashflow-NEUTRAL cumulative-return path, normalized to 1.0 on day 0.
+
+    ``perf_t = Π_{s=1..t}(1 + r_s)`` (day-0 return is absorbed into the level, so
+    ``perf_0 == 1.0``). This is deliberately the SAME normalization the $-curve's
+    ``equity_t / equity_0`` telescopes to under ZERO flows (STITCH-03 equivalence
+    pin) — the two curves are then byte-identical, and any deposit/withdrawal is
+    the ONLY thing that can separate them. Returns ``None`` on an empty series.
+
+    DAY-0 CONVENTION (WR-02 — the Phase-114 BACKBONE-01 precedent, decisive here):
+    normalizing to ``perf_0 == 1.0`` divides OUT the day-0 factor ``(1 + r_0)``, so
+    this curve's total growth is ``Π_{s≥1}(1 + r_s)`` — the SAME day-0-exclusion the
+    deleted forward-TWR scalar (now ``metrics.total_return_from_equity``, an
+    endpoint ratio over ``(1+r).cumprod()``) preserves byte-for-byte. The canonical
+    backbone ``metrics.compute_all_metrics(...).cumulative_return`` is
+    ``Π_{ALL days}(1 + r) − 1`` (INCLUDING day 0, metrics.py:1254), so
+    ``(1 + backbone_cumret) == (1 + r_0) × perf_curve_terminal`` EXACTLY. This
+    divergence is INTENTIONAL and pinned (parity oracle
+    ``test_oracle_2b_curve_excludes_day0_pins_backbone_relationship``): a headline
+    cumulative RETURN must ALWAYS be sourced from the backbone scalar, NEVER read
+    off this perf-curve or the normalized $-curve (both drop day-0 identically). No
+    115.1 consumer may derive a headline return from the curve."""
+    if returns is None or len(returns) == 0:
+        return None
+    # MEDIUM-2: a PRESENT-but-non-finite return (csv gap → NaN) would
+    # ``cumprod`` into a silent NaN curve with no flag. Refuse it here.
+    bad_days = _nonfinite_count(returns)
+    if bad_days:
+        raise NavReconstructionError(
+            f"perf_curve: {bad_days} non-finite return value(s) — refusing to "
+            "propagate NaN/inf into a displayed curve"
+        )
+    factors = (1.0 + returns).cumprod()
+    first = float(factors.iloc[0])
+    if first == 0.0:
+        # MEDIUM-3: ``(1 + r_0) == 0`` is a day-0 TOTAL LOSS, NOT a no-data series —
+        # the old code returned ``None`` for BOTH, conflating them. An INTERIOR
+        # −100% day still normalizes (its cumprod steps to 0, divided by a nonzero
+        # ``first``); only a day-0 wipeout breaks the divisor. Fail loud, distinct
+        # from the empty-series ``None``.
+        raise NavReconstructionError(
+            "perf_curve: day-0 total loss (1 + r_0 == 0) — cannot normalize to "
+            "perf_0 == 1.0; distinct from the empty-series no-data case"
+        )
+    return factors / first
+
+
+def _flows_by_day(flows: Sequence[Any] | None) -> dict[str, float]:
+    """Sum signed external-flow USD per UTC day (deposit +, withdrawal −). Indexed
+    access (``flow[0]``/``flow[1]``) so a 4-field ``ExternalFlow`` and a bare
+    ``(day, usd)`` tuple both read; two flows on one day collapse to one sum —
+    mirrors ``nav_twr._flows_to_daily_usd`` without importing its pandas plumbing."""
+    sums: dict[str, float] = defaultdict(float)
+    for flow in flows or []:
+        amount = float(flow[1])
+        # G2 (Fable, same finiteness class as C1/F3/F5): a non-finite flow amount
+        # poisons the backward roll — a −inf flow builds an infinite equity that passes
+        # the positivity + forward self-check (``abs(inf−inf)=nan > tol`` is False,
+        # is_trustworthy=True), and a nan first-day flow (IN-02) is silently absorbed.
+        # Refuse it with a data-quality message (no USD leak).
+        if not math.isfinite(amount):
+            raise NavReconstructionError(
+                "allocator equity replay: non-finite external flow amount — refusing "
+                "a data-quality NaN/inf flow"
+            )
+        sums[str(flow[0])] += amount
+    return dict(sums)
+
+
+def replay_key_equity(
+    returns: pd.Series,
+    flows: Sequence[Any] | None,
+    anchor: float | None,
+) -> KeyEquity:
+    """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
+
+    ``anchor`` is the terminal (last-day) $-equity from the venue. Rolling
+    backward with ``equity_{t-1} = (equity_t - F_t)/(1 + r_t)`` and unioning every
+    flow day into the return index FIRST (HIGH-1 mirror — a flow on a no-return
+    day is a valid ``r_t == 0`` equity day, never dropped), the series is exact by
+    construction. ``anchor=None`` -> NO series + ``REASON_NO_ANCHOR`` (never a
+    fabricated base).
+
+    IN-02 caveat: the HIGH-1 union guarantee holds for INTERIOR flow days. A flow
+    dated on the EARLIEST union day ``days[0]`` is folded into the reconstructed
+    base ``equity[0]`` — the backward loop subtracts ``F_t`` only for ``t ≥ 1`` —
+    so a first-day flow does NOT separately move the base. It is self-consistent
+    (the forward self-check absorbs it identically) and correct for level
+    reconstruction, but has no distinguishable effect on ``equity[0]``.
+
+    Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
+    ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
+    or a non-positive reconstructed intermediate equity (a withdrawal dwarfing
+    prior capital). Refusal text carries counts/day-indices ONLY — never a raw USD
+    magnitude (T-115-05 / T-73-02).
+
+    A forward/backward construction-sanity self-check (the ``nav_twr``
+    reconcile pattern) replays FORWARD and asserts byte-agreement, reddening only
+    on a roll-loop-vs-identity code divergence."""
+    if anchor is None:
+        return KeyEquity(
+            None, REASON_NO_ANCHOR, degrade_reasons=frozenset({DegradeReason.NO_ANCHOR})
+        )
+
+    # F5 (Fable, same finiteness class as C1/F3): refuse a non-finite anchor. Without
+    # this, ``anchor=inf`` builds an INFINITE equity series that passes the forward
+    # self-check (``abs(inf−inf)=nan > tol`` is False) with is_trustworthy=True, and
+    # ``anchor=nan`` trips the MISATTRIBUTED flow-dominance guard. Data-quality message,
+    # no USD leak.
+    if not math.isfinite(float(anchor)):
+        raise NavReconstructionError(
+            "allocator equity replay: non-finite anchor — refusing a data-quality "
+            "NaN/inf terminal equity (distinct from the flow-dominance guard)"
+        )
+
+    # C-idx: enforce the ISO-day-string index contract before any day keying.
+    _assert_iso_day_index(returns.index, "allocator equity replay")
+
+    # C1: refuse a non-finite return VALUE at ingestion (a csv-gap NaN) with a
+    # DATA-QUALITY diagnostic. Without this, a NaN return sails past the ≤−100%
+    # factor guard (``nan <= 0`` is False), poisons the roll, and trips the
+    # MISATTRIBUTED "a flow dominates prior capital" refusal downstream. Mirrors the
+    # perf_curve / blend MEDIUM-2 refusal (no USD leak).
+    bad_returns = _nonfinite_count(returns)
+    if bad_returns:
+        raise NavReconstructionError(
+            f"allocator equity replay: {bad_returns} non-finite return value(s) — "
+            "refusing a data-quality NaN/inf (distinct from the flow-dominance guard)"
+        )
+
+    fbd = _flows_by_day(flows)
+    r = {str(d): float(v) for d, v in returns.items()}
+    # HIGH-1: union flow days into the return index BEFORE the roll.
+    days = sorted(set(r) | set(fbd))
+    n = len(days)
+    if n == 0:
+        return KeyEquity(
+            None, REASON_NO_ANCHOR, degrade_reasons=frozenset({DegradeReason.NO_ANCHOR})
+        )
+
+    # MEDIUM-5: a flow dated OUTSIDE the return window [first, last] silently extends
+    # the reconstructed curve with a fabricated point (a typo-year / out-of-window
+    # transfer). We do NOT drop it (the HIGH-1 pre-window no-trade-day union is a
+    # legitimate shape) but COUNT it so the extension is never invisible — a 115.1
+    # consumer can refuse when nonzero. Return-day window bounds the check.
+    ret_days = sorted(r)
+    out_of_window_flows = 0
+    if ret_days:
+        lo, hi = ret_days[0], ret_days[-1]
+        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi)
+
+    equity = [0.0] * n
+    equity[n - 1] = float(anchor)
+    for t in range(n - 1, 0, -1):
+        day_t = days[t]
+        factor = 1.0 + r.get(day_t, 0.0)
+        if factor <= 0.0:
+            # An un-replayable ≤ −100% day: the backward identity has no positive
+            # denominator. Fail loud with a day-index only (no USD).
+            raise NavReconstructionError(
+                f"allocator equity replay: non-positive return factor at "
+                f"day-index {t} of {n} — cannot roll backward through a ≤−100% day"
+            )
+        equity[t - 1] = (equity[t] - fbd.get(day_t, 0.0)) / factor
+
+    bad = sum(1 for e in equity if not (e > 0.0))
+    if bad:
+        raise NavReconstructionError(
+            f"allocator equity replay: non-positive reconstructed equity on "
+            f"{bad} of {n} day(s) — a flow dominates prior capital (refusing to "
+            "fabricate a floor)"
+        )
+
+    series = pd.Series(equity, index=days, name=getattr(returns, "name", None))
+    _assert_forward_agreement(series, r, fbd, days)
+    flags = {"out_of_window_flows": out_of_window_flows} if out_of_window_flows else {}
+    reasons = (
+        frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
+        if out_of_window_flows
+        else frozenset()
+    )
+    return KeyEquity(series, None, flags, degrade_reasons=reasons)
+
+
+def _assert_forward_agreement(
+    series: pd.Series,
+    r: Mapping[str, float],
+    fbd: Mapping[str, float],
+    days: Sequence[str],
+) -> None:
+    """DQ-02 construction self-check (``nav_twr.reconcile_flow_residual`` spirit):
+    replay FORWARD from day-0 and assert byte-agreement with the backward roll.
+    Reddens ONLY on a roll-vs-identity code divergence — never on an economically
+    wrong anchor (which shifts every level together). Counts/day-indices only."""
+    vals = series.to_numpy(dtype=float)
+    fwd = float(vals[0])
+    for t in range(1, len(days)):
+        fwd = fwd * (1.0 + r.get(days[t], 0.0)) + fbd.get(days[t], 0.0)
+        tol = _SELF_CHECK_ABS + _SELF_CHECK_REL * abs(float(vals[t]))
+        if abs(fwd - float(vals[t])) > tol:
+            raise NavReconstructionError(
+                "allocator equity replay: forward/backward self-check diverged at "
+                f"day-index {t} of {len(days)} — a roll-loop-vs-identity code "
+                "divergence"
+            )
+
+
+def allocator_equity_curve(
+    per_key_equity: Mapping[str, KeyEquity],
+    seams: Sequence[Seam] | None = None,
+) -> AllocatorEquity:
+    """Sum the anchored per-key $-equity curves over the UNION of their windows.
+
+    A key with ``equity is None`` (no anchor) is DROPPED (never invented). The
+    allocator curve spans the UNION of every surviving (anchored) key's day index;
+    on each union day the portfolio $-equity is the SUM of each key's level that day.
+
+    OWNERSHIP AT A ROTATION (Finding 1 — the discriminator is the seam list):
+      * A key that is ROTATED OUT at a seam (it appears in some seam's
+        ``prev_keys``) hands its capital to the NEXT block — ``build_allocator_ledger``
+        already books that jump as an internal redeployment. So a rotated-out key
+        STOPS contributing after its own last day: 0 thereafter, NEVER a stale
+        carry-forward. Carrying it forward would DOUBLE-COUNT the redeployed capital
+        (it would show as the prev key's level AND inside the next block).
+      * A NON-rotated still-held key whose OWN window has ended keeps its last-known
+        level CARRIED FORWARD (last-observation-carried-forward) — the WR-01 case: the
+        allocator's live equity, which the ground-truth gate reconciles the terminal
+        against, is the sum of every still-held key's last-known ``value_usd`` anchor,
+        so the terminal MUST be ``Σ_{still-held k} anchor_k`` (rotated-out keys
+        contribute 0 at the terminal), never a rolled-back intersection.
+
+    The seam classification is taken from ``seams`` when supplied (pass the SAME list
+    ``build_allocator_ledger`` consumed, for guaranteed curve/ledger agreement) or
+    DERIVED internally from the anchored coverage windows otherwise — either way the
+    ownership semantics match the ledger by construction. A key contributes 0 on
+    union days BEFORE its own window opens (not yet held); interior absent days inside
+    a key's own window carry the prior level.
+
+    WR-01: the OLD implementation summed only over the INTERSECTION of the anchored
+    indices, silently dropping non-overlapping tails with ``degraded=False``. Now,
+    whenever any surviving key's window is a strict SUBSET of the union, the result is
+    flagged ``degraded=True``. The degraded-path ``flags`` carry: ``window_truncated``
+    (bool), ``n_tail_days_carried`` (benign non-rotated stale-mark days),
+    ``rotated_out_keys`` (benign classified rotations), ``unclassified_truncation_keys``
+    (MEDIUM-6 — a coverage-detected rotation the passed seams did NOT classify; a
+    BLOCKING signal), and ``dropped_keys``. The closed ``degrade_reasons`` set +
+    ``is_trustworthy`` (C3) classify these benign-vs-blocking so a consumer can honor
+    them without re-reading the dict. Every key unanchored -> ``None`` + honest-empty."""
+    anchored = {
+        k: ke.equity for k, ke in per_key_equity.items() if ke.equity is not None
+    }
+    dropped = sorted(k for k, ke in per_key_equity.items() if ke.equity is None)
+
+    if not anchored:
+        return AllocatorEquity(
+            None,
+            {
+                "honest_empty": True,
+                "reason": REASON_NO_ANCHORED_KEYS,
+                "dropped_keys": dropped,
+            },
+            frozenset({DegradeReason.NO_ANCHORED_KEYS}),
+        )
+
+    # Rotation ownership: derive the seam classification from the anchored coverage
+    # windows when the caller does not supply it, so the curve agrees with
+    # ``build_allocator_ledger`` on which keys are redeployed vs still held.
+    explicit_seams = seams is not None
+    if seams is None:
+        seams = segment_coverage(dict(anchored)).seams
+    rotated_out: set[str] = set()
+    for seam in seams:
+        rotated_out.update(seam.prev_keys or ())
+
+    # MEDIUM-6: a caller-passed seam list computed over a DIFFERENT key set silently
+    # double-counts — a genuinely-rotated key absent from ``rotated_out`` is carried
+    # forward (ffill) and summed on the next block, flagged BYTE-IDENTICALLY to a
+    # benign stale mark. Guard the passed-seams path:
+    #   (a) every seam-referenced key must be in ``anchored`` (a stray key means the
+    #       seams were computed over a different set) -> fail loud;
+    #   (b) cross-check against the internally-derived rotation: a key the coverage
+    #       says rotates out but the passed seams did NOT classify is an UNCLASSIFIED
+    #       truncation -> a DISTINCT non-benign flag token (not the benign carry).
+    unclassified: set[str] = set()
+    if explicit_seams:
+        seam_keys: set[str] = set()
+        for seam in seams:
+            seam_keys.update(seam.prev_keys or ())
+            seam_keys.update(seam.next_keys or ())
+        stray = seam_keys - set(anchored)
+        if stray:
+            raise NavReconstructionError(
+                f"allocator_equity_curve: passed seam(s) reference {len(stray)} "
+                "key(s) absent from the anchored set — seams computed over a "
+                "different key set (refusing a silent double-count)"
+            )
+        internal_rotated: set[str] = set()
+        for seam in segment_coverage(dict(anchored)).seams:
+            internal_rotated.update(seam.prev_keys or ())
+        unclassified = internal_rotated - rotated_out
+
+    union_days = sorted({str(d) for s in anchored.values() for d in s.index})
+    union_index = pd.Index(union_days)
+
+    key_first: dict[str, str] = {}
+    key_last: dict[str, str] = {}
+    total = pd.Series(0.0, index=union_days, name="allocator_equity")
+    for k, series in anchored.items():
+        day_map = {str(d): float(v) for d, v in series.items()}
+        days_sorted = sorted(day_map)
+        key_first[k] = days_sorted[0]
+        key_last[k] = days_sorted[-1]
+        # Reindex onto the union, carrying the last-known level forward across any
+        # interior gap. 0 before the key opens (not yet part of the portfolio).
+        contrib = pd.Series(day_map).reindex(union_days).ffill()
+        if k in rotated_out:
+            # Rotated OUT: real level within its window, 0 after its last day (the
+            # capital is redeployed into the next block — no stale carry-forward).
+            contrib = contrib.where(union_index <= key_last[k], 0.0)
+        contrib = contrib.where(union_index >= key_first[k], 0.0).fillna(0.0)
+        total = total.add(contrib, fill_value=0.0)
+
+    # Benign stale marks are non-rotated AND non-unclassified keys carried past their
+    # own last day (an unclassified key's carry is the MEDIUM-6 double-count — kept
+    # OUT of the benign count so the two flag tokens stay distinct).
+    n_tail_days_carried = sum(
+        1
+        for day in union_days
+        for k in anchored
+        if k not in rotated_out and k not in unclassified and day > key_last[k]
+    )
+    window_truncated = any(
+        key_first[k] != union_days[0] or key_last[k] != union_days[-1]
+        for k in anchored
+    )
+    rotated_out_present = sorted(rotated_out & set(anchored))
+
+    # C3: the CLOSED reason set — BENIGN (window-truncation, stale-mark carry,
+    # classified rotation) vs BLOCKING (a dropped key, an unclassified rotation).
+    # ``is_trustworthy`` = no blocking reason, so a normal multi-key allocator with a
+    # benign window-truncation stays trustworthy (the LOW-7 gate fix).
+    reasons: set[DegradeReason] = set()
+    if dropped:
+        reasons.add(DegradeReason.DROPPED_KEY)
+    if window_truncated:
+        reasons.add(DegradeReason.WINDOW_TRUNCATED)
+    if n_tail_days_carried:
+        reasons.add(DegradeReason.STALE_MARK_CARRY)
+    if rotated_out_present:
+        reasons.add(DegradeReason.CLASSIFIED_ROTATION)
+    if unclassified:
+        reasons.add(DegradeReason.UNCLASSIFIED_ROTATION)
+
+    return AllocatorEquity(
+        total,
+        {
+            "degraded": bool(dropped) or window_truncated or bool(unclassified),
+            "dropped_keys": dropped,
+            "window_truncated": window_truncated,
+            "n_tail_days_carried": n_tail_days_carried,
+            "rotated_out_keys": rotated_out_present,
+            # MEDIUM-6: a DISTINCT non-benign token — keys the coverage says rotate
+            # out but the passed seams did not classify (a potential double-count),
+            # never conflated with the benign n_tail_days_carried stale-mark carry.
+            "unclassified_truncation_keys": sorted(unclassified),
+            "n_keys": len(anchored),
+        },
+        frozenset(reasons),
+    )
+
+
+# ── STITCH-05/06: the ONE unified cashflow ledger (real + synthetic seam) ─────
+#
+# Windowed stitching and cashflow accounting are ONE code path (the founder-locked
+# STITCH contract). Real external flows AND the synthetic rotation-seam entries
+# live in a SINGLE ordered, provenance-tagged ledger of ``ExternalFlow`` shape.
+# That SAME ledger feeds both the $-replay (a seam is a $-step, not a return) and
+# the Modified-Dietz / MWR scalar adapters — the KEPT ``portfolio_metrics``
+# cashflow surface (which the unified backbone cannot reproduce) gets its FIRST
+# production caller here. Per RESEARCH Open Question 3, the scalars are computed +
+# tested but NOT display-wired this phase (thread-only STITCH-05 scope); the
+# Phase 115.1 worker-side derivation is the consumer that surfaces them.
+#
+# L1 pin: seam synthetic flows apply ONLY at genuine rotation boundaries (the
+# ``segment_coverage`` Seam list — disjoint covering sets). A concurrent-blend day
+# NEVER receives a seam flow; it composes via the capital-weighted blend.
+
+LEDGER_REAL = "real"
+LEDGER_SEAM = "seam"
+
+
+@dataclass(frozen=True)
+class LedgerScalars:
+    """The two KEPT ``portfolio_metrics`` scalars threaded from the unified ledger
+    (C4). ``computable`` is False ONLY on the fail-loud unknown-magnitude ledger (a
+    ``known=False`` seam) — this is DISTINCT from an ordinarily-uncomputable
+    individual scalar (``mwr`` / ``dietz`` may still be ``None`` when the IRR / Dietz
+    solve degenerates even though ``computable`` is True). Replaces the transposable
+    ``(mwr, dietz)`` tuple that aliased the fail-loud path with the uncomputable one."""
+
+    mwr: float | None
+    dietz: float | None
+    computable: bool
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """One dated entry in the unified allocator cashflow ledger.
+
+    ``flow`` is the ``ExternalFlow`` (deposit +, withdrawal −; a synthetic seam
+    step carries the boundary equity jump). ``provenance`` is ``LEDGER_REAL`` for
+    a genuine external flow or ``LEDGER_SEAM`` for a rotation-boundary synthetic
+    entry. ``known`` is ``False`` ONLY for a seam whose magnitude is unknowable
+    because a boundary segment is unanchored — the scalar adapters then fail loud
+    (never a fabricated number) and the flow's ``usd_signed`` is ``nan``."""
+
+    flow: ExternalFlow
+    provenance: str
+    known: bool = True
+
+
+def build_allocator_ledger(
+    real_flows_by_key: Mapping[str, Sequence[Any]],
+    seams: Sequence[Seam],
+    per_key_equity: Mapping[str, KeyEquity],
+    returns_by_key: Mapping[str, pd.Series] | None = None,
+) -> list[LedgerEntry]:
+    """Build the ONE ordered, provenance-tagged allocator cashflow ledger.
+
+    Real external flows (per key) enter tagged ``LEDGER_REAL``. Each rotation
+    ``Seam`` becomes ONE synthetic ``LEDGER_SEAM`` entry dated on the next segment's
+    first day, carrying the boundary equity JUMP — a deposit if capital grew across
+    the handoff, a withdrawal if it shrank (STITCH-06).
+
+    SEAM MAGNITUDE (Finding 3 — the module's own forward identity):
+    ``next_eq`` is the next block's END-of-first-day level, so it ALREADY contains
+    that day's return ``r_next`` on the redeployed capital. The convention-consistent
+    synthetic flow is therefore ``F = next_eq − prev_eq·(1 + r_next)`` — the module
+    identity ``equity_t = equity_{t-1}·(1 + r_t) + F_t`` solved for ``F`` at the seam.
+    The naive ``next_eq − prev_eq`` folded ``prev_eq·r_next`` of first-day P&L on the
+    redeployed capital INTO the flow, dropping it from performance (Dietz numerator).
+    ``r_next`` is the next block's first-day return, capital-weighted across a
+    multi-key incoming block (``_seam_next_first_return``); it needs
+    ``returns_by_key`` (the per-key daily-return series). When a boundary segment is
+    unanchored OR the next-side return is unavailable (no ``returns_by_key``) the
+    magnitude is UNKNOWN: the entry is flagged ``known=False`` (``nan``) so the scalar
+    adapters fail loud rather than fabricate a jump.
+
+    Entries are sorted ascending by UTC day. This is the SINGLE construction site for
+    the ledger — both the $-replay and the Dietz/MWR adapters read the returned list."""
+    entries: list[LedgerEntry] = []
+
+    for key in sorted(real_flows_by_key):
+        for flow in real_flows_by_key[key]:
+            entries.append(_ledger_entry(str(flow[0]), float(flow[1]), LEDGER_REAL))
+
+    for seam in seams:
+        # WR-04: resolve boundary equity by SUMMING the constituent keys' levels
+        # (``seam.prev_keys`` / ``seam.next_keys``), NEVER the '+'-joined scalar
+        # label. A single-key rotation is the 1-member sum; a concurrent-block
+        # rotation now resolves.
+        prev_eq = _boundary_equity_block(
+            per_key_equity, seam.prev_keys, seam.prev_last_day
+        )
+        next_eq = _boundary_equity_block(
+            per_key_equity, seam.next_keys, seam.next_first_day
+        )
+        r_next = _seam_next_first_return(
+            returns_by_key, per_key_equity, seam, real_flows_by_key
+        )
+        if prev_eq is None or next_eq is None or r_next is None:
+            # Magnitude unknown (an unanchored boundary or a missing next-side
+            # return) — flag, never fabricate. usd_signed is nan; scalars refuse.
+            entries.append(
+                _ledger_entry(
+                    seam.next_first_day, float("nan"), LEDGER_SEAM, known=False
+                )
+            )
+        else:
+            # Finding 3: forward-identity flow — strip the redeployed capital's
+            # first-day return out of the synthetic flow (it is performance, not
+            # cash movement).
+            # F1 (Fable): ``next_eq`` ALREADY contains any REAL external flow dated the
+            # seam day into a next-block member (each next key's replayed first-day
+            # equity folds its own same-day flow in), and those flows are booked ONCE
+            # as LEDGER_REAL above. Subtract them from the residual so the seam carries
+            # ONLY the non-return, non-real-flow redeployment magnitude — never
+            # double-booking a seam-day real deposit/withdrawal.
+            seam_day_real = sum(
+                float(flow[1])
+                for k in seam.next_keys
+                for flow in real_flows_by_key.get(k, [])
+                if str(flow[0]) == seam.next_first_day
+            )
+            seam_usd = next_eq - prev_eq * (1.0 + r_next) - seam_day_real
+            entries.append(
+                _ledger_entry(seam.next_first_day, seam_usd, LEDGER_SEAM, known=True)
+            )
+
+    entries.sort(key=lambda e: e.flow.utc_day_iso)
+    return entries
+
+
+def _seam_next_first_return(
+    returns_by_key: Mapping[str, pd.Series] | None,
+    per_key_equity: Mapping[str, KeyEquity],
+    seam: Seam,
+    real_flows_by_key: Mapping[str, Sequence[Any]] | None = None,
+) -> float | None:
+    """The incoming (NEXT) block's first-day return on the seam day, weighted by each
+    member's START capital (Finding 3). For a single-key rotation this is just that
+    key's return on ``next_first_day``. Returns ``None`` if ``returns_by_key`` is absent
+    or any next-side return / equity is missing (the seam magnitude is then unknown —
+    never fabricated).
+
+    F2 (Fable): the redeployed capital earns the START-capital-weighted return
+    ``Σ sᵢ·rᵢ / Σ sᵢ``. G1 (Fable, F1+F2 composition): the member's END-of-day equity
+    ``eqᵢ`` ALREADY contains any seam-day REAL flow ``fᵢ`` into it (the replay identity
+    ``equity_t = equity_{t-1}(1+r)+F``), so the true start capital is
+    ``sᵢ = (eqᵢ − fᵢ)/(1+rᵢ)`` — NOT ``eqᵢ/(1+rᵢ)``, which over-recovers by
+    ``fᵢ/(1+rᵢ)`` and tilts the weight toward the flow-receiving member. Weighting by
+    the end-of-day ``eqᵢ`` (or an un-stripped start capital) biases toward the winner
+    and books a spurious synthetic flow on a pure (zero-cash) rotation. The
+    ``1+rᵢ > 0`` denominator is guaranteed for an anchored key (replay refuses a
+    ≤−100% day)."""
+    if not returns_by_key:
+        return None
+    total_start = 0.0
+    weighted = 0.0
+    for n in seam.next_keys:
+        eq = _boundary_equity(per_key_equity, n, seam.next_first_day)
+        rser = returns_by_key.get(n)
+        if eq is None or rser is None:
+            return None
+        rmap = {str(day): float(val) for day, val in rser.items()}
+        r = rmap.get(str(seam.next_first_day))
+        if r is None or (1.0 + r) <= 0.0:
+            return None
+        # G1: strip the member's seam-day real flow out of the END equity BEFORE
+        # recovering start capital (``eqᵢ`` already folded it in).
+        f_i = sum(
+            float(flow[1])
+            for flow in (real_flows_by_key or {}).get(n, [])
+            if str(flow[0]) == seam.next_first_day
+        )
+        start_capital = (eq - f_i) / (1.0 + r)
+        total_start += start_capital
+        weighted += start_capital * r
+    if total_start == 0.0:
+        return None
+    return weighted / total_start
+
+
+def _ledger_entry(
+    day: str, usd_signed: float, provenance: str, *, known: bool = True
+) -> LedgerEntry:
+    """The SOLE ledger-entry construction site (one-ledger invariant — the
+    STITCH-05 grep pin asserts a single construction of the entry in the
+    module; every real/seam entry funnels through here)."""
+    # G2 (Fable): the LedgerEntry contract is ``nan usd_signed ⇔ known=False``. Enforce
+    # it here (the sole construction site) so a non-finite magnitude on the known=True
+    # path — e.g. a nan seam-day real flow summed into the seam residual — fails loud
+    # into C4's fail-loud channel instead of laundering as ``computable=True,
+    # dietz=None``. The known=False path legitimately carries ``nan`` (unknown seam).
+    if known and not math.isfinite(float(usd_signed)):
+        raise NavReconstructionError(
+            "allocator ledger entry: non-finite usd_signed on a known=True entry — "
+            "refusing a data-quality NaN/inf magnitude (contract: nan ⇔ known=False)"
+        )
+    return LedgerEntry(ExternalFlow(day, usd_signed), provenance, known)
+
+
+def _boundary_equity_block(
+    per_key_equity: Mapping[str, KeyEquity], keys: tuple[str, ...], day: str
+) -> float | None:
+    """The summed boundary $-equity of a (possibly multi-key) segment on ``day``:
+    ``Σ_k _boundary_equity(k, day)`` over the segment's constituent ``keys`` (WR-04).
+
+    A single-key rotation is the 1-member sum. A concurrent-block rotation sums the
+    block members' levels — the keys live at that boundary. Returns ``None`` if ANY
+    member is unanchored / absent that day (the WHOLE boundary magnitude is unknown;
+    never a partial sum) or if ``keys`` is empty (no resolvable block)."""
+    if not keys:
+        return None
+    total = 0.0
+    for k in keys:
+        lvl = _boundary_equity(per_key_equity, k, day)
+        if lvl is None:
+            return None
+        total += lvl
+    return total
+
+
+def _boundary_equity(
+    per_key_equity: Mapping[str, KeyEquity], key: str, day: str
+) -> float | None:
+    """The anchored $-equity of ``key`` on ``day``, or ``None`` when that key is
+    unanchored (no $-series) or the day is absent — the caller flags the seam
+    magnitude-unknown rather than inventing a boundary level."""
+    ke = per_key_equity.get(key)
+    if ke is None or ke.equity is None:
+        return None
+    series = ke.equity
+    day = str(day)
+    if day in {str(d) for d in series.index}:
+        return float(series[day])
+    return None
+
+
+def mwr_and_dietz_from_ledger(
+    ledger: Sequence[LedgerEntry],
+    *,
+    begin_value: float,
+    end_value: float,
+    period_start: str,
+    period_days: int,
+) -> LedgerScalars:
+    """Thread the unified ledger through the KEPT ``portfolio_metrics`` scalars
+    (STITCH-05) — the first production caller of ``compute_mwr`` /
+    ``compute_modified_dietz``.
+
+    Fails loud on an unknown-magnitude ledger: ANY ``known=False`` seam entry ->
+    ``LedgerScalars(None, None, computable=False)`` (never a fabricated scalar; C4
+    keeps this DISTINCT from an ordinarily-uncomputable scalar). Otherwise the
+    adapter converts
+    each ``ExternalFlow`` entry into the two dict shapes the KEPT helpers expect:
+
+      * MWR (annualised IRR, investor perspective): a portfolio deposit is an
+        investment OUT of the investor's pocket, so the sign FLIPS
+        (``amount = −usd_signed``); the ``begin_value`` is prepended as the
+        initial investment at ``period_start`` and ``end_value`` is the terminal
+        inflow. WR-03: ONLY ``LEDGER_REAL`` (real-external) flows enter the
+        IRR — a ``LEDGER_SEAM`` entry is the SAME capital redeployed from one key to
+        the next (internal), NOT money entering/leaving the investor's pocket, and
+        its magnitude is largely independent-anchor reconciliation noise; injecting
+        it as an investor cash flow corrupts the IRR. Rotation seams are EXCLUDED.
+      * Modified Dietz (portfolio perspective): ``amount = usd_signed`` directly
+        (deposit +, withdrawal −, matching ``ExternalFlow``); ``day`` is the
+        0-based offset from ``period_start``. Seam entries ARE kept here (both
+        provenances): Modified-Dietz subtracts ΣF from the return NUMERATOR, so
+        including the boundary jump REMOVES it from performance (the same reason
+        TWR stays clean across a rotation) — the portfolio-perspective return is not
+        credited/debited for an internal redeployment. This asymmetry with MWR is
+        intentional: Dietz is portfolio-return-clean, MWR is investor-action-clean.
+
+    Thread-only: the returned scalars are NOT display-wired this phase."""
+    if any(not e.known for e in ledger):
+        return LedgerScalars(None, None, computable=False)
+
+    start = date.fromisoformat(str(period_start))
+    end_date = (start + timedelta(days=int(period_days))).isoformat()
+
+    # MEDIUM-4: an entry dated OUTSIDE [period_start, period_start + period_days] is a
+    # CONSTRUCTION bug (a mis-dated seam/flow). ``compute_modified_dietz`` would
+    # SILENTLY clamp the day offset (M-0695) — a pre-period entry launders to a
+    # full-weight t=0 flow, a post-period entry to a zero-weight one — quietly
+    # re-weighting the return. Fail loud instead (extending the known=False
+    # fail-loud discipline). Bounds carry day-offset counts only (no USD).
+    for e in ledger:
+        offset = (date.fromisoformat(e.flow.utc_day_iso) - start).days
+        if offset < 0 or offset > int(period_days):
+            raise NavReconstructionError(
+                f"allocator ledger entry dated {offset} day(s) from period_start is "
+                f"outside [0, {int(period_days)}] — a mis-dated seam/flow (refusing "
+                "the silent Modified-Dietz day clamp)"
+            )
+
+    # WR-03: MWR (investor IRR) sees ONLY real-external flows; synthetic rotation
+    # seams are internal capital redeployment, never an investor action.
+    mwr_flows: list[dict[str, Any]] = [
+        {"date": period_start, "amount": -float(begin_value)}
+    ]
+    mwr_flows += [
+        {"date": e.flow.utc_day_iso, "amount": -float(e.flow.usd_signed)}
+        for e in ledger
+        if e.provenance != LEDGER_SEAM
+    ]
+    # Finding 2: append the terminal value EXPLICITLY rather than relying on
+    # compute_mwr's ``final_value>0 AND net_cf<0`` heuristic — for a
+    # withdrawal-heavy ledger (net cash flow >= 0) that heuristic SILENTLY omits the
+    # terminal and the IRR ignores ending wealth (identical MWR for every
+    # end_value). Passing ``final_value=0.0`` makes the helper's own conditional
+    # append a no-op, so the terminal is present exactly once.
+    mwr_flows.append({"date": end_date, "amount": float(end_value)})
+    mwr = compute_mwr(mwr_flows, final_value=0.0, end_date=end_date)
+
+    dietz_flows: list[dict[str, Any]] = [
+        {
+            "amount": float(e.flow.usd_signed),
+            "day": (date.fromisoformat(e.flow.utc_day_iso) - start).days,
+        }
+        for e in ledger
+    ]
+    dietz = compute_modified_dietz(
+        float(begin_value), float(end_value), dietz_flows, int(period_days)
+    )
+    return LedgerScalars(mwr, dietz, computable=True)

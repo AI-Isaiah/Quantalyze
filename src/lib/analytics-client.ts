@@ -154,11 +154,26 @@ function parseResponse<T>(
   return result.data;
 }
 
+// DOGFOOD (2026-07-18): exchange API keys/secrets are whitespace-free tokens
+// (Deribit ClientId/ClientSecret, Binance 64-hex, …). A stray leading/trailing
+// space or newline from a copy-paste makes the exchange reject an otherwise
+// CORRECT key with an auth error (observed: Deribit 13004 invalid_credentials
+// on a live production key), which reads to the user as "my correct key is
+// broken". Trim here — the single chokepoint every key-entry route funnels
+// through (create-with-key, composite/add-key, keys/validate-and-encrypt) — so
+// validate and encrypt normalise IDENTICALLY: the ciphertext we store is the
+// exact trimmed credential we validated, so later syncs authenticate too.
+// Passphrase is NOT trimmed: an OKX passphrase is user-CHOSEN and whitespace
+// there could be significant.
+function trimCredential(value: string): string {
+  return value.trim();
+}
+
 export async function validateKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
   const data = await analyticsRequest("/api/validate-key", {
     exchange,
-    api_key: apiKey,
-    api_secret: apiSecret,
+    api_key: trimCredential(apiKey),
+    api_secret: trimCredential(apiSecret),
     passphrase: passphrase ?? null,
   });
   return parseResponse(ValidateKeyResponseSchema, data, "/api/validate-key");
@@ -167,8 +182,8 @@ export async function validateKey(exchange: string, apiKey: string, apiSecret: s
 export async function encryptKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
   const data = await analyticsRequest("/api/encrypt-key", {
     exchange,
-    api_key: apiKey,
-    api_secret: apiSecret,
+    api_key: trimCredential(apiKey),
+    api_secret: trimCredential(apiSecret),
     passphrase: passphrase ?? null,
   });
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");

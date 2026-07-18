@@ -4,122 +4,27 @@ import pandas as pd
 import numpy as np
 import pytest
 from services.portfolio_metrics import (
-    compute_twr, compute_mwr, compute_modified_dietz, compute_period_returns,
+    compute_mwr, compute_modified_dietz, compute_period_returns,
     _parse_date,
 )
 
 _METRICS_LOGGER = "quantalyze.analytics.portfolio_metrics"
 
 
-def test_twr_no_cash_flows():
-    """With no deposits/withdrawals, TWR equals simple return."""
-    dates = pd.date_range("2026-01-01", periods=30, freq="D")
-    equity = pd.Series(np.linspace(100000, 110000, 30), index=dates)
-    events = []
-    twr = compute_twr(equity, events)
-    assert abs(twr - 0.10) < 0.01  # ~10% return
-
-
-def test_twr_mid_month_deposit():
-    """H-0801: a $200K deposit on the last day must be SUBTRACTED before the
-    sub-period ratio is formed, so it neither inflates nor over-deflates the
-    return. The result is pinned exactly, not just bounded below.
-
-    The equity curve runs 100,000 → 110,000 over the first 29 observations,
-    then the 30th observation jumps to 316,050 because a 200,000 deposit lands
-    that day. There is a single sub-period (start → end), so:
-        begin_val     = 100,000
-        end_val       = 316,050
-        cf_adjustment = +200,000   (deposit on the closing breakpoint)
-        end_before_cf = 316,050 - 200,000 = 116,050
-        TWR           = 116,050 / 100,000 - 1 = 0.1605
-
-    Why an EXACT assertion and not the old `twr > 0.09`: the loose lower bound
-    silently passed under several over/under-adjustment regressions, each of
-    which an exact pin now catches:
-      - deposit NOT subtracted (end_before_cf = 316,050) → TWR = 2.1605
-      - sign flipped (treated as withdrawal, +200K added) → TWR = 4.1605
-      - over-removal (subtracted twice, -400K) → TWR = -1.8395
-    All three exceed `> 0.09` and would have passed the original test.
-    """
-    dates = pd.date_range("2026-01-01", periods=30, freq="D")
-    equity_before = np.linspace(100000, 110000, 29)
-    equity_after = [316050]
-    equity = pd.Series(np.concatenate([equity_before, equity_after]), index=dates)
-    events = [{"event_date": dates[29].isoformat(), "event_type": "deposit", "amount": 200000}]
-    twr = compute_twr(equity, events)
-    assert twr is not None
-    # Lower-bounded (return is genuinely positive) AND upper-bounded: an
-    # un-subtracted or sign-flipped deposit would blow this far past 0.1605.
-    assert abs(twr - 0.1605) < 1e-9, (
-        f"TWR {twr} should be exactly 0.1605 — deposit must be subtracted "
-        f"from the end value once, with the correct sign"
-    )
-
-
-def test_twr_day_zero_deposit():
-    """Day-0 deposit (initial capital) should not create a NaN sub-period."""
-    dates = pd.date_range("2026-01-01", periods=30, freq="D")
-    equity = pd.Series(np.linspace(100000, 110000, 30), index=dates)
-    events = [{"event_date": dates[0].isoformat(), "event_type": "deposit", "amount": 100000}]
-    twr = compute_twr(equity, events)
-    assert twr is not None
-    assert abs(twr - 0.10) < 0.02
-
-
-def test_twr_day_zero_deposit_dropped_equals_no_events():
-    """H-0800: a day-0 deposit must be DROPPED by the `ev_date > start_date`
-    filter, so the TWR with a day-0 event is byte-identical to the no-events
-    baseline on the same equity curve.
-
-    The pre-existing test_twr_day_zero_deposit only proved day-0 doesn't NaN-out
-    (it would pass even if ALL events were ignored, since equity grows linearly).
-    This asserts the SPECIFIC filter contract: dropping the `> start_date`
-    guard (treating day-0 as a breakpoint) would create a degenerate
-    sub-period and change the result.
-    """
-    dates = pd.date_range("2026-01-01", periods=30, freq="D")
-    equity = pd.Series(np.linspace(100000, 110000, 30), index=dates)
-
-    baseline = compute_twr(equity, [])
-    with_day0 = compute_twr(
-        equity,
-        [{"event_date": dates[0].isoformat(), "event_type": "deposit", "amount": 100000}],
-    )
-    assert baseline is not None
-    # Exact equality: the day-0 event must be filtered out entirely.
-    assert with_day0 == baseline
-
-
-def test_twr_day_zero_dropped_but_mid_period_handled():
-    """H-0800: with BOTH a day-0 deposit (must drop) and a mid-period deposit
-    (must be handled), the TWR equals the mid-period-only result.
-
-    Equity grows 100k→110k linearly but a 200k deposit lands on day 15,
-    bumping the curve. The day-0 event must not perturb the breakpoint set;
-    only the mid-period deposit forms a real sub-period boundary. Hand-checked
-    against the mid-only baseline below (exact equality).
-    """
-    dates = pd.date_range("2026-01-01", periods=30, freq="D")
-    eq = np.linspace(100000, 110000, 30).copy()
-    eq[15:] += 200000  # 200k deposit injected at day 15
-    equity = pd.Series(eq, index=dates)
-
-    both = compute_twr(
-        equity,
-        [
-            {"event_date": dates[0].isoformat(), "event_type": "deposit", "amount": 100000},
-            {"event_date": dates[15].isoformat(), "event_type": "deposit", "amount": 200000},
-        ],
-    )
-    mid_only = compute_twr(
-        equity,
-        [{"event_date": dates[15].isoformat(), "event_type": "deposit", "amount": 200000}],
-    )
-    assert mid_only is not None
-    # Day-0 dropped → identical to mid-period-only; ~6.84% chained return.
-    assert both == mid_only
-    assert abs(mid_only - 0.0683615819) < 1e-6
+# ---------------------------------------------------------------------------
+# TWR — the forward cashflow-chaining scalar was DELETED in Phase 114 (E1
+# backbone absorption, BACKBONE-01). The surviving TWR intents now have named
+# homes:
+#   - None-guards + endpoint/day-0 semantics: pinned on the backbone helper
+#     total_return_from_equity by the 114-01 golden oracle
+#     (tests/test_e1_sharpe_twr_parity.py).
+#   - The M-0698 begin-value-0 WARNING intent: re-pinned via caplog on
+#     total_return_from_equity in that same permanent parity file.
+# The with-events cashflow-chaining tests (mid-month deposit, day-0 drop,
+# multi-flow) have no successor BY DESIGN: every production caller passed
+# events=[], so that cashflow-TWR machinery is exactly the dead generality
+# BACKBONE-01 retires. Retirement is on record here, not silent.
+# ---------------------------------------------------------------------------
 
 
 def test_mwr_known_sequence():
@@ -479,40 +384,12 @@ def test_mwr_no_data_path_stays_silent(caplog):
 
 
 # ---------------------------------------------------------------------------
-# M-0698 — compute_twr warns when a meaningful sub-period is silently dropped
+# M-0698 — the forward TWR scalar's begin-value-0 WARNING and the
+# too-short-segment DEBUG trace were behaviors of the DELETED cashflow-chaining
+# TWR. The surviving begin-value-0 WARNING intent (a zero first value cannot
+# form a ratio → None, and the caller must see it) is re-pinned on the backbone
+# helper total_return_from_equity via caplog in the permanent parity file
+# tests/test_e1_sharpe_twr_parity.py. The multi-sub-period DEBUG trace has no
+# successor: sub-period chaining IS the retired cashflow generality (all
+# production callers passed events=[]).
 # ---------------------------------------------------------------------------
-
-def test_twr_warns_on_zero_begin_value(caplog):
-    """M-0698: a sub-period whose begin value is 0 (the portfolio passed through
-    zero — a meaningful blow-up event) is skipped, but must WARN so the
-    resulting TWR being computed from a strict subset of sub-periods is visible.
-    A series starting at 0 then recovering triggers the begin_val==0 skip."""
-    dates = pd.date_range("2026-01-01", periods=3, freq="D")
-    equity = pd.Series([0.0, 100.0, 110.0], index=dates)
-    with caplog.at_level(logging.WARNING, logger=_METRICS_LOGGER):
-        result = compute_twr(equity, [])
-    assert result is None  # the only sub-period was dropped
-    assert any("begin_val=0" in r.message for r in caplog.records), (
-        "a zero begin-value sub-period must warn, not silently continue"
-    )
-
-
-def test_twr_debug_logs_too_short_segment(caplog):
-    """M-0698: a sub-period with only one observation in range is dropped and
-    must emit a DEBUG trace. A cash-flow breakpoint that falls between two
-    equity observations (no equity point on that date) splits the series into
-    two single-observation sub-periods, both of which are dropped."""
-    # Equity on Jan 1 and Jan 3 (no Jan 2 point); a deposit event on Jan 2
-    # inserts a breakpoint, so [Jan1, Jan2] and [Jan2, Jan3] each hold one
-    # equity observation -> both hit the len(segment) < 2 debug skip.
-    equity = pd.Series(
-        [100.0, 110.0],
-        index=pd.to_datetime(["2026-01-01", "2026-01-03"]),
-    )
-    events = [{"event_date": "2026-01-02", "event_type": "deposit", "amount": 5}]
-    with caplog.at_level(logging.DEBUG, logger=_METRICS_LOGGER):
-        result = compute_twr(equity, events)
-    assert result is None  # every sub-period was too short
-    assert any("dropping sub-period" in r.message for r in caplog.records), (
-        "a single-observation sub-period must leave a DEBUG trace, not vanish"
-    )

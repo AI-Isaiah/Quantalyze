@@ -62,7 +62,7 @@ export function MonthlyReturnsHeatmap() {
       {/* Focusable labeled scroll region (ResponsiveTable idiom) — same
           scrollable-region-focusable class as the daily calendar below. */}
       <div
-        className="overflow-x-auto"
+        className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
         role="region"
         aria-label="Monthly returns: table scrolls horizontally. Swipe or use arrow keys to see more columns."
         tabIndex={0}
@@ -195,7 +195,7 @@ export function DailyReturnsHeatmap() {
           scrollable-region-focusable (serious) — first hit in CI run
           28609918423 once a real seeded series made the stack overflow. */}
       <div
-        className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto"
+        className="flex flex-col gap-4 -mx-2 px-2 overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
         style={{ WebkitOverflowScrolling: "touch" }}
         role="region"
         aria-label="Daily returns calendar: scrolls horizontally. Swipe or use arrow keys to see more days."

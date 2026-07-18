@@ -208,11 +208,17 @@ class TestKeyMode:
 
         assert result.outcome == DispatchOutcome.DONE
         # NO compute_analytics_from_csv enqueue (Pitfall 4 — that path is
-        # strategy-keyed and would read strategy_id NULL → garbage).
+        # strategy-keyed and would read strategy_id NULL → garbage). The 115.1
+        # Option-B epilogue DOES enqueue the allocator-scoped
+        # derive_allocator_equity compose (owner-scoped, correct — pinned in
+        # test_derive_allocator_equity_job.py pin 7); only the forbidden
+        # strategy-keyed CSV enqueue must be absent here.
         enqueues = [
             c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"
         ]
-        assert enqueues == [], (
+        assert [
+            c for c in enqueues if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == [], (
             f"key-mode must NOT enqueue compute_analytics_from_csv; got {enqueues!r}"
         )
         # NO strategy_analytics stamp (there is no per-key analytics row).
@@ -223,8 +229,11 @@ class TestKeyMode:
 
     @pytest.mark.asyncio
     async def test_key_mode_insufficient_history_no_strategy_analytics(self) -> None:
-        """<2-day key-mode: no strategy_analytics write, returns DONE (there is
-        no per-key analytics row to stamp)."""
+        """<2-day key-mode: no csv_daily_returns and no strategy_analytics write,
+        returns DONE (there is no per-key analytics row to stamp). F1(a): it DOES
+        now run the Option-B epilogue (persist key_inputs + enqueue the compose) so
+        an idle/short key with real capital is visible to the compose core instead
+        of silently understating a "Derived" curve."""
         ctx, capture = _build_ctx(
             key_row={"id": "key-3", "exchange": "binance", "user_id": "alloc-3"},
             strategy_row=None,
@@ -238,11 +247,39 @@ class TestKeyMode:
             result = await run_derive_broker_dailies_job(job)
 
         assert result.outcome == DispatchOutcome.DONE
-        assert capture["upserts"] == [], (
+        # NO csv_daily_returns and NO strategy_analytics write (<2 days).
+        assert [
+            u for u in capture["upserts"]
+            if u[0] in ("csv_daily_returns", "strategy_analytics")
+        ] == [], (
             "key-mode <2-day must NOT write csv_daily_returns OR strategy_analytics; "
             f"got {capture['upserts']!r}"
         )
-        assert capture["rpc_calls"] == []
+        # F1(a): the Option-B key_inputs row IS persisted and the compose enqueued.
+        ki_upserts = [
+            u for u in capture["upserts"]
+            if u[0] == "allocator_equity_derived"
+            and any(
+                str(r.get("kind", "")).startswith("key_inputs:")
+                for r in ([u[1]] if isinstance(u[1], dict) else u[1])
+            )
+        ]
+        assert len(ki_upserts) == 1, (
+            f"key-mode <2-day must persist key_inputs (F1a); got {capture['upserts']!r}"
+        )
+        compose_enq = [
+            c for c in capture["rpc_calls"]
+            if c[0] == "enqueue_compute_job"
+            and c[1].get("p_kind") == "derive_allocator_equity"
+        ]
+        assert len(compose_enq) == 1, (
+            f"key-mode <2-day must enqueue the compose (F1a); got {capture['rpc_calls']!r}"
+        )
+        # No strategy-keyed CSV-analytics enqueue (that path stays absent).
+        assert [
+            c for c in capture["rpc_calls"]
+            if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == []
 
 
 class TestStrategyModeNonRegression:
@@ -1146,3 +1183,66 @@ class TestCashSettlementSeriesPersist:
         _n2, csv_payload, on_conflict = csv_upserts[0]
         assert on_conflict == "strategy_id,date"
         assert sorted(r["date"] for r in csv_payload) == ["2024-05-01", "2024-05-02"]
+
+
+# ── Phase 115 (E2 / STITCH-01): deribit key-mode parity ─────────────────────
+# The dual-mode key-mode upsert is VENUE-AGNOSTIC below the native branch: a
+# deribit allocator key (native-ledger path) and a ccxt allocator key both land
+# the SAME per-key payload shape (api_key_id + allocator_id=user_id + strategy_id
+# None, on_conflict='api_key_id,date'). This co-locates a deribit key-mode case
+# beside the ccxt ones so a future edit that forks the two upsert shapes reddens
+# HERE. Reuses the native-ledger harness from test_mtm_single_key (the deribit
+# branch mocks combine_native_ledger, not combine_realized_and_funding).
+
+
+class TestKeyModeDeribitParity:
+    """A deribit allocator key produces the IDENTICAL per-key upsert shape as a
+    ccxt allocator key — the dogfooding-gap consumer for an all-deribit allocator."""
+
+    @pytest.mark.asyncio
+    async def test_deribit_key_mode_matches_ccxt_key_mode_shape(self) -> None:
+        from tests.test_mtm_single_key import (
+            _apply,
+            _base_patches,
+            _cash_series,
+            _ctx,
+            _recording_ledger,
+            _report,
+        )
+
+        ctx, capture = _ctx(strategy_row=None, key_mode=True)
+        ctx.key_row = {
+            "id": "key-drb-parity",
+            "user_id": "alloc-parity",
+            "exchange": "deribit",
+        }
+        ledger_mock, _calls = _recording_ledger([_report(has_option_activity=False)])
+        combine = MagicMock(
+            return_value=(_cash_series(), {"used_heuristic_capital": False})
+        )
+        with _apply(_base_patches(
+            ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
+        )):
+            result = await run_derive_broker_dailies_job(
+                {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-drb-parity"}
+            )
+
+        assert result.outcome == DispatchOutcome.DONE
+        csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+        assert len(csv_upserts) == 1
+        _name, payload, on_conflict = csv_upserts[0]
+        # SAME per-key arbiter + payload shape as the ccxt key-mode case above
+        # (TestKeyMode.test_key_mode_upserts_api_key_shape_and_conflict_target).
+        assert on_conflict == "api_key_id,date"
+        for row in payload:
+            assert row["api_key_id"] == "key-drb-parity"
+            assert row["allocator_id"] == "alloc-parity"
+            assert row["strategy_id"] is None
+        # Key-mode owns no strategy row: no strategy-keyed compute_analytics_from_csv
+        # enqueue, no strategy_analytics. The 115.1 Option-B epilogue's allocator-
+        # scoped derive_allocator_equity compose enqueue IS expected (owner-scoped).
+        _km_enq = [c for c in capture["rpc_calls"] if c[0] == "enqueue_compute_job"]
+        assert [
+            c for c in _km_enq if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == []
+        assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []

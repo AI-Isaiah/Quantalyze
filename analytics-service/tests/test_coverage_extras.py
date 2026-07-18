@@ -17,7 +17,6 @@ from services.portfolio_metrics import (
     compute_modified_dietz,
     compute_mwr,
     compute_period_returns,
-    compute_twr,
 )
 from services.portfolio_optimizer import (
     _avg_corr,
@@ -184,38 +183,12 @@ class TestSimulatorScoringHelpers:
 # ---------------------------------------------------------------------------
 
 class TestPortfolioMetricsEdges:
-    def test_compute_twr_too_short_returns_none(self) -> None:
-        """<2 equity points → None (line 50)."""
-        assert compute_twr(pd.Series([], dtype=float), []) is None
-        assert compute_twr(pd.Series([100.0]), []) is None
-
-    def test_compute_twr_skips_day_zero_cashflows(self) -> None:
-        """Cash flow on the first equity date is ignored (cf_dates filter)."""
-        dates = pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"])
-        equity = pd.Series([100.0, 110.0, 121.0], index=dates)
-        # Same-day deposit should be skipped (no prior value to ratio).
-        events = [
-            {"event_date": "2026-01-01", "event_type": "deposit", "amount": 100},
-        ]
-        assert compute_twr(equity, events) == pytest.approx(0.21, rel=1e-3)
-
-    def test_compute_twr_with_midperiod_withdrawal(self) -> None:
-        """Mid-period withdrawal lifts the end-before-cf value (cf_adjustment)."""
-        dates = pd.to_datetime(
-            ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]
-        )
-        equity = pd.Series([100.0, 110.0, 55.0, 60.0], index=dates)
-        events = [
-            {"event_date": "2026-01-03", "event_type": "withdrawal", "amount": 50},
-        ]
-        twr = compute_twr(equity, events)
-        assert twr is not None and twr > 0  # Removing the withdrawal gives a positive TWR
-
-    def test_compute_twr_returns_none_when_all_subperiods_invalid(self) -> None:
-        """begin_val == 0 on every sub-period → None (line 101)."""
-        dates = pd.to_datetime(["2026-01-01", "2026-01-02"])
-        equity = pd.Series([0.0, 10.0], index=dates)
-        assert compute_twr(equity, []) is None
+    # The forward TWR scalar was DELETED in Phase 114 (E1 backbone absorption,
+    # BACKBONE-01). Its too-short/None-guard edge intents already live on the
+    # backbone helper total_return_from_equity via the 114-01 golden oracle pins
+    # (tests/test_e1_sharpe_twr_parity.py); the cashflow variants (day-0 skip,
+    # mid-period withdrawal, all-subperiods-invalid, single-obs skip) retire with
+    # the cashflow-chaining machinery (every production caller passed events=[]).
 
     def test_compute_mwr_empty_cash_flows_returns_none(self) -> None:
         """Empty input → None (line 133)."""
@@ -286,22 +259,6 @@ class TestPortfolioMetricsEdges:
         assert _parse_date(_dt(2026, 1, 1, 12, 0)) == pd.Timestamp(
             "2026-01-01 12:00:00"
         )
-
-    def test_compute_twr_skips_sub_period_with_single_obs(self) -> None:
-        """A breakpoint that isolates a single equity point trips the
-        `len(segment) < 2: continue` guard (line 76). The surrounding
-        sub-periods still chain to a finite TWR."""
-        dates = pd.to_datetime(
-            ["2026-01-01", "2026-01-02", "2026-01-05", "2026-01-06"]
-        )
-        equity = pd.Series([100.0, 110.0, 105.0, 108.0], index=dates)
-        # Cash flow on Jan 3 (no equity obs that day) creates a segment
-        # spanning only Jan 2→Jan 3 with the single Jan 2 observation.
-        events = [
-            {"event_date": "2026-01-03", "event_type": "deposit", "amount": 50},
-        ]
-        twr = compute_twr(equity, events)
-        assert twr is not None
 
     def test_compute_mwr_falls_back_to_brentq(self) -> None:
         """A contrived flow where Newton hits a stationary point forces the

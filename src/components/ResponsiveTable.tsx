@@ -56,7 +56,17 @@ export function ResponsiveTable({
   return (
     <div
       ref={scrollRef}
-      className={["overflow-x-auto", className].filter(Boolean).join(" ")}
+      // UIFIX-02: clip-proof inset focus ring on the shared focusable scroll
+      // region — the browser default outline paints outside the box and is
+      // clipped by ancestor overflow-hidden panels (WCAG 2.4.7). Central fix
+      // for every ResponsiveTable consumer (MetricsColumn, StressWindowsPanel …).
+      className={[
+        "overflow-x-auto",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent",
+        className,
+      ]
+        .filter(Boolean)
+        .join(" ")}
       role="region"
       aria-label={accessibleName}
       tabIndex={0}
