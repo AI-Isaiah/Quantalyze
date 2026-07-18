@@ -118,6 +118,12 @@ export const equityChartWidgetDataSchema = z
     equityOverlays: z.array(overlaySeriesSchema).nullable().optional(),
     allKeysStale: z.boolean().optional(),
     lastSyncAt: z.string().nullable().optional(),
+    // Phase 115.1 / RD-2 — provenance of `equityDailyPoints` so the widget can
+    // render an honest indicator (derived vs legacy snapshot history). Optional
+    // because first-connect / warm-up payloads legitimately omit the equity
+    // leaves; the widget defaults to the legacy label when absent.
+    equityCurveSource: z.enum(["derived", "legacy"]).optional(),
+    derivedCurveComputedAt: z.string().nullable().optional(),
   })
   .loose(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: read-only widget render contract (withWidgetBoundary display), never spread into a write
 
