@@ -253,20 +253,32 @@ async def test_aclose_is_idempotent():
 
 
 async def test_read_after_aclose_fails_loud_no_session_reopen():
-    """WR-01: the closed state is terminal. A read after aclose() must raise rather
-    than silently reopening a fresh session that the (already-early-returning) second
-    aclose() can never close — the guaranteed 'Unclosed client session' leak. This
-    fails against the old code, where _ensure_session gated only on `_session is None`
-    and happily created a brand-new session post-close."""
+    """WR-01 + F1: the closed state is terminal, and the raise happens at the TOP of
+    _request BEFORE the rate gate. A read after aclose() must raise rather than
+    silently reopening a fresh session that the (already-early-returning) second
+    aclose() can never close (the guaranteed 'Unclosed client session' leak) AND it
+    must raise IMMEDIATELY — never real-sleep the rate-gate wait (up to 10s) on the
+    sequential worker first. Injected clock/sleep assert zero gate wait on the
+    post-close call. Fails against the pre-F1 code where _rate_gate ran first."""
+    clock = _FakeClock()
+    sleeps: list[float] = []
+
+    async def fake_sleep(d: float) -> None:
+        sleeps.append(d)
+        clock.t += d
+
     resp = _stub_response(200, "[]")
     with _patch_request(resp):
-        client = SfoxClient(api_key=API_KEY)
+        client = SfoxClient(api_key=API_KEY, _clock=clock, _sleep=fake_sleep)
         await client.get_balances()
         await client.aclose()
         with pytest.raises(RuntimeError):
-            await client.get_balances()
-        # A second aclose() after the refused reopen must still be safe and must
-        # not have a live session to leak (no new session was ever created).
+            # transactions has the 10s interval; a pre-F1 gate-first path would
+            # sleep ~10s here before raising. Post-F1 it raises with no sleep.
+            await client.get_transactions()
+        # The post-close call raised BEFORE the rate gate — no wall-clock wait.
+        assert sleeps == [], "post-close call must raise before the rate gate sleeps"
+        # No new session was ever created, so the second aclose() has nothing to leak.
         assert client._session is None
         await client.aclose()
 

@@ -155,6 +155,14 @@ class SfoxClient:
         internal or future (phase-119) call site can coerce this adapter into a
         write (POST /v1/orders etc.) through the generic request path.
         """
+        # Fail loud on use-after-close at the VERY TOP, BEFORE the rate gate (F1).
+        # _rate_gate can real-sleep up to the endpoint interval (10s on the
+        # transactions path); if the closed-check lived only in _ensure_session
+        # (called after the gate), a post-aclose() call would wedge the sequential
+        # worker for up to that interval before finally raising. Checking here means
+        # a closed client raises immediately with ZERO wall-clock gate wait.
+        if self._closed:
+            raise RuntimeError("SfoxClient used after aclose()")
         await self._rate_gate(path)
         session = await self._ensure_session()
         url = f"{self._base_url}{path}"
