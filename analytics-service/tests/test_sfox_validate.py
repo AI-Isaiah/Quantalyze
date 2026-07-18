@@ -35,7 +35,7 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -287,6 +287,47 @@ async def test_sfox_empty_or_blank_token_fails_closed_not_500(exchange_router, t
     # Guarded BEFORE construction: no client, no session, no get_balances call.
     factory.assert_not_called()
     client.get_balances.assert_not_awaited()
+
+
+async def test_sfox_control_char_token_fails_closed_not_500_and_never_logs_token(exchange_router):
+    """F5 regression: a token with an embedded control char (\\n / \\r) survives
+    trimCredential (which strips only leading/trailing whitespace) and makes
+    aiohttp raise a bare ValueError at request time — neither SfoxApiError nor
+    aiohttp.ClientError. Pre-fix it escaped `_validate_sfox_key` as an unhandled
+    FastAPI 500 (same wart class as IN-01).
+
+    WHY (Rule 9): a malformed token IS a credential problem — it must fail CLOSED
+    with the honest KEY_AUTH_FAILED (400), never an opaque 500, and the raw token
+    must never reach the response body OR any log line (aiohttp's ValueError
+    message can embed the offending header value).
+    """
+    router = exchange_router
+
+    # A realistic aiohttp control-char ValueError whose message embeds the token,
+    # so the test can prove neither the detail nor any log line leaks it.
+    token = "tok_abc\ndef"  # embedded newline — passes the non-empty guard
+    leaky_message = f"Invalid header value {token!r}"
+    client = _make_client(get_balances_side_effect=ValueError(leaky_message))
+    _install_sfox_client(router, client)
+
+    with patch.object(router, "logger") as mock_logger:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req(router, api_key=token))
+
+    # Fail CLOSED, honest, never a 500.
+    assert ei.value.status_code == 400
+    assert ei.value.detail == EXPECTED_AUTH_DETAIL
+    assert ei.value.status_code != 500
+    # The raw token must NOT appear in the client-facing detail.
+    assert token not in ei.value.detail
+    assert "def" not in ei.value.detail
+    # The session is still closed (finally runs) even on this new arm.
+    client.aclose.assert_awaited_once()
+    # The token must NOT be written to ANY log line (no logging at all on this
+    # branch — the aiohttp message that embeds it is never passed to the logger).
+    for meth in ("exception", "error", "warning", "info", "debug"):
+        for call in getattr(mock_logger, meth).call_args_list:
+            assert token not in repr(call)
 
 
 async def test_sfox_aclose_awaited_even_when_get_balances_raises(exchange_router):

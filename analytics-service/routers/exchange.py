@@ -44,6 +44,9 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         not a bad key (recreates the 110.1 honesty fix for sFOX).
       * 5xx or status==0 (transport/shape) → HTTPException(400, NETWORK_ERROR_DETAIL)
         — the SAME shared string the ccxt NetworkError arm emits, mapped identically.
+      * a malformed-token ValueError raised by aiohttp at request time (F5) →
+        HTTPException(400, AUTH_FAILED_DETAIL): a control-char token IS a
+        credential problem, and must not escape as an unhandled 500.
 
     `api_secret` is intentionally ignored: sFOX auth is a single Bearer token
     (Q1 worker contract), so the branch takes only `api_key`. No proxy is wired
@@ -83,6 +86,19 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         # transient blip no longer spams Sentry via logger.exception.
         logger.warning("validate_key: sFOX transient upstream failure (status=%s)", e.status)
         raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+    except ValueError:
+        # F5: a token with an embedded control char (\n / \r survive
+        # trimCredential, which strips only LEADING/TRAILING whitespace) makes
+        # aiohttp raise a bare ValueError("Forbidden control character in
+        # header ...") at request time — neither SfoxApiError nor
+        # aiohttp.ClientError, so it would otherwise escape this function as an
+        # unhandled FastAPI 500 (same class as the IN-01 empty-token wart). A
+        # malformed token IS a credential problem: fail CLOSED with the honest
+        # AUTH_FAILED classification (400 → KEY_AUTH_FAILED), never a 500.
+        # Deliberately DO NOT log the exception: aiohttp's message can embed the
+        # offending header value (the token), so this branch never writes it
+        # anywhere. Fails CLOSED — never returns {"valid": true}.
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
     finally:
         await client.aclose()
 
