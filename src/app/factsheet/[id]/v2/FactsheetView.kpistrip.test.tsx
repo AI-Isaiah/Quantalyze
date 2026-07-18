@@ -5,6 +5,7 @@ import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
+import { pctSigned } from "./format";
 
 /**
  * Phase 52-06 / TYPE-04 / TYPE-02 / APPLY-01 — the FactsheetView KPI strip is
@@ -521,5 +522,122 @@ describe("FactsheetView hero strip — HARD-05 degraded_members server-truth cav
       } as unknown as FactsheetPayload,
     );
     expect(q2(/excluded from this track record/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 117 (UIFIX-03) — the CUM RETURN KPI VALUE cell must render extreme,
+ * high-leverage magnitudes IN FULL: no truncation, no `…` ellipsis. A truncated
+ * number reads as a DIFFERENT number (Numbers-Contract integrity defect). The
+ * culprit is the value `<p>`'s truncation trio (`whitespace-nowrap
+ * overflow-hidden text-ellipsis`, FactsheetView.tsx:884). The fix is layout
+ * (allow the value to wrap/fit) — the type is NEVER shrunk below the DESIGN.md
+ * `text-h2` minimum. The LABEL `<p>` KEEPS its pinned bounded-label clip.
+ *
+ * jsdom renders full textContent regardless of CSS, so the load-bearing,
+ * checkable no-ellipsis contract is the ABSENCE of the truncation trio on the
+ * value `<p>` (the trio IS the clip mechanism).
+ */
+describe("FactsheetView KPI strip — UIFIX-03 (117-03): CUM RETURN extreme value renders untruncated", () => {
+  // Extreme magnitude (e.g. under high leverage). Derived through the REAL
+  // `pctSigned` formatter — no hand-fabricated rendered string (oracle
+  // discipline). 12345.678 → pctSigned(.,1) === "+1234567.8%" (a long string
+  // the pre-fix trio ellipsis-truncated inside the KPI cell).
+  const EXTREME_CUM_RET = 12345.678;
+
+  function renderExtreme() {
+    const payload = buildScenarioFactsheetPayload({
+      portfolioDaily: makeReturnsSeries(300),
+      benchmark: null,
+    });
+    // Under cash the view returns the payload by reference, so overriding the
+    // persisted scalar drives the rendered KPI (mirrors the Phase-90 fixtures).
+    payload.strategyMetrics.cum_ret = EXTREME_CUM_RET;
+    // A non-finite metric exercises the colorless "—" tone gate (Test 3).
+    payload.strategyMetrics.sharpe = NaN;
+    return render(
+      <FactsheetProvider payload={payload} persist={false}>
+        <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      </FactsheetProvider>,
+    );
+  }
+
+  function kpiTiles(container: HTMLElement): HTMLElement[] {
+    const kpiGrid = Array.from(
+      container.querySelectorAll<HTMLElement>("div.grid"),
+    ).find((el) => /@[\w[\]-]*:grid-cols-\d/.test(el.className))!;
+    expect(kpiGrid, "KPI strip grid must exist").toBeDefined();
+    return Array.from(kpiGrid.children) as HTMLElement[];
+  }
+
+  function cell(
+    container: HTMLElement,
+    label: string,
+  ): { labelEl: HTMLElement; valueEl: HTMLElement } {
+    for (const tile of kpiTiles(container)) {
+      const ps = Array.from(tile.querySelectorAll("p")) as HTMLElement[];
+      if (ps.length === 2 && ps[0].textContent?.trim() === label) {
+        return { labelEl: ps[0], valueEl: ps[1] };
+      }
+    }
+    throw new Error(`KPI cell "${label}" not found`);
+  }
+
+  it("Test 1 (RED until 117-03 fix) — the CUM RETURN value renders in FULL with NONE of the truncation trio; type stays at text-h2 (never shrunk)", () => {
+    const { container } = renderExtreme();
+    const expected = pctSigned(EXTREME_CUM_RET, 1); // real formatter path
+    const { valueEl } = cell(container, "Cum. Return");
+
+    // (a) Full text present — jsdom renders full textContent regardless of CSS.
+    expect(valueEl.textContent?.trim()).toBe(expected);
+    expect(expected.length).toBeGreaterThan("+62.7%".length); // it IS long/extreme
+
+    // (b) The checkable no-ellipsis contract: the truncation trio (the clip
+    //     mechanism) is ABSENT on the VALUE <p>. This is the assertion that is
+    //     RED on the current tree and GREEN after the layout fix.
+    expect(valueEl.className).not.toContain("whitespace-nowrap");
+    expect(valueEl.className).not.toContain("overflow-hidden");
+    expect(valueEl.className).not.toContain("text-ellipsis");
+
+    // (c) Type never shrunk below the DESIGN.md text-h2 minimum — the value keeps
+    //     its mono tabular text-h2 leading-none and gains NO smaller type token.
+    expect(valueEl.className).toContain("font-mono");
+    expect(valueEl.className).toContain("tabular-nums");
+    expect(valueEl.className).toContain("text-h2");
+    expect(valueEl.className).toContain("leading-none");
+    expect(valueEl.className).not.toMatch(
+      /\btext-(h3|base|sm|xs|caption|micro|fixed-13)\b/,
+    );
+  });
+
+  it("Test 2 (guard, green before+after) — the CUM RETURN LABEL keeps its pinned bounded-label clip (whitespace-nowrap/overflow-hidden/text-ellipsis)", () => {
+    const { container } = renderExtreme();
+    const { labelEl } = cell(container, "Cum. Return");
+    // The AUDIT-classified legitimate clip on the KPI label <p> — NOT removed.
+    expect(labelEl.className).toContain("whitespace-nowrap");
+    expect(labelEl.className).toContain("overflow-hidden");
+    expect(labelEl.className).toContain("text-ellipsis");
+  });
+
+  it("Test 3 (guard, green before+after) — every value cell shares ONE className (sibling uniformity), and the signTone gate is unchanged (positive→--color-positive, — colorless)", () => {
+    const { container } = renderExtreme();
+    const tiles = kpiTiles(container);
+
+    // Uniform by items.map construction — all value <p>s share one className, so
+    // the single-class change can never visually diverge CAGR/Sharpe/Sortino.
+    const valueClassNames = tiles.map((t) => {
+      const ps = Array.from(t.querySelectorAll("p"));
+      return ps[1].className;
+    });
+    expect(new Set(valueClassNames).size).toBe(1);
+
+    // signTone: a finite positive cum_ret is colored var(--color-positive) ...
+    const { valueEl: cumEl } = cell(container, "Cum. Return");
+    expect(cumEl.style.color).toBe("var(--color-positive)");
+    // ... and a non-finite metric renders "—" with NO tone (text-primary), never
+    // a red/green tint on a dash (Numbers Contract unchanged).
+    const { valueEl: sharpeEl } = cell(container, "Sharpe");
+    expect(sharpeEl.textContent?.trim()).toBe("—");
+    expect(sharpeEl.style.color).toBe("var(--color-text-primary)");
   });
 });
