@@ -1,9 +1,25 @@
 import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import "@testing-library/jest-dom/vitest";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
 import DrawdownChart, { deriveSnapshotDrawdowns } from "./DrawdownChart";
+import EquityChartWidget from "./EquityChart";
+import { TweaksProvider } from "../../context/TweaksContext";
+
+// CustomRangePicker / chart chrome consume next/navigation transitively — stub
+// so the widget mounts under jsdom without a router context.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    refresh: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+}));
 
 /**
  * Phase 07 / 07-03 — parallel-prop test coverage for the f7 equityDailyPoints
@@ -152,5 +168,106 @@ describe("deriveSnapshotDrawdowns — WR-01 boundary regression", () => {
 
   it("empty input returns empty array", () => {
     expect(deriveSnapshotDrawdowns([])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 115.1 / RD-2 — EquityChartWidget provenance indicator render states.
+//
+// The producer (queries.ts:derivePhase07Fields) decides derived-vs-legacy and
+// stamps `equityCurveSource`; the widget renders an HONEST indicator off it.
+// These pins prove: (1) a derived-trustworthy source renders the derived label,
+// (2) a legacy source renders the plainer legacy label and NEVER the
+// api_verified-grade treatment (the RD-2 honesty invariant).
+// ---------------------------------------------------------------------------
+
+// A Map-backed localStorage stub (jsdom's shim is partial) so TweaksProvider
+// hydrates cleanly. Registered via vi.stubGlobal so vi.unstubAllGlobals() in
+// afterEach fully removes it — the Node-22 leaked-stub class
+// (reference_ci_node22_vs_local_node25).
+function makeLocalStorageStub(): Storage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      store.set(k, v);
+    },
+    removeItem: (k: string) => {
+      store.delete(k);
+    },
+    clear: () => {
+      store.clear();
+    },
+    key: () => null,
+    length: 0,
+  } as Storage;
+}
+
+// A positive-anchored dense series so the inner chart mounts (not warm-up).
+function makeSeries(n: number, start = 100_000): DailyPoint[] {
+  const pts: DailyPoint[] = [];
+  const d = new Date(Date.UTC(2026, 0, 1));
+  let v = start;
+  for (let i = 0; i < n; i++) {
+    pts.push({ date: d.toISOString().slice(0, 10), value: v });
+    v *= 1.002;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return pts;
+}
+
+describe("EquityChartWidget — equity provenance indicator (115.1 / RD-2)", () => {
+  afterEach(() => {
+    // Node-22 leaked-stub hygiene: fully undo the localStorage stub.
+    vi.unstubAllGlobals();
+  });
+
+  function renderWidget(data: Record<string, unknown>) {
+    vi.stubGlobal("localStorage", makeLocalStorageStub());
+    return render(
+      <TweaksProvider>
+        <EquityChartWidget
+          data={data as unknown as WidgetProps["data"]}
+          timeframe="1YTD"
+          width={6}
+          height={4}
+        />
+      </TweaksProvider>,
+    );
+  }
+
+  it("derived source → renders the derived provenance label", () => {
+    const { getByTestId } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+      equityCurveSource: "derived",
+      derivedCurveComputedAt: "2026-03-13T00:00:00Z",
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance).toHaveAttribute("data-source", "derived");
+    expect(provenance.textContent).toMatch(/Derived from per-key returns/i);
+  });
+
+  it("legacy source → renders the legacy label and is NEVER api_verified-styled", () => {
+    const { getByTestId, queryByText } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+      equityCurveSource: "legacy",
+      derivedCurveComputedAt: null,
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance).toHaveAttribute("data-source", "legacy");
+    expect(provenance.textContent).toMatch(/Broker snapshot history/i);
+    // The HARD RULE (RD-2): a legacy-fallback curve must not read as
+    // verified-grade — no api_verified label anywhere on the surface.
+    expect(queryByText(/api[\s_-]?verified/i)).toBeNull();
+    expect(provenance.textContent).not.toMatch(/Derived from per-key/i);
+  });
+
+  it("absent source field → defaults to the legacy label (warm-up / first-connect safety)", () => {
+    const { getByTestId } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance).toHaveAttribute("data-source", "legacy");
+    expect(provenance.textContent).toMatch(/Broker snapshot history/i);
   });
 });

@@ -2689,4 +2689,59 @@ describe("115.1 equity display-repoint", () => {
     // is_trustworthy=false → the derived curve is NOT rendered; legacy stands.
     expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
   });
+
+  it("MALFORMED (T-115.1-18): is_trustworthy=true but curve is NOT an array → legacy fallback (no crash)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    // Corrupt worker-written JSONB: trustworthy flag set, but `curve` is a
+    // string. A shape-blind consumer would throw on `.map`; the shape-validate
+    // gate must degrade to legacy instead.
+    state.allocatorEquityDerived = [
+      {
+        allocator_id: "user-1",
+        kind: "equity_curve",
+        payload: {
+          curve: "not-an-array",
+          is_trustworthy: true,
+        } as unknown as Record<string, unknown>,
+      },
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("legacy");
+    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+  });
+
+  it("MALFORMED (T-115.1-18): is_trustworthy=true but a curve point has non-finite equity_usd → legacy fallback (never NaN)", async () => {
+    state.portfolios = [P1151_PORTFOLIO];
+    state.allocatorEquitySnapshots = P1151_SNAPSHOTS;
+    // A single NaN equity_usd must poison the whole derived curve to legacy —
+    // rendering a NaN coordinate to the chart is the exact failure the shape
+    // gate exists to prevent.
+    state.allocatorEquityDerived = [
+      {
+        allocator_id: "user-1",
+        kind: "equity_curve",
+        payload: {
+          curve: [
+            { date: "2026-03-10", equity_usd: 100_500.5 },
+            { date: "2026-03-11", equity_usd: Number.NaN },
+          ],
+          is_trustworthy: true,
+        } as unknown as Record<string, unknown>,
+      },
+    ];
+
+    const { getMyAllocationDashboard } = await import("./queries");
+    const result = await getMyAllocationDashboard("user-1");
+
+    expect(
+      (result as unknown as { equityCurveSource?: string }).equityCurveSource,
+    ).toBe("legacy");
+    expect(result.equityDailyPoints).toEqual(legacyExpectedDailyPoints());
+  });
 });
