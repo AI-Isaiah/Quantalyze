@@ -2769,6 +2769,135 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         if _coverage_flags.get("flow_coverage_incomplete"):
             meta["flow_coverage_incomplete"] = True
 
+    async def _run_key_mode_compose_epilogue() -> None:
+        # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
+        # This derive ALREADY crawled the real external flows and read the live
+        # account equity anchor above (deribit: the native ledger crawl +
+        # account_state.collapsed_equity_usd; ccxt: fetch_ccxt_transfers +
+        # fetch_account_equity_and_upnl_usd). Persist those ALREADY-FETCHED
+        # inputs onto the NEW keyed surface as kind='key_inputs:<api_key_id>' so
+        # the crawl-free `derive_allocator_equity` compose job never has to
+        # decrypt the key or hit the exchange a SECOND time — then enqueue that
+        # compose job for the AUTHORITATIVE owner. Self-healing: any key refresh
+        # re-composes the whole allocator with zero added exchange I/O.
+        #
+        # F1(a): this runs for BOTH the >=2-day path AND the <2-day short-circuit
+        # (an idle/short key with real capital must still land its anchored
+        # key_inputs row so the compose core sees it — anchored-without-returns →
+        # DROPPED_KEY → untrustworthy — instead of silently vanishing from a
+        # "Derived" curve that understates its capital). The anchor + flows are
+        # already fetched above, so this is I/O-cheap.
+        import math
+
+        # M1: Postgres JSONB rejects NaN/Inf, so a non-finite float would fail the
+        # key_inputs upsert and bubble as a transient error → re-crawl loop. These
+        # flows already passed the honest core, so a non-finite here is corruption:
+        # SKIP it honestly (the drop is visible via the count log below), never
+        # persist poison.
+        _flows_payload = []
+        _skipped_nonfinite_flows = 0
+        for _f in (external_flows or []):
+            _usd = float(_f.usd_signed)
+            if not math.isfinite(_usd):
+                _skipped_nonfinite_flows += 1
+                continue
+            _flows_payload.append(
+                {"utc_day_iso": _f.utc_day_iso, "usd_signed": _usd}
+            )
+        # DERIVATIVE-NOTIONAL TRAP (T-115.1-16): the anchor is the venue's own
+        # LIVE total-equity read (`equity` above) — deribit's collapsed native
+        # equity or the ccxt fetch_account_equity_and_upnl_usd NAV — NOT an
+        # allocator_holdings sum, and NEVER a blind value_usd sum (value_usd on a
+        # derivative is NOTIONAL contract size, not equity). An untrustworthy read
+        # (balance_error truthy or equity is None) persists an honest null anchor,
+        # never a heuristic fallback; the compose core then honestly DROPS the key.
+        # The anchor is trustworthy ONLY when it is a material, positive, finite
+        # venue-equity read. Persist a null anchor (compose core then DROPS the key)
+        # on every other case:
+        #   M1  — non-finite (NaN/Inf) would poison the JSONB upsert;
+        #   M2  — dust (|equity| <= DUST_NAV_FLOOR) is immaterial (mirrors the
+        #         function's materiality contract at :2651-2655) and a NON-POSITIVE
+        #         equity would make replay_key_equity raise non-positive-equity,
+        #         permanently FAILING the WHOLE allocator compose. Both → null, not a
+        #         permanent fail / a trustworthy near-zero curve basis.
+        _anchor_untrustworthy = (
+            balance_error
+            or equity is None
+            or not math.isfinite(float(equity))
+            or abs(equity) <= DUST_NAV_FLOOR
+            or equity <= 0.0
+        )
+        _anchor_usd: float | None = None if _anchor_untrustworthy else float(equity)
+        _key_inputs_payload = {
+            "flows": _flows_payload,
+            "anchor_usd": _anchor_usd,
+            "anchor_asof": datetime.now(timezone.utc).isoformat(),
+            "venue": venue,
+        }
+
+        def _persist_key_inputs(
+            payload: dict[str, Any] = _key_inputs_payload,
+            kind: str = "key_inputs:" + api_key_id,
+        ) -> None:
+            ctx.supabase.table("allocator_equity_derived").upsert(
+                {
+                    "allocator_id": allocator_id,
+                    "kind": kind,
+                    "payload": payload,
+                    "computed_at": datetime.now(timezone.utc).isoformat(),
+                },
+                on_conflict="allocator_id,kind",
+            ).execute()
+
+        # Transient DB errors BUBBLE (the job retries; the csv upsert is
+        # idempotent, and the compose enqueue below is dedup-safe) — no silent
+        # swallow, no outcome downgrade.
+        await db_execute(_persist_key_inputs)
+
+        # Enqueue the crawl-free compose for the AUTHORITATIVE owner — read from
+        # ctx.key_row['user_id'] via `allocator_id`, NEVER a job-payload
+        # allocator_id (T-115.1-02 / T-115-16 owner-spoof pin). A one-inflight
+        # dedup collision is benign (the enqueue RPC is idempotent); a hard
+        # enqueue failure is logged and swallowed — the per-key inputs are already
+        # persisted and the next key refresh re-enqueues cleanly, so a compose
+        # enqueue hiccup must never fail an already-done per-key derive.
+        try:
+            def _enqueue_compose(target: str = allocator_id) -> None:
+                # p_strategy_id is passed EXPLICITLY as NULL — it is the RPC's
+                # first positional param and has NO SQL DEFAULT, so a PostgREST
+                # named-notation call that omits it cannot resolve the overload
+                # ("function does not exist") and the compose would never enqueue.
+                # Every SQL caller mirrors this (`p_strategy_id := NULL`); the
+                # allocator-scoped inflight dedup (allocator_id,kind) makes a
+                # collision benign, so no p_idempotency_key is required here.
+                ctx.supabase.rpc(
+                    "enqueue_compute_job",
+                    {
+                        "p_strategy_id": None,
+                        "p_allocator_id": target,
+                        "p_kind": "derive_allocator_equity",
+                    },
+                ).execute()
+
+            await db_execute(_enqueue_compose)
+        except Exception as _enq_exc:  # noqa: BLE001
+            logger.warning(
+                "derive_broker_dailies: compose enqueue for allocator %s failed "
+                "(api_key %s) — per-key inputs persisted; next key refresh "
+                "re-enqueues: %s",
+                allocator_id, api_key_id, _enq_exc,
+            )
+
+        # Log carries NO USD magnitudes (T-115-05): key/allocator/venue + counts +
+        # an anchor-present bool only.
+        logger.info(
+            "derive_broker_dailies: Option-B epilogue persisted key_inputs + "
+            "enqueued compose for api_key %s (allocator %s venue=%s n_flows=%d "
+            "skipped_nonfinite_flows=%d anchor_present=%s)",
+            api_key_id, allocator_id, venue, len(_flows_payload),
+            _skipped_nonfinite_flows, _anchor_usd is not None,
+        )
+
     if int(returns.notna().sum()) < 2:
         # Brand-new / inactive account: not enough history to compile a
         # factsheet (compute_all_metrics needs >=2 days). MEDIUM-2: gate on the
@@ -2788,6 +2917,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 "no strategy_analytics stamp",
                 api_key_id, len(realized), len(funding),
             )
+            # F1(a): STILL persist the Option-B key_inputs (anchor + flows already
+            # fetched) and enqueue the compose. An idle/short key with real capital
+            # must be visible to the compose core (anchored-without-returns →
+            # DROPPED_KEY → untrustworthy → legacy fallback), never silently absent
+            # from a "Derived" curve that understates its capital. No csv_daily_
+            # returns / strategy_analytics write here — only the key_inputs surface.
+            await _run_key_mode_compose_epilogue()
             return DispatchResult(outcome=DispatchOutcome.DONE)
 
         # Strategy-mode: stamp a TERMINAL 'failed' status so the wizard's
@@ -2943,127 +3079,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             len(rows_payload), api_key_id, allocator_id, venue,
             len(realized), len(funding), meta.get("used_heuristic_capital"),
         )
-
-        # ── 115.1 RD-3 OPTION B — key-mode compose epilogue ──────────────────
-        # This derive ALREADY crawled the real external flows and read the live
-        # account equity anchor above (deribit: the native ledger crawl +
-        # account_state.collapsed_equity_usd; ccxt: fetch_ccxt_transfers +
-        # fetch_account_equity_and_upnl_usd). Persist those ALREADY-FETCHED
-        # inputs onto the NEW keyed surface as kind='key_inputs:<api_key_id>' so
-        # the crawl-free `derive_allocator_equity` compose job never has to
-        # decrypt the key or hit the exchange a SECOND time — then enqueue that
-        # compose job for the AUTHORITATIVE owner. Self-healing: any key refresh
-        # re-composes the whole allocator with zero added exchange I/O.
-        import math
-
-        # M1: Postgres JSONB rejects NaN/Inf, so a non-finite float would fail the
-        # key_inputs upsert and bubble as a transient error → re-crawl loop. These
-        # flows already passed the honest core, so a non-finite here is corruption:
-        # SKIP it honestly (the drop is visible via the count log below), never
-        # persist poison.
-        _flows_payload = []
-        _skipped_nonfinite_flows = 0
-        for _f in (external_flows or []):
-            _usd = float(_f.usd_signed)
-            if not math.isfinite(_usd):
-                _skipped_nonfinite_flows += 1
-                continue
-            _flows_payload.append(
-                {"utc_day_iso": _f.utc_day_iso, "usd_signed": _usd}
-            )
-        # DERIVATIVE-NOTIONAL TRAP (T-115.1-16): the anchor is the venue's own
-        # LIVE total-equity read (`equity` above) — deribit's collapsed native
-        # equity or the ccxt fetch_account_equity_and_upnl_usd NAV — NOT an
-        # allocator_holdings sum, and NEVER a blind value_usd sum (value_usd on a
-        # derivative is NOTIONAL contract size, not equity). An untrustworthy read
-        # (balance_error truthy or equity is None) persists an honest null anchor,
-        # never a heuristic fallback; the compose core then honestly DROPS the key.
-        # The anchor is trustworthy ONLY when it is a material, positive, finite
-        # venue-equity read. Persist a null anchor (compose core then DROPS the key)
-        # on every other case:
-        #   M1  — non-finite (NaN/Inf) would poison the JSONB upsert;
-        #   M2  — dust (|equity| <= DUST_NAV_FLOOR) is immaterial (mirrors the
-        #         function's materiality contract at :2651-2655) and a NON-POSITIVE
-        #         equity would make replay_key_equity raise non-positive-equity,
-        #         permanently FAILING the WHOLE allocator compose. Both → null, not a
-        #         permanent fail / a trustworthy near-zero curve basis.
-        _anchor_untrustworthy = (
-            balance_error
-            or equity is None
-            or not math.isfinite(float(equity))
-            or abs(equity) <= DUST_NAV_FLOOR
-            or equity <= 0.0
-        )
-        _anchor_usd: float | None = None if _anchor_untrustworthy else float(equity)
-        _key_inputs_payload = {
-            "flows": _flows_payload,
-            "anchor_usd": _anchor_usd,
-            "anchor_asof": datetime.now(timezone.utc).isoformat(),
-            "venue": venue,
-        }
-
-        def _persist_key_inputs(
-            payload: dict[str, Any] = _key_inputs_payload,
-            kind: str = "key_inputs:" + api_key_id,
-        ) -> None:
-            ctx.supabase.table("allocator_equity_derived").upsert(
-                {
-                    "allocator_id": allocator_id,
-                    "kind": kind,
-                    "payload": payload,
-                    "computed_at": datetime.now(timezone.utc).isoformat(),
-                },
-                on_conflict="allocator_id,kind",
-            ).execute()
-
-        # Transient DB errors BUBBLE (the job retries; the csv upsert above is
-        # idempotent, and the compose enqueue below is dedup-safe) — no silent
-        # swallow, no outcome downgrade.
-        await db_execute(_persist_key_inputs)
-
-        # Enqueue the crawl-free compose for the AUTHORITATIVE owner — read from
-        # ctx.key_row['user_id'] via `allocator_id`, NEVER a job-payload
-        # allocator_id (T-115.1-02 / T-115-16 owner-spoof pin). A one-inflight
-        # dedup collision is benign (the enqueue RPC is idempotent); a hard
-        # enqueue failure is logged and swallowed — the per-key inputs are already
-        # persisted and the next key refresh re-enqueues cleanly, so a compose
-        # enqueue hiccup must never fail an already-done per-key derive.
-        try:
-            def _enqueue_compose(target: str = allocator_id) -> None:
-                # p_strategy_id is passed EXPLICITLY as NULL — it is the RPC's
-                # first positional param and has NO SQL DEFAULT, so a PostgREST
-                # named-notation call that omits it cannot resolve the overload
-                # ("function does not exist") and the compose would never enqueue.
-                # Every SQL caller mirrors this (`p_strategy_id := NULL`); the
-                # allocator-scoped inflight dedup (allocator_id,kind) makes a
-                # collision benign, so no p_idempotency_key is required here.
-                ctx.supabase.rpc(
-                    "enqueue_compute_job",
-                    {
-                        "p_strategy_id": None,
-                        "p_allocator_id": target,
-                        "p_kind": "derive_allocator_equity",
-                    },
-                ).execute()
-
-            await db_execute(_enqueue_compose)
-        except Exception as _enq_exc:  # noqa: BLE001
-            logger.warning(
-                "derive_broker_dailies: compose enqueue for allocator %s failed "
-                "(api_key %s) — per-key inputs persisted; next key refresh "
-                "re-enqueues: %s",
-                allocator_id, api_key_id, _enq_exc,
-            )
-
-        # Log carries NO USD magnitudes (T-115-05): key/allocator/venue + counts +
-        # an anchor-present bool only.
-        logger.info(
-            "derive_broker_dailies: Option-B epilogue persisted key_inputs + "
-            "enqueued compose for api_key %s (allocator %s venue=%s n_flows=%d "
-            "skipped_nonfinite_flows=%d anchor_present=%s)",
-            api_key_id, allocator_id, venue, len(_flows_payload),
-            _skipped_nonfinite_flows, _anchor_usd is not None,
-        )
+        # F1(a): the SAME Option-B epilogue the <2-day short-circuit runs (one
+        # helper, so the two key-mode exits can never drift on the persist/enqueue
+        # contract).
+        await _run_key_mode_compose_epilogue()
         return DispatchResult(outcome=DispatchOutcome.DONE)
 
     logger.info(

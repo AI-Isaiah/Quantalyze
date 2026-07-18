@@ -229,8 +229,11 @@ class TestKeyMode:
 
     @pytest.mark.asyncio
     async def test_key_mode_insufficient_history_no_strategy_analytics(self) -> None:
-        """<2-day key-mode: no strategy_analytics write, returns DONE (there is
-        no per-key analytics row to stamp)."""
+        """<2-day key-mode: no csv_daily_returns and no strategy_analytics write,
+        returns DONE (there is no per-key analytics row to stamp). F1(a): it DOES
+        now run the Option-B epilogue (persist key_inputs + enqueue the compose) so
+        an idle/short key with real capital is visible to the compose core instead
+        of silently understating a "Derived" curve."""
         ctx, capture = _build_ctx(
             key_row={"id": "key-3", "exchange": "binance", "user_id": "alloc-3"},
             strategy_row=None,
@@ -244,11 +247,39 @@ class TestKeyMode:
             result = await run_derive_broker_dailies_job(job)
 
         assert result.outcome == DispatchOutcome.DONE
-        assert capture["upserts"] == [], (
+        # NO csv_daily_returns and NO strategy_analytics write (<2 days).
+        assert [
+            u for u in capture["upserts"]
+            if u[0] in ("csv_daily_returns", "strategy_analytics")
+        ] == [], (
             "key-mode <2-day must NOT write csv_daily_returns OR strategy_analytics; "
             f"got {capture['upserts']!r}"
         )
-        assert capture["rpc_calls"] == []
+        # F1(a): the Option-B key_inputs row IS persisted and the compose enqueued.
+        ki_upserts = [
+            u for u in capture["upserts"]
+            if u[0] == "allocator_equity_derived"
+            and any(
+                str(r.get("kind", "")).startswith("key_inputs:")
+                for r in ([u[1]] if isinstance(u[1], dict) else u[1])
+            )
+        ]
+        assert len(ki_upserts) == 1, (
+            f"key-mode <2-day must persist key_inputs (F1a); got {capture['upserts']!r}"
+        )
+        compose_enq = [
+            c for c in capture["rpc_calls"]
+            if c[0] == "enqueue_compute_job"
+            and c[1].get("p_kind") == "derive_allocator_equity"
+        ]
+        assert len(compose_enq) == 1, (
+            f"key-mode <2-day must enqueue the compose (F1a); got {capture['rpc_calls']!r}"
+        )
+        # No strategy-keyed CSV-analytics enqueue (that path stays absent).
+        assert [
+            c for c in capture["rpc_calls"]
+            if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == []
 
 
 class TestStrategyModeNonRegression:

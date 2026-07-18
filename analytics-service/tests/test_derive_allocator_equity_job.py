@@ -312,6 +312,66 @@ async def test_pin7_key_mode_epilogue_enqueues_owner_scoped_compose() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_pin_f1a_short_key_persists_key_inputs_and_enqueues() -> None:
+    """F1(a): a key-mode derive that hits the <2-non-NaN-days short-circuit must
+    STILL persist its Option-B key_inputs row (anchor + flows already fetched) and
+    enqueue the compose — so an idle/short key with real capital is visible to the
+    compose core (anchored-without-returns → DROPPED_KEY → untrustworthy) instead of
+    silently vanishing from a "Derived" curve that understates its capital.
+
+    RED today: the epilogue runs AFTER the short-circuit's early return, so a <2-day
+    key persists NO key_inputs. MUTATION-FALSIFIABLE: leave the epilogue below the
+    short-circuit → no key_inputs upsert → RED.
+    """
+    from services.job_worker import run_derive_broker_dailies_job
+
+    ctx, capture = _build_ctx(
+        key_row={"id": "key-idle", "exchange": "binance", "user_id": "alloc-owner"},
+        strategy_row=None,
+    )
+    job = {"id": "j-key", "kind": "derive_broker_dailies", "api_key_id": "key-idle"}
+    import pandas as pd
+
+    one_day = pd.Series(
+        [0.01], index=pd.DatetimeIndex(["2024-05-01"]), dtype="float64"
+    )
+    from unittest.mock import AsyncMock, patch
+
+    patches = _patches(ctx, key_mode=True, returns=one_day)
+    # A trustworthy positive equity read so the persisted anchor is a real NAV.
+    equity_patch = patch(
+        "services.exchange.fetch_account_equity_and_upnl_usd",
+        new=AsyncMock(return_value=(100_000.0, False, 0.0, False)),
+    )
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], equity_patch:
+        result = await run_derive_broker_dailies_job(job)
+
+    assert result.outcome.name == "DONE"
+    # key_inputs IS persisted (with the fetched anchor) even at <2 days.
+    ki_upserts = [
+        u for u in capture["upserts"]
+        if u[0] == DERIVED_TABLE and _is_key_inputs_upsert(u[1])
+    ]
+    assert len(ki_upserts) == 1, (
+        f"a <2-day key-mode derive must still persist key_inputs; got {capture['upserts']!r}"
+    )
+    row = _rows_of(ki_upserts[0][1])[0]
+    assert row["kind"] == "key_inputs:key-idle"
+    assert row["payload"]["anchor_usd"] == 100_000.0
+    # The compose is enqueued (owner-scoped) so the allocator recomposes.
+    compose_enqueues = [
+        c for c in capture["rpc_calls"]
+        if c[0] == "enqueue_compute_job"
+        and c[1].get("p_kind") == "derive_allocator_equity"
+    ]
+    assert len(compose_enqueues) == 1
+    assert compose_enqueues[0][1].get("p_allocator_id") == "alloc-owner"
+    # STILL no csv_daily_returns write and no strategy_analytics stamp (<2 days).
+    assert [u for u in capture["upserts"] if u[0] == "csv_daily_returns"] == []
+    assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []
+
+
 def _seed_zero_anchored_with_stale_curve() -> dict[str, list[dict]]:
     """An allocator with an eligible key but ZERO per-key returns and ZERO
     key_inputs → the compose core emits an EMPTY curve (NO_ANCHORED_KEYS, benign
