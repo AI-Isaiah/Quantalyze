@@ -155,6 +155,19 @@ def test_request_chokepoint_has_no_method_parameter():
     assert "method" not in params, "_request must not accept a caller-supplied HTTP verb"
 
 
+async def test_request_disables_redirect_following():
+    """F7: the request must set allow_redirects=False. A JSON API following a 3xx to
+    an off-host location would silently re-send the Bearer credential to an
+    unintended destination; failing loud on the redirect is the safe default."""
+    resp = _stub_response(200, "[]")
+    with _patch_request(resp) as mock_req:
+        client = SfoxClient(api_key=API_KEY)
+        await client.get_balances()
+        await client.aclose()
+    _, kwargs = mock_req.call_args
+    assert kwargs["allow_redirects"] is False
+
+
 @pytest.mark.parametrize(
     "invoke, body",
     [

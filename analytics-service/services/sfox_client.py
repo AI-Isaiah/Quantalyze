@@ -199,7 +199,16 @@ class SfoxClient:
 
         try:
             resp = await session.request(
-                "GET", url, headers=headers, params=query, proxy=self._proxy
+                "GET",
+                url,
+                headers=headers,
+                params=query,
+                proxy=self._proxy,
+                # A JSON API must never follow a redirect (F7): a 3xx to an
+                # off-host location would silently re-send the Bearer credential
+                # somewhere unintended. Fail loud on the 3xx instead (it lands in
+                # the non-2xx SfoxApiError path).
+                allow_redirects=False,
             )
             try:
                 status = resp.status
