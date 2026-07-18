@@ -112,6 +112,13 @@ class SfoxClient:
         self._last_request_at: dict[str, float] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
+        # The closed state is TERMINAL — refuse to reopen (WR-01). Without this,
+        # a read after aclose() would lazily create a BRAND-NEW session that the
+        # already-returned-early second aclose() (`if self._closed: return`) can
+        # never close → a guaranteed "Unclosed client session" leak (the exact
+        # Sentry class SFOX_CLOSE_TIMEOUT_S / the aclose bound exists to prevent).
+        if self._closed:
+            raise RuntimeError("SfoxClient used after aclose()")
         if self._session is None:
             # trust_env stays False by design: the ONLY proxy source is the
             # explicit ctor arg threaded per-request (phase-121 seam).

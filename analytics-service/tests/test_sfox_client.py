@@ -199,6 +199,25 @@ async def test_aclose_is_idempotent():
     await client.aclose()  # second call must not raise
 
 
+async def test_read_after_aclose_fails_loud_no_session_reopen():
+    """WR-01: the closed state is terminal. A read after aclose() must raise rather
+    than silently reopening a fresh session that the (already-early-returning) second
+    aclose() can never close — the guaranteed 'Unclosed client session' leak. This
+    fails against the old code, where _ensure_session gated only on `_session is None`
+    and happily created a brand-new session post-close."""
+    resp = _stub_response(200, "[]")
+    with _patch_request(resp):
+        client = SfoxClient(api_key=API_KEY)
+        await client.get_balances()
+        await client.aclose()
+        with pytest.raises(RuntimeError):
+            await client.get_balances()
+        # A second aclose() after the refused reopen must still be safe and must
+        # not have a live session to leak (no new session was ever created).
+        assert client._session is None
+        await client.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Task 2 — paginated read methods + per-endpoint rate gate
 #
