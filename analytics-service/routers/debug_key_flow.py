@@ -58,7 +58,7 @@ def _verify_internal_token(token: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid internal token")
 
 
-Broker = Literal["okx", "binance", "bybit", "deribit"]
+Broker = Literal["okx", "binance", "bybit", "deribit", "sfox"]
 
 
 def _maybe_enable_sandbox(exchange: ccxt.Exchange) -> None:

@@ -28,7 +28,7 @@ FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
 # ``process_key`` per-flow onboarding sets still exclude deribit (live LTP
 # onboarding is Phase 72), and Deribit returns flow through the broker-dailies
 # ONE-path (70-05, txn-log ledger), never fill-based process_key metrics.
-Source = Literal["okx", "binance", "bybit", "csv", "deribit"]
+Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
     "draft",

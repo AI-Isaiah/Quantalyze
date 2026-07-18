@@ -41,14 +41,24 @@ _BOUNDARY_MIGRATION = (
     / "migrations"
     / "20260704200446_deribit_exchange_boundary_checks.sql"
 )
+# Phase 119 (SFOX-04) — the sfox constraint-widen migration cloning the deribit
+# precedent above. Pinned the same way (byte-parity read of the ADD CONSTRAINT
+# CHECK bodies) so a future drop of sfox from any of the four boundary CHECKs
+# reds this test.
+_SFOX_BOUNDARY_MIGRATION = (
+    _REPO_ROOT
+    / "supabase"
+    / "migrations"
+    / "20260718182056_sfox_exchange_boundary_checks.sql"
+)
 _PROCESS_KEY = (
     Path(__file__).resolve().parents[1] / "routers" / "process_key.py"
 )
 
-# The canonical 4-value key-save allowlist — the pydantic mirror of the TS
-# SUPPORTED_EXCHANGES single source of truth. Drift on either side breaks the
-# set-equality pin below.
-_KEY_SAVE_EXCHANGES = {"binance", "okx", "bybit", "deribit"}
+# The canonical 5-value key-save allowlist — the pydantic mirror of the TS
+# SUPPORTED_EXCHANGES single source of truth. Phase 119 (SFOX-04) added 'sfox'.
+# Drift on either side breaks the set-equality pin below.
+_KEY_SAVE_EXCHANGES = {"binance", "okx", "bybit", "deribit", "sfox"}
 
 # The four canonical `<table>_<column>_check` constraint names the Phase 68
 # migration widens (LOAD-BEARING: the vitest resolveColumnCheck resolves these
@@ -93,6 +103,26 @@ class TestPydanticLiteralsContainDeribit:
             "for type-consistency at the key-save boundary)."
         )
 
+    def test_verify_request_exchange_literal_contains_sfox(self) -> None:
+        args = get_args(VerifyStrategyRequest.model_fields["exchange"].annotation)
+        assert "sfox" in args, (
+            "VerifyStrategyRequest.exchange Literal must admit 'sfox' (Phase 119 "
+            "SFOX-04) — the pydantic key-verify boundary mirroring TS SUPPORTED_EXCHANGES."
+        )
+
+    def test_broker_literal_contains_sfox(self) -> None:
+        assert "sfox" in get_args(Broker), (
+            "debug_key_flow.Broker Literal must admit 'sfox' (Phase 119 SFOX-04)."
+        )
+
+    def test_source_literal_contains_sfox(self) -> None:
+        # Source also carries 'csv' (upload path) — membership pin, not set-equality.
+        assert "sfox" in get_args(Source), (
+            "ingestion.adapter.Source Literal must admit 'sfox' (Phase 119 SFOX-04: "
+            "widened for type-consistency at the key-save boundary; the sfox ingestion "
+            "registry/get_adapter wiring is phase 120)."
+        )
+
 
 class TestMigrationWidensEveryKeyBoundaryCheck:
     """CONTAIN direction — the SQL last-line-of-defense admits deribit too.
@@ -129,6 +159,39 @@ class TestMigrationWidensEveryKeyBoundaryCheck:
             )
             assert "'deribit'" in m.group(1), (
                 f"{name} CHECK must admit 'deribit' but its IN-list does not: "
+                f"{m.group(1).strip()}"
+            )
+
+
+class TestSfoxMigrationWidensEveryKeyBoundaryCheck:
+    """Phase 119 (SFOX-04) — the sfox constraint-widen migration admits 'sfox'
+    at each of the four canonical key-save boundary CHECKs. Mirrors the deribit
+    migration-parity pattern above against the new migration file.
+    """
+
+    def test_sfox_migration_file_exists(self) -> None:
+        assert _SFOX_BOUNDARY_MIGRATION.is_file(), (
+            f"Phase 119 sfox boundary migration missing: {_SFOX_BOUNDARY_MIGRATION}"
+        )
+
+    def test_each_widened_constraint_admits_sfox_exactly_once(self) -> None:
+        sql = _SFOX_BOUNDARY_MIGRATION.read_text(encoding="utf-8")
+        for name in _WIDENED_CONSTRAINTS:
+            add_count = sql.count(f"ADD CONSTRAINT {name}")
+            assert add_count == 1, (
+                f"expected exactly 1 'ADD CONSTRAINT {name}' in the Phase 119 "
+                f"sfox migration, found {add_count}"
+            )
+            m = re.search(
+                rf"ADD CONSTRAINT {name}\s+CHECK\s*\((.*?)\)\s*;",
+                sql,
+                re.DOTALL,
+            )
+            assert m is not None, (
+                f"could not locate the CHECK body for {name} in the sfox migration"
+            )
+            assert "'sfox'" in m.group(1), (
+                f"{name} CHECK must admit 'sfox' but its IN-list does not: "
                 f"{m.group(1).strip()}"
             )
 

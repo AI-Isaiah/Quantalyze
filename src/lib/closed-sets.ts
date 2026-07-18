@@ -36,7 +36,7 @@ import { z } from "zod";
 // deribit key clears the allowlist; the FUNDING and USER-FACING UI surfaces are
 // DECOUPLED below (FUNDING_EXCHANGES / UI_EXCHANGE_CODES) and stay 3-exchange —
 // widening this base MUST NOT auto-widen those (OQ4 gate + Pitfall 2).
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit"] as const;
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit", "sfox"] as const;
 export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
 export const exchangeEnum = z.enum(SUPPORTED_EXCHANGES);
 
@@ -50,6 +50,7 @@ export const EXCHANGE_DISPLAY = {
   okx: "OKX",
   bybit: "Bybit",
   deribit: "Deribit",
+  sfox: "sFOX",
 } as const satisfies Record<SupportedExchange, string>;
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 

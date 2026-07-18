@@ -203,7 +203,7 @@ class VerifyStrategyRequest(BaseModel):
     # ``strategy_verifications.source``, also admits ``csv`` for ingestion, but
     # that is not a user-submitted verify exchange.) The Literal 422s the bad
     # value at the boundary.
-    exchange: Literal["binance", "okx", "bybit", "deribit"]
+    exchange: Literal["binance", "okx", "bybit", "deribit", "sfox"]
     # Audit H-0535: wrap credentials in SecretStr so they never leak into
     # ``repr(req)``, FastAPI validation-error messages, Sentry breadcrumbs, or
     # tracebacks (a bare ``str`` prints verbatim). The consumers in
