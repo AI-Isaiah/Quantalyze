@@ -1,5 +1,5 @@
-import { render } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
 import type { WidgetProps } from "../../lib/types";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
@@ -276,5 +276,73 @@ describe("EquityChartWidget — equity provenance indicator (115.1 / RD-2)", () 
     const provenance = getByTestId("equity-provenance");
     expect(provenance).toHaveAttribute("data-source", "legacy");
     expect(provenance.textContent).toMatch(/Broker snapshot history/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Finding 3 — the minute-tick re-render gate must advance the derived-curve
+// provenance freshness stamp, not just the sync stamp.
+//
+// The gate returned `prev` (skipping the re-render) unless the lastSyncAt
+// relative-time BUCKET changed. But the 115.1 provenance stamp derives from a
+// DIFFERENT timestamp (derivedCurveComputedAt). With stale keys (lastSyncAt
+// bucket flips slowly) and a just-recomputed curve, the provenance label froze
+// for up to ~24h. The fix also watches the provenance bucket in the gate.
+// ---------------------------------------------------------------------------
+describe("EquityChartWidget — provenance freshness minute-tick gate (Finding 3)", () => {
+  // Pin the wall clock so the relative-time buckets are deterministic.
+  const FIXED_NOW = Date.UTC(2026, 5, 1, 12, 0, 0);
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(FIXED_NOW);
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+    // Node-22 leaked-stub hygiene (mirrors the provenance describe above).
+    vi.unstubAllGlobals();
+  });
+
+  function renderWidget(data: Record<string, unknown>) {
+    vi.stubGlobal("localStorage", makeLocalStorageStub());
+    return render(
+      <TweaksProvider>
+        <EquityChartWidget
+          data={data as unknown as WidgetProps["data"]}
+          timeframe="1YTD"
+          width={6}
+          height={4}
+        />
+      </TweaksProvider>,
+    );
+  }
+
+  it("advances the derived provenance stamp when its bucket flips even though the sync bucket is stable", () => {
+    const { getByTestId } = renderWidget({
+      equityDailyPoints: makeSeries(60),
+      equityCurveSource: "derived",
+      // ~70s ago → "1m ago" now, "2m ago" after a 60s tick (bucket flips).
+      derivedCurveComputedAt: new Date(FIXED_NOW - 70_000).toISOString(),
+      // 5h ago → "5h ago" bucket is STABLE across a single 60s tick.
+      lastSyncAt: new Date(FIXED_NOW - 5 * 3_600_000).toISOString(),
+      allKeysStale: true,
+    });
+
+    // Flush the setTimeout(0) that lifts `now` off null → first freshness paint.
+    act(() => {
+      vi.advanceTimersByTime(0);
+    });
+    const provenance = getByTestId("equity-provenance");
+    expect(provenance.textContent).toMatch(/updated 1m ago/i);
+
+    // 60s later the SYNC bucket is unchanged (5h ago → 5h ago) but the DERIVED
+    // bucket flips (1m → 2m). The pre-fix gate watched only lastSyncAt, returned
+    // `prev`, froze `now`, and the stamp stuck at "1m ago". With the fix the gate
+    // also watches the provenance bucket, so `now` advances and the stamp updates.
+    act(() => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(provenance.textContent).toMatch(/updated 2m ago/i);
   });
 });

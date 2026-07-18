@@ -56,8 +56,12 @@ Object.defineProperty(window, "localStorage", {
   configurable: true,
 });
 
-// The three clip-proof tokens every fixed overflow site must carry.
+// The clip-proof tokens every fixed overflow site must carry. `outline-none`
+// SUPPRESSES the UA default outline — without it, keyboard focus paints BOTH the
+// inset accent ring AND the browser outline, and the latter (drawn outside the
+// box) is still clipped at the scroll edge: the exact defect UIFIX-02 targets.
 const RING_TOKENS = [
+  "focus-visible:outline-none",
   "focus-visible:ring-2",
   "focus-visible:ring-inset",
   "focus-visible:ring-accent",

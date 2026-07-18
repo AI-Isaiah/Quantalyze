@@ -265,8 +265,10 @@ describe("HoldingsTabPanel — Watchlist/Optimizer + Notes (100-04 wiring)", () 
     const text = container.textContent ?? "";
     // Watchlist honest-empty.
     expect(text).toContain("No favorites yet.");
-    // Optimizer 0-portfolio honest gate.
-    expect(text).toContain("Optimizer suggestions need a portfolio");
+    // Optimizer 0-portfolio honest gate (copy updated in Phase 116-02 — the
+    // remedy now deep-links the allocator connect-exchange path instead of the
+    // manager-only /portfolios dead-end; ADDALLOC-04).
+    expect(text).toContain("Simulate Impact needs a live portfolio");
     // Notes: placeholder present, no rendered preview (empty content).
     expect(
       getByPlaceholderText(/Add a private note about your allocation book/i),

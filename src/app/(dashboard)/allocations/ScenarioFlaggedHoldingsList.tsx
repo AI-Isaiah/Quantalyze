@@ -231,7 +231,7 @@ export function ScenarioFlaggedHoldingsList({
                       // UIFIX-02: clip-proof inset ring — the button sits inside
                       // the card's overflow-x-auto, so an outside-painting outline
                       // would be clipped at the scroll edge (WCAG 2.4.7).
-                      className="flex h-6 w-6 items-center justify-center rounded text-text-muted transition-colors hover:text-text-secondary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
+                      className="flex h-6 w-6 items-center justify-center rounded text-text-muted transition-colors hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent"
                     >
                       {isExpanded ? "▲" : "▼"}
                     </button>

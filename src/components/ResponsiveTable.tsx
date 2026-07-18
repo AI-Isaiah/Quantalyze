@@ -62,7 +62,7 @@ export function ResponsiveTable({
       // for every ResponsiveTable consumer (MetricsColumn, StressWindowsPanel …).
       className={[
         "overflow-x-auto",
-        "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent",
         className,
       ]
         .filter(Boolean)

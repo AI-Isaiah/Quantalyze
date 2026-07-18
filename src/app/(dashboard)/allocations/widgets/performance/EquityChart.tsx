@@ -2043,11 +2043,28 @@ function EquityChartWidgetInner({
     function advance() {
       setNow((prev) => {
         const next = Date.now();
-        if (!lastSyncAt || prev === null) return next;
-        return formatRelativeTime(lastSyncAt, prev) ===
-          formatRelativeTime(lastSyncAt, next)
-          ? prev
-          : next;
+        if (prev === null) return next;
+        // The tick must advance when ANY live relative-time label it drives would
+        // change bucket. Two labels ride this `now`: the sync stamp (lastSyncAt)
+        // AND the 115.1 derived-curve provenance stamp (derivedCurveComputedAt).
+        // Watching only lastSyncAt froze the provenance label for up to ~24h when
+        // keys were stale (its bucket flips slowly) but the derived curve had just
+        // been recomputed — a fresh "just now" stamp stuck reading stale.
+        const watchProvenance =
+          equityCurveSource === "derived" && derivedCurveComputedAt !== null;
+        // Nothing with a live relative-time label to watch → advance (preserves
+        // the original !lastSyncAt fast-path).
+        if (!lastSyncAt && !watchProvenance) return next;
+        const syncChanged =
+          !!lastSyncAt &&
+          formatRelativeTime(lastSyncAt, prev) !==
+            formatRelativeTime(lastSyncAt, next);
+        const provenanceChanged =
+          equityCurveSource === "derived" &&
+          derivedCurveComputedAt !== null &&
+          formatRelativeTime(derivedCurveComputedAt, prev) !==
+            formatRelativeTime(derivedCurveComputedAt, next);
+        return syncChanged || provenanceChanged ? next : prev;
       });
     }
     // setTimeout(0) defers the first set out of the render commit phase
@@ -2058,7 +2075,7 @@ function EquityChartWidgetInner({
       clearTimeout(tick);
       clearInterval(interval);
     };
-  }, [lastSyncAt]);
+  }, [lastSyncAt, derivedCurveComputedAt, equityCurveSource]);
   // B14 / NEW-C09-04 (H-1226): pass the minute-tick `now` (null on first
   // render) so the resolved relative-time copy updates live; the shared
   // `syncStampLabel` owns the never-synced / stale / fresh copy rules.

@@ -78,6 +78,11 @@ const composerHarness = vi.hoisted(() => ({
   captureBrowseHandoff: null as null | (() => void),
   // Spy standing in for the composer's imperative "open Browse" function.
   browseOpenSpy: vi.fn(),
+  // Every onClose / onSuccess identity the tab-level ContributionWizardOverlay
+  // receives, in render order. The memoization test reads the last two to prove
+  // the handler references are referentially STABLE across a parent re-render.
+  contributeOnClose: [] as Array<() => void>,
+  contributeOnSuccess: [] as Array<((strategyId: string) => void) | undefined>,
 }));
 
 // --- Panel / body stubs (shared with AllocationsTabs.test.tsx idiom) --------
@@ -118,8 +123,12 @@ vi.mock("./components/ContributionWizardOverlay", () => ({
     isOpen: boolean;
     onClose: () => void;
     onSuccess?: (strategyId: string) => void;
-  }) =>
-    props.isOpen ? (
+  }) => {
+    // Record the handler identities on EVERY render (open or not) so the
+    // memoization test can compare them across a forced parent re-render.
+    composerHarness.contributeOnClose.push(props.onClose);
+    composerHarness.contributeOnSuccess.push(props.onSuccess);
+    return props.isOpen ? (
       <div data-testid="contribution-overlay-stub">
         <button
           type="button"
@@ -136,7 +145,8 @@ vi.mock("./components/ContributionWizardOverlay", () => ({
           success
         </button>
       </div>
-    ) : null,
+    ) : null;
+  },
 }));
 
 // Minimal ScenarioComposer stub. Captures the Task-2 Browse seam props so the
@@ -292,6 +302,8 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     composerHarness.captureBrowseClosed = null;
     composerHarness.captureBrowseHandoff = null;
     composerHarness.browseOpenSpy.mockReset();
+    composerHarness.contributeOnClose.length = 0;
+    composerHarness.contributeOnSuccess.length = 0;
     vi.mocked(useRouter).mockReturnValue({
       replace: mockReplace,
       refresh: mockRefresh,
@@ -378,6 +390,39 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     expect(screen.queryByTestId("contribution-overlay-stub")).toBeNull();
     expect(document.activeElement).toBe(btn);
     expect(mockRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("T_ADDALLOC_6 memoization: onClose/onSuccess identities are referentially STABLE across a parent re-render (no 30s-poll focus theft)", () => {
+    // WHY (Rule 9): the Overview tab runs a 30s router.refresh() poll that
+    // re-renders AllocationsTabs. ContributionWizardOverlay's open-effect has
+    // deps [isOpen, onClose] and calls panelRef.focus() — so a NEW onClose
+    // identity on each poll re-runs that effect and yanks focus from the user's
+    // API-key input mid-typing. useCallback pins the identities; this test fails
+    // (identities differ) if either wrapper is unwrapped.
+    setSearchParams("");
+    const { rerender } = render(<AllocationsTabs {...STUB_PROPS} />);
+
+    // Open the overlay so it (re)renders and captures the current handlers.
+    const btn = screen.getByRole("button", { name: ADD_ALLOCATION_NAME });
+    fireEvent.click(btn);
+    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
+
+    const closeBefore = composerHarness.contributeOnClose.at(-1);
+    const successBefore = composerHarness.contributeOnSuccess.at(-1);
+    expect(closeBefore).toBeTypeOf("function");
+    expect(successBefore).toBeTypeOf("function");
+
+    // Force a parent re-render — the same mechanism the 30s Overview poll drives.
+    rerender(<AllocationsTabs {...STUB_PROPS} />);
+
+    const closeAfter = composerHarness.contributeOnClose.at(-1);
+    const successAfter = composerHarness.contributeOnSuccess.at(-1);
+    // A fresh render happened (a new identity was recorded to compare).
+    expect(composerHarness.contributeOnClose.length).toBeGreaterThan(1);
+    // Referentially stable across the re-render → the overlay's open-effect does
+    // not re-run, so focus is not stolen.
+    expect(closeAfter).toBe(closeBefore);
+    expect(successAfter).toBe(successBefore);
   });
 
   // -------------------------------------------------------------------------
@@ -485,6 +530,33 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
       composerHarness.captureBrowseClosed?.();
     });
     expect(document.activeElement).not.toBe(btn);
+  });
+
+  it("T_ADDALLOC_S7 scenario rollback (isUiV2===false): the ScenarioStub is mounted (composer NOT), and '+ Strategy' opens the wizard overlay instead of a silent no-op (ADDALLOC-03)", async () => {
+    // Seed the explicit opt-out so useCrossTabStorage's deferred mount-load
+    // decodes raw "false" → "explicit-false" → isUiV2 === false. The key name +
+    // "false" sentinel mirror UI_V2_STORAGE_KEY / uiV2FlagCodec in
+    // AllocationsTabs.tsx (parse: raw === "false" ? "explicit-false" : "default").
+    lsStore.set("allocations.ui_v2", "false");
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+
+    // The rollback surface (ScenarioStub) mounts after the post-mount hydration
+    // flip; the V2 composer must NOT be present on this path.
+    await screen.findByTestId("scenario-stub-body");
+    expect(screen.queryByTestId("scenario-composer-body")).toBeNull();
+
+    // The header button is still the scenario-tab "+ Strategy" (label + aria are
+    // driven by activeTab, independent of the V2/rollback gate).
+    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
+    expect(btn).toHaveTextContent("+ Strategy");
+
+    // On the rollback path there is no composer Browse to signal, so the
+    // registered Browse-open spy must NOT fire — and, per ADDALLOC-03, the click
+    // is NEVER a silent no-op: it opens the onboarding wizard overlay instead.
+    fireEvent.click(btn);
+    expect(composerHarness.browseOpenSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId("contribution-overlay-stub")).toBeInTheDocument();
   });
 
   it("T_ADDALLOC_S5 no focus theft after a handoff: header-open → onAddOwn handoff → a later in-composer close does not steal focus (WR-01)", async () => {

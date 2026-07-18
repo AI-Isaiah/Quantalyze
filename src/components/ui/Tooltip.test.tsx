@@ -2,6 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { Tooltip } from "./Tooltip";
 
+// The clamp math resolves against `document.documentElement.clientWidth /
+// clientHeight` — the width `position: fixed` actually resolves against
+// (excludes the classic scrollbar). jsdom does no layout, so these default to 0;
+// pin them to the jsdom viewport (matching window.innerWidth/Height 1024×768) so
+// the existing clamp tests see a real viewport. Individual tests override the
+// getter (via Object.defineProperty / vi.spyOn) to probe the clamp basis.
+Object.defineProperty(document.documentElement, "clientWidth", {
+  configurable: true,
+  get: () => 1024,
+});
+Object.defineProperty(document.documentElement, "clientHeight", {
+  configurable: true,
+  get: () => 768,
+});
+
 // F9 (HIGH-tackle batch) — regression guard for the Tooltip enter-delay timer
 // lifecycle. Three folded findings shared one root cause: `show()` queued a
 // 150ms setTimeout into `timerRef` without (a) clearing a prior pending timer
@@ -141,6 +156,44 @@ describe("UIFIX-01: portaled positioning", () => {
       const bubble = screen.getByRole("tooltip");
       const L = parseFloat(bubble.style.left);
       // w-56 === 224px. The full bubble must lie within [0, window.innerWidth].
+      expect(L).toBeGreaterThanOrEqual(0);
+      expect(L + 224).toBeLessThanOrEqual(window.innerWidth);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("Test 2b: clamps horizontally so a left-edge-adjacent bubble stays on-screen (>= VIEWPORT_MARGIN)", () => {
+    // Symmetric to Test 2's right-edge pull-back. Near the left edge: a 16px
+    // trigger at left:0. A naive center (0 + 8 - 112 = -104) would push the
+    // 224px bubble off the LEFT edge; the Math.max(rawLeft, VIEWPORT_MARGIN)
+    // clamp must pull it back to VIEWPORT_MARGIN (8).
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue({
+        left: 0,
+        right: 16,
+        top: 300,
+        bottom: 316,
+        width: 16,
+        height: 16,
+        x: 0,
+        y: 300,
+        toJSON: () => ({}),
+      } as DOMRect);
+    try {
+      render(
+        <Tooltip content="left edge case">
+          <button>info</button>
+        </Tooltip>,
+      );
+      openVia(screen.getByText("info").parentElement!.parentElement!);
+
+      const bubble = screen.getByRole("tooltip");
+      const L = parseFloat(bubble.style.left);
+      // VIEWPORT_MARGIN === 8 (Tooltip.tsx). The clamp floors the left inset at
+      // the gutter so the full bubble lies within [0, window.innerWidth].
+      expect(L).toBeCloseTo(8);
       expect(L).toBeGreaterThanOrEqual(0);
       expect(L + 224).toBeLessThanOrEqual(window.innerWidth);
     } finally {
@@ -349,6 +402,123 @@ describe("WR-01/WR-02: measured-height flip + top clamp (never above the viewpor
     } finally {
       hSpy.mockRestore();
       rectSpy.mockRestore();
+    }
+  });
+});
+
+// Finding 4 (Tooltip clamp basis + bottom clamp) — two clamp corrections in the
+// same reposition pass:
+//   4a: the right-edge clamp used window.innerWidth (INCLUDES the classic
+//       scrollbar), so on a scrollbar-reserving system a right-clamped bubble sat
+//       a few px under the scrollbar / off-screen. The basis is now
+//       documentElement.clientWidth — the width position:fixed actually resolves
+//       against — which EXCLUDES the scrollbar.
+//   4b: the flip-below branch had NO bottom clamp, so a trigger near the top of a
+//       short viewport pushed the bubble past the viewport bottom. It now clamps
+//       the bottom edge on-screen via documentElement.clientHeight, symmetric
+//       with the existing above-placement top clamp.
+describe("Finding 4: clamp basis (clientWidth) + flip-below bottom clamp", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.runOnlyPendingTimers();
+    vi.useRealTimers();
+  });
+
+  const openVia = (wrapper: HTMLElement) => {
+    fireEvent.mouseEnter(wrapper);
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+  };
+
+  it("4a: the right-edge clamp resolves against documentElement.clientWidth (excludes the scrollbar), not window.innerWidth", () => {
+    // window.innerWidth is 1024, but the LAYOUT viewport (what position:fixed
+    // resolves against) is 1000 — a 24px classic scrollbar. A trigger near the
+    // right edge must clamp against 1000, not 1024.
+    const cwSpy = vi
+      .spyOn(document.documentElement, "clientWidth", "get")
+      .mockReturnValue(1000);
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue({
+        left: 980,
+        right: 996,
+        top: 300,
+        bottom: 316,
+        width: 16,
+        height: 16,
+        x: 980,
+        y: 300,
+        toJSON: () => ({}),
+      } as DOMRect);
+    try {
+      render(
+        <Tooltip content="edge case">
+          <button>info</button>
+        </Tooltip>,
+      );
+      openVia(screen.getByText("info").parentElement!.parentElement!);
+
+      const bubble = screen.getByRole("tooltip");
+      const L = parseFloat(bubble.style.left);
+      // clientWidth basis → maxLeft = 1000 - 224 - 8 = 768. The pre-fix
+      // innerWidth basis would yield 792, leaving the last 8px of the 224px
+      // bubble under the scrollbar / off the layout viewport.
+      expect(L).toBeCloseTo(768);
+      // Full bubble within the LAYOUT viewport (1000), not just innerWidth.
+      expect(L + 224).toBeLessThanOrEqual(1000);
+    } finally {
+      rectSpy.mockRestore();
+      cwSpy.mockRestore();
+    }
+  });
+
+  it("4b: the flip-below branch clamps the bubble's bottom edge on-screen using clientHeight", () => {
+    // Short viewport: clientHeight 200. A trigger at top:100 with a real 150px
+    // bubble flips BELOW (aboveTop = 100 - 8 - 150 = -58 < VIEWPORT_MARGIN).
+    // Un-clamped, belowTop = rect.bottom(116) + 8 = 124 → bottom edge 124 + 150 =
+    // 274, off a 200px viewport. The bottom clamp pulls top up to
+    // clientHeight - VIEWPORT_MARGIN - height = 200 - 8 - 150 = 42.
+    const chSpy = vi
+      .spyOn(document.documentElement, "clientHeight", "get")
+      .mockReturnValue(200);
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockReturnValue({
+        left: 400,
+        right: 416,
+        top: 100,
+        bottom: 116,
+        width: 16,
+        height: 16,
+        x: 400,
+        y: 100,
+        toJSON: () => ({}),
+      } as DOMRect);
+    const hSpy = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockReturnValue(150);
+    try {
+      render(
+        <Tooltip content="A two-sentence narrative that wraps to many lines in a short viewport. It is taller than the space below the trigger.">
+          <button>info</button>
+        </Tooltip>,
+      );
+      openVia(screen.getByText("info").parentElement!.parentElement!);
+
+      const bubble = screen.getByRole("tooltip");
+      const top = parseFloat(bubble.style.top);
+      // Clamped to clientHeight - margin - height. Pre-fix (no bottom clamp) this
+      // was 124, so bottom = 274 overflowed the 200px viewport.
+      expect(top).toBeCloseTo(42);
+      // Bottom edge stays within [., clientHeight - VIEWPORT_MARGIN].
+      expect(top + 150).toBeLessThanOrEqual(200 - 8);
+    } finally {
+      hSpy.mockRestore();
+      rectSpy.mockRestore();
+      chSpy.mockRestore();
     }
   });
 });

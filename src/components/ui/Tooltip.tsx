@@ -116,9 +116,13 @@ export function Tooltip({ content, children, className }: TooltipProps) {
     if (!el || typeof window === "undefined") return;
     const rect = el.getBoundingClientRect();
     // Horizontal: center on the trigger, then clamp the full 224px bubble inside
-    // [VIEWPORT_MARGIN, innerWidth - width - VIEWPORT_MARGIN].
+    // [VIEWPORT_MARGIN, clientWidth - width - VIEWPORT_MARGIN]. Use
+    // documentElement.clientWidth (excludes the classic scrollbar) — the same
+    // width `position: fixed` resolves against — so a right-clamped bubble never
+    // sits a few px under the scrollbar / off-screen.
+    const viewportW = document.documentElement.clientWidth;
     const rawLeft = rect.left + rect.width / 2 - BUBBLE_WIDTH / 2;
-    const maxLeft = window.innerWidth - BUBBLE_WIDTH - VIEWPORT_MARGIN;
+    const maxLeft = viewportW - BUBBLE_WIDTH - VIEWPORT_MARGIN;
     const left = Math.min(Math.max(rawLeft, VIEWPORT_MARGIN), maxLeft);
     // Vertical (WR-02): drive the above/below flip with the REAL measured bubble
     // height (not a fixed 80px estimate that underestimates a wrapped 2-sentence
@@ -129,8 +133,20 @@ export function Tooltip({ content, children, className }: TooltipProps) {
     // are never clipped at the viewport edge.
     const bubbleH = bubbleRef.current?.offsetHeight || ESTIMATED_BUBBLE_HEIGHT;
     const aboveTop = rect.top - TRIGGER_GAP - bubbleH;
-    const top =
-      aboveTop >= VIEWPORT_MARGIN ? aboveTop : rect.bottom + TRIGGER_GAP;
+    let top: number;
+    if (aboveTop >= VIEWPORT_MARGIN) {
+      top = aboveTop;
+    } else {
+      // Flip below, top-anchored at `rect.bottom + gap`, then clamp the BOTTOM
+      // edge on-screen (symmetric with the above placement's top clamp) so a
+      // trigger near the top of a SHORT viewport can't push the bubble past the
+      // viewport bottom. Use documentElement.clientHeight (the height a
+      // position:fixed frame resolves against), not window.innerHeight.
+      const belowTop = rect.bottom + TRIGGER_GAP;
+      const maxTop =
+        document.documentElement.clientHeight - VIEWPORT_MARGIN - bubbleH;
+      top = Math.min(belowTop, maxTop);
+    }
     setPos({ left, top });
   }, []);
 

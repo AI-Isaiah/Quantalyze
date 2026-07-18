@@ -329,9 +329,9 @@ const TAB_LABELS: Record<TabKey, string> = {
 // `-mb-[10px]` overhang) onto the CLIP-PROOF inset ring; every other token stays
 // byte-identical to the prior inlined versions (dashboard-parity Tailwind order).
 const TAB_BUTTON_ACTIVE =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-accent text-accent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 const TAB_BUTTON_INACTIVE =
-  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
+  "inline-flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium border-b-2 -mb-[10px] border-transparent text-text-muted hover:text-text-primary transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent";
 
 const TAB_COUNT_BADGE_ACTIVE =
   "rounded-sm bg-accent/15 px-1.5 py-0.5 text-fixed-10 font-mono leading-none text-accent";
@@ -551,19 +551,25 @@ export function AllocationsTabs(
     }
   }, [activeTab]);
 
-  const handleContributeClose = () => {
+  // Memoized so their identities stay stable across the Overview tab's 30s
+  // router.refresh() poll (which re-renders AllocationsTabs). A new handler
+  // identity would re-run ContributionWizardOverlay's open-effect ([isOpen,
+  // onClose]) and yank `panelRef.current?.focus()` away from the user's input
+  // mid-typing every 30s. `setContributeOpen` (state setter) and `addButtonRef`
+  // (a ref) are stable, so neither belongs in deps; `router` does.
+  const handleContributeClose = useCallback(() => {
     setContributeOpen(false);
     // Return focus to the header trigger (UI-SPEC §Close → focus return).
     addButtonRef.current?.focus();
-  };
-  const handleContributeSuccess = () => {
+  }, []);
+  const handleContributeSuccess = useCallback(() => {
     setContributeOpen(false);
     addButtonRef.current?.focus();
     // A freshly connected key / uploaded CSV should reflect in the SSR payload
     // without waiting for the 30s Overview poll. This is a user-initiated
     // refresh (not the guarded background interval above), so call directly.
     router.refresh();
-  };
+  }, [router]);
 
   // Per-tab dispatch (ADDALLOC-01/02/03). Binary on activeTab: the Scenario tab
   // opens the composer's strategy picker (Browse); every OTHER tab
