@@ -79,14 +79,24 @@ def compose_allocator_equity(
     returns_by_key: Mapping[str, pd.Series],
     flows_by_key: Mapping[str, list[ExternalFlow]],
     anchors_by_key: Mapping[str, float | None],
+    null_anchor_reasons: Mapping[str, str] | None = None,
 ) -> dict:
     """Compose the allocator display-row payload from real per-key inputs.
 
     See the module docstring for the four carry-ins. Returns the phase-wide contract:
     ``{curve, flags, degrade_reasons, is_trustworthy, scalars, inputs}``. Pure /
-    I/O-free — the job handler owns persistence."""
+    I/O-free — the job handler owns persistence.
+
+    ``null_anchor_reasons`` (optional) maps a key with a NULL anchor to WHY the
+    epilogue nulled it (``'dust'`` vs a real-capital read failure —
+    ``'balance_error'/'nonpositive'/'nonfinite'/'flow_drop'``). It is consulted ONLY
+    for the fourth reconciliation bucket (a null-anchor key ALSO absent from the
+    returns axis): a ``'dust'`` such key is SILENTLY OMITTED (materiality — a dust
+    key must not pin the allocator to legacy), any other reason (or a MISSING token,
+    the safe default) DEGRADES the allocator (DROPPED_KEY → legacy fallback)."""
     reasons: set[DegradeReason] = set()
     flag_tokens: set[str] = set()
+    _null_reasons = null_anchor_reasons or {}
 
     # ── Carry-in TRAP: drop unanchored keys FIRST (before segmentation) ──
     # WR-01 / B3: reconcile over the UNION of the return-bearing keys AND the keys
@@ -119,6 +129,29 @@ def compose_allocator_equity(
         # MISSING_SERIES (benign honest-empty companion) + DROPPED_KEY (blocking):
         # a key with real anchored capital but no series cannot enter the $-curve,
         # so the total understates it → untrustworthy, never a silent omission.
+        reasons.add(DegradeReason.MISSING_SERIES)
+        reasons.add(DegradeReason.DROPPED_KEY)
+    # FOURTH BUCKET (F1a×F3/M2 seam): a key present in anchors_by_key with a NULL
+    # anchor AND absent from returns_by_key (the <2-day / never-traded idle key
+    # whose live equity read failed) is in NONE of the three buckets above → it
+    # would be silently omitted → a trustworthy partial curve over the rest. Gate it
+    # on the epilogue's anchor_null_reason:
+    #   'dust'  → SILENTLY OMIT (materiality — an immaterial dust key must not pin
+    #             the whole allocator to legacy forever; matches why M2 nulls dust).
+    #   else / MISSING token → real-capital read failure (balance_error / nonpositive
+    #             / nonfinite / flow_drop) OR a legacy pre-fix row with no token →
+    #             emit NO_ANCHOR + MISSING_SERIES + DROPPED_KEY (blocking) so the
+    #             allocator degrades honestly (we cannot account for that key's real
+    #             capital). A MISSING token defaults to the SAFE (degrade) side.
+    null_anchor_without_returns = [
+        k
+        for k in anchors_by_key
+        if anchors_by_key.get(k) is None and k not in returns_by_key
+    ]
+    for k in null_anchor_without_returns:
+        if _null_reasons.get(k) == "dust":
+            continue  # materiality: omit silently, no degrade reason
+        reasons.add(DegradeReason.NO_ANCHOR)
         reasons.add(DegradeReason.MISSING_SERIES)
         reasons.add(DegradeReason.DROPPED_KEY)
 

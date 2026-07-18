@@ -344,6 +344,94 @@ def _seed_poison_with_stale_curve() -> dict[str, list[dict]]:
     }
 
 
+def _seed_null_anchor_sibling(reason: str) -> dict[str, list[dict]]:
+    """Healthy key-A (returns + real anchor) + idle key-B whose key_inputs row
+    carries anchor_usd=None + the given anchor_null_reason and NO returns. Both
+    eligible; a stale equity_curve row is present. The fourth-bucket seam gates
+    key-B on `reason`: dust → omit (trustworthy over A); else → DROPPED_KEY."""
+    alloc = "alloc-nullsib"
+    api_keys = [
+        {"id": "key-A", "user_id": alloc, "is_active": True,
+         "sync_status": "connected", "disconnected_at": None},
+        {"id": "key-B", "user_id": alloc, "is_active": True,
+         "sync_status": "connected", "disconnected_at": None},
+    ]
+    csv = [
+        {"api_key_id": "key-A", "allocator_id": alloc, "date": f"2026-03-0{i+1}",
+         "daily_return": 0.004}
+        for i in range(3)
+    ]
+    ki_b_payload: dict[str, Any] = {"flows": [], "anchor_usd": None, "venue": "binance"}
+    if reason is not None:
+        ki_b_payload["anchor_null_reason"] = reason
+    derived = [
+        {"allocator_id": alloc, "kind": "key_inputs:key-A",
+         "payload": {"flows": [], "anchor_usd": 100_000.0, "venue": "binance"}},
+        {"allocator_id": alloc, "kind": "key_inputs:key-B", "payload": ki_b_payload},
+        {"allocator_id": alloc, "kind": "equity_curve",
+         "payload": {"curve": [{"date": "2026-01-01", "equity_usd": 1.0}],
+                     "is_trustworthy": True}},
+    ]
+    return {"csv_daily_returns": csv, DERIVED_TABLE: derived,
+            LEGACY_TABLE: [], "api_keys": api_keys}
+
+
+@pytest.mark.asyncio
+async def test_pin_fourthbucket_nondust_null_anchor_sibling_degrades() -> None:
+    """F1a×F3/M2 seam (end-to-end): a healthy key-A + an idle key-B whose key_inputs
+    row has anchor_usd=None + anchor_null_reason='balance_error' (real-capital read
+    failure) and no returns → the compose threads the reason token, hits the fourth
+    bucket, and the composed curve is UNTRUSTWORTHY (DROPPED_KEY) → legacy. NOT a
+    trustworthy 1-of-2 curve. key-B has a key_inputs row so it passes F1(b) — this is
+    the seam F1(b) does NOT cover."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_null_anchor_sibling("balance_error"))
+    job = {"id": "j-4b", "kind": "derive_allocator_equity", "allocator_id": "alloc-nullsib"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    curve_upserts = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve_upserts) == 1, (
+        f"key-A yields a non-empty curve → it upserts (untrustworthy); got {fake.upserts!r}"
+    )
+    payload = _extract_payload(curve_upserts[0][1])
+    assert payload["is_trustworthy"] is False, (
+        f"a null-anchor real-failure sibling must degrade the allocator; "
+        f"got degrade_reasons={payload['degrade_reasons']!r}"
+    )
+    assert "dropped_key" in payload["degrade_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_pin_fourthbucket_dust_null_anchor_sibling_omitted() -> None:
+    """F1a×F3/M2 seam (end-to-end): a DUST null-anchor sibling is silently omitted →
+    the rest composes TRUSTWORTHY (dust materiality must not pin the allocator to
+    legacy)."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_null_anchor_sibling("dust"))
+    job = {"id": "j-4bd", "kind": "derive_allocator_equity", "allocator_id": "alloc-nullsib"}
+
+    from unittest.mock import patch
+
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    curve_upserts = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve_upserts) == 1
+    payload = _extract_payload(curve_upserts[0][1])
+    assert payload["is_trustworthy"] is True, (
+        f"a dust null-anchor sibling must be omitted, not degrade; "
+        f"got degrade_reasons={payload['degrade_reasons']!r}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_pin_f2_permanent_failure_deletes_stale_curve() -> None:
     """F2: a poison structural input → permanent FAILED → the stale equity_curve
@@ -498,10 +586,13 @@ async def test_pin_f1b_partial_backfill_refuses_and_degrades() -> None:
 
 @pytest.mark.asyncio
 async def test_pin_f1b_key_inputs_only_key_is_not_missing() -> None:
-    """F1(b) boundary: a key WITH a key_inputs row but NO returns is VISIBLE to the
-    compose core (anchored-without-returns → DROPPED_KEY via B3), so it must NOT trip
-    the missing-key refusal — the compose proceeds (and degrades honestly via B3),
-    not via the F1(b) backfill-window delete."""
+    """F1(b) boundary (NON-null-anchor variant): a key WITH a key_inputs row carrying
+    a REAL (non-null) anchor but NO returns is VISIBLE to the compose core
+    (anchored-without-returns → DROPPED_KEY via B3), so it must NOT trip the
+    missing-key refusal — the compose proceeds (and degrades honestly via B3), not
+    via the F1(b) backfill-window delete. The NULL-anchor variant (a key_inputs row
+    with anchor_usd=None + no returns) is covered by the F1a×F3/M2-seam fourth-bucket
+    pins below and in test_e2_segment_blend_wiring.py."""
     from services.job_worker import run_derive_allocator_equity_job
 
     seed = _seed_partial_backfill()
@@ -973,6 +1064,11 @@ async def test_pin8_epilogue_persists_null_anchor_on_untrustworthy_read() -> Non
         "an untrustworthy equity read must persist anchor_usd: null (never a "
         f"heuristic anchor); got {payload['anchor_usd']!r}"
     )
+    # A balance_error read stamps the reason so compose can degrade (non-dust).
+    assert payload.get("anchor_null_reason") == "balance_error", (
+        f"a balance_error read must stamp anchor_null_reason='balance_error'; "
+        f"got {payload.get('anchor_null_reason')!r}"
+    )
     assert payload["venue"] == "binance"
     assert isinstance(payload["flows"], list)
 
@@ -1009,13 +1105,22 @@ async def _run_key_epilogue_with_equity_read(equity: object, balance_error: bool
     return capture
 
 
-def _persisted_anchor(capture: dict):
+def _persisted_ki_payload(capture: dict) -> dict:
     ki = [
         u for u in capture["upserts"]
         if u[0] == DERIVED_TABLE and _is_key_inputs_upsert(u[1])
     ]
     assert len(ki) == 1, f"expected one key_inputs upsert; got {capture['upserts']!r}"
-    return _rows_of(ki[0][1])[0]["payload"]["anchor_usd"]
+    return _rows_of(ki[0][1])[0]["payload"]
+
+
+def _persisted_anchor(capture: dict):
+    return _persisted_ki_payload(capture)["anchor_usd"]
+
+
+def _persisted_null_reason(capture: dict):
+    # F1a×F3/M2 seam: the epilogue stamps WHY it nulled the anchor.
+    return _persisted_ki_payload(capture).get("anchor_null_reason")
 
 
 @pytest.mark.asyncio
@@ -1027,6 +1132,8 @@ async def test_pin_positive_anchor_persists_the_live_nav() -> None:
     assert _persisted_anchor(capture) == 123_456.78, (
         "a trustworthy positive equity read must persist as the anchor verbatim"
     )
+    # A real anchor carries NO null-reason token.
+    assert _persisted_null_reason(capture) is None
 
 
 @pytest.mark.asyncio
@@ -1041,6 +1148,10 @@ async def test_pin_m1_nonfinite_equity_persists_null_anchor() -> None:
         assert _persisted_anchor(capture) is None, (
             f"a non-finite equity ({bad!r}) must persist anchor_usd null, not poison JSONB"
         )
+        assert _persisted_null_reason(capture) == "nonfinite", (
+            f"a non-finite equity must stamp anchor_null_reason='nonfinite'; "
+            f"got {_persisted_null_reason(capture)!r}"
+        )
 
 
 @pytest.mark.asyncio
@@ -1051,6 +1162,10 @@ async def test_pin_m2_dust_equity_persists_null_anchor() -> None:
     capture = await _run_key_epilogue_with_equity_read(500.0, balance_error=False)
     assert _persisted_anchor(capture) is None, (
         "a dust equity must persist anchor_usd null (materiality contract)"
+    )
+    assert _persisted_null_reason(capture) == "dust", (
+        f"a dust equity must stamp anchor_null_reason='dust' (materiality omit); "
+        f"got {_persisted_null_reason(capture)!r}"
     )
 
 
@@ -1109,6 +1224,10 @@ async def test_pin_f3_dropped_nonfinite_flow_nulls_anchor() -> None:
         "a dropped non-finite flow must null the anchor so the key degrades honestly "
         f"(F3); got {payload['anchor_usd']!r}"
     )
+    assert payload.get("anchor_null_reason") == "flow_drop", (
+        f"a dropped flow must stamp anchor_null_reason='flow_drop'; "
+        f"got {payload.get('anchor_null_reason')!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -1120,6 +1239,10 @@ async def test_pin_m2_negative_equity_persists_null_anchor() -> None:
     capture = await _run_key_epilogue_with_equity_read(-50_000.0, balance_error=False)
     assert _persisted_anchor(capture) is None, (
         "a negative equity must persist anchor_usd null, never a permanent-fail anchor"
+    )
+    assert _persisted_null_reason(capture) == "nonpositive", (
+        f"a negative equity must stamp anchor_null_reason='nonpositive'; "
+        f"got {_persisted_null_reason(capture)!r}"
     )
 
 

@@ -40,6 +40,7 @@ from datetime import date, timedelta
 import pandas as pd
 import pytest
 
+from services.allocator_equity_compose import compose_allocator_equity
 from services.external_flows import ExternalFlow
 from services.nav_twr import NavReconstructionError
 from tests.e2_fixtures import WINDOW_START, make_per_key_returns
@@ -242,6 +243,87 @@ def test_anchored_key_with_no_returns_is_dropped_not_silently_omitted() -> None:
     # The curve is still computed over the key that DOES have a series (A) — the
     # feature degrades honestly (untrustworthy), it does not blank.
     assert _curve_dates(payload), "the anchored-with-returns key still yields a curve"
+
+
+# ---------------------------------------------------------------------------
+# F1a×F3/M2 seam — a NULL-anchor key ALSO absent from returns_by_key. Without the
+# fourth reconciliation bucket it falls into none of the three B3 buckets → it is
+# silently omitted → a trustworthy partial curve over the rest. Gated on the
+# epilogue's anchor_null_reason: 'dust' → omit (materiality); else / MISSING token
+# → DROPPED_KEY (degrade to legacy).
+# ---------------------------------------------------------------------------
+
+
+def _healthy_A_returns() -> pd.Series:
+    return _key_from(0, 10, "key-A")
+
+
+def test_null_anchor_no_returns_nondust_key_degrades_not_silently_omitted() -> None:
+    """The EXACT red-team RED: a healthy key-A + an idle key-B with a NULL anchor
+    (real-capital read failure) AND no return series must make the composed curve
+    UNTRUSTWORTHY (DROPPED_KEY), NOT a trustworthy curve over A only.
+
+    MUTATION-FALSIFIABLE: drop the fourth bucket (or treat every reason as dust) →
+    key-B is silently omitted → is_trustworthy flips back to True → RED.
+    """
+    key_a = _healthy_A_returns()
+    returns_by_key = {"key-A": key_a}  # key-B has NO returns
+    flows_by_key: dict[str, list[ExternalFlow]] = {"key-A": [], "key-B": []}
+    anchors_by_key = {"key-A": 10_000.0, "key-B": None}
+
+    for reason in ("balance_error", "nonpositive", "nonfinite", "flow_drop"):
+        payload = compose_allocator_equity(
+            returns_by_key, flows_by_key, anchors_by_key,
+            {"key-B": reason},
+        )
+        assert payload["is_trustworthy"] is False, (
+            f"a null-anchor idle key ({reason}) must degrade the allocator; "
+            f"got degrade_reasons={payload['degrade_reasons']!r}"
+        )
+        assert "dropped_key" in payload["degrade_reasons"], (
+            f"reason={reason} must emit DROPPED_KEY; got {payload['degrade_reasons']!r}"
+        )
+
+
+def test_null_anchor_no_returns_missing_token_defaults_to_degrade() -> None:
+    """A null-anchor idle key WITHOUT a reason token (a legacy/pre-fix key_inputs
+    row) must default to the SAFE side (non-dust) → DROPPED_KEY → legacy. A missing
+    token must never silently pass as trustworthy."""
+    from services.allocator_equity_compose import compose_allocator_equity as _c
+
+    key_a = _healthy_A_returns()
+    payload = _c(
+        {"key-A": key_a},
+        {"key-A": [], "key-B": []},
+        {"key-A": 10_000.0, "key-B": None},
+        None,  # no reasons map at all → missing token for key-B
+    )
+    assert payload["is_trustworthy"] is False, (
+        "a missing anchor_null_reason must default to degrade (safe), not trustworthy"
+    )
+    assert "dropped_key" in payload["degrade_reasons"]
+
+
+def test_null_anchor_no_returns_dust_key_silently_omitted() -> None:
+    """A DUST null-anchor idle key absent from returns must be SILENTLY OMITTED — a
+    dust key must not pin the whole allocator to legacy forever (materiality, the
+    same reason M2 nulls a dust anchor). The rest composes TRUSTWORTHY."""
+    key_a = _healthy_A_returns()
+    payload = compose_allocator_equity(
+        {"key-A": key_a},
+        {"key-A": [], "key-B": []},
+        {"key-A": 10_000.0, "key-B": None},
+        {"key-B": "dust"},
+    )
+    assert payload["is_trustworthy"] is True, (
+        f"a dust null-anchor key must be omitted, not degrade; "
+        f"got degrade_reasons={payload['degrade_reasons']!r}"
+    )
+    assert payload["degrade_reasons"] == [], (
+        f"a dust omit must raise NO degrade reason; got {payload['degrade_reasons']!r}"
+    )
+    # The curve still composes over the healthy key-A.
+    assert _curve_dates(payload)
 
 
 # ---------------------------------------------------------------------------

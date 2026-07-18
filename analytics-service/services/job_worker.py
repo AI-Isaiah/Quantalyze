@@ -2826,18 +2826,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         #         mis-levels the reconstructed curve with NO degrade signal. Null the
         #         anchor so the key degrades honestly (compose DROPS it) rather than
         #         reading trustworthy over a silently mis-leveled curve.
-        _anchor_untrustworthy = (
-            balance_error
-            or equity is None
-            or not math.isfinite(float(equity))
-            or abs(equity) <= DUST_NAV_FLOOR
-            or equity <= 0.0
-            or _skipped_nonfinite_flows > 0
+        #
+        # F1a×F3/M2 seam: STAMP anchor_null_reason so the compose core can tell a
+        # DUST null (materiality — silently omit, never pin the allocator to legacy)
+        # apart from a REAL-CAPITAL read failure (balance_error/nonpositive/
+        # nonfinite/flow_drop — degrade to legacy). Without the token a null-anchor
+        # key that is ALSO absent from the returns axis (the <2-day / never-traded
+        # idle key) falls into NONE of compose's B3 buckets → invisible → a
+        # trustworthy partial curve. Order matters: nonpositive is checked BEFORE
+        # dust so a small NEGATIVE equity (|equity| <= DUST but a real-capital
+        # problem) degrades rather than being silently omitted as dust.
+        _anchor_null_reason: str | None = None
+        if balance_error or equity is None:
+            _anchor_null_reason = "balance_error"
+        elif not math.isfinite(float(equity)):
+            _anchor_null_reason = "nonfinite"
+        elif equity <= 0.0:
+            _anchor_null_reason = "nonpositive"
+        elif abs(equity) <= DUST_NAV_FLOOR:
+            _anchor_null_reason = "dust"
+        elif _skipped_nonfinite_flows > 0:
+            _anchor_null_reason = "flow_drop"
+        _anchor_usd: float | None = (
+            None if _anchor_null_reason is not None else float(equity)
         )
-        _anchor_usd: float | None = None if _anchor_untrustworthy else float(equity)
         _key_inputs_payload = {
             "flows": _flows_payload,
             "anchor_usd": _anchor_usd,
+            # A present/real anchor carries no reason token (None); a null anchor
+            # records WHY so compose can gate dust-omit vs real-failure-degrade.
+            "anchor_null_reason": _anchor_null_reason,
             "anchor_asof": datetime.now(timezone.utc).isoformat(),
             "venue": venue,
         }
@@ -6071,6 +6089,11 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     ki_rows = await db_execute(_load_key_inputs)
     flows_by_key: dict[str, list[ExternalFlow]] = {}
     anchors_by_key: dict[str, float | None] = {}
+    # F1a×F3/M2 seam: WHY the epilogue nulled an anchor ('dust' vs a real-capital
+    # read failure). Threaded into compose so a null-anchor key ALSO absent from the
+    # returns axis is gated dust-omit vs real-failure-degrade (never silently
+    # omitted → a trustworthy partial curve).
+    null_anchor_reasons: dict[str, str] = {}
     key_inputs_ids: set[str] = set()
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
@@ -6102,6 +6125,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             ]
             _anchor = payload.get("anchor_usd")
             anchors_by_key[api_key_id] = None if _anchor is None else float(_anchor)
+            if _anchor is None:
+                # Capture the reason token (absent on legacy pre-fix rows → None →
+                # compose treats it as the SAFE non-dust/degrade default).
+                _reason = payload.get("anchor_null_reason")
+                if isinstance(_reason, str) and _reason:
+                    null_anchor_reasons[api_key_id] = _reason
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -6150,7 +6179,7 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
     try:
         payload = compose_allocator_equity(
-            returns_by_key, flows_by_key, anchors_by_key
+            returns_by_key, flows_by_key, anchors_by_key, null_anchor_reasons
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
