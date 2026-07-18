@@ -28,7 +28,16 @@ FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
 # ``process_key`` per-flow onboarding sets still exclude deribit (live LTP
 # onboarding is Phase 72), and Deribit returns flow through the broker-dailies
 # ONE-path (70-05, txn-log ledger), never fill-based process_key metrics.
-Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox"]
+#
+# Phase 119 (SFOX-04) deliberately does NOT add 'sfox' here. This ``Source``
+# Literal is the ingestion CAPABILITY vocabulary and is pinned equal to
+# ``SUPPORTED_SOURCES``/``_FACTORIES`` by test_source_literal_and_registry_agree.
+# The sfox ingestion factory (equity reconstruction) is Phase 120, so 'sfox'
+# joins this Literal + the registry + get_adapter TOGETHER there. The key-save
+# EXCHANGE boundary (VerifyStrategyRequest.exchange, debug_key_flow.Broker, and
+# the four SQL CHECKs) already admits 'sfox' in Phase 119 — those are a distinct
+# concern from ingestion capability.
+Source = Literal["okx", "binance", "bybit", "csv", "deribit"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
     "draft",

@@ -115,12 +115,17 @@ class TestPydanticLiteralsContainDeribit:
             "debug_key_flow.Broker Literal must admit 'sfox' (Phase 119 SFOX-04)."
         )
 
-    def test_source_literal_contains_sfox(self) -> None:
-        # Source also carries 'csv' (upload path) — membership pin, not set-equality.
-        assert "sfox" in get_args(Source), (
-            "ingestion.adapter.Source Literal must admit 'sfox' (Phase 119 SFOX-04: "
-            "widened for type-consistency at the key-save boundary; the sfox ingestion "
-            "registry/get_adapter wiring is phase 120)."
+    def test_source_literal_excludes_sfox_until_phase_120(self) -> None:
+        # Phase 119 SFOX-04 does NOT add 'sfox' to the ingestion Source Literal:
+        # Source is pinned EQUAL to SUPPORTED_SOURCES/_FACTORIES by
+        # test_source_literal_and_registry_agree, and the sfox ingestion factory
+        # is Phase 120. Widening the Literal ahead of the registry would break
+        # that invariant. The key-save EXCHANGE boundary (VerifyStrategyRequest.
+        # exchange, Broker, the 4 SQL CHECKs) is a distinct concern and DOES
+        # admit 'sfox' this phase. 'sfox' joins Source + registry together in 120.
+        assert "sfox" not in get_args(Source), (
+            "ingestion.adapter.Source must NOT admit 'sfox' until Phase 120 ships "
+            "the sfox ingestion factory (keeps Source == SUPPORTED_SOURCES parity)."
         )
 
 
