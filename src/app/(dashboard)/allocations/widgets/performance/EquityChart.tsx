@@ -2224,7 +2224,15 @@ function EquityChartWidgetInner({
             data-source={equityCurveSource}
             className="text-[10px] font-mono uppercase tracking-[0.14em] text-text-muted"
             title={
-              equityCurveSource === "derived" && derivedCurveComputedAt
+              // L2: gate the toLocaleString() title on `now !== null` exactly
+              // like the visible provenanceFreshness text below. toLocaleString is
+              // timezone/locale-dependent, so an UNGATED title renders a different
+              // string on the server (UTC) vs the client → a hydration attribute
+              // mismatch. On the first render (now === null, SSR/CSR parity) the
+              // title is absent; it appears after mount.
+              equityCurveSource === "derived" &&
+              derivedCurveComputedAt &&
+              now !== null
                 ? new Date(derivedCurveComputedAt).toLocaleString()
                 : undefined
             }

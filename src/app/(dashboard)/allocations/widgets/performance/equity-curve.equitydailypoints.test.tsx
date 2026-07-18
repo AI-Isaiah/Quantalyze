@@ -245,6 +245,13 @@ describe("EquityChartWidget — equity provenance indicator (115.1 / RD-2)", () 
     const provenance = getByTestId("equity-provenance");
     expect(provenance).toHaveAttribute("data-source", "derived");
     expect(provenance.textContent).toMatch(/Derived from per-key returns/i);
+    // L2 (hydration safety): on the first render `now` is null (SSR/CSR parity —
+    // the minute-tick effect defers via setTimeout(0), not yet fired here). The
+    // toLocaleString() title is GATED on now !== null exactly like the visible
+    // freshness text, so it must be ABSENT in this state — an ungated title emits
+    // a timezone-dependent string that differs server(UTC)-vs-client → a hydration
+    // attribute mismatch. Pre-fix (ungated) this attribute was present → RED.
+    expect(provenance).not.toHaveAttribute("title");
   });
 
   it("legacy source → renders the legacy label and is NEVER api_verified-styled", () => {
