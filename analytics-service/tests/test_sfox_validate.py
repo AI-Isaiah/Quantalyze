@@ -251,3 +251,42 @@ async def test_ccxt_exchange_still_uses_create_exchange_path(exchange_router):
     create_exchange_spy.assert_called_once()
     assert create_exchange_spy.call_args.args[0] == "binance"
     sfox_factory.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Composed-state regression (Task 2): encrypt path + AUTH-string cross-language
+# --------------------------------------------------------------------------- #
+
+
+def test_encrypt_credentials_roundtrips_empty_secret():
+    """Q1 storage shape: a sFOX Bearer token is stored as api_key with an EMPTY
+    api_secret. encrypt_credentials must JSON-serialize + round-trip that empty
+    secret (it is exchange-agnostic — no sfox branch in encrypt_key), so the
+    worker validate/encrypt path needs no sfox encryption carve-out."""
+    from cryptography.fernet import Fernet
+
+    from services.encryption import decrypt_credentials, encrypt_credentials
+
+    kek = Fernet.generate_key()
+    encrypted = encrypt_credentials("tok_bearer_only", "", None, kek)
+
+    # Build the stored-row shape decrypt_credentials consumes.
+    row = dict(encrypted)
+    row["id"] = "k-sfox-1"
+
+    api_key, api_secret, passphrase = decrypt_credentials(row, kek)
+    assert api_key == "tok_bearer_only"
+    assert api_secret == ""
+    assert passphrase is None
+
+
+def test_auth_failed_constant_matches_ts_classifier_literal():
+    """Cross-language guard: the hoisted AUTH_FAILED_DETAIL constant (the single
+    source both the ccxt arm and the sfox branch emit) must stay byte-identical
+    to the literal the TS classifyKeyValidationError matches on
+    (lower.includes("authentication failed")). A reword here silently breaks
+    KEY_AUTH_FAILED classification for sFOX AND ccxt — this pins it."""
+    from services.exchange import AUTH_FAILED_DETAIL
+
+    assert AUTH_FAILED_DETAIL == EXPECTED_AUTH_DETAIL
+    assert "authentication failed" in AUTH_FAILED_DETAIL.lower()
