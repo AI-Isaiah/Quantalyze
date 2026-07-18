@@ -1,0 +1,253 @@
+"""SFOX-03 — the non-ccxt `is_sfox` branch in the worker `validate_key` path.
+
+sFOX is NOT a ccxt exchange, so `routers/exchange.py::validate_key` must NOT
+route it through `create_exchange`/`EXCHANGE_CLASSES` (ccxt-typed — sfox
+ValueErrors there). Instead the branch proves auth + read access through the
+Phase-118 `SfoxClient.get_balances()` and returns an HONEST shape:
+`read_only=True` asserted STRUCTURALLY (the adapter has no order/withdraw
+surface — 118 WR-03; sFOX exposes no per-key scope endpoint, so this is NOT a
+probed {read,trade,withdraw} scope claim — A1, no invented data).
+
+Regression gates — WHY each case matters (Rule 9):
+  - auth+read proof: `get_balances()` is the single live proof the Bearer token
+    authenticates AND can read. If the branch stopped awaiting it, a bad key
+    would false-verify. The test asserts it is awaited on the success path.
+  - AUTH-string byte-identity: a 401/403 must map to the EXACT ccxt AUTH_FAILED
+    string so the cross-language TS `classifyKeyValidationError` returns
+    `KEY_AUTH_FAILED` with ZERO TS edits. A reworded detail silently breaks
+    that classification — the test pins the literal.
+  - fail-CLOSED on non-auth failure: a transport/shape blip (status==0), 429 or
+    5xx must NEVER return {"valid": true} and must NOT be mislabelled an auth
+    failure (would tell the user to fix a key that is fine). Pinned to a 500
+    whose detail does not contain "authentication failed".
+  - aclose on EVERY path: the adapter owns an aiohttp session; a missed aclose
+    on any branch leaks a session (Sentry "Unclosed client session"). Asserted
+    on success + every failure.
+  - ccxt path untouched: the branch is additive and sits BEFORE create_exchange
+    only for exchange=='sfox'. A binance request must still flow through
+    create_exchange → validate_key_permissions — pinned so branch placement
+    can't perturb the ccxt flow.
+  - empty-secret acceptance (Q1 worker contract): sFOX auth is a single Bearer
+    token; the branch takes only api_key and ignores api_secret, so an empty
+    secret is accepted.
+"""
+from __future__ import annotations
+
+import sys
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from fastapi import HTTPException
+
+# The EXACT string the TS classifyKeyValidationError matches on
+# (lower.includes("authentication failed")) — byte-identical to
+# services/exchange.py's ccxt AUTH_FAILED arm. Pinned here so a reword on
+# either side is caught.
+EXPECTED_AUTH_DETAIL = "Authentication failed. Check your API key and secret."
+
+
+@pytest.fixture()
+def exchange_router(monkeypatch):
+    """Import routers.exchange with slowapi stubbed so the module-level Limiter()
+    and @limiter.limit decorator are no-op passthroughs (the handler coroutine
+    keeps its plain (request, req) signature)."""
+
+    class _NoopLimiter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def limit(self, *args, **kwargs):
+            def decorator(fn):
+                return fn
+
+            return decorator
+
+    slowapi_stub = MagicMock()
+    slowapi_stub.Limiter = _NoopLimiter
+    slowapi_util_stub = MagicMock()
+    slowapi_util_stub.get_remote_address = lambda *a, **k: "1.2.3.4"
+
+    monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
+    monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
+
+    sys.modules.pop("routers.exchange", None)
+    from routers import exchange as exchange_router
+
+    yield exchange_router
+
+    sys.modules.pop("routers.exchange", None)
+
+
+def _make_client(get_balances_side_effect=None):
+    """A mock SfoxClient instance: async get_balances + async aclose."""
+    client = MagicMock(name="SfoxClient-instance")
+    client.get_balances = AsyncMock(side_effect=get_balances_side_effect)
+    client.aclose = AsyncMock()
+    return client
+
+
+def _install_sfox_client(router, client):
+    """Patch the router's SfoxClient factory to return `client`; return a spy
+    on the factory so the test can assert construction kwargs."""
+    factory = MagicMock(return_value=client)
+    router.SfoxClient = factory
+    return factory
+
+
+def _make_req(router, exchange="sfox", api_key="tok_abc", api_secret="", passphrase=None):
+    from models.schemas import ValidateKeyRequest
+
+    return ValidateKeyRequest(
+        exchange=exchange,
+        api_key=api_key,
+        api_secret=api_secret,
+        passphrase=passphrase,
+    )
+
+
+async def _call(router, req):
+    return await router.validate_key(MagicMock(name="request"), req)
+
+
+# --------------------------------------------------------------------------- #
+# Success path
+# --------------------------------------------------------------------------- #
+
+
+async def test_sfox_success_returns_valid_readonly_and_never_ccxt(exchange_router):
+    """sfox + get_balances() success -> {valid:true, read_only:true}; the ccxt
+    create_exchange is NEVER called for sfox."""
+    router = exchange_router
+    client = _make_client(get_balances_side_effect=None)
+    client.get_balances.return_value = []  # empty balance list is still a valid auth+read
+    _install_sfox_client(router, client)
+
+    create_exchange_spy = MagicMock(side_effect=AssertionError("create_exchange must not be called for sfox"))
+    router.create_exchange = create_exchange_spy
+
+    result = await _call(router, _make_req(router, api_key="tok_abc"))
+
+    assert result == {"valid": True, "read_only": True}
+    client.get_balances.assert_awaited_once()
+    client.aclose.assert_awaited_once()
+    create_exchange_spy.assert_not_called()
+
+
+async def test_sfox_constructed_with_bearer_token_and_prod_base_url(exchange_router):
+    """The branch constructs SfoxClient with the token as api_key and the prod
+    base URL (no proxy — phase 121)."""
+    router = exchange_router
+    client = _make_client()
+    client.get_balances.return_value = []
+    factory = _install_sfox_client(router, client)
+
+    await _call(router, _make_req(router, api_key="tok_xyz"))
+
+    factory.assert_called_once()
+    _, kwargs = factory.call_args
+    assert kwargs.get("api_key") == "tok_xyz"
+    assert kwargs.get("base_url") == router.SFOX_PROD_BASE_URL
+
+
+async def test_sfox_empty_secret_accepted(exchange_router):
+    """Q1 worker contract: sFOX has a single Bearer token; an empty api_secret
+    is accepted (the branch takes only api_key)."""
+    router = exchange_router
+    client = _make_client()
+    client.get_balances.return_value = []
+    _install_sfox_client(router, client)
+
+    result = await _call(router, _make_req(router, api_key="tok_abc", api_secret=""))
+
+    assert result == {"valid": True, "read_only": True}
+    client.aclose.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------- #
+# Auth failure -> exact AUTH_FAILED string (401 / 403)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_sfox_auth_failure_maps_to_exact_auth_string(exchange_router, status):
+    """401/403 -> HTTPException 400 with the byte-identical AUTH_FAILED string."""
+    from services.sfox_client import SfoxApiError
+
+    router = exchange_router
+    client = _make_client(get_balances_side_effect=SfoxApiError(status, "denied"))
+    _install_sfox_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req(router))
+
+    assert ei.value.status_code == 400
+    assert ei.value.detail == EXPECTED_AUTH_DETAIL
+    client.aclose.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------- #
+# Non-auth failure -> fail CLOSED, never valid, never mislabelled auth
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("status", [0, 429, 500])
+async def test_sfox_non_auth_failure_fails_closed(exchange_router, status):
+    """status==0 (transport/shape), 429, 5xx -> 500 fail-closed; detail must NOT
+    contain 'authentication failed' (never mislabel a blip as a bad key)."""
+    from services.sfox_client import SfoxApiError
+
+    router = exchange_router
+    client = _make_client(get_balances_side_effect=SfoxApiError(status, "boom"))
+    _install_sfox_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req(router))
+
+    assert ei.value.status_code == 500
+    assert "authentication failed" not in ei.value.detail.lower()
+    client.aclose.assert_awaited_once()
+
+
+async def test_sfox_aclose_awaited_even_when_get_balances_raises(exchange_router):
+    """aclose() runs on the failure path (finally), not only on success."""
+    from services.sfox_client import SfoxApiError
+
+    router = exchange_router
+    client = _make_client(get_balances_side_effect=SfoxApiError(401, "nope"))
+    _install_sfox_client(router, client)
+
+    with pytest.raises(HTTPException):
+        await _call(router, _make_req(router))
+
+    client.aclose.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------- #
+# ccxt regression — branch placement does not perturb the ccxt flow
+# --------------------------------------------------------------------------- #
+
+
+async def test_ccxt_exchange_still_uses_create_exchange_path(exchange_router):
+    """binance still flows through create_exchange -> validate_key_permissions;
+    SfoxClient is NOT constructed for a ccxt exchange."""
+    router = exchange_router
+
+    fake_exchange = MagicMock(name="ccxt-exchange")
+    create_exchange_spy = MagicMock(return_value=fake_exchange)
+    router.create_exchange = create_exchange_spy
+    router.validate_key_permissions = AsyncMock(
+        return_value={"valid": True, "read_only": True, "error": None}
+    )
+    router.aclose_exchange = AsyncMock()
+
+    sfox_factory = MagicMock(side_effect=AssertionError("SfoxClient must not be built for ccxt"))
+    router.SfoxClient = sfox_factory
+
+    result = await _call(
+        router, _make_req(router, exchange="binance", api_key="k", api_secret="s")
+    )
+
+    assert result == {"valid": True, "read_only": True}
+    create_exchange_spy.assert_called_once()
+    assert create_exchange_spy.call_args.args[0] == "binance"
+    sfox_factory.assert_not_called()

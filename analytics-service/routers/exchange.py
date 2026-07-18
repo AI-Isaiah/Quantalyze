@@ -5,8 +5,9 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
+from services.sfox_client import SfoxClient, SfoxApiError, SFOX_PROD_BASE_URL
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
 
@@ -20,6 +21,48 @@ class EncryptKeyRequest(BaseModel):
     api_key: str
     api_secret: str
     passphrase: str | None = None
+
+
+async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
+    """Validate a sFOX Bearer token via the non-ccxt SfoxClient (SFOX-03).
+
+    Proof-of-auth + read access is a single `get_balances()` (GET
+    /v1/user/balance) — a list body (even empty) means the token authenticates
+    AND can read. On success we return ``read_only=True`` asserted STRUCTURALLY,
+    NOT probed: the SfoxClient adapter has no order/withdraw/transfer surface
+    (Phase-118 WR-03, HTTP verb hardcoded to GET) and sFOX exposes no per-key
+    scope endpoint, so we NEVER emit a probed ``{read, trade, withdraw}`` triple
+    or claim an observed read-only scope (A1 — no invented data).
+
+    Error mapping:
+      * 401/403 → HTTPException(400, AUTH_FAILED_DETAIL) — the exact same string
+        the ccxt AUTH_FAILED arm emits, so the TS classifyKeyValidationError
+        maps it to KEY_AUTH_FAILED with zero TS edits.
+      * anything else (status==0 transport/shape, 429, 5xx) → fail CLOSED with a
+        generic 500; NEVER return {"valid": true}, and NEVER mislabel a
+        transport blip as a bad key.
+
+    `api_secret` is intentionally ignored: sFOX auth is a single Bearer token
+    (Q1 worker contract), so the branch takes only `api_key`. No proxy is wired
+    here (the phase-121 static-IP egress seam is threaded later).
+    """
+    client = SfoxClient(api_key=api_key, base_url=SFOX_PROD_BASE_URL)
+    try:
+        await client.get_balances()
+        return {"valid": True, "read_only": True}
+    except SfoxApiError as e:
+        if e.status in (401, 403):
+            raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+        logger.exception(
+            "validate_key: sFOX validation failed closed — SfoxApiError(status=%s)",
+            e.status,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Key validation failed. Please check your credentials.",
+        )
+    finally:
+        await client.aclose()
 
 
 @router.post("/validate-key")
@@ -37,6 +80,14 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
     debug-blind on the recurring "code: UNKNOWN" wizard fail. Found
     2026-05-05 via Bybit E2E + Railway log archaeology.)
     """
+    # SFOX-03: sFOX is NOT a ccxt exchange, so it must NOT route through
+    # create_exchange/EXCHANGE_CLASSES (a dict of ccxt classes — sfox
+    # ValueErrors there). Intercept BEFORE the ccxt path and validate via the
+    # Phase-118 non-ccxt SfoxClient. The ccxt branch below is byte-for-byte
+    # unchanged for every real exchange.
+    if req.exchange == "sfox":
+        return await _validate_sfox_key(req.api_key)
+
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as e:

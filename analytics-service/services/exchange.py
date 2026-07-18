@@ -17,6 +17,14 @@ from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
 
+# The single source of truth for the key-authentication-failure detail string.
+# The Next.js `classifyKeyValidationError` (src/lib/wizardErrors.ts) maps any
+# detail whose lowercase form includes "authentication failed" to
+# KEY_AUTH_FAILED. Both the ccxt AUTH_FAILED arm below and the non-ccxt sFOX
+# branch in routers/exchange.py reuse THIS constant so the cross-language
+# contract cannot drift from one site (a reword here must update the TS matcher).
+AUTH_FAILED_DETAIL = "Authentication failed. Check your API key and secret."
+
 
 # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — per-call transient data-quality
 # flags. Callers (job_worker / reconcile) read these via
@@ -1009,7 +1017,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             "validate_key_permissions: ccxt.AuthenticationError on %s — exc_class=%s scrubbed=%s",
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
-        result["error"] = "Authentication failed. Check your API key and secret."
+        result["error"] = AUTH_FAILED_DETAIL
         result["error_code"] = "AUTH_FAILED"
         return result
     except ccxt.DDoSProtection as exc:
