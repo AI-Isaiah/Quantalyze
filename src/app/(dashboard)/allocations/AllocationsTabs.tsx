@@ -486,6 +486,44 @@ export function AllocationsTabs(
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const [contributeOpen, setContributeOpen] = useState(false);
 
+  // Phase 116 / ADDALLOC-01 — the "+ Strategy" (scenario tab) dispatch signals
+  // the composer's StrategyBrowseDrawer to open. The composer registers an
+  // imperative open fn here (onRegisterOpenBrowse); we store it and call it on
+  // click. Because ScenarioComposer is dynamic-imported (scenario-tab-only), a
+  // click can land BEFORE registration during the chunk-load window —
+  // pendingBrowseOpenRef records that so handleRegisterOpenBrowse drains it
+  // (ADDALLOC-03: no silent no-op during the loading window).
+  // headerBrowseTriggeredRef marks a header-initiated open so a subsequent
+  // Browse close returns focus to the header button (while an in-composer Browse
+  // close does not steal focus).
+  const composerBrowseOpenRef = useRef<(() => void) | null>(null);
+  const pendingBrowseOpenRef = useRef(false);
+  const headerBrowseTriggeredRef = useRef(false);
+
+  const handleRegisterOpenBrowse = useCallback((open: () => void) => {
+    composerBrowseOpenRef.current = open;
+    if (pendingBrowseOpenRef.current) {
+      pendingBrowseOpenRef.current = false;
+      open();
+    }
+  }, []);
+
+  const handleBrowseClosed = useCallback(() => {
+    if (headerBrowseTriggeredRef.current) {
+      headerBrowseTriggeredRef.current = false;
+      addButtonRef.current?.focus();
+    }
+  }, []);
+
+  // Guard against a stale pending Browse-open (or focus-return flag) re-firing
+  // on a later scenario remount: clear both whenever we leave the scenario tab.
+  useEffect(() => {
+    if (activeTab !== "scenario") {
+      pendingBrowseOpenRef.current = false;
+      headerBrowseTriggeredRef.current = false;
+    }
+  }, [activeTab]);
+
   const handleContributeClose = () => {
     setContributeOpen(false);
     // Return focus to the header trigger (UI-SPEC §Close → focus return).
@@ -509,10 +547,24 @@ export function AllocationsTabs(
   const handleHeaderAdd = () => {
     if (isScenarioTab) {
       // ADDALLOC-01 — "+ Strategy" opens the composer's StrategyBrowseDrawer.
-      // Wired to the composer's Browse open-signal in plan 116-01 Task 2 (the
-      // onRegisterOpenBrowse seam). Until then this is intentionally inert on
-      // the scenario tab; the wizard overlay must NOT open here (that is the
-      // Holdings/Overview action).
+      if (!isUiV2) {
+        // Rollback surface: the ScenarioStub (not the composer) is mounted, so
+        // there is no Browse drawer to signal. Rather than a silent no-op
+        // (changeTab to the tab we are already on), open the onboarding wizard
+        // so "+ Strategy" still performs a real add-a-strategy action
+        // (ADDALLOC-03: never a silent no-op, even on this degraded path). The
+        // ScenarioStub predates ADDALLOC and is otherwise out of its scope.
+        setContributeOpen(true);
+        return;
+      }
+      headerBrowseTriggeredRef.current = true;
+      if (composerBrowseOpenRef.current) {
+        composerBrowseOpenRef.current();
+      } else {
+        // Click landed during the composer's dynamic-import load window; drain
+        // it when registration arrives (handleRegisterOpenBrowse).
+        pendingBrowseOpenRef.current = true;
+      }
       return;
     }
     // ADDALLOC-02 — real-data onboarding wizard, inline, no navigation.
@@ -901,7 +953,13 @@ export function AllocationsTabs(
             // Phase 23 / PERSIST-03+04 — the composer + the saved-scenarios
             // list + the in-tab compare panel, wired together on the V2
             // scenario path. The ScenarioStub rollback path below is untouched.
-            <ScenarioTabContent {...props} />
+            // Phase 116 / ADDALLOC-01 — thread the header "+ Strategy" Browse
+            // seam down to the composer.
+            <ScenarioTabContent
+              {...props}
+              onRegisterOpenBrowse={handleRegisterOpenBrowse}
+              onBrowseClosed={handleBrowseClosed}
+            />
           ) : (
             <ScenarioStub
               flaggedHoldings={props.flaggedHoldings}
@@ -945,7 +1003,17 @@ export function AllocationsTabs(
 // A dedicated sub-component (not inline in the conditional branch) keeps these
 // hooks unconditional — the V2/ScenarioStub gate lives one level up, so this
 // component's hooks never run on the rollback path.
-function ScenarioTabContent(props: MyAllocationDashboardPayload) {
+function ScenarioTabContent({
+  // Phase 116 / ADDALLOC-01 — Browse seam threaded from AllocationsTabs down to
+  // ScenarioComposer. Destructured out so `props` stays a clean payload for the
+  // `payload=` prop below (and the compare-panel narrow).
+  onRegisterOpenBrowse,
+  onBrowseClosed,
+  ...props
+}: MyAllocationDashboardPayload & {
+  onRegisterOpenBrowse?: (open: () => void) => void;
+  onBrowseClosed?: () => void;
+}) {
   const [savedRows, setSavedRows] = useState<SavedScenarioListRow[]>([]);
   // A hard list-load failure (non-2xx or thrown fetch). Distinct from "no saved
   // scenarios" — an unloaded list must NOT masquerade as an empty list (a
@@ -1050,6 +1118,8 @@ function ScenarioTabContent(props: MyAllocationDashboardPayload) {
         allocatorMandate={props.mandate}
         onRegisterOpen={handleRegisterOpen}
         onScenarioSaved={handleMutated}
+        onRegisterOpenBrowse={onRegisterOpenBrowse}
+        onBrowseClosed={onBrowseClosed}
       />
 
       <SavedScenariosList

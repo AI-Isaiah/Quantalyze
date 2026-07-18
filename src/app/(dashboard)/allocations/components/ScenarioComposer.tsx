@@ -342,6 +342,22 @@ export interface ScenarioComposerProps {
    * refetch and stay consistent. Optional — absent hosts simply don't refetch.
    */
   onScenarioSaved?: () => void;
+  /**
+   * Phase 116 / ADDALLOC-01 — the host (AllocationsTabs) registers to receive
+   * an imperative open-Browse handler. Calling it opens this composer's
+   * StrategyBrowseDrawer — the dispatch for the context-aware header
+   * "+ Strategy" button, which lives in the host, not the composer. Mirrors the
+   * `onRegisterOpen` seam. Optional — when absent the composer simply never
+   * hands out its Browse-open handle.
+   */
+  onRegisterOpenBrowse?: (open: () => void) => void;
+  /**
+   * Phase 116 / ADDALLOC-01 — fired when the Browse drawer closes back to the
+   * composer surface, so the host can restore focus to the "+ Strategy" trigger.
+   * Deliberately NOT fired on the `onAddOwn` wizard handoff (a modal-to-modal
+   * transition, not a close). Optional — absent hosts keep their focus behavior.
+   */
+  onBrowseClosed?: () => void;
   /** Legacy callback API. When `useInternalCommitDrawer === false`, the
    *  composer fires this callback INSTEAD of opening its own
    *  ScenarioCommitDrawer — host owns the commit-confirmation surface.
@@ -762,6 +778,8 @@ export function ScenarioComposer({
   useInternalCommitDrawer = true,
   onRegisterOpen,
   onScenarioSaved,
+  onRegisterOpenBrowse,
+  onBrowseClosed,
 }: ScenarioComposerProps) {
   const {
     holdingsSummary: rawHoldingsSummary,
@@ -1773,6 +1791,18 @@ export function ScenarioComposer({
   useEffect(() => {
     onRegisterOpenRef.current?.(openSavedScenario);
   }, [openSavedScenario]);
+
+  // Phase 116 / ADDALLOC-01 — register the imperative open-Browse handler with
+  // the host (AllocationsTabs), mirroring the onRegisterOpen seam above. The
+  // handed-out function simply opens the StrategyBrowseDrawer; the host calls it
+  // from the context-aware "+ Strategy" header button. Registered once on mount
+  // (the handler only closes over the stable setBrowseOpen setter).
+  const onRegisterOpenBrowseRef = useRef(onRegisterOpenBrowse);
+  onRegisterOpenBrowseRef.current = onRegisterOpenBrowse;
+  useEffect(() => {
+    const openBrowse = () => setBrowseOpen(true);
+    onRegisterOpenBrowseRef.current?.(openBrowse);
+  }, []);
 
   // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
   // route returns `[{date,value}]` (raw daily returns) and degrades to `[]` on
@@ -3617,7 +3647,12 @@ export function ScenarioComposer({
         </div>
         <StrategyBrowseDrawer
           isOpen={browseOpen}
-          onClose={() => setBrowseOpen(false)}
+          onClose={() => {
+            setBrowseOpen(false);
+            // Phase 116 / ADDALLOC-01 — notify the host so a header-initiated
+            // Browse open returns focus to the "+ Strategy" trigger on close.
+            onBrowseClosed?.();
+          }}
           onAdd={(s) =>
             handleAddStrategy({
               id: s.id as AddedStrategy["id"],
@@ -4871,7 +4906,12 @@ export function ScenarioComposer({
 
       <StrategyBrowseDrawer
         isOpen={browseOpen}
-        onClose={() => setBrowseOpen(false)}
+        onClose={() => {
+          setBrowseOpen(false);
+          // Phase 116 / ADDALLOC-01 — notify the host so a header-initiated
+          // Browse open returns focus to the "+ Strategy" trigger on close.
+          onBrowseClosed?.();
+        }}
         onAdd={(s) =>
           handleAddStrategy({
             id: s.id as AddedStrategy["id"],

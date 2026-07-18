@@ -19,7 +19,7 @@
  * `--no-file-parallelism`.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import type { ReadonlyURLSearchParams } from "next/navigation";
 
 // --- next/navigation mocks -------------------------------------------------
@@ -373,6 +373,70 @@ describe("AllocationsTabs — context-aware '+ Allocation' header button (Phase 
     expect(mockRefresh).toHaveBeenCalledTimes(1);
   });
 
-  // Task 2 host-side "+ Strategy" → Browse-signal tests are appended when the
-  // onRegisterOpenBrowse seam lands (see plan 116-01 Task 2).
+  // -------------------------------------------------------------------------
+  // Task 2 — Scenario "+ Strategy" → composer Browse signal (host side)
+  // -------------------------------------------------------------------------
+
+  it("T_ADDALLOC_S1 scenario: clicking '+ Strategy' invokes the registered Browse-open once, no navigation", async () => {
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("scenario-composer-body");
+
+    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
+    fireEvent.click(btn);
+
+    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
+    for (const call of mockReplace.mock.calls) {
+      expect(String(call[0])).not.toContain("tab=scenario");
+    }
+  });
+
+  it("T_ADDALLOC_S2 scenario: composer receives the onRegisterOpenBrowse + onBrowseClosed seam props", async () => {
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    const body = await screen.findByTestId("scenario-composer-body");
+    expect(body.getAttribute("data-has-register-browse")).toBe("true");
+    expect(body.getAttribute("data-has-browse-closed")).toBe("true");
+  });
+
+  it("T_ADDALLOC_S3 pending drain: a click during the loading window opens Browse once registration arrives", async () => {
+    // Simulate the dynamic-import loading window: the composer mounts but does
+    // not register its Browse-open handler yet.
+    composerHarness.registerImmediately = false;
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("scenario-composer-body");
+
+    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
+    fireEvent.click(btn);
+    // Nothing registered yet → no open call, but the click is NOT lost.
+    expect(composerHarness.browseOpenSpy).not.toHaveBeenCalled();
+
+    // Registration arrives (composer chunk resolved) → the pending click drains.
+    act(() => {
+      composerHarness.captureRegister?.(composerHarness.browseOpenSpy);
+    });
+    expect(composerHarness.browseOpenSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("T_ADDALLOC_S4 focus return: a header-initiated Browse close returns focus; a non-header close does not steal it", async () => {
+    setSearchParams("tab=scenario");
+    render(<AllocationsTabs {...STUB_PROPS} />);
+    await screen.findByTestId("scenario-composer-body");
+
+    // Header-initiated open, then a close → focus returns to the header button.
+    const btn = screen.getByRole("button", { name: ADD_STRATEGY_NAME });
+    fireEvent.click(btn);
+    act(() => {
+      composerHarness.captureBrowseClosed?.();
+    });
+    expect(document.activeElement).toBe(btn);
+
+    // A subsequent in-composer close (no prior header click) must NOT steal focus.
+    (document.activeElement as HTMLElement | null)?.blur();
+    act(() => {
+      composerHarness.captureBrowseClosed?.();
+    });
+    expect(document.activeElement).not.toBe(btn);
+  });
 });
