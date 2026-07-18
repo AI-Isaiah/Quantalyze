@@ -95,7 +95,16 @@ class IngestionAdapter(Protocol):
 # orchestration (Phase 72); Deribit returns flow through the broker-dailies
 # ONE-path (70-05, txn-log ledger), not process_key fill metrics
 # (DeribitAdapter.compute_metrics is intentionally fail-loud).
-SUPPORTED_SOURCES: tuple[str, ...] = ("okx", "binance", "bybit", "csv", "deribit")
+# Phase 120 (SFOX-05, 120-01) widens it with "sfox" — landed in lockstep with
+# the ``Source`` Literal (adapter.py) so test_source_literal_and_registry_agree
+# stays green (the phase-119 deferral was exactly a Literal-without-registry
+# split). get_adapter("sfox") resolving is the ingestion CAPABILITY + the F2/F7
+# seam resolution (finalize-wizard/process_key/verify can now resolve sfox); the
+# onboarding UI card is Phase 122 and the live-parity egress is Phase 121. sFOX
+# returns flow through the broker-dailies ONE-path via the balance-history
+# usd_value series, never process_key fill metrics (SfoxAdapter.compute_metrics
+# is intentionally fail-loud).
+SUPPORTED_SOURCES: tuple[str, ...] = ("okx", "binance", "bybit", "csv", "deribit", "sfox")
 ADAPTERS: dict[str, IngestionAdapter] = {}
 
 
@@ -146,6 +155,12 @@ def _make_deribit_adapter() -> IngestionAdapter:
     return DeribitAdapter()
 
 
+def _make_sfox_adapter() -> IngestionAdapter:
+    from .sfox import SfoxAdapter
+
+    return SfoxAdapter()
+
+
 # M-11 — adapter factory registry. New adapters slot in here without
 # touching the dispatch chain.
 _FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
@@ -154,6 +169,7 @@ _FACTORIES: dict[str, "Callable[[], IngestionAdapter]"] = {
     "bybit": _make_bybit_adapter,
     "csv": _make_csv_adapter,
     "deribit": _make_deribit_adapter,
+    "sfox": _make_sfox_adapter,
 }
 
 
@@ -163,8 +179,10 @@ def get_adapter(source: str) -> IngestionAdapter:
     Raises ValueError on unknown source BEFORE attempting any import,
     so the unhappy path never triggers concrete-adapter module loads.
     UC-B drops MT5/IBKR for v1.0.0; the supported allowlist is
-    `okx, binance, bybit, csv, deribit` (Phase 70 / DRB-08 added deribit
-    as the ingestion capability — onboarding orchestration is Phase 72).
+    `okx, binance, bybit, csv, deribit, sfox` (Phase 70 / DRB-08 added deribit
+    as the ingestion capability — onboarding orchestration is Phase 72; Phase
+    120 / SFOX-05 added sfox — onboarding UI is Phase 122, live-parity egress
+    is Phase 121).
     """
     if source not in SUPPORTED_SOURCES:
         raise ValueError(

@@ -115,16 +115,16 @@ class TestPydanticLiteralsContainDeribit:
             "debug_key_flow.Broker Literal must admit 'sfox' (Phase 119 SFOX-04)."
         )
 
-    def test_source_literal_excludes_sfox_until_phase_120(self) -> None:
-        # Phase 119 SFOX-04 does NOT add 'sfox' to the ingestion Source Literal:
-        # Source is pinned EQUAL to SUPPORTED_SOURCES/_FACTORIES by
-        # test_source_literal_and_registry_agree, and the sfox ingestion factory
-        # is Phase 120. Widening the Literal ahead of the registry would break
-        # that invariant. The key-save EXCHANGE boundary (VerifyStrategyRequest.
-        # exchange, Broker, the 4 SQL CHECKs) is a distinct concern and DOES
-        # admit 'sfox' this phase. 'sfox' joins Source + registry together in 120.
-        assert "sfox" not in get_args(Source), (
-            "ingestion.adapter.Source must NOT admit 'sfox' until Phase 120 ships "
+    def test_source_literal_includes_sfox(self) -> None:
+        # Phase 120 (SFOX-05, 120-01) SHIPS the sfox ingestion factory, so 'sfox'
+        # now joins the ingestion Source Literal + the registry TOGETHER (the
+        # lockstep that keeps Source == SUPPORTED_SOURCES/_FACTORIES parity, pinned
+        # by test_source_literal_and_registry_agree). This RESOLVES the phase-119
+        # deferral that pinned it OUT precisely because the factory did not yet
+        # exist. Membership pin (Source also carries 'csv'); the set-equality with
+        # SUPPORTED_SOURCES lives in test_source_literal_and_registry_agree.
+        assert "sfox" in get_args(Source), (
+            "ingestion.adapter.Source must admit 'sfox' now that Phase 120 ships "
             "the sfox ingestion factory (keeps Source == SUPPORTED_SOURCES parity)."
         )
 
