@@ -163,6 +163,28 @@ describe("ScenarioFlaggedHoldingsList", () => {
     expect(screen.getByRole("spinbutton")).toBeInTheDocument();
   });
 
+  // Phase 117 / UIFIX-02 — clip-proof focus indicator (WCAG 2.4.7).
+  //
+  // WHY: the expand/collapse button lives inside an `overflow-x-auto` card and
+  // today has NO focus-visible class → it relies on the browser default outline,
+  // which paints OUTSIDE the button and is CLIPPED at the scroll-container edge.
+  // The inset ring paints INSIDE the button → always visible under the clip.
+  it("[UIFIX-02] the expand/collapse button carries a clip-proof inset focus ring", () => {
+    render(
+      <ScenarioFlaggedHoldingsList
+        flaggedHoldings={[FLAGGED[0]]}
+        matchDecisionsByHoldingRef={{}}
+        existingOutcomesByHoldingRef={{}}
+      />,
+    );
+    const expandBtn = screen.getByRole("button", { name: "Expand review" });
+    expect(expandBtn.className).toContain("focus-visible:ring-2");
+    expect(expandBtn.className).toContain("focus-visible:ring-inset");
+    expect(expandBtn.className).toContain("focus-visible:ring-accent");
+    // Full-opacity accent only — /20 fails WCAG 1.4.11 ≥3:1.
+    expect(expandBtn.className).not.toContain("ring-accent/20");
+  });
+
   it("renders OutcomeRecordedRow directly when existingOutcome present (skip banner AND skip POST)", async () => {
     const existing: BridgeOutcome = {
       id: "outcome-1",
