@@ -187,6 +187,14 @@ def compose_allocator_equity(
         # The anchor is the terminal (last-day) venue equity — the curve's last day.
         anchor_asof = days[-1]
 
+    # F5 NOTE (do NOT display-wire without a guard): ``scalars`` (mwr/dietz) are the
+    # thread-only KEPT cashflow metrics. On a SHORT / staggered window they can be
+    # numerically ABSURD (mwr ≈ −0.9999 at a 1-day window; a ~2.7e26 blow-up on a
+    # 4-day staggered book) — mathematically correct for the period but meaningless
+    # as a headline. The frontend today reads ONLY ``curve`` (+ is_trustworthy) via
+    # extractTrustworthyDerivedCurve and NEVER renders these scalars. If a future
+    # surface DOES render them, it MUST gate on a minimum window / sanity bound and
+    # never show the raw value — otherwise it prints a nonsense headline return.
     return {
         "curve": curve_rows,
         "flags": sorted(flag_tokens),

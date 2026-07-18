@@ -1941,8 +1941,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         fetch_funding_bybit,
     )
 
-    # Dated external flows feed ONLY the core's F_t term (deribit branch sets them
-    # from the ledger crawl; other venues have no dated-flow adapter yet → None).
+    # Dated external flows feed ONLY the core's F_t term. Both venue paths now set
+    # them: the deribit branch from the native ledger crawl (:2519), the ccxt
+    # branch via fetch_ccxt_transfers → ccxt_rows_to_dated_flows (:2612). This
+    # stays None only until whichever branch runs (a safe pre-fetch default).
     external_flows: list[ExternalFlow] | None = None
     # CRITICAL-1: the ccxt else-branch sets this to the venue retention floor the
     # flow fetch was capped at; the DQ-02 terminus evidence gate (below) reads it
@@ -6172,14 +6174,15 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     # ── 5. B2 root cause: an EMPTY curve is NOT a renderable series. A
     #      zero-anchored-keys / zero-weight-mass compose (every prod allocator
-    #      today) returns curve=[] with is_trustworthy=True (the honest-empty
-    #      tokens are BENIGN in the frozen core). Upserting it would blank the
-    #      dashboard while suppressing the legacy render (which has real data),
-    #      and a later structurally-empty recompute would leave a STALE
-    #      trustworthy row (L1). Instead DELETE any existing equity_curve row →
-    #      degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
-    #      case). The frontend extractTrustworthyDerivedCurve is the paired
-    #      last-line defense (B2a). ──
+    #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
+    #      tokens: NO_ANCHORED_KEYS/ZERO_WEIGHT_MASS) OR False (all keys DROPPED_KEY
+    #      post-B3); this branch keys on EMPTINESS, not on the trust flag, so both
+    #      empty shapes degrade the same. Upserting it would blank the dashboard
+    #      while suppressing the legacy render (which has real data), and a later
+    #      structurally-empty recompute would leave a STALE trustworthy row (L1).
+    #      Instead DELETE any existing equity_curve row → degrade to the clean
+    #      no-row legacy fallback (the SAFETY pin's no-row case). The frontend
+    #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
     if not (payload.get("curve") or []):
         await _delete_equity_curve_row()
         logger.info(
