@@ -53,7 +53,6 @@ def _stub_response(status: int = 200, body: str = "[]") -> MagicMock:
     resp = MagicMock()
     resp.status = status
     resp.text = AsyncMock(return_value=body)
-    resp.json = AsyncMock(return_value=json.loads(body) if body else None)
     resp.release = MagicMock()
     return resp
 
