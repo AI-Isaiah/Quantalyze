@@ -89,14 +89,37 @@ def compose_allocator_equity(
     flag_tokens: set[str] = set()
 
     # ── Carry-in TRAP: drop unanchored keys FIRST (before segmentation) ──
+    # WR-01 / B3: reconcile over the UNION of the return-bearing keys AND the keys
+    # that carry a real anchor. A key must be BOTH anchored AND have a return series
+    # to enter the blend; a key present in only ONE of the two maps is DROPPED (and
+    # the number is suspect — the $-total understates its capital), never silently
+    # omitted. Iterating returns_by_key alone (the pre-fix bug) made an anchored key
+    # with NO return series invisible: not summed, no reason raised, is_trustworthy
+    # stayed True on an understated curve.
     anchored_keys = [k for k in returns_by_key if anchors_by_key.get(k) is not None]
-    dropped_keys = [k for k in returns_by_key if anchors_by_key.get(k) is None]
-    if dropped_keys:
+    # A return-bearing key with no anchor (allocator_equity_curve drops it too).
+    unanchored_return_keys = [
+        k for k in returns_by_key if anchors_by_key.get(k) is None
+    ]
+    # An anchored key (real capital) with NO return series — cannot be blended, so
+    # its capital is missing from the $-total. Iterate anchors_by_key so it is seen.
+    anchored_without_returns = [
+        k
+        for k, a in anchors_by_key.items()
+        if a is not None and k not in returns_by_key
+    ]
+    if unanchored_return_keys:
         # Mirror the core's honest-degradation vocabulary: NO_ANCHOR (benign, the
         # reason) + DROPPED_KEY (blocking — the total understates the missing key's
         # capital, so the number is suspect exactly as allocator_equity_curve treats
         # an unanchored key it drops).
         reasons.add(DegradeReason.NO_ANCHOR)
+        reasons.add(DegradeReason.DROPPED_KEY)
+    if anchored_without_returns:
+        # MISSING_SERIES (benign honest-empty companion) + DROPPED_KEY (blocking):
+        # a key with real anchored capital but no series cannot enter the $-curve,
+        # so the total understates it → untrustworthy, never a silent omission.
+        reasons.add(DegradeReason.MISSING_SERIES)
         reasons.add(DegradeReason.DROPPED_KEY)
 
     anchored_returns = {k: returns_by_key[k] for k in anchored_keys}

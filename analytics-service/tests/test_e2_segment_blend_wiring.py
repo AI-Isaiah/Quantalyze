@@ -207,6 +207,43 @@ def test_unanchored_key_dropped_before_segmentation_no_raise() -> None:
     assert set(_curve_dates(payload)) <= _all_days(key_a, key_b)
 
 
+def test_anchored_key_with_no_returns_is_dropped_not_silently_omitted() -> None:
+    """B3 (WR-01, 115.1-close): a key with a REAL anchor but NO return series must
+    be recorded as DROPPED_KEY (blocking → untrustworthy), never silently omitted.
+
+    The pre-fix reconciliation iterated ``returns_by_key`` ONLY for both the
+    anchored and the dropped set, so a key present in ``anchors_by_key`` (real
+    capital) but absent from ``returns_by_key`` fell into NEITHER list: it was not
+    summed into the $-equity total AND raised no DROPPED_KEY/NO_ANCHOR reason, so
+    ``is_trustworthy`` stayed True on a curve that UNDERSTATES real capital.
+
+    MUTATION-FALSIFIABLE: reconcile over ``returns_by_key`` only (drop the union
+    with anchored ``anchors_by_key``) → is_trustworthy flips back to True and
+    DROPPED_KEY vanishes → this pin reddens.
+    """
+    from services.allocator_equity_compose import compose_allocator_equity
+
+    key_a = _key_from(0, 10, "key-A")  # anchored AND has returns
+    returns_by_key = {"key-A": key_a}  # key-B has NO return series at all
+    flows_by_key: dict[str, list[ExternalFlow]] = {"key-A": [], "key-B": []}
+    # key-B carries a real anchor (live capital) but no per-key returns row.
+    anchors_by_key = {"key-A": 100_000.0, "key-B": 50_000.0}
+
+    payload = compose_allocator_equity(returns_by_key, flows_by_key, anchors_by_key)
+
+    assert "dropped_key" in payload["degrade_reasons"], (
+        "an anchored key with no return series must be reported via DROPPED_KEY; "
+        f"got {payload['degrade_reasons']!r}"
+    )
+    assert payload["is_trustworthy"] is False, (
+        "a curve that omits a real anchored key's capital must NOT be trustworthy; "
+        f"got degrade_reasons={payload['degrade_reasons']!r}"
+    )
+    # The curve is still computed over the key that DOES have a series (A) — the
+    # feature degrades honestly (untrustworthy), it does not blank.
+    assert _curve_dates(payload), "the anchored-with-returns key still yields a curve"
+
+
 # ---------------------------------------------------------------------------
 # Carry-in #3 — ISO-string day-index boundary
 # ---------------------------------------------------------------------------
