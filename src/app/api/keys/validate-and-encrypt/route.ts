@@ -28,7 +28,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // empty secret flows through the SAME validateKey/encryptKey trim chokepoint
   // (analytics-client.ts:169; trimCredential("") === ""), never a parallel path.
   // Security-reviewed (T-119-08/09/11).
-  const isSfox = exchange === "sfox";
+  // WR-01: match sfox case-INSENSITIVELY, aligning with the create-with-key /
+  // composite-add-key siblings (`exchange.toLowerCase() === "sfox"`). A caller
+  // submitting the EXCHANGE_DISPLAY casing ("sFOX"/"SFOX") must hit the same
+  // carve-out these routes do, not fall through to a spurious "Missing required
+  // fields" 400.
+  const isSfox = typeof exchange === "string" && exchange.toLowerCase() === "sfox";
+  // Forward the CANONICAL lowercase 'sfox' downstream: the api_keys DB CHECK
+  // admits only lowercase 'sfox' and the Python /validate-key intercept is an
+  // exact `== "sfox"` match, so a mixed-case value must NORMALIZE, not pass
+  // through raw. Normalization is keyed on sfox ONLY — every ccxt exchange is
+  // forwarded verbatim, so ccxt behavior is byte-identical.
+  const exchangeNormalized = isSfox ? "sfox" : exchange;
   const api_secret_normalized =
     isSfox && typeof api_secret !== "string" ? "" : api_secret;
 
@@ -61,7 +72,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // /process-key/encrypt endpoint that returns the same envelope shape as
   // legacy encryptKey), restore the flag-gated unified handler below and
   // route through it. Tracked under the unified-encrypt deferred work item.
-  return await legacyValidateAndEncryptHandler({ exchange, api_key, api_secret: api_secret_normalized, passphrase });
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase });
 });
 
 /**

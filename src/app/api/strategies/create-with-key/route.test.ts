@@ -489,6 +489,23 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
   });
 
+  // WR-01: mixed-case sfox is handled IDENTICALLY to the validate-and-encrypt
+  // allocator route — the carve-out matches case-insensitively AND the value
+  // stamped into the RPC (and stored in the DB) is the canonical lowercase 'sfox'.
+  it.each(["sFOX", "SFOX", "Sfox"])(
+    "accepts mixed-case %s and normalizes to canonical 'sfox' (accepted with empty secret, p_exchange='sfox')",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
+
+      expect(res.status).toBe(200);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
+    },
+  );
+
   it("stamps p_exchange='sfox' into the create_wizard_strategy RPC payload (DB CHECK admits it per 119-01)", async () => {
     const POST = await importPost();
     const res = await POST(makeReq(SFOX_BODY));

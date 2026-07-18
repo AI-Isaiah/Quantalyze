@@ -329,6 +329,24 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
   });
 
+  // ── WR-01: mixed-case sfox is handled IDENTICALLY to the sibling routes ──
+  it.each(["sFOX", "SFOX", "Sfox"])(
+    "accepts mixed-case %s (case-insensitive carve-out) and normalizes the exchange to canonical 'sfox' downstream",
+    async (exchange) => {
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ exchange, api_key: SFOX_TOKEN }));
+
+      expect(res.status).toBe(200);
+      // WR-01: the case-sensitive `exchange === "sfox"` used to 400 this input
+      // ("Missing required fields") while the create-with-key / add-key siblings
+      // accepted it. The empty secret is admitted AND the value forwarded to the
+      // worker + stored in the DB is the canonical lowercase 'sfox' (the DB CHECK
+      // admits only lowercase 'sfox'), never the raw mixed-case string.
+      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    },
+  );
+
   it("rejects sfox with NO api_key — the carve-out relaxes ONLY api_secret, never api_key", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ exchange: "sfox" }));

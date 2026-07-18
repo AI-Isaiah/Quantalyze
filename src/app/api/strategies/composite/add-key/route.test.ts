@@ -344,6 +344,22 @@ describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (
     expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
   });
 
+  // WR-01: mixed-case sfox is handled IDENTICALLY across all three routes —
+  // case-insensitive carve-out AND canonical lowercase 'sfox' stamped into the RPC.
+  it.each(["sFOX", "SFOX", "Sfox"])(
+    "accepts mixed-case %s and normalizes to canonical 'sfox' (accepted with empty secret, p_exchange='sfox')",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
+
+      expect(res.status).toBe(200);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
+    },
+  );
+
   it("STILL rejects a sfox api_secret longer than 512 chars — DoS bound kept", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...SFOX_BODY, api_secret: "s".repeat(513) }));
