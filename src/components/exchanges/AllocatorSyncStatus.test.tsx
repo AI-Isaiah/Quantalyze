@@ -211,6 +211,12 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
     ["OKX", "OKX cooldown remaining"],
     ["binance", "Binance cooldown remaining"],
     ["bybit", "Bybit cooldown remaining"],
+    // F5 (Phase 122): sfox (and deribit) are now DERIVED from the shared
+    // EXCHANGE_DISPLAY, so a founder-connected sfox key renders "sFOX", never
+    // the titleCase "Sfox" regression. deribit was also silently missing before.
+    ["sfox", "sFOX cooldown remaining"],
+    ["sFOX", "sFOX cooldown remaining"],
+    ["deribit", "Deribit cooldown remaining"],
     // Unknown venue falls through to titleCase — graceful degradation.
     ["kraken", "Kraken cooldown remaining"],
   ])(
@@ -230,6 +236,10 @@ describe("AllocatorSyncStatus — D-08 pill copy verbatim", () => {
       // Guard against the pre-fix "Okx" regression sneaking back in.
       if (exchange.toLowerCase() === "okx") {
         expect(helper.textContent).not.toContain("Okx cooldown");
+      }
+      // F5 guard: the titleCase fallback "Sfox" must never resurface.
+      if (exchange.toLowerCase() === "sfox") {
+        expect(helper.textContent).not.toContain("Sfox cooldown");
       }
     },
   );
