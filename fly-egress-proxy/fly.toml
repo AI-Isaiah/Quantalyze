@@ -1,0 +1,28 @@
+# fly-egress-proxy/fly.toml
+# Raw-TCP tinyproxy forward proxy pinned to Amsterdam (ams).
+# Region rationale: ams is geo-allowed and matches today's Railway AS400940
+# Amsterdam egress. A US region is rejected (Bybit/Binance 403/451).
+app = "quantalyze-egress-proxy"
+primary_region = "ams"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Handler-less [[services]] => raw TCP pass-through to tinyproxy (Fly forwards
+# bytes as-is). A shared v4 cannot serve this non-HTTP port, so the runbook
+# allocates a DEDICATED inbound v4 (`fly ips allocate-v4`) for reachability.
+[[services]]
+  internal_port = 8888
+  protocol = "tcp"
+  # Always-on: a cold-started raw-TCP proxy would stall the sequential worker's
+  # first request, so the machine must never scale to zero.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 8888
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
