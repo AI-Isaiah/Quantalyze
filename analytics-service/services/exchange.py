@@ -830,6 +830,23 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 
     exchange = cls(config)
 
+    # SFOX-07 (121-02) — worker static-egress proxy for ccxt, OPT-IN.
+    # ccxt applies `self.aiohttp_proxy` in its base fetch for EVERY request
+    # (load_markets included; verified ccxt 4.5.64), and aiohttp 3.14.1 derives
+    # Proxy-Authorization from the URL userinfo, so setting the attr once is
+    # sufficient — no proxy_auth plumbing. This is behind a SEPARATE flag (default
+    # OFF) so the founder's working ccxt Amsterdam egress is NOT silently rerouted
+    # when only sFOX needs the static IP: sFOX is proxied by default via the
+    # factory, ccxt only when the founder explicitly opts in. Env unset (or flag
+    # off) ⇒ aiohttp_proxy stays the ccxt None class default — byte-identical.
+    _egress_proxy = os.getenv("WORKER_EGRESS_PROXY_URL")
+    if _egress_proxy and os.getenv("WORKER_EGRESS_PROXY_APPLIES_TO_CCXT", "").lower() in (
+        "1",
+        "true",
+        "on",
+    ):
+        exchange.aiohttp_proxy = _egress_proxy
+
     if exchange_name == "bybit":
         # ccxt's bybit `load_markets()` calls `fetch_currencies()`, which hits
         # `GET /v5/asset/coin/query-info`. That endpoint requires the
