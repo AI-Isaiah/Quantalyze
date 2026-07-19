@@ -475,25 +475,25 @@ export async function getStrategyDetail(
 } | null> {
   const supabase = await createClient();
 
-  // Phase 15 / CSV-03: left-join strategy_verifications so we can project
-  // the most-recent verification row's trust_tier onto Strategy.trust_tier.
   // Locked decision D-04 — trust_tier lives ONLY on strategy_verifications;
   // no `strategies.trust_tier` column exists or will be added.
   //
-  // Phase 15 / WR-04: scope the embed to the most-recent verification row
-  // via PostgREST's referencedTable order+limit modifiers. In Phase 15 the
-  // RPC inserts exactly one row per strategy_id; Phase 19 may add more
-  // (flow_type admits 'resync' + 'onboard'). Encoding "latest only" at
-  // the DB layer rather than relying on JS-side sort+[0] keeps the
-  // factsheet read O(1) once the second insert lands.
+  // Phase 126 (FACTSHEET-01, founder Option B — class closure): trust_tier is
+  // sourced from readPublicVerificationSignals (service-role, published-scoped,
+  // trust_tier+status ONLY) below — NOT an RLS-scoped nested embed. The embed
+  // returned zero verification rows for every NON-owner viewer (an allocator
+  // browsing another manager's published strategy on /discovery/[slug]/[id]),
+  // so the api_verified badge was invisible to non-owners here exactly as on
+  // the public factsheet. A logged-in non-owner must never see LESS trust
+  // signal than an anon visitor.
   //
   // Audit 2026-05-07 G11.E.7: when expectedCategorySlug is supplied, embed
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
   const baseSelect = expectedCategorySlug
-    ? "*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)"
-    : "*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)";
+    ? "*, discovery_categories!inner(slug), strategy_analytics (*)"
+    : "*, strategy_analytics (*)";
 
   // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
   // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
@@ -514,13 +514,7 @@ export async function getStrategyDetail(
     query = query.eq("discovery_categories.slug", expectedCategorySlug);
   }
 
-  const { data: strategy, error } = await query
-    .order("created_at", {
-      referencedTable: "strategy_verifications",
-      ascending: false,
-    })
-    .limit(1, { referencedTable: "strategy_verifications" })
-    .single();
+  const { data: strategy, error } = await query.single();
 
   // F-07: split error vs not-found so DB/RLS/network failures are logged and
   // captured rather than silently rendering the same not-found UI. PGRST116
@@ -541,20 +535,15 @@ export async function getStrategyDetail(
   }
   if (!strategy) return null;
 
-  // Phase 15 / CSV-03: pick the most-recent verification row's trust_tier.
-  // In Phase 15 there's at most ONE row per strategy_id (finalize_csv_strategy
-  // inserts exactly one row). Phase 19 may add multiple — pick most-recent
-  // by created_at for forward-compat. Hoist the value onto the typed
-  // Strategy field so consumers read it as `strategy.trust_tier`.
-  const verifications =
-    (strategy as unknown as { strategy_verifications?: { trust_tier: string; status: string; created_at: string }[] })
-      .strategy_verifications ?? [];
-  const latestVerification = verifications
-    .slice()
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  // Phase 126 (FACTSHEET-01, founder Option B): hoist trust_tier from the
+  // service-role, published-scoped signal reader (trust_tier+status ONLY) so a
+  // NON-owner viewer sees the api_verified badge. Consumers read it as
+  // `strategy.trust_tier`.
+  const strat = strategy as unknown as Strategy;
+  const signals = await readPublicVerificationSignals([strat.id]);
   const strategyWithTier: Strategy = {
-    ...(strategy as unknown as Strategy),
-    trust_tier: (latestVerification?.trust_tier ?? null) as Strategy["trust_tier"],
+    ...strat,
+    trust_tier: (signals.get(strat.id)?.trust_tier ?? null) as Strategy["trust_tier"],
   };
 
   const disclosureTier = readDisclosureTier(strategyWithTier);

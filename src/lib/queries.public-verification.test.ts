@@ -32,11 +32,14 @@ const rec = {
   orderCalls: [] as [string, unknown][],
   response: { data: null, error: null } as QueryResult,
   sentry: [] as { err: unknown; opts: unknown }[],
+  // For the getStrategyDetail integration test: the RLS strategies read.
+  strategyRow: null as unknown,
+  strategyError: null as unknown,
 };
 
 // A thenable chain mirroring the PostgREST builder shape the helper awaits:
-//   admin.from(t).select(sel).in(col, ids).eq(col, val).order(col, opts)
-function buildChain() {
+//   admin.from("strategy_verifications").select(sel).in(col, ids).eq(col, val).order(col, opts)
+function buildVerificationChain() {
   const chain: Record<string, unknown> = {};
   chain.select = (cols: string) => {
     rec.selectCols.push(cols);
@@ -61,12 +64,33 @@ function buildChain() {
   return chain;
 }
 
+// The RLS-scoped strategies read used by getStrategyDetail — resolves via
+// .single(). NOTE: it embeds NO strategy_verifications, exactly modelling the
+// non-owner reality (the old owner-only embed returned zero verification rows).
+function buildStrategiesChain() {
+  const chain: Record<string, unknown> = {};
+  chain.select = () => chain;
+  chain.eq = () => chain;
+  chain.order = () => chain;
+  chain.limit = () => chain;
+  chain.single = () =>
+    Promise.resolve({ data: rec.strategyRow, error: rec.strategyError });
+  chain.maybeSingle = () =>
+    Promise.resolve({ data: rec.strategyRow, error: rec.strategyError });
+  return chain;
+}
+
 vi.mock("@/lib/supabase/server", () => ({
-  createClient: async () => ({ from: () => buildChain() }),
+  createClient: async () => ({
+    from: (table: string) =>
+      table === "strategies" ? buildStrategiesChain() : buildVerificationChain(),
+  }),
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({ from: () => buildChain() }),
+  // getStrategyDetail's trust_tier + readPublicVerificationSignals both read
+  // strategy_verifications via the admin client -> the verification chain.
+  createAdminClient: () => ({ from: () => buildVerificationChain() }),
 }));
 
 vi.mock("@/lib/sentry-capture", () => ({
@@ -75,7 +99,7 @@ vi.mock("@/lib/sentry-capture", () => ({
   },
 }));
 
-import { readPublicVerificationSignals } from "./queries";
+import { readPublicVerificationSignals, getStrategyDetail } from "./queries";
 
 // A verification row AS RETURNED BY THE DB — deliberately loaded with internals
 // that must NOT survive the projection.
@@ -99,6 +123,8 @@ beforeEach(() => {
   rec.orderCalls = [];
   rec.response = { data: null, error: null };
   rec.sentry = [];
+  rec.strategyRow = null;
+  rec.strategyError = null;
 });
 
 describe("readPublicVerificationSignals — public projection contract", () => {
@@ -162,5 +188,58 @@ describe("readPublicVerificationSignals — public projection contract", () => {
     const map = await readPublicVerificationSignals([]);
     expect(map.size).toBe(0);
     expect(rec.selectCols).toHaveLength(0);
+  });
+});
+
+describe("getStrategyDetail — class closure: non-owner sees the api_verified tier", () => {
+  it("projects trust_tier from the service-role helper even when the RLS strategies read carries NO verification embed (the non-owner reality)", async () => {
+    // A published strategy owned by SOMEONE ELSE — the RLS strategies read still
+    // returns the published row, but (pre-126) the owner-only verification embed
+    // returned zero rows for this non-owner viewer. The service-role helper does.
+    rec.strategyRow = {
+      id: "s1",
+      user_id: "some-other-owner",
+      status: "published",
+      name: "Someone else's strategy",
+      strategy_analytics: null,
+      disclosure_tier: "exploratory", // keeps loadManagerIdentity from touching profiles
+    };
+    rec.response = {
+      data: [
+        {
+          strategy_id: "s1",
+          trust_tier: "api_verified",
+          status: "validated",
+          created_at: "2026-07-19T00:00:00Z",
+        },
+      ],
+      error: null,
+    };
+
+    const result = await getStrategyDetail("s1");
+
+    expect(result).not.toBeNull();
+    // The badge signal a non-owner sees — RED on pre-126 code (embed empty -> null).
+    expect(result!.strategy.trust_tier).toBe("api_verified");
+    // The trust_tier read went through the service-role helper (published-gated).
+    expect(rec.eqCalls).toContainEqual(["strategies.status", "published"]);
+  });
+
+  it("fail-soft: a verification read error leaves trust_tier null without failing the page", async () => {
+    rec.strategyRow = {
+      id: "s2",
+      user_id: "some-other-owner",
+      status: "published",
+      name: "X",
+      strategy_analytics: null,
+      disclosure_tier: "exploratory",
+    };
+    rec.response = { data: null, error: { message: "boom" } };
+
+    const result = await getStrategyDetail("s2");
+
+    expect(result).not.toBeNull();
+    expect(result!.strategy.trust_tier).toBeNull();
+    expect(rec.sentry.length).toBeGreaterThanOrEqual(1);
   });
 });

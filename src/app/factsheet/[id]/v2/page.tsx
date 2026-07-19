@@ -6,6 +6,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import type { DisclosureTier } from "@/lib/types";
+import { readPublicVerificationSignals } from "@/lib/queries";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
 import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
@@ -319,28 +320,21 @@ export default async function FactsheetV2Page({
   const { id } = await params;
   const supabase = await createClient();
 
-  // Lightweight signature probe (id + name + computed_at) + verifications in
-  // parallel. Strategy meta + dailyReturns are fetched INSIDE the cached
-  // function so the cache key derivation doesn't serialize a multi-MB array
-  // per hit. `name` / `codename` come along on the probe so the
-  // payload-pending fallback below can name the strategy without a second
-  // query.
-  // strategy_verifications is missing from the generated database.types.ts
-  // (type drift — table exists per migration 089). Route the verifications
-  // query through an `unknown`-cast handle so the typed client doesn't reject
-  // it; the runtime call is unchanged.
-  const supabaseUntyped = supabase as unknown as {
-    from: (table: "strategy_verifications") => {
-      select: (cols: string) => {
-        eq: (col: string, val: string) => {
-          order: (col: string, opts: { ascending: boolean }) => {
-            limit: (n: number) => Promise<{ data: { trust_tier: string | null; created_at: string | null }[] | null; error: unknown }>;
-          };
-        };
-      };
-    };
-  };
-  const [signRes, vRes] = await Promise.all([
+  // Lightweight signature probe (id + name + computed_at) + the public trust
+  // signal, in parallel. Strategy meta + dailyReturns are fetched INSIDE the
+  // cached function so the cache key derivation doesn't serialize a multi-MB
+  // array per hit. `name` / `codename` come along on the probe so the
+  // payload-pending fallback below can name the strategy without a second query.
+  //
+  // Phase 126 (FACTSHEET-01, founder Option B — class closure): the trust_tier
+  // read used to be an RLS-scoped strategy_verifications query on the request
+  // client, which returned zero rows for every NON-owner viewer — so the
+  // api_verified badge silently vanished on this PUBLIC factsheet for anon +
+  // non-owner sessions. readPublicVerificationSignals sources it via the
+  // service-role, published-scoped projection (trust_tier+status ONLY),
+  // consistent with the SSR factsheet + browse. Fail-soft (logs to Sentry on a
+  // read error): no signal -> null tier -> badge hides, page still renders.
+  const [signRes, verificationSignals] = await Promise.all([
     withPublishedOnly(
       supabase
         .from("strategies")
@@ -348,12 +342,7 @@ export default async function FactsheetV2Page({
         .eq("id", id),
     )
       .maybeSingle(),
-    supabaseUntyped
-      .from("strategy_verifications")
-      .select("trust_tier, created_at")
-      .eq("strategy_id", id)
-      .order("created_at", { ascending: false })
-      .limit(1),
+    readPublicVerificationSignals([id]),
   ]);
 
   const signature = signRes.data;
@@ -423,21 +412,11 @@ export default async function FactsheetV2Page({
   }
 
   // Trust tier is per-request (not cached with payload) so verification flips
-  // don't require a payload cache bust.
-  // FINDING-4 (b06-silentfailure): Log if the verifications query failed so
-  // the silent drop is visible in Sentry / server console. An api_verified
-  // strategy temporarily losing its badge is a meaningful trust-signal regression.
-  if (vRes.error) {
-    console.error(
-      "[factsheet/v2/page] strategy_verifications query failed — trustTier falling to null",
-      {
-        id,
-        errorMessage: (vRes.error as { message?: string })?.message,
-      },
-    );
-  }
-  const vRows = vRes.data;
-  const rawTrustTier = (vRows?.[0]?.trust_tier ?? null) as string | null;
+  // don't require a payload cache bust. Sourced via the service-role projection
+  // (readPublicVerificationSignals), which fails soft + logs to Sentry on a read
+  // error — a transient drop stays visible without blanking the page (FINDING-4
+  // b06-silentfailure: the silent-drop logging now lives inside the helper).
+  const rawTrustTier = verificationSignals.get(id)?.trust_tier ?? null;
   const trustTier: TrustTierKind | null =
     rawTrustTier === "api_verified" || rawTrustTier === "csv_uploaded" || rawTrustTier === "self_reported"
       ? rawTrustTier
