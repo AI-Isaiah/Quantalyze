@@ -100,14 +100,13 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260603120000_compute_jobs_rpc_clear_error_and_gin_fanin.sql
--- ==========================================================================
--- STEP 1b: claim_compute_jobs_with_priority (live prod path) -- clear stale error
--- ==========================================================================
-CREATE OR REPLACE FUNCTION claim_compute_jobs_with_priority(
+-- source migration: 20260719073701_claim_kind_filter.sql
+CREATE FUNCTION claim_compute_jobs_with_priority(
   p_batch_size INTEGER,
   p_worker_id  TEXT,
-  p_unified_backbone_active BOOLEAN DEFAULT NULL
+  p_unified_backbone_active BOOLEAN DEFAULT NULL,
+  p_kind_include TEXT[] DEFAULT NULL,   -- FLIPRETRY-02: claim ONLY these kinds
+  p_kind_exclude TEXT[] DEFAULT NULL    -- FLIPRETRY-02: never claim these kinds
 )
 RETURNS SETOF compute_jobs
 LANGUAGE plpgsql
@@ -139,12 +138,17 @@ BEGIN
   -- sitting in `failed_retry` (due) is still pending work and MUST trip the
   -- throttle, otherwise the throttle under-counts the priority backlog and
   -- lets low-priority backfill through while priority retries wait.
+  --
+  -- FLIPRETRY-02: the SAME kind filter that scopes the claim SELECT is
+  -- applied here so a filtered worker only throttles on kinds it can claim.
   v_high_pending := CASE WHEN EXISTS (
     SELECT 1
       FROM compute_jobs
      WHERE priority IN ('normal','high')
        AND status IN ('pending', 'failed_retry')
        AND next_attempt_at <= now()
+       AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
+       AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
   ) THEN 1 ELSE 0 END;
 
   -- Partition-key dedupe preserved from mig 117 (which restored mig 090's
@@ -185,6 +189,9 @@ BEGIN
     WHERE status IN ('pending', 'failed_retry')
       AND (next_attempt_at IS NULL OR next_attempt_at <= now())
       AND (v_high_pending = 0 OR priority IN ('normal','high'))
+      -- FLIPRETRY-02: kind filter. NULL/NULL => byte-identical to prod today.
+      AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
+      AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
   ),
   deduped AS (
     SELECT id FROM ranked

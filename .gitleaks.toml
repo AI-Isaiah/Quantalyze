@@ -93,6 +93,15 @@ paths = [
   # read-only keys. Not real credentials — generic-api-key flags the fixture
   # on the push-to-main full scan (the PR-diff scan did not).
   '''(^|/)analytics-service/tests/test_deribit_scope_validation\.py$''',
+  # v1.12 (SFOX-04..09) sFOX key-flow tests: mock the read-only SfoxClient, the
+  # key-save/validate route, and the balance-history reconstruction with
+  # deliberately key-shaped Bearer-token fixtures (e.g. `api_key="..."`). Not real
+  # credentials — generic-api-key flags the fixtures on the full-history scan (the
+  # PR-diff scan did not). v1.12 sFOX Verified Integration.
+  '''(^|/)analytics-service/tests/test_sfox_client\.py$''',
+  '''(^|/)analytics-service/tests/test_sfox_read\.py$''',
+  '''(^|/)analytics-service/tests/test_sfox_reconstruct\.py$''',
+  '''(^|/)src/app/api/keys/validate-and-encrypt/route\.test\.ts$''',
   # H-0305 regression test (route.audit.test.ts): line 118 defines a
   # deliberately key-shaped fixture `secretContents` that the test injects into
   # a thrown upstream error to assert the create-with-key route STRIPS it from

@@ -69,8 +69,8 @@ BEGIN
     VALUES (v_user, 'kindfilter-' || v_user || '@invalid.local');
   INSERT INTO public.profiles (id, display_name)
     VALUES (v_user, 'kindfilter-test') ON CONFLICT (id) DO NOTHING;
-  INSERT INTO public.api_keys (user_id, exchange, encrypted_api_key, encrypted_api_secret, is_active)
-    VALUES (v_user, 'sfox', 'x', 'y', TRUE) RETURNING id INTO v_key;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted, api_secret_encrypted, is_active)
+    VALUES (v_user, 'sfox', 'kindfilter', 'x', 'y', TRUE) RETURNING id INTO v_key;
 
   -- One backfill-kind job (derive_broker_dailies) and one non-backfill-kind
   -- job (compute_analytics), both DUE + normal priority, scoped to this key.
@@ -112,8 +112,8 @@ BEGIN
     VALUES (v_user, 'kindfilter-' || v_user || '@invalid.local');
   INSERT INTO public.profiles (id, display_name)
     VALUES (v_user, 'kindfilter-test') ON CONFLICT (id) DO NOTHING;
-  INSERT INTO public.api_keys (user_id, exchange, encrypted_api_key, encrypted_api_secret, is_active)
-    VALUES (v_user, 'sfox', 'x', 'y', TRUE) RETURNING id INTO v_key;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted, api_secret_encrypted, is_active)
+    VALUES (v_user, 'sfox', 'kindfilter', 'x', 'y', TRUE) RETURNING id INTO v_key;
   INSERT INTO public.compute_jobs
       (id, kind, api_key_id, status, priority, attempts, next_attempt_at, claim_token)
     VALUES
@@ -153,8 +153,8 @@ BEGIN
     VALUES (v_user, 'kindfilter-' || v_user || '@invalid.local');
   INSERT INTO public.profiles (id, display_name)
     VALUES (v_user, 'kindfilter-test') ON CONFLICT (id) DO NOTHING;
-  INSERT INTO public.api_keys (user_id, exchange, encrypted_api_key, encrypted_api_secret, is_active)
-    VALUES (v_user, 'sfox', 'x', 'y', TRUE) RETURNING id INTO v_key;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted, api_secret_encrypted, is_active)
+    VALUES (v_user, 'sfox', 'kindfilter', 'x', 'y', TRUE) RETURNING id INTO v_key;
   INSERT INTO public.compute_jobs
       (id, kind, api_key_id, status, priority, attempts, next_attempt_at, claim_token)
     VALUES
@@ -195,8 +195,8 @@ BEGIN
     VALUES (v_user, 'fanout-test') ON CONFLICT (id) DO NOTHING;
   -- Eligible key: is_active AND sync_status IS DISTINCT FROM 'revoked' AND
   -- disconnected_at IS NULL.
-  INSERT INTO public.api_keys (user_id, exchange, encrypted_api_key, encrypted_api_secret, is_active)
-    VALUES (v_user, 'sfox', 'x', 'y', TRUE) RETURNING id INTO v_key;
+  INSERT INTO public.api_keys (user_id, exchange, label, api_key_encrypted, api_secret_encrypted, is_active)
+    VALUES (v_user, 'sfox', 'kindfilter', 'x', 'y', TRUE) RETURNING id INTO v_key;
 
   PERFORM enqueue_derive_broker_dailies_for_allocator_keys();
   PERFORM enqueue_derive_broker_dailies_for_allocator_keys();
