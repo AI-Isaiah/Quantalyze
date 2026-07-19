@@ -33,6 +33,8 @@ CI carries the committed harness + fixtures (`tests/test_e2_ground_truth_harness
 - [ ] Plans 123-01 + 123-02 merged to `main`.
 - [ ] Migration `20260719073701_claim_kind_filter.sql` auto-applied on PROD at merge — **verify the object**: `claim_compute_jobs_with_priority(integer,text,boolean,text[],text[])` exists (`::regprocedure`). A committed migration auto-applies to PROD on merge; confirm it actually ran (a red-main CI run silently skips nothing here — migrations apply — but verify regardless).
 - [ ] The existing prod Railway worker is deployed **at the merge commit** — verify `commitHash` + `/health` (Railway silently SKIPS deploys on red main CI; a stale worker will not have the role logic).
+- [ ] **Topology confirm (Phase 125, RESEARCH Open Q1/A2) — do this FIRST.** On the Railway dashboard, confirm whether the FastAPI API and the durable worker currently run as **ONE combined service or TWO** in project `quantalyze-analytics` / env `production`. The CLI shows a single linked service (`quantalyze-analytics`); the API/worker split may be dashboard-only. **Name the exact service that will receive `WORKER_CLAIM_ROLE=interactive`** (the one running the durable worker loop, CMD `python -m main_worker`). If today it is a single combined API+worker service, the cutover means the NEW backfill service becomes the second worker while the existing one keeps serving the API AND runs the interactive worker — decide that explicitly here.
+  - **Decision (env contract, not committed config):** the `interactive`/`backfill` split is a **documented DASHBOARD ENV CONTRACT** (this runbook, Step 1), NOT a committed `analytics-service/railway.worker.toml`. Rationale: the split is Railway service+env state that lives in the dashboard, not git — a second toml **cannot bind itself to a Railway service** and would imply git controls topology it does not. **Alternative / override:** if the founder prefers a committed config file, record it as a one-file follow-up (add `analytics-service/railway.worker.toml` pointing the second service at the same image with the worker CMD) — it changes nothing operationally, it only version-controls the intent.
 
 **Abort at any step below → jump to [Step 8 — ROLLBACK].**
 
@@ -40,9 +42,22 @@ CI carries the committed harness + fixtures (`tests/test_e2_ground_truth_harness
 
 ## Step 1 — Deploy the dedicated backfill worker
 
-Create a **second** Railway service from the same repo/image as the prod worker.
+Create a **second** Railway service from the same repo/image as the prod worker. This is the **dashboard env contract** (per the Step 0 decision) — a distinct SERVICE, not a replica.
 
-- Env: `WORKER_CLAIM_ROLE=backfill` + the standard worker env (service-role key var name is **`SUPABASE_SERVICE_KEY`**, plus the same DB/exchange config the prod worker carries).
+**Backfill-service env contract (set on the NEW service):**
+
+| Setting | Value | Note |
+|---------|-------|------|
+| Image / repo | SAME as the prod worker | one image serves both roles |
+| **CMD override** | `python -m main_worker` | the Dockerfile default is `uvicorn main:app` (the API); the worker service MUST override CMD to the worker entrypoint |
+| `WORKER_CLAIM_ROLE` | `backfill` (`WORKER_CLAIM_ROLE=backfill`) | → `p_kind_include=BACKFILL_KINDS`; claims ONLY `derive_broker_dailies` + `derive_allocator_equity` |
+| `SUPABASE_SERVICE_KEY` | (service-role key) | **NOT `SUPABASE_SERVICE_ROLE_KEY`** — the Python worker reads `SUPABASE_SERVICE_KEY` |
+| DB / exchange env | SAME set the prod worker carries | so it can reach the DB + crawl venues |
+| `WORKER_HEARTBEAT_INTERVAL_S` | optional | validated in `(0, 90)`; defaults are fine — omit unless tuning |
+| `PORT` / healthz | default `8080` | its own `main_worker_healthz` listens here; Railway health-checks it independently |
+
+- **⚠️ Railway REPLICAS cannot carry distinct roles.** Scaling the existing worker to 2 replicas will NOT work — replicas share the service's env + CMD, so both would get the same `WORKER_CLAIM_ROLE`. A **distinct SERVICE** (its own env + CMD override) is required for the split (RESEARCH Pitfall 5).
+- **Fail-loud guarantees (rely on these; do not add a silent default):** a typo'd `WORKER_CLAIM_ROLE` (any value outside `{all, interactive, backfill}`) raises a LOUD `ValueError` at worker startup — the service fails to boot rather than silently mis-scoping claims (`_validate_claim_role`). And as a defence-in-depth net, a `backfill` worker that ever lands on the legacy 2-arg claim (kind-filter migration absent) **REFUSES to claim** rather than take interactive jobs out-of-role (logs `claim_rpc_fallback_backfill_refused`). Since `20260719073701` is prod-applied, that fallback is a safety net, not an expected path.
 - **Verify:** the new service `/health` is 200, and its logs show it claims NOTHING while the queue holds no `derive_broker_dailies` / `derive_allocator_equity` jobs (role `backfill` → `p_kind_include=BACKFILL_KINDS`, so it only ever claims those two kinds).
 - **Abort path:** if the service can't reach the DB or `WORKER_CLAIM_ROLE` fails validation (it raises loud on any non-`{all,interactive,backfill}` value), fix env and redeploy before proceeding. Nothing has been enqueued yet, so there is nothing to roll back at this step.
 
@@ -101,6 +116,17 @@ SELECT enqueue_derive_broker_dailies_for_allocator_keys();
 - **Safe to re-run:** an advisory lock (`pg_try_advisory_lock(hashtext('derive_broker_dailies_key_fanout'))`) makes concurrent runs skip; a per-`(api_key_id, UTC-date)` idempotency key + `EXCEPTION WHEN unique_violation THEN NULL` + the `compute_jobs_one_inflight_per_kind_api_key` index guarantee one in-flight `derive_broker_dailies` per key per day (pinned by the SQL gates in `supabase/tests/`).
 - **Verify:** watch prod healthz stays fresh AND the dedicated worker burns the queue down. Spot-check that `allocator_equity_derived` repopulates.
 - **Abort path:** **[Step 8 — ROLLBACK]** at any sign of prod-loop starvation.
+
+## Phase 125 retention hygiene (orphaned-`running` purge) — a MIGRATION, unlike Step 6
+
+Phase 125 landed a recurring safety sweep that keeps the queue clean and, as a side effect, kills the recurring `python` fence-test CI flake at its root:
+
+- **`retention_compute_jobs_orphaned_running`** — a pg_cron job (`15 4 * * *`, 04:15 UTC, in the safe 1–22 hour band) that `DELETE`s `status='running'` rows whose `claimed_at` is older than `interval '2 hours'`. This one **lands as a MIGRATION** (`20260719120000`), safe on BOTH projects: the 2h window is ~3× the longest per-kind watchdog threshold (`process_key_long = 40 min`), so it never touches a legit in-flight prod job, while on the workerless TEST project (which has no watchdog) it clears the daily orphan accumulation.
+  - **TEST-first apply (plan 125-03):** the migration was MCP-applied to the TEST project `qmnijlgmdhviwzwfyzlc` BEFORE merge (so the RED-guarded SQL test asserts green there), and it **auto-applies to PROD `khslejtfbuezsmvmtsdn` at merge — the founder watches the migration land** and confirms the `retention_compute_jobs_orphaned_running` `cron.job` row appears.
+  - **One-time TEST cleanup (plan 125-03):** a scoped `DELETE FROM compute_jobs WHERE status='running' AND created_at < now() - interval '1 hour'` was run on `qmnijlgmdhviwzwfyzlc` alongside the migration to green CI immediately (verified no-op at execution — the project was already clean; the recurring cron prevents re-accumulation nightly).
+- **Why the purge is a migration but the Step 6 reschedule is NOT:** the purge has **no worker-readiness dependency** — it is prod-safe the moment it applies (it only ever deletes definitively-orphaned rows). The Step 6 cron reschedule DOES have that dependency — if it auto-applied via a migration and the worker deploy were skipped, it would fan out backfill jobs onto the old unfiltered worker and re-wedge prod (see Step 6). So the purge auto-applies; the reschedule is a hand-run LIVE op gated on Steps 1–5.
+
+**Founder op ordering (unambiguous):** purge migration merges (auto-applies to prod, founder watches) → cutover **Steps 1–2** (backfill service up, prod worker → `interactive`) → **Steps 3–5** (pilot enqueue, LIVE E2 gate exit 0, full backfill) → **Step 6** cron reschedule **LAST**. The purge cron's 04:15 UTC slot sits before the 05:30 UTC `derive-allocator-key-dailies` derive cron by design, so each day's sweep runs ahead of the fan-out.
 
 ## Step 6 — Reschedule the cron (LAST) — a founder LIVE SQL op, NOT a migration
 
