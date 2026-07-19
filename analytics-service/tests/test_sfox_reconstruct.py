@@ -434,3 +434,341 @@ async def test_crawls_refuse_non_sfoxclient_at_boundary(not_client):
         await crawl_sfox_balance_history(not_client, 0, 1)
     with pytest.raises(TypeError):
         await crawl_sfox_transactions(not_client, 0)
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (plan 120-03): the elif venue=="sfox" worker branch + preflight/close
+# seams. These are the wiring behaviors — a hang is bounded+retryable, every
+# fail-loud disposition stamps + is permanent, the happy path rides the SHARED
+# backbone, and the preflight/close chokepoints route sfox to the SfoxClient.
+# ---------------------------------------------------------------------------
+import asyncio
+import re
+from contextlib import ExitStack
+from pathlib import Path
+from unittest.mock import patch
+
+import services.job_worker as jw
+from services.exchange import aclose_exchange
+from services.job_worker import (
+    DispatchOutcome,
+    _make_exchange_client,
+    _sfox_rows_to_usd_value_series,
+    run_derive_broker_dailies_job,
+)
+
+
+def _bh_row(day: str, usd_value) -> dict:
+    return {"timestamp": _ms(day), "usd_value": usd_value}
+
+
+def _sfox_ctx(exchange: str = "sfox") -> tuple[MagicMock, dict]:
+    """A worker ctx whose supabase captures upserts (mirrors the deribit test
+    seam). strategy_row is a MagicMock (NOT a dict) so the venue-agnostic
+    denominator-config / asset-class parses both resolve to None (defaults)."""
+    capture: dict = {"upserts": []}
+    ctx = MagicMock()
+    ctx.exchange = MagicMock()  # the crawls are mocked, so the client is inert
+    ctx.supabase = MagicMock()
+    ctx.key_row = {"id": "key-sfox", "user_id": "alloc-1", "exchange": exchange}
+
+    def _table(name: str) -> MagicMock:
+        tbl = MagicMock()
+
+        def _upsert(payload: object, **kw: object) -> MagicMock:
+            capture["upserts"].append((name, payload, kw.get("on_conflict")))
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=1)
+            return stub
+
+        tbl.upsert.side_effect = _upsert
+        tbl.insert.side_effect = lambda *a, **k: MagicMock(
+            execute=MagicMock(return_value=MagicMock(data=[{"id": "x"}]))
+        )
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+    return ctx, capture
+
+
+def _sfox_branch_patches(
+    ctx: MagicMock,
+    *,
+    bh_return=None,
+    bh_side_effect=None,
+    txn_return=None,
+    key_mode: bool,
+) -> list:
+    """Patch set for the sfox worker branch: preflight → ctx, the two crawls
+    mocked at services.sfox_read (the branch imports them at call time), the
+    close chokepoint + db_execute stubbed. combine_sfox_balance_history and the
+    derive/persist backbone run FOR REAL (proving the ONE-path wiring)."""
+    preflight = (
+        "services.job_worker._allocator_key_preflight"
+        if key_mode
+        else "services.job_worker._exchange_preflight"
+    )
+    bh_mock = (
+        AsyncMock(side_effect=bh_side_effect)
+        if bh_side_effect is not None
+        else AsyncMock(return_value=(bh_return or [], None))
+    )
+    return [
+        patch(preflight, new=AsyncMock(return_value=ctx)),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+        patch("services.sfox_read.crawl_sfox_balance_history", new=bh_mock),
+        patch(
+            "services.sfox_read.crawl_sfox_transactions",
+            new=AsyncMock(return_value=(txn_return or [])),
+        ),
+    ]
+
+
+def _apply(patchers: list) -> ExitStack:
+    stack = ExitStack()
+    for p in patchers:
+        stack.enter_context(p)
+    return stack
+
+
+def _job(key_mode: bool) -> dict:
+    return {"api_key_id": "key-sfox"} if key_mode else {"strategy_id": "s-sfox"}
+
+
+# --- preflight + close chokepoints -----------------------------------------
+def test_make_exchange_client_sfox_returns_sfoxclient():
+    """The single preflight chokepoint constructs a GET-only SfoxClient for
+    sfox (create_exchange RAISES for sfox) from the TRIMMED api_key; the secret
+    is never passed (single-Bearer contract)."""
+    client = _make_exchange_client("sfox", "  tok-abc  ", "ignored-secret", None)
+    assert isinstance(client, SfoxClient)
+    # The trimmed token is the Bearer (a trailing-newline token authenticates
+    # identically to the validate path's .trim()).
+    assert client._api_key == "tok-abc"
+
+
+async def test_aclose_exchange_routes_sfoxclient_to_aclose():
+    """The close chokepoint routes a SfoxClient to its OWN bounded aclose() and
+    returns before the ccxt close() sequence (which SfoxClient does not implement)."""
+    client = SfoxClient(api_key="secretkey123456")
+    client.aclose = AsyncMock()
+    await aclose_exchange(client)
+    client.aclose.assert_awaited_once()
+
+
+# --- the branch: hang is bounded + retryable (FLIPRETRY-01) ----------------
+async def test_sfox_crawl_hang_is_bounded_transient_not_permanent(monkeypatch):
+    """T-120-10 / FLIPRETRY-01: a crawl that sleeps past the per-crawl bound is
+    converted to a CLASSIFIED TRANSIENT failure — asserted NOT permanent, NO
+    terminal stamp — and the test returns fast (the bound fired, not the sleep)."""
+    monkeypatch.setattr(jw, "_SFOX_CRAWL_TIMEOUT_S", 0.05)
+
+    async def _hang(*a, **k):
+        await asyncio.sleep(5)  # far past the 0.05s bound
+
+    ctx, capture = _sfox_ctx()
+    patches = _sfox_branch_patches(ctx, key_mode=False)
+    # Replace the balance-history crawl with a hanging coroutine.
+    patches[3] = patch(
+        "services.sfox_read.crawl_sfox_balance_history",
+        new=AsyncMock(side_effect=_hang),
+    )
+    with _apply(patches):
+        result = await asyncio.wait_for(
+            run_derive_broker_dailies_job(_job(key_mode=False)), timeout=2.0
+        )
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"  # retryable, NOT permanent
+    assert result.error_kind != "permanent"
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert not stamps, "a bounded hang is transient — never a terminal stamp"
+
+
+# --- fail-loud dispositions: truncation / unvaluable / material floor -------
+async def test_sfox_crawl_truncation_is_permanent_with_stamp():
+    """T-120-11: a truncated/under-fetched crawl (the assert_ledger_complete
+    analog) → permanent FAILED + terminal strategy_analytics stamp; no partial
+    track record is ever written."""
+    ctx, capture = _sfox_ctx()
+    patches = _sfox_branch_patches(
+        ctx,
+        bh_side_effect=SfoxCrawlTruncatedError("stopped short at a page boundary"),
+        key_mode=False,
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps and stamps[0][1]["computation_status"] == "failed"
+
+
+async def test_sfox_unvaluable_flow_is_permanent_with_stamp():
+    """T-120-11: a typed unvaluable flow (a non-USD-family deposit) → permanent
+    FAILED + stamp (the LedgerValuationError disposition parity). sfox_flows_by_day
+    runs FOR REAL here — the raise comes from the real extractor."""
+    ctx, capture = _sfox_ctx()
+    patches = _sfox_branch_patches(
+        ctx,
+        bh_return=[_bh_row("2026-01-01", "1000"), _bh_row("2026-01-02", "1010")],
+        txn_return=[
+            {"id": 1, "action": "deposit", "currency": "BTC",
+             "amount": "0.5", "timestamp": _ms("2026-01-02")},
+        ],
+        key_mode=False,
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps and stamps[0][1]["computation_status"] == "failed"
+
+
+async def test_sfox_material_balance_floor_fails_loud():
+    """T-120-12: a materially-funded account (>$100 terminal) with <2 usable NAV
+    days is a silently-empty (green) track record → permanent FAILED + stamp
+    naming the material equity, BEFORE combine. No leaked raw balance digits with
+    a decimal (the ~USD magnitude is rounded to whole dollars)."""
+    ctx, capture = _sfox_ctx()
+    patches = _sfox_branch_patches(
+        ctx,
+        bh_return=[_bh_row("2026-01-01", "50000")],  # single point, $50k material
+        key_mode=False,
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert "material equity" in (result.error_message or "")
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps and stamps[0][1]["computation_status"] == "failed"
+
+
+async def test_sfox_tiny_empty_account_flows_to_honest_downstream_gate():
+    """A genuinely tiny/empty account (terminal below the $100 floor, single
+    point) does NOT trip the material floor — it flows to the honest downstream
+    <2-day gate. Key-mode returns DONE (no invented rows, no material failure)."""
+    ctx, capture = _sfox_ctx()
+    patches = _sfox_branch_patches(
+        ctx,
+        bh_return=[_bh_row("2026-01-01", "10")],  # $10 — below the floor
+        key_mode=True,
+    )
+    with _apply(patches):
+        result = await run_derive_broker_dailies_job(_job(key_mode=True))
+    assert result.outcome == DispatchOutcome.DONE
+    # NOT the material-balance permanent failure.
+    for _name, payload, _oc in capture["upserts"]:
+        assert "material equity" not in str(payload)
+
+
+# --- happy path: rides the SHARED backbone (ONE-path, no clobber) -----------
+async def test_sfox_happy_path_rides_shared_derive_persist_cash_series():
+    """SFOX-05: a fixture NAV+flows crawl → combine_sfox_balance_history →
+    the UNCHANGED derive_basis_series/persist_basis_series. Proven by capturing
+    persist_basis_series: a cash_settlement basis row with a non-None result is
+    persisted (the sfox returns rode the shared backbone). combine and derive run
+    FOR REAL — no parallel path."""
+    ctx, _capture = _sfox_ctx()
+    nav_rows = [
+        _bh_row("2026-01-01", "1000"),
+        _bh_row("2026-01-02", "1010"),
+        _bh_row("2026-01-03", "1020"),
+        _bh_row("2026-01-04", "1030"),
+    ]
+    persisted: list[tuple] = []
+
+    def _capture_persist(_supabase, _sid, *, basis, result):
+        persisted.append((basis, result))
+
+    patches = _sfox_branch_patches(
+        ctx, bh_return=nav_rows, txn_return=[], key_mode=False
+    )
+    with _apply(patches), patch(
+        "services.basis_series.persist_basis_series", new=_capture_persist
+    ):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.DONE
+    cash = [(b, r) for (b, r) in persisted if b == "cash_settlement"]
+    assert cash, "sfox returns must ride the shared cash_settlement derive/persist"
+    assert cash[0][1] is not None, "a real cash basis series result was persisted"
+
+
+async def test_sfox_native_returns_not_clobbered_by_ccxt_combine():
+    """The money-critical :2645 fix: combine_realized_and_funding (the ccxt
+    USD-space combine) must NEVER run for sfox — it would OVERWRITE the native
+    reconstructed returns with an empty realized/funding stream. Neuter the
+    _NATIVE_RETURNS_VENUES guard (revert to `!= 'deribit'`) → this reddens."""
+    ctx, _capture = _sfox_ctx()
+    nav_rows = [
+        _bh_row("2026-01-01", "1000"),
+        _bh_row("2026-01-02", "1010"),
+        _bh_row("2026-01-03", "1020"),
+    ]
+    patches = _sfox_branch_patches(
+        ctx, bh_return=nav_rows, txn_return=[], key_mode=False
+    )
+    with _apply(patches), patch(
+        "services.broker_dailies.combine_realized_and_funding",
+        new=MagicMock(side_effect=AssertionError(
+            "combine_realized_and_funding must NOT run for sfox (native returns)"
+        )),
+    ), patch(
+        "services.basis_series.persist_basis_series", new=MagicMock()
+    ):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.DONE
+
+
+def test_sfox_rows_to_usd_value_series_fails_loud_on_garbage():
+    """The NAV parse coerces fail-loud on a garbage usd_value — never silently
+    0.0 (which would fabricate NAV)."""
+    good = _sfox_rows_to_usd_value_series(
+        [_bh_row("2026-01-01", "1000"), _bh_row("2026-01-02", "1010")]
+    )
+    assert list(good.to_numpy()) == [1000.0, 1010.0]
+    with pytest.raises(SfoxFlowValuationError):
+        _sfox_rows_to_usd_value_series([_bh_row("2026-01-01", "not-a-number")])
+
+
+# --- source-scan gates: ONE-path + wait_for bound --------------------------
+def _stripped_job_worker_source() -> str:
+    """job_worker.py with full-line comments stripped (the grep-gate hygiene
+    rule) so a call site inside a comment never counts."""
+    text = Path(jw.__file__).read_text()
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def test_one_path_derive_basis_series_call_sites_unchanged():
+    """ONE-path proof: the sfox branch adds ZERO new backbone call sites — the
+    comment-stripped job_worker.py contains exactly the 4 pre-phase
+    derive_basis_series( call sites."""
+    stripped = _stripped_job_worker_source()
+    assert stripped.count("derive_basis_series(") == 4
+
+
+def test_sfox_branch_has_two_bounded_crawls():
+    """FLIPRETRY-01: the sfox branch wraps BOTH live crawls in asyncio.wait_for.
+    Slice the branch region and count the bounds (>=2)."""
+    text = Path(jw.__file__).read_text()
+    start = text.index('elif venue == "sfox":')
+    # The branch ends at the trailing `else:` (the ccxt arm).
+    end = text.index("\n        else:", start)
+    branch = text[start:end]
+    assert branch.count("asyncio.wait_for(") >= 2
+    assert 'crawl_sfox_balance_history' in branch
+    assert 'crawl_sfox_transactions' in branch
+
+
+def test_native_returns_venues_guard_defined_and_used():
+    """The _NATIVE_RETURNS_VENUES set is defined AND used at the combine guard
+    (definition + the :2645 guard = >=2 comment-stripped references)."""
+    stripped = _stripped_job_worker_source()
+    assert stripped.count("_NATIVE_RETURNS_VENUES") >= 2
