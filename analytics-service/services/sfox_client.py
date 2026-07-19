@@ -226,9 +226,16 @@ class SfoxClient:
             # exchange.py's ccxt.NetworkError arm): callers — phase 119 — see a
             # SfoxApiError, never a raw aiohttp/asyncio exception. status=0
             # (non-HTTP failure) keeps it distinguishable from an auth 401/403.
-            # A transport error won't embed the token, but redact-by-value +
-            # scrub anyway (belt-and-suspenders, matching the non-2xx path).
+            # Redact BOTH secrets by value (belt-and-suspenders, matching the
+            # non-2xx path). The proxy is the live concern here (F2/121): aiohttp
+            # raises `InvalidURL` — a `ClientError` — carrying the FULL proxy URL
+            # (incl. `user:pass@` BasicAuth) when WORKER_EGRESS_PROXY_URL is
+            # malformed (e.g. a bad port). By-value replace catches the exact
+            # literal; scrub_freeform_string's URL-userinfo pass (F1) catches any
+            # reformatted `scheme://user:pass@host` shape aiohttp emits.
             safe = str(exc).replace(self._api_key, "[REDACTED]")
+            if self._proxy:
+                safe = safe.replace(self._proxy, "[REDACTED]")
             raise SfoxApiError(
                 0, f"sFOX request transport error: {scrub_freeform_string(safe)}"
             ) from exc
@@ -242,6 +249,10 @@ class SfoxClient:
             # into str(SfoxApiError) and any log/Sentry surface. Replacing the literal
             # value does not depend on the upstream echoing it in a recognized shape.
             safe = raw.replace(self._api_key, "[REDACTED]")
+            # Same by-value belt for the proxy (F2/121): a body/error that echoes
+            # the proxy URL must not carry its `user:pass@` BasicAuth into str(exc).
+            if self._proxy:
+                safe = safe.replace(self._proxy, "[REDACTED]")
             # Then the freeform scrub before the text can reach any surface (T-118-01).
             raise SfoxApiError(status, scrub_freeform_string(safe))
         try:

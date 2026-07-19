@@ -272,6 +272,47 @@ class TestPhase16ScrubPaths:
         assert frames[0]["vars"]["creds"]["passphrase"] == "[REDACTED]"
         assert frames[1]["vars"]["counter"] == 3
 
+    def test_exception_frame_vars_redact_proxy_url(self):
+        # Phase 121 / F1: the proxy BasicAuth secret rides a `scheme://user:pass@host`
+        # URL. Two vectors covered here: (1) a proxy-NAMED frame var (`_egress_proxy`
+        # is denylisted → whole value redacted), and (2) the SAME URL under a
+        # NON-denylisted key `url` (caught ONLY by the URL-userinfo sweep), plus the
+        # exception.value string set by LoggingIntegration.
+        secret = "s3cr3tpw"
+        proxy = f"http://quantalyze:{secret}@1.2.3.4:8888"
+        event = {
+            "exception": {
+                "values": [
+                    {
+                        "type": "ClientProxyConnectionError",
+                        "value": f"Cannot connect to proxy {proxy}",
+                        "stacktrace": {
+                            "frames": [
+                                {
+                                    "function": "make_sfox_client",
+                                    "vars": {
+                                        "_egress_proxy": proxy,
+                                        "url": proxy,
+                                        "host": "1.2.3.4",
+                                    },
+                                }
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+        result = sentry_init._redact_before_send(event, None)
+        v = result["exception"]["values"][0]
+        vars_ = v["stacktrace"]["frames"][0]["vars"]
+        # (1) proxy-named key → whole value redacted by the key denylist.
+        assert vars_["_egress_proxy"] == "[REDACTED]"
+        # (2) same secret under a non-denylisted `url` → userinfo-redacted by sweep.
+        assert secret not in vars_["url"]
+        assert vars_["host"] == "1.2.3.4"
+        # exception.value (LoggingIntegration) also scrubbed.
+        assert secret not in v["value"]
+
     def test_malformed_breadcrumbs_does_not_raise(self):
         # Pitfall 6: redactor must NEVER raise. Defensive shape mismatch.
         event = {"breadcrumbs": "not-a-dict"}

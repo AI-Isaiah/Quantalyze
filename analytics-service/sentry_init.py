@@ -41,6 +41,7 @@ from sentry_sdk.integrations.starlette import StarletteIntegration
 from services.redact import (
     scrub_pii as _redact_scrub_pii,
     scrub_freeform_string as _redact_scrub_freeform_string,
+    scrub_url_userinfo as _redact_scrub_url_userinfo,
     DENYLIST_EXACT as _CANONICAL_DENYLIST,
 )
 
@@ -82,6 +83,16 @@ _PII_KEYS: frozenset[str] = frozenset({
     "ok-access-timestamp",
     # --- Binance signing scheme (extras beyond x-mbx-apikey) ---
     "x-mbx-time-unit",
+    # --- Phase 121 / F1 — proxy URL env/frame-var names. WORKER_EGRESS_PROXY_URL
+    # and the create_exchange `_egress_proxy` / SfoxClient `_proxy` locals hold a
+    # `scheme://user:pass@host` URL whose userinfo IS the proxy BasicAuth secret.
+    # Denylisting the KEY redacts the whole value when it surfaces as a frame var
+    # or extra-dict entry; `_url_userinfo_sweep` below is the companion that
+    # catches the same secret under a differently-named string value.
+    "proxy",
+    "_proxy",
+    "_egress_proxy",
+    "worker_egress_proxy_url",
 })
 
 # Mirror of src/lib/admin/pii-scrub.ts L27 DENYLIST_PREFIX. Case-insensitive.
@@ -151,13 +162,35 @@ def _broker_quirk_sweep(value: Any) -> Any:
     return value
 
 
+def _url_userinfo_sweep(value: Any) -> Any:
+    """Phase 121 / F1 — redact `scheme://user:pass@host` userinfo in EVERY string
+    leaf of a scrubbed structure.
+
+    The proxy BasicAuth secret rides the URL userinfo — a shape the key denylist
+    and the JWT detector both miss. Denylisting proxy-named KEYS (above) covers
+    the `{"_egress_proxy": "http://user:pass@host"}` case; this sweep is the
+    companion for the same credential appearing under a NON-denylisted key (e.g.
+    a local `url` / `proxy_url` frame var, or an aiohttp error string captured
+    into `exception.values[].value`)."""
+    if isinstance(value, str):
+        return _redact_scrub_url_userinfo(value)
+    if isinstance(value, Mapping):
+        return {k: _url_userinfo_sweep(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_url_userinfo_sweep(v) for v in value]
+    return value
+
+
 def _scrub(value: Any) -> Any:
-    """Two-stage scrub:
+    """Three-stage scrub:
       (a) canonical scrub via services.redact.scrub_pii (covers all 17 TS-mirrored
           keys including broker-quirk x-bapi-* / ok-access-* per Grok B1, plus
           sb-ec- prefix and JWT-shape detection),
       (b) broker-quirk sweep for the local extras still in `_PII_KEYS` but not
-          yet in the canonical denylist.
+          yet in the canonical denylist,
+      (c) URL-userinfo sweep (Phase 121 / F1): redact `scheme://user:pass@host`
+          proxy-BasicAuth userinfo in every string leaf — the one credential
+          shape (a) and (b) are structurally blind to.
 
     JWT_SUBSTRING substring detection inside un-anchored strings is intentionally
     NOT applied here — the Sentry surface assumes structured headers/cookies/data
@@ -177,7 +210,10 @@ def _scrub(value: Any) -> Any:
     shift their handling from (b) to (a) with no behavior change.
     """
     canonical = _redact_scrub_pii(value)
-    return _broker_quirk_sweep(canonical)
+    swept = _broker_quirk_sweep(canonical)
+    # Stage (c) / Phase 121 F1 — userinfo-redact any `scheme://user:pass@host`
+    # string leaf (proxy BasicAuth) that the key-based stages above cannot see.
+    return _url_userinfo_sweep(swept)
 
 
 def _redact_before_send(event: dict[str, Any], hint: dict[str, Any] | None) -> dict[str, Any]:

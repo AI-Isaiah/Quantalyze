@@ -263,6 +263,41 @@ async def test_transport_error_maps_to_sfox_api_error_no_key_leak(raised):
     assert API_KEY not in str(excinfo.value)
 
 
+_PROXY_URL = "http://quantalyze:deadbeefcafe@37.16.1.5:8888"
+
+
+async def test_transport_error_redacts_proxy_userinfo():
+    """F2/121: a transport error carrying the proxy URL — the real vector is
+    aiohttp `InvalidURL` (a ClientError) raised on a malformed WORKER_EGRESS_PROXY_URL,
+    which embeds the FULL `user:pass@host` — must NOT leak the proxy BasicAuth into
+    str(SfoxApiError). The InvalidURL here uses a DIFFERENT (bad-port) spelling than
+    the ctor proxy, proving the URL-userinfo scrub (F1) is the net, not just the
+    by-value literal replace."""
+    raised = aiohttp.InvalidURL("http://quantalyze:deadbeefcafe@37.16.1.5:88x8")
+    with patch.object(
+        aiohttp.ClientSession, "request", new=AsyncMock(side_effect=raised)
+    ):
+        client = SfoxClient(api_key=API_KEY, proxy=_PROXY_URL)
+        with pytest.raises(SfoxApiError) as excinfo:
+            await client.get_balances()
+        await client.aclose()
+    msg = str(excinfo.value)
+    assert "deadbeefcafe" not in msg
+    assert excinfo.value.status == 0
+
+
+async def test_non_2xx_body_redacts_proxy_userinfo():
+    """F2/121: a non-2xx body echoing the proxy URL (e.g. a 407 from the proxy
+    itself) is redacted by value AND by the URL-userinfo scrub before str(exc)."""
+    resp = _stub_response(407, f"proxy rejected connection via {_PROXY_URL}")
+    with _patch_request(resp):
+        client = SfoxClient(api_key=API_KEY, proxy=_PROXY_URL)
+        with pytest.raises(SfoxApiError) as excinfo:
+            await client.get_balances()
+        await client.aclose()
+    assert "deadbeefcafe" not in str(excinfo.value)
+
+
 async def test_non_json_2xx_body_raises():
     """Fail-loud (T-118-04, no invented data): a 2xx with a non-JSON body raises
     rather than silently coercing to an empty/garbage payload."""
