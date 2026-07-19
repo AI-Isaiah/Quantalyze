@@ -1,0 +1,30 @@
+# fly-egress-proxy/tinyproxy.filter
+# ---------------------------------------------------------------------------
+# Destination ALLOW-LIST (SFOX-07 / F4 hardening). With `FilterDefaultDeny Yes`
+# in tinyproxy.conf, ONLY destination hosts matching a pattern below are proxied
+# — an authenticated client CANNOT use this public proxy as an open relay to
+# arbitrary hosts. Matched (case-insensitively, POSIX-extended) against the
+# CONNECT/HTTP destination host.
+#
+# Contains NO secrets — committed as-is and COPYed into the image (no render).
+# Patterns are anchored domain suffixes: `(^|\.)example\.com$` matches
+# `example.com` and any subdomain, but not `evilexample.com`.
+#
+# Keep in lockstep with EXCHANGE_CLASSES in analytics-service/services/exchange.py
+# (the ccxt venues the worker may route through the proxy when the opt-in ccxt
+# flag is set) plus the sFOX hosts and the egress-verification probe target.
+# ---------------------------------------------------------------------------
+
+# --- sFOX (prod + sandbox) — the primary reason this proxy exists ---
+(^|\.)sfox\.com$
+
+# --- ccxt exchange API hosts (routed through the proxy only when
+#     WORKER_EGRESS_PROXY_APPLIES_TO_CCXT is opted in) ---
+(^|\.)bybit\.com$
+(^|\.)binance\.com$
+(^|\.)okx\.com$
+(^|\.)deribit\.com$
+
+# --- egress-verification probe target (scripts/probe_exchange_egress.py
+#     reads ipinfo.io to confirm the realized static egress IP) ---
+(^|\.)ipinfo\.io$

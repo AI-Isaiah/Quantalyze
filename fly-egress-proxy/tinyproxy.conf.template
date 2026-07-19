@@ -27,7 +27,21 @@ Port 8888
 
 # --- Absence 3: NO open relay ---
 # There is deliberately no `Allow 0.0.0.0/0`. An unauthenticated public proxy is
-# an abuse magnet; BasicAuth is the sole admission control on this public IP.
+# an abuse magnet; BasicAuth is the client-admission control on this public IP.
+
+# --- DESTINATION allow-list (F4 hardening — defense-in-depth beyond BasicAuth) ---
+# BasicAuth gates WHO may connect; this gates WHERE they may connect TO. With
+# `FilterDefaultDeny Yes` and the anchored domain-suffix patterns in the filter
+# file, an authenticated client (or a leaked credential) CANNOT use this proxy as
+# an open relay to arbitrary hosts — only the sFOX + ccxt-exchange + probe hosts
+# in tinyproxy.filter are reachable. The filter file carries NO secret and is
+# COPYed into the image (see Dockerfile); it is matched against the CONNECT/HTTP
+# destination host. FilterExtended enables POSIX-extended regex (the `(^|\.)`
+# suffix anchors); FilterCaseSensitive No matches hostnames case-insensitively.
+Filter "/etc/tinyproxy/filter"
+FilterDefaultDeny Yes
+FilterExtended On
+FilterCaseSensitive No
 
 # --- AUTH (rendered from the PROXY_BASIC_AUTH fly secret at start) ---
 # tinyproxy BasicAuth is SPACE-separated: `BasicAuth <user> <password>`.

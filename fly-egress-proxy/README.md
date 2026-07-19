@@ -33,6 +33,22 @@ the inbound v4**:
 `CONNECT api.sfox.com:443` — never the Bearer token, never a response body. The proxy
 is a blind pipe.
 
+**Destination allow-list (defense-in-depth):** BasicAuth gates *who* connects;
+`FilterDefaultDeny Yes` + `tinyproxy.filter` gate *where* they connect to. Only the
+sFOX, ccxt-exchange, and egress-probe hosts (`api.sfox.com`, `*.bybit.com`,
+`*.binance.com`, `*.okx.com`, `*.deribit.com`, `ipinfo.io`) are reachable, so a leaked
+proxy credential cannot turn this public IP into an open relay to arbitrary hosts.
+Adding a new venue means adding its host to `tinyproxy.filter` and redeploying.
+
+**Residual risk (accepted, not fixed here):** the proxy BasicAuth itself travels as
+plaintext over the public internet (the worker→proxy hop is plain HTTP on `:8888`,
+only the *tunneled* sFOX TLS is confidential). That credential gates **only the proxy**
+— never the sFOX Bearer token, which stays inside the end-to-end TLS tunnel — and it is
+freely rotatable via `fly secrets set PROXY_BASIC_AUTH=...`. If proxy-credential
+confidentiality on the wire is required, front tinyproxy behind a TLS handler on `443`
+(see the step-7 fallback); that is the confidentiality upgrade, deliberately out of
+scope for this cheap-hardening pass.
+
 ---
 
 ## Runbook
@@ -114,11 +130,19 @@ railway ssh "cd /app && python -m scripts.probe_exchange_egress --expect <egress
 ```
 
 A mismatch or a `407 Proxy Authentication Required` fails loud (plan 121-02 ships the
-`--expect` flag). No-code cross-check through the proxy:
+`--expect` flag). No-code cross-check through the proxy — reuse the
+`WORKER_EGRESS_PROXY_URL` **already set on the worker** (step 6) so the secret is never
+retyped on the command line or captured in shell history:
 
 ```bash
-railway ssh "curl -s --proxy 'http://quantalyze:<secret>@<inbound-v4>:8888' https://ipinfo.io/json"
+# Single-quote the outer string so $WORKER_EGRESS_PROXY_URL expands inside the
+# worker shell (where it is set), NOT locally — the secret stays off your terminal.
+railway ssh 'cd /app && curl -s --proxy "$WORKER_EGRESS_PROXY_URL" https://ipinfo.io/json'
 ```
+
+> ⚠️ Never paste the literal `http://user:secret@host:8888` onto a command line — it
+> lands in shell history and `ps`/`railway` logs. Always reference the env var, or use
+> the `--expect` probe above (which reads the URL from the env and redacts it in output).
 
 > **Fallback (not the default):** if the connection to `<inbound-v4>:8888` cannot be
 > established at all, Railway may block outbound non-443 TCP. In that case, front

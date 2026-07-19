@@ -22,6 +22,12 @@ COPY tinyproxy.conf.template /opt/egress-proxy/tinyproxy.conf.template
 COPY entrypoint.sh /opt/egress-proxy/entrypoint.sh
 RUN chmod +x /opt/egress-proxy/entrypoint.sh
 
+# Destination allow-list (F4). Carries NO secret, so — unlike the auth-bearing
+# config — it is baked directly into the image at the path the rendered
+# tinyproxy.conf references via `Filter "/etc/tinyproxy/filter"`. World-readable
+# (0644) so tinyproxy can read it after dropping to the unprivileged user.
+COPY tinyproxy.filter /etc/tinyproxy/filter
+
 # Raw-TCP proxy port; declared in fly.toml as a handler-less service.
 EXPOSE 8888
 
