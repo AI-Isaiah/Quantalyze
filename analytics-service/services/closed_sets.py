@@ -109,7 +109,16 @@ STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
 # would drift the preview clock (√365) from the blend clock (√252) — the exact
 # silent re-widening / hand-copy failure mode this module exists to prevent. Both
 # now import from here. ``_COMPOSITE_DEGRADE_VENUES`` derives from it (minus deribit).
-CRYPTO_VENUES: frozenset[str] = frozenset({"deribit", "binance", "okx", "bybit"})
+# SFOX-05: sfox is spot crypto — it annualizes on the crypto (√365) clock (#597)
+# everywhere this canonical set is consumed (_resolve_asset_class → asset_class
+# 'crypto'; the composite blend clock). Admitting it HERE (the single MD-01 source)
+# proactively closes the known unknown-asset_class √252 blend-underestimation class
+# for sfox: a sole sfox crypto leg can never be mis-annualized on the traditional
+# clock. (The composite DEGRADABLE-member set is a DIFFERENT question — sfox has no
+# ccxt reconstruction path — and is handled at job_worker._COMPOSITE_DEGRADE_VENUES.)
+CRYPTO_VENUES: frozenset[str] = frozenset(
+    {"deribit", "binance", "okx", "bybit", "sfox"}
+)
 
 
 # ---------------------------------------------------------------------------

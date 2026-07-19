@@ -217,6 +217,56 @@ async def get_key_permissions(
     if not exchange_name:
         raise HTTPException(status_code=502, detail="API key has no exchange set")
 
+    # SFOX-05 (F2): sfox is NOT a ccxt exchange — create_exchange RAISES ValueError
+    # for it, which the ccxt path below maps to a misleading 400/502 at the
+    # finalize-wizard permission probe. Branch BEFORE create_exchange and probe via
+    # the GET-only SfoxClient (mirroring routers/exchange._validate_sfox_key). sFOX
+    # exposes NO per-key scope endpoint, so read-only is STRUCTURAL (the adapter is
+    # GET-only, HTTP verb hardcoded) — a successful auth probe returns the honest
+    # structural triple {read:True, trade:False, withdraw:False}; there is no
+    # trade/withdraw surface to grant. This closes the phase-119 F2 misdirection.
+    if exchange_name == "sfox":
+        from services.sfox_client import SfoxApiError, SfoxClient
+
+        sfox_client = SfoxClient(api_key.strip())
+        try:
+            await sfox_client.get_balances()
+            # Auth + read proven; the structural read-only triple (no scope probe).
+            return {
+                "read": True,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": False,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except SfoxApiError as exc:
+            if exc.status in (401, 403):
+                # An auth-dead key is honestly SCOPELESS (not a probe error): it
+                # can read nothing, so read/trade/withdraw are all False.
+                return {
+                    "read": False,
+                    "trade": False,
+                    "withdraw": False,
+                    "probe_error": False,
+                    "detected_at": datetime.now(timezone.utc).isoformat(),
+                }
+            # Any other SfoxApiError (429 / 5xx / shape) is a TRANSIENT probe
+            # failure — fail CLOSED with probe_error=True (the ccxt _FAIL_CLOSED
+            # semantics), never a false read/trade/withdraw grant.
+            logger.warning(
+                "internal permission probe: sFOX transient failure (status=%s) "
+                "for key=%s", exc.status, key_id,
+            )
+            return {
+                "read": False,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": True,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }
+        finally:
+            await sfox_client.aclose()
+
     try:
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)
     except ValueError as exc:

@@ -131,6 +131,13 @@ class _ProcessKeyBody(BaseModel):
     # the synchronous teaser preview cannot serve it; the async onboard/resync
     # flows route Deribit through the broker-dailies ledger path
     # (run_process_key_long_job → derive_broker_dailies) instead.
+    #
+    # SFOX-05 — `sfox` is admitted to `onboard`/`resync` ONLY, for the SAME
+    # reason: SfoxAdapter.compute_metrics/fetch_raw fail loud by design (returns
+    # come from the balance-history usd_value series via the sfox broker-dailies
+    # branch, NOT fills), so the synchronous teaser/internal_report/csv preview
+    # cannot serve it. Admitting it here kills the phase-119 F2 422-on-source; the
+    # async flows route sfox through run_process_key_long_job → derive_broker_dailies.
     @field_validator("source")
     @classmethod
     def _validate_source_per_flow(cls, source: Source, info: ValidationInfo) -> Source:
@@ -141,9 +148,9 @@ class _ProcessKeyBody(BaseModel):
             return source
         valid: dict[str, set[str]] = {
             "teaser": {"okx", "binance", "bybit"},
-            "onboard": {"okx", "binance", "bybit", "deribit"},
+            "onboard": {"okx", "binance", "bybit", "deribit", "sfox"},
             "internal_report": {"okx", "binance", "bybit"},
-            "resync": {"okx", "binance", "bybit", "deribit"},
+            "resync": {"okx", "binance", "bybit", "deribit", "sfox"},
             "csv": {"csv"},
         }
         allowed = valid.get(flow_type, set())
