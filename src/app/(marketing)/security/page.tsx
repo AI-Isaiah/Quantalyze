@@ -483,6 +483,36 @@ export default function SecurityPage() {
                     </li>
                   </ol>
                 </SubAnchor>
+
+                <SubAnchor id="sfox-readonly" title="sFOX">
+                  <ol className="mt-2 list-decimal space-y-1 pl-5 text-body text-text-secondary">
+                    <li>
+                      Go to the sFOX dashboard → API and generate an API token.
+                      Select read-only permissions where offered. sFOX issues a
+                      single API token — there is no separate secret.
+                    </li>
+                    <li>
+                      Mint a read-only token. sFOX does not expose a per-key
+                      scope endpoint, so we cannot probe or confirm the token&rsquo;s
+                      scope server-side the way we do for scope-reporting
+                      exchanges. Our adapter uses the token read-only — there is
+                      no order or withdraw path in our sFOX integration — but the
+                      read-only guarantee starts with the token you mint.
+                    </li>
+                    <li>
+                      If your token is IP-restricted (recommended), whitelist our
+                      static egress IP. Email{" "}
+                      <a
+                        href="mailto:security@quantalyze.com"
+                        className="text-accent underline underline-offset-4"
+                      >
+                        security@quantalyze.com
+                      </a>{" "}
+                      for the current IP — we rotate infrequently and will notify
+                      ahead of any change. Then paste the token into the wizard.
+                    </li>
+                  </ol>
+                </SubAnchor>
               </div>
             </Section>
 
