@@ -404,6 +404,94 @@ async def test_long_fetch_deribit_enqueues_derive_broker_dailies_and_skips_fills
 
 
 @pytest.mark.asyncio
+async def test_long_fetch_sfox_routes_ledger_path_never_calls_fetch_raw() -> None:
+    """F1 (P120 red-team): sFOX is balance-history-backed, so onboard/resync
+    MUST route through the ledger (derive_broker_dailies) path exactly like
+    deribit — NEVER the fill pipeline.
+
+    Pre-fix, ``is_ledger_backed = source == "deribit"`` excluded sfox, so the
+    handler fell into the fill branch and called ``SfoxAdapter.fetch_raw``,
+    which raises NotImplementedError BY DESIGN → every sfox onboard/resync
+    crashed in production. The tail also enqueued ``sync_trades`` (which
+    re-fetches fills) instead of ``derive_broker_dailies``. This test pins that
+    sfox reaches the derive path and never touches a fill-based method.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-sfox",
+        "kind": "process_key_long",
+        "strategy_id": "s-sfox",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-sfox",
+            "source": "sfox",
+            "flow_type": "onboard",
+            "correlation_id": "cid-sfox",
+            "context": {"strategy_id": "s-sfox", "api_key": "k", "api_secret": "s"},
+        },
+    }
+
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=True,
+            error_code=None,
+            human_message=None,
+            debug_context={},
+        )
+    )
+    # SfoxAdapter.fetch_raw / compute_metrics raise NotImplementedError by
+    # design; wire them to fail loudly here so a routing regression is caught.
+    adapter.fetch_raw = AsyncMock(
+        side_effect=AssertionError("fetch_raw must not run for sfox")
+    )
+    adapter.compute_metrics = MagicMock(
+        side_effect=AssertionError("compute_metrics must not run for sfox")
+    )
+    adapter.compute_fingerprint = MagicMock(
+        side_effect=AssertionError("compute_fingerprint must not run for sfox")
+    )
+    adapter.reconstruct_positions = AsyncMock(
+        side_effect=AssertionError("reconstruct_positions must not run for sfox")
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.encryption.encrypt_credentials", return_value={"v": 1}), \
+         patch("services.encryption.get_kek", return_value=b"0" * 32):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.DONE
+
+    # No fill-based method was ever invoked (would have raised otherwise).
+    adapter.fetch_raw.assert_not_called()
+    adapter.compute_metrics.assert_not_called()
+    adapter.compute_fingerprint.assert_not_called()
+    adapter.reconstruct_positions.assert_not_called()
+
+    published = [
+        c for c in sb.rpc.call_args_list
+        if c.args and c.args[0] == "transition_strategy_verification"
+        and c.args[1].get("p_new_status") == "published"
+    ]
+    assert published, "sfox run must advance the verification to 'published'"
+
+    enqueue = [
+        c for c in sb.rpc.call_args_list
+        if c.args and c.args[0] == "enqueue_compute_job"
+    ]
+    assert enqueue, "sfox success must enqueue a ledger factsheet tail"
+    assert enqueue[0].args[1]["p_kind"] == "derive_broker_dailies", (
+        "sfox must enqueue derive_broker_dailies, not sync_trades"
+    )
+    assert enqueue[0].args[1]["p_strategy_id"] == "s-sfox"
+
+
+@pytest.mark.asyncio
 async def test_drain_missing_metadata_treated_as_legacy():
     """When metadata is None or has no `unified_backbone_at_claim` key,
     handler treats it as a legacy claim → FAILED-permanent."""
