@@ -41,15 +41,14 @@ import pandas as pd
 from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
-    CASH_BEARING_TYPES,
     DEFAULT_PNL_BASIS,
     PNL_BASIS_MARK_TO_MARKET,
     _day_ccy_own_index,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
+    _row_is_cash_bearing,
     assert_balance_identity,
     classify_instrument,
-    correction_is_trading,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
@@ -1109,19 +1108,13 @@ async def _crawl_deribit_ledger(
                     indexable_currencies=indexable,
                 )
             )
+            # Cash-bearing membership (incl. the Phase 128 trading-reason
+            # `correction`, which counts toward the C2 equity-vs-activity floor) is
+            # the SINGLE source of truth in `_row_is_cash_bearing` — call it rather
+            # than re-deriving the predicate here, so this floor count can never
+            # drift out of sync with the USD aggregator that backs it (IN-02).
             total_return_rows += sum(
-                1
-                for r in rows
-                if isinstance(r, Mapping)
-                and (
-                    str(r.get("type", "")) in CASH_BEARING_TYPES
-                    # Phase 128: a trading-reason `correction` is realized cash too,
-                    # so it counts toward the C2 equity-vs-activity floor.
-                    or (
-                        str(r.get("type", "")) == "correction"
-                        and correction_is_trading(r)
-                    )
-                )
+                1 for r in rows if isinstance(r, Mapping) and _row_is_cash_bearing(r)
             )
             # An empty crawl (no-wallet currency) is legitimately complete-empty.
             entries[key] = {

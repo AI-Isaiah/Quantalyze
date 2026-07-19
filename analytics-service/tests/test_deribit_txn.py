@@ -655,6 +655,15 @@ def test_correction_funding_reason_is_cash_bearing_hand_derived_native() -> None
         "transfer to funding account correction",   # contains "funding"
         "withdrawal fee correction",                 # contains "fee"
         "deposit settlement adjustment",             # contains "settlement"
+        # BL-01 (milestone review) — PLURAL/inflected capital forms that a
+        # word-boundary denylist would MISS (the \b anchor doesn't span "transfer"
+        # inside "transfers"), each ALSO carrying a trading token. The substring
+        # denylist MUST still catch them → fail loud. REVERT-PROOF: switch the
+        # denylist back to word-boundary matching and these silently sum → reddens.
+        "transfers correction related to settlement",  # "transfer" inside "transfers"
+        "withdrawals fee correction",                   # "withdrawal" inside "withdrawals"
+        "wallets rebalance funding correction",         # "wallet" inside "wallets"
+        "deposits reconciliation settlement",           # "deposit" inside "deposits"
     ],
 )
 def test_correction_capital_reason_fails_loud(capital_reason: str) -> None:

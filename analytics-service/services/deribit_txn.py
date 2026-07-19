@@ -637,7 +637,15 @@ assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
 # Without this precedence, "transfer to funding account correction" (contains
 # "funding"), "withdrawal fee correction" (contains "fee"), etc. would be silently
 # summed into realized PnL — the exact silent capital-as-performance corruption this
-# gate exists to prevent. Matched on WORD BOUNDARIES (see ``_reason_matches_any``).
+# gate exists to prevent.
+#
+# BL-01 (money-safety, milestone review): the denylist is matched by PLAIN SUBSTRING
+# (NOT word boundary) so plural/inflected capital forms — "transfers", "withdrawals",
+# "wallets", "deposits" — cannot slip a ``\b`` anchor and get counted as trading.
+# The denylist can afford to be broad: a spurious capital match only ADDS a fail-loud
+# (the safe direction — an operator hand-classifies), and NEVER silently counts
+# capital as performance. See ``_reason_contains_any`` vs the word-boundary
+# ``_reason_matches_any`` used for the allow-list.
 _CORRECTION_CAPITAL_REASON_KEYWORDS: tuple[str, ...] = (
     "deposit",
     "withdrawal",
@@ -680,11 +688,20 @@ def _correction_reason_raw(row: Mapping[str, Any]) -> str:
 def _reason_matches_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
     """True iff the lowered reason contains ANY keyword on a WORD BOUNDARY (``\\b``)
     — so a short token like ``fee`` never collides inside a larger word (``market``,
-    ``benchmark``) and ``transfer`` matches ``transfer`` but not ``transferable``."""
+    ``benchmark``). Used for the TRADING allow-list, where a false positive would
+    silently count non-trading cash as performance (the unsafe direction)."""
     return any(
         re.search(rf"\b{re.escape(kw)}\b", reason_lower) is not None
         for kw in keywords
     )
+
+
+def _reason_contains_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
+    """True iff the lowered reason contains ANY keyword as a PLAIN SUBSTRING — so
+    plural/inflected forms match (``transfers`` contains ``transfer``). Used for the
+    CAPITAL denylist, where a false positive only ADDS a fail-loud (the safe
+    direction), so broad substring matching is correct (BL-01)."""
+    return any(kw in reason_lower for kw in keywords)
 
 
 def correction_is_trading(row: Mapping[str, Any]) -> bool:
@@ -696,12 +713,13 @@ def correction_is_trading(row: Mapping[str, Any]) -> bool:
     also contains a trading substring ("transfer to funding account correction"
     contains "funding" but is a capital transfer → False → the caller FAILS LOUD).
     Only when NO capital keyword matches does a trading keyword make it cash-bearing.
-    ALL matching is word-boundary anchored. False for a capital / unrecognized /
-    missing reason (the caller must then FAIL LOUD via
-    :func:`assert_correction_classifiable`). Pure / never raises."""
+    The denylist is matched by SUBSTRING (catches plurals — "transfers"/"withdrawals",
+    BL-01); the allow-list by WORD BOUNDARY (a short token can't collide inside a
+    larger word). False for a capital / unrecognized / missing reason (the caller must
+    then FAIL LOUD via :func:`assert_correction_classifiable`). Pure / never raises."""
     reason = _correction_reason_raw(row).lower()
-    if _reason_matches_any(reason, _CORRECTION_CAPITAL_REASON_KEYWORDS):
-        return False  # capital denylist beats ANY trading substring (WR-01)
+    if _reason_contains_any(reason, _CORRECTION_CAPITAL_REASON_KEYWORDS):
+        return False  # capital denylist (substring) beats ANY trading token (WR-01/BL-01)
     return _reason_matches_any(reason, _CORRECTION_TRADING_REASON_KEYWORDS)
 
 
