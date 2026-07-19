@@ -83,6 +83,30 @@ def test_no_expect_geo_block_exit_1(monkeypatch):
     assert probe.main(argv=[]) == 1
 
 
+class _RaisingOpener:
+    """An opener whose .open raises an error echoing the proxy URL — simulates a
+    ProxyHandler failing to connect to a (malformed/unreachable) proxy."""
+
+    def __init__(self, message):
+        self._message = message
+
+    def open(self, req, timeout=None):
+        raise OSError(self._message)
+
+
+def test_get_error_body_redacts_proxy_userinfo():
+    # F3/121: when the routed fetch raises an error whose message carries the
+    # proxy URL (`user:pass@host`), `_get`'s catch-all body — which main() prints
+    # to stdout — must have the BasicAuth userinfo redacted before it is returned.
+    opener = _RaisingOpener(
+        "Cannot connect to proxy http://quantalyze:SECRETPW@10.0.0.1:8888"
+    )
+    status, body = probe._get("https://api.bybit.com/v5/market/time", opener=opener)
+    assert status is None
+    assert "SECRETPW" not in body
+    assert "[REDACTED]" in body
+
+
 def test_proxy_url_secret_never_printed(monkeypatch, capsys):
     # When routed through the proxy, the probe must redact the URL to host:port —
     # the BasicAuth secret must never reach stdout (T-121-06 / Pitfall 5).

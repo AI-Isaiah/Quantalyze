@@ -57,6 +57,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# services.redact is a LEAF module (imports only stdlib `re`/`typing`), so this
+# adds ZERO third-party dependency — the probe stays runnable identically
+# locally, in-container, and via `railway ssh`. Reusing the ONE definition of the
+# URL-userinfo scrub (F1) keeps the redaction pattern from drifting (Pitfall 5).
+from services.redact import scrub_url_userinfo
+
 _TIMEOUT_S = 10
 _UA = "quantalyze-egress-probe/1"
 
@@ -88,7 +94,12 @@ def _get(url: str, opener: urllib.request.OpenerDirector | None = None) -> tuple
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(400).decode("utf-8", "replace")
     except Exception as exc:  # noqa: BLE001 - report any transport failure
-        return None, f"{type(exc).__name__}: {exc}"
+        # F3/121: a transport/proxy failure (esp. a malformed WORKER_EGRESS_PROXY_URL
+        # routed via the ProxyHandler) can surface the FULL proxy URL — incl. its
+        # `user:pass@` BasicAuth — inside `str(exc)`. This body is printed to stdout
+        # in main(), so userinfo-redact it here (the earlier `_redact_proxy` only
+        # covered the routed-through note, not this catch-all error body).
+        return None, scrub_url_userinfo(f"{type(exc).__name__}: {exc}")
 
 
 def _redact_proxy(url: str) -> str:
