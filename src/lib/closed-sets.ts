@@ -55,6 +55,25 @@ export const EXCHANGE_DISPLAY = {
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
 /**
+ * Feature flag for the public sFOX offer (Phase 122 / SFOX-08). Strict equality
+ * against the EXACT string "true" — fail-closed: "1" / "TRUE" / "on" / "" all
+ * read as OFF. Next.js inlines the full static `process.env.NEXT_PUBLIC_SFOX_ENABLED`
+ * member expression into the client bundle at build time, so this MUST stay a
+ * single static member access (never dynamic `process.env[...]` indexing) or the
+ * build-time inlining breaks and the flag reads undefined in the browser.
+ *
+ * DEFAULT OFF. Unlike deribit (which worked on the existing egress the moment
+ * its card shipped), a sfox CONNECT needs the founder's ops FIRST: the static
+ * egress deployed + whitelisted (121-03), a validated live flow (SFOX-06), and
+ * active-account crawl is phase-123-gated. So the card / picker / chip offer is
+ * built READY but hidden until the founder sets NEXT_PUBLIC_SFOX_ENABLED=true in
+ * Vercel. The sfox provenance badge + the 3-letter SFOX tag ship UNCONDITIONALLY
+ * elsewhere (122-01) — a founder-connected sfox key must render correctly before
+ * this offer flag flips.
+ */
+export const SFOX_UI_ENABLED = process.env.NEXT_PUBLIC_SFOX_ENABLED === "true";
+
+/**
  * User-facing "offered" exchange codes — the set the public/marketing surfaces
  * and the public VerificationForm dropdown may present. DECOUPLED from
  * SUPPORTED_EXCHANGES on purpose (OQ4 gate): the key-save boundary admitted
@@ -62,13 +81,33 @@ export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
  * deribit once the wizard card + the /security#deribit-readonly scope guide
  * shipped. Still NOT derived from SUPPORTED_EXCHANGES — this is a deliberate,
  * per-phase widening (FUNDING_EXCHANGES stays 3-value until Phase 70).
+ *
+ * Phase 122 / SFOX-08: sfox is appended ONLY when SFOX_UI_ENABLED is on (the
+ * founder-gated flag above). Both the base 4-tuple and the widened 5-tuple carry
+ * `as const satisfies readonly SupportedExchange[]`, so the compile-time
+ * closed-set guarantee holds on each literal; the exported value is typed
+ * `readonly SupportedExchange[]` and selects between them at module load. Flag
+ * OFF (default) → BYTE-IDENTICAL to today's 4-tuple; every EXCHANGES-derived chip
+ * surface (OQ4) and the two wizard pickers auto-widen only when the flag flips.
  */
-export const UI_EXCHANGE_CODES = [
+const UI_EXCHANGE_CODES_BASE = [
   "binance",
   "okx",
   "bybit",
   "deribit",
 ] as const satisfies readonly SupportedExchange[];
+
+const UI_EXCHANGE_CODES_WITH_SFOX = [
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+  "sfox",
+] as const satisfies readonly SupportedExchange[];
+
+export const UI_EXCHANGE_CODES: readonly SupportedExchange[] = SFOX_UI_ENABLED
+  ? UI_EXCHANGE_CODES_WITH_SFOX
+  : UI_EXCHANGE_CODES_BASE;
 
 /**
  * Funding/reconcile-eligible exchange codes — the TS mirror of the SQL
