@@ -28,10 +28,19 @@
 --
 -- Safety backstop
 -- ---------------
--- The `retention_delete_guard` trigger (mig 121) caps every retention cron
--- body at a 100k-row per-statement DELETE ceiling. This cron INHERITS that
--- backstop — it is NOT disabled, bypassed, or re-implemented here (no
--- session_replication_role, no ALTER TABLE DISABLE TRIGGER).
+-- The ONLY safety on this DELETE is its scoped WHERE predicate (status =
+-- 'running' AND claimed_at older than the 2h window) — there is deliberately
+-- no row-count ceiling trigger on public.compute_jobs. The
+-- `retention_delete_guard()` STATEMENT-level trigger (mig 20260515113853) is
+-- attached ONLY to audit_log / audit_log_cold (see its own COMMENT and the two
+-- CREATE TRIGGER … ON audit_log[_cold] statements) — it does NOT fire on
+-- compute_jobs. This body neither disables nor relies on it (no
+-- session_replication_role, no ALTER TABLE DISABLE TRIGGER). Volume is bounded
+-- naturally: a row only enters scope after being orphaned >2h, so the daily
+-- sweep's working set is small. (NOTE: the sibling retention_compute_jobs_failed
+-- migration 20260515210200 carries the same historical mis-citation of a
+-- compute_jobs guard — a pre-existing wrong assumption, not corrected here since
+-- that migration is already applied to prod and historical migrations are frozen.)
 --
 -- Scope discipline
 -- ----------------
@@ -80,8 +89,9 @@ BEGIN
   -- schema-qualified to public.compute_jobs so resolution is independent of
   -- the cron session search_path. Scoped to status='running' AND
   -- claimed_at IS NOT NULL AND claimed_at older than the 2h window — it can
-  -- NEVER touch a non-running row or a row younger than 2h. The
-  -- retention_delete_guard trigger (mig 121) backstops the volume.
+  -- NEVER touch a non-running row or a row younger than 2h. The scoped WHERE
+  -- predicate is the only safety here (no row-count guard trigger exists on
+  -- compute_jobs — see the Safety backstop note in the header).
   PERFORM cron.schedule(
     'retention_compute_jobs_orphaned_running',
     '15 4 * * *',

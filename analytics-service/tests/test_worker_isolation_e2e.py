@@ -162,7 +162,9 @@ class TestHealthzTcpServerHonesty:
             # 200 captured while the long backfill was still running.
             assert b"200 OK" in mid_dispatch_resp, mid_dispatch_resp[:120]
             assert b'"last_tick_at":' in mid_dispatch_resp
-            assert b'"last_tick_at": null' not in mid_dispatch_resp.replace(b" ", b" ")
+            # Spacing-robust: strip ALL spaces, then assert the null form is absent
+            # regardless of the JSON serializer's colon spacing.
+            assert b'"last_tick_at":null' not in mid_dispatch_resp.replace(b" ", b"")
             # The heartbeat advanced LAST_TICK_AT during the 0.3s dispatch.
             assert main_worker_healthz.LAST_TICK_AT > start_stamp, (
                 "the heartbeat must refresh LAST_TICK_AT during a long backfill; "
