@@ -43,6 +43,8 @@ let strategiesUpdateResult: { error: { code?: string; message?: string } | null 
 let apiKeysInsertResult: { error: { code?: string; message?: string } | null } = {
   error: null,
 };
+// Captures the payload passed to `.from("api_keys").insert(...)` (F4).
+let apiKeysInsertArg: Record<string, unknown> | null = null;
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -66,7 +68,12 @@ vi.mock("@/lib/supabase/client", () => ({
         };
       }
       if (table === "api_keys") {
-        return { insert: () => Promise.resolve(apiKeysInsertResult) };
+        return {
+          insert: (payload: Record<string, unknown>) => {
+            apiKeysInsertArg = payload;
+            return Promise.resolve(apiKeysInsertResult);
+          },
+        };
       }
       throw new Error(`unexpected from(${table})`);
     },
@@ -93,6 +100,7 @@ beforeEach(() => {
   routerRefreshMock.mockClear();
   strategiesUpdateResult = { error: null };
   apiKeysInsertResult = { error: null };
+  apiKeysInsertArg = null;
   // jsdom lacks HTMLDialogElement methods the <Modal> uses on mount.
   if (!HTMLDialogElement.prototype.showModal) {
     HTMLDialogElement.prototype.showModal = function showModal() {
@@ -198,5 +206,64 @@ describe("StrategyForm — H-0405 error redaction", () => {
     // The raw RLS/SQLSTATE detail must not reach the banner.
     expect(screen.queryByText(/row-level security/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/42501/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * F4 (Phase 122): the legacy StrategyForm connect-key modal is the THIRD api_keys
+ * insert site. It (a) must canonicalize the exchange to lowercase at the insert
+ * chokepoint (the DB CHECK + Python intercept key on lowercase), and (b) must NOT
+ * auto-offer sfox — the modal renders a hardcoded API Secret field + generic
+ * copy, which structurally cannot serve token-only sfox. The wizard ApiKeyForm
+ * owns the correct sfox flow; this legacy surface excludes it.
+ */
+describe("StrategyForm — F4 legacy insert-site chokepoint + sfox exclusion", () => {
+  it("inserts the exchange canonicalized to lowercase (chokepoint) on connect", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ valid: true, read_only: true, api_key_encrypted: "ct" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    render(<StrategyForm mode="create" />);
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+    fireEvent.change(screen.getByPlaceholderText(/your read-only api key/i), {
+      target: { value: "kkkkkkkk" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/your api secret/i), {
+      target: { value: "ssssssss" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect Key" }));
+
+    await waitFor(() => expect(apiKeysInsertArg).not.toBeNull());
+    // Default select value is "binance" (lowercase); the insert must carry the
+    // canonical lowercase code + a lowercase-derived label, never a display case.
+    expect(apiKeysInsertArg?.exchange).toBe("binance");
+    expect(apiKeysInsertArg?.label).toBe("binance key");
+    expect(String(apiKeysInsertArg?.exchange)).toBe(
+      String(apiKeysInsertArg?.exchange).toLowerCase(),
+    );
+  });
+
+  it("flag ON: the connect-key modal does NOT offer sfox (legacy surface excludes it)", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const { StrategyForm: Fresh } = await import("./StrategyForm");
+
+    render(<Fresh mode="create" />);
+    fireEvent.click(screen.getByRole("button", { name: /connect api key/i }));
+
+    const optionValues = screen
+      .getAllByRole("option")
+      .map((o) => (o as HTMLOptionElement).value);
+    // Revert-proof: with the flag ON, EXCHANGES includes sfox; the filter must
+    // still keep it out of THIS legacy modal's dropdown.
+    expect(optionValues).not.toContain("sfox");
+    // The ccxt offer is intact.
+    expect(optionValues).toEqual(
+      expect.arrayContaining(["binance", "okx", "bybit", "deribit"]),
+    );
+    vi.unstubAllEnvs();
   });
 });
