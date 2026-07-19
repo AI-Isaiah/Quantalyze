@@ -165,9 +165,28 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
         </div>
 
         <p className="text-xs text-text-muted mt-3">
-          {isSfox
-            ? "sFOX keys are used read-only by our adapter — no order or withdraw path exists. sFOX does not expose a per-key scope check, so mint a READ-ONLY token."
-            : "Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected."}
+          {isSfox ? (
+            <>
+              sFOX keys are used read-only by our adapter — no order or withdraw
+              path exists. sFOX does not expose a per-key scope check, so mint a
+              READ-ONLY token. See the{" "}
+              {/* F6 (Phase 122): make the /security#sfox-readonly reference an
+                  actual link to the (now-gated) sFOX read-only key guide, so a
+                  user minting a token can follow the step-by-step. Same tab-safe
+                  anchor the wizard ConnectKeyStep deep-links to. */}
+              <a
+                href="/security#sfox-readonly"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent underline underline-offset-4"
+              >
+                sFOX read-only key guide
+              </a>
+              .
+            </>
+          ) : (
+            "Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected."
+          )}
         </p>
 
         {error && <p className="text-sm text-negative mt-3">{error}</p>}

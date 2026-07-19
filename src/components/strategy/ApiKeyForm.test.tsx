@@ -131,6 +131,9 @@ describe("Phase 122 — ApiKeyForm sfox token-only (SFOX-08)", () => {
     expect(
       screen.queryByText(/trading or withdrawal permissions will be rejected/i),
     ).toBeNull();
+    // F6 (Phase 122): the footer links to the /security#sfox-readonly guide.
+    const guideLink = screen.getByRole("link", { name: /sFOX read-only key guide/i });
+    expect(guideLink).toHaveAttribute("href", "/security#sfox-readonly");
   });
 
   it("flag ON + sfox selected: submits with apiSecret as empty string", async () => {
