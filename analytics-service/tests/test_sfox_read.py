@@ -166,14 +166,31 @@ def test_write_surface_grep_gate():
         code = code.replace(doc, "")
 
     lowered = code.lower()
-    for forbidden in ("create_order", "place_order", "cancel_order", "withdraw", "transfer", "post"):
+    for forbidden in ("create_order", "place_order", "cancel_order", "transfer", "post"):
         assert forbidden not in lowered, (
             f"sfox_read.py executable code references a write/forbidden token: {forbidden!r}"
         )
+    # `withdraw` is checked in its CALL form only. Phase 120's flow extraction
+    # legitimately names the "withdraw" TRANSACTION TYPE as data (action -> sign
+    # map); a bare-substring ban would forbid that while adding nothing — the
+    # write surface is a `client.withdraw(...)` CALL, not the string. This mirrors
+    # the 120-02 plan's own `withdraw\(` acceptance grep. Spaces are stripped so
+    # `withdraw (` cannot slip through.
+    assert "withdraw(" not in lowered.replace(" ", ""), (
+        "sfox_read.py executable code makes a withdraw(...) write call"
+    )
 
     # Positive: the only client-surface methods referenced are the read set.
+    # `get_balance_history` (GET /v1/account/balance/history) is a phase-120 read
+    # — a GET-only composition, added to the allow-set alongside the 119 reads.
     referenced = set(re.findall(r"\.(get_[a-z_]+|aclose)\b", code))
-    allowed = {"get_balances", "get_trades", "get_transactions", "aclose"}
+    allowed = {
+        "get_balances",
+        "get_trades",
+        "get_transactions",
+        "get_balance_history",
+        "aclose",
+    }
     assert referenced <= allowed, (
         f"sfox_read.py references non-read client methods: {referenced - allowed}"
     )
