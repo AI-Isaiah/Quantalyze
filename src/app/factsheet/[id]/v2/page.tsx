@@ -414,8 +414,9 @@ export default async function FactsheetV2Page({
   }
 
   // Trust tier is per-request (not cached with payload) so verification flips
-  // don't require a payload cache bust. Sourced via the service-role projection
-  // (readPublicVerificationSignals), which fails soft + logs to Sentry on a read
+  // don't require a payload cache bust. Sourced via readPublicVerificationSignals
+  // (the published-gated get_published_trust_signals SECDEF RPC on a normal
+  // client — NOT service role), which fails soft + logs to Sentry on a read
   // error — a transient drop stays visible without blanking the page (FINDING-4
   // b06-silentfailure: the silent-drop logging now lives inside the helper).
   const rawTrustTier = verificationSignals.get(id)?.trust_tier ?? null;

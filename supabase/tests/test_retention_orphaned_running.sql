@@ -25,8 +25,10 @@
 -- (analytics-service/main_worker.py WATCHDOG_PER_KIND_OVERRIDES line 206) caps
 -- the max per-kind stale threshold at process_key_long = 40 minutes, so a
 -- `running` row older than 2h is definitively orphaned (worker down), never a
--- live in-flight job. The `retention_delete_guard` trigger (mig 121) backstops
--- the DELETE at a 100k-row ceiling.
+-- live in-flight job. NOTE: `retention_delete_guard` (mig 121) fires ONLY on
+-- audit_log / audit_log_cold, NOT compute_jobs — there is no row-count ceiling
+-- on this purge (the DELETE-vs-reset-on-outage tradeoff is the founder-deferred
+-- WR-02 decision, resolved at FLIP).
 --
 -- Oracle discipline: the behavioral section EXECUTEs the REAL deployed
 -- cron.job.command (not a re-typed copy of the predicate) so the test pins the

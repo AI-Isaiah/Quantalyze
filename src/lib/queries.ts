@@ -340,9 +340,19 @@ export async function readPublicVerificationSignals(
     });
 
     if (error) {
+      // This helper is the SINGLE trust-signal reader behind five surfaces
+      // (factsheet, browse, discovery, returns drawer, watchlist). A systemic
+      // RPC failure — anon EXECUTE revoked on get_published_trust_signals, the
+      // migration rolled back, the fn renamed — blanks EVERY badge at once, so
+      // log to the console FIRST (captureToSentry swallows transport failures;
+      // the caller owns the console log) and page at `error`, not `warning`.
+      console.error(
+        "[readPublicVerificationSignals] get_published_trust_signals RPC failed — all trust badges hidden:",
+        error,
+      );
       captureToSentry(error, {
         tags: { op: "readPublicVerificationSignals" },
-        level: "warning",
+        level: "error",
       });
       return byStrategy;
     }
@@ -362,9 +372,13 @@ export async function readPublicVerificationSignals(
       }
     }
   } catch (err) {
+    console.error(
+      "[readPublicVerificationSignals] unexpected error — all trust badges hidden:",
+      err,
+    );
     captureToSentry(err, {
       tags: { op: "readPublicVerificationSignals" },
-      level: "warning",
+      level: "error",
     });
   }
 
