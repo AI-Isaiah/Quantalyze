@@ -179,9 +179,10 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
     // Phase 126 (FACTSHEET-01): the admin is a NON-owner viewer. Before the fix
     // the badge was invisible to every non-owner because trust_tier was read via
     // an RLS-scoped embed on strategy_verifications (owner-only SELECT) → tier
-    // null → no badge. The fix reads trust_tier via a service-role, published-
-    // scoped projection (queries.readPublicVerificationSignals), so ANY non-owner
-    // viewer now sees the api_verified badge. This asserts that corrected intent.
+    // null → no badge. The fix reads trust_tier via the published-gated
+    // get_published_trust_signals SECURITY DEFINER RPC (queries.readPublicVerificationSignals,
+    // normal client + anon EXECUTE — NOT service role), so ANY non-owner viewer
+    // now sees the api_verified badge. This asserts that corrected intent.
     await page.goto(`/strategy/${seeded.strategyId}`);
     await expect(page).toHaveURL(new RegExp(`/strategy/${seeded.strategyId}`), {
       timeout: 10_000,
