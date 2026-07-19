@@ -173,7 +173,9 @@ import {
   fetchStrategyLazyMetrics,
   getMyWatchlist,
   getStrategyDetailV2,
+  derivePhase07Fields,
 } from "./queries";
+import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 
 const baseStrategy = {
   id: "strat_123",
@@ -1135,5 +1137,99 @@ describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () 
     // headroom against GC pauses on noisy CI runners while still flagging
     // any 10x regression in the panel-mapper hot path.
     expect(p95).toBeLessThan(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FLIPRETRY-03 (Phase 123): the derived↔legacy display flip, pinned at the
+// derivePhase07Fields WIRING level (the call-site-invokes-it rule — the
+// integration flip through getMyAllocationDashboard is already pinned in
+// queries.my-allocation.test.ts; this proves the ONE producer site itself).
+//
+// The two cases feed a BYTE-IDENTICAL derived curve differing ONLY in the
+// persisted `is_trustworthy` flag, so the flip is attributable to that flag
+// alone. Deleting the `is_trustworthy !== true` guard in
+// extractTrustworthyDerivedCurve would make the FAIL case render 'derived' —
+// neuter-proof.
+// ---------------------------------------------------------------------------
+describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLIPRETRY-03)", () => {
+  const SNAPSHOTS = [
+    {
+      asof: "2026-03-10",
+      value_usd: 10_000,
+      breakdown: null,
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+      pre_terminus_balance_unknown: false,
+    },
+    {
+      asof: "2026-03-11",
+      value_usd: 10_100,
+      breakdown: null,
+      source: "exchange_primary" as const,
+      history_depth_months: 24,
+      pre_terminus_balance_unknown: false,
+    },
+  ];
+
+  // A dense, well-formed derived curve — the payload the worker persists.
+  const DERIVED_CURVE = [
+    { date: "2026-03-10", equity_usd: 100_500.5 },
+    { date: "2026-03-11", equity_usd: 100_900.25 },
+  ];
+
+  const COMPUTED_AT = "2026-03-11T05:30:00Z";
+
+  function derivedRow(isTrustworthy: boolean) {
+    return {
+      payload: {
+        curve: DERIVED_CURVE,
+        flags: [],
+        degrade_reasons: [],
+        is_trustworthy: isTrustworthy,
+      } as Record<string, unknown>,
+      computed_at: COMPUTED_AT,
+    };
+  }
+
+  function callWith(derivedEquityRow: {
+    payload: unknown;
+    computed_at: string | null;
+  } | null) {
+    return derivePhase07Fields(
+      [],
+      SNAPSHOTS,
+      SNAPSHOTS.length,
+      [],
+      false,
+      derivedEquityRow,
+    );
+  }
+
+  it("PASS: a trustworthy well-formed curve renders 'derived' and maps the payload directly", () => {
+    const result = callWith(derivedRow(true));
+
+    expect(result.equityCurveSource).toBe("derived");
+    // The dense curve is mapped DIRECTLY ({date, equity_usd} → {date, value}) —
+    // no snapshot forward-fill adapter.
+    expect(result.equityDailyPoints).toEqual(
+      DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
+    );
+    expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
+  });
+
+  it("FAIL: the BYTE-IDENTICAL curve with is_trustworthy=false renders 'legacy' and falls back to the snapshot render", () => {
+    const result = callWith(derivedRow(false));
+
+    expect(result.equityCurveSource).toBe("legacy");
+    // Falls back to the legacy forward-fill render over the snapshots — NOT the
+    // derived curve.
+    expect(result.equityDailyPoints).toEqual(
+      equitySnapshotsToDailyPoints(
+        SNAPSHOTS.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
+      ),
+    );
+    // computed_at is suppressed when the curve is not shown.
+    expect(result.derivedCurveComputedAt).toBeNull();
   });
 });
