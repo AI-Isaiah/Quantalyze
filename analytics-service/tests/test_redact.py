@@ -28,10 +28,12 @@ from services.redact import (
     JWT_SHAPE,
     JWT_SUBSTRING,
     SENSITIVE_KEY_VALUE,
+    URL_USERINFO,
     REDACTED,
     REDACTED_JWT,
     scrub_freeform_string,
     scrub_pii,
+    scrub_url_userinfo,
     truncate_account_id,
 )
 
@@ -159,6 +161,66 @@ def test_scrub_freeform_string_jwt_embedded():
     out = scrub_freeform_string(line)
     assert "aaaaaaaaaa.bbbbbbbbbb.cccccccccc" not in out
     assert REDACTED_JWT in out
+
+
+# ---------------------------------------------------------------------------
+# Phase 121 / F1 — URL userinfo (proxy BasicAuth) redaction (secret-leak class)
+# ---------------------------------------------------------------------------
+
+
+def test_scrub_url_userinfo_redacts_proxy_basicauth():
+    """The F1 red-team case: a raw proxy URL with BasicAuth userinfo must have the
+    `user:pass@` stripped. `SENSITIVE_KEY_VALUE` + the JWT detector are both blind
+    to this shape, so before F1 the proxy secret rode `str(exc)` verbatim."""
+    url = "http://quantalyze:deadbeefcafe@37.16.1.5:8888"
+    out = scrub_url_userinfo(url)
+    assert "deadbeefcafe" not in out
+    assert "quantalyze" not in out
+    assert out == "http://[REDACTED]@37.16.1.5:8888"
+
+
+def test_scrub_freeform_string_redacts_proxy_url_userinfo():
+    """The class fix must apply inside scrub_freeform_string so EVERY str(exc)
+    scrub (SfoxApiError, ccxt NetworkError logs, Sentry exc value) catches it."""
+    secret = "deadbeefcafe"
+    for line in (
+        f"http://quantalyze:{secret}@37.16.1.5:8888",
+        f"InvalidURL('http://quantalyze:{secret}@37.16.1.5:88x8')",
+        f"Cannot connect to proxy https://user:{secret}@10.0.0.1:8888 ssl:default",
+    ):
+        out = scrub_freeform_string(line)
+        assert secret not in out, f"line {line!r} leaked proxy secret: {out!r}"
+        assert "[REDACTED]" in out
+
+
+def test_scrub_freeform_string_redacts_ccxt_networkerror_with_proxy():
+    """F1 closes the create_exchange ccxt path by value: validate_key_permissions
+    already routes every str(exc) through scrub_freeform_string, so a proxy-bearing
+    ccxt.NetworkError message is now userinfo-redacted with no exchange.py change."""
+    msg = "bybit GET https://api.bybit.com via proxy http://quantalyze:s3cr3tpw@1.2.3.4:8888 failed"
+    out = scrub_freeform_string(msg)
+    assert "s3cr3tpw" not in out
+    assert "[REDACTED]" in out
+
+
+def test_scrub_url_userinfo_leaves_benign_urls_untouched():
+    """No `scheme://...@` userinfo → byte-identical passthrough (no over-redaction)."""
+    for benign in (
+        "https://api.sfox.com/v1/user/balance",
+        "http://37.16.1.5:8888",
+        "GET https://api.bybit.com/v5/market/time 200",
+    ):
+        assert scrub_url_userinfo(benign) == benign
+
+
+def test_scrub_url_userinfo_non_string_passthrough():
+    assert scrub_url_userinfo(None) is None
+    assert scrub_url_userinfo(42) == 42
+
+
+def test_url_userinfo_pattern_compiled():
+    assert URL_USERINFO.search("http://u:p@h:1") is not None
+    assert URL_USERINFO.search("https://example.com/path") is None
 
 
 # ---------------------------------------------------------------------------

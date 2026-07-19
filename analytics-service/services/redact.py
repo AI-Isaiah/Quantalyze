@@ -120,6 +120,24 @@ SENSITIVE_KEY_VALUE: re.Pattern[str] = _build_sensitive_key_value()
 REDACTED = "[REDACTED]"
 REDACTED_JWT = "[REDACTED_JWT]"
 
+# Phase 121 / F1 (secret-leak class fix) — URL userinfo (BasicAuth) redaction.
+# A `scheme://user:pass@host[:port]` URL carries a credential in its userinfo
+# segment (e.g. the proxy BasicAuth secret in WORKER_EGRESS_PROXY_URL). That
+# shape has NO `key=value` and NO JWT structure, so BOTH `SENSITIVE_KEY_VALUE`
+# (Pass 1/4) and the JWT detector (Pass 2/3) are structurally BLIND to it — a
+# raw proxy URL echoed in `str(exc)` (e.g. aiohttp `InvalidURL` on a malformed
+# port, or a ccxt proxy-connection `NetworkError`) slipped through unredacted.
+# This pattern closes the CLASS by matching the scheme + userinfo and redacting
+# the whole `user:pass@` to `[REDACTED]@`. The `@` and preceding scheme are what
+# make it a credential-bearing URL rather than a benign `host/path` — a plain
+# `https://example.com/x` (no `@` before the first `/`) never matches.
+URL_USERINFO: re.Pattern[str] = re.compile(
+    r"([A-Za-z][A-Za-z0-9+.\-]*://)"  # group 1: scheme://  (kept verbatim)
+    r"[^/@\s:]+"                        # username (no '/', '@', ws, or ':')
+    r"(?::[^/@\s]*)?"                  # optional ':password' (up to '@')
+    r"@"                                # userinfo/host delimiter
+)
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -195,9 +213,28 @@ def truncate_account_id(s: Any) -> Any:
     return f"***{s[-4:]}"
 
 
-def scrub_freeform_string(s: Any) -> Any:
-    """Four-pass redaction for freeform strings (mirrors TS scrubFreeformString).
+def scrub_url_userinfo(s: Any) -> Any:
+    """Redact the `user:pass@` userinfo of any `scheme://user:pass@host` URL.
 
+    Phase 121 / F1. The proxy BasicAuth credential (WORKER_EGRESS_PROXY_URL /
+    `_egress_proxy`) lives in the URL userinfo — a shape that `SENSITIVE_KEY_VALUE`
+    and the JWT detector are both blind to. This is the root-cause primitive for
+    the secret-leak class: it is applied inside `scrub_freeform_string` (so every
+    `str(exc)` scrub catches it) and is exported for the Sentry frame-var sweep
+    and the egress probe's stdout redaction (single definition, no drift).
+
+    Non-strings pass through unchanged. Benign URLs without a `scheme://...@`
+    userinfo (e.g. `https://example.com/path`) are returned verbatim.
+    """
+    if not isinstance(s, str):
+        return s
+    return URL_USERINFO.sub(lambda m: f"{m.group(1)}{REDACTED}@", s)
+
+
+def scrub_freeform_string(s: Any) -> Any:
+    """Five-pass redaction for freeform strings (mirrors TS scrubFreeformString).
+
+    Pass 0: URL userinfo redaction (`scheme://user:pass@host` -> `scheme://[REDACTED]@host`).
     Pass 1: SENSITIVE_KEY_VALUE substring redaction (`key: value` / `key=value`).
     Pass 2: scrub_pii (whole-string JWT — anchored regex; no-op on non-JWT strings).
     Pass 3: JWT_SUBSTRING (embedded JWT shape mid-line).
@@ -218,7 +255,11 @@ def scrub_freeform_string(s: Any) -> Any:
     if ":" not in s and "=" not in s and "." not in s:
         return s
 
-    pass1 = SENSITIVE_KEY_VALUE.sub(lambda m: f"{m.group(1)}: {REDACTED}", s)
+    # Pass 0 — URL userinfo (BasicAuth) redaction. Run FIRST so a raw proxy URL
+    # (`http://user:pass@host:port`) echoed anywhere in the line is caught before
+    # the key=value / JWT passes, which are blind to the userinfo shape (F1).
+    pass0 = scrub_url_userinfo(s)
+    pass1 = SENSITIVE_KEY_VALUE.sub(lambda m: f"{m.group(1)}: {REDACTED}", pass0)
     pass2 = scrub_pii(pass1)
     pass2_str = (
         pass2 if isinstance(pass2, str)
