@@ -22,12 +22,29 @@ deposit as return (Pitfall 1).
 from __future__ import annotations
 
 import math
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from services.broker_dailies import combine_sfox_balance_history
+from services.external_flows import ExternalFlow
+from services.sfox_client import SfoxClient
+from services.sfox_read import (
+    SfoxCrawlTruncatedError,
+    SfoxFlowValuationError,
+    crawl_sfox_balance_history,
+    crawl_sfox_transactions,
+    sfox_flows_by_day,
+)
+
+_MS_DAY = 86_400_000  # one day in milliseconds
+
+
+def _ms(day: str) -> int:
+    """UTC-midnight epoch milliseconds for a 'YYYY-MM-DD' day."""
+    return int(pd.Timestamp(day, tz="UTC").timestamp() * 1000)
 
 
 # ---------------------------------------------------------------------------
@@ -208,3 +225,212 @@ def test_non_finite_usd_value_point_breaks_never_propagates_number():
     assert math.isnan(returns.loc[d2])  # the NaN point breaks
     assert math.isnan(returns.loc[d3])  # the following day (NaN prev) breaks
     assert returns.loc[d4] == pytest.approx((1040.0 - 1030.0) / 1030.0, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Task 2: bounded crawls + typed-flow extraction (services.sfox_read)
+# ---------------------------------------------------------------------------
+def _sfox_client() -> SfoxClient:
+    """A REAL SfoxClient (so the isinstance boundary passes) with no live session."""
+    return SfoxClient(api_key="secretkey123456")
+
+
+async def test_crawl_transactions_follows_cursor_to_exhaustion_in_order():
+    """The `after` id cursor is followed page-by-page to exhaustion; all rows are
+    returned in order and the requests are SERIAL (one after another)."""
+    page1 = [{"id": "1"}, {"id": "2"}]
+    page2 = [{"id": "3"}, {"id": "4"}]
+    page3 = [{"id": "5"}]
+    pages = {None: page1, "2": page2, "4": page3, "5": []}
+
+    client = _sfox_client()
+    client.get_transactions = AsyncMock(
+        side_effect=lambda from_ms=None, to_ms=None, limit=None, after=None: pages[after]
+    )
+
+    rows = await crawl_sfox_transactions(client, from_ms=0)
+
+    assert [r["id"] for r in rows] == ["1", "2", "3", "4", "5"]
+    # cursor followed: None -> "2" -> "4" -> "5" (four serial requests).
+    afters = [c.kwargs.get("after") for c in client.get_transactions.await_args_list]
+    assert afters == [None, "2", "4", "5"]
+
+
+async def test_crawl_transactions_budget_exhaustion_raises_truncated():
+    """A crawl that never exhausts within the hard request budget raises a typed
+    truncation error — never a silent partial."""
+    client = _sfox_client()
+    # Always a fresh non-empty page whose last id advances → never terminates.
+    counter = {"n": 0}
+
+    def _page(from_ms=None, to_ms=None, limit=None, after=None):
+        counter["n"] += 1
+        return [{"id": str(counter["n"])}]
+
+    client.get_transactions = AsyncMock(side_effect=_page)
+
+    with pytest.raises(SfoxCrawlTruncatedError):
+        await crawl_sfox_transactions(client, from_ms=0)
+
+
+async def test_crawl_balance_history_full_window_returns_rows_and_earliest():
+    """A crawl that reaches the requested recent edge returns its rows plus the
+    observed earliest timestamp."""
+    start = _ms("2026-01-01")
+    end = _ms("2026-01-04")
+    rows_full = [
+        {"timestamp": _ms("2026-01-01"), "usd_value": "1000"},
+        {"timestamp": _ms("2026-01-02"), "usd_value": "1010"},
+        {"timestamp": _ms("2026-01-03"), "usd_value": "1020"},
+        {"timestamp": _ms("2026-01-04"), "usd_value": "1030"},
+    ]
+
+    client = _sfox_client()
+
+    def _bh(start_date_ms, end_date_ms=None, interval=86400):
+        # One page covers the whole window; a follow-up (past the edge) is empty.
+        return rows_full if start_date_ms <= start else []
+
+    client.get_balance_history = AsyncMock(side_effect=_bh)
+
+    rows, earliest = await crawl_sfox_balance_history(client, start, end)
+
+    assert [r["usd_value"] for r in rows] == ["1000", "1010", "1020", "1030"]
+    assert earliest == _ms("2026-01-01")
+
+
+async def test_crawl_balance_history_recent_edge_shortfall_raises():
+    """Pitfall 4: a crawl whose latest point stops MATERIALLY short of the
+    requested recent edge is a truncation, never a complete-but-short series."""
+    start = _ms("2026-01-01")
+    end = _ms("2026-01-31")
+    short_rows = [
+        {"timestamp": _ms("2026-01-01"), "usd_value": "1000"},
+        {"timestamp": _ms("2026-01-02"), "usd_value": "1010"},
+    ]  # latest 2026-01-02, ~29 days short of the requested 2026-01-31 edge
+
+    client = _sfox_client()
+
+    def _bh(start_date_ms, end_date_ms=None, interval=86400):
+        return short_rows if start_date_ms <= start else []
+
+    client.get_balance_history = AsyncMock(side_effect=_bh)
+
+    with pytest.raises(SfoxCrawlTruncatedError):
+        await crawl_sfox_balance_history(client, start, end)
+
+
+async def test_crawl_balance_history_earliest_after_start_is_not_error():
+    """A1: the earliest returned point being AFTER the requested start is NOT an
+    error (docs-silent depth → the earliest point is the empirical inception); it
+    is surfaced to the caller."""
+    start = _ms("2026-01-01")
+    end = _ms("2026-01-10")
+    rows = [
+        {"timestamp": _ms("2026-01-05"), "usd_value": "1000"},  # inception > start
+        {"timestamp": _ms("2026-01-10"), "usd_value": "1050"},  # reaches the edge
+    ]
+
+    client = _sfox_client()
+
+    def _bh(start_date_ms, end_date_ms=None, interval=86400):
+        return rows if start_date_ms <= start else []
+
+    client.get_balance_history = AsyncMock(side_effect=_bh)
+
+    out_rows, earliest = await crawl_sfox_balance_history(client, start, end)
+    assert earliest == _ms("2026-01-05")  # empirical inception surfaced, no raise
+    assert len(out_rows) == 2
+
+
+async def test_crawl_balance_history_budget_exhaustion_raises():
+    """A balance-history crawl that keeps advancing without ever reaching the edge
+    exhausts the hard request budget → typed truncation."""
+    start = _ms("2026-01-01")
+    end = _ms("2030-01-01")  # far future the mock never reaches
+
+    client = _sfox_client()
+
+    def _bh(start_date_ms, end_date_ms=None, interval=86400):
+        # A single advancing point per call — progresses forever, never hits edge.
+        return [{"timestamp": start_date_ms + _MS_DAY, "usd_value": "1000"}]
+
+    client.get_balance_history = AsyncMock(side_effect=_bh)
+
+    with pytest.raises(SfoxCrawlTruncatedError):
+        await crawl_sfox_balance_history(client, start, end)
+
+
+def test_sfox_flows_by_day_signs_excludes_rotations_and_aggregates():
+    """action→sign map (deposit +, withdraw −, credit +, charge −); same-UTC-day
+    flows aggregate; buy/sell are internal rotations and are EXCLUDED; returns both
+    the daily Series and the list[ExternalFlow] evidence."""
+    txns = [
+        {"id": 1, "action": "deposit", "currency": "USD", "amount": "1000", "timestamp": _ms("2026-01-02")},
+        {"id": 2, "action": "withdraw", "currency": "USD", "amount": "300", "timestamp": _ms("2026-01-02")},
+        {"id": 3, "action": "credit", "currency": "USD", "amount": "50", "timestamp": _ms("2026-01-03")},
+        {"id": 4, "action": "charge", "currency": "USD", "amount": "20", "timestamp": _ms("2026-01-03")},
+        {"id": 5, "action": "buy", "currency": "BTC", "amount": "0.1", "timestamp": _ms("2026-01-03")},
+        {"id": 6, "action": "sell", "currency": "BTC", "amount": "0.1", "timestamp": _ms("2026-01-03")},
+    ]
+
+    series, evidence = sfox_flows_by_day(txns)
+
+    d2 = pd.Timestamp("2026-01-02").as_unit("us")
+    d3 = pd.Timestamp("2026-01-03").as_unit("us")
+    # 2026-01-02: +1000 (deposit) − 300 (withdraw) = +700
+    # 2026-01-03: +50 (credit) − 20 (charge) = +30 ; buy/sell EXCLUDED
+    assert series.loc[d2] == pytest.approx(700.0)
+    assert series.loc[d3] == pytest.approx(30.0)
+    assert set(series.index) == {d2, d3}
+    # evidence = the 4 external flows only (rotations excluded).
+    assert len(evidence) == 4
+    assert all(isinstance(e, ExternalFlow) for e in evidence)
+    signed = {(e.utc_day_iso, round(e.usd_signed, 2)) for e in evidence}
+    assert ("2026-01-02", 1000.0) in signed
+    assert ("2026-01-02", -300.0) in signed
+    assert ("2026-01-03", 50.0) in signed
+    assert ("2026-01-03", -20.0) in signed
+
+
+def test_sfox_flows_by_day_non_usd_flow_raises_never_guessed():
+    """A deposit/withdraw whose USD value is not derivable from its OWN fields
+    (non-USD currency, no usable USD field) RAISES — never guessed, never dropped
+    (a mis-valued flow silently corrupts the TWR)."""
+    txns = [
+        {"id": 1, "action": "deposit", "currency": "BTC", "amount": "0.5", "timestamp": _ms("2026-01-02")},
+    ]
+    with pytest.raises(SfoxFlowValuationError):
+        sfox_flows_by_day(txns)
+
+
+def test_sfox_flows_by_day_empty_is_honest_empty():
+    """An empty account → honest empties everywhere (no fabricated flow)."""
+    series, evidence = sfox_flows_by_day([])
+    assert series.empty
+    assert evidence == []
+
+
+def test_extracted_flows_feed_combine_cashflow_neutral_end_to_end():
+    """Wiring (Rule 9): the flows Series produced by sfox_flows_by_day aligns
+    (index unit/day) with the combine_sfox_balance_history NAV reindex and books
+    the deposit day cashflow-neutral (the P115 oracle value)."""
+    txns = [
+        {"id": 1, "action": "deposit", "currency": "USD", "amount": "500", "timestamp": _ms("2026-01-03")},
+    ]
+    flows, _evidence = sfox_flows_by_day(txns)
+    nav = _nav([1000.0, 1010.0, 1515.0, 1500.15], start="2026-01-01")
+
+    returns, _meta = combine_sfox_balance_history(nav, flows)
+    # (1515 − 1010 − 500) / 1010 = 0.004950495049504950 — deposit removed.
+    assert returns.iloc[2] == pytest.approx(0.004950495049504950, abs=1e-12)
+
+
+@pytest.mark.parametrize("not_client", [object(), None, MagicMock()])
+async def test_crawls_refuse_non_sfoxclient_at_boundary(not_client):
+    """Read-only ingestion boundary: a non-SfoxClient object is refused with a
+    TypeError BEFORE any read (the read_sfox_account precedent)."""
+    with pytest.raises(TypeError):
+        await crawl_sfox_balance_history(not_client, 0, 1)
+    with pytest.raises(TypeError):
+        await crawl_sfox_transactions(not_client, 0)
