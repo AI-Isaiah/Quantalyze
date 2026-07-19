@@ -852,8 +852,15 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 _ACLOSE_TIMEOUT_S = float(os.getenv("EXCHANGE_CLOSE_TIMEOUT_S", "10"))
 
 
-async def aclose_exchange(exchange: ccxt.Exchange) -> None:
+async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
     """Close a ccxt async exchange, cancellation-safe and bounded.
+
+    SFOX-05: the single close chokepoint the job-worker calls for EVERY venue.
+    A non-ccxt SfoxClient is routed to its OWN bounded, idempotent aclose()
+    (which already wraps session.close() in asyncio.wait_for) and returns — so
+    every job_worker call site becomes sfox-safe with zero per-site edits. The
+    SfoxClient import is lazy to avoid any import cycle at module load. The ccxt
+    path below stays BYTE-IDENTICAL.
 
     A bare ``await exchange.close()`` inside a ``finally`` is best-effort: the
     worker wraps every exchange-owning handler in ``asyncio.wait_for(...)`` and
@@ -881,6 +888,16 @@ async def aclose_exchange(exchange: ccxt.Exchange) -> None:
     raises (e.g. an SSL shutdown error) is logged and swallowed — it is not a leak
     and must not mask the handler's real error.
     """
+    # SFOX-05: isinstance chokepoint — a SfoxClient owns its own bounded aclose()
+    # (asyncio.wait_for(SFOX_CLOSE_TIMEOUT_S), idempotent, swallows close errors).
+    # Route it there and return BEFORE the ccxt close() sequence below, which the
+    # SfoxClient does not implement. Lazy import avoids an import cycle.
+    from services.sfox_client import SfoxClient
+
+    if isinstance(exchange, SfoxClient):
+        await exchange.aclose()
+        return
+
     task = asyncio.ensure_future(exchange.close())
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=_ACLOSE_TIMEOUT_S)

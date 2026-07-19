@@ -90,6 +90,7 @@ from services.exchange import (
     parse_since_ms,
 )
 from services.positions import fetch_positions, persist_position_snapshots
+from services.sfox_client import SfoxClient
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +176,39 @@ WORKER_FENCE_V2: Final[bool] = (
 # C2 (P70 review): a Deribit account holding more than this USD equity but
 # producing ZERO return-bearing ledger rows is treated as a silently-empty ledger
 # (fail loud), not "insufficient history". Above dust, below any real balance.
+# The floor is VENUE-AGNOSTIC (also the sFOX material-balance analog, SFOX-05):
+# any broker account holding >$100 but producing <2 usable NAV days is a
+# silently-empty (green) track record, never genuine "insufficient history".
 _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = 100.0
+
+# SFOX-05 / FLIPRETRY-01 — hard per-crawl wall-clock bound for the sfox venue
+# branch. derive_broker_dailies runs under a FIXED 15-min (900s) outer budget
+# (TIMEOUT_PER_KIND["derive_broker_dailies"]); the sfox branch makes TWO serial
+# live crawls (balance-history + transactions). A 300s bound per crawl caps the
+# two reads at 600s and leaves ~300s headroom for the (pure, no-I/O)
+# combine_sfox_balance_history + derive/persist under the outer wait_for. A
+# hanging live crawl (the v1.11 FLIP wedge root cause — a slow exchange read
+# blocking the SEQUENTIAL worker's event loop) thus becomes a classified,
+# retryable transient failure at 300s, never an unbounded wedge.
+_SFOX_CRAWL_TIMEOUT_S: Final[float] = float(
+    os.getenv("SFOX_CRAWL_TIMEOUT_S", "300")
+)
+
+# A1 (docs-silent depth): request the sfox history crawls from a far-past epoch
+# so they reach empirical inception; the earliest returned point IS the
+# inception (the crawl surfaces it, an earlier-than-requested start is never an
+# error). 2015-01-01T00:00:00Z in epoch-ms — comfortably before sFOX existed.
+_SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
+
+# The venues whose daily-return series are produced NATIVELY inside the venue
+# dispatch (deribit: combine_native_ledger; sfox: combine_sfox_balance_history)
+# rather than by the ccxt USD-space combine_realized_and_funding pass below. The
+# :2645 guard excludes these so the ccxt combine never OVERWRITES a native
+# returns/meta with an empty realized/funding stream. Adding sfox here is the
+# money-critical fix (SFOX-05): without it, combine_realized_and_funding runs on
+# empty streams and clobbers the reconstructed sfox TWR. deribit stays byte
+# -identical (it was, and remains, excluded).
+_NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox"})
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -662,7 +695,73 @@ class _ExchangeContext:
     # which owns no strategy — only the strategy-side preflight populates it.
     strategy_row: dict[str, Any] | None
     key_row: dict[str, Any]
-    exchange: ccxt.Exchange
+    # SFOX-05: sfox is a non-ccxt venue read through the GET-only SfoxClient. The
+    # preflights construct that instead of a ccxt.Exchange; aclose_exchange routes
+    # it to SfoxClient.aclose() at the single close chokepoint.
+    exchange: ccxt.Exchange | SfoxClient
+
+
+def _make_exchange_client(
+    exchange_name: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str | None,
+) -> ccxt.Exchange | SfoxClient:
+    """SFOX-05 — the SINGLE preflight construction chokepoint. Both
+    _exchange_preflight and _allocator_key_preflight route through here, so the
+    sfox-vs-ccxt decision lives in exactly ONE place.
+
+    sFOX is NOT a ccxt exchange: create_exchange RAISES ValueError for it
+    (EXCHANGE_CLASSES holds only ccxt classes). Construct the GET-only
+    SfoxClient from the trimmed api_key instead. sFOX auth is a SINGLE Bearer
+    token (the Q1 worker contract) — the api_secret is intentionally NEVER
+    passed. The .strip() mirrors the validate/exchange-router credential
+    chokepoint (a trailing-newline token must authenticate identically).
+
+    Every ccxt venue is BYTE-IDENTICAL to the prior inline create_exchange call.
+    """
+    if exchange_name == "sfox":
+        return SfoxClient(api_key.strip())
+    return create_exchange(exchange_name, api_key, api_secret, passphrase)
+
+
+def _sfox_rows_to_usd_value_series(rows: list[dict[str, Any]]) -> "pd.Series":
+    """SFOX-05 — parse sFOX balance-history rows into the daily ``usd_value`` NAV
+    Series combine_sfox_balance_history consumes.
+
+    Each row is ``{"timestamp": <epoch-ms>, "usd_value": <number|str>}``. We coerce
+    to a UTC calendar-day DatetimeIndex [us] with float usd_value, FAIL LOUD
+    (``SfoxFlowValuationError``) on a missing/garbage timestamp or usd_value —
+    never silently coerce a bad value to 0.0 (that would fabricate NAV). On the
+    rare duplicate-day row, last observation wins (the crawl advances the cursor
+    past the latest point, so a boundary day can appear twice). An empty crawl
+    yields an honest empty Series.
+    """
+    import pandas as pd
+
+    from services.sfox_read import SfoxFlowValuationError
+
+    if not rows:
+        return pd.Series(dtype="float64", name="usd_value")
+
+    by_day: dict[pd.Timestamp, float] = {}
+    for row in rows:
+        try:
+            ts_ms = int(row["timestamp"])
+            value = float(row["usd_value"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise SfoxFlowValuationError(
+                "sFOX balance-history row carries no usable numeric "
+                "timestamp/usd_value"
+            ) from exc
+        day = pd.Timestamp(
+            datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
+        ).as_unit("us")
+        by_day[day] = value
+
+    days = sorted(by_day)
+    index = pd.DatetimeIndex(days).as_unit("us")
+    return pd.Series([by_day[d] for d in days], index=index, name="usd_value")
 
 
 async def _exchange_preflight(
@@ -705,7 +804,7 @@ async def _exchange_preflight(
         return defer_result
 
     api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-    exchange = create_exchange(
+    exchange = _make_exchange_client(
         key_row["exchange"], api_key, api_secret, passphrase
     )
 
@@ -787,7 +886,7 @@ async def _allocator_key_preflight(
         return defer_result
 
     api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-    exchange = create_exchange(
+    exchange = _make_exchange_client(
         key_row["exchange"], api_key, api_secret, passphrase
     )
 
@@ -2524,6 +2623,162 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # funding are retained (empty) only for the downstream log lines.
             funding: list[Any] = []
             realized: list[Any] = []
+        elif venue == "sfox":
+            # ── SFOX-05: the sFOX broker-dailies ONE-path (plan 120-03) ──
+            # sFOX is the SIMPLEST broker-dailies venue: /v1/account/balance/history
+            # HANDS us the daily usd_value NAV series directly, so there is NO
+            # ledger reconstruction (no per-currency backward roll). We read the NAV
+            # series + the typed transaction ledger, EACH crawl HARD-BOUNDED by
+            # asyncio.wait_for (the FLIPRETRY-01 worker-wedge guard: a slow/hanging
+            # live crawl becomes a classified TRANSIENT failure, never a wedge of the
+            # SEQUENTIAL worker loop — the v1.11 FLIP rollback root cause), gate
+            # honesty (a truncated/under-fetched crawl, an unvaluable flow, and a
+            # materially-funded-but-uninterpretable account each fail loud), then feed
+            # combine_sfox_balance_history → the UNCHANGED shared derive/persist below
+            # (the ccxt combine at :2645 is excluded via _NATIVE_RETURNS_VENUES).
+            from services.broker_dailies import combine_sfox_balance_history
+            from services.sfox_read import (
+                SfoxCrawlTruncatedError,
+                SfoxFlowValuationError,
+                crawl_sfox_balance_history,
+                crawl_sfox_transactions,
+                sfox_flows_by_day,
+            )
+
+            _sfox_now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            try:
+                # FLIPRETRY-01: EACH crawl is wall-clock bounded. asyncio.wait_for
+                # cancels the inner crawl on timeout and raises asyncio.TimeoutError.
+                _bh_rows, _earliest_ms = await asyncio.wait_for(
+                    crawl_sfox_balance_history(
+                        ctx.exchange,
+                        start_date_ms=_SFOX_FAR_PAST_EPOCH_MS,
+                        end_date_ms=_sfox_now_ms,
+                    ),
+                    timeout=_SFOX_CRAWL_TIMEOUT_S,
+                )
+                _txn_rows = await asyncio.wait_for(
+                    crawl_sfox_transactions(
+                        ctx.exchange,
+                        from_ms=_SFOX_FAR_PAST_EPOCH_MS,
+                        to_ms=_sfox_now_ms,
+                    ),
+                    timeout=_SFOX_CRAWL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
+                # NEVER an unbounded wedge, and NO terminal `failed` stamp (the next
+                # attempt may succeed). The `finally: aclose_exchange` below still
+                # runs (bounded SfoxClient.aclose). This is the FLIPRETRY-01 guard.
+                logger.warning(
+                    "derive_broker_dailies: sfox crawl exceeded the %ss per-crawl "
+                    "bound (label=%s) — classified transient, retrying (FLIPRETRY-01)",
+                    _SFOX_CRAWL_TIMEOUT_S, funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox crawl exceeded the per-crawl "
+                        f"wall-clock bound ({_SFOX_CRAWL_TIMEOUT_S}s) — retrying "
+                        "rather than wedging the worker (FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
+            except SfoxCrawlTruncatedError as exc:
+                # The assert_ledger_complete analog (D-02 honesty gate): a
+                # silently-partial read must NEVER become a complete track record.
+                # Permanent FAILED + terminal stamp — retrying cannot help.
+                scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_strategy_analytics_failed(
+                    "sFOX history crawl could not be verified as complete. "
+                    + scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox crawl truncated/under-fetched "
+                        "— " + scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+
+            # Parse the balance-history rows → the usd_value pd.Series and extract
+            # the typed daily flow series + ExternalFlow evidence. A typed
+            # unvaluable-flow error (non-USD-family currency, malformed amount,
+            # unrecognized action) OR a non-finite/garbage NAV point → permanent
+            # FAILED + stamp (the LedgerValuationError disposition parity).
+            try:
+                _usd_value = _sfox_rows_to_usd_value_series(_bh_rows)
+                _flows_series, _flow_evidence = sfox_flows_by_day(_txn_rows)
+            except SfoxFlowValuationError as exc:
+                scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_strategy_analytics_failed(
+                    "sFOX ledger contained a value that could not be interpreted "
+                    "(a non-USD-family flow, a malformed amount, an unrecognized "
+                    "action, or a non-finite NAV point). " + scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox ledger value unvaluable — "
+                        + scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+
+            # Material-balance floor (the deribit C2 analog, venue-agnostic): a
+            # materially-funded account that produced <2 usable observed NAV days is
+            # a silently-empty (green) track record (broken key / wrong account),
+            # NOT genuine "insufficient history". Fail loud BEFORE combine. A
+            # genuinely tiny/empty account (terminal balance below the floor) instead
+            # flows to the honest downstream <2-day gate (:2931) — no invented rows.
+            _sfox_terminal_usd = (
+                float(_usd_value.iloc[-1]) if len(_usd_value) else 0.0
+            )
+            _sfox_usable_nav_days = int(_usd_value.notna().sum())
+            if (
+                abs(_sfox_terminal_usd) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
+                and _sfox_usable_nav_days < 2
+            ):
+                await _stamp_strategy_analytics_failed(
+                    "sFOX account holds material equity but produced no "
+                    "interpretable daily history."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox account holds material equity "
+                        f"(~{abs(_sfox_terminal_usd):.0f} USD) but produced <2 "
+                        "usable NAV days — refusing an empty-but-green track record"
+                    ),
+                    error_kind="permanent",
+                )
+
+            # THE combine: usd_value NAV + typed flows → cashflow-neutral daily TWR
+            # via the EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard
+            # set). No new backbone call site — (returns, meta) fall through to the
+            # UNCHANGED derive_basis_series / persist_basis_series below.
+            returns, meta = combine_sfox_balance_history(_usd_value, _flows_series)
+
+            # Set the shared downstream variables EXACTLY as the deribit branch does
+            # so the post-dispatch code runs unchanged. usd_value IS the total MTM
+            # equity of a spot NAV series — there is NO separate open-uPnL wedge — so
+            # open_unrealized_usd is 0.0 and upnl_unreadable is False (the :2720
+            # unreadable-uPnL warning never fires for sfox). sFOX returns are NATIVE
+            # (already TWR from the NAV series) → no flat realized/funding record
+            # list, mirroring the deribit branch's empty lists.
+            equity = _sfox_terminal_usd
+            balance_error = False
+            open_unrealized_usd = 0.0
+            upnl_unreadable = False
+            funding = []
+            realized = []
+            # external_flows is the DQ-02 evidence shape the downstream terminus gate
+            # consumes. The deribit branch sets it to _completeness.dated_external_flows
+            # — a list[ExternalFlow] (deribit_ingest.py:732). sfox_flows_by_day yields
+            # the SAME list[ExternalFlow] type (sfox_read.py:238), so the downstream
+            # consumer accepts it identically. Shape parity CONFIRMED.
+            external_flows = _flow_evidence
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
@@ -2639,10 +2894,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # v1.9 NATIVE SWITCH: the deribit venue already produced (returns, meta) via
     # the native core above (combine_native_ledger), with its per-currency wedge
     # subtracted INSIDE the core (App A #6) and materiality re-derived from the
-    # collapsed anchor. The USD-space noise-guard + combine below are the CCXT
-    # venues' path only — running combine_realized_and_funding for deribit would
-    # overwrite the native returns with an empty realized/funding stream.
-    if venue != "deribit":
+    # collapsed anchor. SFOX-05: the sfox venue likewise already produced
+    # (returns, meta) via combine_sfox_balance_history. The USD-space noise-guard
+    # + combine below are the CCXT venues' path only — running
+    # combine_realized_and_funding for a NATIVE-returns venue would OVERWRITE its
+    # reconstructed returns with an empty realized/funding stream (the
+    # money-critical clobber). Both native venues are excluded via the single
+    # _NATIVE_RETURNS_VENUES set; deribit's exclusion is byte-identical to the
+    # prior `!= "deribit"`.
+    if venue not in _NATIVE_RETURNS_VENUES:
         # FLOW-04 (v1.8) NOISE GUARD (Pitfall 5 / T-77-08): the companion open-uPnL
         # wedge is only trustworthy relative to a trustworthy anchor. Force it to
         # 0.0 when the anchor is heuristic/dust — a balance_error read, a missing
@@ -3453,7 +3713,23 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = CRYPTO_VENUES
 # (`venue_reconstruction_unavailable`) the user sees, rather than killing the whole
 # composite (the Phase-86 Deribit-only fence is lifted). Derived from
 # _COMPOSITE_CRYPTO_VENUES so the two sets can never drift.
-_COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {"deribit"}
+#
+# GUARD AUDIT (SFOX-05): sfox is now in CRYPTO_VENUES (√365 RISK basis) and thus
+# in _COMPOSITE_CRYPTO_VENUES, so the #597 blend clock correctly annualizes a
+# composite that contains an sfox leg on the crypto clock. But sfox has NO ccxt
+# reconstruction path — its dailies come from the sfox broker-dailies branch
+# (combine_sfox_balance_history via create_exchange→SfoxClient), which
+# _reconstruct_ccxt_member does NOT invoke (it calls create_exchange, which
+# raises ValueError for sfox). So sfox is EXCLUDED from _COMPOSITE_DEGRADE_VENUES:
+# an sfox composite member (not a reachable flow until 122, but defended here)
+# falls through to the `venue != "deribit"` arm below and gets an HONEST permanent
+# "unsupported composite member venue" refusal, never a confusing ccxt-reconstruct
+# crash. The blend-clock membership (crypto √365) and the degradable-member set
+# (ccxt-reconstructable) are DIFFERENT questions; only the former includes sfox.
+_COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {
+    "deribit",
+    "sfox",
+}
 
 
 class _CcxtMemberDegrade(Exception):
