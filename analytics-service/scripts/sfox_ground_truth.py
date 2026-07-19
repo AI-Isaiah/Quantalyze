@@ -356,10 +356,27 @@ def check_parity(
     cash_only_signature = (
         diverged and not account_balance_moves_off_event and len(event_days) > 0
     )
+    # WR-03: a ZERO-cashflow account (no deposit/withdraw events) whose constant
+    # account_balance diverges from a moving usd_value is GENUINELY AMBIGUOUS — the
+    # cash-only and total-MTM interpretations are indistinguishable with no cashflow
+    # event to reconcile at, so the cash-only signature (which requires
+    # ``len(event_days) > 0``) never matches and the divergence would auto-raise on
+    # a legitimate no-flow account. Surface it for the founder (exit 0, both residual
+    # sets emitted), consistent with the event-bearing cash-only case — never
+    # auto-fail. A moving account_balance (``account_balance_moves_off_event``) is
+    # the total-MTM shape, which either reconciles (a2_total_mtm) or is a genuine
+    # divergence that still fails loud below.
+    zero_cashflow_ambiguity = (
+        diverged
+        and len(event_days) == 0
+        and not account_balance_moves_off_event
+    )
     if a2_total_mtm_reconciles:
         a2_verdict = "total_mtm_reconciles"
     elif cash_only_signature:
         a2_verdict = "cash_only_pattern_requires_founder"
+    elif zero_cashflow_ambiguity:
+        a2_verdict = "zero_cashflow_ambiguous_requires_founder"
     else:
         a2_verdict = "indeterminate"
 
@@ -378,7 +395,10 @@ def check_parity(
         and not _is_material(a3_residual, inception_capital)
     )
 
-    requires_founder_decision = a2_verdict == "cash_only_pattern_requires_founder"
+    requires_founder_decision = a2_verdict in (
+        "cash_only_pattern_requires_founder",
+        "zero_cashflow_ambiguous_requires_founder",
+    )
 
     evidence: dict[str, Any] = {
         "run_meta": {
@@ -421,8 +441,10 @@ def check_parity(
         "requires_founder_decision": bool(requires_founder_decision),
     }
 
-    if diverged and not cash_only_signature:
-        # Material divergence NOT attributable to the A2 ambiguity — fail loud.
+    if diverged and not cash_only_signature and not zero_cashflow_ambiguity:
+        # Material divergence NOT attributable to the A2 ambiguity (neither the
+        # event-bearing cash-only signature nor the WR-03 zero-cashflow ambiguity)
+        # — fail loud.
         raise ParityDivergenceError(
             "sFOX parity FAIL-LOUD: the reconstructed curve diverges from the "
             "independent transactions oracle beyond materiality "

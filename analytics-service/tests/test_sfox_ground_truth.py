@@ -201,6 +201,68 @@ def test_cash_only_account_balance_flags_founder_decision_not_raise():
 
 
 # ---------------------------------------------------------------------------
+# WR-03 zero-cashflow ambiguity — an account with NO deposit/withdraw events whose
+# account_balance is a cash-only running balance (constant, no cashflows) while
+# usd_value marks the held crypto daily. With zero events the cash-only and
+# total-MTM interpretations are genuinely indistinguishable, so a divergence must
+# be FLAGGED requires_founder_decision (exit 0), never auto-raised.
+# HAND-DERIVED: account_balance (cash) 100000 every day; usd_value (total MTM)
+#   100000, 101000, 102000, 103000 — a +1% daily MTM drift, no external flow.
+# ---------------------------------------------------------------------------
+def test_zero_cashflow_account_flags_founder_decision_not_raise_wr03():
+    """WR-03: a zero-cashflow account (only rotations; no deposit/withdraw) whose
+    constant cash-only account_balance diverges from a moving usd_value must NOT
+    auto-raise — the two A2 interpretations are indistinguishable with no cashflow
+    event to reconcile at → FLAG requires_founder_decision, exit-0."""
+    zero_flow_bh = [
+        _bh("2026-01-01", "100000"),
+        _bh("2026-01-02", "101000"),
+        _bh("2026-01-03", "102000"),
+        _bh("2026-01-04", "103000"),
+    ]
+    # Only buy/sell rotations (no deposit/withdraw) → zero cashflow events; the
+    # cash-only account_balance is constant across the window.
+    zero_flow_txns = [
+        {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-01"), "account_balance": "100000"},
+        {"id": 2, "action": "sell", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-02"), "account_balance": "100000"},
+        {"id": 3, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-03"), "account_balance": "100000"},
+        {"id": 4, "action": "sell", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-04"), "account_balance": "100000"},
+    ]
+    evidence = check_parity(zero_flow_bh, zero_flow_txns)  # must NOT raise
+    a2 = evidence["a2_account_balance_semantics"]
+    assert a2["verdict"] == "zero_cashflow_ambiguous_requires_founder"
+    assert evidence["run_meta"]["cashflow_event_count"] == 0
+    assert evidence["requires_founder_decision"] is True
+
+
+def test_zero_cashflow_total_mtm_account_passes_clean_wr03():
+    """WR-03 companion: a zero-cashflow account whose account_balance IS the total
+    MTM equity (tracks usd_value) reconciles cleanly — total-MTM verdict, no
+    founder decision, no raise (the legitimate no-flow account just passes)."""
+    bh = [
+        _bh("2026-01-01", "100000"),
+        _bh("2026-01-02", "101000"),
+        _bh("2026-01-03", "102000"),
+    ]
+    txns = [
+        {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-01"), "account_balance": "100000"},
+        {"id": 2, "action": "sell", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-02"), "account_balance": "101000"},
+        {"id": 3, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-03"), "account_balance": "102000"},
+    ]
+    evidence = check_parity(bh, txns)  # must NOT raise
+    a2 = evidence["a2_account_balance_semantics"]
+    assert a2["verdict"] == "total_mtm_reconciles"
+    assert evidence["requires_founder_decision"] is False
+
+
+# ---------------------------------------------------------------------------
 # Oracle independence pins (P115 — signature + source scan).
 # ---------------------------------------------------------------------------
 def test_oracle_signature_takes_only_transactions():
