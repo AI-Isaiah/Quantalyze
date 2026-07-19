@@ -373,12 +373,17 @@ def test_type_sets_pinned_to_evidence() -> None:
         "usdc_reward",
         "swap",
     }
-    # options_settlement_summary + correction are DELIBERATELY in NEITHER set
-    # (H3): a nonzero-change occurrence must fail loud, not be silently skipped.
-    for ambiguous in ("options_settlement_summary", "correction"):
-        assert ambiguous not in CASH_BEARING_TYPES
-        assert ambiguous not in INFORMATIONAL_TYPES
-    # A genuinely-unknown future type is in NEITHER set (must fail loud on cash).
+    # Phase 128 (DERIBITFIX): `correction` is DELIBERATELY NOT a static member of
+    # either set — a bare set-membership cannot see info.reason. It is gated PER ROW
+    # (a trading/PnL reason → cash-bearing; else fail loud). Pinned separately by
+    # test_correction_* below; the set-pin proves it is not silently a blanket member.
+    assert "correction" not in CASH_BEARING_TYPES
+    assert "correction" not in INFORMATIONAL_TYPES
+    # options_settlement_summary is STILL DELIBERATELY in NEITHER set (H3): a
+    # nonzero-change occurrence must fail loud, not be silently skipped.
+    assert "options_settlement_summary" not in CASH_BEARING_TYPES
+    assert "options_settlement_summary" not in INFORMATIONAL_TYPES
+    # A genuinely-unknown future type is STILL in NEITHER set (must fail loud on cash).
     for unknown in ("mystery_new_type", "rebate_v2"):
         assert unknown not in CASH_BEARING_TYPES
         assert unknown not in INFORMATIONAL_TYPES
@@ -521,10 +526,12 @@ def test_informational_types_excluded() -> None:
 
 
 def test_ambiguous_types_fail_loud_on_nonzero_change() -> None:
-    """H3: options_settlement_summary and correction are in NEITHER set — a
-    nonzero-change occurrence must FAIL LOUD (never a silent skip), forcing an
-    evidence-grounded decision; their zero-change form is harmlessly ignored."""
-    for t in ("options_settlement_summary", "correction"):
+    """H3: options_settlement_summary is in NEITHER set — a nonzero-change
+    occurrence must FAIL LOUD (never a silent skip), forcing an evidence-grounded
+    decision; its zero-change form is harmlessly ignored. (Phase 128: `correction`
+    LEFT this ambiguous bucket — it is now gated PER ROW on info.reason; its
+    dedicated regressions live in test_correction_* below.)"""
+    for t in ("options_settlement_summary",):
         nonzero = {"type": t, "currency": "USDC", "change": 12.0,
                    "timestamp": _ms(_DAY_A), "id": 91}
         with pytest.raises(ValueError) as exc:
@@ -532,6 +539,186 @@ def test_ambiguous_types_fail_loud_on_nonzero_change() -> None:
         assert t in str(exc.value)
         zero = dict(nonzero, change=0.0)
         assert txn_rows_to_daily_records([zero]) == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 128 (DERIBITFIX) — `correction` is classified PER ROW on info.reason
+# (founder decision): a TRADING/PnL correction is realized cash; a CAPITAL /
+# unrecognized / missing-reason correction FAILS LOUD (never miscount a capital
+# adjustment as trading performance). Evidence — the key3 row (read-only Railway
+# recrawl 2026-07-19): type=correction change=-3.2469e-4 BTC currency=BTC
+# instrument_name=null id=952844476 2026-07-15
+# info.reason="BTC-PERPETUAL funding calculation correction" — a FUNDING-calc
+# correction (perp funding is already cash-bearing via settlement) → realized cash,
+# matches the trading allow-list on "funding".
+# ---------------------------------------------------------------------------
+
+# The real key3 correction row's native change (BTC), modelled verbatim.
+_KEY3_CORRECTION_CHANGE_BTC = -3.2469e-4
+
+
+def _correction_row(
+    reason: str = "2026-07-15 BTC-PERPETUAL funding calculation correction",
+    *,
+    rid: int = 952844476,
+    change: float = _KEY3_CORRECTION_CHANGE_BTC,
+    with_info: bool = True,
+) -> dict[str, object]:
+    """A `correction` row modelled on the actual key3 shape: type=correction, a
+    nonzero BTC `change`, currency=BTC, no instrument_name/index_price (a bare
+    balance correction, not an instrument fill). ``reason`` sets info.reason; pass
+    ``with_info=False`` to model a schema-drifted row that carries NO info at all."""
+    row: dict[str, object] = {
+        "type": "correction",
+        "currency": "BTC",
+        "change": change,
+        "instrument_name": None,
+        "timestamp": _ms(_DAY_A),
+        "id": rid,
+    }
+    if with_info:
+        row["info"] = {"reason": reason}
+    return row
+
+
+def test_correction_funding_reason_is_cash_bearing_hand_derived_usd() -> None:
+    """DERIBITFIX-01/02(a) — USD path. A funding `settlement` + the key3 FUNDING
+    `correction` on the same UTC day ingest as ONE realized day-sum with the
+    HAND-DERIVED USD equity.
+
+    MONEY ORACLE (hand-derived, NOT the impl's own formula): the day's realized is
+    the funding session PnL PLUS the funding correction, each valued once at the
+    same-day BTC index (50000):
+        settlement:  +0.01 BTC  * 50000 = +500.0 USD
+        correction: -3.2469e-4 BTC * 50000 = -16.2345 USD  (own-index absent →
+                    valued at the same-day settlement fallback index)
+        day realized = 500.0 - 16.2345 = 483.7655 USD
+
+    REVERT-PROOF: removing the "funding" keyword from
+    _CORRECTION_TRADING_REASON_KEYWORDS (or the whole correction branch) makes this
+    correction non-trading → LedgerValuationError, reddening the assert."""
+    settlement = {
+        "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+        "change": 0.01, "index_price": 50000.0, "timestamp": _ms(_DAY_A), "id": 11,
+    }
+    records = txn_rows_to_daily_records([settlement, _correction_row()])
+    assert len(records) == 1
+    # Hand-summed economics: +500.0 (funding) + (-16.2345) (funding correction).
+    expected_usd = 500.0 + (-3.2469e-4 * 50000.0)  # == 483.7655
+    assert records[0]["side"] == "buy"
+    assert records[0]["price"] == pytest.approx(expected_usd, abs=1e-9)
+
+
+def test_correction_funding_reason_is_cash_bearing_hand_derived_native() -> None:
+    """DERIBITFIX-01/02(a) — NATIVE path (the layer the dogfood
+    LedgerValuationError actually raised on, via build_deribit_native_ledger →
+    txn_rows_to_native_daily → assert_balance_identity).
+
+    MONEY ORACLE (hand-derived): in native BTC units the day's realized is the raw
+    sum of the two cash-bearing rows (no index multiply):
+        +0.01 BTC (funding session PnL) + (-3.2469e-4 BTC) (funding correction)
+        = 0.00967531 BTC
+    assert_balance_identity is then called in the SAME mode: the trading-reason
+    correction sits on BOTH sides (reference Σchange == computed native_pnl), so the
+    mandatory fail-loud reconcile guard CLOSES — proving the whole native valuation
+    ingests cleanly with the correct equity, not just the classifier.
+
+    REVERT-PROOF: dropping the "funding" keyword (or the correction branch) makes the
+    row non-trading → txn_rows_to_native_daily raises, reddening the first assert."""
+    settlement = {
+        "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+        "change": 0.01, "index_price": 50000.0, "timestamp": _ms(_DAY_A), "id": 11,
+    }
+    rows = [settlement, _correction_row()]
+    native = txn_rows_to_native_daily(rows)
+    day = "2026-01-15"
+    # Hand-summed economics in native BTC: 0.01 + (-3.2469e-4) = 0.00967531 BTC.
+    expected_btc = 0.01 + (-3.2469e-4)
+    assert set(native) == {"BTC"}
+    assert native["BTC"][day] == pytest.approx(expected_btc, abs=1e-12)
+    # The mandatory reconcile guard closes (correction on BOTH sides of Σ) — the
+    # native ingest that raised in dogfood now succeeds.
+    assert_balance_identity(rows, native)
+
+
+@pytest.mark.parametrize(
+    "capital_reason",
+    ["transfer correction", "deposit adjustment", "withdrawal reversal",
+     "wallet balance correction"],
+)
+def test_correction_capital_reason_fails_loud(capital_reason: str) -> None:
+    """DERIBITFIX-02(b) — the NEW safety: a `correction` whose info.reason is
+    CAPITAL-flavored (a deposit/withdrawal/transfer/wallet fix) carrying real cash
+    must FAIL LOUD on BOTH aggregators — NEVER silently summed into realized PnL (a
+    capital adjustment miscounted as trading performance would corrupt returns). The
+    raise NAMES the reason.
+
+    REVERT-PROOF: the blanket-set classification from the prior round (type ∈
+    CASH_BEARING_TYPES) would SILENTLY SUM this capital correction — this test
+    reddens under that revert (no raise). Hand-derived money at risk: the -3.2469e-4
+    BTC would wrongly enter realized."""
+    row = _correction_row(capital_reason)
+    with pytest.raises(LedgerValuationError) as exc_usd:
+        txn_rows_to_daily_records([row])
+    assert capital_reason in str(exc_usd.value)
+    with pytest.raises(LedgerValuationError) as exc_native:
+        txn_rows_to_native_daily([row])
+    assert capital_reason in str(exc_native.value)
+
+
+def test_correction_unrecognized_or_missing_reason_fails_loud() -> None:
+    """DERIBITFIX-02(c) — a `correction` with an UNRECOGNIZED reason, an EMPTY
+    reason, or NO info at all (schema drift) carrying real cash FAILS LOUD on both
+    aggregators — we cannot classify it, so we refuse to guess (fail-loud where the
+    risk is). A zero-change correction is harmlessly ignored (no cash to misplace),
+    matching the module's zero-change convention.
+
+    REVERT-PROOF: the blanket-set classification would silently sum these; this test
+    reddens under that revert."""
+    for reason_kwargs in (
+        {"reason": "some brand new adjustment kind"},   # unrecognized
+        {"reason": ""},                                  # empty reason
+        {"with_info": False},                            # no info at all
+    ):
+        row = _correction_row(rid=777001, **reason_kwargs)  # type: ignore[arg-type]
+        with pytest.raises(LedgerValuationError):
+            txn_rows_to_daily_records([row])
+        with pytest.raises(LedgerValuationError):
+            txn_rows_to_native_daily([row])
+        # Zero-change form of the SAME unclassifiable correction is harmlessly
+        # ignored (no cash at stake) — no entry, no raise.
+        zero = dict(row, change=0.0)
+        assert txn_rows_to_daily_records([zero]) == []
+        assert txn_rows_to_native_daily([zero]) == {}
+
+
+def test_correction_did_not_broaden_allow_list_unknown_type_still_fails_loud() -> None:
+    """DERIBITFIX-02(d) — the fix targets `correction` SPECIFICALLY; it did NOT open
+    a silent absorb-path for the next unknown TYPE. A genuinely-new future type
+    (`quorble`) carrying the SAME row shape STILL fails loud on BOTH aggregators,
+    while the funding `correction` succeeds — proving `correction` is handled by its
+    own reason-gated branch, not by a broadened type allow-list."""
+    funding = _correction_row()
+    # A settlement provides the same-day BTC fallback index so the USD path can value
+    # a coin `correction` (isolates the type/reason decision from the index machinery).
+    settlement = {
+        "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+        "change": 0.01, "index_price": 50000.0, "timestamp": _ms(_DAY_A), "id": 11,
+    }
+    # The funding `correction` succeeds on both paths.
+    assert len(txn_rows_to_daily_records([settlement, funding])) == 1
+    assert set(txn_rows_to_native_daily([settlement, funding])) == {"BTC"}
+    # A genuinely-unknown TYPE with the SAME nonzero-BTC shape (even with a
+    # trading-looking reason) STILL fails loud — the reason gate is scoped to
+    # type == "correction" only.
+    for unknown_type in ("quorble", "zzz_new_type"):
+        bogus = dict(funding, type=unknown_type, id=999001)
+        with pytest.raises(LedgerValuationError) as exc_usd:
+            txn_rows_to_daily_records([settlement, bogus])
+        assert unknown_type in str(exc_usd.value)
+        with pytest.raises(LedgerValuationError) as exc_native:
+            txn_rows_to_native_daily([settlement, bogus])
+        assert unknown_type in str(exc_native.value)
 
 
 def test_cash_bearing_row_missing_change_key_fails_loud() -> None:
@@ -1380,8 +1567,13 @@ def test_swap_is_native_only_usd_path_and_flow_channel_unchanged() -> None:
 def test_txn_rows_to_native_daily_unknown_type_fail_loud() -> None:
     """unknown_type_fail_loud: an unknown type carrying nonzero change raises
     LedgerValuationError naming the type (verbatim guard); a zero-change unknown
-    row is harmlessly ignored (no entry)."""
-    unknown = "correction"
+    row is harmlessly ignored (no entry).
+
+    Phase 128: the exemplar unknown type here USED to be `correction` — now that
+    `correction` is CASH_BEARING, this uses a genuinely-unknown future type
+    (`quorble`) to prove the native unknown-type fail-loud is INTACT (the allow-list
+    was NOT broadened beyond `correction`)."""
+    unknown = "quorble"
     row = {
         "type": unknown, "currency": "BTC", "change": 0.5,
         "timestamp": _ms(_DAY_A), "id": 8001003,

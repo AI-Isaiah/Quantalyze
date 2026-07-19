@@ -49,6 +49,7 @@ from services.deribit_txn import (
     _pre_coverage_option_days,
     assert_balance_identity,
     classify_instrument,
+    correction_is_trading,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     txn_rows_to_daily_records,
@@ -1112,7 +1113,15 @@ async def _crawl_deribit_ledger(
                 1
                 for r in rows
                 if isinstance(r, Mapping)
-                and str(r.get("type", "")) in CASH_BEARING_TYPES
+                and (
+                    str(r.get("type", "")) in CASH_BEARING_TYPES
+                    # Phase 128: a trading-reason `correction` is realized cash too,
+                    # so it counts toward the C2 equity-vs-activity floor.
+                    or (
+                        str(r.get("type", "")) == "correction"
+                        and correction_is_trading(r)
+                    )
+                )
             )
             # An empty crawl (no-wallet currency) is legitimately complete-empty.
             entries[key] = {
