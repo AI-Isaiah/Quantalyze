@@ -28,7 +28,21 @@ FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
 # ``process_key`` per-flow onboarding sets still exclude deribit (live LTP
 # onboarding is Phase 72), and Deribit returns flow through the broker-dailies
 # ONE-path (70-05, txn-log ledger), never fill-based process_key metrics.
-Source = Literal["okx", "binance", "bybit", "csv", "deribit"]
+#
+# Phase 120 (SFOX-05, 120-01) SHIPS the sfox ingestion path: the ingestion
+# registry (``SUPPORTED_SOURCES`` / ``_FACTORIES`` in
+# services/ingestion/__init__.py) now admits 'sfox' and get_adapter("sfox")
+# resolves an ``SfoxAdapter``. 'sfox' joins this ``Source`` Literal + the
+# registry TOGETHER here (the pinned lockstep — test_source_literal_and_registry_agree),
+# resolving the phase-119 deferral that pinned it OUT precisely because the
+# factory did not yet exist. This is the ingestion CAPABILITY (mirroring the
+# deribit Phase-70 landing): sFOX returns flow through the broker-dailies
+# ONE-path via the balance-history usd_value series
+# (chain_linked_twr -> derive_basis_series), never fill-based process_key
+# metrics (``SfoxAdapter.compute_metrics`` is intentionally fail-loud). The
+# key-save EXCHANGE boundary (VerifyStrategyRequest.exchange, debug_key_flow.
+# Broker, the four SQL CHECKs) already admitted 'sfox' in Phase 119.
+Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
     "draft",

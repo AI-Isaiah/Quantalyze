@@ -24,6 +24,7 @@ export const STRATEGY_SOURCES = [
   "binance",
   "bybit",
   "deribit",
+  "sfox",
 ] as const;
 
 export type StrategySource = (typeof STRATEGY_SOURCES)[number];

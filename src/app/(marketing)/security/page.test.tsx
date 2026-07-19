@@ -19,7 +19,7 @@
  * UI-SPEC AC #10 — `/security` is unauthenticated and meant to be crawled.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import SecurityPage, { metadata } from "./page";
 
@@ -174,5 +174,134 @@ describe("Phase 69 — Deribit readonly setup guide (UX-02)", () => {
     // also live in steer-away language, so matching them would be a false pin.
     expect(block.textContent).toMatch(/Do not enable Trade or Withdraw/);
     expect(block.textContent).toMatch(/do not grant any :read_write scope/);
+  });
+});
+
+/**
+ * Phase 122 Plan 03 — sFOX readonly setup guide (SFOX-08, F3-honest).
+ *
+ * A new #sfox-readonly SubAnchor inside the readonly-key section documents how
+ * to mint a read-only sFOX API token and whitelist the static egress IP. It is
+ * the deep-link target for ConnectKeyStep's derived /security#sfox-readonly
+ * href (plan 122-02 pins the link side; this plan provides the target).
+ *
+ * F3 honesty is the hard requirement (threat T-122-08): sFOX exposes no per-key
+ * scope endpoint, so the copy must (a) instruct minting a READ-ONLY token,
+ * (b) state the adapter is structurally read-only (no order/withdraw path), and
+ * (c) NEVER claim a server-verified read-only scope for sfox. Threat T-122-09:
+ * no hardcoded egress IP — the security@ contact channel gates disclosure,
+ * mirroring the #egress-ips precedent.
+ *
+ * Revert-proof: deleting the SubAnchor turns the first test red; softening the
+ * honest limit turns the honesty tests red; leaking a false-verified claim or a
+ * hardcoded IP turns the negative tests red.
+ */
+describe("Phase 122 — sFOX readonly setup guide (SFOX-08, F3)", () => {
+  // F2/F1 (Phase 122): the guide is founder-gated. It renders ONLY when the
+  // server go-live flag SFOX_ENABLED is on; the ENABLED assertions below pin it
+  // on, and the dedicated fail-closed block further down proves it is ABSENT
+  // (byte-identical to the pre-sfox page) when the flag is off.
+  beforeEach(() => {
+    process.env.SFOX_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  it("renders a #sfox-readonly block titled sFOX inside the readonly-key section", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly");
+    expect(block).not.toBeNull();
+    expect(within(block as HTMLElement).getByRole("heading")).toHaveTextContent(
+      "sFOX",
+    );
+    // Nested under the readonly-key section (deribit precedent placement).
+    expect(document.getElementById("readonly-key")?.contains(block)).toBe(true);
+  });
+
+  it("instructs minting a READ-ONLY single API token (F3 remedy)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    expect(block.textContent).toMatch(/read-only/i);
+    // sFOX auth is a single Bearer token — no separate secret.
+    expect(block.textContent).toMatch(/single API token/i);
+  });
+
+  it("states the F3 limit: no per-key scope endpoint, structurally read-only adapter", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    // The honest limit, with the reason attached (DESIGN.md Voice).
+    expect(block.textContent).toMatch(/does not expose a per-key scope endpoint/);
+    expect(block.textContent).toMatch(/no order or withdraw path/i);
+  });
+
+  it("whitelists the static egress IP via the security contact — no hardcoded IP (T-122-09)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    expect(block.textContent).toMatch(/static egress IP/i);
+    // Disclosure gated by the contact channel, mirroring #egress-ips.
+    const mailto = within(block).getByRole("link", {
+      name: "security@quantalyze.com",
+    });
+    expect(mailto).toHaveAttribute("href", "mailto:security@quantalyze.com");
+    // No literal IPv4/IPv6 address is baked into the copy.
+    expect(block.textContent).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/);
+    expect(block.textContent).not.toMatch(/\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){4,}\b/i);
+  });
+
+  it("makes NO false verified-scope claim for sfox (T-122-08)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    // The non-sfox key-handling copy legitimately says keys are "rejected
+    // before the ciphertext is written" / "we verify" — that claim is TRUE for
+    // scope-probing exchanges but would be a LIE for sfox. Assert none of that
+    // affirmative-verification phrasing leaks into the sfox block.
+    expect(block.textContent).not.toMatch(/verified read-only scope/i);
+    expect(block.textContent).not.toMatch(/we verify the scope/i);
+    expect(block.textContent).not.toMatch(/rejected before/i);
+  });
+});
+
+/**
+ * F1 (Phase 122 — pre-launch leak removal): with SFOX_ENABLED off (the default),
+ * the /security#sfox-readonly guide must be ABSENT. Pre-launch there is no sfox
+ * wizard card to "paste into" and no static egress IP to whitelist, so rendering
+ * the guide would assert a capability we do not have yet. Absence also keeps the
+ * public page byte-identical to its pre-sfox baseline while the flag is off.
+ */
+describe("Phase 122 — sFOX guide is founder-gated (F1, SFOX_ENABLED off)", () => {
+  beforeEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  it("does NOT render the #sfox-readonly block when the server flag is off", () => {
+    render(<SecurityPage />);
+    expect(document.getElementById("sfox-readonly")).toBeNull();
+  });
+
+  it("does not leak the false static-egress-IP copy pre-launch", () => {
+    render(<SecurityPage />);
+    // The sfox-only "whitelist our static egress IP … paste the token into the
+    // wizard" copy lives ONLY in the gated SubAnchor; the #egress-ips section's
+    // generic email-path copy is unaffected. With the flag off, the sfox phrasing
+    // must be gone from the whole page.
+    expect(document.body.textContent).not.toMatch(/paste the token into the wizard/i);
+    expect(document.body.textContent).not.toMatch(/single API token/i);
+  });
+
+  it.each(["1", "on", "", "false"])(
+    "stays absent for a non-exact SFOX_ENABLED=%s (strict 'true' only)",
+    (flag) => {
+      process.env.SFOX_ENABLED = flag;
+      render(<SecurityPage />);
+      expect(document.getElementById("sfox-readonly")).toBeNull();
+      delete process.env.SFOX_ENABLED;
+    },
+  );
+
+  it("still renders the sibling #deribit-readonly and #egress-ips (only sfox is gated)", () => {
+    render(<SecurityPage />);
+    expect(document.getElementById("deribit-readonly")).not.toBeNull();
+    expect(document.getElementById("egress-ips")).not.toBeNull();
   });
 });

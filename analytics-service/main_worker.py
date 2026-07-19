@@ -37,7 +37,8 @@ import os
 import signal
 import socket
 import time
-from typing import Any, TypedDict, cast
+from types import SimpleNamespace
+from typing import Any, Final, TypedDict, cast
 
 from dotenv import load_dotenv
 
@@ -45,6 +46,7 @@ from dotenv import load_dotenv
 # injected directly and no .env file exists, so load_dotenv() is a no-op.
 load_dotenv()
 
+import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
@@ -96,6 +98,79 @@ class ClaimedJob(_ClaimedJobOptional):
 # Worker identity
 # ---------------------------------------------------------------------------
 WORKER_ID = f"worker-{socket.gethostname()}-{os.getpid()}"
+
+# ---------------------------------------------------------------------------
+# FLIPRETRY-02: role-aware claim scope (Phase 123)
+# ---------------------------------------------------------------------------
+# The v1.11 derived-allocator-curve backfill wedged the SEQUENTIAL prod worker:
+# one slow/uncancellable live-exchange crawl blocked the shared loop, healthz
+# went stale ~12min, and the 90s auto-restart never fired. Per-crawl wait_for
+# alone cannot keep the shared loop's healthz fresh — the only structural
+# guarantee is ISOLATION. A DEDICATED backfill worker claims ONLY the backfill
+# kinds; the interactive prod worker EXCLUDES them.
+#
+# BACKFILL_KINDS: the derive chain that must leave the prod loop together. The
+# cron fans out derive_broker_dailies, which follow-on-enqueues
+# derive_allocator_equity (123-CONTEXT SCOPE CORRECTION) — isolating both
+# isolates the whole chain. NOTE: role "interactive" also moves NEW-key
+# broker-dailies ingestion (deribit/sfox key connects) onto the dedicated
+# worker — INTENDED (those are exactly the long-crawl jobs), and the plan-03
+# runbook makes the dedicated worker prod-critical from cutover. The sFOX-F5
+# active-account crawl rides this worker for free (same derive_broker_dailies
+# kind) — nothing sFOX-specific is built here.
+BACKFILL_KINDS: Final[tuple[str, ...]] = (
+    "derive_broker_dailies",
+    "derive_allocator_equity",
+)
+_VALID_CLAIM_ROLES: Final[tuple[str, ...]] = ("all", "interactive", "backfill")
+
+# FLIPRETRY-04: how often to refresh healthz WHILE a single dispatch is in
+# flight. A backfill derive_broker_dailies crawl can legitimately run past
+# STALE_THRESHOLD (90s) while still under its per-crawl wait_for bound; the
+# per-job refresh (top of the loop) only covers a BATCH of short jobs, not one
+# long job. 30s keeps the age comfortably under 90s (at most one missed tick ⇒
+# age < 60s). VALIDATED loudly like WORKER_CLAIM_ROLE (not just documented): a
+# value ≥ STALE_THRESHOLD lets healthz 503 in the gap before the first heartbeat
+# — reintroducing the exact false-stale restart this fixes — and 0 turns the
+# heartbeat into an asyncio.sleep(0) busy-loop stealing CPU from the crawl.
+_HEARTBEAT_INTERVAL_S: Final[float] = float(os.getenv("WORKER_HEARTBEAT_INTERVAL_S", "30"))
+if not 0.0 < _HEARTBEAT_INTERVAL_S < main_worker_healthz.STALE_THRESHOLD:
+    raise ValueError(
+        f"WORKER_HEARTBEAT_INTERVAL_S must be in (0, {main_worker_healthz.STALE_THRESHOLD}); "
+        f"got {_HEARTBEAT_INTERVAL_S} — a value ≥ STALE_THRESHOLD reintroduces the "
+        f"false-stale restart FLIPRETRY-04 fixes; 0 busy-loops."
+    )
+
+
+def _validate_claim_role(role: str) -> str:
+    """Validate WORKER_CLAIM_ROLE; raise a LOUD ValueError on any other value
+    (no silent default — a misconfigured role changes claim scope)."""
+    if role not in _VALID_CLAIM_ROLES:
+        raise ValueError(
+            f"WORKER_CLAIM_ROLE={role!r} is invalid; must be one of "
+            f"{_VALID_CLAIM_ROLES}"
+        )
+    return role
+
+
+# Read ONCE at import/startup. Default "all" is the byte-identical merge-safe
+# choice: merging this plan changes NO prod behavior until the founder cuts
+# over BOTH workers in the plan-03 runbook — the same structural-gate
+# discipline as SFOX_ENABLED (Phase 122).
+WORKER_CLAIM_ROLE: str = _validate_claim_role(os.getenv("WORKER_CLAIM_ROLE", "all"))
+
+
+def _claim_kind_args(role: str) -> dict[str, list[str]]:
+    """Role → the p_kind_* keys to ADD to the claim RPC payload.
+
+    role "all" returns {} so the payload stays BYTE-IDENTICAL to prod today
+    (the RPC's NULL defaults preserve behavior). "interactive" excludes the
+    backfill kinds; "backfill" includes only them."""
+    if role == "interactive":
+        return {"p_kind_exclude": list(BACKFILL_KINDS)}
+    if role == "backfill":
+        return {"p_kind_include": list(BACKFILL_KINDS)}
+    return {}
 
 # ---------------------------------------------------------------------------
 # Shutdown event — set by SIGTERM/SIGINT handler; all loops check this.
@@ -391,19 +466,45 @@ async def dispatch_tick(worker_id: str) -> None:
     flag_active = True
 
     def _claim_priority():
-        return supabase.rpc(
-            "claim_compute_jobs_with_priority",
-            {
-                "p_batch_size": 5,
-                "p_worker_id": worker_id,
-                "p_unified_backbone_active": flag_active,
-            },
-        ).execute()
+        params: dict[str, Any] = {
+            "p_batch_size": 5,
+            "p_worker_id": worker_id,
+            "p_unified_backbone_active": flag_active,
+        }
+        # FLIPRETRY-02: role "all" adds NO keys → byte-identical to prod today.
+        params.update(_claim_kind_args(WORKER_CLAIM_ROLE))
+        return supabase.rpc("claim_compute_jobs_with_priority", params).execute()
 
     def _claim_legacy():
         # Pre-migration-086 signature: 2 args, no priority/throttle.
         # Used only as the fallback path when migration 086 has not been
         # applied to this Supabase project (audit-2026-05-07 C-0190).
+        #
+        # FLIPRETRY-02: the legacy 2-arg claim CANNOT filter by kind. A
+        # "backfill" worker must therefore REFUSE to claim on the fallback path
+        # (it would take interactive jobs out-of-role); an "interactive" worker
+        # still falls back (today's behavior) but the exclusion is degraded for
+        # that tick — warn so it stays visible.
+        if WORKER_CLAIM_ROLE == "backfill":
+            logger.error(
+                "claim_compute_jobs_with_priority unavailable (SQLSTATE 42883) "
+                "and WORKER_CLAIM_ROLE=backfill: the legacy 2-arg claim cannot "
+                "filter by kind, so a backfill worker REFUSES to claim (would "
+                "take interactive jobs out-of-role). Claiming NOTHING this tick. "
+                "Apply the kind-filter migration to restore backfill claiming.",
+                extra={"event_type": "claim_rpc_fallback_backfill_refused"},
+            )
+            return SimpleNamespace(data=[])
+        if WORKER_CLAIM_ROLE == "interactive":
+            logger.warning(
+                "claim_compute_jobs_with_priority unavailable (SQLSTATE 42883) "
+                "and WORKER_CLAIM_ROLE=interactive: the legacy 2-arg claim "
+                "cannot exclude the backfill kinds (%s) — this tick may claim "
+                "backfill jobs. Apply the kind-filter migration to restore the "
+                "exclusion.",
+                ", ".join(BACKFILL_KINDS),
+                extra={"event_type": "claim_rpc_fallback_interactive_degraded"},
+            )
         return supabase.rpc(
             "claim_compute_jobs",
             {
@@ -503,6 +604,17 @@ async def dispatch_tick(worker_id: str) -> None:
     logger.info("Claimed %d jobs: %s", len(jobs), [j["id"] for j in jobs])
 
     for job in jobs:
+        # FLIPRETRY-04: refresh healthz BETWEEN jobs. A dedicated backfill
+        # worker processes a batch of bounded (wait_for-capped) 300s crawls
+        # sequentially; without a per-job refresh, LAST_TICK_AT (stamped once
+        # at claim above) freezes for the whole batch and healthz falsely
+        # stales past 90s. Refreshing at the TOP of each iteration keeps the
+        # signal HONEST — between jobs the loop is provably alive — while a
+        # genuinely frozen dispatch gets no refresh and still goes stale (the
+        # liveness check is not weakened). main_worker_healthz is imported
+        # above at claim time.
+        main_worker_healthz.LAST_TICK_AT = time.time()
+
         # audit-2026-05-07 P97 / G12.A.2 (mig 117): claim-token fence.
         # The claim RPC stamps a fresh UUID into compute_jobs.claim_token at
         # claim time; we read it from the row here and pass it through to the
@@ -512,6 +624,27 @@ async def dispatch_tick(worker_id: str) -> None:
         # not a failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
         try:
+            # FLIPRETRY-04: keep healthz HONEST during ONE long-but-alive
+            # dispatch. A single backfill crawl can legitimately exceed
+            # STALE_THRESHOLD (90s) while under its per-crawl wait_for bound;
+            # without a mid-dispatch refresh, LAST_TICK_AT (stamped at the top of
+            # this iteration) freezes → healthz 503s → the platform restarts the
+            # worker mid-crawl → the large account NEVER ingests (the exact
+            # accounts FLIPRETRY targets). This heartbeat only advances the tick if
+            # the event loop is SERVICING it, so healthz now reflects LOOP liveness:
+            # a loop-BLOCKING freeze (a non-yielding await / CPU spin / deadlock)
+            # stops the heartbeat too → healthz still stales → restart (preserved).
+            # It does NOT catch a YIELDING single-job hang (a dead upstream we keep
+            # awaiting): the loop stays alive so healthz stays green — that case is
+            # backstopped by the per-kind OUTER wait_for (dispatch → transient) plus
+            # the DB watchdog re-claim, NOT by healthz. Cancelled in `finally` so it
+            # never outlives its job.
+            async def _heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                    main_worker_healthz.LAST_TICK_AT = time.time()
+
+            _hb = asyncio.create_task(_heartbeat())
             # `dispatch(job: dict)` in services.job_worker accepts a plain dict;
             # a TypedDict is not assignable to `dict[Any, Any]` under mypy's
             # invariance rules even though `ClaimedJob` IS a dict at runtime.
@@ -520,7 +653,14 @@ async def dispatch_tick(worker_id: str) -> None:
             # / `job.get(...)` access in this module. Widening dispatch()'s
             # parameter to a Mapping is the symmetric cross-module follow-up
             # (services.job_worker is out of scope for H-0529).
-            result = await dispatch(cast("dict[str, Any]", job))
+            try:
+                result = await dispatch(cast("dict[str, Any]", job))
+            finally:
+                _hb.cancel()
+                try:
+                    await _hb
+                except asyncio.CancelledError:
+                    pass
 
             if result.outcome == DispatchOutcome.DONE:
                 def _mark_done(jid=job["id"], tok=claim_token):

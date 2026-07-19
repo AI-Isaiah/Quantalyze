@@ -938,6 +938,70 @@ describe("[94.1 F3/F4] MultiKeyConnectStep — rehydration status + draft protec
   });
 });
 
+describe("[SFOX-08] MultiKeyConnectStep — flag-gated sFOX panel (token-only)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("flag OFF (default): a State-B panel offers exactly the four exchange cards, no sfox", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel0 = screen.getByTestId("key-panel-0");
+    expect(within(panel0).getByTestId("key-0-exchange-binance")).toBeInTheDocument();
+    expect(within(panel0).getByTestId("key-0-exchange-deribit")).toBeInTheDocument();
+    expect(within(panel0).queryByTestId("key-0-exchange-sfox")).toBeNull();
+  });
+
+  it("flag ON: a sfox panel is token-only and validates via add-key with api_secret \"\"", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        return jsonResponse({}, 200);
+      });
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+
+    const panel0 = screen.getByTestId("key-panel-0");
+    // Select sfox — the secret input disappears (token-only).
+    fireEvent.click(within(panel0).getByTestId("key-0-exchange-sfox"));
+    expect(within(panel0).getByTestId("key-0-api-key")).toBeInTheDocument();
+    expect(within(panel0).queryByTestId("key-0-api-secret")).toBeNull();
+
+    // Token + window alone enable validate (no secret required).
+    fireEvent.change(within(panel0).getByTestId("key-0-api-key"), {
+      target: { value: "SFOX_TOKEN_xxx" },
+    });
+    fireEvent.change(within(panel0).getByTestId("key-0-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    const validate = within(panel0).getByTestId("key-0-validate");
+    expect(validate).not.toBeDisabled();
+    fireEvent.click(validate);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("key-0-summary")).toBeInTheDocument(),
+    );
+    const addCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/add-key"),
+    )!;
+    const body = JSON.parse((addCall[1] as RequestInit).body as string);
+    expect(body.exchange).toBe("sfox");
+    expect(body.api_key).toBe("SFOX_TOKEN_xxx");
+    expect(body.api_secret).toBe("");
+    expect(body.passphrase).toBeNull();
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — tap targets (v1.4 flex-compression)", () => {
   it("Move and Remove controls carry explicit >=44px width AND height classes", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);

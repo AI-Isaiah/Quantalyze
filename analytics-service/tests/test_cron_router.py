@@ -394,6 +394,66 @@ class TestRevokedKeyBranch:
         mock_supabase.table.return_value.update.assert_not_called()
 
 
+class TestDeferredNonCcxtSkip:
+    """F1: a connected non-ccxt key (sfox) has no cron ingestion path yet.
+
+    WHY (Rule 9): cron_sync selects ALL active api_keys with no exchange
+    filter, and `_sync_single_key` calls `create_exchange(exchange)` which
+    raises ValueError("Unsupported exchange: sfox") for anything outside
+    EXCHANGE_CLASSES. Pre-fix that ValueError hit the outer `except Exception`
+    → logger.exception (Sentry) + status="error" on EVERY 15-min tick, forever,
+    for every connected sfox key — recurring, unactionable alert spam until the
+    later-phase ingestion ships. The fix guards BEFORE create_exchange and
+    returns a benign "deferred" outcome. This pins: no exception logged, status
+    is "deferred" (NOT "error"), the key is NOT deactivated, and neither
+    create_exchange nor decrypt_credentials is reached for the deferred key.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sfox_key_is_deferred_not_errored_or_deactivated(self):
+        # sfox is genuinely absent from EXCHANGE_CLASSES — assert the premise so
+        # this test can never silently pass because sfox was later added there
+        # (at which point the real ingestion path exists and this guard changes).
+        assert "sfox" not in cron_mod.EXCHANGE_CLASSES
+
+        mock_supabase = MagicMock()
+
+        # create_exchange / decrypt_credentials must be UNREACHABLE for a
+        # deferred key: the guard short-circuits before either. A side_effect
+        # AssertionError converts any accidental call into a hard failure.
+        create_exchange_spy = MagicMock(
+            side_effect=AssertionError("create_exchange must not run for a deferred non-ccxt key")
+        )
+        decrypt_spy = MagicMock(
+            side_effect=AssertionError("decrypt_credentials must not run for a deferred non-ccxt key")
+        )
+
+        with patch.object(cron_mod, "get_supabase", return_value=mock_supabase), \
+             patch.object(cron_mod, "decrypt_credentials", decrypt_spy), \
+             patch.object(cron_mod, "create_exchange", create_exchange_spy), \
+             patch.object(cron_mod, "logger") as mock_logger:
+            key_row = _make_key_row(exchange="sfox", strategy_ids=["strat-A"])
+            result = await cron_mod._sync_single_key(key_row, kek=b"x" * 32)
+
+        # Benign, distinctly-bucketed outcome — never an error.
+        assert result["status"] == "deferred"
+        assert result["status"] != "error"
+        assert result["exchange"] == "sfox"
+        assert result["trades_fetched"] == 0
+
+        # NO Sentry-grade exception; a single INFO breadcrumb instead.
+        mock_logger.exception.assert_not_called()
+        mock_logger.error.assert_not_called()
+        mock_logger.info.assert_called_once()
+
+        # Guarded before any exchange/credential work.
+        create_exchange_spy.assert_not_called()
+        decrypt_spy.assert_not_called()
+
+        # Key stays active — nothing is wrong with it, ingestion just deferred.
+        mock_supabase.table.return_value.update.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # C-0201 — multi-strategy keys must fan out sync_trades
 # ---------------------------------------------------------------------------

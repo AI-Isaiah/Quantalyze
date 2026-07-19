@@ -75,6 +75,17 @@ export interface SeededAllocator {
  */
 export async function seedTestAllocator(opts?: {
   role?: "allocator" | "manager" | "both";
+  /**
+   * Plan 122-04 (SFOX-09 e2e) — elevate the seeded profile to admin
+   * (`profiles.is_admin = TRUE`, the primary admin gate per
+   * src/lib/approval.ts:33 + src/lib/auth.ts:64). Only stamped when
+   * `true`; omitted otherwise so every pre-existing caller's profile
+   * upsert stays byte-identical (the column defaults to false, so an
+   * explicit false would be a semantic no-op — we simply don't write it).
+   * The admin leg of e2e/sfox-badge.spec.ts uses this to read the seeded
+   * sfox strategy through an admin-elevated session.
+   */
+  isAdmin?: boolean;
 }): Promise<SeededAllocator> {
   const admin = getAdmin();
   // Phase 11 WR-05: @example.test (RFC 6761 reserved TLD, guaranteed
@@ -138,6 +149,9 @@ export async function seedTestAllocator(opts?: {
           // verified per isProfileApproved's truth table).
           allocator_status: "verified",
           manager_status: "verified",
+          // Plan 122-04 — only stamp is_admin when the caller asks for an
+          // elevated profile; omit otherwise (default false == no-op).
+          ...(opts?.isAdmin ? { is_admin: true } : {}),
         },
         { onConflict: "id" },
       ),
@@ -1019,4 +1033,242 @@ export async function seedCompositeStrategy(opts?: {
   }
 
   return { strategyId, ownerUserId, memberApiKeyIds };
+}
+
+// ---------------------------------------------------------------------------
+// Plan 122-04 / SFOX-09 — the ONE connected-sFOX fixture (badge + tag e2e).
+// ---------------------------------------------------------------------------
+
+/**
+ * The phase-119 SFOX-04 constraint-widening migration. Named in the fail-loud
+ * message below so a missing precondition is unambiguous — never a bare 23514.
+ */
+const SFOX_BOUNDARY_MIGRATION =
+  "supabase/migrations/20260718182056_sfox_exchange_boundary_checks.sql";
+
+/**
+ * True when a PostgREST error is a `23514` CHECK violation on one of the
+ * exchange/source boundary constraints the SFOX-04 migration widens. We match
+ * on the SQLSTATE (`23514` = check_violation) AND the constraint/message text
+ * so an unrelated 23514 (e.g. a future check on another column) is NOT
+ * misattributed to the sfox precondition.
+ */
+function isSfoxBoundaryViolation(err: {
+  code?: string;
+  message?: string;
+  details?: string;
+} | null): boolean {
+  if (!err || err.code !== "23514") return false;
+  const haystack = `${err.message ?? ""} ${err.details ?? ""}`.toLowerCase();
+  return (
+    haystack.includes("exchange") ||
+    haystack.includes("source") ||
+    haystack.includes("sfox")
+  );
+}
+
+/** Fail loud, naming the phase-119 SFOX-04 migration as the missing precondition. */
+function throwSfoxPreconditionError(
+  where: string,
+  err: { message?: string } | null,
+): never {
+  throw new Error(
+    `[seed] seedSfoxVerifiedStrategy: ${where} rejected 'sfox' with a 23514 CHECK ` +
+      `violation — the phase-119 SFOX-04 constraint-widening migration (${SFOX_BOUNDARY_MIGRATION}) ` +
+      `is NOT applied on this Supabase project. Apply it to the TEST project ` +
+      `(qmnijlgmdhviwzwfyzlc) before running the sfox-badge seed. Raw error: ` +
+      `${err?.message ?? String(err)}`,
+  );
+}
+
+export interface SeededSfoxVerifiedStrategy {
+  /** Owner ("both" role): owns BOTH the manager /strategies/[id]/edit surface AND the allocator surfaces. */
+  owner: SeededAllocator;
+  /** A separate admin-elevated session (profiles.is_admin = TRUE) for the admin leg. */
+  admin: SeededAllocator;
+  strategyId: string;
+  apiKeyId: string;
+  /** The strategy `name` (unique per seed) — pass to cleanupSfoxVerifiedStrategy / cleanupStrategiesByNamePrefix. */
+  namePrefix: string;
+}
+
+/**
+ * Seed ONE connected-sFOX strategy for e2e/sfox-badge.spec.ts (SFOX-09):
+ *
+ *   - an owner ("both" role) — one user sweeps the manager edit page AND the
+ *     allocator/browse surfaces with no requireRolePage redirect;
+ *   - a SEPARATE admin-elevated user (is_admin) for the admin-review leg;
+ *   - an `api_keys` row with `exchange='sfox'` owned by the owner (drives the
+ *     "SFOX" mono tag in ApiKeyManager on /strategies/[id]/edit — 122-01);
+ *   - a `published` `strategies` row owned by the owner, `source='sfox'`,
+ *     `api_key_id` linked to the sfox key (the browse-page VerifiedBadge is
+ *     gated on `strategy.api_key_id`, so the link is REQUIRED for that surface),
+ *     with enough analytics to render the public factsheet;
+ *   - a `strategy_analytics` row (`computation_status='complete'`);
+ *   - a `strategy_verifications` row `{ source:'sfox', trust_tier:'api_verified' }`
+ *     — the row getStrategyDetail / getPublicStrategyDetail project onto
+ *     `strategy.trust_tier` to drive VerifiedBadge ("Verified") + TrustTierLabel
+ *     ("API verified").
+ *
+ * The two sfox-bearing inserts (api_keys.exchange, strategy_verifications.source)
+ * — and the strategies.source insert — are wrapped in the SFOX-04 fail-loud
+ * translation: a 23514 on any of them throws a message naming the phase-119
+ * migration instead of surfacing a confusing bare postgres error.
+ *
+ * Prod-safety: EVERY mutation routes through the single `getAdmin()` client
+ * (:48-64), whose `assertNotProductionSupabaseUrl` + service-role assertions
+ * fire before any write — this helper can only ever touch the TEST project. The
+ * only ciphertext-shaped literal is the existing gitleaks-safe
+ * `"e2e-placeholder-ciphertext"` idiom; no real credential.
+ *
+ * Cleanup is the caller's responsibility via `cleanupSfoxVerifiedStrategy` in
+ * afterAll (mirrors the composite spec's teardown idiom).
+ *
+ * @param opts.name strategy name (default `e2e-sfox-verified-<suffix>`; keep a
+ *                   unique prefix so cleanupStrategiesByNamePrefix collects it).
+ */
+export async function seedSfoxVerifiedStrategy(opts?: {
+  name?: string;
+}): Promise<SeededSfoxVerifiedStrategy> {
+  const admin = getAdmin();
+
+  // 1. Owner ("both") + a separate admin-elevated reviewer. seedTestAllocator
+  //    upserts each profile verified (and is_admin for the admin), so both
+  //    clear the universal approval gate.
+  const owner = await seedTestAllocator({ role: "both" });
+  const adminUser = await seedTestAllocator({ role: "both", isAdmin: true });
+
+  // 2. sfox api_keys row owned by the owner (placeholder ciphertext — no DB
+  //    INSERT trigger rejects it; see seedAllocatorBook:600-610). Fail loud on
+  //    the SFOX-04 miss (api_keys_exchange_check).
+  const apiKeyLabel = `e2e-sfox-key-${uniqueSuffix(6)}`;
+  const { data: key, error: kErr } = await admin
+    .from("api_keys")
+    .insert({
+      user_id: owner.userId,
+      exchange: "sfox",
+      label: apiKeyLabel,
+      api_key_encrypted: "e2e-placeholder-ciphertext",
+      is_active: true,
+    })
+    .select("id")
+    .single();
+  if (kErr || !key) {
+    if (isSfoxBoundaryViolation(kErr)) {
+      throwSfoxPreconditionError("api_keys.exchange", kErr);
+    }
+    throw new Error(`[seed] seedSfoxVerifiedStrategy (api_key) failed: ${kErr?.message}`);
+  }
+  const apiKeyId = key.id as string;
+
+  // 3. Published strategy owned by the owner, linked to the sfox key,
+  //    source='sfox'. Deterministic 120d date window so the factsheet analytics
+  //    render (no RNG). Fail loud on the SFOX-04 miss (strategies_source_check).
+  const name = opts?.name ?? `e2e-sfox-verified-${uniqueSuffix(6)}`;
+  const days = 120;
+  const anchorMs = Date.now();
+  const startDate = new Date(anchorMs - days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const { data: strategy, error: sErr } = await admin
+    .from("strategies")
+    .insert({
+      user_id: owner.userId,
+      name,
+      status: "published",
+      source: "sfox",
+      api_key_id: apiKeyId,
+      benchmark: "BTC",
+      start_date: startDate,
+      supported_exchanges: ["sfox"],
+      strategy_types: ["spot"],
+      subtypes: [],
+      markets: ["BTC"],
+    })
+    .select("id")
+    .single();
+  if (sErr || !strategy) {
+    if (isSfoxBoundaryViolation(sErr)) {
+      throwSfoxPreconditionError("strategies.source", sErr);
+    }
+    throw new Error(`[seed] seedSfoxVerifiedStrategy (strategy) failed: ${sErr?.message}`);
+  }
+  const strategyId = strategy.id as string;
+
+  // 4. strategy_analytics row (complete) — a compact but sufficient shape for
+  //    the public factsheet + browse page to render (both require
+  //    result.analytics). Deterministic sin() series, no RNG.
+  const series = Array.from({ length: days }, (_, i) => ({
+    date: new Date(anchorMs - (days - i) * 86_400_000).toISOString().slice(0, 10),
+    value: 1 + Math.sin(i / 30) * 0.05 * (i / days),
+  }));
+  const { error: aErr } = await admin.from("strategy_analytics").insert({
+    strategy_id: strategyId,
+    computation_status: "complete",
+    benchmark: "BTC",
+    returns_series: series,
+    cumulative_return: series[series.length - 1].value - 1,
+    cagr: 0.12,
+    sharpe: 1.4,
+    sortino: 1.8,
+    max_drawdown: -0.08,
+    volatility: 0.18,
+    sparkline_returns: [0.01, -0.02, 0.03, 0.01, -0.005, 0.015],
+  });
+  if (aErr) {
+    throw new Error(`[seed] seedSfoxVerifiedStrategy (analytics) failed: ${aErr.message}`);
+  }
+
+  // 5. strategy_verifications row → source='sfox', trust_tier='api_verified'.
+  //    getPublicStrategyDetail / getStrategyDetail project the most-recent
+  //    verification's trust_tier onto strategy.trust_tier (queries.ts:303-324),
+  //    which drives VerifiedBadge ("Verified") + TrustTierLabel ("API verified").
+  //    Fail loud on the SFOX-04 miss (strategy_verifications_source_check).
+  const { error: vErr } = await admin.from("strategy_verifications").insert({
+    strategy_id: strategyId,
+    // wizard_session_id is NOT NULL (migration 093 STEP 1); a fresh uuid is
+    // fine — Phase 15 left it un-uniqued.
+    wizard_session_id: crypto.randomUUID(),
+    status: "validated",
+    trust_tier: "api_verified",
+    // flow_type CHECK admits teaser/onboard/internal_report/csv/resync; a
+    // key-connect verify is an 'onboard'.
+    flow_type: "onboard",
+    source: "sfox",
+  });
+  if (vErr) {
+    if (isSfoxBoundaryViolation(vErr)) {
+      throwSfoxPreconditionError("strategy_verifications.source", vErr);
+    }
+    throw new Error(`[seed] seedSfoxVerifiedStrategy (verification) failed: ${vErr.message}`);
+  }
+
+  return {
+    owner,
+    admin: adminUser,
+    strategyId,
+    apiKeyId,
+    namePrefix: name,
+  };
+}
+
+/**
+ * Teardown for seedSfoxVerifiedStrategy. Deletes the strategy by its unique
+ * name (strategy_analytics + strategy_verifications cascade via their FK
+ * ON DELETE CASCADE), then the sfox api_key (which does NOT cascade from
+ * strategies — the strategy delete first drops the api_key_id reference).
+ * Best-effort: failures log and return, matching cleanupStrategiesByNamePrefix.
+ * The seeded users are intentionally left around (the file's convention).
+ */
+export async function cleanupSfoxVerifiedStrategy(
+  seeded: Pick<SeededSfoxVerifiedStrategy, "namePrefix" | "apiKeyId">,
+): Promise<void> {
+  const admin = getAdmin();
+  await cleanupStrategiesByNamePrefix(seeded.namePrefix);
+  const { error } = await admin.from("api_keys").delete().eq("id", seeded.apiKeyId);
+  if (error) {
+    console.warn(
+      `[seed] cleanupSfoxVerifiedStrategy api_key delete failed (non-fatal): ${error.message}`,
+    );
+  }
 }

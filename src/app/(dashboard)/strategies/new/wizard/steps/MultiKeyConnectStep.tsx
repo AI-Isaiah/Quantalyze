@@ -16,6 +16,7 @@ import {
 } from "./ConnectKeyStep";
 import { type WizardErrorCode } from "@/lib/wizardErrors";
 import type { SupportedExchange } from "@/lib/utils";
+import { SFOX_UI_ENABLED } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -64,11 +65,16 @@ interface ExchangeOption {
   name: string;
   caption: string;
   requiresPassphrase: boolean;
+  // See ConnectKeyStep: absent → true (ccxt key+secret pair). sFOX is a single
+  // Bearer token (no secret) → requiresSecret false.
+  requiresSecret?: boolean;
   credentialLabels?: { key: string; secret: string };
   credentialPlaceholders?: { key: string; secret: string };
 }
 
 // Replicated verbatim from ConnectKeyStep (see DELIBERATE DUPLICATION above).
+// Phase 122 / SFOX-08: the sfox card is APPENDED only when SFOX_UI_ENABLED is on
+// — flag OFF (default) leaves this literal byte-identical to today's four cards.
 const EXCHANGES: ExchangeOption[] = [
   {
     id: "binance",
@@ -99,7 +105,30 @@ const EXCHANGES: ExchangeOption[] = [
       secret: "Paste the Deribit Client Secret",
     },
   },
+  ...(SFOX_UI_ENABLED
+    ? [
+        {
+          id: "sfox" as const,
+          name: "sFOX",
+          caption: "Spot account. A single read-only API token, no secret.",
+          requiresPassphrase: false,
+          requiresSecret: false,
+          credentialLabels: { key: "API Token", secret: "API Token" },
+          credentialPlaceholders: {
+            key: "Paste the read-only sFOX API token",
+            secret: "Paste the read-only sFOX API token",
+          },
+        },
+      ]
+    : []),
 ];
+
+// F3 (Phase 122): honest structural note appended to the step-level "What we
+// reject" atom whenever a token-only (sfox) panel is present — sFOX exposes no
+// per-key scope endpoint, so the unqualified ccxt scope-rejection claim would be
+// false for it. See ConnectKeyStep SFOX_REJECT_ATOM_BODY.
+const SFOX_REJECT_ATOM_NOTE =
+  " sFOX exposes no per-key scope endpoint — sFOX keys are used read-only by our adapter (no order or withdraw path exists), so mint a READ-ONLY token.";
 
 // Replicated verbatim from ConnectKeyStep (step-level permission block).
 const TRUST_ATOMS: { title: string; body: string }[] = [
@@ -579,8 +608,9 @@ export function MultiKeyConnectStep({
     async (idx: number) => {
       const p = panelsRef.current[idx];
       if (p.status === "validating") return;
-      const requiresPassphrase =
-        EXCHANGES.find((e) => e.id === p.exchange)?.requiresPassphrase ?? false;
+      const activeOption = EXCHANGES.find((e) => e.id === p.exchange);
+      const requiresPassphrase = activeOption?.requiresPassphrase ?? false;
+      const requiresSecret = activeOption?.requiresSecret ?? true;
       updatePanel(idx, { status: "validating", errorCode: null });
       try {
         const res = await wizardFetch("/api/strategies/composite/add-key", {
@@ -589,7 +619,9 @@ export function MultiKeyConnectStep({
           body: JSON.stringify({
             exchange: p.exchange,
             api_key: p.apiKey,
-            api_secret: p.apiSecret,
+            // sFOX is token-only: send api_secret "" (Phase-119 add-key carve-out
+            // normalizes empty→"" and accepts it for sfox).
+            api_secret: requiresSecret ? p.apiSecret : "",
             passphrase: requiresPassphrase ? p.passphrase : null,
             label: p.nickname.trim() || `${p.exchange} key`,
             wizard_session_id: wizardSessionId,
@@ -823,10 +855,22 @@ export function MultiKeyConnectStep({
         anything. Secrets are never persisted to your browser.
       </p>
 
-      {/* Step-level permission block — rendered ONCE, not per key. */}
+      {/* Step-level permission block — rendered ONCE, not per key. F3: when a
+          token-only (sfox) panel is present, append the honest sfox structural
+          note to "What we reject" so the unqualified scope-rejection claim is
+          not shown false for sfox. */}
       <div className="mt-6 rounded-md border border-border bg-page">
         <dl className="divide-y divide-border">
-          {TRUST_ATOMS.map((atom) => (
+          {TRUST_ATOMS.map((atom) =>
+            atom.title === "What we reject" &&
+            panels.some(
+              (p) =>
+                (EXCHANGES.find((e) => e.id === p.exchange)?.requiresSecret ??
+                  true) === false,
+            )
+              ? { ...atom, body: atom.body + SFOX_REJECT_ATOM_NOTE }
+              : atom,
+          ).map((atom) => (
             <div
               key={atom.title}
               className="grid gap-1 px-4 py-3 md:grid-cols-[180px_1fr] md:gap-6"
@@ -954,6 +998,8 @@ function KeyPanel({
 }: KeyPanelProps) {
   const active = EXCHANGES.find((e) => e.id === p.exchange);
   const requiresPassphrase = active?.requiresPassphrase ?? false;
+  // Absent → true (ccxt key+secret pair). sFOX is token-only.
+  const requiresSecret = active?.requiresSecret ?? true;
   const keyLabel = active?.credentialLabels?.key ?? "API Key";
   const secretLabel = active?.credentialLabels?.secret ?? "API Secret";
   const keyPlaceholder =
@@ -969,7 +1015,7 @@ function KeyPanel({
 
   const canValidate =
     !!p.apiKey &&
-    !!p.apiSecret &&
+    (!requiresSecret || !!p.apiSecret) &&
     (!requiresPassphrase || !!p.passphrase) &&
     !!p.windowStart &&
     p.status !== "validating";
@@ -1114,37 +1160,41 @@ function KeyPanel({
                 data-testid={`key-${index}-api-key`}
               />
 
-              <div>
-                <div className="flex items-center justify-between">
-                  <label
-                    htmlFor={secretInputId}
-                    className="text-caption font-medium text-text-primary"
-                  >
-                    {secretLabel}
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      onUpdate(index, { showSecret: !p.showSecret })
+              {/* sFOX is token-only — render the secret block only for
+                  key+secret exchanges (mirrors ConnectKeyStep). */}
+              {requiresSecret && (
+                <div>
+                  <div className="flex items-center justify-between">
+                    <label
+                      htmlFor={secretInputId}
+                      className="text-caption font-medium text-text-primary"
+                    >
+                      {secretLabel}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onUpdate(index, { showSecret: !p.showSecret })
+                      }
+                      className="text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
+                    >
+                      {p.showSecret ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                  <input
+                    id={secretInputId}
+                    type={p.showSecret ? "text" : "password"}
+                    value={p.apiSecret}
+                    onChange={(e) =>
+                      onUpdate(index, { apiSecret: e.target.value })
                     }
-                    className="text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
-                  >
-                    {p.showSecret ? "Hide" : "Show"}
-                  </button>
+                    placeholder={secretPlaceholder}
+                    autoComplete="off"
+                    data-testid={`key-${index}-api-secret`}
+                    className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+                  />
                 </div>
-                <input
-                  id={secretInputId}
-                  type={p.showSecret ? "text" : "password"}
-                  value={p.apiSecret}
-                  onChange={(e) =>
-                    onUpdate(index, { apiSecret: e.target.value })
-                  }
-                  placeholder={secretPlaceholder}
-                  autoComplete="off"
-                  data-testid={`key-${index}-api-secret`}
-                  className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-                />
-              </div>
+              )}
 
               {requiresPassphrase && (
                 <div>

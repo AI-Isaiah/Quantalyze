@@ -243,6 +243,80 @@ class TestDispatchTick:
         finally:
             main_worker_healthz.LAST_TICK_AT = _saved_tick
 
+    @pytest.mark.asyncio
+    async def test_heartbeat_refreshes_last_tick_during_long_dispatch(
+        self, monkeypatch
+    ) -> None:
+        """FLIPRETRY-04: a SINGLE dispatch that outlives STALE_THRESHOLD must NOT
+        false-stale healthz. A concurrent heartbeat refreshes LAST_TICK_AT WHILE the
+        dispatch is in flight, so the platform does not restart a legitimately-long
+        (but alive) backfill crawl mid-flight. Pre-fix LAST_TICK_AT was stamped only
+        at the TOP of the job iteration, so one long crawl froze it → 503 → restart
+        loop on exactly the large accounts FLIPRETRY targets."""
+        import main_worker
+        import main_worker_healthz
+
+        # Tiny interval so several heartbeats fire within a short test dispatch.
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.02)
+
+        jobs = [{"id": "job-slow", "kind": "derive_broker_dailies", "strategy_id": "s-slow"}]
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=jobs)
+        mock_supabase.rpc.return_value = chain
+
+        captured: dict = {}
+
+        async def _slow_dispatch(job):
+            # LAST_TICK_AT here == the top-of-iteration stamp (before the crawl).
+            captured["at_start"] = main_worker_healthz.LAST_TICK_AT
+            await asyncio.sleep(0.15)  # ~7 heartbeat intervals, all yielding
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_slow_dispatch):
+                await dispatch_tick("worker-hb")
+            # The heartbeat advanced LAST_TICK_AT DURING the 0.15s dispatch, past the
+            # stamp captured at dispatch start — proving mid-dispatch liveness.
+            assert "at_start" in captured
+            assert main_worker_healthz.LAST_TICK_AT > captured["at_start"], (
+                "the heartbeat must refresh LAST_TICK_AT during a long dispatch; "
+                "otherwise a legit >90s crawl false-stales healthz."
+            )
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_cancelled_after_dispatch_no_leak(self, monkeypatch) -> None:
+        """The heartbeat task is cancelled in `finally`, so it never outlives its
+        job (no orphan task bumping LAST_TICK_AT after dispatch returns)."""
+        import main_worker
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        jobs = [{"id": "job-fast", "kind": "sync_trades", "strategy_id": "s-1"}]
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=jobs)
+        mock_supabase.rpc.return_value = chain
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch(
+                     "main_worker.dispatch",
+                     new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+                 ):
+                await dispatch_tick("worker-hb-cancel")
+            frozen = main_worker_healthz.LAST_TICK_AT
+            # No live heartbeat remains: after a few intervals the tick must NOT move.
+            await asyncio.sleep(0.05)
+            assert main_worker_healthz.LAST_TICK_AT == frozen
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
+
     # METRICS-14 / Plan 12-07: priority-aware claim path. The throttle MUST
     # live in the claim path (dispatch_tick), not in dispatch() — by the time
     # dispatch runs, the row is already claimed. Phase 12 SC#4: live
@@ -1656,3 +1730,218 @@ class TestDailyEnqueueStartupGate:
             )
         finally:
             main_worker.SHUTDOWN = original
+
+
+# ---------------------------------------------------------------------------
+# FLIPRETRY-02 / FLIPRETRY-04: role-aware claim + per-job healthz refresh
+# ---------------------------------------------------------------------------
+class TestWorkerClaimRole:
+    """WORKER_CLAIM_ROLE maps to the claim RPC's p_kind_include/p_kind_exclude
+    args. Default 'all' MUST keep the claim payload byte-identical to prod
+    today (no p_kind_* keys), so merging this plan changes nothing until the
+    founder cuts over both workers (plan 03)."""
+
+    def _empty_claim_supabase(self):
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=[])
+        mock_supabase.rpc.return_value = chain
+        return mock_supabase
+
+    def _claim_params(self, mock_supabase):
+        """Return the params dict of the claim_compute_jobs_with_priority call."""
+        for c in mock_supabase.rpc.call_args_list:
+            if c.args[0] == "claim_compute_jobs_with_priority":
+                return c.args[1]
+        raise AssertionError("no claim_compute_jobs_with_priority RPC call recorded")
+
+    def test_invalid_role_raises_value_error(self) -> None:
+        import main_worker
+
+        with pytest.raises(ValueError):
+            main_worker._validate_claim_role("bogus")
+        # Valid roles pass through unchanged.
+        for role in ("all", "interactive", "backfill"):
+            assert main_worker._validate_claim_role(role) == role
+
+    @pytest.mark.asyncio
+    async def test_role_all_payload_byte_identical(self) -> None:
+        """role='all' → the claim payload has EXACTLY the 3 legacy keys and NO
+        p_kind_* keys. This assertion fails if anyone later adds an
+        unconditional p_kind_* arg (byte-identical merge safety pin)."""
+        import main_worker
+
+        mock_supabase = self._empty_claim_supabase()
+        with patch("main_worker.WORKER_CLAIM_ROLE", "all"), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            await dispatch_tick("worker-role-all")
+
+        params = self._claim_params(mock_supabase)
+        assert set(params.keys()) == {
+            "p_batch_size", "p_worker_id", "p_unified_backbone_active",
+        }, f"role=all must be byte-identical; got extra keys: {params.keys()}"
+
+    @pytest.mark.asyncio
+    async def test_role_interactive_excludes_backfill_kinds(self) -> None:
+        import main_worker
+
+        mock_supabase = self._empty_claim_supabase()
+        with patch("main_worker.WORKER_CLAIM_ROLE", "interactive"), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            await dispatch_tick("worker-role-interactive")
+
+        params = self._claim_params(mock_supabase)
+        assert params.get("p_kind_exclude") == list(main_worker.BACKFILL_KINDS)
+        assert "p_kind_include" not in params
+
+    @pytest.mark.asyncio
+    async def test_role_backfill_includes_only_backfill_kinds(self) -> None:
+        import main_worker
+
+        mock_supabase = self._empty_claim_supabase()
+        with patch("main_worker.WORKER_CLAIM_ROLE", "backfill"), \
+             patch("main_worker.get_supabase", return_value=mock_supabase), \
+             patch("main_worker.dispatch", new=AsyncMock()):
+            await dispatch_tick("worker-role-backfill")
+
+        params = self._claim_params(mock_supabase)
+        assert params.get("p_kind_include") == list(main_worker.BACKFILL_KINDS)
+        assert "p_kind_exclude" not in params
+
+    @pytest.mark.asyncio
+    async def test_backfill_role_refuses_legacy_fallback(self) -> None:
+        """With role='backfill' and the 42883 fallback triggered, dispatch_tick
+        claims NOTHING (the 2-arg legacy claim cannot filter by kind) and never
+        calls the legacy claim RPC — a backfill worker must never take
+        interactive jobs out-of-role."""
+        import main_worker
+
+        class _Undef(Exception):
+            code = "42883"
+
+        def _rpc_side_effect(name: str, params: dict):
+            chain = MagicMock()
+            if name == "claim_compute_jobs_with_priority":
+                chain.execute.side_effect = _Undef("does not exist")
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase = MagicMock()
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        # Reset the module fallback latch so this test is order-independent.
+        _saved = (main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT)
+        main_worker._FALLBACK_CLAIM_RPC = False
+        main_worker._FALLBACK_LATCHED_AT = 0.0
+        try:
+            with patch("main_worker.WORKER_CLAIM_ROLE", "backfill"), \
+                 patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=AsyncMock()) as mock_dispatch:
+                await dispatch_tick("worker-backfill-fallback")
+        finally:
+            main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT = _saved
+
+        rpc_names = [c.args[0] for c in mock_supabase.rpc.call_args_list]
+        assert "claim_compute_jobs" not in rpc_names, (
+            "backfill role must NOT fall back to the unfilterable legacy claim"
+        )
+        mock_dispatch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interactive_role_still_falls_back(self) -> None:
+        """role='interactive' keeps today's behavior on 42883 — it still falls
+        back to the legacy claim (the degraded-exclusion warning names it)."""
+        import main_worker
+
+        class _Undef(Exception):
+            code = "42883"
+
+        legacy_called = {"n": 0}
+
+        def _rpc_side_effect(name: str, params: dict):
+            chain = MagicMock()
+            if name == "claim_compute_jobs_with_priority":
+                chain.execute.side_effect = _Undef("does not exist")
+            elif name == "claim_compute_jobs":
+                legacy_called["n"] += 1
+                chain.execute.return_value = MagicMock(data=[])
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase = MagicMock()
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        _saved = (main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT)
+        main_worker._FALLBACK_CLAIM_RPC = False
+        main_worker._FALLBACK_LATCHED_AT = 0.0
+        try:
+            with patch("main_worker.WORKER_CLAIM_ROLE", "interactive"), \
+                 patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=AsyncMock()):
+                await dispatch_tick("worker-interactive-fallback")
+        finally:
+            main_worker._FALLBACK_CLAIM_RPC, main_worker._FALLBACK_LATCHED_AT = _saved
+
+        assert legacy_called["n"] == 1, "interactive role must still fall back"
+
+
+class TestPerJobHealthzRefresh:
+    """FLIPRETRY-04: LAST_TICK_AT refreshes BETWEEN jobs in a claimed batch so
+    a batch of bounded-slow backfill jobs keeps healthz honest — while a
+    genuinely frozen dispatch still gets no refresh and goes stale."""
+
+    @pytest.mark.asyncio
+    async def test_last_tick_advances_between_jobs(self) -> None:
+        import main_worker
+        import main_worker_healthz
+
+        jobs = [
+            {"id": "job-0", "kind": "derive_broker_dailies", "api_key_id": "k-0"},
+            {"id": "job-1", "kind": "derive_broker_dailies", "api_key_id": "k-1"},
+        ]
+
+        def _rpc_side_effect(name: str, params: dict):
+            chain = MagicMock()
+            if name == "claim_compute_jobs_with_priority":
+                chain.execute.return_value = MagicMock(data=jobs)
+            else:
+                chain.execute.return_value = MagicMock(data=None)
+            return chain
+
+        mock_supabase = MagicMock()
+        mock_supabase.rpc.side_effect = _rpc_side_effect
+
+        # Capture LAST_TICK_AT at the moment each dispatch STARTS. A refresh at
+        # the top of each for-job iteration means the 2nd dispatch sees a
+        # STRICTLY LATER tick than the 1st. Assert NO refresh happens DURING a
+        # single dispatch await (the refresh is between jobs, not mid-frozen-job).
+        seen: list[float] = []
+
+        async def _dispatch(job):
+            during_before = main_worker_healthz.LAST_TICK_AT
+            seen.append(during_before)
+            await asyncio.sleep(0)  # yield; a frozen job would never return here
+            during_after = main_worker_healthz.LAST_TICK_AT
+            assert during_after == during_before, (
+                "LAST_TICK_AT must NOT refresh DURING a single dispatch (only "
+                "between jobs) — a frozen job must still be able to go stale"
+            )
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.WORKER_CLAIM_ROLE", "all"), \
+                 patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_dispatch):
+                await dispatch_tick("worker-refresh")
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
+
+        assert len(seen) == 2
+        assert seen[1] > seen[0], (
+            f"LAST_TICK_AT must strictly advance between jobs; got {seen}"
+        )

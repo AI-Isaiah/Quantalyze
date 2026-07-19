@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -73,6 +74,21 @@ logger = logging.getLogger("quantalyze.analytics.equity_reconstruction")
 RAW_PAYLOAD_CAP_BYTES: int = 4096
 OKX_TRADE_TERMINUS_DAYS: int = 90          # documented OKX cap (RESEARCH.md §1B, A3)
 BACKFILL_CAP_DAYS: int = 730                # 2 years (RESEARCH.md §1E recommended cap)
+
+# FLIPRETRY-01 (defensive half, A4 mitigation) — hard per-crawl wall-clock bound
+# for the reconstruct orchestrating crawl. run_reconstruct_allocator_history_job
+# awaits a SINGLE _fetch_and_price_window that internally does up to 500 trade
+# pages + transfers + OHLCV gather + CoinGecko fallback + _fetch_current_equity —
+# a legitimately long crawl. Bounding it in asyncio.wait_for converts a hang into
+# a classified transient (retryable) instead of an unbounded await that could wedge
+# the worker's event loop (the sibling guard to job_worker._BROKER_CRAWL_TIMEOUT_S,
+# for the CONTEXT-named legacy pipeline). 1500s = 25 min leaves persist headroom
+# under the 30-min reconstruct_allocator_history outer budget; a full 500-page
+# window crawl is legitimately long, so the bound sits well above the sfox/broker
+# 300s per-crawl figure. Env-overridable via RECONSTRUCT_CRAWL_TIMEOUT_S.
+_RECONSTRUCT_CRAWL_TIMEOUT_S: float = float(
+    os.getenv("RECONSTRUCT_CRAWL_TIMEOUT_S", "1500")
+)
 COINGECKO_BASE: str = "https://api.coingecko.com/api/v3"
 COINGECKO_MIN_SLEEP_SECS: float = 2.0       # stay below 30 RPM free tier
 
@@ -2128,8 +2144,14 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
 
     try:
         try:
-            rows, hit_terminus, telemetry = await _fetch_and_price_window(
-                ctx.exchange, venue, ctx.supabase, start_date, end_date,
+            # FLIPRETRY-01 (defensive): the orchestrating window crawl is HARD-BOUNDED
+            # so a hang becomes a classified transient (the except asyncio.TimeoutError
+            # arm below), never an unbounded await that wedges the worker loop.
+            rows, hit_terminus, telemetry = await asyncio.wait_for(
+                _fetch_and_price_window(
+                    ctx.exchange, venue, ctx.supabase, start_date, end_date,
+                ),
+                timeout=_RECONSTRUCT_CRAWL_TIMEOUT_S,
             )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
@@ -2144,6 +2166,33 @@ async def run_reconstruct_allocator_history_job(job: dict[str, Any]) -> Dispatch
                 outcome=DispatchOutcome.FAILED,
                 error_message=sanitized,
                 error_kind=error_kind,
+            )
+        except asyncio.TimeoutError:
+            # FLIPRETRY-01: the window crawl exceeded the per-crawl bound. This arm
+            # MUST precede the broader `except Exception` below — in Python 3.11+
+            # asyncio.TimeoutError IS an OSError subclass, and the generic arm's
+            # classify_exception would otherwise dispose it. A hang is a CLASSIFIED,
+            # RETRYABLE transient (the handler's retryable disposition), never a wedge.
+            # Static scrubbed text only — never logger.exception (H-3 HMAC-in-URL leak).
+            sanitized = (
+                "reconstruct window crawl exceeded the per-crawl wall-clock bound "
+                f"({_RECONSTRUCT_CRAWL_TIMEOUT_S}s) — retrying rather than wedging the "
+                "worker (FLIPRETRY-01)"
+            )
+            logger.warning(
+                "reconstruct_allocator_history window crawl exceeded the %ss bound "
+                "allocator=%s key=%s venue=%s — classified transient (FLIPRETRY-01)",
+                _RECONSTRUCT_CRAWL_TIMEOUT_S, allocator_id, api_key_id, venue,
+            )
+            _emit_audit(
+                allocator_id, api_key_id,
+                "allocator.equity.reconstruct_failed",
+                {"error_kind": "transient", "sanitized_message": sanitized},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized,
+                error_kind="transient",
             )
         except Exception as exc:  # noqa: BLE001
             # H-1172: log the error before sanitisation so the original error

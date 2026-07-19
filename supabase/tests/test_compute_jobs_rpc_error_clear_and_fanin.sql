@@ -25,7 +25,7 @@
 DO $$
 DECLARE
   v_claim  TEXT := pg_get_functiondef('claim_compute_jobs(integer,text)'::regprocedure);
-  v_claimp TEXT := pg_get_functiondef('claim_compute_jobs_with_priority(integer,text,boolean)'::regprocedure);
+  v_claimp TEXT := pg_get_functiondef('claim_compute_jobs_with_priority(integer,text,boolean,text[],text[])'::regprocedure);
   v_done   TEXT := pg_get_functiondef('mark_compute_job_done(uuid,uuid)'::regprocedure);
 BEGIN
   -- M-1137/M-1138: both claim RPCs clear the error columns on re-claim.

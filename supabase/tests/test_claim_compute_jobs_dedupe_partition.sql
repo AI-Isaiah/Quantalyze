@@ -36,7 +36,7 @@
 -- ==========================================================================
 DO $$
 DECLARE
-  v_claimp TEXT := pg_get_functiondef('claim_compute_jobs_with_priority(integer,text,boolean)'::regprocedure);
+  v_claimp TEXT := pg_get_functiondef('claim_compute_jobs_with_priority(integer,text,boolean,text[],text[])'::regprocedure);
 BEGIN
   -- The strategy-partition dedupe: `(strategy_id IS NULL OR kind =
   -- 'compute_intro_snapshot' OR rn_s = 1)`. The `rn_s = 1` term is what

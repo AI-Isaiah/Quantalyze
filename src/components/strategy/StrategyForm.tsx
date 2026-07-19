@@ -12,7 +12,16 @@ import { Modal } from "@/components/ui/Modal";
 import { STRATEGY_NAMES, STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
 
-const EXCHANGE_OPTIONS = EXCHANGES.map((e) => ({ value: e.toLowerCase(), label: e }));
+// F4 (Phase 122): this legacy StrategyForm connect-key modal renders a HARDCODED
+// API Secret field + generic "read-only keys only" copy — it is NOT token-only /
+// F3-aware, so it structurally cannot serve sfox (single Bearer token, no secret,
+// no per-key scope probe). The wizard ApiKeyForm handles sfox correctly; this
+// legacy surface EXCLUDES sfox from its offer instead — even when SFOX_UI_ENABLED
+// flips EXCHANGES to include it — so it can never render a secret field + generic
+// copy for a sfox connect. Filtered on the canonical lowercase code.
+const EXCHANGE_OPTIONS = EXCHANGES.filter((e) => e.toLowerCase() !== "sfox").map(
+  (e) => ({ value: e.toLowerCase(), label: e }),
+);
 
 /**
  * H-0405 (audit-2026-05-07): map a raw Postgres/PostgREST error to a safe,
@@ -100,11 +109,17 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
     setApiLoading(true);
     setApiError(null);
     try {
+      // F4 (Phase 122): canonicalize the exchange to lowercase at the ONE point
+      // it enters the validate/insert path — the api_keys DB CHECK and the Python
+      // /validate-key intercept both key on lowercase, so a display-cased value
+      // must never reach either. The Select value is already lowercase today; this
+      // is the explicit chokepoint mirroring the wizard routes' toLowerCase().
+      const exchangeCanonical = apiExchange.trim().toLowerCase();
       const res = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          exchange: apiExchange,
+          exchange: exchangeCanonical,
           api_key: apiKey,
           api_secret: apiSecret,
           passphrase: apiPassphrase || null,
@@ -124,8 +139,8 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       if (!user) throw new Error("Not authenticated");
       const { error: insertError } = await supabase.from("api_keys").insert({
         user_id: user.id,
-        exchange: apiExchange,
-        label: `${apiExchange} key`,
+        exchange: exchangeCanonical,
+        label: `${exchangeCanonical} key`,
         ...dbFields,
       });
       if (insertError) {

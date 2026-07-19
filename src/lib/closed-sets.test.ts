@@ -144,9 +144,19 @@ describe("closed-sets registry", () => {
 
   describe("exchanges (value-space A)", () => {
     it("SUPPORTED_EXCHANGES is the canonical lowercase wire form (key-save boundary)", () => {
-      // Phase 68 (DRB-02): the key-save boundary admits deribit. This is the
-      // widened allowlist a key-save request clears at the TS layer.
-      expect(SUPPORTED_EXCHANGES).toEqual(["binance", "okx", "bybit", "deribit"]);
+      // Phase 68 (DRB-02): the key-save boundary admits deribit. Phase 119
+      // (SFOX) widened it further to admit sfox at the TS layer, in lockstep
+      // with the pydantic Literals + the SQL CHECK. This is the widened
+      // allowlist a key-save request clears at the TS layer. NOTE: the
+      // USER-FACING offer (UI_EXCHANGE_CODES / EXCHANGES) stays decoupled and
+      // sfox is flag-gated there (SFOX_UI_ENABLED) — see the pins below.
+      expect(SUPPORTED_EXCHANGES).toEqual([
+        "binance",
+        "okx",
+        "bybit",
+        "deribit",
+        "sfox",
+      ]);
     });
 
     it("EXCHANGES (display) is the 4-value UI-offered set — post-Phase-69 flip pin", () => {

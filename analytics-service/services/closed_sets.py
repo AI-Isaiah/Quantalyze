@@ -40,7 +40,33 @@ Scope notes (deliberate boundaries — see B8b PR body):
   behaviors, so they stay separate by design.
 """
 
+import os
 from typing import Literal
+
+# ---------------------------------------------------------------------------
+# sFOX server/worker go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
+#
+# Python mirror of the TS `isSfoxEnabledServer()` in src/lib/closed-sets.ts.
+# DISTINCT from the TS client-build flag NEXT_PUBLIC_SFOX_ENABLED (which gates
+# only the wizard CARD offer): this reads the worker/server env SFOX_ENABLED and
+# gates whether a sfox key is ADMITTED for validation (routers/exchange.py
+# /validate-key) and for onboard/resync processing (routers/process_key.py's
+# per-flow source whitelist) AT ALL. Fail-CLOSED: strict lower-cased "true" —
+# unset / "" / "1" / "on" / "TRUE " all read OFF, so a sfox connect fails closed
+# honestly (a clean 4xx "not yet available", NEVER a live balance probe, NEVER a
+# false-verified draft) until the founder sets SFOX_ENABLED=true on the worker at
+# go-live, in lockstep with the Vercel server env of the same name (121/122
+# runbook). A `.strip().lower()` normalization is used (not raw `== "true"`) so a
+# fat-fingered "true\n" / "True" deploy value still reads ON — this direction is
+# safe because it can only ENABLE, and enabling is the founder's explicit intent.
+# ---------------------------------------------------------------------------
+SFOX_DISABLED_DETAIL = "sFOX integration is not yet available."
+
+
+def sfox_enabled_server() -> bool:
+    """True iff SFOX_ENABLED is set to "true" (fail-closed; see module note)."""
+    return (os.getenv("SFOX_ENABLED") or "").strip().lower() == "true"
+
 
 # ---------------------------------------------------------------------------
 # Trade side — the {buy, sell} fill action.
@@ -109,7 +135,16 @@ STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
 # would drift the preview clock (√365) from the blend clock (√252) — the exact
 # silent re-widening / hand-copy failure mode this module exists to prevent. Both
 # now import from here. ``_COMPOSITE_DEGRADE_VENUES`` derives from it (minus deribit).
-CRYPTO_VENUES: frozenset[str] = frozenset({"deribit", "binance", "okx", "bybit"})
+# SFOX-05: sfox is spot crypto — it annualizes on the crypto (√365) clock (#597)
+# everywhere this canonical set is consumed (_resolve_asset_class → asset_class
+# 'crypto'; the composite blend clock). Admitting it HERE (the single MD-01 source)
+# proactively closes the known unknown-asset_class √252 blend-underestimation class
+# for sfox: a sole sfox crypto leg can never be mis-annualized on the traditional
+# clock. (The composite DEGRADABLE-member set is a DIFFERENT question — sfox has no
+# ccxt reconstruction path — and is handled at job_worker._COMPOSITE_DEGRADE_VENUES.)
+CRYPTO_VENUES: frozenset[str] = frozenset(
+    {"deribit", "binance", "okx", "bybit", "sfox"}
+)
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ import { z } from "zod";
 // deribit key clears the allowlist; the FUNDING and USER-FACING UI surfaces are
 // DECOUPLED below (FUNDING_EXCHANGES / UI_EXCHANGE_CODES) and stay 3-exchange —
 // widening this base MUST NOT auto-widen those (OQ4 gate + Pitfall 2).
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit"] as const;
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit", "sfox"] as const;
 export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
 export const exchangeEnum = z.enum(SUPPORTED_EXCHANGES);
 
@@ -50,8 +50,56 @@ export const EXCHANGE_DISPLAY = {
   okx: "OKX",
   bybit: "Bybit",
   deribit: "Deribit",
+  sfox: "sFOX",
 } as const satisfies Record<SupportedExchange, string>;
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
+
+/**
+ * Feature flag for the public sFOX offer (Phase 122 / SFOX-08). Strict equality
+ * against the EXACT string "true" — fail-closed: "1" / "TRUE" / "on" / "" all
+ * read as OFF. Next.js inlines the full static `process.env.NEXT_PUBLIC_SFOX_ENABLED`
+ * member expression into the client bundle at build time, so this MUST stay a
+ * single static member access (never dynamic `process.env[...]` indexing) or the
+ * build-time inlining breaks and the flag reads undefined in the browser.
+ *
+ * DEFAULT OFF. Unlike deribit (which worked on the existing egress the moment
+ * its card shipped), a sfox CONNECT needs the founder's ops FIRST: the static
+ * egress deployed + whitelisted (121-03), a validated live flow (SFOX-06), and
+ * active-account crawl is phase-123-gated. So the card / picker / chip offer is
+ * built READY but hidden until the founder sets NEXT_PUBLIC_SFOX_ENABLED=true in
+ * Vercel. The sfox provenance badge + the 3-letter SFOX tag ship UNCONDITIONALLY
+ * elsewhere (122-01) — a founder-connected sfox key must render correctly before
+ * this offer flag flips.
+ */
+export const SFOX_UI_ENABLED = process.env.NEXT_PUBLIC_SFOX_ENABLED === "true";
+
+/**
+ * SERVER-SIDE sFOX go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
+ *
+ * DISTINCT from SFOX_UI_ENABLED above: that is the NEXT_PUBLIC *client-build*
+ * flag that gates only the wizard CARD / picker / chip OFFER (pixels). THIS is
+ * a server/runtime-only flag (deliberately NOT NEXT_PUBLIC) that gates whether a
+ * sfox CONNECT is admitted at the three key routes (validate-and-encrypt,
+ * create-with-key, composite/add-key) — the Python worker enforces the mirror
+ * gate (services/closed_sets.py::sfox_enabled_server). Fail-CLOSED with strict
+ * equality against the EXACT string "true": unset / "1" / "TRUE" / "on" / "" all
+ * read OFF, so a sfox connect FAILS CLOSED honestly ("not yet available", a
+ * clean 4xx — never a crash, never a false KEY_AUTH_FAILED, never a live probe)
+ * until the founder sets SFOX_ENABLED=true at go-live.
+ *
+ * GO-LIVE RUNBOOK (121/122): the founder must set BOTH `SFOX_ENABLED` (Vercel
+ * server env AND the Railway worker env — the server structural gate) AND
+ * `NEXT_PUBLIC_SFOX_ENABLED` (the client build — the UI offer). Either alone is
+ * an intentional half-state (card hidden but connect works, or card shown but
+ * connect fails closed) that this pair of gates makes SAFE, not broken.
+ *
+ * Read as a FUNCTION (never a module-load const) so it is evaluated per-request
+ * server-side and is never inlined into the client bundle; on the client
+ * `process.env.SFOX_ENABLED` is undefined, so this reads false there.
+ */
+export function isSfoxEnabledServer(): boolean {
+  return process.env.SFOX_ENABLED === "true";
+}
 
 /**
  * User-facing "offered" exchange codes — the set the public/marketing surfaces
@@ -61,13 +109,33 @@ export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
  * deribit once the wizard card + the /security#deribit-readonly scope guide
  * shipped. Still NOT derived from SUPPORTED_EXCHANGES — this is a deliberate,
  * per-phase widening (FUNDING_EXCHANGES stays 3-value until Phase 70).
+ *
+ * Phase 122 / SFOX-08: sfox is appended ONLY when SFOX_UI_ENABLED is on (the
+ * founder-gated flag above). Both the base 4-tuple and the widened 5-tuple carry
+ * `as const satisfies readonly SupportedExchange[]`, so the compile-time
+ * closed-set guarantee holds on each literal; the exported value is typed
+ * `readonly SupportedExchange[]` and selects between them at module load. Flag
+ * OFF (default) → BYTE-IDENTICAL to today's 4-tuple; every EXCHANGES-derived chip
+ * surface (OQ4) and the two wizard pickers auto-widen only when the flag flips.
  */
-export const UI_EXCHANGE_CODES = [
+const UI_EXCHANGE_CODES_BASE = [
   "binance",
   "okx",
   "bybit",
   "deribit",
 ] as const satisfies readonly SupportedExchange[];
+
+const UI_EXCHANGE_CODES_WITH_SFOX = [
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+  "sfox",
+] as const satisfies readonly SupportedExchange[];
+
+export const UI_EXCHANGE_CODES: readonly SupportedExchange[] = SFOX_UI_ENABLED
+  ? UI_EXCHANGE_CODES_WITH_SFOX
+  : UI_EXCHANGE_CODES_BASE;
 
 /**
  * Funding/reconcile-eligible exchange codes — the TS mirror of the SQL
@@ -117,7 +185,7 @@ export function isSupportedExchange(value: string): boolean {
 
 /**
  * Is this exchange a crypto venue? Today EVERY supported exchange
- * (binance / okx / bybit / deribit) is crypto, so membership in the
+ * (binance / okx / bybit / deribit / sfox) is crypto, so membership in the
  * allowlist IS the crypto signal. Case-insensitive. When a non-crypto
  * (equities/FX) venue is ever added to SUPPORTED_EXCHANGES this must be
  * narrowed to an explicit crypto subset — until then, allowlist membership

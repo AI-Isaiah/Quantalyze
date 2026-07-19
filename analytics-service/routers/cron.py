@@ -9,7 +9,7 @@ from fastapi import APIRouter, HTTPException
 
 from services.db import get_supabase, rows
 from services.encryption import decrypt_credentials, get_kek
-from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, parse_since_ms, fetch_usdt_balance, validate_key_permissions, EXCHANGE_CLASSES
 
 router = APIRouter(prefix="/api", tags=["cron"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -117,6 +117,11 @@ SyncStatus = Literal[
     "transient_failure",
     "error",
     "timeout",
+    # F1: a non-ccxt exchange (sfox) whose cron ingestion path has not shipped
+    # yet. Benign — NOT an error. Counted separately in the summary so a tick
+    # that only "syncs" deferred keys is not misread as an idle/failed tick, and
+    # so recurring deferrals never masquerade as errors in the Sentry stream.
+    "deferred",
 ]
 
 # Outcome bucket for a per-portfolio recompute attempt. `in_flight` is
@@ -163,6 +168,34 @@ async def _sync_single_key(
     start = time.monotonic()
 
     try:
+        # F1: non-ccxt exchanges (sfox) have no cron ingestion path yet — their
+        # live pull lands in a later phase. `create_exchange(exchange_name, …)`
+        # below raises ValueError("Unsupported exchange: <x>") for anything not
+        # in EXCHANGE_CLASSES, which the outer `except Exception` would log via
+        # logger.exception (→ Sentry) with status="error" on EVERY 15-min tick,
+        # forever, for every connected sfox key. Guard BEFORE create_exchange:
+        # log at INFO (not exception) and return a benign "deferred" status that
+        # the summary counts apart from real errors. The key STAYS active —
+        # nothing is broken, ingestion just hasn't shipped. Generalizes to any
+        # future non-ccxt venue. Placed before decrypt: the exchange is known
+        # from key_row, so a deferred key needn't be decrypted at all.
+        if exchange_name not in EXCHANGE_CLASSES:
+            logger.info(
+                "cron_sync: key %s exchange=%s has no cron ingestion path yet "
+                "(deferred to a later phase) — skipping benignly, key stays active",
+                key_id,
+                exchange_name,
+            )
+            return {
+                "key_id": key_id,
+                "strategy_id": strategy_id,
+                "strategy_ids": strategy_ids,
+                "exchange": exchange_name,
+                "trades_fetched": 0,
+                "duration_s": round(time.monotonic() - start, 2),
+                "status": "deferred",
+            }
+
         # A key row with NULL encryption columns (malformed/seed data that
         # slipped into api_keys with is_active=true) makes decrypt_credentials
         # call `.encode()` on None → AttributeError, which surfaces to Sentry
@@ -671,18 +704,22 @@ async def cron_sync() -> dict[str, Any]:
     timed_out = sum(1 for r in all_results if r["status"] == "timeout")
     revoked = sum(1 for r in all_results if r["status"] == "key_revoked")
     transient = sum(1 for r in all_results if r["status"] == "transient_failure")
+    # F1: benign non-ccxt deferrals (e.g. sfox pre-ingestion). Counted apart from
+    # `failed` so a book of only-deferred keys reads as "deferred", never "error".
+    deferred = sum(1 for r in all_results if r["status"] == "deferred")
     total_trades = sum(r.get("trades_fetched", 0) for r in all_results)
     overall_duration = round(time.monotonic() - overall_start, 2)
 
     logger.info(
         "cron_sync complete: %d synced, %d partial, %d failed, %d timed out, "
-        "%d revoked, %d transient, %d total trades, %.1fs total duration",
+        "%d revoked, %d transient, %d deferred, %d total trades, %.1fs total duration",
         synced,
         partial,
         failed,
         timed_out,
         revoked,
         transient,
+        deferred,
         total_trades,
         overall_duration,
     )
@@ -1049,6 +1086,7 @@ async def cron_sync() -> dict[str, Any]:
         "timed_out": timed_out,
         "revoked": revoked,
         "transient": transient,
+        "deferred": deferred,
         "total_keys": len(keys),
         "total_trades": total_trades,
         "total_results": len(all_results),

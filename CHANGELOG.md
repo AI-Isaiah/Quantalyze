@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.46.0.0] - 2026-07-19
+### v1.12 sFOX Verified Integration (Phases 118–123)
+A LIVE sFOX exchange adapter reading the real account as `api_verified` ground
+truth (CSV is fabricatable, a live API read is not; sFOX is not in ccxt → a
+custom read-only `SfoxClient`), backed by a Fly.io static-egress proxy, plus the
+FLIPRETRY derived-equity worker hardening. Ships flag-gated OFF
+(`SFOX_ENABLED` / `NEXT_PUBLIC_SFOX_ENABLED`) — no user-facing change until the
+founder runs the go-live ops (deploy the proxy, allocate + verify the static
+egress IP, whitelist at sFOX).
+
+- **118 — SfoxClient**: read-only Bearer adapter (GET hardcoded), rate-gated,
+  38 offline tests; every network call timeout-bounded; secrets never logged.
+- **119 — key-connect boundary**: DB CHECK widening (api_keys / compute_jobs /
+  strategies / strategy_verifications admit `sfox`) in lockstep with the TS
+  allowlist + pydantic Literals; validate/probe routes; `api_secret` carve-out.
+- **120 — reconstruction**: sFOX `balance/history` → cashflow-neutral TWR → the
+  ONE backbone; `api_verified` provenance; a P115-independent transactions-only
+  parity oracle that fails loud on an unclassified txn type.
+- **121 — static egress**: `fly-egress-proxy/` (tinyproxy, ams, dual-IP topology,
+  ~$5.60/mo) + explicit `WORKER_EGRESS_PROXY_URL` threading (aiohttp
+  `trust_env=False` trap avoided) + an `--expect` egress-verify gate.
+- **122 — add-key UI**: flag-gated sFOX offer + `SFOX` badge + honest copy;
+  server-side gate parity across all key routes.
+- **123 — FLIPRETRY**: per-crawl `wait_for` bounds sized under the outer budget +
+  a kind-filtered dedicated backfill worker + an E2 ground-truth trust gate;
+  go-live/rollback runbook. The derived-equity flip stays DORMANT until the live
+  E2 run earns `is_trustworthy`.
+- **Review**: two full rounds on the composed branch — a specialist fan-out
+  (silent-failure / migration / RLS / type / test / correctness) then a
+  fresh-context Fable red team that caught regressions the fixes introduced
+  (F4 parity false-raise + coverage collapse, crawl-timeout false-timeouts,
+  proxy-secret leaks, a worker kill-switch gap). All findings fixed and pinned
+  with economics-first (P115) regression tests.
+
 ## [0.45.0.0] - 2026-07-18
 ### v1.11 Scenario Composer v2 — tail (Phases 114–117; completes the milestone)
 Second and final v1.11 tranche, landing on the v1.10 dailies-canonical backbone.

@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { EXCHANGE_DISPLAY } from "@/lib/closed-sets";
 
 /**
  * Allocator-facing sync-status pill + helper line.
@@ -103,14 +104,18 @@ function titleCase(s: string): string {
 }
 
 // ISSUE-007: "OKX" is an acronym, not a title-case proper noun. Plain
-// `titleCase("okx")` produces "Okx", which is wrong. The table below is
-// the authoritative display name per exchange; fall through to titleCase
-// for unknown exchanges so we degrade gracefully on the next venue.
-const EXCHANGE_DISPLAY_NAME: Record<string, string> = {
-  okx: "OKX",
-  binance: "Binance",
-  bybit: "Bybit",
-};
+// `titleCase("okx")` produces "Okx", which is wrong. The map below is the
+// authoritative display name per exchange; fall through to titleCase for
+// unknown exchanges so we degrade gracefully on the next venue.
+//
+// F5 (Phase 122): DERIVED from the shared closed-set EXCHANGE_DISPLAY (the ONE
+// lowercase-code → label source) instead of a hand-maintained literal — the old
+// literal was missing deribit AND sfox, so a founder-connected sfox key rendered
+// "Sfox" via the titleCase fallback. Deriving here means a new exchange picks up
+// its correct casing automatically and this map can never drift from the wizard /
+// chip surfaces again. EXCHANGE_DISPLAY is keyed by the canonical lowercase code,
+// matching the `exchange.toLowerCase()` lookup below.
+const EXCHANGE_DISPLAY_NAME: Record<string, string> = EXCHANGE_DISPLAY;
 
 export function exchangeDisplayName(exchange: string): string {
   if (!exchange) return exchange;

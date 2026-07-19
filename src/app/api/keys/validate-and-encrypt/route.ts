@@ -12,6 +12,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
 import { getCorrelationId } from "@/lib/correlation-id";
+import { isSfoxEnabledServer } from "@/lib/closed-sets";
 
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
@@ -20,7 +21,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
   const { exchange, api_key, api_secret, passphrase } = body;
 
-  if (!exchange || !api_key || !api_secret) {
+  // SECURITY-SENSITIVE carve-out (119-CONTEXT Q1, LOCKED): sFOX authenticates with a
+  // SINGLE Bearer token and carries NO api_secret (118-RESEARCH confirmed). For sfox
+  // ONLY, the token is stored as api_key and the absent secret is normalized to "".
+  // This relaxes credential PRESENCE for exactly one exchange — every ccxt exchange
+  // (binance/okx/bybit/deribit) still requires a secret below, byte-identically. The
+  // empty secret flows through the SAME validateKey/encryptKey trim chokepoint
+  // (analytics-client.ts:169; trimCredential("") === ""), never a parallel path.
+  // Security-reviewed (T-119-08/09/11).
+  // WR-01: match sfox case-INSENSITIVELY, aligning with the create-with-key /
+  // composite-add-key siblings (`exchange.toLowerCase() === "sfox"`). A caller
+  // submitting the EXCHANGE_DISPLAY casing ("sFOX"/"SFOX") must hit the same
+  // carve-out these routes do, not fall through to a spurious "Missing required
+  // fields" 400.
+  const isSfox = typeof exchange === "string" && exchange.toLowerCase() === "sfox";
+  // Forward the CANONICAL lowercase 'sfox' downstream: the api_keys DB CHECK
+  // admits only lowercase 'sfox' and the Python /validate-key intercept is an
+  // exact `== "sfox"` match, so a mixed-case value must NORMALIZE, not pass
+  // through raw. Normalization is keyed on sfox ONLY — every ccxt exchange is
+  // forwarded verbatim, so ccxt behavior is byte-identical.
+  const exchangeNormalized = isSfox ? "sfox" : exchange;
+  const api_secret_normalized =
+    isSfox && typeof api_secret !== "string" ? "" : api_secret;
+
+  // F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
+  // The client flag NEXT_PUBLIC_SFOX_ENABLED only hides the wizard card; this
+  // server flag makes a sfox CONNECT fail CLOSED until SFOX_ENABLED=true is set
+  // server-side. Return a clean, honest 4xx BEFORE the rate-limit and the live
+  // validate/encrypt round-trip — never a crash, never a false KEY_AUTH_FAILED,
+  // never a live probe. ccxt exchanges are entirely unaffected (isSfox is false).
+  if (isSfox && !isSfoxEnabledServer()) {
+    return NextResponse.json(
+      { error: "sFOX integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  if (!exchange || !api_key || (!isSfox && !api_secret)) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });
   }
 
@@ -49,7 +86,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // /process-key/encrypt endpoint that returns the same envelope shape as
   // legacy encryptKey), restore the flag-gated unified handler below and
   // route through it. Tracked under the unified-encrypt deferred work item.
-  return await legacyValidateAndEncryptHandler({ exchange, api_key, api_secret, passphrase });
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase });
 });
 
 /**

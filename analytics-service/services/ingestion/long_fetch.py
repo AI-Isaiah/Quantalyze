@@ -43,6 +43,13 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger("quantalyze.analytics.long_fetch")
 
+# F1 (P120 red-team) — sources whose returns are ledger/balance-history-backed,
+# NOT fill-derived. Their adapters raise NotImplementedError from fetch_raw /
+# compute_metrics BY DESIGN, so the fill steps must be skipped and the factsheet
+# produced by the derive_broker_dailies tail. deribit = txn-log ledger; sfox =
+# balance-history usd_value series (both feed the broker-dailies ONE-path).
+_LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox"})
+
 
 async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     """Phase 19 / BACKBONE-09 — long-fetch worker handler.
@@ -245,7 +252,17 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # still run validate (the scope gate applies) + encrypt + advance the state
     # machine, but the factsheet is produced by the derive_broker_dailies ledger
     # job enqueued at the tail (the exact analogue of the perp sync_trades tail).
-    is_ledger_backed = source == "deribit"
+    #
+    # F1 (P120 red-team): sFOX is ALSO ledger/balance-history-backed — its
+    # returns come from the /v1/account/balance/history usd_value series via the
+    # broker-dailies ONE-path. SfoxAdapter.fetch_raw + compute_metrics both raise
+    # NotImplementedError BY DESIGN (there is no fill-based sfox consumer). Before
+    # this fix, sfox fell into the fill branch below → fetch_raw NotImplementedError
+    # crashed every onboard/resync in production, and the tail enqueued sync_trades
+    # (which also re-fetches fills) instead of derive_broker_dailies. Treat sfox as
+    # ledger-backed so it routes to the derive_broker_dailies tail, exactly like
+    # deribit.
+    is_ledger_backed = source in _LEDGER_BACKED_SOURCES
 
     # 1. validate
     val = await adapter.validate(request)

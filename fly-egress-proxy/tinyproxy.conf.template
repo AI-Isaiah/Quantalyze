@@ -1,0 +1,66 @@
+# fly-egress-proxy/tinyproxy.conf.template
+# ---------------------------------------------------------------------------
+# Secure forward proxy for the Fly.io static-egress app.
+# This is a TEMPLATE: entrypoint.sh renders the real config at container start,
+# substituting the BasicAuth placeholders from the PROXY_BASIC_AUTH fly secret.
+# The __PROXY_BASIC_AUTH_*__ tokens must each appear EXACTLY once.
+# Directive names verified against upstream tinyproxy.conf.in + tinyproxy.conf(5).
+# ---------------------------------------------------------------------------
+
+# tinyproxy binds the port as root, then drops to this unprivileged user/group.
+User tinyproxy
+Group tinyproxy
+
+# Listen port for proxy clients. MUST equal fly.toml internal_port (8888) and the
+# :PORT in WORKER_EGRESS_PROXY_URL. All three are kept in lockstep on purpose.
+Port 8888
+
+# --- Absence 1: NO `Listen` directive ---
+# Omitting `Listen` binds 0.0.0.0 inside the Fly machine. Fly's edge routes the
+# dedicated inbound v4 to this port, so the machine-local bind is intentionally
+# broad; the public gate is BasicAuth below, NOT a bind-address restriction.
+
+# --- Absence 2: NO `Allow` lines (deny-by-default) ---
+# Railway's worker egress IP is NOT stable, so an IP allow-list would break
+# silently. With BasicAuth set and zero `Allow` lines, tinyproxy admits ONLY
+# authenticated clients — that is the deny-by-default gate.
+
+# --- Absence 3: NO open relay ---
+# There is deliberately no `Allow 0.0.0.0/0`. An unauthenticated public proxy is
+# an abuse magnet; BasicAuth is the client-admission control on this public IP.
+
+# --- DESTINATION allow-list (F4 hardening — defense-in-depth beyond BasicAuth) ---
+# BasicAuth gates WHO may connect; this gates WHERE they may connect TO. With
+# `FilterDefaultDeny Yes` and the anchored domain-suffix patterns in the filter
+# file, an authenticated client (or a leaked credential) CANNOT use this proxy as
+# an open relay to arbitrary hosts — only the sFOX + ccxt-exchange + probe hosts
+# in tinyproxy.filter are reachable. The filter file carries NO secret and is
+# COPYed into the image (see Dockerfile); it is matched against the CONNECT/HTTP
+# destination host. FilterExtended enables POSIX-extended regex (the `(^|\.)`
+# suffix anchors); FilterCaseSensitive No matches hostnames case-insensitively.
+Filter "/etc/tinyproxy/filter"
+FilterDefaultDeny Yes
+FilterExtended On
+FilterCaseSensitive No
+
+# --- AUTH (rendered from the PROXY_BASIC_AUTH fly secret at start) ---
+# tinyproxy BasicAuth is SPACE-separated: `BasicAuth <user> <password>`.
+# (Some blogs show a colon form `user:password` — that form is WRONG and 407s;
+#  the tinyproxy.conf(5) man page + upstream template use the space form.)
+BasicAuth __PROXY_BASIC_AUTH_USER__ __PROXY_BASIC_AUTH_PASS__
+
+# --- CONNECT tunneling: restrict to 443 (all sFOX/ccxt traffic is HTTPS) ---
+# HTTPS is tunneled end-to-end via CONNECT, so the proxy never sees the Bearer
+# token or any response body — it only ever observes `CONNECT host:443`.
+ConnectPort 443
+
+# --- Header hygiene / no identity leakage ---
+# (Load-bearing for plain-HTTP requests; CONNECT is opaque anyway — defense-in-depth.)
+DisableViaHeader Yes
+XTinyproxy No
+Anonymous "Host"
+Anonymous "Authorization"
+
+Timeout 600
+MaxClients 50
+LogLevel Info

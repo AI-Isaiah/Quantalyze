@@ -141,3 +141,58 @@ class TestVerifyStrategyOuterHandlerRedaction:
                 "outer handler must NOT set exc_info=True — it ships api_key / "
                 "api_secret stack-locals to Sentry"
             )
+
+
+class TestVerifyStrategySfoxHonestRejection:
+    """SFOX-05 (F7): verify_strategy rejects sfox EARLY with honest copy — never a
+    misleading network/timeout envelope, never a fall-through into
+    create_exchange's generic ValueError. The verify UI does not offer sfox until
+    Phase 122; sfox connects via the add-key flow."""
+
+    def test_sfox_rejected_early_with_honest_copy_no_timeout_wording(
+        self, monkeypatch
+    ):
+        import asyncio
+
+        portfolio_mod = _real_portfolio_module()
+        from fastapi import HTTPException
+        from models.schemas import VerifyStrategyRequest
+        from starlette.requests import Request as StarletteRequest
+
+        req = VerifyStrategyRequest(
+            email="trader@example.com",
+            exchange="sfox",
+            api_key="tok_sfox_abc",
+            api_secret="",
+        )
+
+        # create_exchange must NEVER be reached for sfox (it would ValueError /
+        # misdirect). Neuter it so a fall-through reddens loudly.
+        monkeypatch.setattr(
+            portfolio_mod,
+            "create_exchange",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("create_exchange must NOT run for sfox")
+            ),
+        )
+
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": "/api/verify-strategy",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "query_string": b"",
+        }
+        request = StarletteRequest(scope)
+
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(portfolio_mod.verify_strategy(request, req))
+
+        assert ei.value.status_code == 400
+        detail = str(ei.value.detail).lower()
+        # Honest copy names sfox + the add-key flow; NO network/timeout misdirection.
+        assert "sfox" in detail
+        assert "network" not in detail
+        assert "timeout" not in detail
+        assert "connection" not in detail

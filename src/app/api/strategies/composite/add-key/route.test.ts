@@ -17,7 +17,7 @@
  * and the credential-leak posture (T-88-13: uniform { code } bodies, no cred
  * values in logs).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
@@ -291,6 +291,202 @@ describe("POST /api/strategies/composite/add-key — ONB-03 per-key add", () => 
     expect(res.status).toBe(409);
     expect((await res.json()).code).toBe("DRAFT_ALREADY_EXISTS");
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * SFOX-03 / 119-CONTEXT Q1 (LOCKED) — the SECURITY-SENSITIVE api_secret carve-out,
+ * mirror of the create-with-key sibling. sFOX authenticates with a SINGLE Bearer
+ * token (no api_secret). For `exchange === "sfox"` ONLY, the :81 `length < 8` gate
+ * admits a missing/empty secret, normalizes it to "", and routes it through the SAME
+ * validateKey/encryptKey chokepoint (trimCredential("") === "") — never a parallel
+ * path. Every ccxt exchange keeps the byte-identical KEY_INVALID_FORMAT rejection for
+ * a short/empty secret; the 512-char DoS bound is retained for any present secret.
+ */
+describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (SFOX-03)", () => {
+  beforeEach(resetHappyMocks);
+  // F2 (Phase 122): the carve-out only runs when the server go-live flag is ON.
+  // These tests exercise the ENABLED path; the disabled default is covered by
+  // the dedicated fail-closed block below.
+  beforeEach(() => {
+    process.env.SFOX_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  const SFOX_TOKEN = "sfox-bearer-token-value";
+  const SFOX_BODY = {
+    exchange: "sfox",
+    api_key: SFOX_TOKEN,
+    label: "sfox composite key",
+    wizard_session_id: WIZARD_SESSION_ID,
+  };
+
+  it("admits sfox through isSupportedExchange and accepts NO api_secret (validateKey gets '')", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(SFOX_BODY));
+
+    expect(res.status).toBe(200);
+    // Proves 119-01's SUPPORTED_EXCHANGES wiring: had the :67 gate rejected sfox
+    // we'd see 400 "Unsupported exchange". The absent secret is normalized to ""
+    // and passed through the SAME funnel the ccxt path uses.
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
+    expect(rpcName).toBe("add_wizard_composite_key");
+    expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["empty string", ""],
+  ])("normalizes sfox api_secret=%s to '' through the shared chokepoint", async (_label, secret) => {
+    const body: Record<string, unknown> = { ...SFOX_BODY };
+    if (secret !== undefined) body.api_secret = secret;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(body));
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+  });
+
+  // WR-01: mixed-case sfox is handled IDENTICALLY across all three routes —
+  // case-insensitive carve-out AND canonical lowercase 'sfox' stamped into the RPC.
+  it.each(["sFOX", "SFOX", "Sfox"])(
+    "accepts mixed-case %s and normalizes to canonical 'sfox' (accepted with empty secret, p_exchange='sfox')",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
+
+      expect(res.status).toBe(200);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
+    },
+  );
+
+  it("STILL rejects a sfox api_secret longer than 512 chars — DoS bound kept", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...SFOX_BODY, api_secret: "s".repeat(513) }));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces KEY_AUTH_FAILED when the worker rejects sfox auth (shared classifier)", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error("Authentication failed. Check your API key and secret."),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(SFOX_BODY));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_AUTH_FAILED");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it.each(["binance", "okx", "bybit", "deribit"])(
+    "STILL rejects %s with a 7-char api_secret — KEY_INVALID_FORMAT 'api_secret is required' (ccxt unchanged)",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({
+          exchange,
+          api_key: "ccxt-key-with-enough-chars",
+          api_secret: "short77", // 7 chars
+          passphrase: "pp",
+          wizard_session_id: WIZARD_SESSION_ID,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.error).toBe("api_secret is required");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["binance", "okx", "bybit", "deribit"])(
+    "STILL rejects %s with an EMPTY api_secret (carve-out is sfox-only)",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({
+          exchange,
+          api_key: "ccxt-key-with-enough-chars",
+          api_secret: "",
+          passphrase: "pp",
+          wizard_session_id: WIZARD_SESSION_ID,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.error).toBe("api_secret is required");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+    },
+  );
+});
+
+/**
+ * F2 (Phase 122 — STRUCTURAL server gate): with SFOX_ENABLED unset (default), a
+ * sfox "+ Add another key" must FAIL CLOSED — a clean 400 "not yet available",
+ * no live probe (validateKey), no minted composite key row. Mirrors the
+ * create-with-key sibling; ccxt exchanges are unaffected by the flag.
+ */
+describe("POST /api/strategies/composite/add-key — sfox server gate (F2, SFOX_ENABLED off)", () => {
+  beforeEach(resetHappyMocks);
+  beforeEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  it.each(["sfox", "sFOX", "SFOX"])(
+    "fails closed for %s (400 not-available, no live probe, no key minted)",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({
+          exchange,
+          api_key: "sfox-bearer-token-value",
+          label: "sfox composite key",
+          wizard_session_id: WIZARD_SESSION_ID,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.error).toBe("sFOX integration is not yet available.");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does NOT gate ccxt — binance runs normally with SFOX_ENABLED unset", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalled();
   });
 });
 

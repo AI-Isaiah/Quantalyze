@@ -17,6 +17,31 @@ from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
 
+# The single source of truth for the key-authentication-failure detail string.
+# The Next.js `classifyKeyValidationError` (src/lib/wizardErrors.ts) maps any
+# detail whose lowercase form includes "authentication failed" to
+# KEY_AUTH_FAILED. Both the ccxt AUTH_FAILED arm below and the non-ccxt sFOX
+# branch in routers/exchange.py reuse THIS constant so the cross-language
+# contract cannot drift from one site (a reword here must update the TS matcher).
+AUTH_FAILED_DETAIL = "Authentication failed. Check your API key and secret."
+
+# Shared UPSTREAM-transient detail strings. Like AUTH_FAILED_DETAIL, these are
+# the single source of truth for two cross-language contracts: the ccxt arms in
+# validate_key_permissions below AND the non-ccxt sFOX branch in
+# routers/exchange.py (F4) both emit THESE constants, so a sFOX 429 / 5xx is
+# classified BYTE-IDENTICALLY to the equivalent ccxt failure by
+# classifyKeyValidationError (src/lib/wizardErrors.ts) — never misreported as a
+# credential problem. RATE_LIMITED_DETAIL contains "rate" → KEY_RATE_LIMIT.
+RATE_LIMITED_DETAIL = (
+    "Exchange rate-limited the validation request. Wait a moment "
+    "and try again — repeated failures may indicate a missing "
+    "read scope."
+)
+NETWORK_ERROR_DETAIL = (
+    "Network error reaching the exchange. Check connectivity "
+    "and try again."
+)
+
 
 # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — per-call transient data-quality
 # flags. Callers (job_worker / reconcile) read these via
@@ -805,6 +830,23 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 
     exchange = cls(config)
 
+    # SFOX-07 (121-02) — worker static-egress proxy for ccxt, OPT-IN.
+    # ccxt applies `self.aiohttp_proxy` in its base fetch for EVERY request
+    # (load_markets included; verified ccxt 4.5.64), and aiohttp 3.14.1 derives
+    # Proxy-Authorization from the URL userinfo, so setting the attr once is
+    # sufficient — no proxy_auth plumbing. This is behind a SEPARATE flag (default
+    # OFF) so the founder's working ccxt Amsterdam egress is NOT silently rerouted
+    # when only sFOX needs the static IP: sFOX is proxied by default via the
+    # factory, ccxt only when the founder explicitly opts in. Env unset (or flag
+    # off) ⇒ aiohttp_proxy stays the ccxt None class default — byte-identical.
+    _egress_proxy = os.getenv("WORKER_EGRESS_PROXY_URL")
+    if _egress_proxy and os.getenv("WORKER_EGRESS_PROXY_APPLIES_TO_CCXT", "").lower() in (
+        "1",
+        "true",
+        "on",
+    ):
+        exchange.aiohttp_proxy = _egress_proxy
+
     if exchange_name == "bybit":
         # ccxt's bybit `load_markets()` calls `fetch_currencies()`, which hits
         # `GET /v5/asset/coin/query-info`. That endpoint requires the
@@ -827,8 +869,15 @@ def create_exchange(exchange_name: str, api_key: str, api_secret: str, passphras
 _ACLOSE_TIMEOUT_S = float(os.getenv("EXCHANGE_CLOSE_TIMEOUT_S", "10"))
 
 
-async def aclose_exchange(exchange: ccxt.Exchange) -> None:
+async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
     """Close a ccxt async exchange, cancellation-safe and bounded.
+
+    SFOX-05: the single close chokepoint the job-worker calls for EVERY venue.
+    A non-ccxt SfoxClient is routed to its OWN bounded, idempotent aclose()
+    (which already wraps session.close() in asyncio.wait_for) and returns — so
+    every job_worker call site becomes sfox-safe with zero per-site edits. The
+    SfoxClient import is lazy to avoid any import cycle at module load. The ccxt
+    path below stays BYTE-IDENTICAL.
 
     A bare ``await exchange.close()`` inside a ``finally`` is best-effort: the
     worker wraps every exchange-owning handler in ``asyncio.wait_for(...)`` and
@@ -856,6 +905,16 @@ async def aclose_exchange(exchange: ccxt.Exchange) -> None:
     raises (e.g. an SSL shutdown error) is logged and swallowed — it is not a leak
     and must not mask the handler's real error.
     """
+    # SFOX-05: isinstance chokepoint — a SfoxClient owns its own bounded aclose()
+    # (asyncio.wait_for(SFOX_CLOSE_TIMEOUT_S), idempotent, swallows close errors).
+    # Route it there and return BEFORE the ccxt close() sequence below, which the
+    # SfoxClient does not implement. Lazy import avoids an import cycle.
+    from services.sfox_client import SfoxClient
+
+    if isinstance(exchange, SfoxClient):
+        await exchange.aclose()
+        return
+
     task = asyncio.ensure_future(exchange.close())
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=_ACLOSE_TIMEOUT_S)
@@ -1009,7 +1068,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             "validate_key_permissions: ccxt.AuthenticationError on %s — exc_class=%s scrubbed=%s",
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
-        result["error"] = "Authentication failed. Check your API key and secret."
+        result["error"] = AUTH_FAILED_DETAIL
         result["error_code"] = "AUTH_FAILED"
         return result
     except ccxt.DDoSProtection as exc:
@@ -1035,11 +1094,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             "validate_key_permissions: ccxt.RateLimitExceeded on %s — exc_class=%s scrubbed=%s",
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
-        result["error"] = (
-            "Exchange rate-limited the validation request. Wait a moment "
-            "and try again — repeated failures may indicate a missing "
-            "read scope."
-        )
+        result["error"] = RATE_LIMITED_DETAIL
         result["error_code"] = "RATE_LIMITED"
         return result
     except ccxt.ExchangeNotAvailable as exc:
@@ -1061,10 +1116,7 @@ async def validate_key_permissions(exchange: ccxt.Exchange) -> dict[str, Any]:
             "validate_key_permissions: ccxt.NetworkError on %s — exc_class=%s scrubbed=%s",
             exchange.id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
-        result["error"] = (
-            "Network error reaching the exchange. Check connectivity "
-            "and try again."
-        )
+        result["error"] = NETWORK_ERROR_DETAIL
         result["error_code"] = "NETWORK_UNAVAILABLE"
         return result
     except Exception as exc:  # noqa: BLE001

@@ -153,13 +153,64 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(verifyStrategyMock).not.toHaveBeenCalled();
   });
 
-  it("returns 400 'Unsupported exchange' when the exchange is not in SUPPORTED_EXCHANGES", async () => {
+  it("returns 400 'Unsupported exchange' when the exchange is not in UI_EXCHANGE_CODES", async () => {
     const { POST } = await import("./route");
     const res = await POST(postReq({ ...VALID_BODY, exchange: "kraken" }));
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("Unsupported exchange");
     expect(verifyStrategyMock).not.toHaveBeenCalled();
+  });
+
+  // F3 (Phase 122): sfox is in the widened key-save allowlist SUPPORTED_EXCHANGES
+  // but NOT in the public OFFERED set — so this public teaser must reject it
+  // cleanly WITHOUT disclosing it (no half-accept → no confusing downstream 422)
+  // and WITHOUT leaking "sfox" into the error enum shown to anon callers.
+  it.each(["sfox", "sFOX", "SFOX"])(
+    "rejects %s cleanly and never discloses sfox in the error enum (F3)",
+    async (exchange) => {
+      const { POST } = await import("./route");
+      const res = await POST(postReq({ ...VALID_BODY, exchange }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("Unsupported exchange");
+      // The disclosed "Supported: …" enum must NOT name sfox pre-launch.
+      expect(body.error.toLowerCase()).not.toContain("sfox");
+      // Never forwarded to the teaser pipeline (no half-accept).
+      expect(verifyStrategyMock).not.toHaveBeenCalled();
+    },
+  );
+
+  // Specialist finding (LOW): the public teaser gated sfox ONLY on the client
+  // OFFER flag (UI_EXCHANGE_CODES ← NEXT_PUBLIC_SFOX_ENABLED), not the SERVER
+  // go-live flag (isSfoxEnabledServer ← SFOX_ENABLED) its 3 sibling key routes
+  // enforce. In the documented half-state (NEXT_PUBLIC on, SFOX_ENABLED off) the
+  // offer set admits sfox, so without the server gate the teaser would forward a
+  // live sfox key-process before go-live. This pins the structural server gate.
+  it("fails closed on the SERVER gate in the half-state (offer on, SFOX_ENABLED off)", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/utils", async () => {
+      const actual = (await vi.importActual("@/lib/utils")) as Record<string, unknown>;
+      const codes = actual.UI_EXCHANGE_CODES as string[];
+      return { ...actual, UI_EXCHANGE_CODES: [...codes, "sfox"] }; // offer on
+    });
+    vi.doMock("@/lib/closed-sets", async () => {
+      const actual = (await vi.importActual("@/lib/closed-sets")) as Record<string, unknown>;
+      return { ...actual, isSfoxEnabledServer: () => false }; // server flag OFF
+    });
+    try {
+      const { POST } = await import("./route");
+      const res = await POST(postReq({ ...VALID_BODY, exchange: "sfox" }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("not yet available");
+      // Never forwarded to the teaser pipeline despite passing the offer gate.
+      expect(verifyStrategyMock).not.toHaveBeenCalled();
+    } finally {
+      vi.doUnmock("@/lib/utils");
+      vi.doUnmock("@/lib/closed-sets");
+      vi.resetModules();
+    }
   });
 });
 

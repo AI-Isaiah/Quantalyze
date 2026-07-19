@@ -2164,6 +2164,24 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
     portfolio, and return the metrics. The verification_id is generated
     locally via uuid.uuid4().
     """
+    # SFOX-05 (F7): sfox is a NAV-backed venue whose returns come from the
+    # balance-history usd_value series (the sfox broker-dailies branch), NOT from
+    # fills — so the fill-based verify flow cannot serve it, and routing it into
+    # the ccxt-construction path below would raise a generic ValueError (or, worse,
+    # a network-timeout-shaped envelope) that misleads the caller. Reject EARLY with
+    # HONEST copy: no KEY_NETWORK_TIMEOUT misdirection, no fake connection error.
+    # The verify UI does not offer sfox until Phase 122; sfox accounts connect via
+    # the add-key flow (process_key → derive_broker_dailies), not this endpoint.
+    if req.exchange == "sfox":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "sFOX strategy verification is not yet available through this "
+                "flow. sFOX accounts connect via the add-key flow — fill-based "
+                "verification does not apply to a NAV-backed venue."
+            ),
+        )
+
     # Audit H-0535 — the credential fields are pydantic.SecretStr (so they
     # never leak into repr/validation errors/tracebacks). Unwrap the raw
     # values ONCE here for the handshake + idempotency-fingerprint consumers

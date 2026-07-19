@@ -42,6 +42,10 @@ vi.mock("next/navigation", () => ({
 // `.from("api_keys").select(...).order(...)` chain resolves to. Each test
 // queues the result(s) the component's loadKeys() effect should observe.
 const selectResultMock = vi.fn();
+// F6 (SFOX-09): capture the api_keys insert payload so a test can assert the
+// exchange reaches the DB canonicalized (lowercase). Returns the queued result
+// for the `.insert(...).select("id").single()` chain.
+const apiKeyInsertMock = vi.fn();
 
 vi.mock("@/lib/supabase/client", () => ({
   createClient: () => ({
@@ -54,6 +58,18 @@ vi.mock("@/lib/supabase/client", () => ({
         order: (_col: string, _opts?: unknown) =>
           Promise.resolve(selectResultMock()),
       }),
+      // handleAddKey does api_keys.insert({...}).select("id").single().
+      insert: (row: unknown) => {
+        const result = apiKeyInsertMock(row);
+        return {
+          select: (_cols?: string) => ({
+            single: () =>
+              Promise.resolve(
+                result ?? { data: { id: "new-key" }, error: null },
+              ),
+          }),
+        };
+      },
       // handleLinkKey does strategies.update({api_key_id}).eq('id', ...).
       update: (_vals: unknown) => ({
         eq: (_col: string, _val: unknown) => Promise.resolve({ error: null }),
@@ -306,6 +322,45 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     // … and the degraded "?" fallback does NOT.
     expect(screen.queryByText("?")).not.toBeInTheDocument();
   });
+
+  // SFOX-09 — sfox ships UNCONDITIONALLY (a founder-connected sfox key exists
+  // before the public offer flag flips). Without the exchangeIcon `sfox` entry
+  // the avatar falls through to "?", making a live-and-correct key look broken.
+  // Pins the mono tag: a sfox row must show "SFOX", never "?". FAILS without
+  // the map entry.
+  it("renders the SFOX badge (not '?') for a sfox key row (SFOX-09)", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-sfox",
+          user_id: "user-a",
+          exchange: "sfox",
+          label: "My sFOX",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My sFOX")).toBeInTheDocument();
+    });
+    // Canonical mono tag renders …
+    expect(screen.getByText("SFOX")).toBeInTheDocument();
+    // … and the degraded "?" fallback does NOT.
+    expect(screen.queryByText("?")).not.toBeInTheDocument();
+  });
 });
 
 // mig 20260707120000 — a warned sync (complete_with_warnings) is a terminal
@@ -379,5 +434,118 @@ describe("ApiKeyManager — complete_with_warnings is terminal (mig 202607071200
     expect(
       screen.queryByRole("button", { name: /Syncing/i }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// F6 (phase-119 fold-in) — the CLIENT composes the api_keys INSERT directly, so
+// a mixed-case exchange from the form ("sFOX") passes the server validate route
+// (burning a live probe) then 23514s on the DB lowercase-only CHECK. handleAddKey
+// must canonicalize to lowercase and use that value for BOTH the
+// validate-and-encrypt fetch body AND the insert. Tests drive the REAL ApiKeyForm
+// (defaultExchange seeds the exchange state) and assert the wiring at the call
+// site — a helper-only test would not prove the insert receives the canonical
+// value (test-the-wiring rule). Neuter `data.exchange.trim().toLowerCase()` back
+// to `data.exchange` and the sFOX case fails on both the fetch body and insert.
+describe("ApiKeyManager — F6 canonical-lowercase exchange at the add-key insert", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+    apiKeyInsertMock.mockReset();
+    // Empty key list on mount so the Add-Key form is the whole surface.
+    selectResultMock.mockReturnValue({ data: [], error: null });
+    apiKeyInsertMock.mockReturnValue({ data: { id: "new-key" }, error: null });
+    fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            api_key_encrypted: "enc",
+            api_secret_encrypted: "sec",
+            passphrase_encrypted: null,
+            dek_encrypted: "dek",
+            nonce: "nonce",
+            kek_version: 1,
+          }),
+        });
+      }
+      // Background auto-sync (fire-and-forget).
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        json: async () => ({ ok: true }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function submitAddKeyForm() {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+    });
+    const labelInput = screen.getByLabelText(/Label/i);
+    const keyInput = screen.getByLabelText(/API Key$/i);
+    const secretInput = screen.getByLabelText("API Secret");
+    fireEvent.change(labelInput, { target: { value: "Test Key" } });
+    fireEvent.change(keyInput, { target: { value: "test-key" } });
+    fireEvent.change(secretInput, { target: { value: "test-secret" } });
+    const form = labelInput.closest("form")!;
+    await act(async () => {
+      fireEvent.submit(form);
+    });
+  }
+
+  function validateBody() {
+    const call = fetchMock.mock.calls.find(
+      (c) => c[0] === "/api/keys/validate-and-encrypt",
+    );
+    expect(call).toBeTruthy();
+    return JSON.parse(call![1].body as string) as { exchange: string };
+  }
+
+  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in BOTH the validate body and the insert", async () => {
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="sFOX"
+      />,
+    );
+    await submitAddKeyForm();
+
+    // (a) validate-and-encrypt fetch body carries the canonical lowercase value.
+    await waitFor(() => {
+      expect(validateBody().exchange).toBe("sfox");
+    });
+    // (b) the api_keys insert payload carries the canonical lowercase value —
+    // the call-site wiring, not a helper. This is the row that hits the DB CHECK.
+    expect(apiKeyInsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "sfox" }),
+    );
+  });
+
+  it("leaves an already-lowercase 'binance' byte-identical (no regression)", async () => {
+    render(
+      <ApiKeyManager
+        strategyId="strat-1"
+        currentKeyId={null}
+        defaultExchange="binance"
+      />,
+    );
+    await submitAddKeyForm();
+
+    await waitFor(() => {
+      expect(validateBody().exchange).toBe("binance");
+    });
+    expect(apiKeyInsertMock).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "binance" }),
+    );
   });
 });

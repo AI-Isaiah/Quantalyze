@@ -5,7 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
-import { isSupportedExchange } from "@/lib/closed-sets";
+import { isSupportedExchange, isSfoxEnabledServer } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
@@ -78,12 +78,42 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (typeof api_secret !== "string" || api_secret.length < 8) {
+  // SECURITY-SENSITIVE carve-out (119-CONTEXT Q1, LOCKED): sFOX authenticates with a
+  // SINGLE Bearer token and carries NO api_secret (118-RESEARCH confirmed). For sfox
+  // ONLY, the token is stored as api_key and the absent secret is normalized to "".
+  // This relaxes the secret presence/length requirement for exactly one exchange —
+  // every ccxt exchange (binance/okx/bybit/deribit) keeps the byte-identical <8-char
+  // KEY_INVALID_FORMAT rejection below. Security-reviewed (T-119-08/09/11). The empty
+  // secret flows through the SAME trim/validate/encrypt chokepoint
+  // (analytics-client.ts:169; trimCredential("") === ""), not a parallel path.
+  // Mirrors the create-with-key sibling and this file's `exchange.toLowerCase() ===
+  // "okx"` convention.
+  const isSfox = exchange.toLowerCase() === "sfox";
+
+  // F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
+  // The client flag NEXT_PUBLIC_SFOX_ENABLED only hides the wizard card; this
+  // server flag makes a sfox CONNECT fail CLOSED (treated exactly like an
+  // unsupported exchange) until SFOX_ENABLED=true is set server-side. A clean 400
+  // BEFORE the rate-limit and the live validate/encrypt round-trip — never a
+  // crash, never a false KEY_AUTH, never a live probe. Mirrors the create-with-key
+  // sibling verbatim; ccxt paths are unaffected.
+  if (isSfox && !isSfoxEnabledServer()) {
+    return NextResponse.json(
+      { code: "KEY_INVALID_FORMAT", error: "sFOX integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  if (!isSfox && (typeof api_secret !== "string" || api_secret.length < 8)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
+
+  // sfox: absent/empty secret → ""; ccxt: already a validated string above (no-op).
+  const apiSecretNormalized: string =
+    typeof api_secret === "string" ? api_secret : "";
 
   if (
     exchange.toLowerCase() === "okx" &&
@@ -102,7 +132,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (api_key.length > 512 || api_secret.length > 512) {
+  if (api_key.length > 512 || apiSecretNormalized.length > 512) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "Key or secret too long" },
       { status: 400, headers: NO_STORE_HEADERS },
@@ -162,7 +192,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const validation = await validateKey(
       exchangeNormalized,
       api_key,
-      api_secret,
+      apiSecretNormalized,
       passphraseOrNull ?? undefined,
     );
 
@@ -194,7 +224,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     const encrypted = await encryptKey(
       exchangeNormalized,
       api_key,
-      api_secret,
+      apiSecretNormalized,
       passphraseOrNull ?? undefined,
     );
 

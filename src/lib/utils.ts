@@ -161,6 +161,7 @@ export type DocType = (typeof DOC_TYPES)[number];
 export {
   SUPPORTED_EXCHANGES,
   UI_EXCHANGE_CODES,
+  SFOX_UI_ENABLED,
   FUNDING_EXCHANGES,
   type SupportedExchange,
 } from "./closed-sets";

@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -70,13 +71,19 @@ if TYPE_CHECKING:
     # runtime import (the value is still parsed function-locally in the deribit arm).
     from services.allocated_capital import ReturnsDenominatorConfig
 
+    # SFOX-05: pandas is imported lazily inside functions at runtime; the
+    # `-> "pd.Series"` return annotation needs the name resolvable under mypy.
+    import pandas as pd
+
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
     CRYPTO_VENUES,
+    SFOX_DISABLED_DETAIL,
     PositionDirection as PositionDirection,
     Side as Side,
+    sfox_enabled_server,
 )
 from services.db import db_execute, get_supabase, one, rows
 from services.encryption import decrypt_credentials, get_kek
@@ -90,6 +97,9 @@ from services.exchange import (
     parse_since_ms,
 )
 from services.positions import fetch_positions, persist_position_snapshots
+from services.sfox_client import SfoxClient  # type annotations only
+from services.sfox_factory import make_sfox_client
+from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +185,79 @@ WORKER_FENCE_V2: Final[bool] = (
 # C2 (P70 review): a Deribit account holding more than this USD equity but
 # producing ZERO return-bearing ledger rows is treated as a silently-empty ledger
 # (fail loud), not "insufficient history". Above dust, below any real balance.
+# The floor is VENUE-AGNOSTIC (also the sFOX material-balance analog, SFOX-05):
+# any broker account holding >$100 but producing <2 usable NAV days is a
+# silently-empty (green) track record, never genuine "insufficient history".
 _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = 100.0
+
+# ── FLIPRETRY-01 per-crawl wall-clock bounds, sized UNDER the outer budget ──
+# derive_broker_dailies runs under a FIXED outer wait_for =
+# TIMEOUT_PER_KIND["derive_broker_dailies"] (900s / 15 min; mirrored here because
+# that dict is defined below — a parity test pins the two equal). A per-crawl bound
+# converts a single hung LIVE crawl into a CLASSIFIED transient (the v1.11 FLIP
+# wedge guard) — but it MUST NOT be tighter than the crawl's LEGITIMATE duration,
+# or it just manufactures a false transient → infinite retry → failed_final (the
+# exact failure the sfox-txn bound was raised to avoid, and the one the red team
+# found the earlier flat-300s bounds re-created for OKX/bybit/deribit large
+# accounts whose real crawls run many minutes). The outer wait_for + the
+# FLIPRETRY-04 healthz heartbeat remain the real MULTI-crawl / true-wedge backstop;
+# per-crawl bounds add single-crawl attribution and catch a lone hang just before
+# the outer. Invariant (asserted by test): bh + txn + reserve ≤ outer.
+_DERIVE_OUTER_BUDGET_S: Final[float] = 900.0  # == TIMEOUT_PER_KIND["derive_broker_dailies"]
+# Reserve for the post-crawl PURE combine + derive_basis_series + persist (+ the
+# preflight) that run inside the SAME outer budget after the serial crawls finish.
+_DERIVE_POST_CRAWL_RESERVE_S: Final[float] = 90.0
+
+# sfox balance-history: 50 daily windows × ~1s rate ≈ 50-80s real — a small hang
+# guard, NOT the 300s the txn crawl needs (keeping it small preserves headroom for
+# the txn crawl + reserve under the outer).
+_SFOX_CRAWL_TIMEOUT_S: Final[float] = float(os.getenv("SFOX_CRAWL_TIMEOUT_S", "120"))
+
+# sfox transactions: /v1/account/transactions is rate-gated at 10s/request, so the
+# 50-page budget legitimately needs ~600-660s (rate + response latency; the 300s
+# balance-history bound would false-time-out a >30-page ledger). Sized from the
+# owning module's budget, then CAPPED so bh + txn + reserve ≤ the outer budget (the
+# serial-sum-vs-outer invariant — a bound the account can pass while the OUTER
+# wait_for still kills the job mid-persist is no fix at all).
+_SFOX_TXN_CRAWL_TIMEOUT_S: Final[float] = float(
+    os.getenv(
+        "SFOX_TXN_CRAWL_TIMEOUT_S",
+        str(min(
+            sfox_transactions_crawl_wallclock_budget_s(),
+            _DERIVE_OUTER_BUDGET_S - _SFOX_CRAWL_TIMEOUT_S - _DERIVE_POST_CRAWL_RESERVE_S,
+        )),
+    )
+)
+
+# deribit + ccxt crawls (full-history paginated: OKX/Binance inception, bybit 19k,
+# deribit native ledger ~inception). Their LEGITIMATE durations reach many minutes
+# — the v1.11 incident measured ~12 min — so the bound is sized at the outer
+# envelope MINUS the post-crawl reserve, NOT a flat 300s that would convert those
+# succeeding-under-the-outer accounts into deterministic false transients. A lone
+# hung crawl is still caught (at ~reserve before the outer, with attribution); the
+# outer + heartbeat catch the multi-crawl / true-wedge case.
+_BROKER_CRAWL_TIMEOUT_S: Final[float] = float(
+    os.getenv(
+        "BROKER_CRAWL_TIMEOUT_S",
+        str(_DERIVE_OUTER_BUDGET_S - _DERIVE_POST_CRAWL_RESERVE_S),
+    )
+)
+
+# A1 (docs-silent depth): request the sfox history crawls from a far-past epoch
+# so they reach empirical inception; the earliest returned point IS the
+# inception (the crawl surfaces it, an earlier-than-requested start is never an
+# error). 2015-01-01T00:00:00Z in epoch-ms — comfortably before sFOX existed.
+_SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
+
+# The venues whose daily-return series are produced NATIVELY inside the venue
+# dispatch (deribit: combine_native_ledger; sfox: combine_sfox_balance_history)
+# rather than by the ccxt USD-space combine_realized_and_funding pass below. The
+# :2645 guard excludes these so the ccxt combine never OVERWRITES a native
+# returns/meta with an empty realized/funding stream. Adding sfox here is the
+# money-critical fix (SFOX-05): without it, combine_realized_and_funding runs on
+# empty streams and clobbers the reconstructed sfox TWR. deribit stays byte
+# -identical (it was, and remains, excluded).
+_NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox"})
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -662,7 +744,83 @@ class _ExchangeContext:
     # which owns no strategy — only the strategy-side preflight populates it.
     strategy_row: dict[str, Any] | None
     key_row: dict[str, Any]
-    exchange: ccxt.Exchange
+    # SFOX-05: sfox is a non-ccxt venue read through the GET-only SfoxClient. The
+    # preflights construct that instead of a ccxt.Exchange; aclose_exchange routes
+    # it to SfoxClient.aclose() at the single close chokepoint.
+    exchange: ccxt.Exchange | SfoxClient
+
+
+def _make_exchange_client(
+    exchange_name: str,
+    api_key: str,
+    api_secret: str,
+    passphrase: str | None,
+) -> ccxt.Exchange | SfoxClient:
+    """SFOX-05 — the SINGLE preflight construction chokepoint. Both
+    _exchange_preflight and _allocator_key_preflight route through here, so the
+    sfox-vs-ccxt decision lives in exactly ONE place.
+
+    sFOX is NOT a ccxt exchange: create_exchange RAISES ValueError for it
+    (EXCHANGE_CLASSES holds only ccxt classes). Construct the GET-only
+    SfoxClient from the trimmed api_key instead. sFOX auth is a SINGLE Bearer
+    token (the Q1 worker contract) — the api_secret is intentionally NEVER
+    passed. The .strip() mirrors the validate/exchange-router credential
+    chokepoint (a trailing-newline token must authenticate identically).
+
+    Every ccxt venue is BYTE-IDENTICAL to the prior inline create_exchange call.
+    """
+    if exchange_name == "sfox":
+        return make_sfox_client(api_key.strip())
+    return create_exchange(exchange_name, api_key, api_secret, passphrase)
+
+
+def _sfox_rows_to_usd_value_series(rows: list[dict[str, Any]]) -> "pd.Series":
+    """SFOX-05 — parse sFOX balance-history rows into the daily ``usd_value`` NAV
+    Series combine_sfox_balance_history consumes.
+
+    Each row is ``{"timestamp": <epoch-ms>, "usd_value": <number|str>}``. We coerce
+    to a UTC calendar-day DatetimeIndex [us] with float usd_value, FAIL LOUD
+    (``SfoxFlowValuationError``) on a missing/garbage timestamp or usd_value —
+    never silently coerce a bad value to 0.0 (that would fabricate NAV). On the
+    rare duplicate-day row, last observation wins (the crawl advances the cursor
+    past the latest point, so a boundary day can appear twice). An empty crawl
+    yields an honest empty Series.
+    """
+    import pandas as pd
+
+    from services.sfox_read import SfoxFlowValuationError
+
+    if not rows:
+        return pd.Series(dtype="float64", name="usd_value")
+
+    by_day: dict[pd.Timestamp, float] = {}
+    for row in rows:
+        try:
+            ts_ms = int(row["timestamp"])
+            value = float(row["usd_value"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise SfoxFlowValuationError(
+                "sFOX balance-history row carries no usable numeric "
+                "timestamp/usd_value"
+            ) from exc
+        # F7 (P120 red-team): float("nan")/float("inf") SUCCEED — so a non-finite
+        # usd_value would slip through as a poisoned NAV point despite the docstring
+        # promising to fail loud on it (a NaN/inf NAV then silently corrupts the
+        # whole TWR denominator chain). Reject it here, mirroring the ground-truth
+        # _coerce_finite gate. Never coerce to 0.0 (that fabricates NAV).
+        if not math.isfinite(value):
+            raise SfoxFlowValuationError(
+                "sFOX balance-history row carries a non-finite usd_value "
+                "(NaN/Inf); refusing a poisoned NAV point"
+            )
+        day = pd.Timestamp(
+            datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
+        ).as_unit("us")
+        by_day[day] = value
+
+    days = sorted(by_day)
+    index = pd.DatetimeIndex(days).as_unit("us")
+    return pd.Series([by_day[d] for d in days], index=index, name="usd_value")
 
 
 async def _exchange_preflight(
@@ -705,7 +863,7 @@ async def _exchange_preflight(
         return defer_result
 
     api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-    exchange = create_exchange(
+    exchange = _make_exchange_client(
         key_row["exchange"], api_key, api_secret, passphrase
     )
 
@@ -787,7 +945,7 @@ async def _allocator_key_preflight(
         return defer_result
 
     api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-    exchange = create_exchange(
+    exchange = _make_exchange_client(
         key_row["exchange"], api_key, api_secret, passphrase
     )
 
@@ -2153,7 +2311,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # FLOW-04 (v1.8): the companion session-uPnL wedge (session_upl) rides
             # this SAME response + index_prices (77-02) — noise-guarded below before
             # it threads into the realized-basis roll terminal.
-            account_state = await fetch_deribit_native_account_state(ctx.exchange)
+            # FLIPRETRY-01: the anchor summaries read is a LIVE crawl too — bound it
+            # so a hang becomes a classified transient (via the same
+            # DeribitTransientReadError retryable path the empty-read case uses
+            # below), never an unbounded wedge of the sequential worker loop.
+            try:
+                account_state = await asyncio.wait_for(
+                    fetch_deribit_native_account_state(ctx.exchange),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError as _exc:
+                raise DeribitTransientReadError(
+                    "Deribit get_account_summaries anchor read exceeded the "
+                    f"{_BROKER_CRAWL_TIMEOUT_S}s per-crawl bound — retrying rather "
+                    "than wedging the worker (FLIPRETRY-01)"
+                ) from _exc
             # HIGH-1: a FAILED / empty summaries read yields EMPTY native maps. A
             # blank read is I/O, NOT a structural refusal — fail RETRYABLE rather
             # than build a ZERO-anchor ledger. A zero anchor rolls every bucket back
@@ -2205,9 +2377,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # old fetch_deribit_ledger_daily_records did (so the D-08
                 # funding-inside-settlement and completeness accounting are
                 # unchanged) and assembles the NativeLedger + CompletenessReport.
-                native_ledger, _completeness = await build_deribit_native_ledger(
-                    ctx.exchange, account_state=account_state, pnl_basis=pnl_basis,
-                    exclude_spot_extraction=exclude_spot_extraction,
+                # FLIPRETRY-01: the cash-pass crawl (deribit native ledger, ~inception
+                # for a long-lived account) is HARD-BOUNDED by asyncio.wait_for so a
+                # slow/hanging live read becomes a classified transient (the
+                # `except asyncio.TimeoutError` arm below), never an unbounded wedge of
+                # the SEQUENTIAL worker's event loop (the v1.11 FLIP rollback root
+                # cause). The MTM SECOND pass at :2472 is separately bounded already.
+                native_ledger, _completeness = await asyncio.wait_for(
+                    build_deribit_native_ledger(
+                        ctx.exchange, account_state=account_state, pnl_basis=pnl_basis,
+                        exclude_spot_extraction=exclude_spot_extraction,
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
                 )
                 # Re-anchored D-02 gate: a silently-partial ledger FAILS LOUD
                 # BEFORE any upsert — no partial track record is ever written. The
@@ -2439,6 +2620,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                                 strategy_id,
                                 scrub_freeform_string(str(_mtm_exc)),
                             )
+            except asyncio.TimeoutError:
+                # FLIPRETRY-01: the cash-pass crawl exceeded the per-crawl bound.
+                # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent, NEVER
+                # an unbounded wedge, and NO terminal `failed` stamp (the next attempt
+                # may succeed). This arm MUST precede the broader permanent-stamping
+                # arms below: in Python 3.11+ asyncio.TimeoutError IS builtins.
+                # TimeoutError (an OSError subclass), so an earlier broader catch would
+                # mis-dispose the timeout as PERMANENT and defeat the retry intent. The
+                # MTM second pass (:2472) has its own local TimeoutError arm, so this
+                # only ever fires for the cash pass. The `finally: aclose_exchange`
+                # below still runs. Mirrors the sfox FLIPRETRY-01 block (:2680): static
+                # scrubbed text only, never logger.exception / interpolated crawl
+                # content (H-3 HMAC-in-URL leak class).
+                logger.warning(
+                    "derive_broker_dailies: deribit cash-pass crawl exceeded the %ss "
+                    "per-crawl bound (label=%s) — classified transient, retrying "
+                    "(FLIPRETRY-01)",
+                    _BROKER_CRAWL_TIMEOUT_S, funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: deribit cash-pass crawl exceeded the "
+                        f"per-crawl wall-clock bound ({_BROKER_CRAWL_TIMEOUT_S}s) — "
+                        "retrying rather than wedging the worker (FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,
@@ -2524,6 +2733,212 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # funding are retained (empty) only for the downstream log lines.
             funding: list[Any] = []
             realized: list[Any] = []
+        elif venue == "sfox":
+            # SFOX-06 kill-switch chokepoint: the QUEUE-executed path must honor the
+            # founder go-live gate too, not just the request-facing routes. The DB
+            # CHECK admits 'sfox' unconditionally and the derive-allocator-key cron
+            # fans out one derive_broker_dailies per eligible key with NO exchange
+            # filter, so after SFOX_ENABLED is turned off (an incident rollback — the
+            # exact purpose of the switch) a stored sfox key would keep firing live
+            # sFOX crawls here every run. Gate BEFORE any decrypt/crawl. Permanent
+            # (not transient): the founder disabled it deliberately, so retrying is
+            # wrong — it fails cleanly and stops, never a live read while disabled.
+            if not sfox_enabled_server():
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=f"derive_broker_dailies: {SFOX_DISABLED_DETAIL}",
+                    error_kind="permanent",
+                )
+            # ── SFOX-05: the sFOX broker-dailies ONE-path (plan 120-03) ──
+            # sFOX is the SIMPLEST broker-dailies venue: /v1/account/balance/history
+            # HANDS us the daily usd_value NAV series directly, so there is NO
+            # ledger reconstruction (no per-currency backward roll). We read the NAV
+            # series + the typed transaction ledger, EACH crawl HARD-BOUNDED by
+            # asyncio.wait_for (the FLIPRETRY-01 worker-wedge guard: a slow/hanging
+            # live crawl becomes a classified TRANSIENT failure, never a wedge of the
+            # SEQUENTIAL worker loop — the v1.11 FLIP rollback root cause), gate
+            # honesty (a truncated/under-fetched crawl, an unvaluable flow, and a
+            # materially-funded-but-uninterpretable account each fail loud), then feed
+            # combine_sfox_balance_history → the UNCHANGED shared derive/persist below
+            # (the ccxt combine at :2645 is excluded via _NATIVE_RETURNS_VENUES).
+            from services.broker_dailies import combine_sfox_balance_history
+            from services.sfox_read import (
+                SfoxCrawlTruncatedError,
+                SfoxFlowValuationError,
+                crawl_sfox_balance_history,
+                crawl_sfox_transactions,
+                sfox_flows_by_day,
+            )
+
+            _sfox_now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+            try:
+                # FLIPRETRY-01: EACH crawl is wall-clock bounded. asyncio.wait_for
+                # cancels the inner crawl on timeout and raises asyncio.TimeoutError.
+                _bh_rows, _earliest_ms = await asyncio.wait_for(
+                    crawl_sfox_balance_history(
+                        ctx.exchange,
+                        start_date_ms=_SFOX_FAR_PAST_EPOCH_MS,
+                        end_date_ms=_sfox_now_ms,
+                    ),
+                    timeout=_SFOX_CRAWL_TIMEOUT_S,
+                )
+                # The transactions crawl uses its OWN budget-sized bound (10s/req
+                # rate × 50-page budget) — the 300s balance-history bound would
+                # false-time-out a >30-page ledger into an infinite transient retry.
+                _txn_rows = await asyncio.wait_for(
+                    crawl_sfox_transactions(
+                        ctx.exchange,
+                        from_ms=_SFOX_FAR_PAST_EPOCH_MS,
+                        to_ms=_sfox_now_ms,
+                    ),
+                    timeout=_SFOX_TXN_CRAWL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
+                # NEVER an unbounded wedge, and NO terminal `failed` stamp (the next
+                # attempt may succeed). The `finally: aclose_exchange` below still
+                # runs (bounded SfoxClient.aclose). This is the FLIPRETRY-01 guard.
+                # Bound-agnostic: this arm covers BOTH sfox crawls (balance-history
+                # at _SFOX_CRAWL_TIMEOUT_S and transactions at the larger
+                # _SFOX_TXN_CRAWL_TIMEOUT_S), so it does not name a single number.
+                logger.warning(
+                    "derive_broker_dailies: sfox crawl exceeded its per-crawl "
+                    "wall-clock bound (label=%s) — classified transient, retrying "
+                    "(FLIPRETRY-01)",
+                    funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox crawl exceeded its per-crawl "
+                        "wall-clock bound — retrying rather than wedging the worker "
+                        "(FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
+            except SfoxCrawlTruncatedError as exc:
+                # The assert_ledger_complete analog (D-02 honesty gate): a
+                # silently-partial read must NEVER become a complete track record.
+                # Permanent FAILED + terminal stamp — retrying cannot help.
+                scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_strategy_analytics_failed(
+                    "sFOX history crawl could not be verified as complete. "
+                    + scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox crawl truncated/under-fetched "
+                        "— " + scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+
+            # Parse the balance-history rows → the usd_value pd.Series and extract
+            # the typed daily flow series + ExternalFlow evidence. A typed
+            # unvaluable-flow error (non-USD-family currency, malformed amount,
+            # unrecognized action) OR a non-finite/garbage NAV point → permanent
+            # FAILED + stamp (the LedgerValuationError disposition parity).
+            try:
+                _usd_value = _sfox_rows_to_usd_value_series(_bh_rows)
+                _flows_series, _flow_evidence = sfox_flows_by_day(_txn_rows)
+            except SfoxFlowValuationError as exc:
+                scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_strategy_analytics_failed(
+                    "sFOX ledger contained a value that could not be interpreted "
+                    "(a non-USD-family flow, a malformed amount, an unrecognized "
+                    "action, or a non-finite NAV point). " + scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox ledger value unvaluable — "
+                        + scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+
+            # Material-balance floor (the deribit C2 analog, venue-agnostic): a
+            # materially-funded account that produced <2 usable observed NAV days is
+            # a silently-empty (green) track record (broken key / wrong account),
+            # NOT genuine "insufficient history". Fail loud BEFORE combine. A
+            # genuinely tiny/empty account (terminal balance below the floor) instead
+            # flows to the honest downstream <2-day gate (:2931) — no invented rows.
+            _sfox_terminal_usd = (
+                float(_usd_value.iloc[-1]) if len(_usd_value) else 0.0
+            )
+            _sfox_usable_nav_days = int(_usd_value.notna().sum())
+            if (
+                abs(_sfox_terminal_usd) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
+                and _sfox_usable_nav_days < 2
+            ):
+                await _stamp_strategy_analytics_failed(
+                    "sFOX account holds material equity but produced no "
+                    "interpretable daily history."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: sfox account holds material equity "
+                        f"(~{abs(_sfox_terminal_usd):.0f} USD) but produced <2 "
+                        "usable NAV days — refusing an empty-but-green track record"
+                    ),
+                    error_kind="permanent",
+                )
+
+            # THE combine: usd_value NAV + typed flows → cashflow-neutral daily TWR
+            # via the EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard
+            # set). No new backbone call site — (returns, meta) fall through to the
+            # UNCHANGED derive_basis_series / persist_basis_series below.
+            try:
+                returns, meta = combine_sfox_balance_history(
+                    _usd_value, _flows_series
+                )
+            except NavReconstructionError as exc:
+                # CR-01 defense-in-depth: a STRUCTURAL NAV/TWR refusal from the
+                # shared core must dispose PERMANENT with a terminal stamp — the
+                # IDENTICAL disposition as the ccxt combine seam (:2934) and the
+                # deribit native handler (:2589). This combine sits INSIDE the sfox
+                # branch, whose only typed catches are asyncio.TimeoutError /
+                # SfoxCrawlTruncatedError / SfoxFlowValuationError, and the enclosing
+                # outer try catches ONLY ccxt.RateLimitExceeded — so without this
+                # catch a NavReconstructionError escapes to the generic dispatcher →
+                # retried FOREVER as `unknown` (T-74-02/T-80-10 DoS) with NO scrubbed
+                # terminal `failed` stamp (the wizard spins on 'computing'). The
+                # CR-01 union above already books the common boundary-flow case
+                # cashflow-neutral (no raise); THIS guards a genuinely structural
+                # residual (schema drift) so it reaches a terminal gate, never a spin.
+                return await _dispose_broker_nav_error(
+                    exc,
+                    stamp_detail=(
+                        "sFOX NAV/TWR reconstruction refused a structural input "
+                        "(an orphan/undatable flow or a non-finite NAV/flow amount). "
+                    ),
+                    result_detail=(
+                        "derive_broker_dailies: sfox NAV/TWR reconstruction failed "
+                        "structurally — "
+                    ),
+                )
+
+            # Set the shared downstream variables EXACTLY as the deribit branch does
+            # so the post-dispatch code runs unchanged. usd_value IS the total MTM
+            # equity of a spot NAV series — there is NO separate open-uPnL wedge — so
+            # open_unrealized_usd is 0.0 and upnl_unreadable is False (the :2720
+            # unreadable-uPnL warning never fires for sfox). sFOX returns are NATIVE
+            # (already TWR from the NAV series) → no flat realized/funding record
+            # list, mirroring the deribit branch's empty lists.
+            equity = _sfox_terminal_usd
+            balance_error = False
+            open_unrealized_usd = 0.0
+            upnl_unreadable = False
+            funding = []
+            realized = []
+            # external_flows is the DQ-02 evidence shape the downstream terminus gate
+            # consumes. The deribit branch sets it to _completeness.dated_external_flows
+            # — a list[ExternalFlow] (deribit_ingest.py:732). sfox_flows_by_day yields
+            # the SAME list[ExternalFlow] type (sfox_read.py:238), so the downstream
+            # consumer accepts it identically. Shape parity CONFIRMED.
+            external_flows = _flow_evidence
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
@@ -2531,23 +2946,64 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # FLOW-04 (v1.8): the venue-gated companion open-uPnL wedge rides the
             # SAME response (OKX upl; Bybit/Binance structural 0.0 — realized-basis
             # walletBalance, so a downstream subtract can never double-count, 77-02).
-            equity, balance_error, open_unrealized_usd, upnl_unreadable = (
-                await fetch_account_equity_and_upnl_usd(ctx.exchange, venue)
-            )
-            # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
-            # bills, Binance inception, Bybit last 365 days).
-            realized = await fetch_all_trades(ctx.exchange, since_ms=None)
-            if venue == "binance":
-                funding = await fetch_funding_binance(ctx.exchange, funding_label, None)
-            elif venue == "okx":
-                funding = await fetch_funding_okx(ctx.exchange, funding_label, None)
-            elif venue == "bybit":
-                funding = await fetch_funding_bybit(ctx.exchange, funding_label, None)
-            else:
+            # FLIPRETRY-01: the equity anchor + full-history trades + funding are
+            # LIVE crawls (fetch_all_trades on the bybit-19k account was a named
+            # v1.11 wedge) — bound EACH by asyncio.wait_for so a slow/hanging read
+            # becomes a classified transient at the bound, never an unbounded wedge
+            # of the SEQUENTIAL worker loop. Mirrors the ccxt flow-crawl block below
+            # (:2945) and the deribit/sfox blocks: one shared TimeoutError arm,
+            # static text, never logger.exception. The unsupported-venue branch is a
+            # PERMANENT classification (a return, not a raise) so the timeout arm
+            # never sees it.
+            try:
+                equity, balance_error, open_unrealized_usd, upnl_unreadable = (
+                    await asyncio.wait_for(
+                        fetch_account_equity_and_upnl_usd(ctx.exchange, venue),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
+                )
+                # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
+                # bills, Binance inception, Bybit last 365 days).
+                realized = await asyncio.wait_for(
+                    fetch_all_trades(ctx.exchange, since_ms=None),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+                if venue == "binance":
+                    funding = await asyncio.wait_for(
+                        fetch_funding_binance(ctx.exchange, funding_label, None),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
+                elif venue == "okx":
+                    funding = await asyncio.wait_for(
+                        fetch_funding_okx(ctx.exchange, funding_label, None),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
+                elif venue == "bybit":
+                    funding = await asyncio.wait_for(
+                        fetch_funding_bybit(ctx.exchange, funding_label, None),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
+                else:
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=f"derive_broker_dailies: venue {venue} not supported",
+                        error_kind="permanent",
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "derive_broker_dailies: ccxt equity/trades/funding crawl exceeded "
+                    "the %ss per-crawl bound (venue=%s, label=%s) — classified "
+                    "transient, retrying (FLIPRETRY-01)",
+                    _BROKER_CRAWL_TIMEOUT_S, venue, funding_label,
+                )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
-                    error_message=f"derive_broker_dailies: venue {venue} not supported",
-                    error_kind="permanent",
+                    error_message=(
+                        "derive_broker_dailies: ccxt equity/trades/funding crawl "
+                        f"exceeded the per-crawl wall-clock bound ({_BROKER_CRAWL_TIMEOUT_S}s)"
+                        " — retrying rather than wedging the worker (FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
                 )
             # FLOW-03 (v1.8): enumerate + event-time-value real deposits/
             # withdrawals for the ccxt venues (binance/okx/bybit) and thread
@@ -2582,22 +3038,65 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # never a silent truncation), so these are NOT wrapped in a
             # segment-converting catch — a transient fetch error must reach the
             # outer dispatcher classifier, never be mistaken for a coverage gap.
-            _deposits = await fetch_ccxt_transfers(
-                ctx.exchange, "deposits", _flow_since_ms, now_ms
-            )
-            _withdrawals = await fetch_ccxt_transfers(
-                ctx.exchange, "withdrawals", _flow_since_ms, now_ms
-            )
-            _flow_rows = list(_deposits) + list(_withdrawals)
-            # Resolve the same-UTC-day close for every NON-STABLE flow currency
-            # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
-            # source; NO new price fetcher). The pure valuer marks stablecoins at
-            # 1.0 and FAILS LOUD if a non-stable flow has no same-day price (never
-            # 1.0 / current / drop → never a fabricated ±return that mis-anchors
-            # the TWR base).
-            _price_index = await _resolve_ccxt_flow_price_index(
-                ctx.exchange, venue, ctx.supabase, _flow_rows
-            )
+            # FLIPRETRY-01: EACH live crawl (both transfer fetches + the price-index
+            # resolve, which may hit venue OHLCV I/O) is HARD-BOUNDED by
+            # asyncio.wait_for so a slow/hanging read (bybit 19k rows was the v1.11
+            # wedge) becomes a classified transient at the bound, never an unbounded
+            # wedge of the SEQUENTIAL worker loop. The wait_for wraps ONLY the awaits:
+            # a non-timeout fetch error still bubbles to the dispatcher classifier
+            # exactly as WR-04 requires (wait_for re-raises the inner exception
+            # unchanged), and the HIGH-1 pure-valuer NavReconstructionError disposition
+            # (its own try below) is untouched. Mirrors the sfox block (:2680): one
+            # shared TimeoutError arm, static scrubbed text, never logger.exception.
+            try:
+                _deposits = await asyncio.wait_for(
+                    fetch_ccxt_transfers(
+                        ctx.exchange, "deposits", _flow_since_ms, now_ms
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+                _withdrawals = await asyncio.wait_for(
+                    fetch_ccxt_transfers(
+                        ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+                _flow_rows = list(_deposits) + list(_withdrawals)
+                # Resolve the same-UTC-day close for every NON-STABLE flow currency
+                # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
+                # source; NO new price fetcher). The pure valuer marks stablecoins at
+                # 1.0 and FAILS LOUD if a non-stable flow has no same-day price (never
+                # 1.0 / current / drop → never a fabricated ±return that mis-anchors
+                # the TWR base).
+                _price_index = await asyncio.wait_for(
+                    _resolve_ccxt_flow_price_index(
+                        ctx.exchange, venue, ctx.supabase, _flow_rows
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                # FLIPRETRY-01: a ccxt flow crawl exceeded the per-crawl bound. A hang
+                # is a CLASSIFIED, RETRYABLE transient — NEVER permanent, NEVER an
+                # unbounded wedge, no terminal stamp. The `finally: aclose_exchange`
+                # below still runs. (asyncio.TimeoutError is caught HERE, locally, so a
+                # transient network/parse error from fetch_ccxt_transfers still bubbles
+                # to the outer dispatcher classifier per WR-04 — this arm only ever sees
+                # the wait_for timeout.)
+                logger.warning(
+                    "derive_broker_dailies: ccxt flow crawl exceeded the %ss "
+                    "per-crawl bound (venue=%s, label=%s) — classified transient, "
+                    "retrying (FLIPRETRY-01)",
+                    _BROKER_CRAWL_TIMEOUT_S, venue, funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: ccxt flow crawl exceeded the "
+                        f"per-crawl wall-clock bound ({_BROKER_CRAWL_TIMEOUT_S}s) — "
+                        "retrying rather than wedging the worker (FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
             # HIGH-1: the PURE flow valuer raises NavReconstructionError
             # (permanent, structural) on the realistically-common case of a
             # non-stable coin flow with no resolvable same-UTC-day price AND on
@@ -2639,10 +3138,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # v1.9 NATIVE SWITCH: the deribit venue already produced (returns, meta) via
     # the native core above (combine_native_ledger), with its per-currency wedge
     # subtracted INSIDE the core (App A #6) and materiality re-derived from the
-    # collapsed anchor. The USD-space noise-guard + combine below are the CCXT
-    # venues' path only — running combine_realized_and_funding for deribit would
-    # overwrite the native returns with an empty realized/funding stream.
-    if venue != "deribit":
+    # collapsed anchor. SFOX-05: the sfox venue likewise already produced
+    # (returns, meta) via combine_sfox_balance_history. The USD-space noise-guard
+    # + combine below are the CCXT venues' path only — running
+    # combine_realized_and_funding for a NATIVE-returns venue would OVERWRITE its
+    # reconstructed returns with an empty realized/funding stream (the
+    # money-critical clobber). Both native venues are excluded via the single
+    # _NATIVE_RETURNS_VENUES set; deribit's exclusion is byte-identical to the
+    # prior `!= "deribit"`.
+    if venue not in _NATIVE_RETURNS_VENUES:
         # FLOW-04 (v1.8) NOISE GUARD (Pitfall 5 / T-77-08): the companion open-uPnL
         # wedge is only trustworthy relative to a trustworthy anchor. Force it to
         # 0.0 when the anchor is heuristic/dust — a balance_error read, a missing
@@ -3453,7 +3957,23 @@ _COMPOSITE_CRYPTO_VENUES: frozenset[str] = CRYPTO_VENUES
 # (`venue_reconstruction_unavailable`) the user sees, rather than killing the whole
 # composite (the Phase-86 Deribit-only fence is lifted). Derived from
 # _COMPOSITE_CRYPTO_VENUES so the two sets can never drift.
-_COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {"deribit"}
+#
+# GUARD AUDIT (SFOX-05): sfox is now in CRYPTO_VENUES (√365 RISK basis) and thus
+# in _COMPOSITE_CRYPTO_VENUES, so the #597 blend clock correctly annualizes a
+# composite that contains an sfox leg on the crypto clock. But sfox has NO ccxt
+# reconstruction path — its dailies come from the sfox broker-dailies branch
+# (combine_sfox_balance_history via create_exchange→SfoxClient), which
+# _reconstruct_ccxt_member does NOT invoke (it calls create_exchange, which
+# raises ValueError for sfox). So sfox is EXCLUDED from _COMPOSITE_DEGRADE_VENUES:
+# an sfox composite member (not a reachable flow until 122, but defended here)
+# falls through to the `venue != "deribit"` arm below and gets an HONEST permanent
+# "unsupported composite member venue" refusal, never a confusing ccxt-reconstruct
+# crash. The blend-clock membership (crypto √365) and the degradable-member set
+# (ccxt-reconstructable) are DIFFERENT questions; only the former includes sfox.
+_COMPOSITE_DEGRADE_VENUES: frozenset[str] = _COMPOSITE_CRYPTO_VENUES - {
+    "deribit",
+    "sfox",
+}
 
 
 class _CcxtMemberDegrade(Exception):

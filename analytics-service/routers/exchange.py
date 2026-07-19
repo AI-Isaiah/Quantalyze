@@ -5,8 +5,11 @@ from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
+from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
+from services.sfox_factory import make_sfox_client
+from services.closed_sets import sfox_enabled_server, SFOX_DISABLED_DETAIL
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
 
@@ -20,6 +23,97 @@ class EncryptKeyRequest(BaseModel):
     api_key: str
     api_secret: str
     passphrase: str | None = None
+
+
+async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
+    """Validate a sFOX Bearer token via the non-ccxt SfoxClient (SFOX-03).
+
+    Proof-of-auth + read access is a single `get_balances()` (GET
+    /v1/user/balance) — a list body (even empty) means the token authenticates
+    AND can read. On success we return ``read_only=True`` asserted STRUCTURALLY,
+    NOT probed: the SfoxClient adapter has no order/withdraw/transfer surface
+    (Phase-118 WR-03, HTTP verb hardcoded to GET) and sFOX exposes no per-key
+    scope endpoint, so we NEVER emit a probed ``{read, trade, withdraw}`` triple
+    or claim an observed read-only scope (A1 — no invented data).
+
+    Error mapping (F4 — every arm fails CLOSED; NEVER returns {"valid": true},
+    and only a genuine 401/403 blames the user's credentials):
+      * 401/403 → HTTPException(400, AUTH_FAILED_DETAIL) — the exact same string
+        the ccxt AUTH_FAILED arm emits → TS classifyKeyValidationError maps it to
+        KEY_AUTH_FAILED with zero TS edits.
+      * 429 → HTTPException(400, RATE_LIMITED_DETAIL) — the SAME shared string the
+        ccxt RateLimitExceeded arm emits → KEY_RATE_LIMIT. A throttle is upstream,
+        not a bad key (recreates the 110.1 honesty fix for sFOX).
+      * 5xx or status==0 (transport/shape) → HTTPException(400, NETWORK_ERROR_DETAIL)
+        — the SAME shared string the ccxt NetworkError arm emits, mapped identically.
+      * a malformed-token ValueError raised by aiohttp at request time (F5) →
+        HTTPException(400, AUTH_FAILED_DETAIL): a control-char token IS a
+        credential problem, and must not escape as an unhandled 500.
+
+    `api_secret` is intentionally ignored: sFOX auth is a single Bearer token
+    (Q1 worker contract), so the branch takes only `api_key`. No proxy is wired
+    here (the phase-121 static-IP egress seam is threaded later).
+    """
+    # IN-01: an empty/whitespace-only Bearer token cannot authenticate.
+    # SfoxClient.__init__ raises ValueError("… non-empty api_key") on an empty
+    # token (sfox_client.py:108); constructed BELOW the try/finally that
+    # ValueError would escape the fail-closed mapping and surface as an unhandled
+    # FastAPI 500 (an 8-space token arrives here as "" after analytics-client's
+    # trimCredential). Guard up front and fail CLOSED with the SAME AUTH_FAILED
+    # string a bad ccxt key emits, so the TS classifyKeyValidationError maps it to
+    # KEY_AUTH_FAILED — matching this function's documented fail-closed contract
+    # rather than leaking a raw 500. Keeps the ctor's non-empty invariant intact.
+    if not api_key or not api_key.strip():
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+    try:
+        client = make_sfox_client(api_key, base_url=SFOX_PROD_BASE_URL)
+    except ValueError:
+        # A CONSTRUCTION-time ValueError is a SERVER egress-proxy misconfig
+        # (WORKER_EGRESS_PROXY_URL malformed) — NOT the user's key. It was thrown
+        # OUTSIDE the get_balances try below, so it used to escape as an unhandled
+        # 500 + Sentry traceback (and pre-fix carried the proxy token in the
+        # message). Fail as a clean 503 — never a 500, never a misleading
+        # AUTH_FAILED that blames the user's credentials. The factory's ValueError
+        # is already secret-free (sfox_factory.py), but do not log it here either.
+        logger.error("validate_key: sFOX client construction failed (egress proxy misconfig)")
+        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+    try:
+        await client.get_balances()
+        return {"valid": True, "read_only": True}
+    except SfoxApiError as e:
+        if e.status in (401, 403):
+            raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+        if e.status == 429:
+            # F4: a throttle is an UPSTREAM condition, not bad credentials —
+            # recreates the 110.1 honesty fix the ccxt path already made. Emit the
+            # SAME shared RATE_LIMITED_DETAIL the ccxt RateLimitExceeded arm emits,
+            # so classifyKeyValidationError maps it to KEY_RATE_LIMIT (not the
+            # misleading "check your credentials"). Fails CLOSED (never valid:true);
+            # logged at WARNING (not exception) since a throttle is not Sentry-grade.
+            logger.warning("validate_key: sFOX rate-limited (status=429)")
+            raise HTTPException(status_code=400, detail=RATE_LIMITED_DETAIL)
+        # 5xx (exchange down) or status==0 (transport/shape blip): an UPSTREAM /
+        # transport problem, never the user's key. Same shared NETWORK_ERROR_DETAIL
+        # the ccxt NetworkError arm emits so the TS classifier maps it identically.
+        # Still fails CLOSED; WARNING-level (mirrors the ccxt transient arms) so a
+        # transient blip no longer spams Sentry via logger.exception.
+        logger.warning("validate_key: sFOX transient upstream failure (status=%s)", e.status)
+        raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+    except ValueError:
+        # F5: a token with an embedded control char (\n / \r survive
+        # trimCredential, which strips only LEADING/TRAILING whitespace) makes
+        # aiohttp raise a bare ValueError("Forbidden control character in
+        # header ...") at request time — neither SfoxApiError nor
+        # aiohttp.ClientError, so it would otherwise escape this function as an
+        # unhandled FastAPI 500 (same class as the IN-01 empty-token wart). A
+        # malformed token IS a credential problem: fail CLOSED with the honest
+        # AUTH_FAILED classification (400 → KEY_AUTH_FAILED), never a 500.
+        # Deliberately DO NOT log the exception: aiohttp's message can embed the
+        # offending header value (the token), so this branch never writes it
+        # anywhere. Fails CLOSED — never returns {"valid": true}.
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+    finally:
+        await client.aclose()
 
 
 @router.post("/validate-key")
@@ -37,6 +131,23 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
     debug-blind on the recurring "code: UNKNOWN" wizard fail. Found
     2026-05-05 via Bybit E2E + Railway log archaeology.)
     """
+    # SFOX-03: sFOX is NOT a ccxt exchange, so it must NOT route through
+    # create_exchange/EXCHANGE_CLASSES (a dict of ccxt classes — sfox
+    # ValueErrors there). Intercept BEFORE the ccxt path and validate via the
+    # Phase-118 non-ccxt SfoxClient. The ccxt branch below is byte-for-byte
+    # unchanged for every real exchange.
+    if req.exchange == "sfox":
+        # F2 (Phase 122 — STRUCTURAL worker gate): sFOX is founder-gated until
+        # go-live. Fail CLOSED with an honest "not yet available" 400 BEFORE
+        # _validate_sfox_key constructs a client or fires a live get_balances()
+        # probe — never a live probe when disabled, never a false AUTH_FAILED.
+        # A clean 400 (not a 500) so the TS layer surfaces it as a normal
+        # rejection. Mirrors the TS isSfoxEnabledServer() gate at the three key
+        # routes; defense-in-depth for any direct/worker caller of /validate-key.
+        if not sfox_enabled_server():
+            raise HTTPException(status_code=400, detail=SFOX_DISABLED_DETAIL)
+        return await _validate_sfox_key(req.api_key)
+
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
     except ValueError as e:
