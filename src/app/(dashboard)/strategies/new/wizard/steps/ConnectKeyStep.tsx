@@ -9,6 +9,7 @@ import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
+import { SFOX_UI_ENABLED } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -30,6 +31,12 @@ interface ExchangeOption {
   name: string;
   caption: string;
   requiresPassphrase: boolean;
+  // Whether this exchange authenticates with an api_key + api_secret PAIR.
+  // Absent → true (every ccxt exchange). sFOX authenticates with a SINGLE Bearer
+  // token (no secret), so its card sets requiresSecret false: the secret input
+  // is not rendered, submit is not gated on it, and the POST sends api_secret as
+  // "" (the validate route's Phase-119 sfox carve-out normalizes + accepts it).
+  requiresSecret?: boolean;
   // Per-exchange, presentation-only overrides for the credential-field labels
   // and placeholders. Defaults are "API Key"/"API Secret"; Deribit issues an
   // OAuth-style Client ID + Client Secret. The submit payload keys
@@ -39,6 +46,9 @@ interface ExchangeOption {
   credentialPlaceholders?: { key: string; secret: string };
 }
 
+// Phase 122 / SFOX-08: the sfox card is APPENDED only when SFOX_UI_ENABLED is on
+// (the founder-gated NEXT_PUBLIC_SFOX_ENABLED flag). Flag OFF (default) leaves
+// this array literal byte-identical to today's four cards (the spread is empty).
 const EXCHANGES: ExchangeOption[] = [
   {
     id: "binance",
@@ -69,7 +79,29 @@ const EXCHANGES: ExchangeOption[] = [
       secret: "Paste the Deribit Client Secret",
     },
   },
+  ...(SFOX_UI_ENABLED
+    ? [
+        {
+          id: "sfox" as const,
+          name: "sFOX",
+          caption: "Spot account. A single read-only API token, no secret.",
+          requiresPassphrase: false,
+          requiresSecret: false,
+          credentialLabels: { key: "API Token", secret: "API Token" },
+          credentialPlaceholders: {
+            key: "Paste the read-only sFOX API token",
+            secret: "Paste the read-only sFOX API token",
+          },
+        },
+      ]
+    : []),
 ];
+
+// F3 (Phase 122): the sfox honest "what we reject" atom. sFOX exposes no per-key
+// scope endpoint, so we cannot PROBE scope the way the ccxt scope-rejection claim
+// implies — say the structural facts instead, never a false verified-scope claim.
+const SFOX_REJECT_ATOM_BODY =
+  "sFOX keys are used read-only by our adapter — no order or withdraw path exists. sFOX exposes no per-key scope endpoint, so mint a READ-ONLY token.";
 
 const TRUST_ATOMS: { title: string; body: string }[] = [
   {
@@ -153,6 +185,16 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
   const requiresPassphrase = activeExchange?.requiresPassphrase ?? false;
+  // Absent requiresSecret → true (every ccxt exchange). sFOX is token-only.
+  const requiresSecret = activeExchange?.requiresSecret ?? true;
+  // F3: swap the "What we reject" atom body to the honest structural claim for
+  // sfox (no order/withdraw path; no per-key scope endpoint). Every other
+  // exchange renders today's scope-rejection copy byte-identically.
+  const trustAtoms = TRUST_ATOMS.map((atom) =>
+    atom.title === "What we reject" && !requiresSecret
+      ? { ...atom, body: SFOX_REJECT_ATOM_BODY }
+      : atom,
+  );
   // Presentation-only credential labels/placeholders. Default to the generic
   // "API Key"/"API Secret" wording; Deribit overrides to "Client ID"/"Client
   // Secret" (D-03). Storage columns + payload keys are unchanged.
@@ -181,7 +223,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         body: JSON.stringify({
           exchange,
           api_key: apiKey,
-          api_secret: apiSecret,
+          // sFOX is token-only: send api_secret as "" (the Phase-119 validate
+          // carve-out normalizes empty→"" and accepts it for sfox; every ccxt
+          // exchange still sends its real secret).
+          api_secret: requiresSecret ? apiSecret : "",
           passphrase: requiresPassphrase ? passphrase : null,
           label: nickname.trim() || `${exchange} key`,
           wizard_session_id: wizardSessionId,
@@ -244,7 +289,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
       {/* Inline permission block — visible, not collapsible */}
       <div className="mt-6 rounded-md border border-border bg-page">
         <dl className="divide-y divide-border">
-          {TRUST_ATOMS.map((atom) => (
+          {trustAtoms.map((atom) => (
             <div
               key={atom.title}
               className="grid gap-1 px-4 py-3 md:grid-cols-[180px_1fr] md:gap-6"
@@ -306,33 +351,39 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           required
         />
 
-        <div>
-          <div className="flex items-center justify-between">
-            <label
-              htmlFor="wizard-api-secret"
-              className="text-caption font-medium text-text-primary"
-            >
-              {secretLabel}
-            </label>
-            <button
-              type="button"
-              onClick={() => setShowSecret((v) => !v)}
-              className="text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
-            >
-              {showSecret ? "Hide" : "Show"}
-            </button>
+        {/* sFOX is token-only (requiresSecret false) — render the secret block
+            only for exchanges that authenticate with a key+secret pair. A
+            rendered `required` secret input would otherwise block a sfox submit
+            on a field it does not have. */}
+        {requiresSecret && (
+          <div>
+            <div className="flex items-center justify-between">
+              <label
+                htmlFor="wizard-api-secret"
+                className="text-caption font-medium text-text-primary"
+              >
+                {secretLabel}
+              </label>
+              <button
+                type="button"
+                onClick={() => setShowSecret((v) => !v)}
+                className="text-micro text-text-muted underline-offset-4 hover:text-text-primary hover:underline"
+              >
+                {showSecret ? "Hide" : "Show"}
+              </button>
+            </div>
+            <input
+              id="wizard-api-secret"
+              type={showSecret ? "text" : "password"}
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              placeholder={secretPlaceholder}
+              autoComplete="off"
+              required
+              className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
+            />
           </div>
-          <input
-            id="wizard-api-secret"
-            type={showSecret ? "text" : "password"}
-            value={apiSecret}
-            onChange={(e) => setApiSecret(e.target.value)}
-            placeholder={secretPlaceholder}
-            autoComplete="off"
-            required
-            className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
-          />
-        </div>
+        )}
 
         {requiresPassphrase && (
           <div>
@@ -381,7 +432,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         <div className="flex gap-3">
           <Button
             type="submit"
-            disabled={submitting || !apiKey || !apiSecret || (requiresPassphrase && !passphrase)}
+            disabled={submitting || !apiKey || (requiresSecret && !apiSecret) || (requiresPassphrase && !passphrase)}
             data-testid="wizard-connect-submit"
           >
             {submitting ? "Validating..." : "Validate key and continue"}

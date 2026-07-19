@@ -203,6 +203,150 @@ describe("Phase 69 — Deribit wizard card (UX-01)", () => {
     expect(link).toHaveAttribute("href", "/security#deribit-readonly");
   });
 
+  it("does NOT render a sFOX card when the flag is OFF (default) — byte-neutral offer", () => {
+    // Default env: NEXT_PUBLIC_SFOX_ENABLED unset → SFOX_UI_ENABLED false. Exactly
+    // the four wizard-exchange-* cards, no sfox. This static-import render reads
+    // the default (OFF) flag; the flag-ON block below re-imports with the stub.
+    renderStep();
+    expect(screen.getByTestId("wizard-exchange-binance")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-okx")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-bybit")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-deribit")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-exchange-sfox")).toBeNull();
+  });
+});
+
+/**
+ * Phase 122 / SFOX-08 — flag-gated sFOX wizard card (token-only + F3-honest).
+ *
+ * With NEXT_PUBLIC_SFOX_ENABLED === "true" the picker offers a fifth sFOX card.
+ * sFOX authenticates with a SINGLE Bearer token (no secret), so the card is
+ * token-only: ONE credential field labelled "API Token", no secret input, submit
+ * enables on the token alone, and the POST carries api_secret as "" (the validate
+ * route's 119 carve-out normalizes+accepts it). F3: the "What we reject" trust
+ * atom must state structural facts (no order/withdraw path; sFOX exposes no
+ * per-key scope endpoint) — never a false "verified read-only scope" claim.
+ *
+ * SFOX_UI_ENABLED is a module-scope const, so each flag-ON render stubs the env,
+ * resets the registry, and dynamic-imports the step fresh. vi.unstubAllEnvs in
+ * afterEach prevents the stub leaking into a sibling test.
+ */
+describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  async function renderWithFlagOn() {
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+  }
+
+  it("renders a sFOX card whose credential collection is token-only (no secret input)", async () => {
+    await renderWithFlagOn();
+    const card = screen.getByTestId("wizard-exchange-sfox");
+    expect(card).toHaveTextContent("sFOX");
+
+    fireEvent.click(card);
+    // ONE credential field, labelled "API Token".
+    expect(screen.getByLabelText("API Token")).toBeInTheDocument();
+    // NO secret field is rendered for sfox (contrast: binance renders one).
+    expect(screen.queryByLabelText("API Secret")).toBeNull();
+    expect(screen.queryByLabelText(/passphrase/i)).toBeNull();
+  });
+
+  it("enables submit with the token alone and POSTs api_secret as an empty string", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          strategy_id: "77777777-7777-7777-7777-777777777777",
+          api_key_id: "88888888-8888-8888-8888-888888888888",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+
+    fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
+    const submit = screen.getByTestId("wizard-connect-submit");
+    // Submit is gated only on the token — no secret required.
+    expect(submit).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("API Token"), {
+      target: { value: "SFOX_TOKEN_xxx" },
+    });
+    expect(submit).not.toBeDisabled();
+
+    fireEvent.click(submit);
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    const body = JSON.parse(
+      (fetchSpy.mock.calls[0]![1] as RequestInit).body as string,
+    ) as Record<string, unknown>;
+    expect(body.exchange).toBe("sfox");
+    expect(body.api_key).toBe("SFOX_TOKEN_xxx");
+    expect(body.api_secret).toBe("");
+    expect(body.passphrase).toBeNull();
+  });
+
+  it("points the sFOX setup-guide link at /security#sfox-readonly", async () => {
+    await renderWithFlagOn();
+    fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
+    const link = screen.getByRole("link", { name: /sFOX setup guide/ });
+    expect(link).toHaveAttribute("href", "/security#sfox-readonly");
+  });
+
+  it("renders the F3-honest read-only claim for sFOX — never a scope-verification claim", async () => {
+    await renderWithFlagOn();
+    fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
+    // Honest structural facts: read-only by our adapter + no per-key scope endpoint.
+    expect(screen.getByText(/read-only by our adapter/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/no per-key scope endpoint/i),
+    ).toBeInTheDocument();
+    // The scope-rejection claim (true for ccxt, FALSE for sfox) must NOT render.
+    expect(
+      screen.queryByText(/rejected before we store it/i),
+    ).toBeNull();
+  });
+
+  it("renders the scripted KEY_AUTH_FAILED envelope on an invalid sFOX key (no false-verified path)", async () => {
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "KEY_AUTH_FAILED" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
+    fireEvent.change(screen.getByLabelText("API Token"), {
+      target: { value: "BAD_TOKEN" },
+    });
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_AUTH_FAILED");
+  });
+
+  it("non-sfox exchanges STILL require a secret when the flag is ON (Rule-2 pin)", async () => {
+    await renderWithFlagOn();
+    // Binance (default) still renders the secret input and gates submit on it.
+    expect(screen.getByLabelText("API Secret")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "AK_LIVE_xxx" },
+    });
+    // Token filled but secret empty → submit stays disabled for a ccxt exchange.
+    expect(screen.getByTestId("wizard-connect-submit")).toBeDisabled();
+  });
+
   it("submits Deribit with api_key/api_secret + passphrase:null (rename is label-only)", async () => {
     // SC-1 invariant: the "Client ID"/"Client Secret" relabel is PRESENTATION
     // ONLY. The POST body must still use the generic api_key/api_secret keys
