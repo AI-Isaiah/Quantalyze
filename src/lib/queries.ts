@@ -226,12 +226,14 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
 
   if (!strategies || strategies.length === 0) return [];
 
-  // Phase 126 (FACTSHEET-01, founder Option B): project trust_tier from the
-  // service-role, published-scoped signal reader (trust_tier+status ONLY) so
-  // the browse/discovery LIST badge is visible to the PUBLIC. The prior
-  // RLS-scoped `strategy_verifications` embed returned zero rows for non-owner
-  // viewers, hiding every list badge for anon (same root cause as the factsheet
-  // — see readPublicVerificationSignals). One batched read for the whole list.
+  // Phase 126 (FACTSHEET-01, founder Option B): project trust_tier via the
+  // published-gated `get_published_trust_signals` SECURITY DEFINER RPC
+  // (trust_tier+status ONLY, read on a NORMAL client — anon/authenticated hold
+  // EXECUTE, NOT service role) so the browse/discovery LIST badge is visible to
+  // the PUBLIC. The prior RLS-scoped `strategy_verifications` embed returned
+  // zero rows for non-owner viewers, hiding every list badge for anon (same root
+  // cause as the factsheet — see readPublicVerificationSignals). One batched read
+  // for the whole list.
   const signals = await readPublicVerificationSignals(
     strategies.map((s) => (s as unknown as Strategy).id),
   );
@@ -380,8 +382,10 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
   // Phase 15 / CSV-03 + QA report 2026-05-21 ISSUE-007: the public factsheet
   // renders the api_verified badge + tier Disclaimer from the strategy's
   // verification. Phase 126 (FACTSHEET-01, founder Option B): the trust_tier
-  // signal is now read via readPublicVerificationSignals (service-role,
-  // published-scoped, trust_tier+status ONLY) instead of an RLS-scoped nested
+  // signal is now read via readPublicVerificationSignals (the published-gated
+  // `get_published_trust_signals` SECURITY DEFINER RPC, read on a normal client
+  // with anon/authenticated EXECUTE — NOT service role; trust_tier+status ONLY)
+  // instead of an RLS-scoped nested
   // embed — the embed returned zero rows for every non-owner viewer and hid the
   // badge from the public (repro: 126-01-SUMMARY). Locked decision D-04:
   // trust_tier lives ONLY on strategy_verifications; no strategies.trust_tier
@@ -480,8 +484,10 @@ export async function getStrategyDetail(
   // no `strategies.trust_tier` column exists or will be added.
   //
   // Phase 126 (FACTSHEET-01, founder Option B — class closure): trust_tier is
-  // sourced from readPublicVerificationSignals (service-role, published-scoped,
-  // trust_tier+status ONLY) below — NOT an RLS-scoped nested embed. The embed
+  // sourced from readPublicVerificationSignals (the published-gated
+  // `get_published_trust_signals` SECURITY DEFINER RPC, read on a normal client
+  // with anon/authenticated EXECUTE — NOT service role; trust_tier+status ONLY)
+  // below — NOT an RLS-scoped nested embed. The embed
   // returned zero verification rows for every NON-owner viewer (an allocator
   // browsing another manager's published strategy on /discovery/[slug]/[id]),
   // so the api_verified badge was invisible to non-owners here exactly as on
@@ -536,10 +542,11 @@ export async function getStrategyDetail(
   }
   if (!strategy) return null;
 
-  // Phase 126 (FACTSHEET-01, founder Option B): hoist trust_tier from the
-  // service-role, published-scoped signal reader (trust_tier+status ONLY) so a
-  // NON-owner viewer sees the api_verified badge. Consumers read it as
-  // `strategy.trust_tier`.
+  // Phase 126 (FACTSHEET-01, founder Option B): hoist trust_tier via the
+  // published-gated `get_published_trust_signals` SECURITY DEFINER RPC
+  // (trust_tier+status ONLY, read on a normal client — anon/authenticated hold
+  // EXECUTE, NOT service role) so a NON-owner viewer sees the api_verified badge.
+  // Consumers read it as `strategy.trust_tier`.
   const strat = strategy as unknown as Strategy;
   const signals = await readPublicVerificationSignals([strat.id]);
   const strategyWithTier: Strategy = {
