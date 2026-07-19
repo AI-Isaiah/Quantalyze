@@ -176,3 +176,77 @@ describe("Phase 69 — Deribit readonly setup guide (UX-02)", () => {
     expect(block.textContent).toMatch(/do not grant any :read_write scope/);
   });
 });
+
+/**
+ * Phase 122 Plan 03 — sFOX readonly setup guide (SFOX-08, F3-honest).
+ *
+ * A new #sfox-readonly SubAnchor inside the readonly-key section documents how
+ * to mint a read-only sFOX API token and whitelist the static egress IP. It is
+ * the deep-link target for ConnectKeyStep's derived /security#sfox-readonly
+ * href (plan 122-02 pins the link side; this plan provides the target).
+ *
+ * F3 honesty is the hard requirement (threat T-122-08): sFOX exposes no per-key
+ * scope endpoint, so the copy must (a) instruct minting a READ-ONLY token,
+ * (b) state the adapter is structurally read-only (no order/withdraw path), and
+ * (c) NEVER claim a server-verified read-only scope for sfox. Threat T-122-09:
+ * no hardcoded egress IP — the security@ contact channel gates disclosure,
+ * mirroring the #egress-ips precedent.
+ *
+ * Revert-proof: deleting the SubAnchor turns the first test red; softening the
+ * honest limit turns the honesty tests red; leaking a false-verified claim or a
+ * hardcoded IP turns the negative tests red.
+ */
+describe("Phase 122 — sFOX readonly setup guide (SFOX-08, F3)", () => {
+  it("renders a #sfox-readonly block titled sFOX inside the readonly-key section", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly");
+    expect(block).not.toBeNull();
+    expect(within(block as HTMLElement).getByRole("heading")).toHaveTextContent(
+      "sFOX",
+    );
+    // Nested under the readonly-key section (deribit precedent placement).
+    expect(document.getElementById("readonly-key")?.contains(block)).toBe(true);
+  });
+
+  it("instructs minting a READ-ONLY single API token (F3 remedy)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    expect(block.textContent).toMatch(/read-only/i);
+    // sFOX auth is a single Bearer token — no separate secret.
+    expect(block.textContent).toMatch(/single API token/i);
+  });
+
+  it("states the F3 limit: no per-key scope endpoint, structurally read-only adapter", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    // The honest limit, with the reason attached (DESIGN.md Voice).
+    expect(block.textContent).toMatch(/does not expose a per-key scope endpoint/);
+    expect(block.textContent).toMatch(/no order or withdraw path/i);
+  });
+
+  it("whitelists the static egress IP via the security contact — no hardcoded IP (T-122-09)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    expect(block.textContent).toMatch(/static egress IP/i);
+    // Disclosure gated by the contact channel, mirroring #egress-ips.
+    const mailto = within(block).getByRole("link", {
+      name: "security@quantalyze.com",
+    });
+    expect(mailto).toHaveAttribute("href", "mailto:security@quantalyze.com");
+    // No literal IPv4/IPv6 address is baked into the copy.
+    expect(block.textContent).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/);
+    expect(block.textContent).not.toMatch(/\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){4,}\b/i);
+  });
+
+  it("makes NO false verified-scope claim for sfox (T-122-08)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("sfox-readonly") as HTMLElement;
+    // The non-sfox key-handling copy legitimately says keys are "rejected
+    // before the ciphertext is written" / "we verify" — that claim is TRUE for
+    // scope-probing exchanges but would be a LIE for sfox. Assert none of that
+    // affirmative-verification phrasing leaks into the sfox block.
+    expect(block.textContent).not.toMatch(/verified read-only scope/i);
+    expect(block.textContent).not.toMatch(/we verify the scope/i);
+    expect(block.textContent).not.toMatch(/rejected before/i);
+  });
+});
