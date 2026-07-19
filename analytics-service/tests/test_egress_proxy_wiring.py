@@ -46,6 +46,14 @@ def test_worker_egress_proxy_url_set_returns_url(monkeypatch):
     assert worker_egress_proxy_url() == _URL
 
 
+@pytest.mark.parametrize("ws", ["   ", "\t", "\n", " \t\n "])
+def test_worker_egress_proxy_url_whitespace_only_is_none(monkeypatch, ws):
+    # F5 (121): an all-whitespace value is deploy-config noise; coerce to None so
+    # it is byte-identical to truly unset, NOT handed to aiohttp as InvalidURL('').
+    monkeypatch.setenv(_ENV, ws)
+    assert worker_egress_proxy_url() is None
+
+
 # --------------------------------------------------------------------------- #
 # make_sfox_client() — explicit proxy threading + credential passthrough       #
 # --------------------------------------------------------------------------- #
@@ -60,6 +68,44 @@ def test_make_sfox_client_empty_env_proxy_is_none(monkeypatch):
     monkeypatch.setenv(_ENV, "")
     client = make_sfox_client("k")
     assert client._proxy is None
+
+
+def test_make_sfox_client_whitespace_env_proxy_is_none(monkeypatch):
+    # F5: whitespace-only env → None → no validation → byte-identical to unset.
+    monkeypatch.setenv(_ENV, "   ")
+    client = make_sfox_client("k")
+    assert client._proxy is None
+
+
+def test_make_sfox_client_malformed_bad_port_fails_loud_no_secret(monkeypatch):
+    # F5: a genuinely-malformed proxy URL (bad port 88x8) must fail LOUD at the
+    # construction seam with a clear message that NEVER echoes the BasicAuth secret.
+    secret = "deadbeefcafe"
+    monkeypatch.setenv(_ENV, f"http://quantalyze:{secret}@37.16.1.5:88x8")
+    with pytest.raises(ValueError) as excinfo:
+        make_sfox_client("k")
+    msg = str(excinfo.value)
+    assert secret not in msg, f"malformed-URL error leaked the secret: {msg!r}"
+    assert "WORKER_EGRESS_PROXY_URL" in msg
+
+
+def test_make_sfox_client_missing_scheme_fails_loud_no_secret(monkeypatch):
+    # F5: a non-empty URL with no http(s):// scheme fails loud; the shape error
+    # names the expected form WITHOUT echoing the (un-`://`-anchored) secret.
+    secret = "topsecretpw"
+    monkeypatch.setenv(_ENV, f"quantalyze:{secret}@37.16.1.5:8888")
+    with pytest.raises(ValueError) as excinfo:
+        make_sfox_client("k")
+    msg = str(excinfo.value)
+    assert secret not in msg, f"shape error leaked the secret: {msg!r}"
+    assert "http(s)://" in msg
+
+
+def test_make_sfox_client_valid_url_passes_validation(monkeypatch):
+    # F5 must NOT regress a well-formed URL: it validates cleanly and threads.
+    monkeypatch.setenv(_ENV, _URL)
+    client = make_sfox_client("k")
+    assert client._proxy == _URL
 
 
 def test_make_sfox_client_env_set_threads_proxy(monkeypatch):
