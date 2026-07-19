@@ -50,6 +50,30 @@ from services.sfox_client import _TRANSACTIONS_MAX_LIMIT, SfoxClient
 # runaway/looping crawl into a typed truncation instead of an unbounded spin.
 _SFOX_CRAWL_MAX_REQUESTS = 50
 
+
+def sfox_transactions_crawl_wallclock_budget_s(
+    headroom: float = 1.1, response_s: float = 2.0
+) -> float:
+    """Wall-clock seconds the transactions crawl can legitimately need: its
+    shared request budget under the ``/v1/account/transactions`` rate gate PLUS a
+    per-request response allowance.
+
+    The worker sizes the transactions crawl's per-crawl ``wait_for`` bound to
+    THIS (not the faster balance-history bound). ``/v1/account/transactions`` is
+    rate-gated at 10s/request, so the 50-request budget needs ~500s of gate time;
+    each request ALSO waits on a real response (``response_s``), so the honest
+    budget is ``max_requests × (rate + response) × headroom`` — counting only the
+    rate (as the first cut did) under-sizes it and re-opens the false-timeout the
+    bound exists to close. Derived from the source constants so the bound can never
+    silently drift from the pagination it protects."""
+    from services.sfox_client import SFOX_DEFAULT_RATE_INTERVAL_S, SFOX_RATE_LIMITS
+
+    rate_s = SFOX_RATE_LIMITS.get(
+        "/v1/account/transactions", SFOX_DEFAULT_RATE_INTERVAL_S
+    )
+    return _SFOX_CRAWL_MAX_REQUESTS * (rate_s + response_s) * headroom
+
+
 # Balance-history granularity: daily buckets. The seconds value is the client
 # `interval` wire param; the milliseconds value advances the crawl cursor.
 _SFOX_BALANCE_HISTORY_INTERVAL_S = 86_400

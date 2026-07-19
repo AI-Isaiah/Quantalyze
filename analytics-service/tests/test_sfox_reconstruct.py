@@ -622,6 +622,14 @@ from services.job_worker import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _sfox_enabled(monkeypatch):
+    # SFOX-06: the worker derive_broker_dailies sfox branch is gated on
+    # SFOX_ENABLED (the kill switch). These tests exercise the ENABLED pipeline;
+    # the disabled-gate behavior is pinned by test_worker_sfox_branch_gated_when_disabled.
+    monkeypatch.setenv("SFOX_ENABLED", "true")
+
+
 def _bh_row(day: str, usd_value) -> dict:
     return {"timestamp": _ms(day), "usd_value": usd_value}
 
@@ -750,6 +758,25 @@ async def test_sfox_crawl_hang_is_bounded_transient_not_permanent(monkeypatch):
     assert result.error_kind != "permanent"
     stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
     assert not stamps, "a bounded hang is transient — never a terminal stamp"
+
+
+async def test_worker_sfox_branch_gated_when_disabled(monkeypatch):
+    """SFOX-06 kill switch (red-team MED): with SFOX_ENABLED off, the QUEUE-executed
+    sfox branch fails PERMANENT before any decrypt/crawl. The DB CHECK admits sfox
+    unconditionally and the derive-allocator-key cron fans out with NO exchange
+    filter, so after a rollback flips the switch off a stored sfox key must NOT keep
+    firing live sFOX reads here — the worker is the enforcement chokepoint too."""
+    from services.closed_sets import SFOX_DISABLED_DETAIL
+
+    monkeypatch.delenv("SFOX_ENABLED", raising=False)  # override the autouse enable
+    ctx, capture = _sfox_ctx()
+    with _apply(_sfox_branch_patches(ctx, key_mode=False)):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"  # founder disabled it — retrying is wrong
+    assert SFOX_DISABLED_DETAIL in (result.error_message or "")
+    # A clean pre-crawl refusal — no terminal analytics stamp, no live read.
+    assert not [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
 
 
 # --- fail-loud dispositions: truncation / unvaluable / material floor -------

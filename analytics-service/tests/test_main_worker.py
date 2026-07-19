@@ -243,6 +243,80 @@ class TestDispatchTick:
         finally:
             main_worker_healthz.LAST_TICK_AT = _saved_tick
 
+    @pytest.mark.asyncio
+    async def test_heartbeat_refreshes_last_tick_during_long_dispatch(
+        self, monkeypatch
+    ) -> None:
+        """FLIPRETRY-04: a SINGLE dispatch that outlives STALE_THRESHOLD must NOT
+        false-stale healthz. A concurrent heartbeat refreshes LAST_TICK_AT WHILE the
+        dispatch is in flight, so the platform does not restart a legitimately-long
+        (but alive) backfill crawl mid-flight. Pre-fix LAST_TICK_AT was stamped only
+        at the TOP of the job iteration, so one long crawl froze it → 503 → restart
+        loop on exactly the large accounts FLIPRETRY targets."""
+        import main_worker
+        import main_worker_healthz
+
+        # Tiny interval so several heartbeats fire within a short test dispatch.
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.02)
+
+        jobs = [{"id": "job-slow", "kind": "derive_broker_dailies", "strategy_id": "s-slow"}]
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=jobs)
+        mock_supabase.rpc.return_value = chain
+
+        captured: dict = {}
+
+        async def _slow_dispatch(job):
+            # LAST_TICK_AT here == the top-of-iteration stamp (before the crawl).
+            captured["at_start"] = main_worker_healthz.LAST_TICK_AT
+            await asyncio.sleep(0.15)  # ~7 heartbeat intervals, all yielding
+            return DispatchResult(outcome=DispatchOutcome.DONE)
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch("main_worker.dispatch", new=_slow_dispatch):
+                await dispatch_tick("worker-hb")
+            # The heartbeat advanced LAST_TICK_AT DURING the 0.15s dispatch, past the
+            # stamp captured at dispatch start — proving mid-dispatch liveness.
+            assert "at_start" in captured
+            assert main_worker_healthz.LAST_TICK_AT > captured["at_start"], (
+                "the heartbeat must refresh LAST_TICK_AT during a long dispatch; "
+                "otherwise a legit >90s crawl false-stales healthz."
+            )
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_cancelled_after_dispatch_no_leak(self, monkeypatch) -> None:
+        """The heartbeat task is cancelled in `finally`, so it never outlives its
+        job (no orphan task bumping LAST_TICK_AT after dispatch returns)."""
+        import main_worker
+        import main_worker_healthz
+
+        monkeypatch.setattr(main_worker, "_HEARTBEAT_INTERVAL_S", 0.01)
+        jobs = [{"id": "job-fast", "kind": "sync_trades", "strategy_id": "s-1"}]
+        mock_supabase = MagicMock()
+        chain = MagicMock()
+        chain.execute.return_value = MagicMock(data=jobs)
+        mock_supabase.rpc.return_value = chain
+
+        _saved_tick = main_worker_healthz.LAST_TICK_AT
+        try:
+            with patch("main_worker.get_supabase", return_value=mock_supabase), \
+                 patch(
+                     "main_worker.dispatch",
+                     new=AsyncMock(return_value=DispatchResult(outcome=DispatchOutcome.DONE)),
+                 ):
+                await dispatch_tick("worker-hb-cancel")
+            frozen = main_worker_healthz.LAST_TICK_AT
+            # No live heartbeat remains: after a few intervals the tick must NOT move.
+            await asyncio.sleep(0.05)
+            assert main_worker_healthz.LAST_TICK_AT == frozen
+        finally:
+            main_worker_healthz.LAST_TICK_AT = _saved_tick
+
     # METRICS-14 / Plan 12-07: priority-aware claim path. The throttle MUST
     # live in the claim path (dispatch_tick), not in dispatch() — by the time
     # dispatch runs, the row is already claimed. Phase 12 SC#4: live

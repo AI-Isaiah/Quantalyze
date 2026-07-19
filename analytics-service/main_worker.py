@@ -46,6 +46,7 @@ from dotenv import load_dotenv
 # injected directly and no .env file exists, so load_dotenv() is a no-op.
 load_dotenv()
 
+import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
 from services.db import db_execute, get_supabase
 from services.encryption import validate_kek_on_startup
 from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
@@ -122,6 +123,23 @@ BACKFILL_KINDS: Final[tuple[str, ...]] = (
     "derive_allocator_equity",
 )
 _VALID_CLAIM_ROLES: Final[tuple[str, ...]] = ("all", "interactive", "backfill")
+
+# FLIPRETRY-04: how often to refresh healthz WHILE a single dispatch is in
+# flight. A backfill derive_broker_dailies crawl can legitimately run past
+# STALE_THRESHOLD (90s) while still under its per-crawl wait_for bound; the
+# per-job refresh (top of the loop) only covers a BATCH of short jobs, not one
+# long job. 30s keeps the age comfortably under 90s (at most one missed tick ⇒
+# age < 60s). VALIDATED loudly like WORKER_CLAIM_ROLE (not just documented): a
+# value ≥ STALE_THRESHOLD lets healthz 503 in the gap before the first heartbeat
+# — reintroducing the exact false-stale restart this fixes — and 0 turns the
+# heartbeat into an asyncio.sleep(0) busy-loop stealing CPU from the crawl.
+_HEARTBEAT_INTERVAL_S: Final[float] = float(os.getenv("WORKER_HEARTBEAT_INTERVAL_S", "30"))
+if not 0.0 < _HEARTBEAT_INTERVAL_S < main_worker_healthz.STALE_THRESHOLD:
+    raise ValueError(
+        f"WORKER_HEARTBEAT_INTERVAL_S must be in (0, {main_worker_healthz.STALE_THRESHOLD}); "
+        f"got {_HEARTBEAT_INTERVAL_S} — a value ≥ STALE_THRESHOLD reintroduces the "
+        f"false-stale restart FLIPRETRY-04 fixes; 0 busy-loops."
+    )
 
 
 def _validate_claim_role(role: str) -> str:
@@ -606,6 +624,27 @@ async def dispatch_tick(worker_id: str) -> None:
         # not a failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
         try:
+            # FLIPRETRY-04: keep healthz HONEST during ONE long-but-alive
+            # dispatch. A single backfill crawl can legitimately exceed
+            # STALE_THRESHOLD (90s) while under its per-crawl wait_for bound;
+            # without a mid-dispatch refresh, LAST_TICK_AT (stamped at the top of
+            # this iteration) freezes → healthz 503s → the platform restarts the
+            # worker mid-crawl → the large account NEVER ingests (the exact
+            # accounts FLIPRETRY targets). This heartbeat only advances the tick if
+            # the event loop is SERVICING it, so healthz now reflects LOOP liveness:
+            # a loop-BLOCKING freeze (a non-yielding await / CPU spin / deadlock)
+            # stops the heartbeat too → healthz still stales → restart (preserved).
+            # It does NOT catch a YIELDING single-job hang (a dead upstream we keep
+            # awaiting): the loop stays alive so healthz stays green — that case is
+            # backstopped by the per-kind OUTER wait_for (dispatch → transient) plus
+            # the DB watchdog re-claim, NOT by healthz. Cancelled in `finally` so it
+            # never outlives its job.
+            async def _heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                    main_worker_healthz.LAST_TICK_AT = time.time()
+
+            _hb = asyncio.create_task(_heartbeat())
             # `dispatch(job: dict)` in services.job_worker accepts a plain dict;
             # a TypedDict is not assignable to `dict[Any, Any]` under mypy's
             # invariance rules even though `ClaimedJob` IS a dict at runtime.
@@ -614,7 +653,14 @@ async def dispatch_tick(worker_id: str) -> None:
             # / `job.get(...)` access in this module. Widening dispatch()'s
             # parameter to a Mapping is the symmetric cross-module follow-up
             # (services.job_worker is out of scope for H-0529).
-            result = await dispatch(cast("dict[str, Any]", job))
+            try:
+                result = await dispatch(cast("dict[str, Any]", job))
+            finally:
+                _hb.cancel()
+                try:
+                    await _hb
+                except asyncio.CancelledError:
+                    pass
 
             if result.outcome == DispatchOutcome.DONE:
                 def _mark_done(jid=job["id"], tok=claim_token):

@@ -328,3 +328,110 @@ def test_no_logger_exception_at_new_catch_sites():
 def test_broker_crawl_timeout_constant_defined():
     """The bound is a module constant, env-overridable via BROKER_CRAWL_TIMEOUT_S."""
     assert isinstance(jw._BROKER_CRAWL_TIMEOUT_S, float)
+
+
+# ===========================================================================
+# HIGH #2 (specialist fan-out) — the LARGEST crawls were previously UNWRAPPED:
+# fetch_all_trades (bybit-19k full history), fetch_account_equity_and_upnl_usd,
+# fetch_funding_*, and the deribit anchor fetch_deribit_native_account_state. A
+# hang there re-created the exact v1.11 wedge. These pin the new wraps.
+# ===========================================================================
+async def test_ccxt_fetch_all_trades_hang_is_bounded_transient(monkeypatch):
+    """HIGH #2: fetch_all_trades (since_ms=None ⇒ ENTIRE history — the named
+    bybit-19k wedge) hangs → cut at the per-crawl bound → transient FAILED, never
+    an unbounded wedge of the sequential loop."""
+    monkeypatch.setattr(jw, "_BROKER_CRAWL_TIMEOUT_S", 0.05)
+    ctx, _capture = _ctx("bybit")
+    patches = _common_patches(ctx) + [
+        patch(
+            "services.exchange.fetch_account_equity_and_upnl_usd",
+            new=AsyncMock(return_value=(1000.0, False, 0.0, False)),
+        ),
+        patch("services.job_worker.fetch_all_trades", new=AsyncMock(side_effect=_hang)),
+    ]
+    with _apply(patches):
+        result = await asyncio.wait_for(
+            run_derive_broker_dailies_job(_job()), timeout=3.0
+        )
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert "FLIPRETRY-01" in (result.error_message or "")
+
+
+async def test_deribit_native_account_state_hang_is_bounded_transient(monkeypatch):
+    """HIGH #2: the deribit anchor read fetch_deribit_native_account_state hangs →
+    cut at the per-crawl bound and routed to the DeribitTransientReadError retryable
+    path (the SAME path the empty-anchor case uses), never an unbounded await."""
+    from services.deribit_ingest import DeribitTransientReadError
+
+    monkeypatch.setattr(jw, "_BROKER_CRAWL_TIMEOUT_S", 0.05)
+    ctx, _capture = _ctx("deribit")
+    patches = _common_patches(ctx) + [
+        patch(
+            "services.deribit_ingest.fetch_deribit_native_account_state",
+            new=AsyncMock(side_effect=_hang),
+        ),
+    ]
+    with _apply(patches):
+        with pytest.raises(DeribitTransientReadError, match="FLIPRETRY-01"):
+            await asyncio.wait_for(
+                run_derive_broker_dailies_job(_job()), timeout=3.0
+            )
+
+
+def test_ccxt_equity_trades_funding_now_bounded():
+    """HIGH #2 source scan: the ccxt equity anchor, full-history trades, and funding
+    crawls are now wait_for-wrapped too (previously bare awaits). Total bounded
+    awaits in the branch ≥6 (equity + trades + ≥1 funding + 2 transfers + price)."""
+    region = _ccxt_branch_region()
+    assert "fetch_account_equity_and_upnl_usd" in region
+    assert "fetch_all_trades" in region
+    assert region.count("asyncio.wait_for(") >= 6
+
+
+def test_deribit_native_account_state_is_wait_for_bounded():
+    """HIGH #2 source scan: the deribit anchor read is wrapped, and a timeout is
+    raised as DeribitTransientReadError (the retryable class)."""
+    region = _deribit_branch_region()
+    assert "fetch_deribit_native_account_state" in region
+    assert "DeribitTransientReadError" in region
+
+
+def test_sfox_txn_crawl_has_own_larger_budget_bound():
+    """MED #3: /v1/account/transactions is rate-gated at 10s/req, so the 50-page
+    budget needs ~600s. The transactions crawl gets its OWN bound (sized to that
+    budget, capped to fit the outer), strictly larger than the balance-history
+    bound — else a >30-page ledger false-times-out into an infinite transient
+    retry → failed_final."""
+    from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
+
+    assert jw._SFOX_TXN_CRAWL_TIMEOUT_S > jw._SFOX_CRAWL_TIMEOUT_S
+    # It is min(rate-budget, outer-fit cap), so never ABOVE the rate budget.
+    assert jw._SFOX_TXN_CRAWL_TIMEOUT_S <= sfox_transactions_crawl_wallclock_budget_s() + 1e-6
+    text = Path(jw.__file__).read_text()
+    sfox_start = text.index('elif venue == "sfox":')
+    sfox_end = text.index("\n        else:\n", sfox_start)
+    sfox_region = _strip_comments(text[sfox_start:sfox_end])
+    assert "_SFOX_TXN_CRAWL_TIMEOUT_S" in sfox_region
+    assert "crawl_sfox_transactions" in sfox_region
+
+
+def test_crawl_bounds_fit_under_outer_budget():
+    """Red-team (MED): a per-crawl bound the account can PASS while the OUTER
+    wait_for still kills the job mid-persist is no fix. Pin the composition:
+    (1) the mirrored outer budget equals the real TIMEOUT_PER_KIND entry;
+    (2) sfox bh + txn + post-crawl reserve ≤ outer (serial-sum invariant);
+    (3) the deribit/ccxt bound is not tighter than the outer envelope (a bound
+        below legit crawl duration manufactures false transients → failed_final)."""
+    outer = jw.TIMEOUT_PER_KIND["derive_broker_dailies"]
+    assert jw._DERIVE_OUTER_BUDGET_S == outer, "mirrored outer budget drifted from TIMEOUT_PER_KIND"
+    assert (
+        jw._SFOX_CRAWL_TIMEOUT_S
+        + jw._SFOX_TXN_CRAWL_TIMEOUT_S
+        + jw._DERIVE_POST_CRAWL_RESERVE_S
+        <= outer
+    ), "sfox bh + txn + reserve exceeds the outer budget — the outer would kill a legit large account"
+    assert jw._BROKER_CRAWL_TIMEOUT_S <= outer
+    # And the deribit/ccxt bound is NOT the old flat 300s that false-timed-out
+    # OKX/bybit/deribit large accounts (must leave room for their real durations).
+    assert jw._BROKER_CRAWL_TIMEOUT_S >= outer - jw._DERIVE_POST_CRAWL_RESERVE_S
