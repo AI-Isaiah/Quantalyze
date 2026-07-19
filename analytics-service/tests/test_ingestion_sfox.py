@@ -50,10 +50,12 @@ def _make_client(get_balances_side_effect=None):
 
 
 def _install_sfox_client(monkeypatch, client):
-    """Patch the sfox-adapter module's SfoxClient factory to return `client`;
-    return the factory spy so the test can assert construction kwargs."""
+    """Patch the sfox-adapter module's make_sfox_client factory to return `client`;
+    return the factory spy so the test can assert construction args. (121-02: the
+    adapter now constructs via the make_sfox_client egress-proxy factory, not
+    SfoxClient directly — same behavior, the injection seam moved.)"""
     factory = MagicMock(return_value=client)
-    monkeypatch.setattr("services.ingestion.sfox.SfoxClient", factory)
+    monkeypatch.setattr("services.ingestion.sfox.make_sfox_client", factory)
     return factory
 
 
@@ -116,7 +118,8 @@ def test_validate_success_valid_readonly_and_aclose(monkeypatch) -> None:
     assert result.error_code is None
     # Credential trimmed at the chokepoint (v1.11 convention).
     factory.assert_called_once()
-    assert factory.call_args.kwargs["api_key"] == "tok_abc"
+    # 121-02: the adapter calls make_sfox_client(api_key) positionally.
+    assert factory.call_args.args[0] == "tok_abc"
     client.get_balances.assert_awaited_once()
     client.aclose.assert_awaited_once()
 

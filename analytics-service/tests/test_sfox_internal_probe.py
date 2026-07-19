@@ -69,7 +69,7 @@ def _probe(client, sfox_client, *, create_exchange_spy):
              "routers.internal.decrypt_credentials",
              return_value=("tok-sfox", "", None),
          ), \
-         patch("services.sfox_client.SfoxClient", return_value=sfox_client), \
+         patch("services.sfox_factory.make_sfox_client", return_value=sfox_client), \
          patch("routers.internal.create_exchange", new=create_exchange_spy):
         return client.post(
             "/internal/keys/key-sfox/permissions", headers=_headers()

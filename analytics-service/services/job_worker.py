@@ -91,7 +91,8 @@ from services.exchange import (
     parse_since_ms,
 )
 from services.positions import fetch_positions, persist_position_snapshots
-from services.sfox_client import SfoxClient
+from services.sfox_client import SfoxClient  # type annotations only
+from services.sfox_factory import make_sfox_client
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +723,7 @@ def _make_exchange_client(
     Every ccxt venue is BYTE-IDENTICAL to the prior inline create_exchange call.
     """
     if exchange_name == "sfox":
-        return SfoxClient(api_key.strip())
+        return make_sfox_client(api_key.strip())
     return create_exchange(exchange_name, api_key, api_secret, passphrase)
 
 

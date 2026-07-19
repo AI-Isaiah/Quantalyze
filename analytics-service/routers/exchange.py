@@ -7,7 +7,8 @@ from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
-from services.sfox_client import SfoxClient, SfoxApiError, SFOX_PROD_BASE_URL
+from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
+from services.sfox_factory import make_sfox_client
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
 
@@ -63,7 +64,7 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
     # rather than leaking a raw 500. Keeps the ctor's non-empty invariant intact.
     if not api_key or not api_key.strip():
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
-    client = SfoxClient(api_key=api_key, base_url=SFOX_PROD_BASE_URL)
+    client = make_sfox_client(api_key, base_url=SFOX_PROD_BASE_URL)
     try:
         await client.get_balances()
         return {"valid": True, "read_only": True}

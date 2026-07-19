@@ -226,9 +226,10 @@ async def get_key_permissions(
     # structural triple {read:True, trade:False, withdraw:False}; there is no
     # trade/withdraw surface to grant. This closes the phase-119 F2 misdirection.
     if exchange_name == "sfox":
-        from services.sfox_client import SfoxApiError, SfoxClient
+        from services.sfox_client import SfoxApiError
+        from services.sfox_factory import make_sfox_client
 
-        sfox_client = SfoxClient(api_key.strip())
+        sfox_client = make_sfox_client(api_key.strip())
         try:
             await sfox_client.get_balances()
             # Auth + read proven; the structural read-only triple (no scope probe).

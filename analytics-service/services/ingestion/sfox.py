@@ -43,7 +43,8 @@ from services.ingestion.adapter import (
     Trade,
     ValidationResult,
 )
-from services.sfox_client import SfoxApiError, SfoxClient
+from services.sfox_client import SfoxApiError
+from services.sfox_factory import make_sfox_client
 
 
 class SfoxAdapter:
@@ -71,7 +72,7 @@ class SfoxAdapter:
                 human_message=AUTH_FAILED_DETAIL,
                 debug_context=None,
             )
-        client = SfoxClient(api_key=api_key)
+        client = make_sfox_client(api_key)
         try:
             # A list body (even empty) means the token authenticates AND can
             # read — the single live proof of auth + read access.

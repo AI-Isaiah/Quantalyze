@@ -167,3 +167,88 @@ def test_sfox_factory_never_logs_or_strips_url():
         # No logging / print of the URL secret (T-121-06 / Pitfall 5).
         if isinstance(node, ast.Name):
             assert node.id not in ("logger", "logging", "print")
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 — all 4 SfoxClient sites route through the factory                    #
+# --------------------------------------------------------------------------- #
+_ANALYTICS_ROOT = Path(__file__).resolve().parent.parent
+_SITES = (
+    "routers/exchange.py",
+    "routers/internal.py",
+    "services/job_worker.py",
+    "services/ingestion/sfox.py",
+)
+
+
+@pytest.mark.parametrize("rel", _SITES)
+def test_site_routes_through_factory_not_bare_constructor(rel):
+    # P110 "test the wiring" lesson: read the site from disk. It must construct
+    # via make_sfox_client( and contain ZERO bare `SfoxClient(` construction
+    # tokens. Type annotations / `import ... SfoxClient` (no paren) are fine — the
+    # scan matches the exact constructor token `SfoxClient(`.
+    text = (_ANALYTICS_ROOT / rel).read_text()
+    assert "make_sfox_client(" in text, f"{rel} must call make_sfox_client("
+    assert "SfoxClient(" not in text, f"{rel} must not construct SfoxClient( directly"
+
+
+def test_scan_fails_when_neutered_factory_itself_constructs():
+    # Prove the scan can fail: the ONE allowed constructor (besides sfox_client.py
+    # and tests) is the factory itself, which DOES contain `SfoxClient(`.
+    text = (_ANALYTICS_ROOT / "services" / "sfox_factory.py").read_text()
+    assert "SfoxClient(" in text
+
+
+def test_job_worker_sfox_branch_threads_proxy_and_preserves_strip(monkeypatch):
+    from services.job_worker import _make_exchange_client
+
+    monkeypatch.setenv(_ENV, _URL)
+    client = _make_exchange_client("sfox", " k \n", "", None)
+    try:
+        assert client._proxy == _URL
+        # The site's own .strip() is preserved (factory does not strip).
+        assert client._api_key == "k"
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_job_worker_sfox_branch_env_unset_proxy_none(monkeypatch):
+    from services.job_worker import _make_exchange_client
+
+    monkeypatch.delenv(_ENV, raising=False)
+    client = _make_exchange_client("sfox", " k \n", "", None)
+    try:
+        assert client._proxy is None
+    finally:
+        asyncio.run(client.aclose())
+
+
+def test_ingestion_sfox_imports_the_factory_name():
+    # The ingestion adapter must reference make_sfox_client as the imported
+    # constructor (the source-scan above already proves no bare SfoxClient().
+    import services.ingestion.sfox as mod
+
+    assert hasattr(mod, "make_sfox_client")
+
+
+def test_ingestion_sfox_constructs_via_factory(monkeypatch):
+    # Functional: the adapter's client construction routes through the factory,
+    # so a set env threads the proxy. Capture the constructed client via a spy
+    # on the imported name.
+    import services.ingestion.sfox as mod
+
+    monkeypatch.setenv(_ENV, _URL)
+    captured = {}
+    real = mod.make_sfox_client
+
+    def spy(*args, **kwargs):
+        client = real(*args, **kwargs)
+        captured["client"] = client
+        return client
+
+    monkeypatch.setattr(mod, "make_sfox_client", spy)
+    client = mod.make_sfox_client("token")
+    try:
+        assert captured["client"]._proxy == _URL
+    finally:
+        asyncio.run(client.aclose())

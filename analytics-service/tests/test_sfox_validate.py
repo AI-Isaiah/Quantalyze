@@ -88,10 +88,12 @@ def _make_client(get_balances_side_effect=None):
 
 
 def _install_sfox_client(router, client):
-    """Patch the router's SfoxClient factory to return `client`; return a spy
-    on the factory so the test can assert construction kwargs."""
+    """Patch the router's make_sfox_client factory to return `client`; return a spy
+    on the factory so the test can assert construction args. (121-02: the router
+    now constructs via the make_sfox_client egress-proxy factory, not SfoxClient
+    directly — the behavioral contract is unchanged, the injection seam moved.)"""
     factory = MagicMock(return_value=client)
-    router.SfoxClient = factory
+    router.make_sfox_client = factory
     return factory
 
 
@@ -145,8 +147,10 @@ async def test_sfox_constructed_with_bearer_token_and_prod_base_url(exchange_rou
     await _call(router, _make_req(router, api_key="tok_xyz"))
 
     factory.assert_called_once()
-    _, kwargs = factory.call_args
-    assert kwargs.get("api_key") == "tok_xyz"
+    args, kwargs = factory.call_args
+    # 121-02: the router calls make_sfox_client(api_key, base_url=SFOX_PROD_BASE_URL)
+    # — api_key is positional at the site now, base_url stays a kwarg.
+    assert args[0] == "tok_xyz"
     assert kwargs.get("base_url") == router.SFOX_PROD_BASE_URL
 
 
@@ -363,7 +367,7 @@ async def test_ccxt_exchange_still_uses_create_exchange_path(exchange_router):
     router.aclose_exchange = AsyncMock()
 
     sfox_factory = MagicMock(side_effect=AssertionError("SfoxClient must not be built for ccxt"))
-    router.SfoxClient = sfox_factory
+    router.make_sfox_client = sfox_factory
 
     result = await _call(
         router, _make_req(router, exchange="binance", api_key="k", api_secret="s")
