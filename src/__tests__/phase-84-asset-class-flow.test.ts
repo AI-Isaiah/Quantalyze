@@ -33,12 +33,13 @@ describe("Phase 84 — asset_class flows to every blend surface", () => {
 
   it("the lazy returns route probe projects asset_class (drawer-added legs)", () => {
     const src = read("src/app/api/strategies/[id]/returns/route.ts");
-    // Phase 111 / CONSTIT-02 widened this probe select to also embed
-    // strategy_verifications; assert asset_class is still projected on the same
-    // published-gated probe (substring, not exact — the select is multi-field).
-    expect(src).toContain(
-      '.select("id, asset_class, strategy_verifications (trust_tier, status, created_at)")',
-    );
+    // Phase 126-04 (FACTSHEET-01 hardening) removed the strategy_verifications
+    // embed from this probe — trust_tier now comes from the correct-by-construction
+    // get_published_trust_signals SECDEF primitive (via readPublicVerificationSignals),
+    // NOT an RLS-scoped embed. This pin's real intent is unchanged: asset_class MUST
+    // still be projected on the published-gated probe (else a crypto book silently
+    // falls back to √252 and understates risk ~17%).
+    expect(src).toContain('.select("id, asset_class")');
   });
 
   it("the public share page strategies read projects asset_class (shared scenarios)", () => {

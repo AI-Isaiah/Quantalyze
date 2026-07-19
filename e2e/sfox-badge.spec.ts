@@ -21,9 +21,11 @@
  *   - ALLOCATOR (the SAME "both" user): the /browse/<slug>/<id> discovery
  *     presentation, whose VerifiedBadge is gated on strategy.api_key_id (the
  *     seed links the sfox key, so it renders).
- *   - ADMIN (a separate is_admin-elevated session): reads the same seeded sfox
- *     strategy's api_verified tier through the public factsheet — an admin
- *     session is never blocked, so it sees the strategy with its tier.
+ *   - ADMIN (a separate is_admin-elevated session): a NON-owner viewer reads the
+ *     same seeded sfox strategy's api_verified tier through the public factsheet.
+ *   - ANON (logged-out): the /strategy/[id] factsheet is publicly viewable and
+ *     the api_verified badge is public provenance — a logged-out visitor must
+ *     see it (Phase 126 FACTSHEET-01; the anti-mask regression net).
  *   - PUBLIC-DEMO: N/A. The /demo surface runs on sentinel fixtures with no
  *     sfox strategy; asserting there would require inventing data (no-invented-
  *     data rule), so it is deliberately not swept.
@@ -108,7 +110,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("owner: /strategies/[id]/edit renders the SFOX exchange tag", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
     await page.goto(`/strategies/${seeded.strategyId}/edit`);
@@ -131,7 +133,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("owner: the strategy factsheet shows the api_verified badge (+ axe)", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
     await page.goto(`/strategy/${seeded.strategyId}`);
@@ -151,7 +153,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("allocator: the browse presentation shows the api_verified badge", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     // Same "both" user — it owns the allocator/browse surfaces too.
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
@@ -171,12 +173,36 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("admin: an elevated session reads the sfox strategy's api_verified tier", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.admin.email, seeded.admin.password);
 
-    // The admin-elevated session is never blocked from the strategy's factsheet
-    // and reads the same api_verified tier (admin SELECT RLS on
-    // strategy_verifications, migration 093 STEP 3).
+    // Phase 126 (FACTSHEET-01): the admin is a NON-owner viewer. Before the fix
+    // the badge was invisible to every non-owner because trust_tier was read via
+    // an RLS-scoped embed on strategy_verifications (owner-only SELECT) → tier
+    // null → no badge. The fix reads trust_tier via the published-gated
+    // get_published_trust_signals SECURITY DEFINER RPC (queries.readPublicVerificationSignals,
+    // normal client + anon EXECUTE — NOT service role), so ANY non-owner viewer
+    // now sees the api_verified badge. This asserts that corrected intent.
+    await page.goto(`/strategy/${seeded.strategyId}`);
+    await expect(page).toHaveURL(new RegExp(`/strategy/${seeded.strategyId}`), {
+      timeout: 10_000,
+    });
+
+    await expect(apiVerifiedBadge(page).first()).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
+  test("anon: a logged-out visitor sees the api_verified badge on the public factsheet", async ({
+    page,
+  }) => {
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
+    // NO login — the /strategy/[id] factsheet of a PUBLISHED strategy is
+    // publicly viewable, and the api_verified badge is public provenance. This
+    // is the core FACTSHEET-01 requirement (badge visible to EVERYONE incl.
+    // logged-out) AND the anti-mask net: it fails RED on the pre-126 code where
+    // the RLS-scoped verification embed returned zero rows for anon → tier null
+    // → the badge silently vanished. Do NOT log in here.
     await page.goto(`/strategy/${seeded.strategyId}`);
     await expect(page).toHaveURL(new RegExp(`/strategy/${seeded.strategyId}`), {
       timeout: 10_000,

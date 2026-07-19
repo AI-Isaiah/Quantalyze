@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.47.0.0] - 2026-07-20
+### v1.13 Infra — sFOX go-live foundation + worker rebuild (Phases 125–130)
+The go-live foundation for the v1.12 sFOX adapter: a hardened dedicated backfill
+worker, the public `api_verified` badge fixed for anon/non-owner viewers via a
+correct-by-construction DB primitive, an evidence-based deribit `correction`
+classifier, the derived-equity FLIP re-attempt groundwork, and the complete
+sFOX go-live runbook. Still ships FLAG-OFF (`SFOX_ENABLED` /
+`NEXT_PUBLIC_SFOX_ENABLED` empty) — the egress whitelist + flag flip + live
+proof remain founder live ops (EGRESS-01/02/03, GOLIVE-01/02, E2GT-01, FLIP-01
+recorded human_needed-OPEN), gated on the external sFOX IP-bind. Egress lands on
+native Railway Pro static outbound (NOT Fly, NOT a proxy; `WORKER_EGRESS_PROXY_URL`
+stays UNSET).
+
+- **125 — WORKER**: dedicated backfill worker with claim-role isolation (the
+  v1.11 wedge fix), `asyncio.wait_for` crawl bounds + real-TCP healthz honesty
+  (200 mid-backfill / 503 when stale), and a recurring pg_cron purge of
+  orphaned `running` compute_jobs (migration 20260719120000).
+- **126 — FACTSHEET**: the public `api_verified` badge was invisible to anon +
+  non-owner viewers (owner-only RLS on `strategy_verifications`). Replaced the
+  app-layer service-role projection with `get_published_trust_signals`
+  (migration 20260719140000) — a SECURITY DEFINER, published-gated,
+  column-scoped primitive; the table stays owner-locked. All six readers
+  repointed; the `sfox-badge` e2e wired BLOCKING into the `frontend` gate with
+  an anti-tamper guard.
+- **127 — E2GT**: the derived-curve display gate (`extractTrustworthyDerivedCurve`)
+  proven + the E2 ground-truth acceptance sharpened to a two-part gate (exit 0
+  AND `within_same_day_tolerance`). E2GT-01 live run stays human_needed.
+- **128 — DERIBITFIX**: a deribit `correction` txn-log entry is now classified
+  PER ROW on `info.reason` — a trading/PnL correction (the observed BTC-PERPETUAL
+  funding-calc row) is realized cash on both the USD and native paths; a capital
+  or unrecognized reason FAILS LOUD (never a silent capital-as-performance
+  miscount). Capital denylist matched by substring so plural forms can't slip.
+- **129 — FLIP**: the v1.11-rolled-back derived-equity flip re-verified safe —
+  idempotent enqueue + executable Step-8 rollback audited; the live prod
+  backfill (FLIP-01) modeled human_needed on the hardened worker.
+- **130 — GOLIVE**: `docs/runbooks/sfox-go-live.md` — the founder's step-by-step
+  egress-whitelist → gate-check → flag-flip → live-proof → rollback path.
+
+### Milestone big-review fixes (full specialist fan-out)
+- **BL-01 (money)**: the deribit correction capital denylist used word-boundary
+  matching on singular keywords, so a plural capital reason ("transfers…",
+  "withdrawals fee correction") could be silently summed as trading PnL. Fixed to
+  substring matching (safe-by-precedence); RED-proven regression tests added.
+- **Observability**: `readPublicVerificationSignals` (the single reader behind
+  five badge surfaces) now `console.error`s before Sentry + pages at `error`, so
+  a site-wide badge outage is never silent.
+- Added `supabase/tests/test_get_published_trust_signals.sql` — a recurring CI
+  gate for the published-gate negative + column allow-list. Comment-accuracy and
+  drift (`_row_is_cash_bearing` single source) fixes.
+
 ## [0.46.0.0] - 2026-07-19
 ### v1.12 sFOX Verified Integration (Phases 118–123)
 A LIVE sFOX exchange adapter reading the real account as `api_verified` ground

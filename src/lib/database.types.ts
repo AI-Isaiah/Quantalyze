@@ -3436,6 +3436,14 @@ export type Database = {
           total_return_twr: number | null
         }[]
       }
+      get_published_trust_signals: {
+        Args: { p_strategy_ids: string[] }
+        Returns: {
+          status: string
+          strategy_id: string
+          trust_tier: string
+        }[]
+      }
       get_user_compute_jobs: {
         Args: { p_limit?: number; p_strategy_id?: string }
         Returns: {

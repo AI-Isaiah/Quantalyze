@@ -215,14 +215,9 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)`)
+      .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
       .eq("discovery_categories.slug", categorySlug),
-  )
-    .order("created_at", {
-      referencedTable: "strategy_verifications",
-      ascending: false,
-    })
-    .limit(1, { referencedTable: "strategy_verifications" });
+  );
 
   if (error) {
     console.error("Strategy query failed:", error.message);
@@ -231,16 +226,23 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
 
   if (!strategies || strategies.length === 0) return [];
 
+  // Phase 126 (FACTSHEET-01, founder Option B): project trust_tier via the
+  // published-gated `get_published_trust_signals` SECURITY DEFINER RPC
+  // (trust_tier+status ONLY, read on a NORMAL client — anon/authenticated hold
+  // EXECUTE, NOT service role) so the browse/discovery LIST badge is visible to
+  // the PUBLIC. The prior RLS-scoped `strategy_verifications` embed returned
+  // zero rows for non-owner viewers, hiding every list badge for anon (same root
+  // cause as the factsheet — see readPublicVerificationSignals). One batched read
+  // for the whole list.
+  const signals = await readPublicVerificationSignals(
+    strategies.map((s) => (s as unknown as Strategy).id),
+  );
+
   return strategies.map((s) => {
-    const verifications =
-      (s as unknown as { strategy_verifications?: { trust_tier: string; status: string; created_at: string }[] })
-        .strategy_verifications ?? [];
-    const latest = verifications
-      .slice()
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+    const strat = s as unknown as Strategy;
     return {
-      ...(s as unknown as Strategy),
-      trust_tier: (latest?.trust_tier ?? null) as Strategy["trust_tier"],
+      ...strat,
+      trust_tier: (signals.get(strat.id)?.trust_tier ?? null) as Strategy["trust_tier"],
       analytics: extractAnalytics(s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
     };
   });
@@ -281,6 +283,108 @@ export async function getPopulatedCategorySlugs(): Promise<string[]> {
 
 const PUBLIC_ANALYTICS_COLUMNS = "cumulative_return, cagr, volatility, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, six_month_return, sparkline_returns, computation_status, computed_at";
 
+/** The ONLY strategy_verifications fields that may reach a public client. */
+export type PublicVerificationSignal = {
+  trust_tier: string | null;
+  status: string | null;
+};
+
+/**
+ * Read the PUBLIC verification signal — `trust_tier` + `status` ONLY — for a
+ * set of strategies, keyed by strategy_id (latest verification per strategy).
+ *
+ * Phase 126 (FACTSHEET-01, founder decision "Option B"). ROOT CAUSE this fixes:
+ * `strategy_verifications` RLS grants SELECT to the OWNER only (+ an app-role
+ * admin, + service_role) — there is deliberately NO public-read policy, because
+ * the table carries verification internals (wizard_session_id, flow_type,
+ * source, …) we do NOT expose. Consequently the old RLS-scoped nested embed
+ * (`strategy_verifications (...)` on a `createClient()` query) returned ZERO
+ * rows for every NON-owner viewer — anonymous public AND admin — so `trust_tier`
+ * projected as `null` and the `api_verified` badge silently vanished on the
+ * public factsheet even though the strategy is published and the badge is
+ * public provenance (repro pinned in 126-01-SUMMARY; the page returned 200, it
+ * never threw).
+ *
+ * Phase 126-04 (hardening): the deliberate, column-scoped exposure is now a DB
+ * primitive — the `get_published_trust_signals(uuid[])` SECURITY DEFINER
+ * function (migration 135). Correct BY CONSTRUCTION: its RETURNS TABLE signature
+ * `(strategy_id, trust_tier, status)` is the column allow-list (verification
+ * internals are structurally unreachable), its `WHERE strategies.status =
+ * 'published'` is the published-gate, and its pinned search_path lets anon read
+ * the signal WITHOUT any RLS widening — so this helper calls it via a NORMAL
+ * server client (anon/authenticated hold EXECUTE; no service-role client, no
+ * `createAdminClient`). This is the SINGLE typed public-signal reader; the two
+ * allocations-subsystem members (returns route + watchlist-read) route through
+ * it too, so a logged-in non-owner never sees LESS trust signal than an anon.
+ *
+ * Fail-soft (there is no SSR throw to catch here, so no error boundary is
+ * warranted — YAGNI): any read error → the strategy is simply absent from the
+ * map → `trust_tier` stays `null` → the badge hides and the page still renders
+ * 200. It never invents a tier (no-invented-data).
+ */
+export async function readPublicVerificationSignals(
+  strategyIds: readonly string[],
+): Promise<Map<string, PublicVerificationSignal>> {
+  const byStrategy = new Map<string, PublicVerificationSignal>();
+  const ids = Array.from(new Set(strategyIds.filter(Boolean)));
+  if (ids.length === 0) return byStrategy;
+
+  try {
+    const supabase = await createClient();
+    // Correct-by-construction: the DB function is the trust boundary. It returns
+    // ONLY (strategy_id, trust_tier, status) for PUBLISHED strategies, most
+    // recent per strategy. No table read here — no SELECT list to widen, no
+    // service-role client. anon/authenticated hold EXECUTE (migration 135).
+    const { data, error } = await supabase.rpc("get_published_trust_signals", {
+      p_strategy_ids: ids,
+    });
+
+    if (error) {
+      // This helper is the SINGLE trust-signal reader behind five surfaces
+      // (factsheet, browse, discovery, returns drawer, watchlist). A systemic
+      // RPC failure — anon EXECUTE revoked on get_published_trust_signals, the
+      // migration rolled back, the fn renamed — blanks EVERY badge at once, so
+      // log to the console FIRST (captureToSentry swallows transport failures;
+      // the caller owns the console log) and page at `error`, not `warning`.
+      console.error(
+        "[readPublicVerificationSignals] get_published_trust_signals RPC failed — all trust badges hidden:",
+        error,
+      );
+      captureToSentry(error, {
+        tags: { op: "readPublicVerificationSignals" },
+        level: "error",
+      });
+      return byStrategy;
+    }
+
+    // The function already returns the latest row per strategy (DISTINCT ON);
+    // the `has` guard is a defensive keep-first belt-and-suspenders.
+    for (const row of (data ?? []) as {
+      strategy_id: string;
+      trust_tier: string | null;
+      status: string | null;
+    }[]) {
+      if (!byStrategy.has(row.strategy_id)) {
+        byStrategy.set(row.strategy_id, {
+          trust_tier: row.trust_tier ?? null,
+          status: row.status ?? null,
+        });
+      }
+    }
+  } catch (err) {
+    console.error(
+      "[readPublicVerificationSignals] unexpected error — all trust badges hidden:",
+      err,
+    );
+    captureToSentry(err, {
+      tags: { op: "readPublicVerificationSignals" },
+      level: "error",
+    });
+  }
+
+  return byStrategy;
+}
+
 export async function getPublicStrategyDetail(strategyId: string): Promise<{
   strategy: Strategy;
   analytics: ReturnType<typeof extractAnalytics>;
@@ -289,39 +393,33 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
 } | null> {
   const supabase = await createClient();
 
-  // Phase 15 / CSV-03 + QA report 2026-05-21 ISSUE-007: also project
-  // strategy_verifications.trust_tier so the public-sheet Disclaimer
-  // can render the API-tier copy instead of falling back to
-  // 'self_reported'. Mirror getStrategyDetail's pattern — embed the
-  // most-recent verification row via PostgREST referencedTable
-  // order+limit. Locked decision D-04: trust_tier lives ONLY on
-  // strategy_verifications; no strategies.trust_tier column exists.
+  // Phase 15 / CSV-03 + QA report 2026-05-21 ISSUE-007: the public factsheet
+  // renders the api_verified badge + tier Disclaimer from the strategy's
+  // verification. Phase 126 (FACTSHEET-01, founder Option B): the trust_tier
+  // signal is now read via readPublicVerificationSignals (the published-gated
+  // `get_published_trust_signals` SECURITY DEFINER RPC, read on a normal client
+  // with anon/authenticated EXECUTE — NOT service role; trust_tier+status ONLY)
+  // instead of an RLS-scoped nested
+  // embed — the embed returned zero rows for every non-owner viewer and hid the
+  // badge from the public (repro: 126-01-SUMMARY). Locked decision D-04:
+  // trust_tier lives ONLY on strategy_verifications; no strategies.trust_tier
+  // column exists.
   const { data: strategy, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(
-        `*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS}), strategy_verifications (trust_tier, status, created_at)`,
-      )
+      .select(`*, strategy_analytics (${PUBLIC_ANALYTICS_COLUMNS})`)
       .eq("id", strategyId),
   )
-    .order("created_at", {
-      referencedTable: "strategy_verifications",
-      ascending: false,
-    })
-    .limit(1, { referencedTable: "strategy_verifications" })
     .single<Strategy & {
       strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null } | null;
-      strategy_verifications: { trust_tier: string; status: string; created_at: string }[] | null;
     }>();
 
   if (error || !strategy) return null;
 
-  const latestVerification = (strategy.strategy_verifications ?? [])
-    .slice()
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const verificationSignals = await readPublicVerificationSignals([strategyId]);
   const strategyWithTier: Strategy = {
     ...strategy,
-    trust_tier: (latestVerification?.trust_tier ?? null) as Strategy["trust_tier"],
+    trust_tier: (verificationSignals.get(strategyId)?.trust_tier ?? null) as Strategy["trust_tier"],
   };
 
   const disclosureTier = readDisclosureTier(strategyWithTier);
@@ -396,25 +494,27 @@ export async function getStrategyDetail(
 } | null> {
   const supabase = await createClient();
 
-  // Phase 15 / CSV-03: left-join strategy_verifications so we can project
-  // the most-recent verification row's trust_tier onto Strategy.trust_tier.
   // Locked decision D-04 — trust_tier lives ONLY on strategy_verifications;
   // no `strategies.trust_tier` column exists or will be added.
   //
-  // Phase 15 / WR-04: scope the embed to the most-recent verification row
-  // via PostgREST's referencedTable order+limit modifiers. In Phase 15 the
-  // RPC inserts exactly one row per strategy_id; Phase 19 may add more
-  // (flow_type admits 'resync' + 'onboard'). Encoding "latest only" at
-  // the DB layer rather than relying on JS-side sort+[0] keeps the
-  // factsheet read O(1) once the second insert lands.
+  // Phase 126 (FACTSHEET-01, founder Option B — class closure): trust_tier is
+  // sourced from readPublicVerificationSignals (the published-gated
+  // `get_published_trust_signals` SECURITY DEFINER RPC, read on a normal client
+  // with anon/authenticated EXECUTE — NOT service role; trust_tier+status ONLY)
+  // below — NOT an RLS-scoped nested embed. The embed
+  // returned zero verification rows for every NON-owner viewer (an allocator
+  // browsing another manager's published strategy on /discovery/[slug]/[id]),
+  // so the api_verified badge was invisible to non-owners here exactly as on
+  // the public factsheet. A logged-in non-owner must never see LESS trust
+  // signal than an anon visitor.
   //
   // Audit 2026-05-07 G11.E.7: when expectedCategorySlug is supplied, embed
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
   const baseSelect = expectedCategorySlug
-    ? "*, discovery_categories!inner(slug), strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)"
-    : "*, strategy_analytics (*), strategy_verifications (trust_tier, status, created_at)";
+    ? "*, discovery_categories!inner(slug), strategy_analytics (*)"
+    : "*, strategy_analytics (*)";
 
   // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
   // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
@@ -435,13 +535,7 @@ export async function getStrategyDetail(
     query = query.eq("discovery_categories.slug", expectedCategorySlug);
   }
 
-  const { data: strategy, error } = await query
-    .order("created_at", {
-      referencedTable: "strategy_verifications",
-      ascending: false,
-    })
-    .limit(1, { referencedTable: "strategy_verifications" })
-    .single();
+  const { data: strategy, error } = await query.single();
 
   // F-07: split error vs not-found so DB/RLS/network failures are logged and
   // captured rather than silently rendering the same not-found UI. PGRST116
@@ -462,20 +556,16 @@ export async function getStrategyDetail(
   }
   if (!strategy) return null;
 
-  // Phase 15 / CSV-03: pick the most-recent verification row's trust_tier.
-  // In Phase 15 there's at most ONE row per strategy_id (finalize_csv_strategy
-  // inserts exactly one row). Phase 19 may add multiple — pick most-recent
-  // by created_at for forward-compat. Hoist the value onto the typed
-  // Strategy field so consumers read it as `strategy.trust_tier`.
-  const verifications =
-    (strategy as unknown as { strategy_verifications?: { trust_tier: string; status: string; created_at: string }[] })
-      .strategy_verifications ?? [];
-  const latestVerification = verifications
-    .slice()
-    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  // Phase 126 (FACTSHEET-01, founder Option B): hoist trust_tier via the
+  // published-gated `get_published_trust_signals` SECURITY DEFINER RPC
+  // (trust_tier+status ONLY, read on a normal client — anon/authenticated hold
+  // EXECUTE, NOT service role) so a NON-owner viewer sees the api_verified badge.
+  // Consumers read it as `strategy.trust_tier`.
+  const strat = strategy as unknown as Strategy;
+  const signals = await readPublicVerificationSignals([strat.id]);
   const strategyWithTier: Strategy = {
-    ...(strategy as unknown as Strategy),
-    trust_tier: (latestVerification?.trust_tier ?? null) as Strategy["trust_tier"],
+    ...strat,
+    trust_tier: (signals.get(strat.id)?.trust_tier ?? null) as Strategy["trust_tier"],
   };
 
   const disclosureTier = readDisclosureTier(strategyWithTier);

@@ -524,6 +524,12 @@ def deribit_equity_to_usd(
 #   delivery             -> option/future expiry cash settlement
 #   liquidation          -> forced-close PnL/fees
 #   negative_balance_fee -> a genuine cost of carry (live-confirmed cash-bearing)
+#
+# NOTE: `correction` is DELIBERATELY NOT a static member of this set — a bare
+# set-membership cannot see `info.reason`, and the founder decision (Phase 128) is
+# to classify each `correction` PER ROW on its reason, NOT to assume every
+# correction is trading performance. See ``correction_is_trading`` /
+# ``assert_correction_classifiable`` below and the evidence block there.
 CASH_BEARING_TYPES: frozenset[str] = frozenset(
     {"trade", "settlement", "delivery", "liquidation", "negative_balance_fee"}
 )
@@ -598,6 +604,167 @@ assert _NATIVE_INTERNAL_REBALANCE_TYPES <= (
 assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
     "native CASH_BEARING and INFORMATIONAL sets must be disjoint"
 )
+
+# --- `correction` per-row classification (Phase 128 DERIBITFIX) ---------------
+# A deribit `correction` is classified PER ROW on its ``info.reason``, NOT by
+# blanket type membership (founder decision, 2026-07-19). Rationale: a blanket
+# type→CASH_BEARING rule assumes EVERY correction is trading performance — a guess
+# for correction kinds we have not observed. A hypothetical future CAPITAL
+# correction (a deposit/withdrawal/transfer fix) summed into realized PnL would
+# silently CORRUPT returns. So a correction is CASH_BEARING only when its reason
+# matches a trading/PnL pattern; every OTHER correction (capital-flavored,
+# unrecognized, or missing reason) FAILS LOUD — preserving the original fail-loud
+# safety exactly where the risk is.
+#
+# ⭐EVIDENCE (read-only Railway recrawl 2026-07-19, founder-authorized,
+# DERIBIT_CLIENT_ID_3): the single live `correction` row on key3 — the one the
+# dogfood LedgerValuationError fired on — was
+#   type=correction  change=-3.2469e-4 BTC  currency=BTC  instrument_name=null
+#   id=952844476  2026-07-15  side="-"  info.reason="2026-07-15 BTC-PERPETUAL
+#   funding calculation correction"
+# The `info.reason` proves it adjusts BTC-PERPETUAL FUNDING. Perpetual funding is
+# ALREADY cash-bearing here (realized inside `settlement.change` — "session PnL +
+# perpetual funding"), so a funding-CALCULATION correction is an adjustment to
+# REALIZED trading cash and is summed like settlement/funding. It matches the
+# trading allow-list on "funding" (and no capital denylist keyword). A capital
+# correction (deposit/withdrawal/transfer/wallet/capital) fails loud, never
+# miscounted as performance — the capital denylist takes PRECEDENCE over any
+# trading substring the reason may also contain (WR-01; see below).
+#
+# WR-01 (money-safety): a CAPITAL DENYLIST is checked FIRST and takes PRECEDENCE
+# over the trading allow-list. A correction whose reason names a capital movement is
+# NEVER trading performance — even if the reason ALSO contains a trading substring.
+# Without this precedence, "transfer to funding account correction" (contains
+# "funding"), "withdrawal fee correction" (contains "fee"), etc. would be silently
+# summed into realized PnL — the exact silent capital-as-performance corruption this
+# gate exists to prevent.
+#
+# BL-01 (money-safety, milestone review): the denylist is matched by PLAIN SUBSTRING
+# (NOT word boundary) so plural/inflected capital forms — "transfers", "withdrawals",
+# "wallets", "deposits" — cannot slip a ``\b`` anchor and get counted as trading.
+# The denylist can afford to be broad: a spurious capital match only ADDS a fail-loud
+# (the safe direction — an operator hand-classifies), and NEVER silently counts
+# capital as performance. See ``_reason_contains_any`` vs the word-boundary
+# ``_reason_matches_any`` used for the allow-list.
+_CORRECTION_CAPITAL_REASON_KEYWORDS: tuple[str, ...] = (
+    "deposit",
+    "withdrawal",
+    "transfer",
+    "wallet",
+    "capital",
+)
+
+# BROAD trading/PnL allow-list, consulted ONLY after the capital denylist clears.
+# Matched on WORD BOUNDARIES so a short token cannot collide inside a larger word
+# (belt-and-suspenders on top of the denylist: e.g. `fee` must not match inside a
+# capital reason). `mark` is deliberately EXCLUDED (collides with market/benchmark/
+# earmarked and adds no real signal); the remaining tokens cover the observed +
+# plausible trading corrections. Deliberately NOT a full reason taxonomy (KISS).
+_CORRECTION_TRADING_REASON_KEYWORDS: tuple[str, ...] = (
+    "funding",
+    "settlement",
+    "session",
+    "pnl",
+    "p&l",
+    "delivery",
+    "trade",
+    "fee",
+    "interest",
+    "liquidation",
+    "premium",
+    "expiry",
+)
+
+
+def _correction_reason_raw(row: Mapping[str, Any]) -> str:
+    """The RAW (un-lowered) ``info.reason`` of a row — defensive: ``info`` may be
+    absent / ``None`` / a non-Mapping. Empty string when unavailable."""
+    info = row.get("info")
+    if not isinstance(info, Mapping):
+        return ""
+    return str(info.get("reason", "") or "")
+
+
+def _reason_matches_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
+    """True iff the lowered reason contains ANY keyword on a WORD BOUNDARY (``\\b``)
+    — so a short token like ``fee`` never collides inside a larger word (``market``,
+    ``benchmark``). Used for the TRADING allow-list, where a false positive would
+    silently count non-trading cash as performance (the unsafe direction)."""
+    return any(
+        re.search(rf"\b{re.escape(kw)}\b", reason_lower) is not None
+        for kw in keywords
+    )
+
+
+def _reason_contains_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
+    """True iff the lowered reason contains ANY keyword as a PLAIN SUBSTRING — so
+    plural/inflected forms match (``transfers`` contains ``transfer``). Used for the
+    CAPITAL denylist, where a false positive only ADDS a fail-loud (the safe
+    direction), so broad substring matching is correct (BL-01)."""
+    return any(kw in reason_lower for kw in keywords)
+
+
+def correction_is_trading(row: Mapping[str, Any]) -> bool:
+    """True iff a ``type == "correction"`` row is a TRADING/PnL correction (realized
+    cash — summed like settlement/funding) per its ``info.reason``.
+
+    PRECEDENCE (WR-01): the CAPITAL denylist (deposit/withdrawal/transfer/wallet/
+    capital) is matched FIRST → a capital-flavored reason is NOT trading, even if it
+    also contains a trading substring ("transfer to funding account correction"
+    contains "funding" but is a capital transfer → False → the caller FAILS LOUD).
+    Only when NO capital keyword matches does a trading keyword make it cash-bearing.
+    The denylist is matched by SUBSTRING (catches plurals — "transfers"/"withdrawals",
+    BL-01); the allow-list by WORD BOUNDARY (a short token can't collide inside a
+    larger word). False for a capital / unrecognized / missing reason (the caller must
+    then FAIL LOUD via :func:`assert_correction_classifiable`). Pure / never raises."""
+    reason = _correction_reason_raw(row).lower()
+    if _reason_contains_any(reason, _CORRECTION_CAPITAL_REASON_KEYWORDS):
+        return False  # capital denylist (substring) beats ANY trading token (WR-01/BL-01)
+    return _reason_matches_any(reason, _CORRECTION_TRADING_REASON_KEYWORDS)
+
+
+def assert_correction_classifiable(row: Mapping[str, Any]) -> None:
+    """Fail loud on a ``correction`` whose ``info.reason`` is NOT a recognized
+    trading/PnL pattern (capital-flavored, unrecognized, or missing) — never
+    silently count a capital adjustment as trading performance. No-op for a
+    trading-reason correction (it is realized cash, handled as cash-bearing)."""
+    if correction_is_trading(row):
+        return
+    raise LedgerValuationError(
+        f"Deribit correction row id={row.get('id')!r} "
+        f"reason={_correction_reason_raw(row)!r} — correction with unrecognized or "
+        "possibly-capital reason; classify against fresh evidence before ingesting "
+        "(do NOT silently count a capital adjustment as trading performance). Only a "
+        "trading/PnL correction (reason matching one of "
+        f"{list(_CORRECTION_TRADING_REASON_KEYWORDS)}) is realized cash."
+    )
+
+
+def _row_is_cash_bearing(row: Mapping[str, Any]) -> bool:
+    """USD-path realized-cash membership: a static ``CASH_BEARING_TYPES`` member OR
+    a trading-reason ``correction`` (Phase 128 per-row gate). Pure / never raises —
+    a NON-trading correction returns False here, and the aggregator's
+    :func:`assert_correction_classifiable` call is what fails it loud."""
+    row_type = str(row.get("type", ""))
+    if row_type in CASH_BEARING_TYPES:
+        return True
+    if row_type == "correction":
+        return correction_is_trading(row)
+    return False
+
+
+def _row_is_native_cash_bearing(row: Mapping[str, Any]) -> bool:
+    """Native-path realized-cash membership: a ``_NATIVE_CASH_BEARING_TYPES`` member
+    (the USD set PLUS the reclassed internal-rebalance ``swap``) OR a trading-reason
+    ``correction`` (the SAME per-row gate as the USD path, so the two paths never
+    diverge on which corrections count). Pure / never raises."""
+    row_type = str(row.get("type", ""))
+    if row_type in _NATIVE_CASH_BEARING_TYPES:
+        return True
+    if row_type == "correction":
+        return correction_is_trading(row)
+    return False
+
 
 # --- native options P&L channel (Phase 82, options-aware daily P&L) -----------
 # The `options_settlement_summary` type is Deribit's own daily MTM decomposition
@@ -679,10 +846,12 @@ def deribit_linear_external_flow_usd(
 
 
 # DELIBERATELY in NEITHER USD set (P70 review H3): `options_settlement_summary`
-# and `correction` (an ambiguous manual adjustment that CAN be a real
-# credit/debit). Leaving them unclassified in the USD path means a nonzero-`change`
-# occurrence FAILS LOUD via the unknown-type guard below (never a silent skip),
-# while their normal zero-`change` form is harmlessly ignored.
+# (an ambiguous 0.0-change MTM recap). Leaving it unclassified in the USD path
+# means a nonzero-`change` occurrence FAILS LOUD via the unknown-type guard below
+# (never a silent skip), while its normal zero-`change` form is harmlessly ignored.
+# (Phase 128: `correction` is NOT a blanket set member — it is gated PER ROW on
+# info.reason: a trading/PnL correction is realized cash, every other correction
+# fails loud. See ``correction_is_trading`` / ``assert_correction_classifiable``.)
 #
 # ⚠️ PHASE 82 (native path, MARK_TO_MARKET basis only): `options_settlement_summary`
 # IS classified by `txn_rows_to_native_daily` via `_NATIVE_OPTIONS_SUMMARY_TYPES`
@@ -691,8 +860,9 @@ def deribit_linear_external_flow_usd(
 # nonzero change fails loud there). Under CASH_SETTLEMENT (the DEFAULT / shipped
 # basis) the native path ALSO leaves it unclassified (zero-change ignored, nonzero →
 # loud), exactly like the USD sibling. The USD sibling `txn_rows_to_daily_records` is
-# UNCHANGED on both bases: summary stays unclassified. `correction` remains
-# unclassified everywhere. Every UNKNOWN type carrying nonzero `change` fails loud.
+# UNCHANGED on both bases: summary stays unclassified. Every UNKNOWN type carrying
+# nonzero `change` still fails loud, and a `correction` with a non-trading reason
+# fails loud too — a genuinely-new type is still classified against fresh evidence.
 
 
 def _row_utc_day(ts: Any) -> str:
@@ -866,9 +1036,12 @@ def inverse_days_needing_index(
         # Finding C1: BOTH cash-bearing rows AND inverse external-flow rows are
         # valued against a same-day index, so BOTH quiet-day kinds need a fetch.
         # (The linear-flow case is filtered out by the indexable_currencies guard
-        # below — a USD-family flow never consumes an index.)
+        # below — a USD-family flow never consumes an index.) Phase 128: a
+        # trading-reason `correction` is cash-bearing (``_row_is_cash_bearing``) so a
+        # quiet-day inverse funding correction gets its same-day index fetched too; a
+        # non-trading correction returns False here and fails loud in the aggregator.
         row_type = str(row.get("type", ""))
-        if row_type not in CASH_BEARING_TYPES and row_type not in _EXTERNAL_FLOW_TYPES:
+        if not _row_is_cash_bearing(row) and row_type not in _EXTERNAL_FLOW_TYPES:
             continue
         ccy = str(row.get("currency", "")).upper()
         if ccy not in indexable_currencies:
@@ -1080,7 +1253,20 @@ def txn_rows_to_daily_records(
         # matches the native sibling exactly.
         if _row_is_net_extraction_spot(row, spot_extraction):
             continue
-        if row_type in CASH_BEARING_TYPES:
+        # Phase 128 (DERIBITFIX): a `correction` is gated PER ROW on info.reason. A
+        # NON-trading correction fails loud on any cash (a possible capital
+        # adjustment must NEVER be miscounted as trading performance) and harmlessly
+        # ignores a zero-change annotation (no cash to misplace); a trading-reason
+        # correction is realized cash and falls into the cash-bearing branch below
+        # via ``_row_is_cash_bearing``.
+        if row_type == "correction" and not correction_is_trading(row):
+            change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            if change != 0.0:
+                assert_correction_classifiable(row)  # raises, naming the reason
+            continue
+        if _row_is_cash_bearing(row):
             # H2: a cash-bearing row MUST carry a `change` field. Absent (not just
             # zero) means schema drift / a field rename — the entire premise of
             # this module. Coalescing absent→0.0 would silently zero real cash and
@@ -1132,9 +1318,9 @@ def txn_rows_to_daily_records(
             )
             by_day[day] = by_day.get(day, 0.0) + usd
             continue
-        # Unknown type (incl. options_settlement_summary / correction, H3):
-        # silence is unsafe both ways — fail loud on any cash, harmlessly ignore
-        # a zero-change occurrence.
+        # Unknown type (incl. options_settlement_summary, H3; `correction` is
+        # per-row gated above — Phase 128): silence is unsafe both ways — fail loud
+        # on any cash, harmlessly ignore a zero-change occurrence.
         change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
         if change != 0.0:
             raise LedgerValuationError(
@@ -1373,7 +1559,12 @@ def assert_balance_identity(
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        if str(row.get("type", "")) not in _NATIVE_CASH_BEARING_TYPES:
+        # Phase 128: the reference set includes a trading-reason `correction`
+        # (``_row_is_native_cash_bearing`` — the SAME per-row gate the native
+        # aggregator sums on) so a funding correction sits on BOTH sides of the
+        # identity and does not false-fire; a non-trading correction is excluded
+        # here exactly as the aggregator skips/fails it.
+        if not _row_is_native_cash_bearing(row):
             continue
         # A net-extraction spot leg dropped from native_pnl (ALLOCATED path) MUST
         # also be excluded from this reference Σchange — else the guard false-fires
@@ -1641,7 +1832,21 @@ def txn_rows_to_native_daily(
             key = (day, ccy)
             by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
             continue
-        if row_type in _NATIVE_CASH_BEARING_TYPES:
+        # Phase 128 (DERIBITFIX): a `correction` is gated PER ROW on info.reason —
+        # the SAME gate as the USD sibling so the two paths never diverge on which
+        # corrections count. A NON-trading correction fails loud on any cash (never
+        # miscount a possible capital adjustment as trading performance) and
+        # harmlessly ignores a zero-change annotation; a trading-reason correction is
+        # realized cash and falls into the cash-bearing branch via
+        # ``_row_is_native_cash_bearing``.
+        if row_type == "correction" and not correction_is_trading(row):
+            change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            if change != 0.0:
+                assert_correction_classifiable(row)  # raises, naming the reason
+            continue
+        if _row_is_native_cash_bearing(row):
             # [VERBATIM from txn_rows_to_daily_records] absent-`change` guard: a
             # cash-bearing row MUST carry a `change` field. Coalescing absent→0.0
             # would silently zero real cash and pass the completeness gate green.
