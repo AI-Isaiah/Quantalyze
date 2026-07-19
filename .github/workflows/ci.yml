@@ -1454,11 +1454,26 @@ jobs:
           need_anchor 'anon: a logged-out visitor sees the api_verified badge' 'anon non-owner badge-visible leg'
           need_anchor "admin: an elevated session reads the sfox strategy" 'admin non-owner badge-visible leg'
           need_anchor 'results.violations).toEqual([])' 'owner-leg axe zero-violations assertion'
+          # Title anchors alone are gameable: the test TITLES could survive while
+          # the actual badge-visibility ASSERTIONS are gutted or downgraded (e.g.
+          # swapping toBeVisible for a weaker matcher, or emptying a leg body) --
+          # the grep would still pass and green-wash a weakened spec. So also
+          # anchor on the badge-visibility ASSERTION EXPRESSION itself and require
+          # its minimum count. Deleting or weakening ANY of the four badge-visible
+          # legs (owner-factsheet + allocator + admin-non-owner + anon-non-owner)
+          # drops the count below the floor and fails the gate.
+          badge_assert='expect(apiVerifiedBadge(page).first()).toBeVisible'
+          min_badge=4
+          badge_count=$(grep -cF "$badge_assert" "$spec" || true)
+          if [ "$badge_count" -lt "$min_badge" ]; then
+            echo "::error::sfox-badge anti-mask guard: badge-visibility assertions dropped to ${badge_count} (need >= ${min_badge}) -- a non-owner api_verified badge assertion was deleted or weakened."
+            fail=1
+          fi
           if [ "$fail" = "1" ]; then
             echo "::error::e2e/sfox-badge.spec.ts anti-mask assertions were weakened -- refusing to green the FACTSHEET-02 gate."
             exit 1
           fi
-          echo "sfox-badge anti-mask assertions present (anon + admin badge-visible + axe zero-violations)."
+          echo "sfox-badge anti-mask assertions present (anon + admin badge-visible titles + ${badge_count} badge-visibility assertions + axe zero-violations)."
       - name: Run seed-gated specs (MA-8 / BLOCK-3)
         run: |
           # Phase 11 review fix WR-04: defense-in-depth port-bind guard.
