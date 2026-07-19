@@ -40,3 +40,31 @@ describe("VerifiedBadge", () => {
     expect(container.firstChild).toBeNull();
   });
 });
+
+// SFOX-09 (provenance leg) — VerifiedBadge dispatches on trust_tier alone; it is
+// exchange-AGNOSTIC (no per-exchange branch), and the Python ingestion side
+// auto-stamps trust_tier="api_verified" for a synced sfox key (process_key.py:828,
+// landed 120-01). So a sfox-sourced strategy whose strategy_verifications row
+// carries api_verified renders the "Verified" chip through the same path as any
+// other exchange — and every lesser tier still fails closed. These cases document
+// the SFOX-09 claim explicitly (greppable "sfox") so a future refactor that adds
+// an exchange-aware branch to VerifiedBadge would break here. No production code
+// changes for this task.
+describe("VerifiedBadge — SFOX-09 sfox provenance dispatch", () => {
+  it("renders the Verified badge for a sfox api_verified strategy", () => {
+    // A sfox key ingested + auto-stamped api_verified → the badge renders,
+    // identical to every other api_verified source (trust_tier is the sole gate).
+    render(<VerifiedBadge trustTier="api_verified" />);
+    expect(screen.getByText("Verified")).toBeDefined();
+  });
+
+  it("renders nothing for a sfox self_reported strategy (fail-closed)", () => {
+    const { container } = render(<VerifiedBadge trustTier="self_reported" />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("renders nothing for a sfox csv_uploaded strategy (fail-closed)", () => {
+    const { container } = render(<VerifiedBadge trustTier="csv_uploaded" />);
+    expect(container.firstChild).toBeNull();
+  });
+});
