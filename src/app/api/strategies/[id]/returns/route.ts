@@ -57,6 +57,7 @@ import {
 } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { normalizeDailyReturns, type DailyPoint } from "@/lib/portfolio-math-utils";
+import { readPublicVerificationSignals } from "@/lib/queries";
 
 // AGENTS.md: default to the Node.js runtime explicitly. The route touches the
 // supabase server client; Edge runtime would skip the Node-only paths the
@@ -177,15 +178,20 @@ export async function GET(
       // and stays behind the SAME published-only gate, so this reveals nothing
       // the existing existence-oracle didn't already gate (404 on unpublished /
       // cross-tenant is unchanged — T-84-05a).
-      // Phase 111 / CONSTIT-02 — embed strategy_verifications on the SAME
-      // published-gated probe so a drawer-added strategy carries its trust_tier
-      // (D-04: trust_tier lives only on strategy_verifications). The rows are
-      // picked most-recent-first in JS below (mirrors queries.ts:465-478),
-      // avoiding a second round-trip. Public metadata; no new disclosure surface.
+      // Phase 126-04 (FACTSHEET-01 hardening) — the trust_tier signal is NO
+      // LONGER read via an RLS-scoped `strategy_verifications` embed on this
+      // probe. That embed rides the owner-only RLS on strategy_verifications, so
+      // it returned ZERO rows for a NON-owner allocator adding another manager's
+      // published strategy to the drawer — the api_verified badge silently
+      // vanished (same class as the public-factsheet gap fixed in 126-01). The
+      // signal now comes from `readPublicVerificationSignals` (the DB
+      // `get_published_trust_signals` SECURITY DEFINER primitive, migration 135),
+      // read below. The probe stays scoped to `id, asset_class` (existence +
+      // public classification); it no longer over-fetches the verification table.
       const { data: strat, error: probeError } = await withPublishedOrOwner(
         supabase
           .from("strategies")
-          .select("id, asset_class, strategy_verifications (trust_tier, status, created_at)")
+          .select("id, asset_class")
           .eq("id", id),
         user.id,
       ).maybeSingle();
@@ -251,17 +257,13 @@ export async function GET(
       const asset_class =
         (strat as { asset_class?: string | null }).asset_class ?? null;
 
-      // CONSTIT-02 — pick the most-recent verification row's trust_tier (D-04
-      // latest-verification pick; most-recent created_at wins). A stale build or
-      // a strategy with no verification rows → null (never a throw).
-      const verifications =
-        (strat as unknown as {
-          strategy_verifications?: { trust_tier: string; status: string; created_at: string }[];
-        }).strategy_verifications ?? [];
-      const latestVerification = verifications
-        .slice()
-        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-      const trust_tier: string | null = latestVerification?.trust_tier ?? null;
+      // Phase 126-04 — the PUBLIC trust_tier signal via the correct-by-
+      // construction DB primitive (get_published_trust_signals, migration 135):
+      // published-gated + column-scoped (trust_tier+status only) + readable by a
+      // NON-owner. A drawer-added strategy with no verification row, or an
+      // unpublished one, → null (never a throw; fail-soft empty map).
+      const signals = await readPublicVerificationSignals([id]);
+      const trust_tier: string | null = signals.get(id)?.trust_tier ?? null;
 
       // CONSTIT-02 — strict `=== true` composite coercion (T-111-04). The raw
       // data_quality_flags blob is read here but only the boolean is emitted.

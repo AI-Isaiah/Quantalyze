@@ -1,25 +1,30 @@
 /**
  * Phase 126 (FACTSHEET-01) — security + correctness contract for
- * `readPublicVerificationSignals`, the service-role projection that makes the
- * api_verified badge visible to the PUBLIC on published factsheets/lists.
+ * `readPublicVerificationSignals`, the reader that makes the api_verified badge
+ * visible to the PUBLIC on published factsheets/lists.
  *
- * Two guarantees this pins:
+ * Phase 126-04 (hardening): the projection is now a correct-by-construction DB
+ * primitive — the `get_published_trust_signals(uuid[])` SECURITY DEFINER
+ * function (migration 135). The helper calls it via a NORMAL server client (no
+ * `createAdminClient`). The column allow-list (trust_tier+status) and the
+ * published-gate live in the function's RETURNS TABLE signature and WHERE
+ * clause; the migration's self-verify DO block behaviorally proves the
+ * published-gate (a published strategy's signal is returned, a non-published
+ * one's is NOT). These vitest guards pin the APP-LAYER contract:
  *
- *   1. SECURITY (no-leak): the public shape exposes ONLY `trust_tier` + `status`.
- *      strategy_verifications carries internals (wizard_session_id, flow_type,
- *      source, …) that must NEVER reach a public client. The test feeds a DB row
- *      that INCLUDES those internals and asserts they are dropped, AND asserts
- *      the SELECT column list never requests them.
+ *   1. SECURITY (no-leak): the helper maps ONLY `trust_tier` + `status` even
+ *      when the RPC row carries internals (defence against a widened RETURNS
+ *      TABLE ever leaking through). It reads via the RPC — NOT a raw
+ *      `strategy_verifications` table SELECT (reverting to a table `select("*")`
+ *      fails these guards).
  *
- *   2. SCOPE: the read is gated to PUBLISHED strategies (defence-in-depth) and
- *      returns the LATEST verification per strategy. Fail-soft on error (empty
- *      map → null tier → badge hides → page still renders; no throw, no invented
- *      data).
+ *   2. SCOPE: the read routes through `get_published_trust_signals` (the
+ *      published-gated primitive) and keeps the LATEST row per strategy.
+ *      Fail-soft on error (empty map → null tier → badge hides → page still
+ *      renders; no throw, no invented data).
  *
- * These are the RED-provable guards for the founder-decision "Option B"
- * (service-role projection, NOT an RLS widening). The non-owner *visibility*
- * regression (anon/admin now SEE the badge) is pinned end-to-end in
- * e2e/sfox-badge.spec.ts — the real SSR/RLS regression.
+ * The non-owner *visibility* regression (anon/admin now SEE the badge) is pinned
+ * end-to-end in e2e/sfox-badge.spec.ts — the real SSR/RLS regression.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -27,9 +32,7 @@ type QueryResult = { data: unknown; error: unknown };
 
 const rec = {
   selectCols: [] as string[],
-  inCalls: [] as [string, readonly unknown[]][],
-  eqCalls: [] as [string, unknown][],
-  orderCalls: [] as [string, unknown][],
+  rpcCalls: [] as [string, Record<string, unknown>][],
   response: { data: null, error: null } as QueryResult,
   sentry: [] as { err: unknown; opts: unknown }[],
   // For the getStrategyDetail integration test: the RLS strategies read.
@@ -37,39 +40,17 @@ const rec = {
   strategyError: null as unknown,
 };
 
-// A thenable chain mirroring the PostgREST builder shape the helper awaits:
-//   admin.from("strategy_verifications").select(sel).in(col, ids).eq(col, val).order(col, opts)
-function buildVerificationChain() {
-  const chain: Record<string, unknown> = {};
-  chain.select = (cols: string) => {
-    rec.selectCols.push(cols);
-    return chain;
-  };
-  chain.in = (col: string, ids: readonly unknown[]) => {
-    rec.inCalls.push([col, ids]);
-    return chain;
-  };
-  chain.eq = (col: string, val: unknown) => {
-    rec.eqCalls.push([col, val]);
-    return chain;
-  };
-  chain.order = (col: string, opts: unknown) => {
-    rec.orderCalls.push([col, opts]);
-    return chain;
-  };
-  chain.then = (
-    onFulfilled: (v: QueryResult) => unknown,
-    onRejected?: (e: unknown) => unknown,
-  ) => Promise.resolve(rec.response).then(onFulfilled, onRejected);
-  return chain;
-}
-
-// The RLS-scoped strategies read used by getStrategyDetail — resolves via
-// .single(). NOTE: it embeds NO strategy_verifications, exactly modelling the
-// non-owner reality (the old owner-only embed returned zero verification rows).
+// A chain mirroring the RLS strategies read used by getStrategyDetail — resolves
+// via .single(). It embeds NO strategy_verifications (the non-owner reality: the
+// old owner-only embed returned zero verification rows). Any raw table SELECT on
+// strategy_verifications would land here and push to rec.selectCols, tripping
+// the "reads via the RPC, not a table select" guard.
 function buildStrategiesChain() {
   const chain: Record<string, unknown> = {};
-  chain.select = () => chain;
+  chain.select = (cols?: string) => {
+    if (typeof cols === "string") rec.selectCols.push(cols);
+    return chain;
+  };
   chain.eq = () => chain;
   chain.order = () => chain;
   chain.limit = () => chain;
@@ -82,15 +63,25 @@ function buildStrategiesChain() {
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    from: (table: string) =>
-      table === "strategies" ? buildStrategiesChain() : buildVerificationChain(),
+    // The trust-signal read now goes through the DB primitive, NOT a table read.
+    rpc: (name: string, params: Record<string, unknown>) => {
+      rec.rpcCalls.push([name, params]);
+      return Promise.resolve(rec.response);
+    },
+    from: (table: string) => {
+      if (table === "strategies") return buildStrategiesChain();
+      // Any OTHER table read (e.g. a regression to a raw strategy_verifications
+      // SELECT) is recorded so the "reads via the RPC" guard can catch it.
+      return buildStrategiesChain();
+    },
   }),
 }));
 
 vi.mock("@/lib/supabase/admin", () => ({
-  // getStrategyDetail's trust_tier + readPublicVerificationSignals both read
-  // strategy_verifications via the admin client -> the verification chain.
-  createAdminClient: () => ({ from: () => buildVerificationChain() }),
+  // readPublicVerificationSignals no longer uses the admin client, but queries.ts
+  // imports createAdminClient at module load for OTHER functions — mock it so the
+  // import resolves under vitest.
+  createAdminClient: () => ({ from: () => buildStrategiesChain() }),
 }));
 
 vi.mock("@/lib/sentry-capture", () => ({
@@ -101,26 +92,24 @@ vi.mock("@/lib/sentry-capture", () => ({
 
 import { readPublicVerificationSignals, getStrategyDetail } from "./queries";
 
-// A verification row AS RETURNED BY THE DB — deliberately loaded with internals
-// that must NOT survive the projection.
-const dbRow = (over: Record<string, unknown> = {}) => ({
+// An RPC row AS RETURNED BY get_published_trust_signals. The function's RETURNS
+// TABLE is (strategy_id, trust_tier, status); here we deliberately load the row
+// with EXTRA internals to prove the app-layer mapping drops anything beyond the
+// two public fields even if a widened RETURNS TABLE ever leaked them through.
+const rpcRow = (over: Record<string, unknown> = {}) => ({
   strategy_id: "s1",
   trust_tier: "api_verified",
   status: "validated",
-  created_at: "2026-07-19T00:00:00Z",
-  // internals that must be dropped + never selected:
+  // internals that must be dropped by the app-layer mapping if ever present:
   wizard_session_id: "leak-wizard-uuid",
   flow_type: "onboard",
   source: "sfox",
-  strategies: { status: "published" },
   ...over,
 });
 
 beforeEach(() => {
   rec.selectCols = [];
-  rec.inCalls = [];
-  rec.eqCalls = [];
-  rec.orderCalls = [];
+  rec.rpcCalls = [];
   rec.response = { data: null, error: null };
   rec.sentry = [];
   rec.strategyRow = null;
@@ -128,8 +117,8 @@ beforeEach(() => {
 });
 
 describe("readPublicVerificationSignals — public projection contract", () => {
-  it("exposes ONLY trust_tier + status (drops verification internals)", async () => {
-    rec.response = { data: [dbRow()], error: null };
+  it("exposes ONLY trust_tier + status (drops any extra columns the RPC returns)", async () => {
+    rec.response = { data: [rpcRow()], error: null };
 
     const map = await readPublicVerificationSignals(["s1"]);
     const signal = map.get("s1");
@@ -142,52 +131,58 @@ describe("readPublicVerificationSignals — public projection contract", () => {
     expect(signal).not.toHaveProperty("source");
   });
 
-  it("never SELECTs verification internals from the DB", async () => {
-    rec.response = { data: [dbRow()], error: null };
+  it("reads via the get_published_trust_signals RPC, NOT a raw strategy_verifications table SELECT", async () => {
+    rec.response = { data: [rpcRow()], error: null };
     await readPublicVerificationSignals(["s1"]);
 
-    expect(rec.selectCols).toHaveLength(1);
-    const sel = rec.selectCols[0];
-    for (const forbidden of ["wizard_session_id", "flow_type", "source", "api_key", "encrypted", "*"]) {
-      expect(sel).not.toContain(forbidden);
-    }
-    // The two public fields ARE requested.
-    expect(sel).toContain("trust_tier");
-    expect(sel).toContain("status");
+    // The trust signal comes from the published-gated DB primitive.
+    expect(rec.rpcCalls).toHaveLength(1);
+    const [name, params] = rec.rpcCalls[0];
+    expect(name).toBe("get_published_trust_signals");
+    expect(params).toEqual({ p_strategy_ids: ["s1"] });
+    // A regression to a raw `.from("strategy_verifications").select(...)` (or a
+    // `select("*")`) would land on a table chain and push to selectCols — proving
+    // the read never re-widens back to a direct table projection.
+    expect(rec.selectCols).toHaveLength(0);
   });
 
-  it("gates the read to PUBLISHED strategies (defence-in-depth)", async () => {
-    rec.response = { data: [dbRow()], error: null };
+  it("gates the read to PUBLISHED strategies via the primitive (the published-gate lives in the DB fn)", async () => {
+    rec.response = { data: [rpcRow()], error: null };
     await readPublicVerificationSignals(["s1"]);
 
-    expect(rec.eqCalls).toContainEqual(["strategies.status", "published"]);
-    expect(rec.inCalls[0]?.[0]).toBe("strategy_id");
+    // The published-gate is `WHERE strategies.status='published'` INSIDE
+    // get_published_trust_signals (migration 135, behaviorally proven in its
+    // self-verify DO block). At the app layer we pin that the read routes through
+    // THAT function (not an un-gated table read) with the requested ids.
+    expect(rec.rpcCalls[0]?.[0]).toBe("get_published_trust_signals");
+    expect(rec.rpcCalls[0]?.[1]).toEqual({ p_strategy_ids: ["s1"] });
   });
 
-  it("keeps the LATEST verification per strategy (newest created_at first)", async () => {
+  it("keeps the LATEST row per strategy (defensive keep-first on the RPC result)", async () => {
+    // The DB function returns DISTINCT ON (strategy_id) newest-first; the helper
+    // keeps the first row per id as belt-and-suspenders.
     rec.response = {
       data: [
-        dbRow({ trust_tier: "api_verified", created_at: "2026-07-19T00:00:00Z" }),
-        dbRow({ trust_tier: "self_reported", created_at: "2026-01-01T00:00:00Z" }),
+        rpcRow({ trust_tier: "api_verified" }),
+        rpcRow({ trust_tier: "self_reported" }),
       ],
       error: null,
     };
     const map = await readPublicVerificationSignals(["s1"]);
-    // rows arrive newest-first (the helper orders desc); first wins.
     expect(map.get("s1")?.trust_tier).toBe("api_verified");
   });
 
-  it("fail-soft: a DB error yields an EMPTY map (badge hides, page still renders) + logs", async () => {
+  it("fail-soft: an RPC error yields an EMPTY map (badge hides, page still renders) + logs", async () => {
     rec.response = { data: null, error: { message: "boom" } };
     const map = await readPublicVerificationSignals(["s1"]);
     expect(map.size).toBe(0);
     expect(rec.sentry).toHaveLength(1);
   });
 
-  it("short-circuits on empty input without querying", async () => {
+  it("short-circuits on empty input without calling the RPC", async () => {
     const map = await readPublicVerificationSignals([]);
     expect(map.size).toBe(0);
-    expect(rec.selectCols).toHaveLength(0);
+    expect(rec.rpcCalls).toHaveLength(0);
   });
 });
 
@@ -221,8 +216,12 @@ describe("getStrategyDetail — class closure: non-owner sees the api_verified t
     expect(result).not.toBeNull();
     // The badge signal a non-owner sees — RED on pre-126 code (embed empty -> null).
     expect(result!.strategy.trust_tier).toBe("api_verified");
-    // The trust_tier read went through the service-role helper (published-gated).
-    expect(rec.eqCalls).toContainEqual(["strategies.status", "published"]);
+    // The trust_tier read went through the published-gated DB primitive, keyed on
+    // the strategy id — NOT the owner-only RLS embed.
+    expect(rec.rpcCalls).toContainEqual([
+      "get_published_trust_signals",
+      { p_strategy_ids: ["s1"] },
+    ]);
   });
 
   it("fail-soft: a verification read error leaves trust_tier null without failing the page", async () => {

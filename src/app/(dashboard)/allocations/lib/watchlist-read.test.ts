@@ -13,15 +13,46 @@
  * The mock honours `.order()` + `.limit()` so the default-pick test can seed
  * portfolios OUT of order and still prove the read orders by created_at desc.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
+
+// Phase 126-04: the watchlist trust_tier now comes from the published-gated DB
+// primitive via readPublicVerificationSignals (queries.ts), NOT an owner-only
+// RLS strategy_verifications embed. Mock the helper so these unit tests feed the
+// signal directly and pin that getFavoritesWithStrategies routes trust_tier
+// through it (keyed by strategy_id).
+const trustSignals = vi.hoisted(
+  () => new Map<string, { trust_tier: string | null; status: string | null }>(),
+);
+const readSignalsMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/queries", () => ({
+  readPublicVerificationSignals: readSignalsMock,
+}));
+
 import {
   getFavoritesWithStrategies,
   getOptimizerPrefetch,
 } from "./watchlist-read";
 
 type Resp = { data: unknown; error: { message: string } | null };
+
+beforeEach(() => {
+  trustSignals.clear();
+  readSignalsMock.mockReset();
+  // Default: return the signals seeded per-test, keyed by requested id.
+  readSignalsMock.mockImplementation(async (ids: readonly string[]) => {
+    const out = new Map<
+      string,
+      { trust_tier: string | null; status: string | null }
+    >();
+    for (const id of ids) {
+      const s = trustSignals.get(id);
+      if (s) out.set(id, s);
+    }
+    return out;
+  });
+});
 
 /**
  * A minimal chainable Supabase stand-in that routes each `.from(table)` to a
@@ -100,14 +131,12 @@ function favoriteRow(overrides: {
   strategy_id: string;
   created_at: string;
   name: string;
-  verifications?: { trust_tier: string; status: string; created_at: string }[];
 }) {
   return {
     strategy_id: overrides.strategy_id,
     created_at: overrides.created_at,
     strategies: {
       name: overrides.name,
-      strategy_verifications: overrides.verifications ?? [],
     },
   };
 }
@@ -127,7 +156,12 @@ describe("getFavoritesWithStrategies", () => {
     await expect(getFavoritesWithStrategies(client, USER)).resolves.toEqual([]);
   });
 
-  it("maps real columns + picks the latest verification's trust_tier", async () => {
+  it("maps real columns + sources trust_tier from the published-gated primitive (keyed by strategy_id)", async () => {
+    // Phase 126-04: the published-gated DB primitive resolves the tier for a
+    // NON-owner allocator (the owner-only RLS embed returned zero rows → badge
+    // vanished). The helper returns the latest tier already; the read is keyed
+    // by strategy_id.
+    trustSignals.set("s-1", { trust_tier: "api_verified", status: "active" });
     const client = makeClient({
       user_favorites: {
         data: [
@@ -135,18 +169,6 @@ describe("getFavoritesWithStrategies", () => {
             strategy_id: "s-1",
             created_at: "2026-06-01T00:00:00Z",
             name: "Alpha",
-            verifications: [
-              {
-                trust_tier: "self_reported",
-                status: "active",
-                created_at: "2026-01-01T00:00:00Z",
-              },
-              {
-                trust_tier: "api_verified",
-                status: "active",
-                created_at: "2026-05-01T00:00:00Z",
-              },
-            ],
           }),
         ],
         error: null,
@@ -161,16 +183,20 @@ describe("getFavoritesWithStrategies", () => {
         created_at: "2026-06-01T00:00:00Z",
       },
     ]);
+    // The tier came through the published-gated primitive, keyed on the
+    // favorited strategy ids — NOT an RLS strategy_verifications embed.
+    expect(readSignalsMock).toHaveBeenCalledWith(["s-1"]);
   });
 
   // Regression (v1.10 e2e-seeded): the embedded `strategies` projection MUST
   // reference only columns that EXIST on public.strategies. A prior revision
   // selected a phantom `strategies.slug`, which PostgREST rejects with 42703 at
   // runtime — crashing the whole /allocations page (this read is in page.tsx's
-  // Promise.all) into error.tsx. The mocked-DB tests above ignore the
-  // projection string, so they stayed green over it; this test captures the
-  // actual select and fails loud if a nonexistent strategies column returns.
-  it("projects only real strategies columns (no phantom slug — 42703 guard)", async () => {
+  // Promise.all) into error.tsx. Phase 126-04: the projection also MUST NOT
+  // re-embed `strategy_verifications` (owner-only RLS → zero rows for non-owner
+  // favorites → vanished badge). This test captures the actual select and fails
+  // loud on either a phantom slug OR a re-added verification embed.
+  it("projects only real strategies columns (no phantom slug, no RLS verification embed)", async () => {
     const captures = { selects: [] as string[] };
     const client = makeClient(
       { user_favorites: { data: [], error: null } },
@@ -183,9 +209,13 @@ describe("getFavoritesWithStrategies", () => {
     expect(strategiesEmbed).toBeDefined();
     // `slug` is NOT a column on public.strategies (id / name / codename …).
     expect(strategiesEmbed).not.toMatch(/\bslug\b/);
+    // The owner-only RLS embed is GONE — trust_tier now routes through the
+    // published-gated primitive (keeps a non-owner from losing the badge).
+    expect(strategiesEmbed).not.toMatch(/strategy_verifications/);
   });
 
-  it("yields trust_tier null when a strategy has no verification rows", async () => {
+  it("yields trust_tier null when the primitive returns no signal (unverified / non-published)", async () => {
+    // No signal seeded for s-2 → the primitive's map has no entry → null tier.
     const client = makeClient({
       user_favorites: {
         data: [
@@ -193,7 +223,6 @@ describe("getFavoritesWithStrategies", () => {
             strategy_id: "s-2",
             created_at: "2026-06-02T00:00:00Z",
             name: "Beta",
-            verifications: [],
           }),
         ],
         error: null,

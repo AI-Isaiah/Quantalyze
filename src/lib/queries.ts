@@ -303,12 +303,17 @@ export type PublicVerificationSignal = {
  * public provenance (repro pinned in 126-01-SUMMARY; the page returned 200, it
  * never threw).
  *
- * The deliberate, column-scoped exposure: read via the service-role admin
- * client (bypassing RLS), gated to PUBLISHED strategies via an inner join, and
- * project ONLY `trust_tier` + `status`. No other `strategy_verifications`
- * column reaches the caller (and thus the client). No RLS widening — the table
- * stays locked; this is the intentional server-side projection of the two
- * public fields.
+ * Phase 126-04 (hardening): the deliberate, column-scoped exposure is now a DB
+ * primitive — the `get_published_trust_signals(uuid[])` SECURITY DEFINER
+ * function (migration 135). Correct BY CONSTRUCTION: its RETURNS TABLE signature
+ * `(strategy_id, trust_tier, status)` is the column allow-list (verification
+ * internals are structurally unreachable), its `WHERE strategies.status =
+ * 'published'` is the published-gate, and its pinned search_path lets anon read
+ * the signal WITHOUT any RLS widening — so this helper calls it via a NORMAL
+ * server client (anon/authenticated hold EXECUTE; no service-role client, no
+ * `createAdminClient`). This is the SINGLE typed public-signal reader; the two
+ * allocations-subsystem members (returns route + watchlist-read) route through
+ * it too, so a logged-in non-owner never sees LESS trust signal than an anon.
  *
  * Fail-soft (there is no SSR throw to catch here, so no error boundary is
  * warranted — YAGNI): any read error → the strategy is simply absent from the
@@ -323,19 +328,14 @@ export async function readPublicVerificationSignals(
   if (ids.length === 0) return byStrategy;
 
   try {
-    const admin = createAdminClient();
-    // Service-role read. `strategies!inner(status)` + the `.eq('published')`
-    // gate restrict the exposure to PUBLISHED strategies (defence-in-depth —
-    // callers already filter published via withPublishedOnly). The SELECT list
-    // is `trust_tier, status` (the two public fields) plus `strategy_id` (to key
-    // the map) and `created_at` (to pick the latest) — NO verification internals
-    // are projected, and the embedded `strategies.status` never leaves this fn.
-    const { data, error } = await admin
-      .from("strategy_verifications")
-      .select("strategy_id, trust_tier, status, created_at, strategies!inner(status)")
-      .in("strategy_id", ids)
-      .eq("strategies.status", "published")
-      .order("created_at", { ascending: false });
+    const supabase = await createClient();
+    // Correct-by-construction: the DB function is the trust boundary. It returns
+    // ONLY (strategy_id, trust_tier, status) for PUBLISHED strategies, most
+    // recent per strategy. No table read here — no SELECT list to widen, no
+    // service-role client. anon/authenticated hold EXECUTE (migration 135).
+    const { data, error } = await supabase.rpc("get_published_trust_signals", {
+      p_strategy_ids: ids,
+    });
 
     if (error) {
       captureToSentry(error, {
@@ -345,7 +345,8 @@ export async function readPublicVerificationSignals(
       return byStrategy;
     }
 
-    // Rows arrive newest-first; keep the FIRST (latest) row per strategy_id.
+    // The function already returns the latest row per strategy (DISTINCT ON);
+    // the `has` guard is a defensive keep-first belt-and-suspenders.
     for (const row of (data ?? []) as {
       strategy_id: string;
       trust_tier: string | null;

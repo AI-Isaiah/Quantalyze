@@ -76,14 +76,11 @@ const STATE = vi.hoisted(() => ({
   // route forwards it on the 200 body (null models a strategy with no class /
   // a stale build that predates the widened select).
   publishedAssetClass: "crypto" as string | null,
-  // Phase 111 / CONSTIT-02 — the strategy_verifications rows the widened probe
-  // embed carries. The route picks the most-recent by created_at and forwards
-  // its trust_tier (null when no rows). Defaults to empty (→ trust_tier null).
-  publishedVerifications: [] as Array<{
-    trust_tier: string;
-    status: string;
-    created_at: string;
-  }>,
+  // Phase 126-04 — the PUBLIC trust_tier the get_published_trust_signals
+  // primitive resolves for this strategy (via readPublicVerificationSignals).
+  // null models a strategy with no published verification signal → trust_tier
+  // null on the body (never a throw). Replaces the old RLS-embed on the probe.
+  publishedTrustTier: null as string | null,
   // The strategy_analytics row the series read resolves. `null` models an
   // absent analytics row → honest empty []. data_quality_flags is the source of
   // the server-coerced is_composite boolean (strict === true, T-111-04).
@@ -196,7 +193,6 @@ vi.mock("@/lib/supabase/server", () => ({
                 ? {
                     id: PUBLISHED_ID,
                     asset_class: STATE.publishedAssetClass,
-                    strategy_verifications: STATE.publishedVerifications,
                   }
                 : null,
               error: null,
@@ -254,6 +250,17 @@ vi.mock("@/lib/sentry-capture", () => ({
   captureToSentry: captureSpy,
 }));
 
+// Phase 126-04: the trust_tier signal now comes from the published-gated DB
+// primitive via readPublicVerificationSignals (queries.ts), NOT an owner-only
+// RLS strategy_verifications embed on the probe. Mock the helper so these tests
+// feed the tier directly and pin that the route routes trust_tier through it.
+// (Mocking the helper also avoids the returns route transitively importing the
+// large queries.ts module graph under vitest.)
+const readSignalsMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/queries", () => ({
+  readPublicVerificationSignals: readSignalsMock,
+}));
+
 function makeRequest(id: string): NextRequest {
   return new NextRequest(
     `http://localhost:3000/api/strategies/${id}/returns`,
@@ -278,7 +285,21 @@ beforeEach(() => {
   STATE.strategyStatus = "published";
   STATE.strategyOwnerId = "99999999-9999-4999-8999-999999999999";
   STATE.publishedAssetClass = "crypto";
-  STATE.publishedVerifications = [];
+  STATE.publishedTrustTier = null;
+  // The published-gated primitive resolves the tier keyed by strategy_id.
+  readSignalsMock.mockReset();
+  readSignalsMock.mockImplementation(async (ids: readonly string[]) => {
+    const out = new Map<
+      string,
+      { trust_tier: string | null; status: string | null }
+    >();
+    if (STATE.publishedTrustTier !== null) {
+      for (const id of ids) {
+        out.set(id, { trust_tier: STATE.publishedTrustTier, status: "verified" });
+      }
+    }
+    return out;
+  });
   STATE.analyticsRow = { daily_returns: [] };
   STATE.analyticsQueryError = null;
   STATE.observedFilters = {
@@ -390,9 +411,11 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.asset_class).toBe("crypto");
     // The probe select was widened to include asset_class (non-vacuous — the
     // route reads it from the SAME published-gated probe, not a second query).
-    // Phase 111 / CONSTIT-02 also embeds strategy_verifications on the SAME probe.
+    // Phase 126-04: the probe NO LONGER embeds strategy_verifications — the tier
+    // now comes from the published-gated primitive (readPublicVerificationSignals),
+    // so the probe stays scoped to id + asset_class (no owner-only RLS embed).
     expect(STATE.observedFilters.strategiesSelect).toContain("asset_class");
-    expect(STATE.observedFilters.strategiesSelect).toContain("strategy_verifications");
+    expect(STATE.observedFilters.strategiesSelect).not.toContain("strategy_verifications");
 
     // A strategy with no class (or a stale build) → null, never fabricated.
     STATE.publishedAssetClass = null;
@@ -401,26 +424,29 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.asset_class).toBeNull();
   });
 
-  it("R9 — CONSTIT-02: forwards trust_tier (most-recent verification) + is_composite on the 200 body", async () => {
-    STATE.publishedVerifications = [
-      { trust_tier: "self_reported", status: "pending", created_at: "2026-01-01T00:00:00Z" },
-      { trust_tier: "api_verified", status: "verified", created_at: "2026-06-01T00:00:00Z" },
-    ];
+  it("R9 — CONSTIT-02 / 126-04: forwards trust_tier (from the published-gated primitive) + is_composite on the 200 body", async () => {
+    // Phase 126-04: the tier is resolved by readPublicVerificationSignals (the
+    // get_published_trust_signals primitive) — published-gated + non-owner-
+    // readable, so a drawer-added strategy owned by SOMEONE ELSE carries its
+    // api_verified badge (the owner-only RLS embed used to return zero rows).
+    STATE.publishedTrustTier = "api_verified";
     STATE.analyticsRow = { daily_returns: [], data_quality_flags: { composite: true } };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
     expect(res.status).toBe(200);
     const body = await res.json();
-    // most-recent created_at wins (D-04 latest-verification pick)
     expect(body.trust_tier).toBe("api_verified");
     expect(body.is_composite).toBe(true);
+    // The tier came through the published-gated primitive, keyed on the
+    // requested strategy id.
+    expect(readSignalsMock).toHaveBeenCalledWith([PUBLISHED_ID]);
     // The analytics read was widened to fetch data_quality_flags for the
     // is_composite derivation.
     expect(STATE.observedFilters.analyticsSelect).toContain("data_quality_flags");
   });
 
-  it("R9b — CONSTIT-02: missing verification row → trust_tier null (never a 500)", async () => {
-    STATE.publishedVerifications = [];
+  it("R9b — CONSTIT-02 / 126-04: no published signal → trust_tier null (never a 500)", async () => {
+    STATE.publishedTrustTier = null;
     STATE.analyticsRow = { daily_returns: [] };
     const { GET } = await import("./route");
     const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));

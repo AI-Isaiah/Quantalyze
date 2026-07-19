@@ -40,6 +40,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { Database } from "@/lib/database.types";
 import type { OptimizerSuggestion } from "@/components/portfolio/PortfolioOptimizer";
 import type { TrustTier } from "@/lib/design-tokens/trust-tier";
+import { readPublicVerificationSignals } from "@/lib/queries";
 
 /** Mirror of PortfolioOptimizer's internal (unexported) ComputationStatus. */
 type ComputationStatus = "pending" | "computing" | "complete" | "failed" | null;
@@ -71,24 +72,30 @@ export interface OptimizerPrefetch {
   computationStatus: ComputationStatus;
 }
 
-/** Shape of one embedded user_favorites → strategies → verifications row. */
+/** Shape of one embedded user_favorites → strategies row (display fields). */
 interface FavoriteJoinRow {
   strategy_id: string;
   created_at: string;
   strategies: {
     name: string;
-    strategy_verifications:
-      | { trust_tier: string; status: string; created_at: string }[]
-      | null;
   } | null;
 }
 
 /**
  * PI-05 — the allocator's watchlist: `user_favorites` (owner RLS) joined to
- * `strategies` for the display fields, with the latest `strategy_verifications`
- * tier picked in JS (locked decision D-04: trust_tier lives ONLY on
- * strategy_verifications; no `strategies.trust_tier` column exists). Ordered
- * most-recently-favorited first. Returns [] for no favorites; THROWS on error.
+ * `strategies` for the display fields. Ordered most-recently-favorited first.
+ * Returns [] for no favorites; THROWS on error.
+ *
+ * Phase 126-04 (FACTSHEET-01 hardening) — trust_tier is NO LONGER read via an
+ * RLS-scoped `strategy_verifications` embed. `strategy_verifications` grants
+ * SELECT to the OWNER only (migration 093), so the embed returned ZERO rows for
+ * an allocator's favorited (NON-owner) strategies — the trust badge silently
+ * vanished on the watchlist (same class as the public-factsheet gap fixed in
+ * 126-01). trust_tier now comes from `readPublicVerificationSignals` (the DB
+ * `get_published_trust_signals` SECURITY DEFINER primitive, migration 135):
+ * published-gated, column-scoped, and readable by a non-owner. Locked decision
+ * D-04 (trust_tier lives ONLY on strategy_verifications) is preserved — the
+ * primitive is the single source of that signal.
  */
 export async function getFavoritesWithStrategies(
   supabase: SupabaseUserClient,
@@ -96,31 +103,32 @@ export async function getFavoritesWithStrategies(
 ): Promise<FavoriteRow[]> {
   const { data, error } = await supabase
     .from("user_favorites")
-    .select(
-      `strategy_id, created_at, strategies!inner (name, strategy_verifications (trust_tier, status, created_at))`,
-    )
+    .select(`strategy_id, created_at, strategies!inner (name)`)
     .eq("user_id", userId)
     .order("created_at", { ascending: false });
 
   if (error) throw error;
 
   const rows = (data ?? []) as unknown as FavoriteJoinRow[];
-  return rows
-    .filter(
-      (r): r is FavoriteJoinRow & { strategies: NonNullable<FavoriteJoinRow["strategies"]> } =>
-        r.strategies != null,
-    )
-    .map((r) => {
-      const latest = (r.strategies.strategy_verifications ?? [])
-        .slice()
-        .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-      return {
-        strategy_id: r.strategy_id,
-        name: r.strategies.name,
-        trust_tier: (latest?.trust_tier ?? null) as TrustTier | null,
-        created_at: r.created_at,
-      };
-    });
+  const present = rows.filter(
+    (r): r is FavoriteJoinRow & { strategies: NonNullable<FavoriteJoinRow["strategies"]> } =>
+      r.strategies != null,
+  );
+
+  // Batched public trust-signal read (published-gated, non-owner-readable).
+  // Fail-soft: on error the map is empty → every tier resolves null → badges
+  // hide, the watchlist still renders (readPublicVerificationSignals never
+  // throws).
+  const signals = await readPublicVerificationSignals(
+    present.map((r) => r.strategy_id),
+  );
+
+  return present.map((r) => ({
+    strategy_id: r.strategy_id,
+    name: r.strategies.name,
+    trust_tier: (signals.get(r.strategy_id)?.trust_tier ?? null) as TrustTier | null,
+    created_at: r.created_at,
+  }));
 }
 
 /**
