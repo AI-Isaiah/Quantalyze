@@ -65,6 +65,7 @@ EXIT CODES
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pandas as pd
@@ -112,6 +113,17 @@ _ORACLE_ROTATION_ACTIONS: frozenset[str] = frozenset({"buy", "sell"})
 # jump) so a real corruption fails loud while clean data passes.
 _MATERIALITY_REL: float = 0.005
 _MATERIALITY_ABS: float = 1.0
+
+# F4 — reconstruction-vs-oracle RETURN-space materiality. When the two RAW streams
+# reconcile as the same total-MTM NAV (``a2_total_mtm_reconciles``), the two
+# INDEPENDENTLY reconstructed daily-return series (combine_sfox_balance_history's
+# ``returns_ut`` vs the transactions-only oracle's ``returns``) MUST agree — a
+# divergence there is a COMBINE BUG (wrong flow sign/numerator) that the raw-level
+# Δusd_value−Δaccount_balance check structurally CANNOT see (the flow cancels in the
+# difference). The 2% floor sits well above the return-space noise that the 0.5%
+# level tolerance can induce on adversarial consecutive days, yet far below any real
+# combine corruption (a flipped flow sign on a meaningful deposit, a scaled curve).
+_RETURNS_RECON_MATERIALITY: float = 0.02
 
 # 2015-01-01T00:00:00Z in epoch-ms — far before any sFOX account could exist, so a
 # crawl from here reaches the empirical inception (A1 depth probe).
@@ -313,6 +325,10 @@ def check_parity(
     # The flow extractor runs for real (its own fail-loud path on an unvaluable
     # flow propagates — a mis-valued flow silently corrupts the TWR).
     flows_ut, _flow_evidence = sfox_flows_by_day(transactions)
+    # F4: the RECONSTRUCTION under test — combine_sfox_balance_history's actual
+    # cashflow-neutral daily returns. Previously computed then DISCARDED (only its
+    # meta hint was read), so a combine bug sailed through. It is now compared
+    # against the independent oracle reconstruction below.
     returns_ut, meta_ut = combine_sfox_balance_history(usd_value, flows_ut)
 
     oracle = reconstruct_equity_from_transactions(transactions)
@@ -357,6 +373,30 @@ def check_parity(
     cumulative_material = (
         cumulative_ratio_gap is not None and cumulative_ratio_gap > _MATERIALITY_REL
     )
+
+    # --- F4: RECONSTRUCTION vs INDEPENDENT ORACLE (the money-path net that the
+    # raw-level Δ check cannot provide). Compare the reconstructed cashflow-neutral
+    # daily returns (returns_ut, from combine_sfox_balance_history) against the
+    # transactions-only oracle returns, day by day, on the days BOTH are finite (a
+    # DQ-guard/gap NaN on either side carries no comparison). The flow terms do NOT
+    # cancel here (each series divides by its OWN prior NAV), so a wrong flow sign or
+    # numerator in the combine surfaces as a material per-day return divergence.
+    oracle_returns: pd.Series = oracle["returns"]
+    recon_common = returns_ut.index.intersection(oracle_returns.index)
+    returns_recon_max_resid = 0.0
+    returns_recon_material_days: list[str] = []
+    for ts in recon_common:
+        r_ut = float(returns_ut.loc[ts])
+        r_or = float(oracle_returns.loc[ts])
+        if not (math.isfinite(r_ut) and math.isfinite(r_or)):
+            continue
+        d = abs(r_ut - r_or)
+        returns_recon_max_resid = max(returns_recon_max_resid, d)
+        if d > _RETURNS_RECON_MATERIALITY:
+            returns_recon_material_days.append(
+                pd.Timestamp(ts).date().isoformat()
+            )
+    reconstruction_diverges = bool(returns_recon_material_days)
 
     # --- A2 probe: residuals under BOTH interpretations (emit, never pick).
     total_mtm_residuals = [abs(float(v.iloc[i]) - float(b.iloc[i])) for i in range(len(v))]
@@ -443,6 +483,10 @@ def check_parity(
                 else None
             ),
             "under_test_status_hint": meta_ut.get("computation_status_hint"),
+            "reconstruction_vs_oracle_max_return_residual": round(
+                returns_recon_max_resid, 8
+            ),
+            "reconstruction_vs_oracle_material_days": returns_recon_material_days,
         },
         "a2_account_balance_semantics": {
             "total_mtm_max_residual": round(a2_total_mtm_max, 6),
@@ -465,6 +509,25 @@ def check_parity(
         },
         "requires_founder_decision": bool(requires_founder_decision),
     }
+
+    # F4: a RECONSTRUCTION divergence fails loud whenever the two raw streams DO
+    # reconcile as the same total-MTM NAV (a2_total_mtm_reconciles) — because then
+    # the two independently-reconstructed return series MUST agree, so a material
+    # per-day gap can only be a combine bug (never the A2 cash-vs-MTM ambiguity, and
+    # never explained by a level divergence, since the levels reconcile). This is
+    # the net the raw-level Δ check structurally cannot provide. In the cash-only /
+    # ambiguous case the two NAVs legitimately differ, so the reconstructed returns
+    # differ too — that stays founder-flagged below, NOT auto-failed here.
+    if a2_total_mtm_reconciles and reconstruction_diverges:
+        raise ParityDivergenceError(
+            "sFOX RECONSTRUCTION FAIL-LOUD: combine_sfox_balance_history's "
+            "reconstructed returns diverge from the independent transactions-only "
+            "reconstruction on days where the two raw streams agree as the same "
+            "total-MTM NAV — a combine bug (wrong flow sign/numerator) "
+            f"(max return residual={returns_recon_max_resid:.4f}, "
+            f"material days={len(returns_recon_material_days)}). The reconstructed "
+            "curve must not be displayed."
+        )
 
     if diverged and not cash_only_signature and not zero_cashflow_ambiguity:
         # Material divergence NOT attributable to the A2 ambiguity (neither the

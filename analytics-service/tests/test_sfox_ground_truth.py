@@ -163,6 +163,45 @@ def test_dropped_deposit_row_fails_loud():
         check_parity(_CONSISTENT_BH, hidden_deposit_txns)
 
 
+def test_tampered_reconstruction_fails_loud_f4(monkeypatch):
+    """F4: a COMBINE bug — the reconstructed returns diverge from the independent
+    oracle even though the two RAW streams STILL reconcile as the same total-MTM NAV
+    — must FAIL LOUD. Pre-fix the gate compared only raw Δusd_value−Δaccount_balance
+    (where the flow cancels) and DISCARDED returns_ut, so a combine bug sailed
+    through untested. The gate now compares the reconstruction itself.
+
+    We simulate the classic corruption: the deposit is NOT removed from the
+    numerator (booked as a fake ~+50% return). The raw streams are untouched (they
+    reconcile), so the OLD raw-level check still passes — only the new
+    reconstruction-vs-oracle net catches it.
+    """
+    import scripts.sfox_ground_truth as gt
+
+    real_combine = gt.combine_sfox_balance_history
+
+    def buggy_combine(usd_value, flows):
+        # Ignore the extracted flows → the +500 deposit is booked as return (the
+        # exact cashflow-neutrality bug the reconstruction must prevent).
+        return real_combine(usd_value, pd.Series(dtype="float64", name="flows"))
+
+    monkeypatch.setattr(gt, "combine_sfox_balance_history", buggy_combine)
+
+    with pytest.raises(ParityDivergenceError, match="RECONSTRUCTION FAIL-LOUD"):
+        gt.check_parity(_CONSISTENT_BH, _CONSISTENT_TXNS)
+
+
+def test_reconstruction_check_passes_on_consistent_fixture_f4():
+    """F4 no-false-positive: the clean, cashflow-neutral reconstruction agrees with
+    the independent oracle → the reconstruction residual is ~0 and the gate does NOT
+    raise on a legitimate account."""
+    evidence = check_parity(_CONSISTENT_BH, _CONSISTENT_TXNS)
+    p = evidence["parity"]
+    assert p["reconstruction_vs_oracle_material_days"] == []
+    assert p["reconstruction_vs_oracle_max_return_residual"] == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+
 # ---------------------------------------------------------------------------
 # A2 cash-only pattern — account_balance is a USD *cash* running balance that is
 # piecewise-constant between cashflow events (jumps only on the 01-03 deposit),
