@@ -19,7 +19,7 @@
  * UI-SPEC AC #10 — `/security` is unauthenticated and meant to be crawled.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import SecurityPage, { metadata } from "./page";
 
@@ -197,6 +197,17 @@ describe("Phase 69 — Deribit readonly setup guide (UX-02)", () => {
  * hardcoded IP turns the negative tests red.
  */
 describe("Phase 122 — sFOX readonly setup guide (SFOX-08, F3)", () => {
+  // F2/F1 (Phase 122): the guide is founder-gated. It renders ONLY when the
+  // server go-live flag SFOX_ENABLED is on; the ENABLED assertions below pin it
+  // on, and the dedicated fail-closed block further down proves it is ABSENT
+  // (byte-identical to the pre-sfox page) when the flag is off.
+  beforeEach(() => {
+    process.env.SFOX_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
   it("renders a #sfox-readonly block titled sFOX inside the readonly-key section", () => {
     render(<SecurityPage />);
     const block = document.getElementById("sfox-readonly");
@@ -248,5 +259,49 @@ describe("Phase 122 — sFOX readonly setup guide (SFOX-08, F3)", () => {
     expect(block.textContent).not.toMatch(/verified read-only scope/i);
     expect(block.textContent).not.toMatch(/we verify the scope/i);
     expect(block.textContent).not.toMatch(/rejected before/i);
+  });
+});
+
+/**
+ * F1 (Phase 122 — pre-launch leak removal): with SFOX_ENABLED off (the default),
+ * the /security#sfox-readonly guide must be ABSENT. Pre-launch there is no sfox
+ * wizard card to "paste into" and no static egress IP to whitelist, so rendering
+ * the guide would assert a capability we do not have yet. Absence also keeps the
+ * public page byte-identical to its pre-sfox baseline while the flag is off.
+ */
+describe("Phase 122 — sFOX guide is founder-gated (F1, SFOX_ENABLED off)", () => {
+  beforeEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  it("does NOT render the #sfox-readonly block when the server flag is off", () => {
+    render(<SecurityPage />);
+    expect(document.getElementById("sfox-readonly")).toBeNull();
+  });
+
+  it("does not leak the false static-egress-IP copy pre-launch", () => {
+    render(<SecurityPage />);
+    // The sfox-only "whitelist our static egress IP … paste the token into the
+    // wizard" copy lives ONLY in the gated SubAnchor; the #egress-ips section's
+    // generic email-path copy is unaffected. With the flag off, the sfox phrasing
+    // must be gone from the whole page.
+    expect(document.body.textContent).not.toMatch(/paste the token into the wizard/i);
+    expect(document.body.textContent).not.toMatch(/single API token/i);
+  });
+
+  it.each(["1", "on", "", "false"])(
+    "stays absent for a non-exact SFOX_ENABLED=%s (strict 'true' only)",
+    (flag) => {
+      process.env.SFOX_ENABLED = flag;
+      render(<SecurityPage />);
+      expect(document.getElementById("sfox-readonly")).toBeNull();
+      delete process.env.SFOX_ENABLED;
+    },
+  );
+
+  it("still renders the sibling #deribit-readonly and #egress-ips (only sfox is gated)", () => {
+    render(<SecurityPage />);
+    expect(document.getElementById("deribit-readonly")).not.toBeNull();
+    expect(document.getElementById("egress-ips")).not.toBeNull();
   });
 });
