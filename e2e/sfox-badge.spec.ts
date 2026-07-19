@@ -110,7 +110,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("owner: /strategies/[id]/edit renders the SFOX exchange tag", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
     await page.goto(`/strategies/${seeded.strategyId}/edit`);
@@ -133,7 +133,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("owner: the strategy factsheet shows the api_verified badge (+ axe)", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
     await page.goto(`/strategy/${seeded.strategyId}`);
@@ -153,7 +153,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("allocator: the browse presentation shows the api_verified badge", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     // Same "both" user — it owns the allocator/browse surfaces too.
     await loginViaForm(page, seeded.owner.email, seeded.owner.password);
 
@@ -173,7 +173,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("admin: an elevated session reads the sfox strategy's api_verified tier", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     await loginViaForm(page, seeded.admin.email, seeded.admin.password);
 
     // Phase 126 (FACTSHEET-01): the admin is a NON-owner viewer. Before the fix
@@ -195,7 +195,7 @@ test.describe("Plan 122-04 — connected-sFOX badge + tag (SFOX-09)", () => {
   test("anon: a logged-out visitor sees the api_verified badge on the public factsheet", async ({
     page,
   }) => {
-    if (!HAS_SEED_ENV) return;
+    test.skip(!HAS_SEED_ENV, "sfox-badge: seed-env not wired (visible skip, not a silent pass).");
     // NO login — the /strategy/[id] factsheet of a PUBLISHED strategy is
     // publicly viewable, and the api_verified badge is public provenance. This
     // is the core FACTSHEET-01 requirement (badge visible to EVERYONE incl.
