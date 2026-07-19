@@ -269,7 +269,7 @@ class SfoxClient:
 
     # -- Read methods (four, read-only by construction) ---------------------
 
-    async def get_balances(self) -> list[dict]:
+    async def get_balances(self) -> list[dict[str, Any]]:
         """GET /v1/user/balance — current per-asset balance snapshot (bare array)."""
         payload = await self._request("/v1/user/balance")
         if not isinstance(payload, list):
@@ -284,7 +284,7 @@ class SfoxClient:
         after: str | None = None,
         offset: int | None = None,
         types: str | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """GET /v1/account/transactions — SINGLE PAGE of the typed ledger.
 
         `account_balance` (running) + typed deposit/withdraw/buy/sell actions are
@@ -313,7 +313,7 @@ class SfoxClient:
 
     async def get_trades(
         self, page_size: int = 100, last_seen_id: str | None = None
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """GET /v1/account/trades — SINGLE PAGE of fills. Unwraps the documented
         {data:[...]} envelope. `last_seen_id` is the exposed pagination cursor
         (phase 120 drives the crawl; no auto-loop here)."""
@@ -326,7 +326,7 @@ class SfoxClient:
         start_date_ms: int,
         end_date_ms: int | None = None,
         interval: int = 86400,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """GET /v1/account/balance/history — the daily (86400s) or hourly (3600s)
         `usd_value` equity series (the load-bearing phase-120 primary series).
         `start_date` is required; unwraps the documented {data:[{timestamp,usd_value}]}
@@ -345,7 +345,7 @@ class SfoxClient:
         return self._unwrap_data(payload, "/v1/account/balance/history")
 
     @staticmethod
-    def _unwrap_data(payload: Any, path: str) -> list[dict]:
+    def _unwrap_data(payload: Any, path: str) -> list[dict[str, Any]]:
         """Unwrap a documented {data:[...]} envelope, fail-loud on a missing key or
         a non-list `data` (contract break — never coerce to an empty series)."""
         if not isinstance(payload, dict) or "data" not in payload:

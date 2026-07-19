@@ -777,11 +777,15 @@ describe("[UAT] composite asset_class hardcode tripwire", () => {
   it("every SUPPORTED_EXCHANGES venue is crypto — else the 'crypto' hardcode must be revisited", () => {
     // Sorted exact pin: adding ANY venue (crypto or not) reddens this and forces
     // a conscious review of the keys/sync + finalize-wizard asset_class derive.
+    // sfox added v1.12 (SFOX-08): a crypto prime broker → isCryptoExchange
+    // (SUPPORTED_EXCHANGES membership) classifies it √365, so the composite
+    // asset_class='crypto' hardcode stays valid. Conscious review DONE.
     expect([...SUPPORTED_EXCHANGES].sort()).toEqual([
       "binance",
       "bybit",
       "deribit",
       "okx",
+      "sfox",
     ]);
   });
 });

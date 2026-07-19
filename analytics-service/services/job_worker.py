@@ -71,6 +71,10 @@ if TYPE_CHECKING:
     # runtime import (the value is still parsed function-locally in the deribit arm).
     from services.allocated_capital import ReturnsDenominatorConfig
 
+    # SFOX-05: pandas is imported lazily inside functions at runtime; the
+    # `-> "pd.Series"` return annotation needs the name resolvable under mypy.
+    import pandas as pd
+
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked

@@ -150,7 +150,7 @@ async def crawl_sfox_balance_history(
     client: SfoxClient,
     start_date_ms: int,
     end_date_ms: int | None = None,
-) -> tuple[list[dict], int | None]:
+) -> tuple[list[dict[str, Any]], int | None]:
     """Bounded GET crawl of the daily ``usd_value`` equity series.
 
     Pulls ``client.get_balance_history(interval=86400)`` windows, advancing the
@@ -168,7 +168,7 @@ async def crawl_sfox_balance_history(
     """
     _require_sfox_client(client)
 
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     cursor = int(start_date_ms)
     reached_edge = False
     for _ in range(_SFOX_CRAWL_MAX_REQUESTS):
@@ -221,7 +221,7 @@ async def crawl_sfox_transactions(
     client: SfoxClient,
     from_ms: int,
     to_ms: int | None = None,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Bounded GET cursor crawl of the typed transaction ledger.
 
     Follows the ``after`` id cursor page-by-page to exhaustion via
@@ -234,7 +234,7 @@ async def crawl_sfox_transactions(
     """
     _require_sfox_client(client)
 
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     after: str | None = None
     for _ in range(_SFOX_CRAWL_MAX_REQUESTS):
         page = await client.get_transactions(
@@ -295,7 +295,7 @@ def _utc_day_iso(ts_ms: Any) -> str:
 
 
 def sfox_flows_by_day(
-    transactions: list[dict],
+    transactions: list[dict[str, Any]],
 ) -> tuple[pd.Series, list[ExternalFlow]]:
     """Extract the signed daily USD external-flow series + ExternalFlow evidence
     from typed transaction rows.
@@ -361,7 +361,7 @@ def sfox_flows_by_day(
     return series, evidence
 
 
-async def read_sfox_account(client: SfoxClient) -> dict:
+async def read_sfox_account(client: SfoxClient) -> dict[str, Any]:
     """Read an sFOX account's balances + trades + transactions in one pull.
 
     Composes exactly SfoxClient's three GET read methods (single-page; no cursor

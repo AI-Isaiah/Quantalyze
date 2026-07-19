@@ -185,7 +185,7 @@ export function isSupportedExchange(value: string): boolean {
 
 /**
  * Is this exchange a crypto venue? Today EVERY supported exchange
- * (binance / okx / bybit / deribit) is crypto, so membership in the
+ * (binance / okx / bybit / deribit / sfox) is crypto, so membership in the
  * allowlist IS the crypto signal. Case-insensitive. When a non-crypto
  * (equities/FX) venue is ever added to SUPPORTED_EXCHANGES this must be
  * narrowed to an explicit crypto subset — until then, allowlist membership

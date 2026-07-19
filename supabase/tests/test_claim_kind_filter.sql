@@ -73,18 +73,21 @@ BEGIN
     VALUES (v_user, 'sfox', 'kindfilter', 'x', 'y', TRUE) RETURNING id INTO v_key;
 
   -- One backfill-kind job (derive_broker_dailies) and one non-backfill-kind
-  -- job (compute_analytics), both DUE + normal priority, scoped to this key.
+  -- job (poll_allocator_positions), both DUE + normal priority, scoped to this key.
+  -- Both are api_key-scoped kinds so they can share api_key_id and satisfy
+  -- compute_jobs_kind_target_coherence (the non-backfill partner must NOT be a
+  -- strategy-scoped kind like compute_analytics, which would need strategy_id).
   INSERT INTO public.compute_jobs
       (id, kind, api_key_id, status, priority, attempts, next_attempt_at, claim_token)
     VALUES
       (gen_random_uuid(), 'derive_broker_dailies', v_key, 'pending', 'normal', 0,
        TIMESTAMPTZ '1970-01-01 00:00:00+00', NULL),
-      (gen_random_uuid(), 'compute_analytics', v_key, 'pending', 'normal', 0,
+      (gen_random_uuid(), 'poll_allocator_positions', v_key, 'pending', 'normal', 0,
        TIMESTAMPTZ '1970-01-01 00:00:01+00', NULL);
 
   -- EXCLUDE the backfill kinds: only the non-backfill row is claimable.
   SELECT count(*) FILTER (WHERE kind = 'derive_broker_dailies'),
-         count(*) FILTER (WHERE kind = 'compute_analytics')
+         count(*) FILTER (WHERE kind = 'poll_allocator_positions')
     INTO v_backfill, v_other
     FROM public.claim_compute_jobs_with_priority(
            5, 'kf-exclude-' || v_user, NULL,
@@ -119,14 +122,14 @@ BEGIN
     VALUES
       (gen_random_uuid(), 'derive_broker_dailies', v_key, 'pending', 'normal', 0,
        TIMESTAMPTZ '1970-01-01 00:00:00+00', NULL),
-      (gen_random_uuid(), 'compute_analytics', v_key, 'pending', 'normal', 0,
+      (gen_random_uuid(), 'poll_allocator_positions', v_key, 'pending', 'normal', 0,
        TIMESTAMPTZ '1970-01-01 00:00:01+00', NULL);
 
   -- INCLUDE the backfill kinds: only the backfill row is claimable, and the
   -- unrelated non-backfill normal-priority pending row must NOT make the
   -- include-filtered worker defer (throttle scoped to includable kinds).
   SELECT count(*) FILTER (WHERE kind = 'derive_broker_dailies'),
-         count(*) FILTER (WHERE kind = 'compute_analytics')
+         count(*) FILTER (WHERE kind = 'poll_allocator_positions')
     INTO v_backfill, v_other
     FROM public.claim_compute_jobs_with_priority(
            5, 'kf-include-' || v_user, NULL,
@@ -160,7 +163,7 @@ BEGIN
     VALUES
       (gen_random_uuid(), 'derive_broker_dailies', v_key, 'pending', 'normal', 0,
        TIMESTAMPTZ '1970-01-01 00:00:00+00', NULL),
-      (gen_random_uuid(), 'compute_analytics', v_key, 'pending', 'normal', 0,
+      (gen_random_uuid(), 'poll_allocator_positions', v_key, 'pending', 'normal', 0,
        TIMESTAMPTZ '1970-01-01 00:00:01+00', NULL);
 
   -- Both NULL (3-arg-equivalent call): byte-identical to prod today — BOTH
