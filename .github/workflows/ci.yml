@@ -629,6 +629,14 @@ jobs:
     # every merge) and its noisiest signal. It is now ADVISORY like e2e: it
     # still runs on every PR and reports its own check — it just no longer
     # blocks this aggregator.
+    #
+    # Phase 126 / FACTSHEET-02 (2026-07-19): the seed-gated `e2e-seeded` job
+    # is now BLOCKING here -- the sfox-badge legs are the go-live gate and
+    # were advisory before. It self-skips when `E2E_TEST_DB_CONFIGURED` is
+    # unset (fork PRs / repos without test-DB setup), so `skipped` is
+    # tolerated FOR THE e2e-seeded ROW ONLY in the loop below; on the main
+    # repo the variable is set, the job runs, and a real `failure` reddens
+    # this required check. All other rows stay strict (any non-success fails).
     runs-on: ubuntu-latest
     needs:
       - frontend-typecheck
@@ -637,6 +645,7 @@ jobs:
       - frontend-coverage
       - frontend-policy
       - frontend-build
+      - e2e-seeded
     if: always()
     steps:
       - name: Verify all frontend-* jobs succeeded
@@ -648,10 +657,21 @@ jobs:
             "frontend-test=${{ needs.frontend-test.result }}" \
             "frontend-coverage=${{ needs.frontend-coverage.result }}" \
             "frontend-policy=${{ needs.frontend-policy.result }}" \
-            "frontend-build=${{ needs.frontend-build.result }}"; do
+            "frontend-build=${{ needs.frontend-build.result }}" \
+            "e2e-seeded=${{ needs.e2e-seeded.result }}"; do
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
-            if [ "$result" != "success" ]; then fail=1; fi
+            if [ "$name" = "e2e-seeded" ]; then
+              # Phase 126 / FACTSHEET-02: e2e-seeded is BLOCKING (the
+              # sfox-badge legs are the go-live gate). It self-skips when
+              # E2E_TEST_DB_CONFIGURED is unset (fork PRs / unconfigured
+              # repos), so `skipped` is tolerated FOR THIS ROW ONLY. A real
+              # `failure` still fails the gate on the main repo where the
+              # variable is set and the job runs.
+              if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then fail=1; fi
+            elif [ "$result" != "success" ]; then
+              fail=1
+            fi
           done
           if [ "$fail" = "1" ]; then
             echo "::error::One or more frontend-* jobs did not succeed."
@@ -1413,6 +1433,32 @@ jobs:
             exit 1
           fi
           echo "Rebuild inlined real test-Supabase URL into .next/ — proceeding to seed-gated specs."
+      - name: Guard -- sfox-badge anti-mask assertions present (FACTSHEET-02)
+        # Phase 126 / FACTSHEET-02 anti-tamper: e2e-seeded is now BLOCKING
+        # (frontend aggregator), so a green sfox-badge run is load-bearing.
+        # DELETING the non-owner badge-visibility legs (admin + anon) or the
+        # owner-leg axe zero-violations assertion would GUT the FACTSHEET-01
+        # anti-mask net while still passing the spec -- false-greening the
+        # gate. This grep fails the job if any of those load-bearing
+        # assertions are gone, so the gate cannot be satisfied by weakening
+        # the spec. Read-only; anchors are literal (`-F`), no untrusted input.
+        run: |
+          spec=e2e/sfox-badge.spec.ts
+          fail=0
+          need_anchor() {
+            if ! grep -qF "$1" "$spec"; then
+              echo "::error::sfox-badge anti-mask guard: missing assertion anchor -- $2"
+              fail=1
+            fi
+          }
+          need_anchor 'anon: a logged-out visitor sees the api_verified badge' 'anon non-owner badge-visible leg'
+          need_anchor "admin: an elevated session reads the sfox strategy" 'admin non-owner badge-visible leg'
+          need_anchor 'results.violations).toEqual([])' 'owner-leg axe zero-violations assertion'
+          if [ "$fail" = "1" ]; then
+            echo "::error::e2e/sfox-badge.spec.ts anti-mask assertions were weakened -- refusing to green the FACTSHEET-02 gate."
+            exit 1
+          fi
+          echo "sfox-badge anti-mask assertions present (anon + admin badge-visible + axe zero-violations)."
       - name: Run seed-gated specs (MA-8 / BLOCK-3)
         run: |
           # Phase 11 review fix WR-04: defense-in-depth port-bind guard.
