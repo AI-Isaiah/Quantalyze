@@ -118,7 +118,12 @@ export default async function PublicStrategyPage({
   }
 
   return (
-    <div className="min-h-screen bg-page">
+    // Phase 126 (FACTSHEET-01): the v1 factsheet had no <main> landmark, so axe
+    // flagged landmark-one-main / region on an otherwise-successful render (the
+    // owner-leg failure). Wrap the page body in exactly one <main> (page-body
+    // wrap, NOT a /strategy route layout — the v2 route already renders its own
+    // <main> via StrategyV2Shell, and a shared layout would double it).
+    <main className="min-h-screen bg-page">
       <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
         {/* Header */}
         <div className="mb-8">
@@ -217,6 +222,6 @@ export default async function PublicStrategyPage({
 
         <Disclaimer variant="strategy" trustTier={strategy.trust_tier} />
       </div>
-    </div>
+    </main>
   );
 }
