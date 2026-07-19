@@ -43,6 +43,14 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
   }
 
   const needsPassphrase = exchange === "okx";
+  // Phase 122 / SFOX-08: sFOX authenticates with a SINGLE Bearer token (no
+  // secret). The Select value is already lowercased, so an exact match is
+  // enough. When sfox: relabel the key input to "API Token", skip the secret
+  // block entirely (its `required` would otherwise block submit on a field sfox
+  // does not have), submit apiSecret as "", and swap the footer to the F3-honest
+  // copy. Non-sfox exchanges are unchanged — the scope-probe claim is TRUE for
+  // ccxt exchanges.
+  const isSfox = exchange === "sfox";
 
   // NEW-C29-03 / I1: zero out all plaintext credential fields on unmount,
   // regardless of close path (Cancel button, modal X, Escape key). This bounds
@@ -66,7 +74,16 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
     // re-render and fire two validate-and-encrypt requests.
     if (loading) return;
     try {
-      await onSubmit({ exchange, label, apiKey, apiSecret, passphrase });
+      // sFOX is token-only — submit an empty secret regardless of state (the
+      // secret input is not rendered for sfox, so state stays "", but pin it
+      // explicitly so a future edit cannot leak a stale secret into a sfox save).
+      await onSubmit({
+        exchange,
+        label,
+        apiKey,
+        apiSecret: isSfox ? "" : apiSecret,
+        passphrase,
+      });
     } finally {
       // NEW-C37-06 + NEW-C29-03: scrub plaintext secrets from component state
       // after the parent resolves, whether success or failure. On success the
@@ -101,34 +118,40 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
             required
           />
           <Input
-            label="API Key"
+            label={isSfox ? "API Token" : "API Key"}
             value={apiKey}
             onChange={(e) => setApiKey(e.target.value)}
-            placeholder="Your read-only API key"
+            placeholder={
+              isSfox ? "Your read-only sFOX API token" : "Your read-only API key"
+            }
             required
             autoComplete="off"
           />
-          <div className="relative">
-            <Input
-              label="API Secret"
-              value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
-              placeholder="Your API secret"
-              type={showSecret ? "text" : "password"}
-              required
-              autoComplete="off"
-              className="pr-16"
-            />
-            <button
-              type="button"
-              onClick={() => setShowSecret((s) => !s)}
-              aria-pressed={showSecret}
-              aria-label={showSecret ? "Hide API secret" : "Show API secret"}
-              className="absolute bottom-0 right-0 flex h-[44px] items-center px-3 text-micro font-mono uppercase tracking-[0.14em] text-text-muted hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
-            >
-              {showSecret ? "Hide" : "Show"}
-            </button>
-          </div>
+          {/* sFOX is token-only — render the secret block only for key+secret
+              exchanges. Its `required` attr would otherwise block a sfox submit. */}
+          {!isSfox && (
+            <div className="relative">
+              <Input
+                label="API Secret"
+                value={apiSecret}
+                onChange={(e) => setApiSecret(e.target.value)}
+                placeholder="Your API secret"
+                type={showSecret ? "text" : "password"}
+                required
+                autoComplete="off"
+                className="pr-16"
+              />
+              <button
+                type="button"
+                onClick={() => setShowSecret((s) => !s)}
+                aria-pressed={showSecret}
+                aria-label={showSecret ? "Hide API secret" : "Show API secret"}
+                className="absolute bottom-0 right-0 flex h-[44px] items-center px-3 text-micro font-mono uppercase tracking-[0.14em] text-text-muted hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/20"
+              >
+                {showSecret ? "Hide" : "Show"}
+              </button>
+            </div>
+          )}
           {needsPassphrase && (
             <Input
               label="Passphrase (OKX)"
@@ -142,7 +165,9 @@ export function ApiKeyForm({ onSubmit, onCancel, loading, error, defaultExchange
         </div>
 
         <p className="text-xs text-text-muted mt-3">
-          Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected.
+          {isSfox
+            ? "sFOX keys are used read-only by our adapter — no order or withdraw path exists. sFOX does not expose a per-key scope check, so mint a READ-ONLY token."
+            : "Only read-only keys are accepted. Keys with trading or withdrawal permissions will be rejected."}
         </p>
 
         {error && <p className="text-sm text-negative mt-3">{error}</p>}
