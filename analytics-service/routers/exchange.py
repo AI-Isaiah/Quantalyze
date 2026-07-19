@@ -65,7 +65,18 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
     # rather than leaking a raw 500. Keeps the ctor's non-empty invariant intact.
     if not api_key or not api_key.strip():
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
-    client = make_sfox_client(api_key, base_url=SFOX_PROD_BASE_URL)
+    try:
+        client = make_sfox_client(api_key, base_url=SFOX_PROD_BASE_URL)
+    except ValueError:
+        # A CONSTRUCTION-time ValueError is a SERVER egress-proxy misconfig
+        # (WORKER_EGRESS_PROXY_URL malformed) — NOT the user's key. It was thrown
+        # OUTSIDE the get_balances try below, so it used to escape as an unhandled
+        # 500 + Sentry traceback (and pre-fix carried the proxy token in the
+        # message). Fail as a clean 503 — never a 500, never a misleading
+        # AUTH_FAILED that blames the user's credentials. The factory's ValueError
+        # is already secret-free (sfox_factory.py), but do not log it here either.
+        logger.error("validate_key: sFOX client construction failed (egress proxy misconfig)")
+        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
     try:
         await client.get_balances()
         return {"valid": True, "read_only": True}

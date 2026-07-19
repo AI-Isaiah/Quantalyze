@@ -156,6 +156,28 @@ def main(argv: list[str] | None = None) -> int:
     # proxy so we measure the REALIZED proxied egress (the whole point of the gate).
     opener = _build_proxy_opener()
 
+    # SFOX-07: an ambient NO_PROXY/no_proxy makes urllib's ProxyHandler silently
+    # BYPASS the proxy (proxy_bypass) while _build_proxy_opener still printed
+    # "routed THROUGH proxy" — so the probe would measure DIRECT egress, diverging
+    # from the real aiohttp path (SfoxClient trust_env=False + explicit proxy=, and
+    # ccxt aiohttp_proxy) which ignores NO_PROXY. Refuse — but ONLY when a host this
+    # probe actually fetches would be bypassed: proxy_bypass is PER-HOST, so the
+    # near-universal `NO_PROXY=localhost,127.0.0.1` must not hard-fail a run whose
+    # ipinfo/exchange fetches all still route through the proxy.
+    if opener is not None:
+        _probed_hosts = ["ipinfo.io"] + [
+            urllib.parse.urlsplit(u).hostname for _, u in _EXCHANGE_PROBES
+        ]
+        _bypassed = [h for h in _probed_hosts if h and urllib.request.proxy_bypass(h)]
+        if _bypassed:
+            print(
+                "EGRESS-VERIFY FAIL: NO_PROXY/no_proxy would BYPASS the egress proxy "
+                f"for {', '.join(_bypassed)} — urllib would measure DIRECT egress for "
+                "those hosts, diverging from the real aiohttp path (trust_env=False "
+                "ignores NO_PROXY). Unset NO_PROXY/no_proxy for these hosts and re-run."
+            )
+            return 1
+
     egress_status, egress_body = _get("https://ipinfo.io/json", opener)
     country = "?"
     ip: str | None = None
@@ -172,6 +194,19 @@ def main(argv: list[str] | None = None) -> int:
     # evidence, BEFORE any exchange probe, so the founder never whitelists an
     # egress IP that was assumed rather than realized.
     if args.expect is not None:
+        # A proxied-egress gate can only certify a PROXIED measurement. With no
+        # proxy configured this probe measured DIRECT egress — which may equal the
+        # expected IP by coincidence (e.g. run ON the Fly machine, where direct
+        # egress IS the static IP), so certifying it would green-light a whitelist
+        # for a path production never takes. Refuse on missing proxy, never assume.
+        if opener is None:
+            print(
+                "EGRESS-VERIFY FAIL: WORKER_EGRESS_PROXY_URL is not set, so this "
+                "probe measured DIRECT egress, not the proxied static-egress path. "
+                f"Cannot confirm egress == {args.expect}. Set the proxy URL and "
+                "re-run. NOT verified; do NOT whitelist."
+            )
+            return 1
         if egress_status != 200 or not ip:
             print(
                 f"EGRESS-VERIFY FAIL: could not read the egress IP (ipinfo HTTP "

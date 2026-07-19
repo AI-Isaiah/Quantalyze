@@ -226,11 +226,37 @@ async def get_key_permissions(
     # structural triple {read:True, trade:False, withdraw:False}; there is no
     # trade/withdraw surface to grant. This closes the phase-119 F2 misdirection.
     if exchange_name == "sfox":
+        from services.closed_sets import SFOX_DISABLED_DETAIL, sfox_enabled_server
         from services.sfox_client import SfoxApiError
         from services.sfox_factory import make_sfox_client
 
-        sfox_client = make_sfox_client(api_key.strip())
+        # SFOX-06 founder gate: NEVER fire a live sFOX read while the integration
+        # is disabled — mirrors routers/exchange.validate_key + process_key. The DB
+        # CHECK admits 'sfox' unconditionally, so a stored sfox key can exist
+        # pre-go-live; without this gate the permission probe would decrypt its
+        # token and hit sFOX production behind the static-egress proxy.
+        if not sfox_enabled_server():
+            raise HTTPException(status_code=400, detail=SFOX_DISABLED_DETAIL)
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        api_key_str = api_key.strip()
+        if not api_key_str:
+            # An empty/whitespace credential cannot authenticate — fail CLOSED
+            # (probe_error), never a 500 from SfoxClient.__init__'s empty-key guard.
+            return {
+                "read": False,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": True,
+                "detected_at": now_iso,
+            }
+
+        sfox_client = None
         try:
+            # Construct INSIDE the try so a make_sfox_client / SfoxClient ctor
+            # ValueError (e.g. a misconfigured WORKER_EGRESS_PROXY_URL) fails CLOSED
+            # as a probe error, not an unhandled 500 at the finalize-wizard probe.
+            sfox_client = make_sfox_client(api_key_str)
             await sfox_client.get_balances()
             # Auth + read proven; the structural read-only triple (no scope probe).
             return {
@@ -238,35 +264,59 @@ async def get_key_permissions(
                 "trade": False,
                 "withdraw": False,
                 "probe_error": False,
-                "detected_at": datetime.now(timezone.utc).isoformat(),
+                "detected_at": now_iso,
             }
         except SfoxApiError as exc:
             if exc.status in (401, 403):
-                # An auth-dead key is honestly SCOPELESS (not a probe error): it
-                # can read nothing, so read/trade/withdraw are all False.
+                # DEFINITIVE auth rejection: the exchange ANSWERED, rejecting the
+                # key. Consistent with routers/exchange._validate_sfox_key, which
+                # maps a sfox 401/403 to the definitive AUTH_FAILED — the two
+                # surfaces must agree on the same upstream signal, else a revoked
+                # key reads as KEY_AUTH_FAILED at connect but a misleading
+                # KEY_NETWORK_TIMEOUT ("could not contact") at the finalize probe.
+                # Honestly scopeless: reads nothing, probe_error:False (the exchange
+                # WAS contacted — not a network/"try again" state).
+                # NOTE: the "a 4xx behind the shared static-egress proxy could be a
+                # transient IP/WAF block, not a revoked key" ambiguity is real but
+                # applies to BOTH surfaces identically; changing it is a founder
+                # decision that must move validate_key + this probe together, not a
+                # unilateral split here (see deferred-items).
                 return {
                     "read": False,
                     "trade": False,
                     "withdraw": False,
                     "probe_error": False,
-                    "detected_at": datetime.now(timezone.utc).isoformat(),
+                    "detected_at": now_iso,
                 }
-            # Any other SfoxApiError (429 / 5xx / shape) is a TRANSIENT probe
-            # failure — fail CLOSED with probe_error=True (the ccxt _FAIL_CLOSED
-            # semantics), never a false read/trade/withdraw grant.
+            # 429 / 5xx / shape(0): an UPSTREAM/transport failure that yields NO
+            # clear answer about the key -> fail CLOSED transient (probe_error:True,
+            # not cached), the ccxt _FAIL_CLOSED semantics. Never a false grant.
             logger.warning(
-                "internal permission probe: sFOX transient failure (status=%s) "
-                "for key=%s", exc.status, key_id,
+                "internal permission probe: sFOX transient upstream failure "
+                "(status=%s) for key=%s", exc.status, key_id,
             )
             return {
                 "read": False,
                 "trade": False,
                 "withdraw": False,
                 "probe_error": True,
-                "detected_at": datetime.now(timezone.utc).isoformat(),
+                "detected_at": now_iso,
+            }
+        except ValueError as exc:
+            logger.warning(
+                "internal permission probe: sFOX client construction failed for "
+                "key=%s: %s", key_id, exc,
+            )
+            return {
+                "read": False,
+                "trade": False,
+                "withdraw": False,
+                "probe_error": True,
+                "detected_at": now_iso,
             }
         finally:
-            await sfox_client.aclose()
+            if sfox_client is not None:
+                await sfox_client.aclose()
 
     try:
         exchange = create_exchange(exchange_name, api_key, api_secret, passphrase)

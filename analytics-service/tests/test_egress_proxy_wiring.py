@@ -89,6 +89,20 @@ def test_make_sfox_client_malformed_bad_port_fails_loud_no_secret(monkeypatch):
     assert "WORKER_EGRESS_PROXY_URL" in msg
 
 
+def test_make_sfox_client_truncated_at_at_sign_no_secret_leak(monkeypatch):
+    # Red-team (MED): a URL COPY-CUT at the '@' (`scheme://user:PASSWORD`, no host)
+    # makes urlsplit parse PASSWORD into the PORT slot, so the port-cast ValueError's
+    # text IS the password — and scrub_url_userinfo is a structural no-op (no
+    # `://...@`). The validator must name the failure WITHOUT echoing the value.
+    secret = "MySecret123"
+    monkeypatch.setenv(_ENV, f"http://quantalyze:{secret}")
+    with pytest.raises(ValueError) as excinfo:
+        make_sfox_client("k")
+    msg = str(excinfo.value)
+    assert secret not in msg, f"truncated-URL port-cast leaked the secret: {msg!r}"
+    assert "WORKER_EGRESS_PROXY_URL" in msg
+
+
 def test_make_sfox_client_missing_scheme_fails_loud_no_secret(monkeypatch):
     # F5: a non-empty URL with no http(s):// scheme fails loud; the shape error
     # names the expected form WITHOUT echoing the (un-`://`-anchored) secret.

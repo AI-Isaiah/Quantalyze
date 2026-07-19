@@ -213,6 +213,41 @@ def test_scrub_url_userinfo_leaves_benign_urls_untouched():
         assert scrub_url_userinfo(benign) == benign
 
 
+def test_scrub_url_userinfo_redacts_password_only_userinfo():
+    """Specialist finding (MED): a PASSWORD-ONLY userinfo `scheme://:secret@host`
+    (the common token-as-password proxy form) must also redact. The username
+    sub-pattern was `+` (≥1 char), so an empty username made the whole regex fail
+    to match and the proxy password rode `str(exc)` verbatim — a real secret leak."""
+    for url, expected in (
+        ("http://:s3cr3tpw@egress.host:8080", "http://[REDACTED]@egress.host:8080"),
+        ("socks5://:tokvalue@10.0.0.1:1080", "socks5://[REDACTED]@10.0.0.1:1080"),
+    ):
+        out = scrub_url_userinfo(url)
+        assert "s3cr3tpw" not in out and "tokvalue" not in out
+        assert out == expected
+    # And through the freeform scrub (the surface that actually echoes str(exc)).
+    assert "s3cr3tpw" not in scrub_freeform_string(
+        "InvalidURL('http://:s3cr3tpw@egress.host:80x80')"
+    )
+
+
+def test_scrub_url_userinfo_redacts_password_containing_at_sign():
+    """Red-team finding (MED): a password CONTAINING '@' (`user:p@ss@host`). urlsplit
+    splits userinfo at the LAST '@', so validation accepts it and the URL is used;
+    a single-'@' terminator in the scrub stopped at the FIRST '@' and leaked the
+    tail. The userinfo must be consumed whole, up to the last '@' before the host."""
+    for url, expected in (
+        ("http://user:p@ssw0rd@37.16.1.5:8888", "http://[REDACTED]@37.16.1.5:8888"),
+        ("http://quantalyze:a@b@c@10.0.0.1:8888", "http://[REDACTED]@10.0.0.1:8888"),
+    ):
+        out = scrub_url_userinfo(url)
+        assert "ssw0rd" not in out and "a@b@c" not in out
+        assert out == expected
+    assert "ssw0rd" not in scrub_freeform_string(
+        "Cannot connect to proxy http://user:p@ssw0rd@37.16.1.5:8888 ssl:default"
+    )
+
+
 def test_scrub_url_userinfo_non_string_passthrough():
     assert scrub_url_userinfo(None) is None
     assert scrub_url_userinfo(42) == 42

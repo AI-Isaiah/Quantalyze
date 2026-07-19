@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 import urllib.parse
 
-from services.redact import scrub_url_userinfo
 from services.sfox_client import SFOX_PROD_BASE_URL, SfoxClient
 
 
@@ -57,18 +56,19 @@ def _validate_proxy_url(url: str) -> None:
     opaque transport error far from the config mistake. Raise a clear ValueError
     at the construction seam instead.
 
-    SECRET HYGIENE: the message NEVER echoes the `user:pass@` BasicAuth secret.
-    The port-cast branch surfaces only the offending port token (userinfo-scrubbed
-    belt-and-suspenders); the shape branch names the expected form WITHOUT echoing
-    the URL at all — a no-scheme URL's userinfo is not `://`-anchored and so could
-    not be reliably userinfo-redacted, so it is withheld entirely.
+    SECRET HYGIENE: the message NEVER echoes the URL. The port-cast branch used to
+    scrub-and-echo str(exc), but urlsplit parses a URL TRUNCATED at '@' (e.g. a
+    copy-cut `scheme://user:PASSWORD`) with PASSWORD in the PORT slot, so str(exc)
+    IS the secret — and scrub_url_userinfo is a structural no-op on a string with no
+    `://...@`. Both branches now name the failure mode WITHOUT the value.
     """
     try:
         parts = urllib.parse.urlsplit(url)
         _ = parts.port  # `.port` property raises ValueError on a non-numeric port
-    except ValueError as exc:
+    except ValueError:
         raise ValueError(
-            "WORKER_EGRESS_PROXY_URL is malformed: " + scrub_url_userinfo(str(exc))
+            "WORKER_EGRESS_PROXY_URL is malformed: the port is missing or "
+            "non-numeric (expected http(s)://[user:pass@]host:PORT)"
         ) from None
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError(

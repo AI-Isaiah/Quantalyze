@@ -10,7 +10,26 @@ drive `main(argv=[...])`, asserting the exit-code contract.
 """
 from __future__ import annotations
 
+import pytest
+
 import scripts.probe_exchange_egress as probe
+
+# A --expect gate can only certify a PROXIED measurement, so the gate tests must
+# run WITH a proxy configured (the fetch itself is stubbed via `_get`, so the
+# opener is built but never used). Kept malformed-userinfo to also assert redaction.
+_PROXY = "http://user:pw@10.0.0.1:8888"
+
+
+@pytest.fixture(autouse=True)
+def _clear_no_proxy(monkeypatch):
+    # Hermetic: the host may export NO_PROXY; clear it so ONLY the dedicated test
+    # exercises the NO_PROXY-bypass refusal, never an ambient one.
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+
+def _set_proxy(monkeypatch):
+    monkeypatch.setenv("WORKER_EGRESS_PROXY_URL", _PROXY)
 
 
 def _fake_get_factory(ipinfo_response, exchange_status=200):
@@ -26,6 +45,7 @@ def _fake_get_factory(ipinfo_response, exchange_status=200):
 
 
 def test_expect_match_exit_0(monkeypatch, capsys):
+    _set_proxy(monkeypatch)
     monkeypatch.setattr(
         probe, "_get", _fake_get_factory((200, '{"ip":"1.2.3.4","country":"NL"}'))
     )
@@ -36,6 +56,7 @@ def test_expect_match_exit_0(monkeypatch, capsys):
 
 
 def test_expect_mismatch_exit_1_names_both(monkeypatch, capsys):
+    _set_proxy(monkeypatch)
     monkeypatch.setattr(
         probe, "_get", _fake_get_factory((200, '{"ip":"5.6.7.8","country":"NL"}'))
     )
@@ -46,19 +67,68 @@ def test_expect_mismatch_exit_1_names_both(monkeypatch, capsys):
     assert "5.6.7.8" in out and "1.2.3.4" in out
 
 
+def test_expect_without_proxy_refuses_exit_1(monkeypatch, capsys):
+    # SFOX-07 fix: with no proxy configured the probe measured DIRECT egress, which
+    # may equal the expected IP by coincidence (e.g. run ON the Fly machine). A
+    # proxied-egress gate must REFUSE rather than certify a direct measurement.
+    monkeypatch.delenv("WORKER_EGRESS_PROXY_URL", raising=False)
+    monkeypatch.setattr(
+        probe, "_get", _fake_get_factory((200, '{"ip":"1.2.3.4","country":"NL"}'))
+    )
+    rc = probe.main(argv=["--expect", "1.2.3.4"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "do NOT whitelist" in out.lower() or "not verified" in out.lower()
+    assert "DIRECT egress" in out
+
+
+def test_expect_with_no_proxy_env_refuses_exit_1(monkeypatch, capsys):
+    # SFOX-07 fix: an ambient NO_PROXY makes urllib silently bypass the proxy → the
+    # probe would measure DIRECT egress while the real aiohttp path (trust_env=False)
+    # still uses the proxy. Refuse rather than certify the diverging measurement.
+    _set_proxy(monkeypatch)
+    monkeypatch.setenv("NO_PROXY", "ipinfo.io")
+    monkeypatch.setattr(
+        probe, "_get", _fake_get_factory((200, '{"ip":"1.2.3.4","country":"NL"}'))
+    )
+    rc = probe.main(argv=["--expect", "1.2.3.4"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "NO_PROXY" in out
+
+
+def test_expect_benign_no_proxy_does_not_refuse(monkeypatch, capsys):
+    # Red-team (LOW): proxy_bypass is PER-HOST, so the near-universal
+    # NO_PROXY=localhost,127.0.0.1 must NOT hard-fail a run whose ipinfo/exchange
+    # fetches all still route through the proxy — refuse only when a PROBED host
+    # would actually be bypassed.
+    _set_proxy(monkeypatch)
+    monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+    monkeypatch.setattr(
+        probe, "_get", _fake_get_factory((200, '{"ip":"1.2.3.4","country":"NL"}'))
+    )
+    rc = probe.main(argv=["--expect", "1.2.3.4"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "1.2.3.4" in out
+
+
 def test_expect_ipinfo_transport_failure_exit_1(monkeypatch):
     # ipinfo unreachable (status None) → cannot confirm → fail loud, never pass.
+    _set_proxy(monkeypatch)
     monkeypatch.setattr(probe, "_get", _fake_get_factory((None, "ConnResetError")))
     assert probe.main(argv=["--expect", "1.2.3.4"]) == 1
 
 
 def test_expect_ipinfo_non200_exit_1(monkeypatch):
+    _set_proxy(monkeypatch)
     monkeypatch.setattr(probe, "_get", _fake_get_factory((429, "rate limited")))
     assert probe.main(argv=["--expect", "1.2.3.4"]) == 1
 
 
 def test_expect_ipinfo_unparseable_exit_1(monkeypatch):
     # A 200 with a non-JSON body yields no ip → missing evidence → exit 1.
+    _set_proxy(monkeypatch)
     monkeypatch.setattr(probe, "_get", _fake_get_factory((200, "not json at all")))
     assert probe.main(argv=["--expect", "1.2.3.4"]) == 1
 

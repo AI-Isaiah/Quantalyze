@@ -131,11 +131,16 @@ REDACTED_JWT = "[REDACTED_JWT]"
 # the whole `user:pass@` to `[REDACTED]@`. The `@` and preceding scheme are what
 # make it a credential-bearing URL rather than a benign `host/path` — a plain
 # `https://example.com/x` (no `@` before the first `/`) never matches.
+# The username segment is `*` (0+), not `+`, so a PASSWORD-ONLY userinfo
+# (`scheme://:secret@host` — the common token-as-password proxy form) also
+# redacts; a `+` there structurally skipped it and leaked the password.
+# The userinfo is a REPEATED `<seg>@` group so it consumes up to the LAST '@'
+# before the host — urlsplit/aiohttp split userinfo at the last '@', so a
+# password CONTAINING an '@' (`user:p@ss@host`) must be redacted whole; a single
+# `@` terminator stopped at the first '@' and leaked the tail after it.
 URL_USERINFO: re.Pattern[str] = re.compile(
-    r"([A-Za-z][A-Za-z0-9+.\-]*://)"  # group 1: scheme://  (kept verbatim)
-    r"[^/@\s:]+"                        # username (no '/', '@', ws, or ':')
-    r"(?::[^/@\s]*)?"                  # optional ':password' (up to '@')
-    r"@"                                # userinfo/host delimiter
+    r"([A-Za-z][A-Za-z0-9+.\-]*://)"       # group 1: scheme://  (kept verbatim)
+    r"(?:[^/@\s:]*(?::[^/@\s]*)?@)+"        # userinfo segment(s), up to the LAST '@'
 )
 
 

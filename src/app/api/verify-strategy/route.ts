@@ -3,7 +3,7 @@ import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { UI_EXCHANGE_CODES } from "@/lib/utils";
-import type { SupportedExchange } from "@/lib/closed-sets";
+import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
 
@@ -64,6 +64,18 @@ export async function POST(req: NextRequest) {
   if (!UI_EXCHANGE_CODES.includes(exchange as SupportedExchange)) {
     return NextResponse.json(
       { error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}` },
+      { status: 400 },
+    );
+  }
+
+  // Structural server gate (parity with the 3 authenticated key routes): fail
+  // CLOSED on the SERVER go-live flag, not just the client offer flag. With
+  // NEXT_PUBLIC_SFOX_ENABLED=true but SFOX_ENABLED unset (the documented
+  // half-state), UI_EXCHANGE_CODES above would admit sfox; this ensures the
+  // public teaser cannot forward a live sfox key-process before go-live either.
+  if (exchange.toLowerCase() === "sfox" && !isSfoxEnabledServer()) {
+    return NextResponse.json(
+      { error: "sFOX integration is not yet available." },
       { status: 400 },
     );
   }
