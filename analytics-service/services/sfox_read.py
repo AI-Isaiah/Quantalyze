@@ -60,13 +60,23 @@ _SFOX_BALANCE_HISTORY_INTERVAL_MS = 86_400_000
 # must fail loud rather than render as a complete-but-short series (Pitfall 4).
 _SFOX_RECENT_EDGE_TOLERANCE_MS = 2 * _SFOX_BALANCE_HISTORY_INTERVAL_MS
 
-# action -> external-flow sign. Deposit / credit are cash IN (+); withdraw /
-# charge are cash OUT (-). buy/sell are INTERNAL rotations, never external flows.
+# action -> external-flow sign. ONLY the two DEFINITIVELY-external cash movements
+# are classified: deposit is cash IN (+), withdraw is cash OUT (-). buy/sell are
+# DEFINITIVELY-internal rotations (never external flows). EVERYTHING ELSE fails
+# loud below — see F3.
+#
+# F3 (P120 red-team, DERIBIT-CORRECTION precedent): `charge` and `credit` were
+# previously mapped to -1.0 / +1.0 external flows. That is UNVERIFIED and
+# money-unsafe: if a `charge` is a FEE (a real cost) rather than a withdrawal,
+# treating it as an external outflow F backs it OUT of the TWR numerator
+# (r_t = (NAV_t − NAV_{t−1} − F_t)/NAV_{t−1}; F<0 ⇒ −F>0 ⇒ inflated return) —
+# silently OVERSTATING performance. The economic meaning of charge/credit (fee vs
+# flow vs rebate vs rotation) cannot be told from the row alone, so — exactly like
+# the deribit `correction` txn-type — an unclassified type MUST fail loud and wait
+# for real-account evidence, never be guessed into a displayed number.
 _FLOW_SIGN: dict[str, float] = {
     "deposit": 1.0,
-    "credit": 1.0,
     "withdraw": -1.0,
-    "charge": -1.0,
 }
 _ROTATION_ACTIONS: frozenset[str] = frozenset({"buy", "sell"})
 
@@ -288,9 +298,16 @@ def sfox_flows_by_day(
             continue
         sign = _FLOW_SIGN.get(action)
         if sign is None:
+            # F3: only deposit/withdraw (flows) and buy/sell (rotations, skipped
+            # above) are definitively classified. Anything else — charge, credit,
+            # fee, interest, rebate, correction, ... — is UNCLASSIFIED and must NOT
+            # be silently treated as a flow: doing so could back a fee out of the
+            # TWR numerator and OVERSTATE performance. Fail loud (terminal) and wait
+            # for real-account evidence, mirroring the deribit `correction` gate.
             raise SfoxFlowValuationError(
-                f"unrecognized sFOX transaction action {action!r}; refusing to "
-                "guess whether it is an external flow (evidence-first)"
+                f"unclassified sFOX transaction type {action!r} — needs evidence "
+                "before it can be treated as flow vs fee vs rotation; refusing to "
+                "guess (evidence-first, money-path fail-loud)"
             )
 
         currency = str(row.get("currency", "")).strip().upper()

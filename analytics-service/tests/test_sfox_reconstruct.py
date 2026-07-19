@@ -507,14 +507,17 @@ async def test_crawl_balance_history_budget_exhaustion_raises():
 
 
 def test_sfox_flows_by_day_signs_excludes_rotations_and_aggregates():
-    """action→sign map (deposit +, withdraw −, credit +, charge −); same-UTC-day
-    flows aggregate; buy/sell are internal rotations and are EXCLUDED; returns both
-    the daily Series and the list[ExternalFlow] evidence."""
+    """F3: only the DEFINITIVELY-external types classify — deposit +, withdraw −;
+    same-UTC-day flows aggregate; buy/sell are internal rotations and are EXCLUDED;
+    returns both the daily Series and the list[ExternalFlow] evidence.
+
+    (charge/credit are no longer silently signed — see
+    test_sfox_flows_by_day_unclassified_type_fails_loud_f3.)"""
     txns = [
         {"id": 1, "action": "deposit", "currency": "USD", "amount": "1000", "timestamp": _ms("2026-01-02")},
         {"id": 2, "action": "withdraw", "currency": "USD", "amount": "300", "timestamp": _ms("2026-01-02")},
-        {"id": 3, "action": "credit", "currency": "USD", "amount": "50", "timestamp": _ms("2026-01-03")},
-        {"id": 4, "action": "charge", "currency": "USD", "amount": "20", "timestamp": _ms("2026-01-03")},
+        {"id": 3, "action": "withdraw", "currency": "USD", "amount": "20", "timestamp": _ms("2026-01-03")},
+        {"id": 4, "action": "deposit", "currency": "USD", "amount": "50", "timestamp": _ms("2026-01-03")},
         {"id": 5, "action": "buy", "currency": "BTC", "amount": "0.1", "timestamp": _ms("2026-01-03")},
         {"id": 6, "action": "sell", "currency": "BTC", "amount": "0.1", "timestamp": _ms("2026-01-03")},
     ]
@@ -524,7 +527,7 @@ def test_sfox_flows_by_day_signs_excludes_rotations_and_aggregates():
     d2 = pd.Timestamp("2026-01-02").as_unit("us")
     d3 = pd.Timestamp("2026-01-03").as_unit("us")
     # 2026-01-02: +1000 (deposit) − 300 (withdraw) = +700
-    # 2026-01-03: +50 (credit) − 20 (charge) = +30 ; buy/sell EXCLUDED
+    # 2026-01-03: +50 (deposit) − 20 (withdraw) = +30 ; buy/sell EXCLUDED
     assert series.loc[d2] == pytest.approx(700.0)
     assert series.loc[d3] == pytest.approx(30.0)
     assert set(series.index) == {d2, d3}
@@ -536,6 +539,22 @@ def test_sfox_flows_by_day_signs_excludes_rotations_and_aggregates():
     assert ("2026-01-02", -300.0) in signed
     assert ("2026-01-03", 50.0) in signed
     assert ("2026-01-03", -20.0) in signed
+
+
+@pytest.mark.parametrize("unclassified", ["charge", "credit", "fee", "interest", "rebate"])
+def test_sfox_flows_by_day_unclassified_type_fails_loud_f3(unclassified):
+    """F3 (money-path, DERIBIT-CORRECTION precedent): a transaction type that is NOT
+    definitively deposit/withdraw (flow) or buy/sell (rotation) — charge, credit,
+    fee, interest, rebate, ... — MUST fail loud, never be silently classified. The
+    economic meaning (fee vs flow vs rebate) is UNVERIFIED, and mis-treating a fee as
+    an external outflow backs it out of the TWR numerator and OVERSTATES performance.
+    Fail loud and wait for real-account evidence."""
+    txns = [
+        {"id": 1, "action": "deposit", "currency": "USD", "amount": "1000", "timestamp": _ms("2026-01-02")},
+        {"id": 2, "action": unclassified, "currency": "USD", "amount": "20", "timestamp": _ms("2026-01-03")},
+    ]
+    with pytest.raises(SfoxFlowValuationError, match="unclassified sFOX transaction type"):
+        sfox_flows_by_day(txns)
 
 
 def test_sfox_flows_by_day_non_usd_flow_raises_never_guessed():

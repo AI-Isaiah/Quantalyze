@@ -272,6 +272,43 @@ def test_oracle_signature_takes_only_transactions():
     assert params == ["transactions"]
 
 
+@pytest.mark.parametrize("unclassified", ["charge", "credit", "fee", "interest"])
+def test_oracle_unclassified_type_fails_loud_independently_f3(unclassified):
+    """F3(b): the INDEPENDENT oracle fails loud on an unclassified transaction type
+    on its OWN (its own map, its own raise) — it never defers to the read path. So a
+    read-path mis-classification can never sneak through the parity gate by being
+    mirrored on the oracle stream."""
+    from scripts.sfox_ground_truth import ParityInputError
+
+    txns = [
+        {"id": 1, "action": "deposit", "currency": "USD", "amount": "1000",
+         "account_balance": "1000", "timestamp": _ms("2026-01-02")},
+        {"id": 2, "action": unclassified, "currency": "USD", "amount": "20",
+         "account_balance": "980", "timestamp": _ms("2026-01-03")},
+    ]
+    with pytest.raises(ParityInputError, match="unclassified sFOX transaction type"):
+        reconstruct_equity_from_transactions(txns)
+
+
+def test_oracle_does_not_import_impl_flow_classification_f3():
+    """F3(b): the oracle module must NOT import the read path's classification
+    (``_FLOW_SIGN`` / ``_ROTATION_ACTIONS``). Importing them would make the oracle
+    self-referential — a mis-classification in ``sfox_read`` would be reproduced
+    identically on the oracle stream, so the parity gate could never catch it. The
+    oracle owns an INDEPENDENT ``_ORACLE_FLOW_SIGN`` map instead."""
+    import scripts.sfox_ground_truth as gt
+
+    # The impl's classification symbols are NOT bound in the oracle module.
+    assert not hasattr(gt, "_FLOW_SIGN")
+    assert not hasattr(gt, "_ROTATION_ACTIONS")
+    # The oracle's own independent map exists and covers ONLY the definitive types.
+    assert gt._ORACLE_FLOW_SIGN == {"deposit": 1.0, "withdraw": -1.0}
+    assert gt._ORACLE_ROTATION_ACTIONS == frozenset({"buy", "sell"})
+    # Source-level guard: the module never imports the impl classification symbols.
+    src = inspect.getsource(gt)
+    assert "_FLOW_SIGN,\n" not in src and "_ROTATION_ACTIONS,\n" not in src
+
+
 def test_oracle_body_never_references_usd_value_or_balance_history():
     """Comment-stripped source scan: the oracle body references neither usd_value
     nor balance_history (a self-referential oracle would pin the impl's formula)."""

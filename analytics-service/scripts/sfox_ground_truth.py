@@ -7,7 +7,9 @@ validates the RECONSTRUCTED sFOX equity curve — the cashflow-neutral daily-ret
 series that ``services.broker_dailies.combine_sfox_balance_history`` derives from
 ``/v1/account/balance/history``'s daily ``usd_value`` — against an ECONOMICALLY
 INDEPENDENT oracle reconstructed SOLELY from ``/v1/account/transactions``' running
-``account_balance`` anchors + typed deposit/withdraw/credit/charge cashflows. The
+``account_balance`` anchors + typed deposit/withdraw cashflows (F3: charge/credit
+and every other non-deposit/withdraw type fail loud pending real-account evidence).
+The
 two streams are computed by sFOX independently of each other, so a material
 divergence between them is evidence that one is corrupt — and the wrong curve
 MUST NEVER be displayed (it would be the exact fabrication class ``api_verified``
@@ -77,11 +79,27 @@ from scripts.deribit_ground_truth import (  # noqa: F401 - ScopeViolationError r
 )
 from services.broker_dailies import combine_sfox_balance_history
 from services.sfox_read import (
-    _FLOW_SIGN,
-    _ROTATION_ACTIONS,
     _utc_day_iso,
     sfox_flows_by_day,
 )
+
+# F3(b) (P120 red-team): the P115 INDEPENDENT oracle classifies typed cashflows
+# with its OWN hardcoded sign map — it must NEVER import
+# ``services.sfox_read._FLOW_SIGN`` / ``_ROTATION_ACTIONS``. Importing the impl's
+# classification makes the oracle self-referential: a mis-classification in the
+# read path (e.g. treating a fee as a flow) would then be reproduced IDENTICALLY on
+# the oracle stream, so the parity gate could never catch it — the oracle would pin
+# the impl's bug instead of the economics. This map is arrived at INDEPENDENTLY and
+# happens to agree on the two definitively-classifiable types; any divergence
+# between the two maps is exactly what the gate exists to surface. Only
+# deposit/withdraw are external flows; buy/sell are internal rotations; every other
+# type fails loud here on its own (mirroring, but not importing, the read-path F3
+# gate).
+_ORACLE_FLOW_SIGN: dict[str, float] = {
+    "deposit": 1.0,
+    "withdraw": -1.0,
+}
+_ORACLE_ROTATION_ACTIONS: frozenset[str] = frozenset({"buy", "sell"})
 
 # ---------------------------------------------------------------------------
 # Materiality thresholds (the parity gate). Documented values + rationale.
@@ -166,9 +184,11 @@ def reconstruct_equity_from_transactions(transactions: list[dict]) -> dict[str, 
         ``r_t = (B_t - B_{t-1} - F_t) / B_{t-1}``
 
     where ``B`` is the end-of-day running balance (the last row's balance per UTC
-    day) and ``F`` is that day's signed typed cashflow (deposit +, credit +,
-    withdraw -, charge -; buy/sell are internal rotations, excluded — the SAME
-    sign convention the flow extractor uses, so the deposit is booked once). The
+    day) and ``F`` is that day's signed typed cashflow (deposit +, withdraw -;
+    buy/sell are internal rotations, excluded; every other type fails loud — F3).
+    The sign map is the oracle's OWN (``_ORACLE_FLOW_SIGN``), INDEPENDENT of the
+    read path's ``_FLOW_SIGN`` (F3(b) — a self-referential oracle would pin the
+    impl's classification instead of the economics), so the deposit is booked once. The
     returns are re-cumulated into an equity index anchored at the first observed
     balance (the transactions-implied inception capital).
 
@@ -213,14 +233,19 @@ def reconstruct_equity_from_transactions(transactions: list[dict]) -> dict[str, 
     event_days: set[str] = set()
     for row in transactions:
         action = str(row.get("action", "")).strip().lower()
-        if action in _ROTATION_ACTIONS:
+        if action in _ORACLE_ROTATION_ACTIONS:
             continue
-        sign = _FLOW_SIGN.get(action)
+        sign = _ORACLE_FLOW_SIGN.get(action)
         if sign is None:
-            # An unrecognized action is surfaced to the flow extractor's fail-loud
-            # path in the parity comparison; the oracle skips it for the running
-            # balance roll (which is action-agnostic).
-            continue
+            # F3(b): an unclassified type fails loud in the oracle INDEPENDENTLY
+            # (own map, own raise — never deferring to the read path), so a
+            # read-path mis-classification can never sneak through by being mirrored
+            # here. Mirrors the read-path evidence-first gate, arrived at separately.
+            raise ParityInputError(
+                f"unclassified sFOX transaction type {action!r} in the independent "
+                "oracle — needs evidence before it can be treated as flow vs fee vs "
+                "rotation (evidence-first; NOT imported from sfox_read)"
+            )
         iso = _utc_day_iso(row.get("timestamp"))
         magnitude = abs(_coerce_finite(row.get("amount"), field="flow amount"))
         flow_at[iso] = flow_at.get(iso, 0.0) + sign * magnitude
