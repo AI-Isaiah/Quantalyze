@@ -127,20 +127,23 @@ def test_withdrawal_day_books_only_real_pnl():
 
 
 def test_deposit_after_last_nav_day_ingests_no_orphan_raise_cr01():
-    """CR-01 (the money-path blocker): a deposit dated AFTER the last EOD
-    balance-history day — the ordinary "fund the account, then connect/resync"
-    flow (balance-history's last snapshot is yesterday; the deposit is today) —
-    must NOT raise NavReconstructionError. The flow day is UNIONED into the NAV
-    index as a (NaN-NAV) calendar day, so the deposit books cashflow-neutral: an
-    honest NaN return on the un-observed day, never double-counted, never an orphan
-    crash.
+    """CR-01 (the money-path blocker) refined by F2/F6: a deposit dated AFTER the
+    last EOD balance-history day — the ordinary "fund the account, then
+    connect/resync" flow (balance-history's last snapshot is yesterday; the deposit
+    is today) — must NOT raise NavReconstructionError. The flow day is unioned into
+    the CHAIN-LINK index (so _align_flows never orphan-raises), the deposit books
+    cashflow-neutral (never counted as return), and — F2/F6 — the out-of-span flow
+    day is then STRIPPED from the emitted series: it carried only a NaN and must
+    NOT appear as a phantom row or widen the stamped span past the last observed
+    NAV day (that would be a fabricated, inception/terminus-shifting artifact).
 
     NAV observed [1000, 1010] on 01-01/01-02 (last EOD = 01-02); a +500 deposit
     dated 01-03 (today — no EOD snapshot yet). HAND-DERIVED:
       day0 (01-01) = 0.0 anchor (prev0 = first NAV = 1000)
       day1 (01-02) = (1010 - 1000)/1000                 = 0.01
-      day2 (01-03) = NaN  (NaN NAV — today's EOD equity is unknown; the deposit is
-                           neither return nor lost)
+      01-03: NOT in the series — no NAV observation covers it yet; the deposit is
+             neither booked nor lost, simply not-yet-reflected (the next crawl,
+             once an EOD snapshot exists for it, picks it up honestly).
     """
     nav = _nav([1000.0, 1010.0], start="2026-01-01")  # last EOD = 01-02
     flows = _flows({"2026-01-03": 500.0})  # deposit dated AFTER the last NAV day
@@ -153,24 +156,67 @@ def test_deposit_after_last_nav_day_ingests_no_orphan_raise_cr01():
     d2 = pd.Timestamp("2026-01-03").as_unit("us")
     assert returns.loc[d0] == pytest.approx(0.0, abs=1e-12)
     assert returns.loc[d1] == pytest.approx(0.01, abs=1e-12)
-    assert d2 in returns.index  # the boundary flow day exists (unioned in)
-    assert math.isnan(returns.loc[d2])  # honest NaN — deposit NOT booked as return
+    # F2/F6: the out-of-span boundary flow day is NOT fabricated into the series and
+    # does NOT widen the stamped span past the last observed NAV day.
+    assert d2 not in returns.index
+    assert returns.index.max() == d1
     # The deposit's naive +50%-ish return (500/1010) appears NOWHERE.
     assert not np.any(np.isclose(returns.dropna().to_numpy(), 500.0 / 1010.0))
 
 
 def test_pre_inception_deposit_does_not_raise_orphan_cr01():
-    """CR-01 symmetric case: a funding deposit dated a day BEFORE the first EOD
-    balance-history snapshot must also not raise — it lands on a leading NaN-NAV
-    day (benign), never an orphan NavReconstructionError."""
+    """CR-01 symmetric case refined by F2/F6: a funding deposit dated a day BEFORE
+    the first EOD balance-history snapshot must also not raise. It is unioned into
+    the chain-link index (no orphan raise) but — F2/F6 — the out-of-span day is
+    STRIPPED from the emitted series, so the displayed inception is NOT shifted
+    earlier onto a phantom pre-inception day."""
     nav = _nav([1000.0, 1010.0, 1020.0], start="2026-02-02")  # first EOD = 02-02
     flows = _flows({"2026-02-01": 400.0})  # deposit dated BEFORE the first NAV day
 
     returns, meta = combine_sfox_balance_history(nav, flows)  # must not raise
 
     d_pre = pd.Timestamp("2026-02-01").as_unit("us")
-    assert d_pre in returns.index
-    assert math.isnan(returns.loc[d_pre])  # leading NaN day (benign)
+    d_first = pd.Timestamp("2026-02-02").as_unit("us")
+    # F2/F6: inception is the first OBSERVED NAV day, never shifted earlier onto the
+    # out-of-span flow day.
+    assert d_pre not in returns.index
+    assert returns.index.min() == d_first
+
+
+def test_flow_multiple_days_before_first_nav_fabricates_no_flat_days_f2():
+    """F2/F6 (a): a flow dated MULTIPLE (>=2) days before the first NAV day must
+    NOT fabricate flat 0.0 pre-inception days, and must NOT shift the displayed
+    inception earlier.
+
+    Pre-fix, ``combine_sfox_balance_history`` unioned the flow day into the NAV
+    index THEN ran ``gap_fill_daily_returns`` (reindex fill_value=0.0). Because the
+    union only added the single flow day (not the calendar days between it and the
+    NAV span), gap_fill then FABRICATED 0.0 returns on those intervening days and
+    pulled ``returns.index.min()`` back to the flow day — a fabricated,
+    inception-shifting pre-history that says "flat, no change" on days the account
+    was never observed. Post-fix the series is restricted to the OBSERVED NAV span,
+    so those days simply do not exist.
+
+    NAV observed 01-10/01-11/01-12; a +5000 deposit dated 01-07 (3 days pre-NAV).
+    """
+    nav = _nav([100000.0, 101000.0, 102000.0], start="2026-01-10")
+    flows = _flows({"2026-01-07": 5000.0})  # 3 days before the first NAV day
+
+    returns, meta = combine_sfox_balance_history(nav, flows)
+
+    # Inception is the first observed NAV day — never the pre-inception flow day.
+    assert returns.index.min() == pd.Timestamp("2026-01-10").as_unit("us")
+    # None of the pre-inception calendar days were fabricated into the series.
+    for d in ("2026-01-07", "2026-01-08", "2026-01-09"):
+        assert pd.Timestamp(d).as_unit("us") not in returns.index
+    # No fabricated flat 0.0 return sits before the first real move.
+    # (day-0 01-10 is a NaN anchor here because its prev is the un-observed
+    #  pre-inception NAV; the honest daily moves begin 01-11.)
+    assert returns.loc[pd.Timestamp("2026-01-11").as_unit("us")] == pytest.approx(
+        (101000.0 - 100000.0) / 100000.0, abs=1e-12
+    )
+    # A clean, hole-free observed span reports no coverage gap.
+    assert meta.get("nav_coverage_gap_days", 0) == 0
 
 
 def test_day0_inception_flow_forced_to_zero_anchor_wr01():
@@ -232,6 +278,12 @@ def test_interior_missing_nav_day_breaks_that_day_and_next_never_bridged():
 
     bridged = (1030.0 - 1010.0) / 1010.0
     assert not np.any(np.isclose(returns.dropna().to_numpy(), bridged))
+
+    # F2/F6 (b): the missing interior day is an HONEST coverage gap — the meta must
+    # reflect it (never a silent 'complete' over a holed sampled span), and the real
+    # PnL on the following observed pair is preserved (NOT zeroed).
+    assert meta.get("computation_status_hint") != "complete"
+    assert meta.get("nav_coverage_gap_days", 0) >= 1
 
 
 def test_flow_dominated_guard_fires_and_surfaces_in_meta():

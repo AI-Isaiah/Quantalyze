@@ -239,9 +239,12 @@ def combine_sfox_balance_history(
     SIMPLEST broker-dailies path: it HANDS us the NAV series directly, so there is
     NO ledger reconstruction here — no native backward-roll, no bespoke ``r_t``
     loop, and no downstream scalar/backbone call (that stays at the job-worker
-    seam, plan 120-03). Returns ``(returns, meta)`` in the
-    BYTE-identical sibling shape: a gap-filled float Series on an ascending daily
-    DatetimeIndex unit [us] + a plain dict of the ``NavTWRMeta`` DQ-01 flags.
+    seam, plan 120-03). Returns ``(returns, meta)``: a float Series on the DENSE
+    daily OBSERVED-NAV span (ascending DatetimeIndex unit [us]) whose interior
+    missing days are honest NaN gaps — NEVER 0.0-filled (F2/F6: sFOX NAV is a
+    SAMPLED series, so an unobserved day is UNKNOWN, not flat) — plus a plain dict
+    of the ``NavTWRMeta`` DQ-01 flags (carrying ``nav_coverage_gap_days`` when the
+    span has interior holes).
 
     Cashflow separation (economically load-bearing): the external flow F sits in
     the numerator ``r_t = (NAV_t - NAV_{t-1} - F_t) / NAV_{t-1}`` — a deposit day
@@ -303,13 +306,16 @@ def combine_sfox_balance_history(
         else pd.Series(dtype="float64", name="flows")
     )
 
-    # Reindex to EVERY calendar day in [first, last] WITHOUT value-filling: a
-    # missing observation stays NaN (never 0.0-filled — that would FABRICATE a
-    # flat NAV day). The NaN then propagates as an honest break through the TWR.
-    full_idx = pd.date_range(
+    # The OBSERVED NAV span [first, last] — the dense daily grid over the days sFOX
+    # actually reported a usd_value for. Computed from the ORIGINAL series BEFORE the
+    # chain-link union below, so an out-of-span boundary flow can NEVER widen the
+    # displayed span (F2/F6). A missing observation INSIDE this span stays NaN
+    # (never 0.0-filled — that would FABRICATE a flat NAV day); the NaN propagates
+    # as an honest break through the TWR.
+    span_idx = pd.date_range(
         nav.index.min(), nav.index.max(), freq="D"
     ).as_unit("us")
-    # CR-01: UNION the flow days into the NAV index BEFORE chain_linked_twr,
+    # CR-01: UNION the flow days into the CHAIN-LINK index BEFORE chain_linked_twr,
     # mirroring how reconstruct_nav_and_twr unions flow days via _union_flow_days.
     # sFOX's two crawls are INDEPENDENT time domains: /balance/history is an
     # end-of-day snapshot (its last point is typically YESTERDAY — the crawl edge
@@ -321,10 +327,13 @@ def combine_sfox_balance_history(
     # realistic onboarding account (the T-74-02/T-80-10 DoS: it escapes the sfox
     # worker branch → retried forever, no terminal stamp). Unioned, that boundary
     # flow gets a (NaN-NAV) calendar day here and yields an honest NaN return — the
-    # deposit is neither counted as return nor lost, and never a crash.
+    # deposit is neither counted as return nor lost, and never a crash. The
+    # out-of-span union day is stripped back off below (F2/F6) so it can never
+    # fabricate flat days between it and the span.
+    chain_idx = span_idx
     if not flows_arg.empty:
-        full_idx = full_idx.union(flows_arg.index)
-    nav = nav.reindex(full_idx)
+        chain_idx = span_idx.union(flows_arg.index)
+    nav = nav.reindex(chain_idx)
 
     # WR-01: the day-0 anchor carries NO flow-driven return. prev0 = first_observed
     # is the EOD inception equity, which ALREADY reflects any SAME-day funding
@@ -350,9 +359,31 @@ def combine_sfox_balance_history(
         flows_by_day=flows_arg,
         prev0=first_observed,
     )
-    # Same shape contract as the other combiners: the index is already dense so
-    # gap-fill fills NOTHING; existing NaN breaks SURVIVE (a shape no-op, never a
-    # bridge across a gap).
-    returns = gap_fill_daily_returns(returns)
-    meta = _build_nav_meta(flags)
-    return returns, dict(meta)
+    # F2/F6 (P120 red-team, no-invented-data): DO NOT gap_fill(0.0) the sFOX series
+    # (the other combiners do, because for a ledger-COMPLETE venue an absent day is
+    # genuinely flat and 0.0 is correct). sFOX NAV is a SAMPLED series, so an
+    # unobserved day is UNKNOWN, never flat — a 0.0 fabricates equity ("flat, no
+    # change" when the truth is "we don't know"). Left unfixed, gap_fill would
+    # (a) 0.0-BRIDGE the gap between an out-of-span boundary flow (unioned into
+    # chain_idx above) and the NAV span — fabricating pre-inception/post-terminus
+    # flat days AND shifting the displayed inception earlier — and (b) it is simply
+    # unnecessary for interior holes (they must stay UNKNOWN). Instead restrict the
+    # series back to the OBSERVED NAV span: interior missing days remain honest NaN
+    # gaps that derive_basis_series DROPS into gap_spans (an absent csv_daily_returns
+    # row), never a fabricated 0.0; and the out-of-span union days (whose NaN returns
+    # carry no information) fall away — the flow is simply not yet reflected in any
+    # NAV observation (honest), never a crash (the union already booked it
+    # cashflow-neutral for the chain-link). The index stays DENSE over the span
+    # (date_range) so the downstream "dense Series" contract holds.
+    returns = returns.reindex(span_idx)
+
+    # Coverage honesty: an interior missing NAV day is a real coverage gap in a
+    # SAMPLED series. Surface it in the meta so no consumer reads a holed span as
+    # 'complete' coverage; the authoritative per-day gap_spans are still derived
+    # downstream by derive_basis_series from the NaN rows.
+    nav_gap_days = int(nav.reindex(span_idx).isna().sum())
+    meta = dict(_build_nav_meta(flags))
+    if nav_gap_days > 0:
+        meta["nav_coverage_gap_days"] = nav_gap_days
+        meta["computation_status_hint"] = "complete_with_warnings"
+    return returns, meta
