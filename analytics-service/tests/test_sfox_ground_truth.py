@@ -203,6 +203,135 @@ def test_reconstruction_check_passes_on_consistent_fixture_f4():
 
 
 # ---------------------------------------------------------------------------
+# F4 HORIZON regression — a SPARSE-transaction account (transactions only on
+# 01-01 and 01-05; a 4-day gap) whose usd_value drifts daily (MTM) across the gap
+# and RECONCILES with account_balance at the two txn endpoints. The oracle books
+# ONE return over the 4-day span (01-01→01-05); returns_ut books four single-day
+# returns. Comparing the span return against a single-day returns_ut value is a
+# horizon mismatch that FALSELY raised pre-fix. Now the non-consecutive day is
+# SKIPPED (surfaced), so a legitimate sparse account is NOT falsely rejected.
+# HAND-DERIVED: usd_value 1000,1020,1040,1060,1080 (+20/day MTM); account_balance
+# on the two txn days == usd_value there (1000, 1080); zero external flow.
+# ---------------------------------------------------------------------------
+def test_sparse_transactions_multiday_gap_no_false_divergence_f4():
+    sparse_bh = [
+        _bh("2026-01-01", "1000"),
+        _bh("2026-01-02", "1020"),
+        _bh("2026-01-03", "1040"),
+        _bh("2026-01-04", "1060"),
+        _bh("2026-01-05", "1080"),
+    ]
+    sparse_txns = [
+        # Only two txn days, 4 calendar days apart; buy/sell rotations (no flow).
+        {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-01"), "account_balance": "1000"},
+        {"id": 2, "action": "sell", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-05"), "account_balance": "1080"},
+    ]
+    # Must NOT raise (pre-fix this raised a false ParityDivergenceError).
+    evidence = check_parity(sparse_bh, sparse_txns)
+    p = evidence["parity"]
+    # The span day was skipped as non-consecutive, never falsely flagged material.
+    assert p["reconstruction_vs_oracle_material_days"] == []
+    assert p["reconstruction_vs_oracle_skipped_gap_days"] >= 1
+    assert p["reconstruction_vs_oracle_compared_days"] == 0
+    assert evidence["a2_account_balance_semantics"]["total_mtm_reconciles"] is True
+    # COVERAGE GATE (red-team HIGH-2/3): F4 verified NOTHING → must NOT pass
+    # silently green; surface for the founder rather than exit-0 with the combine
+    # entirely unexercised.
+    assert p["reconstruction_unverified"] is True
+    assert evidence["requires_founder_decision"] is True
+
+
+def test_sparse_flow_day_uncovered_requires_founder_not_silent_green():
+    """Red-team HIGH-2/3: on a sparse account whose ONLY flow lands on a
+    non-consecutive day, the horizon-skip skips that flow day → F4 exercises no
+    flow handling. It must NOT exit-0 clean (a flow-sign combine bug would then be
+    invisible); the coverage gate surfaces requires_founder_decision so the founder
+    verifies before stamping api_verified."""
+    bh = [_bh(f"2026-01-0{d}", str(1000 + (d - 1) * 5)) for d in range(1, 10)]
+    bh.append(_bh("2026-01-10", "1545"))  # +500 deposit on 01-10 (1045 -> 1545)
+    txns = [
+        {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-01"), "account_balance": "1000"},
+        # sole external flow, on a day 9 calendar days after the prior txn day.
+        {"id": 2, "action": "deposit", "currency": "USD", "amount": "500",
+         "timestamp": _ms("2026-01-10"), "account_balance": "1545"},
+    ]
+    evidence = check_parity(bh, txns)  # must NOT raise
+    p = evidence["parity"]
+    assert p["reconstruction_vs_oracle_material_days"] == []
+    assert p["reconstruction_flow_day_uncovered"] is True
+    assert p["reconstruction_unverified"] is True
+    assert evidence["requires_founder_decision"] is True
+
+
+def test_designed_flow_dominated_break_no_false_raise_surfaces_founder():
+    """Red-team HIGH-1: combine_sfox_balance_history NaN-breaks a flow-DOMINATED day
+    BY DESIGN (deposit ≥ prior NAV → flow_dominated_guard). The oracle keeps that
+    day's return (0.0 here) finite → a one-sided finite/NaN. It must NOT be
+    auto-condemned as a combine bug (that false-raised ordinary staged-funding
+    accounts); surface it for the founder instead."""
+    # NAV 2000 on 01-01, +5000 deposit on 01-02 (EOD 7000): 5000/2000 = 2.5 ≥ 1.0
+    # → the combine flow-dominated guard NaNs 01-02; account_balance == usd_value on
+    # both txn days so a2_total_mtm reconciles and F4 is armed.
+    bh = [_bh("2026-01-01", "2000"), _bh("2026-01-02", "7000")]
+    txns = [
+        {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-01"), "account_balance": "2000"},
+        {"id": 2, "action": "deposit", "currency": "USD", "amount": "5000",
+         "timestamp": _ms("2026-01-02"), "account_balance": "7000"},
+    ]
+    evidence = check_parity(bh, txns)  # must NOT raise (pre-fix this false-raised)
+    p = evidence["parity"]
+    assert "2026-01-02" in p["reconstruction_vs_oracle_one_sided_break_days"]
+    assert p["reconstruction_vs_oracle_material_days"] == []  # NOT auto-material
+    assert evidence["requires_founder_decision"] is True  # surfaced, not condemned
+
+
+def test_asymmetric_start_bh_after_txns_no_false_raise():
+    """Red-team MED-413: when the transactions crawl reaches further back than
+    balance-history (bh first snapshot is a txn day whose returns_ut value is the
+    0.0 A3 anchor, not a measured return), F4 must EXCLUDE that anchor day rather
+    than compare a real oracle return against 0.0 and false-raise."""
+    # bh starts 01-02; txns on 01-01 (10000) and 01-02 (10300, a real +3% move).
+    bh = [_bh("2026-01-02", "10300"), _bh("2026-01-03", "10403")]
+    txns = [
+        {"id": 1, "action": "buy", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-01"), "account_balance": "10000"},
+        {"id": 2, "action": "sell", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-02"), "account_balance": "10300"},
+        {"id": 3, "action": "sell", "currency": "BTC", "amount": "0.01",
+         "timestamp": _ms("2026-01-03"), "account_balance": "10403"},
+    ]
+    evidence = check_parity(bh, txns)  # must NOT raise on the anchor day
+    assert evidence["parity"]["reconstruction_vs_oracle_material_days"] == []
+
+
+def test_reconstruction_nan_break_surfaces_founder_decision_not_raise(monkeypatch):
+    """F4 one-sided break (red-team HIGH-1 refinement): a combine NaN on a day the
+    oracle values is AMBIGUOUS (a designed guard vs a bug) — the harness cannot tell
+    them apart without re-implementing the combine's guards (a P115 violation), so it
+    SURFACES the day (requires_founder_decision), never auto-raises. Pre-redo it
+    auto-raised, which false-condemned every designed-break account."""
+    import scripts.sfox_ground_truth as gt
+
+    real_combine = gt.combine_sfox_balance_history
+
+    def buggy_combine(usd_value, flows):
+        returns, meta = real_combine(usd_value, flows)
+        returns = returns.copy()
+        returns.iloc[1] = float("nan")  # NaN the real 01-02 (+1%) return
+        return returns, meta
+
+    monkeypatch.setattr(gt, "combine_sfox_balance_history", buggy_combine)
+    evidence = gt.check_parity(_CONSISTENT_BH, _CONSISTENT_TXNS)  # must NOT raise
+    p = evidence["parity"]
+    assert "2026-01-02" in p["reconstruction_vs_oracle_one_sided_break_days"]
+    assert evidence["requires_founder_decision"] is True
+
+
+# ---------------------------------------------------------------------------
 # A2 cash-only pattern — account_balance is a USD *cash* running balance that is
 # piecewise-constant between cashflow events (jumps only on the 01-03 deposit),
 # while usd_value marks the held crypto daily. The two reconcile at the cashflow

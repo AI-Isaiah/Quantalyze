@@ -382,20 +382,81 @@ def check_parity(
     # cancel here (each series divides by its OWN prior NAV), so a wrong flow sign or
     # numerator in the combine surfaces as a material per-day return divergence.
     oracle_returns: pd.Series = oracle["returns"]
-    recon_common = returns_ut.index.intersection(oracle_returns.index)
+    # F4 HORIZON MATCH + COVERAGE GATE. The oracle computes each return against the
+    # PRIOR TRANSACTION day, which can span several CALENDAR days when transactions
+    # are sparse; returns_ut is a DENSE single-calendar-day series. Comparing on the
+    # raw index intersection pits a multi-day oracle span against a one-day
+    # returns_ut value → a FALSE per-day divergence on any sparse-txn account. So
+    # compare ONLY where the oracle return spans a SINGLE calendar day (its prior
+    # txn day is the immediately preceding calendar day): there both series measure
+    # the same one-day, flow-neutral return, and — the raise fires ONLY under
+    # a2_total_mtm_reconciles (NAV==account_balance on every txn day) — they must
+    # agree EXACTLY, so a per-day residual is a real combine bug.
+    #
+    # TWO refinements the red team forced (each a cross-fix contradiction the
+    # per-fix review missed):
+    #  1. A one-sided finite/NaN (combine NaN'd a day the oracle values, or vice
+    #     versa) is NOT auto-material. combine_sfox_balance_history has DESIGNED
+    #     honest breaks (flow-dominated / dust / sub-floor / non-positive NAV
+    #     guards, and F2/F6 sampled-NAV holes) that legitimately NaN a day the
+    #     oracle keeps — auto-raising there false-condemns ordinary staged-funding /
+    #     small / gap accounts. Surface it (founder decision), never raise on it.
+    #  2. The horizon-skip must NOT silently DOWNGRADE to zero-coverage-exit-0: on a
+    #     sparse account every flow day can be skipped, F4 compares nothing, and a
+    #     real flow-sign combine bug would pass green (the level/cumulative checks
+    #     compare only the RAW streams, never the reconstruction). So if F4 verified
+    #     nothing, or a FLOW day went unverified, mark reconstruction_unverified →
+    #     requires_founder_decision (surfaced, never a false green).
+    # Keyed by ISO date to sidestep any DatetimeIndex unit mismatch (us vs ns).
+    ut_anchor_day = (
+        pd.Timestamp(usd_value.index[0]).date().isoformat() if len(usd_value) else None
+    )
+    ut_by_day: dict[str, float] = {
+        pd.Timestamp(ts).date().isoformat(): float(returns_ut.loc[ts])
+        for ts in returns_ut.index
+    }
+    oracle_days = [pd.Timestamp(ts).date().isoformat() for ts in oracle_returns.index]
+    _one_day = pd.Timedelta(days=1)
     returns_recon_max_resid = 0.0
     returns_recon_material_days: list[str] = []
-    for ts in recon_common:
-        r_ut = float(returns_ut.loc[ts])
-        r_or = float(oracle_returns.loc[ts])
-        if not (math.isfinite(r_ut) and math.isfinite(r_or)):
+    returns_recon_compared_days = 0
+    returns_recon_skipped_gap_days = 0
+    returns_recon_one_sided_break_days: list[str] = []
+    returns_recon_flow_day_uncovered = False
+    for i in range(1, len(oracle_days)):
+        day = oracle_days[i]
+        consecutive = (
+            pd.Timestamp(day) - pd.Timestamp(oracle_days[i - 1])
+        ) == _one_day
+        # Skip the returns_ut anchor day (the first balance-history day): its 0.0 is
+        # the A3 prev0 convention, NOT a measured return, so comparing a real oracle
+        # return against it false-diverges when the txn history reaches back further
+        # than balance-history. The A3 inception-residual probe covers that day.
+        if day == ut_anchor_day or not consecutive or day not in ut_by_day:
+            returns_recon_skipped_gap_days += 1
+            if day in event_days:
+                returns_recon_flow_day_uncovered = True
             continue
+        r_ut = ut_by_day[day]
+        r_or = float(oracle_returns.iloc[i])
+        ut_fin = math.isfinite(r_ut)
+        or_fin = math.isfinite(r_or)
+        if not ut_fin and not or_fin:
+            # Both reconstructions honestly broke this day (e.g. zero prior NAV) —
+            # no comparison, not a divergence.
+            continue
+        if ut_fin != or_fin:
+            # AMBIGUOUS one-sided break (designed guard vs bug) — surface, DON'T
+            # raise. If it is on a flow day, that flow went unverified.
+            returns_recon_one_sided_break_days.append(day)
+            if day in event_days:
+                returns_recon_flow_day_uncovered = True
+            continue
+        returns_recon_compared_days += 1
         d = abs(r_ut - r_or)
         returns_recon_max_resid = max(returns_recon_max_resid, d)
         if d > _RETURNS_RECON_MATERIALITY:
-            returns_recon_material_days.append(
-                pd.Timestamp(ts).date().isoformat()
-            )
+            returns_recon_material_days.append(day)
     reconstruction_diverges = bool(returns_recon_material_days)
 
     # --- A2 probe: residuals under BOTH interpretations (emit, never pick).
@@ -460,9 +521,25 @@ def check_parity(
         and not _is_material(a3_residual, inception_capital)
     )
 
-    requires_founder_decision = a2_verdict in (
-        "cash_only_pattern_requires_founder",
-        "zero_cashflow_ambiguous_requires_founder",
+    # F4 COVERAGE GATE (armed only where F4 itself is armed — total-MTM
+    # reconciling): if the reconstruction-vs-oracle net verified NOTHING
+    # (compared_days==0) or left a FLOW day unverified (skipped non-consecutive OR a
+    # one-sided break), the combine is NOT confirmed clean and MUST NOT pass silently
+    # green — surface it for the founder. This closes the horizon-skip's coverage
+    # collapse (a real flow-sign bug on a sparse account would otherwise exit 0).
+    reconstruction_unverified = a2_total_mtm_reconciles and (
+        returns_recon_compared_days == 0
+        or returns_recon_flow_day_uncovered
+        or bool(returns_recon_one_sided_break_days)
+    )
+
+    requires_founder_decision = (
+        a2_verdict
+        in (
+            "cash_only_pattern_requires_founder",
+            "zero_cashflow_ambiguous_requires_founder",
+        )
+        or reconstruction_unverified
     )
 
     evidence: dict[str, Any] = {
@@ -487,6 +564,16 @@ def check_parity(
                 returns_recon_max_resid, 8
             ),
             "reconstruction_vs_oracle_material_days": returns_recon_material_days,
+            # Coverage honesty (never a silent cap): how many single-calendar-day
+            # returns were actually compared vs skipped (non-consecutive span, or the
+            # returns_ut anchor day), the AMBIGUOUS one-sided break days (a designed
+            # combine guard OR a bug — surfaced, never auto-raised), whether a FLOW
+            # day went unverified, and the resulting coverage-gate verdict.
+            "reconstruction_vs_oracle_compared_days": returns_recon_compared_days,
+            "reconstruction_vs_oracle_skipped_gap_days": returns_recon_skipped_gap_days,
+            "reconstruction_vs_oracle_one_sided_break_days": returns_recon_one_sided_break_days,
+            "reconstruction_flow_day_uncovered": bool(returns_recon_flow_day_uncovered),
+            "reconstruction_unverified": bool(reconstruction_unverified),
         },
         "a2_account_balance_semantics": {
             "total_mtm_max_residual": round(a2_total_mtm_max, 6),
@@ -522,8 +609,9 @@ def check_parity(
         raise ParityDivergenceError(
             "sFOX RECONSTRUCTION FAIL-LOUD: combine_sfox_balance_history's "
             "reconstructed returns diverge from the independent transactions-only "
-            "reconstruction on days where the two raw streams agree as the same "
-            "total-MTM NAV — a combine bug (wrong flow sign/numerator) "
+            "reconstruction on a COMPARABLE (single-calendar-day, both-finite) day "
+            "where the two raw streams agree as the same total-MTM NAV — a combine "
+            "bug (wrong flow sign/numerator) "
             f"(max return residual={returns_recon_max_resid:.4f}, "
             f"material days={len(returns_recon_material_days)}). The reconstructed "
             "curve must not be displayed."
