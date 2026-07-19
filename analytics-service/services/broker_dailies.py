@@ -291,12 +291,35 @@ def combine_sfox_balance_history(
     # inserted (missing-day) NaN can never become the inception capital.
     first_observed = float(nav.iloc[0])
 
+    # Normalize the flow argument up front so the CR-01 union (below) and the
+    # downstream chain-link operate on one Series (never a None branch).
+    flows_arg = (
+        flows_by_day
+        if flows_by_day is not None
+        else pd.Series(dtype="float64", name="flows")
+    )
+
     # Reindex to EVERY calendar day in [first, last] WITHOUT value-filling: a
     # missing observation stays NaN (never 0.0-filled — that would FABRICATE a
     # flat NAV day). The NaN then propagates as an honest break through the TWR.
     full_idx = pd.date_range(
         nav.index.min(), nav.index.max(), freq="D"
     ).as_unit("us")
+    # CR-01: UNION the flow days into the NAV index BEFORE chain_linked_twr,
+    # mirroring how reconstruct_nav_and_twr unions flow days via _union_flow_days.
+    # sFOX's two crawls are INDEPENDENT time domains: /balance/history is an
+    # end-of-day snapshot (its last point is typically YESTERDAY — the crawl edge
+    # tolerance permits now−2d), while /transactions is real-time. So a
+    # deposit/withdraw dated today (the ordinary "fund the account, then
+    # connect/resync" flow) or a pre-inception funding deposit lands on a day
+    # OUTSIDE [first_bh_day, last_bh_day]. Left un-unioned it is an ORPHAN that
+    # _align_flows rejects with NavReconstructionError, permanently failing a
+    # realistic onboarding account (the T-74-02/T-80-10 DoS: it escapes the sfox
+    # worker branch → retried forever, no terminal stamp). Unioned, that boundary
+    # flow gets a (NaN-NAV) calendar day here and yields an honest NaN return — the
+    # deposit is neither counted as return nor lost, and never a crash.
+    if not flows_arg.empty:
+        full_idx = full_idx.union(flows_arg.index)
     nav = nav.reindex(full_idx)
 
     # daily_pnl is consulted by chain_linked_twr ONLY at iloc[0], and prev0
@@ -307,11 +330,7 @@ def combine_sfox_balance_history(
     returns, flags = chain_linked_twr(
         nav=nav,
         daily_pnl=daily_pnl,
-        flows_by_day=(
-            flows_by_day
-            if flows_by_day is not None
-            else pd.Series(dtype="float64", name="flows")
-        ),
+        flows_by_day=flows_arg,
         prev0=first_observed,
     )
     # Same shape contract as the other combiners: the index is already dense so

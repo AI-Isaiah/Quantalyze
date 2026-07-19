@@ -2758,7 +2758,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # via the EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard
             # set). No new backbone call site — (returns, meta) fall through to the
             # UNCHANGED derive_basis_series / persist_basis_series below.
-            returns, meta = combine_sfox_balance_history(_usd_value, _flows_series)
+            try:
+                returns, meta = combine_sfox_balance_history(
+                    _usd_value, _flows_series
+                )
+            except NavReconstructionError as exc:
+                # CR-01 defense-in-depth: a STRUCTURAL NAV/TWR refusal from the
+                # shared core must dispose PERMANENT with a terminal stamp — the
+                # IDENTICAL disposition as the ccxt combine seam (:2934) and the
+                # deribit native handler (:2589). This combine sits INSIDE the sfox
+                # branch, whose only typed catches are asyncio.TimeoutError /
+                # SfoxCrawlTruncatedError / SfoxFlowValuationError, and the enclosing
+                # outer try catches ONLY ccxt.RateLimitExceeded — so without this
+                # catch a NavReconstructionError escapes to the generic dispatcher →
+                # retried FOREVER as `unknown` (T-74-02/T-80-10 DoS) with NO scrubbed
+                # terminal `failed` stamp (the wizard spins on 'computing'). The
+                # CR-01 union above already books the common boundary-flow case
+                # cashflow-neutral (no raise); THIS guards a genuinely structural
+                # residual (schema drift) so it reaches a terminal gate, never a spin.
+                return await _dispose_broker_nav_error(
+                    exc,
+                    stamp_detail=(
+                        "sFOX NAV/TWR reconstruction refused a structural input "
+                        "(an orphan/undatable flow or a non-finite NAV/flow amount). "
+                    ),
+                    result_detail=(
+                        "derive_broker_dailies: sfox NAV/TWR reconstruction failed "
+                        "structurally — "
+                    ),
+                )
 
             # Set the shared downstream variables EXACTLY as the deribit branch does
             # so the post-dispatch code runs unchanged. usd_value IS the total MTM

@@ -126,6 +126,53 @@ def test_withdrawal_day_books_only_real_pnl():
     assert abs(returns.iloc[2] - naive) > 0.25
 
 
+def test_deposit_after_last_nav_day_ingests_no_orphan_raise_cr01():
+    """CR-01 (the money-path blocker): a deposit dated AFTER the last EOD
+    balance-history day — the ordinary "fund the account, then connect/resync"
+    flow (balance-history's last snapshot is yesterday; the deposit is today) —
+    must NOT raise NavReconstructionError. The flow day is UNIONED into the NAV
+    index as a (NaN-NAV) calendar day, so the deposit books cashflow-neutral: an
+    honest NaN return on the un-observed day, never double-counted, never an orphan
+    crash.
+
+    NAV observed [1000, 1010] on 01-01/01-02 (last EOD = 01-02); a +500 deposit
+    dated 01-03 (today — no EOD snapshot yet). HAND-DERIVED:
+      day0 (01-01) = 0.0 anchor (prev0 = first NAV = 1000)
+      day1 (01-02) = (1010 - 1000)/1000                 = 0.01
+      day2 (01-03) = NaN  (NaN NAV — today's EOD equity is unknown; the deposit is
+                           neither return nor lost)
+    """
+    nav = _nav([1000.0, 1010.0], start="2026-01-01")  # last EOD = 01-02
+    flows = _flows({"2026-01-03": 500.0})  # deposit dated AFTER the last NAV day
+
+    # Pre-fix this raised NavReconstructionError (orphan flow); post-fix it does not.
+    returns, meta = combine_sfox_balance_history(nav, flows)
+
+    d0 = pd.Timestamp("2026-01-01").as_unit("us")
+    d1 = pd.Timestamp("2026-01-02").as_unit("us")
+    d2 = pd.Timestamp("2026-01-03").as_unit("us")
+    assert returns.loc[d0] == pytest.approx(0.0, abs=1e-12)
+    assert returns.loc[d1] == pytest.approx(0.01, abs=1e-12)
+    assert d2 in returns.index  # the boundary flow day exists (unioned in)
+    assert math.isnan(returns.loc[d2])  # honest NaN — deposit NOT booked as return
+    # The deposit's naive +50%-ish return (500/1010) appears NOWHERE.
+    assert not np.any(np.isclose(returns.dropna().to_numpy(), 500.0 / 1010.0))
+
+
+def test_pre_inception_deposit_does_not_raise_orphan_cr01():
+    """CR-01 symmetric case: a funding deposit dated a day BEFORE the first EOD
+    balance-history snapshot must also not raise — it lands on a leading NaN-NAV
+    day (benign), never an orphan NavReconstructionError."""
+    nav = _nav([1000.0, 1010.0, 1020.0], start="2026-02-02")  # first EOD = 02-02
+    flows = _flows({"2026-02-01": 400.0})  # deposit dated BEFORE the first NAV day
+
+    returns, meta = combine_sfox_balance_history(nav, flows)  # must not raise
+
+    d_pre = pd.Timestamp("2026-02-01").as_unit("us")
+    assert d_pre in returns.index
+    assert math.isnan(returns.loc[d_pre])  # leading NaN day (benign)
+
+
 def test_day0_is_anchor_no_return():
     """A3 [ASSUMED]: prev0 = first OBSERVED usd_value → day-0 emits no movement
     (0.0 anchor); returns begin on day 1. Convention resolves empirically in the
@@ -665,6 +712,65 @@ async def test_sfox_tiny_empty_account_flows_to_honest_downstream_gate():
     # NOT the material-balance permanent failure.
     for _name, payload, _oc in capture["upserts"]:
         assert "material equity" not in str(payload)
+
+
+# --- CR-01: boundary-flow money path + defensive combine catch --------------
+async def test_sfox_deposit_dated_after_last_nav_day_ingests_no_retry_cr01():
+    """CR-01 end-to-end (THE money path): a deposit dated AFTER the last EOD
+    balance-history snapshot (the fund-then-connect flow) ingests cleanly through
+    the worker — DONE, no NavReconstructionError, no transient retry, no terminal
+    `failed` stamp. Pre-fix the orphan flow raised inside combine and escaped the
+    sfox branch to the retry-forever dispatcher (T-74-02 DoS)."""
+    ctx, capture = _sfox_ctx()
+    nav_rows = [
+        _bh_row("2026-01-01", "100000"),
+        _bh_row("2026-01-02", "101000"),  # last EOD snapshot (yesterday)
+    ]
+    # +5000 deposit dated 01-03 — AFTER the last NAV day (the orphan-flow trigger).
+    txns = [
+        {"id": 1, "action": "deposit", "currency": "USD", "amount": "5000",
+         "timestamp": _ms("2026-01-03")},
+    ]
+    patches = _sfox_branch_patches(
+        ctx, bh_return=nav_rows, txn_return=txns, key_mode=False
+    )
+    with _apply(patches), patch(
+        "services.basis_series.persist_basis_series", new=MagicMock()
+    ):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.DONE
+    # It ingested — no terminal failed stamp, no retry classification.
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    for _name, payload, _oc in stamps:
+        assert payload.get("computation_status") != "failed"
+
+
+async def test_sfox_combine_nav_reconstruction_error_is_permanent_with_stamp():
+    """CR-01 defense-in-depth: if combine_sfox_balance_history raises a STRUCTURAL
+    NavReconstructionError (a residual schema-drift case the union cannot absorb),
+    the sfox branch disposes PERMANENT with a terminal strategy_analytics stamp —
+    NEVER letting it escape to the generic dispatcher (retry-forever, no stamp: the
+    T-74-02 DoS). Neuter the try/except at the combine site → this reddens."""
+    from services.nav_twr import NavReconstructionError
+
+    ctx, capture = _sfox_ctx()
+    patches = _sfox_branch_patches(
+        ctx,
+        bh_return=[_bh_row("2026-01-01", "1000"), _bh_row("2026-01-02", "1010")],
+        txn_return=[],
+        key_mode=False,
+    )
+    with _apply(patches), patch(
+        "services.broker_dailies.combine_sfox_balance_history",
+        new=MagicMock(
+            side_effect=NavReconstructionError("orphan flow outside the window")
+        ),
+    ):
+        result = await run_derive_broker_dailies_job(_job(key_mode=False))
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"  # NOT transient/unknown retry-forever
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert stamps and stamps[0][1]["computation_status"] == "failed"
 
 
 # --- happy path: rides the SHARED backbone (ONE-path, no clobber) -----------
