@@ -196,6 +196,23 @@ _SFOX_CRAWL_TIMEOUT_S: Final[float] = float(
     os.getenv("SFOX_CRAWL_TIMEOUT_S", "300")
 )
 
+# FLIPRETRY-01 — hard per-crawl wall-clock bound for the deribit + ccxt venue
+# branches of derive_broker_dailies (the sibling of _SFOX_CRAWL_TIMEOUT_S for the
+# non-sfox venues). This is the v1.11 FLIP wedge root cause guard: the
+# `derive-allocator-key-dailies` cron fanned out derive_broker_dailies jobs whose
+# deribit native-ledger cash pass (~inception) and ccxt transfers (bybit 19k rows)
+# crawls were UNWRAPPED, so a slow/hanging live read blocked the SEQUENTIAL
+# worker's single event loop on an unbounded await → healthz stale 12 min. Wrapping
+# each crawl in asyncio.wait_for on this bound converts a hang into a CLASSIFIED,
+# retryable TRANSIENT failure at the bound, never a wedge. 300s per crawl matches
+# the landed sfox constant and leaves headroom under the FIXED 15-min (900s) outer
+# derive_broker_dailies budget (deribit cash pass + ≤2 serial ccxt crawls). A1
+# (docs-silent): the founder verifies this bound against a real deribit-inception /
+# bybit-19k crawl duration in the plan-03 runbook pilot before the live enqueue.
+_BROKER_CRAWL_TIMEOUT_S: Final[float] = float(
+    os.getenv("BROKER_CRAWL_TIMEOUT_S", "300")
+)
+
 # A1 (docs-silent depth): request the sfox history crawls from a far-past epoch
 # so they reach empirical inception; the earliest returned point IS the
 # inception (the crawl surfaces it, an earlier-than-requested start is never an
@@ -2316,9 +2333,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # old fetch_deribit_ledger_daily_records did (so the D-08
                 # funding-inside-settlement and completeness accounting are
                 # unchanged) and assembles the NativeLedger + CompletenessReport.
-                native_ledger, _completeness = await build_deribit_native_ledger(
-                    ctx.exchange, account_state=account_state, pnl_basis=pnl_basis,
-                    exclude_spot_extraction=exclude_spot_extraction,
+                # FLIPRETRY-01: the cash-pass crawl (deribit native ledger, ~inception
+                # for a long-lived account) is HARD-BOUNDED by asyncio.wait_for so a
+                # slow/hanging live read becomes a classified transient (the
+                # `except asyncio.TimeoutError` arm below), never an unbounded wedge of
+                # the SEQUENTIAL worker's event loop (the v1.11 FLIP rollback root
+                # cause). The MTM SECOND pass at :2472 is separately bounded already.
+                native_ledger, _completeness = await asyncio.wait_for(
+                    build_deribit_native_ledger(
+                        ctx.exchange, account_state=account_state, pnl_basis=pnl_basis,
+                        exclude_spot_extraction=exclude_spot_extraction,
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
                 )
                 # Re-anchored D-02 gate: a silently-partial ledger FAILS LOUD
                 # BEFORE any upsert — no partial track record is ever written. The
@@ -2550,6 +2576,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                                 strategy_id,
                                 scrub_freeform_string(str(_mtm_exc)),
                             )
+            except asyncio.TimeoutError:
+                # FLIPRETRY-01: the cash-pass crawl exceeded the per-crawl bound.
+                # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent, NEVER
+                # an unbounded wedge, and NO terminal `failed` stamp (the next attempt
+                # may succeed). This arm MUST precede the broader permanent-stamping
+                # arms below: in Python 3.11+ asyncio.TimeoutError IS builtins.
+                # TimeoutError (an OSError subclass), so an earlier broader catch would
+                # mis-dispose the timeout as PERMANENT and defeat the retry intent. The
+                # MTM second pass (:2472) has its own local TimeoutError arm, so this
+                # only ever fires for the cash pass. The `finally: aclose_exchange`
+                # below still runs. Mirrors the sfox FLIPRETRY-01 block (:2680): static
+                # scrubbed text only, never logger.exception / interpolated crawl
+                # content (H-3 HMAC-in-URL leak class).
+                logger.warning(
+                    "derive_broker_dailies: deribit cash-pass crawl exceeded the %ss "
+                    "per-crawl bound (label=%s) — classified transient, retrying "
+                    "(FLIPRETRY-01)",
+                    _BROKER_CRAWL_TIMEOUT_S, funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: deribit cash-pass crawl exceeded the "
+                        f"per-crawl wall-clock bound ({_BROKER_CRAWL_TIMEOUT_S}s) — "
+                        "retrying rather than wedging the worker (FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
             except (
                 LedgerCompletenessError,
                 LedgerTruncatedError,
@@ -2877,22 +2931,65 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # never a silent truncation), so these are NOT wrapped in a
             # segment-converting catch — a transient fetch error must reach the
             # outer dispatcher classifier, never be mistaken for a coverage gap.
-            _deposits = await fetch_ccxt_transfers(
-                ctx.exchange, "deposits", _flow_since_ms, now_ms
-            )
-            _withdrawals = await fetch_ccxt_transfers(
-                ctx.exchange, "withdrawals", _flow_since_ms, now_ms
-            )
-            _flow_rows = list(_deposits) + list(_withdrawals)
-            # Resolve the same-UTC-day close for every NON-STABLE flow currency
-            # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
-            # source; NO new price fetcher). The pure valuer marks stablecoins at
-            # 1.0 and FAILS LOUD if a non-stable flow has no same-day price (never
-            # 1.0 / current / drop → never a fabricated ±return that mis-anchors
-            # the TWR base).
-            _price_index = await _resolve_ccxt_flow_price_index(
-                ctx.exchange, venue, ctx.supabase, _flow_rows
-            )
+            # FLIPRETRY-01: EACH live crawl (both transfer fetches + the price-index
+            # resolve, which may hit venue OHLCV I/O) is HARD-BOUNDED by
+            # asyncio.wait_for so a slow/hanging read (bybit 19k rows was the v1.11
+            # wedge) becomes a classified transient at the bound, never an unbounded
+            # wedge of the SEQUENTIAL worker loop. The wait_for wraps ONLY the awaits:
+            # a non-timeout fetch error still bubbles to the dispatcher classifier
+            # exactly as WR-04 requires (wait_for re-raises the inner exception
+            # unchanged), and the HIGH-1 pure-valuer NavReconstructionError disposition
+            # (its own try below) is untouched. Mirrors the sfox block (:2680): one
+            # shared TimeoutError arm, static scrubbed text, never logger.exception.
+            try:
+                _deposits = await asyncio.wait_for(
+                    fetch_ccxt_transfers(
+                        ctx.exchange, "deposits", _flow_since_ms, now_ms
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+                _withdrawals = await asyncio.wait_for(
+                    fetch_ccxt_transfers(
+                        ctx.exchange, "withdrawals", _flow_since_ms, now_ms
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+                _flow_rows = list(_deposits) + list(_withdrawals)
+                # Resolve the same-UTC-day close for every NON-STABLE flow currency
+                # (I/O — reuses the existing OHLCV/CoinGecko/token_price_history
+                # source; NO new price fetcher). The pure valuer marks stablecoins at
+                # 1.0 and FAILS LOUD if a non-stable flow has no same-day price (never
+                # 1.0 / current / drop → never a fabricated ±return that mis-anchors
+                # the TWR base).
+                _price_index = await asyncio.wait_for(
+                    _resolve_ccxt_flow_price_index(
+                        ctx.exchange, venue, ctx.supabase, _flow_rows
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                # FLIPRETRY-01: a ccxt flow crawl exceeded the per-crawl bound. A hang
+                # is a CLASSIFIED, RETRYABLE transient — NEVER permanent, NEVER an
+                # unbounded wedge, no terminal stamp. The `finally: aclose_exchange`
+                # below still runs. (asyncio.TimeoutError is caught HERE, locally, so a
+                # transient network/parse error from fetch_ccxt_transfers still bubbles
+                # to the outer dispatcher classifier per WR-04 — this arm only ever sees
+                # the wait_for timeout.)
+                logger.warning(
+                    "derive_broker_dailies: ccxt flow crawl exceeded the %ss "
+                    "per-crawl bound (venue=%s, label=%s) — classified transient, "
+                    "retrying (FLIPRETRY-01)",
+                    _BROKER_CRAWL_TIMEOUT_S, venue, funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: ccxt flow crawl exceeded the "
+                        f"per-crawl wall-clock bound ({_BROKER_CRAWL_TIMEOUT_S}s) — "
+                        "retrying rather than wedging the worker (FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
             # HIGH-1: the PURE flow valuer raises NavReconstructionError
             # (permanent, structural) on the realistically-common case of a
             # non-stable coin flow with no resolvable same-UTC-day price AND on
