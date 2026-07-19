@@ -251,9 +251,13 @@ def combine_sfox_balance_history(
 
     Day-0 convention (A3 [ASSUMED]): ``prev0`` = the FIRST OBSERVED ``usd_value``
     (the balance-history inception point = inception capital), so day-0 emits a
-    0.0 anchor return (no spurious first-day move) and returns begin day 1. This
-    resolves empirically in the SFOX-06 founder ground-truth run — amend here if
-    the live curve contradicts.
+    0.0 anchor return (no spurious first-day move) and returns begin day 1. Because
+    ``prev0`` already reflects any same-day funding deposit, a flow dated ON the
+    day-0 anchor is FORCED to 0 (dropped) before the chain-link — WR-01 — so the
+    anchor cannot emit a spurious ``−F_0/first_observed`` return; the 0.0-anchor
+    claim would otherwise hold ONLY when there is no day-0 flow. This resolves
+    empirically in the SFOX-06 founder ground-truth run — amend here if the live
+    curve contradicts.
 
     Missing-day honesty: an UNOBSERVED interior sfox NAV day is UNKNOWN, not flat.
     We reindex the NAV to every calendar day WITHOUT value-filling, so a missing
@@ -321,6 +325,19 @@ def combine_sfox_balance_history(
     if not flows_arg.empty:
         full_idx = full_idx.union(flows_arg.index)
     nav = nav.reindex(full_idx)
+
+    # WR-01: the day-0 anchor carries NO flow-driven return. prev0 = first_observed
+    # is the EOD inception equity, which ALREADY reflects any SAME-day funding
+    # deposit; with a day-0 flow F_0 present, chain_linked_twr would emit
+    # returns[0] = (first_observed − first_observed − F_0)/first_observed
+    # = −F_0/first_observed — a spurious, economically-wrong anchor-day return that
+    # re-subtracts a deposit already embedded in the inception capital (the "0.0
+    # anchor" is honest ONLY when F_0 == 0). Drop any flow dated on the first index
+    # day so _align_flows fills 0.0 there and the anchor stays the honest 0.0. (In
+    # the rarer pre-inception-flow case the first index day is a NaN-NAV day whose
+    # return is NaN regardless, so this drop is harmless there.)
+    if not flows_arg.empty and nav.index[0] in flows_arg.index:
+        flows_arg = flows_arg.drop(nav.index[0])
 
     # daily_pnl is consulted by chain_linked_twr ONLY at iloc[0], and prev0
     # overrides even that — so the implied nav.diff() is a formal argument whose

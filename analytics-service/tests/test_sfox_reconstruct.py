@@ -173,6 +173,29 @@ def test_pre_inception_deposit_does_not_raise_orphan_cr01():
     assert math.isnan(returns.loc[d_pre])  # leading NaN day (benign)
 
 
+def test_day0_inception_flow_forced_to_zero_anchor_wr01():
+    """WR-01: a funding deposit dated ON the inception day must NOT emit a spurious
+    ``-F_0/first_observed`` anchor-day return. prev0 = first_observed already
+    reflects the same-day deposit, so F_0 is forced to 0 (dropped) → the anchor
+    stays the honest 0.0.
+
+    NAV = [1000, 1010] on 01-01/01-02; a +500 deposit dated 01-01 (inception day).
+    Pre-fix returns[0] = (1000 - 1000 - 500)/1000 = -0.5 (spurious). Post-fix 0.0.
+    day1 is unaffected: (1010 - 1000)/1000 = 0.01 (HAND-DERIVED).
+    """
+    nav = _nav([1000.0, 1010.0], start="2026-01-01")
+    flows = _flows({"2026-01-01": 500.0})  # deposit ON the inception day
+
+    returns, meta = combine_sfox_balance_history(nav, flows)
+
+    assert returns.iloc[0] == pytest.approx(0.0, abs=1e-12)  # honest anchor, not -0.5
+    assert returns.iloc[1] == pytest.approx(0.01, abs=1e-12)
+    # The spurious -0.5 anchor return must appear NOWHERE.
+    assert not np.any(np.isclose(returns.dropna().to_numpy(), -0.5))
+    # A clean anchor fires no DQ guard.
+    assert meta.get("computation_status_hint") == "complete"
+
+
 def test_day0_is_anchor_no_return():
     """A3 [ASSUMED]: prev0 = first OBSERVED usd_value → day-0 emits no movement
     (0.0 anchor); returns begin on day 1. Convention resolves empirically in the
