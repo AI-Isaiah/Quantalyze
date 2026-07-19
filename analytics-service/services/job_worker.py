@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -754,6 +755,16 @@ def _sfox_rows_to_usd_value_series(rows: list[dict[str, Any]]) -> "pd.Series":
                 "sFOX balance-history row carries no usable numeric "
                 "timestamp/usd_value"
             ) from exc
+        # F7 (P120 red-team): float("nan")/float("inf") SUCCEED — so a non-finite
+        # usd_value would slip through as a poisoned NAV point despite the docstring
+        # promising to fail loud on it (a NaN/inf NAV then silently corrupts the
+        # whole TWR denominator chain). Reject it here, mirroring the ground-truth
+        # _coerce_finite gate. Never coerce to 0.0 (that fabricates NAV).
+        if not math.isfinite(value):
+            raise SfoxFlowValuationError(
+                "sFOX balance-history row carries a non-finite usd_value "
+                "(NaN/Inf); refusing a poisoned NAV point"
+            )
         day = pd.Timestamp(
             datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).date()
         ).as_unit("us")

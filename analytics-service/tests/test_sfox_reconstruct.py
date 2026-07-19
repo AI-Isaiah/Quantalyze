@@ -959,6 +959,16 @@ def test_sfox_rows_to_usd_value_series_fails_loud_on_garbage():
         _sfox_rows_to_usd_value_series([_bh_row("2026-01-01", "not-a-number")])
 
 
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "Infinity", float("nan"), float("inf")])
+def test_sfox_rows_to_usd_value_series_fails_loud_on_non_finite_f7(bad):
+    """F7 (P120 red-team): float('nan')/float('inf') SUCCEED, so a non-finite
+    usd_value would slip through as a poisoned NAV point — silently corrupting the
+    whole TWR denominator chain — despite the parse docstring promising to fail
+    loud on it. A non-finite NAV point must RAISE (never coerce, never propagate)."""
+    with pytest.raises(SfoxFlowValuationError, match="non-finite"):
+        _sfox_rows_to_usd_value_series([_bh_row("2026-01-01", bad)])
+
+
 # --- source-scan gates: ONE-path + wait_for bound --------------------------
 def _stripped_job_worker_source() -> str:
     """job_worker.py with full-line comments stripped (the grep-gate hygiene
