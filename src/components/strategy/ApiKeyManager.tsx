@@ -296,6 +296,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // convention. (The two maps can still drift; a shared-constant consolidation
     // is out of scope per locked decision D5.)
     deribit: "DRB",
+    // SFOX-09: ships UNCONDITIONALLY (a founder-connected sfox key exists before
+    // the public offer flag flips) so the key card renders the mono tag, never
+    // the "?" fallback. Mono, no emoji per DESIGN.md.
+    sfox: "SFOX",
   };
 
   return (

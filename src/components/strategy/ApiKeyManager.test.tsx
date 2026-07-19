@@ -306,6 +306,45 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     // … and the degraded "?" fallback does NOT.
     expect(screen.queryByText("?")).not.toBeInTheDocument();
   });
+
+  // SFOX-09 — sfox ships UNCONDITIONALLY (a founder-connected sfox key exists
+  // before the public offer flag flips). Without the exchangeIcon `sfox` entry
+  // the avatar falls through to "?", making a live-and-correct key look broken.
+  // Pins the mono tag: a sfox row must show "SFOX", never "?". FAILS without
+  // the map entry.
+  it("renders the SFOX badge (not '?') for a sfox key row (SFOX-09)", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-sfox",
+          user_id: "user-a",
+          exchange: "sfox",
+          label: "My sFOX",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My sFOX")).toBeInTheDocument();
+    });
+    // Canonical mono tag renders …
+    expect(screen.getByText("SFOX")).toBeInTheDocument();
+    // … and the degraded "?" fallback does NOT.
+    expect(screen.queryByText("?")).not.toBeInTheDocument();
+  });
 });
 
 // mig 20260707120000 — a warned sync (complete_with_warnings) is a terminal

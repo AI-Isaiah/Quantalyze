@@ -129,6 +129,11 @@ const EXCHANGE_TAGS: Record<
   kraken: { label: "KRK", bg: "#EDE9FE", fg: "#5B21B6" },
   deribit: { label: "DRB", bg: "#DBEAFE", fg: "#1E3A8A" },
   coinbase: { label: "CBS", bg: "#DBEAFE", fg: "#1D4ED8" },
+  // SFOX-09: sfox has no bright brand colour — a neutral slate pairing
+  // (slate-100 bg / near-black navy fg, well past WCAG AA at ~17:1), distinct
+  // from every entry above. Ships UNCONDITIONALLY, independent of the SFOX-08
+  // offer flag: a founder-connected sfox key must render before the flag flips.
+  sfox: { label: "SFOX", bg: "#F1F5F9", fg: "#0F172A" },
 };
 
 function formatRelative(iso: string | null): string {

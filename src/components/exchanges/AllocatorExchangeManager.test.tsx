@@ -139,6 +139,28 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     expect(screen.queryByText("Auto-synced")).not.toBeInTheDocument();
   });
 
+  // SFOX-09 — the connected-key row renders the 3-letter-family mono tag from
+  // EXCHANGE_TAGS. Without the `sfox` entry the row falls through to the generic
+  // "SFO" slice fallback (wrong label + neutral grey), making a live sfox key
+  // look like an unknown venue. Pins the mono "SFOX" tag while proving an
+  // existing venue (binance → "BNB") is unchanged. FAILS without the map entry.
+  it("renders the SFOX mono tag for a sfox connected key, binance unchanged (SFOX-09)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-sfox-1", exchange: "sfox", label: "My sFOX" }),
+          makeKey({ id: "key-bnb-1", exchange: "binance", label: "My Binance" }),
+        ]}
+      />,
+    );
+    // sfox renders the canonical mono tag (not the "SFO" slice fallback).
+    expect(screen.getByText("SFOX")).toBeInTheDocument();
+    expect(screen.queryByText("SFO")).not.toBeInTheDocument();
+    // Existing venue is byte-unchanged.
+    expect(screen.getByText("BNB")).toBeInTheDocument();
+  });
+
   it("clicking Sync now POSTs to /api/allocator/holdings/sync with { api_key_id }", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
