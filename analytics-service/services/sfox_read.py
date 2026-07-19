@@ -212,12 +212,37 @@ async def crawl_sfox_transactions(
         if not page:
             return rows
         rows.extend(page)
-        after = str(page[-1]["id"])
+        after = _row_cursor_id(page[-1])  # WR-02: fail loud on a missing id cursor
 
     raise SfoxCrawlTruncatedError(
         "sFOX transactions crawl exhausted the request budget "
         f"({_SFOX_CRAWL_MAX_REQUESTS}) before the cursor reached exhaustion"
     )
+
+
+def _row_cursor_id(row: Any) -> str:
+    """The ``after`` pagination cursor of a transactions row — its ``id`` field.
+
+    WR-02: fail loud (``SfoxCrawlTruncatedError``) on a missing/unusable ``id``. A
+    schema-drifted page whose last row carries no cursor field would otherwise
+    raise a bare ``KeyError`` — neither ``SfoxCrawlTruncatedError`` nor any typed
+    error the worker branch handles — so it would escape to the generic dispatcher
+    as transient ``unknown`` and retry forever (the CR-01 DoS class, lower
+    likelihood). Disposing it as a typed truncation makes it PERMANENT with a
+    terminal stamp instead of an unbounded retry loop."""
+    try:
+        cursor = row["id"]
+    except (TypeError, KeyError) as exc:
+        raise SfoxCrawlTruncatedError(
+            "sFOX transactions page row carries no `id` cursor field — cannot "
+            "advance pagination; refusing to loop or silently truncate"
+        ) from exc
+    if cursor is None or str(cursor) == "":
+        raise SfoxCrawlTruncatedError(
+            "sFOX transactions page row carries an empty `id` cursor — cannot "
+            "advance pagination; refusing to loop or silently truncate"
+        )
+    return str(cursor)
 
 
 def _utc_day_iso(ts_ms: Any) -> str:

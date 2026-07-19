@@ -326,6 +326,29 @@ async def test_crawl_transactions_follows_cursor_to_exhaustion_in_order():
     assert afters == [None, "2", "4", "5"]
 
 
+async def test_crawl_transactions_missing_id_cursor_fails_loud_not_keyerror():
+    """WR-02: a schema-drifted transactions page whose last row lacks an `id`
+    cursor must raise the TYPED SfoxCrawlTruncatedError (→ permanent, terminal
+    stamp at the worker), NEVER a bare KeyError that escapes as transient and
+    retries forever (the CR-01 DoS class). Pre-fix `page[-1]["id"]` raised KeyError."""
+    client = _sfox_client()
+    # A non-empty page whose LAST row has no `id` field (schema drift).
+    client.get_transactions = AsyncMock(
+        return_value=[{"id": "1"}, {"action": "deposit", "amount": "100"}]
+    )
+    with pytest.raises(SfoxCrawlTruncatedError):
+        await crawl_sfox_transactions(client, from_ms=0)
+
+
+async def test_crawl_transactions_empty_id_cursor_fails_loud():
+    """WR-02: an `id` present but empty/None is not a usable cursor → typed
+    truncation, never a silent loop on a degenerate `after`."""
+    client = _sfox_client()
+    client.get_transactions = AsyncMock(return_value=[{"id": None}])
+    with pytest.raises(SfoxCrawlTruncatedError):
+        await crawl_sfox_transactions(client, from_ms=0)
+
+
 async def test_crawl_transactions_budget_exhaustion_raises_truncated():
     """A crawl that never exhausts within the hard request budget raises a typed
     truncation error — never a silent partial."""
