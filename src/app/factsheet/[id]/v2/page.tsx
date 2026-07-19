@@ -331,9 +331,11 @@ export default async function FactsheetV2Page({
   // client, which returned zero rows for every NON-owner viewer — so the
   // api_verified badge silently vanished on this PUBLIC factsheet for anon +
   // non-owner sessions. readPublicVerificationSignals sources it via the
-  // service-role, published-scoped projection (trust_tier+status ONLY),
-  // consistent with the SSR factsheet + browse. Fail-soft (logs to Sentry on a
-  // read error): no signal -> null tier -> badge hides, page still renders.
+  // published-gated SECDEF primitive get_published_trust_signals (RPC on a
+  // normal client, trust_tier+status ONLY; strategy_verifications stays
+  // owner-locked), consistent with the SSR factsheet + browse. Fail-soft (logs
+  // to Sentry on a read error): no signal -> null tier -> badge hides, page
+  // still renders.
   const [signRes, verificationSignals] = await Promise.all([
     withPublishedOnly(
       supabase
