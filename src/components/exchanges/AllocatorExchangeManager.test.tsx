@@ -81,6 +81,31 @@ vi.mock("@/lib/supabase/client", () => ({
   }),
 }));
 
+// F6 (SFOX-09): passthrough-wrap ApiKeyForm so the REAL form still renders for
+// every existing test, while capturing its onSubmit so the F6 wiring test can
+// drive the real handleAddKey with a mixed-case exchange vector. jsdom's <select>
+// resets a non-option value to "", so "sFOX" can't be injected via the real
+// Select — invoking the captured onSubmit is the faithful call-site drive.
+let capturedAddKeyOnSubmit:
+  | ((d: {
+      exchange: string;
+      label: string;
+      apiKey: string;
+      apiSecret: string;
+      passphrase: string;
+    }) => Promise<void>)
+  | null = null;
+vi.mock("@/components/strategy/ApiKeyForm", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/components/strategy/ApiKeyForm")>();
+  return {
+    ApiKeyForm: (props: Parameters<typeof actual.ApiKeyForm>[0]) => {
+      capturedAddKeyOnSubmit = props.onSubmit;
+      return <actual.ApiKeyForm {...props} />;
+    },
+  };
+});
+
 // Polyfill jsdom's missing HTMLDialogElement methods so the <Modal> component
 // can open/close without throwing. Native <dialog> isn't implemented in jsdom.
 beforeEach(() => {
@@ -1487,6 +1512,111 @@ describe("AllocatorExchangeManager — DOGFOOD-2 subtitle gated on holdings", ()
     expect(
       screen.queryByText(/no open positions yet/),
     ).not.toBeInTheDocument();
+  });
+});
+
+// F6 (phase-119 fold-in) — the CLIENT composes the api_keys INSERT directly, so a
+// mixed-case exchange ("sFOX") passes the server validate route (burning a live
+// probe) then 23514s on the DB lowercase-only CHECK. handleAddKey must
+// canonicalize to lowercase and use that value for BOTH the validate-and-encrypt
+// fetch body AND the insert. These tests drive the REAL handleAddKey (via the
+// captured onSubmit) with the mixed-case vector and assert the wiring at the call
+// site — a helper-only test would not prove the insert receives the canonical
+// value. Neuter `data.exchange.trim().toLowerCase()` back to `data.exchange` and
+// the sFOX case fails on both the fetch body and the insert payload.
+describe("AllocatorExchangeManager — F6 canonical-lowercase exchange at the add-key insert", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    insertMock.mockReset();
+    getUserMock.mockReset();
+    capturedAddKeyOnSubmit = null;
+    getUserMock.mockResolvedValue({
+      data: { user: { id: "user-a" } },
+      error: null,
+    });
+    insertMock.mockReturnValue({
+      data: makeKey({ id: "new-key", sync_status: "idle" }),
+      error: null,
+    });
+    fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            api_key_encrypted: "enc",
+            api_secret_encrypted: "sec",
+            passphrase_encrypted: null,
+            dek_encrypted: "dek",
+            nonce: "nonce",
+            kek_version: 1,
+          }),
+        });
+      }
+      // First-run holdings/sync POST.
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, job_id: "job-1" }),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function validateBody() {
+    const call = fetchMock.mock.calls.find(
+      (c) => c[0] === "/api/keys/validate-and-encrypt",
+    );
+    expect(call).toBeTruthy();
+    return JSON.parse(call![1].body as string) as { exchange: string };
+  }
+
+  async function openFormAndSubmit(exchange: string) {
+    render(<AllocatorExchangeManager hasHoldings={true} initialKeys={[]} />);
+    // Open the modal so the (wrapped) ApiKeyForm mounts and captures onSubmit.
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /\+ Connect exchange/i }),
+      );
+    });
+    expect(capturedAddKeyOnSubmit).not.toBeNull();
+    // Drive the REAL handleAddKey with the exchange vector under test.
+    await act(async () => {
+      await capturedAddKeyOnSubmit!({
+        exchange,
+        label: "Test Key",
+        apiKey: "test-key",
+        apiSecret: "test-secret",
+        passphrase: "",
+      });
+    });
+  }
+
+  it("canonicalizes a mixed-case 'sFOX' to 'sfox' in BOTH the validate body and the insert", async () => {
+    await openFormAndSubmit("sFOX");
+
+    // (a) validate-and-encrypt fetch body carries the canonical lowercase value.
+    expect(validateBody().exchange).toBe("sfox");
+    // (b) the api_keys insert payload carries the canonical lowercase value —
+    // the row that hits the DB lowercase-only CHECK.
+    expect(insertMock).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "sfox" }),
+    );
+  });
+
+  it("leaves an already-lowercase 'binance' byte-identical (no regression)", async () => {
+    await openFormAndSubmit("binance");
+
+    expect(validateBody().exchange).toBe("binance");
+    expect(insertMock).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "binance" }),
+    );
   });
 });
 

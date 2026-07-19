@@ -542,6 +542,13 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
   }) {
     setFormError(null);
     setFormLoading(true);
+    // F6 (phase-119 fold-in): the server validate route normalizes the exchange
+    // (WR-01), but the CLIENT performs the api_keys INSERT directly — a mixed-case
+    // value ("sFOX") passes validation (burning a live probe) then 23514s on the
+    // DB lowercase-only CHECK. Canonicalize once here and reuse for BOTH the
+    // validate-and-encrypt body AND the insert. Credential fields are untouched
+    // (their .trim() chokepoint lives server-side per the v1.11 dogfood fix).
+    const exchange = data.exchange.trim().toLowerCase();
     try {
       // Call the existing validate-and-encrypt endpoint — same path the
       // strategy-side flow uses. It validates against the exchange via
@@ -550,7 +557,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          exchange: data.exchange,
+          exchange,
           api_key: data.apiKey,
           api_secret: data.apiSecret,
           passphrase: data.passphrase,
@@ -577,7 +584,7 @@ export function AllocatorExchangeManager({ initialKeys, hasHoldings }: Props) {
         .from("api_keys")
         .insert({
           user_id: user.id,
-          exchange: data.exchange,
+          exchange,
           label: data.label,
           api_key_encrypted: result.api_key_encrypted,
           api_secret_encrypted: result.api_secret_encrypted,

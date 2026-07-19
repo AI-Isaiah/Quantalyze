@@ -138,13 +138,21 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     setLoading(true);
     setError(null);
 
+    // F6 (phase-119 fold-in): the server validate route normalizes the exchange
+    // (WR-01), but the CLIENT performs the api_keys INSERT directly — a mixed-case
+    // value ("sFOX") passes validation (burning a live probe) then 23514s on the
+    // DB lowercase-only CHECK. Canonicalize once here and reuse for BOTH the
+    // validate-and-encrypt body AND the insert. Credential fields are untouched
+    // (their .trim() chokepoint lives server-side per the v1.11 dogfood fix).
+    const exchange = data.exchange.trim().toLowerCase();
+
     try {
       // Validate + encrypt atomically (prevents TOCTOU race on key permissions)
       const res = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          exchange: data.exchange,
+          exchange,
           api_key: data.apiKey,
           api_secret: data.apiSecret,
           passphrase: data.passphrase || null,
@@ -167,7 +175,7 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       if (!user) throw new Error("Not authenticated");
       const { data: newKey, error: insertError } = await supabase.from("api_keys").insert({
         user_id: user.id,
-        exchange: data.exchange,
+        exchange,
         label: data.label,
         ...dbFields,
       }).select("id").single();
