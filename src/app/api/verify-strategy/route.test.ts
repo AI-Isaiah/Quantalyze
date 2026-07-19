@@ -153,7 +153,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(verifyStrategyMock).not.toHaveBeenCalled();
   });
 
-  it("returns 400 'Unsupported exchange' when the exchange is not in SUPPORTED_EXCHANGES", async () => {
+  it("returns 400 'Unsupported exchange' when the exchange is not in UI_EXCHANGE_CODES", async () => {
     const { POST } = await import("./route");
     const res = await POST(postReq({ ...VALID_BODY, exchange: "kraken" }));
     expect(res.status).toBe(400);
@@ -161,6 +161,25 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(body.error).toContain("Unsupported exchange");
     expect(verifyStrategyMock).not.toHaveBeenCalled();
   });
+
+  // F3 (Phase 122): sfox is in the widened key-save allowlist SUPPORTED_EXCHANGES
+  // but NOT in the public OFFERED set — so this public teaser must reject it
+  // cleanly WITHOUT disclosing it (no half-accept → no confusing downstream 422)
+  // and WITHOUT leaking "sfox" into the error enum shown to anon callers.
+  it.each(["sfox", "sFOX", "SFOX"])(
+    "rejects %s cleanly and never discloses sfox in the error enum (F3)",
+    async (exchange) => {
+      const { POST } = await import("./route");
+      const res = await POST(postReq({ ...VALID_BODY, exchange }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toContain("Unsupported exchange");
+      // The disclosed "Supported: …" enum must NOT name sfox pre-launch.
+      expect(body.error.toLowerCase()).not.toContain("sfox");
+      // Never forwarded to the teaser pipeline (no half-accept).
+      expect(verifyStrategyMock).not.toHaveBeenCalled();
+    },
+  );
 });
 
 /**

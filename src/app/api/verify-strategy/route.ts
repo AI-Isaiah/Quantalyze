@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
-import { SUPPORTED_EXCHANGES } from "@/lib/utils";
+import { UI_EXCHANGE_CODES } from "@/lib/utils";
+import type { SupportedExchange } from "@/lib/closed-sets";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
 
@@ -51,9 +52,18 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Invalid email address" }, { status: 400 });
   }
 
-  if (!SUPPORTED_EXCHANGES.includes(exchange as (typeof SUPPORTED_EXCHANGES)[number])) {
+  // F3 (Phase 122): gate this PUBLIC/unauthenticated teaser verify on the
+  // user-facing OFFERED set (UI_EXCHANGE_CODES — what the landing VerificationForm
+  // actually presents), NOT the wider key-save allowlist SUPPORTED_EXCHANGES.
+  // SUPPORTED_EXCHANGES was widened to admit sfox (119/122) for the AUTHENTICATED
+  // wizard key-save; leaking it here (a) DISCLOSED sfox in the error enum to anon
+  // callers pre-launch, and (b) half-accepted sfox (this route allowed it, then the
+  // Python teaser flow rejects source=sfox with a confusing 422). Gating on the
+  // offered set gives sfox a clean "Unsupported exchange" and stops the disclosure
+  // until SFOX_ENABLED flips the offer on. The disclosed enum tracks the offer.
+  if (!UI_EXCHANGE_CODES.includes(exchange as SupportedExchange)) {
     return NextResponse.json(
-      { error: `Unsupported exchange. Supported: ${SUPPORTED_EXCHANGES.join(", ")}` },
+      { error: `Unsupported exchange. Supported: ${UI_EXCHANGE_CODES.join(", ")}` },
       { status: 400 },
     );
   }
