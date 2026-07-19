@@ -12,6 +12,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
 import { getCorrelationId } from "@/lib/correlation-id";
+import { isSfoxEnabledServer } from "@/lib/closed-sets";
 
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
@@ -42,6 +43,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const exchangeNormalized = isSfox ? "sfox" : exchange;
   const api_secret_normalized =
     isSfox && typeof api_secret !== "string" ? "" : api_secret;
+
+  // F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
+  // The client flag NEXT_PUBLIC_SFOX_ENABLED only hides the wizard card; this
+  // server flag makes a sfox CONNECT fail CLOSED until SFOX_ENABLED=true is set
+  // server-side. Return a clean, honest 4xx BEFORE the rate-limit and the live
+  // validate/encrypt round-trip — never a crash, never a false KEY_AUTH_FAILED,
+  // never a live probe. ccxt exchanges are entirely unaffected (isSfox is false).
+  if (isSfox && !isSfoxEnabledServer()) {
+    return NextResponse.json(
+      { error: "sFOX integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (!exchange || !api_key || (!isSfox && !api_secret)) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });

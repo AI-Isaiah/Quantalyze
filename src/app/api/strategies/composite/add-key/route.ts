@@ -5,7 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
-import { isSupportedExchange } from "@/lib/closed-sets";
+import { isSupportedExchange, isSfoxEnabledServer } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
@@ -89,6 +89,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Mirrors the create-with-key sibling and this file's `exchange.toLowerCase() ===
   // "okx"` convention.
   const isSfox = exchange.toLowerCase() === "sfox";
+
+  // F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
+  // The client flag NEXT_PUBLIC_SFOX_ENABLED only hides the wizard card; this
+  // server flag makes a sfox CONNECT fail CLOSED (treated exactly like an
+  // unsupported exchange) until SFOX_ENABLED=true is set server-side. A clean 400
+  // BEFORE the rate-limit and the live validate/encrypt round-trip — never a
+  // crash, never a false KEY_AUTH, never a live probe. Mirrors the create-with-key
+  // sibling verbatim; ccxt paths are unaffected.
+  if (isSfox && !isSfoxEnabledServer()) {
+    return NextResponse.json(
+      { code: "KEY_INVALID_FORMAT", error: "sFOX integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (!isSfox && (typeof api_secret !== "string" || api_secret.length < 8)) {
     return NextResponse.json(

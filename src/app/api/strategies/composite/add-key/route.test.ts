@@ -17,7 +17,7 @@
  * and the credential-leak posture (T-88-13: uniform { code } bodies, no cred
  * values in logs).
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
@@ -305,6 +305,15 @@ describe("POST /api/strategies/composite/add-key — ONB-03 per-key add", () => 
  */
 describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (SFOX-03)", () => {
   beforeEach(resetHappyMocks);
+  // F2 (Phase 122): the carve-out only runs when the server go-live flag is ON.
+  // These tests exercise the ENABLED path; the disabled default is covered by
+  // the dedicated fail-closed block below.
+  beforeEach(() => {
+    process.env.SFOX_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
 
   const SFOX_TOKEN = "sfox-bearer-token-value";
   const SFOX_BODY = {
@@ -428,6 +437,57 @@ describe("POST /api/strategies/composite/add-key — sfox api_secret carve-out (
       expect(validateKeyMock).not.toHaveBeenCalled();
     },
   );
+});
+
+/**
+ * F2 (Phase 122 — STRUCTURAL server gate): with SFOX_ENABLED unset (default), a
+ * sfox "+ Add another key" must FAIL CLOSED — a clean 400 "not yet available",
+ * no live probe (validateKey), no minted composite key row. Mirrors the
+ * create-with-key sibling; ccxt exchanges are unaffected by the flag.
+ */
+describe("POST /api/strategies/composite/add-key — sfox server gate (F2, SFOX_ENABLED off)", () => {
+  beforeEach(resetHappyMocks);
+  beforeEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  it.each(["sfox", "sFOX", "SFOX"])(
+    "fails closed for %s (400 not-available, no live probe, no key minted)",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({
+          exchange,
+          api_key: "sfox-bearer-token-value",
+          label: "sfox composite key",
+          wizard_session_id: WIZARD_SESSION_ID,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.error).toBe("sFOX integration is not yet available.");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does NOT gate ccxt — binance runs normally with SFOX_ENABLED unset", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalled();
+  });
 });
 
 describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () => {

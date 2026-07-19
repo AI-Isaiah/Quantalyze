@@ -1543,14 +1543,19 @@ def test_derive_return_scalars_traditional_uses_252_not_365():
     assert four["sharpe"] != sharpe_365
 
 
-def test_h11_sfox_admitted_to_onboard_and_resync_only():
+def test_h11_sfox_admitted_to_onboard_and_resync_only(monkeypatch):
     """SFOX-05 (F2): `sfox` is admitted to the onboard + resync source whitelists
     ONLY, and stays REJECTED for teaser/internal_report/csv — mirroring the P72
     deribit posture. SfoxAdapter.compute_metrics fails loud by design (returns
     come from the sfox broker-dailies branch, not fills), so the synchronous
-    teaser preview cannot serve it. This kills the phase-119 F2 422-on-source."""
+    teaser preview cannot serve it. This kills the phase-119 F2 422-on-source.
+
+    Phase 122 / F2: admission ALSO requires the server go-live flag SFOX_ENABLED
+    — pinned ON here; the disabled default is covered by the fail-closed test
+    below."""
     from pydantic import ValidationError
 
+    monkeypatch.setenv("SFOX_ENABLED", "true")
     Body = process_key_router._ProcessKeyBody
 
     # ACCEPTED: resync (resolves the stored key server-side, no creds in body).
@@ -1573,11 +1578,43 @@ def test_h11_sfox_admitted_to_onboard_and_resync_only():
             )
 
 
-def test_process_key_sfox_onboard_draft_carries_trust_tier_api_verified(client):
+def test_sfox_source_fails_closed_when_server_flag_off(monkeypatch):
+    """F2 (Phase 122 — STRUCTURAL worker gate): with SFOX_ENABLED off (default), a
+    sfox onboard/resync body is REJECTED at the wire boundary (ValidationError)
+    BEFORE any compute_job is enqueued or any live balance crawl runs — never a
+    live probe, never a false-verified draft. ccxt sources stay admitted."""
+    from pydantic import ValidationError
+
+    monkeypatch.delenv("SFOX_ENABLED", raising=False)
+    Body = process_key_router._ProcessKeyBody
+
+    for flow in ("onboard", "resync"):
+        with pytest.raises(ValidationError, match="SFOX-F2"):
+            Body(
+                flow_type=flow,
+                source="sfox",
+                context={"strategy_id": "s1", "api_key": "k", "api_secret": "s"},
+            )
+
+    # A non-exact flag value stays fail-closed (only exact 'true' enables).
+    for flag in ("1", "on", "", "false"):
+        monkeypatch.setenv("SFOX_ENABLED", flag)
+        with pytest.raises(ValidationError, match="SFOX-F2"):
+            Body(flow_type="resync", source="sfox", context={"strategy_id": "s1"})
+
+    # ccxt sources are UNAFFECTED by the flag (still admitted to onboard/resync).
+    monkeypatch.delenv("SFOX_ENABLED", raising=False)
+    Body(flow_type="resync", source="okx", context={"strategy_id": "s1"})
+
+
+def test_process_key_sfox_onboard_draft_carries_trust_tier_api_verified(client, monkeypatch):
     """SFOX-05 (the FREE :828 stamp, proven): an onboard flow with source='sfox'
     inserts a strategy_verifications draft carrying trust_tier='api_verified' —
     with ZERO stamp-code edits (sfox is non-csv → the existing
-    `"csv_uploaded" if source=="csv" else "api_verified"` earns it)."""
+    `"csv_uploaded" if source=="csv" else "api_verified"` earns it).
+
+    Phase 122 / F2: sfox admission requires SFOX_ENABLED — pinned ON here."""
+    monkeypatch.setenv("SFOX_ENABLED", "true")
     fake = _build_supabase_mock(existing_row=None, insert_id="ver-sfox")
     with patch("routers.process_key.get_supabase", return_value=fake):
         r = client.post(

@@ -40,7 +40,33 @@ Scope notes (deliberate boundaries — see B8b PR body):
   behaviors, so they stay separate by design.
 """
 
+import os
 from typing import Literal
+
+# ---------------------------------------------------------------------------
+# sFOX server/worker go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
+#
+# Python mirror of the TS `isSfoxEnabledServer()` in src/lib/closed-sets.ts.
+# DISTINCT from the TS client-build flag NEXT_PUBLIC_SFOX_ENABLED (which gates
+# only the wizard CARD offer): this reads the worker/server env SFOX_ENABLED and
+# gates whether a sfox key is ADMITTED for validation (routers/exchange.py
+# /validate-key) and for onboard/resync processing (routers/process_key.py's
+# per-flow source whitelist) AT ALL. Fail-CLOSED: strict lower-cased "true" —
+# unset / "" / "1" / "on" / "TRUE " all read OFF, so a sfox connect fails closed
+# honestly (a clean 4xx "not yet available", NEVER a live balance probe, NEVER a
+# false-verified draft) until the founder sets SFOX_ENABLED=true on the worker at
+# go-live, in lockstep with the Vercel server env of the same name (121/122
+# runbook). A `.strip().lower()` normalization is used (not raw `== "true"`) so a
+# fat-fingered "true\n" / "True" deploy value still reads ON — this direction is
+# safe because it can only ENABLE, and enabling is the founder's explicit intent.
+# ---------------------------------------------------------------------------
+SFOX_DISABLED_DETAIL = "sFOX integration is not yet available."
+
+
+def sfox_enabled_server() -> bool:
+    """True iff SFOX_ENABLED is set to "true" (fail-closed; see module note)."""
+    return (os.getenv("SFOX_ENABLED") or "").strip().lower() == "true"
+
 
 # ---------------------------------------------------------------------------
 # Trade side — the {buy, sell} fill action.

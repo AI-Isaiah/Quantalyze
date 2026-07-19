@@ -71,6 +71,11 @@ def exchange_router(monkeypatch):
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
+    # F2 (Phase 122): these tests exercise the ENABLED sfox validation path, so
+    # pin the server go-live flag ON. The disabled default is covered by the
+    # dedicated fail-closed test below (which delenv's it after this setup).
+    monkeypatch.setenv("SFOX_ENABLED", "true")
+
     sys.modules.pop("routers.exchange", None)
     from routers import exchange as exchange_router
 
@@ -134,6 +139,46 @@ async def test_sfox_success_returns_valid_readonly_and_never_ccxt(exchange_route
     client.get_balances.assert_awaited_once()
     client.aclose.assert_awaited_once()
     create_exchange_spy.assert_not_called()
+
+
+async def test_sfox_fails_closed_when_server_flag_off(exchange_router, monkeypatch):
+    """F2 (Phase 122 — STRUCTURAL worker gate): with SFOX_ENABLED off, a sfox
+    /validate-key request fails CLOSED with an honest 'not yet available' 400
+    BEFORE any client is constructed or any live get_balances() probe runs —
+    never a live probe, never a false AUTH_FAILED. The fixture set the flag ON;
+    delenv here flips it OFF for this test only."""
+    from services.closed_sets import SFOX_DISABLED_DETAIL
+
+    router = exchange_router
+    monkeypatch.delenv("SFOX_ENABLED", raising=False)
+
+    # A construction spy that MUST NOT fire — no live probe when disabled.
+    factory = MagicMock(side_effect=AssertionError("make_sfox_client must not run when SFOX_ENABLED is off"))
+    router.make_sfox_client = factory
+
+    with pytest.raises(HTTPException) as exc:
+        await _call(router, _make_req(router, api_key="tok_abc"))
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == SFOX_DISABLED_DETAIL
+    factory.assert_not_called()
+
+
+async def test_sfox_stays_fail_closed_for_non_exact_flag(exchange_router, monkeypatch):
+    """F2: only the exact 'true' (case/space-normalized) enables sfox — '1' /
+    'on' / '' stay fail-closed, so a fat-fingered deploy value cannot half-open
+    the gate."""
+    from services.closed_sets import SFOX_DISABLED_DETAIL
+
+    router = exchange_router
+    for flag in ("1", "on", "", "false"):
+        monkeypatch.setenv("SFOX_ENABLED", flag)
+        factory = MagicMock(side_effect=AssertionError("no live probe when disabled"))
+        router.make_sfox_client = factory
+        with pytest.raises(HTTPException) as exc:
+            await _call(router, _make_req(router, api_key="tok_abc"))
+        assert exc.value.status_code == 400
+        assert exc.value.detail == SFOX_DISABLED_DETAIL
 
 
 async def test_sfox_constructed_with_bearer_token_and_prod_base_url(exchange_router):

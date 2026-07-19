@@ -74,6 +74,34 @@ export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 export const SFOX_UI_ENABLED = process.env.NEXT_PUBLIC_SFOX_ENABLED === "true";
 
 /**
+ * SERVER-SIDE sFOX go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
+ *
+ * DISTINCT from SFOX_UI_ENABLED above: that is the NEXT_PUBLIC *client-build*
+ * flag that gates only the wizard CARD / picker / chip OFFER (pixels). THIS is
+ * a server/runtime-only flag (deliberately NOT NEXT_PUBLIC) that gates whether a
+ * sfox CONNECT is admitted at the three key routes (validate-and-encrypt,
+ * create-with-key, composite/add-key) — the Python worker enforces the mirror
+ * gate (services/closed_sets.py::sfox_enabled_server). Fail-CLOSED with strict
+ * equality against the EXACT string "true": unset / "1" / "TRUE" / "on" / "" all
+ * read OFF, so a sfox connect FAILS CLOSED honestly ("not yet available", a
+ * clean 4xx — never a crash, never a false KEY_AUTH_FAILED, never a live probe)
+ * until the founder sets SFOX_ENABLED=true at go-live.
+ *
+ * GO-LIVE RUNBOOK (121/122): the founder must set BOTH `SFOX_ENABLED` (Vercel
+ * server env AND the Railway worker env — the server structural gate) AND
+ * `NEXT_PUBLIC_SFOX_ENABLED` (the client build — the UI offer). Either alone is
+ * an intentional half-state (card hidden but connect works, or card shown but
+ * connect fails closed) that this pair of gates makes SAFE, not broken.
+ *
+ * Read as a FUNCTION (never a module-load const) so it is evaluated per-request
+ * server-side and is never inlined into the client bundle; on the client
+ * `process.env.SFOX_ENABLED` is undefined, so this reads false there.
+ */
+export function isSfoxEnabledServer(): boolean {
+  return process.env.SFOX_ENABLED === "true";
+}
+
+/**
  * User-facing "offered" exchange codes — the set the public/marketing surfaces
  * and the public VerificationForm dropdown may present. DECOUPLED from
  * SUPPORTED_EXCHANGES on purpose (OQ4 gate): the key-save boundary admitted

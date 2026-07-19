@@ -9,6 +9,7 @@ from services.exchange import aclose_exchange, create_exchange, validate_key_per
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
+from services.closed_sets import sfox_enabled_server, SFOX_DISABLED_DETAIL
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
 
@@ -125,6 +126,15 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
     # Phase-118 non-ccxt SfoxClient. The ccxt branch below is byte-for-byte
     # unchanged for every real exchange.
     if req.exchange == "sfox":
+        # F2 (Phase 122 — STRUCTURAL worker gate): sFOX is founder-gated until
+        # go-live. Fail CLOSED with an honest "not yet available" 400 BEFORE
+        # _validate_sfox_key constructs a client or fires a live get_balances()
+        # probe — never a live probe when disabled, never a false AUTH_FAILED.
+        # A clean 400 (not a 500) so the TS layer surfaces it as a normal
+        # rejection. Mirrors the TS isSfoxEnabledServer() gate at the three key
+        # routes; defense-in-depth for any direct/worker caller of /validate-key.
+        if not sfox_enabled_server():
+            raise HTTPException(status_code=400, detail=SFOX_DISABLED_DETAIL)
         return await _validate_sfox_key(req.api_key)
 
     try:

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
 /**
@@ -290,6 +290,10 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    // F2 (Phase 122): the carve-out only runs when the server go-live flag is
+    // ON. These tests exercise the ENABLED path, so pin SFOX_ENABLED=true; the
+    // disabled default is covered by the dedicated fail-closed block below.
+    process.env.SFOX_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
       api_key_encrypted: "ct-blob",
@@ -299,6 +303,10 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
       nonce: "nonce-b64",
       kek_version: 3,
     });
+  });
+
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
   });
 
   const SFOX_TOKEN = "sfox-bearer-token-value";
@@ -395,5 +403,63 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Missing required fields");
     expect(mockValidateKey).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
+ * With SFOX_ENABLED unset (the default), a sfox connect must FAIL CLOSED with an
+ * honest "not yet available" 400 — never a crash, never a false KEY_AUTH_FAILED,
+ * and NEVER a live probe (validateKey/encryptKey are not called). ccxt exchanges
+ * are entirely unaffected by the server flag.
+ */
+describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENABLED off)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    delete process.env.SFOX_ENABLED;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+  });
+
+  it.each(["sfox", "sFOX", "SFOX"])(
+    "fails closed for %s with no live probe when SFOX_ENABLED is unset",
+    async (exchange) => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeReq({ exchange, api_key: "sfox-bearer-token-value" }),
+      );
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("sFOX integration is not yet available.");
+      // No live probe, no encryption of a key we refuse to admit.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["1", "TRUE", "on", ""])(
+    "stays fail-closed for a non-exact SFOX_ENABLED=%s (strict === 'true')",
+    async (flag) => {
+      process.env.SFOX_ENABLED = flag;
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeReq({ exchange: "sfox", api_key: "sfox-bearer-token-value" }),
+      );
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("sFOX integration is not yet available.");
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      delete process.env.SFOX_ENABLED;
+    },
+  );
+
+  it("does NOT gate ccxt exchanges — okx runs normally with SFOX_ENABLED unset", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
   });
 });

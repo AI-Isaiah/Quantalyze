@@ -435,6 +435,10 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     assetClassUpdateMock.mockClear();
     draftLookupMock.mockReset();
     draftLookupMock.mockResolvedValue({ data: null, error: null });
+    // F2 (Phase 122): the carve-out only runs when the server go-live flag is
+    // ON. These tests exercise the ENABLED path; the disabled default is covered
+    // by the dedicated fail-closed block below.
+    process.env.SFOX_ENABLED = "true";
     validateKeyMock.mockResolvedValue({
       valid: true,
       read_only: true,
@@ -452,6 +456,10 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
       data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
       error: null,
     });
+  });
+
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
   });
 
   const SFOX_TOKEN = "sfox-bearer-token-value";
@@ -584,6 +592,68 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
       expect(validateKeyMock).not.toHaveBeenCalled();
     },
   );
+});
+
+/**
+ * F2 (Phase 122 — STRUCTURAL server gate): with SFOX_ENABLED unset (default), a
+ * sfox connect must FAIL CLOSED — a clean 400 "not yet available", no live
+ * probe (validateKey), no saved key, no api_verified draft. The client flag
+ * NEXT_PUBLIC_SFOX_ENABLED only hides the card; this proves the SERVER refuses
+ * a hand-crafted sfox request. ccxt exchanges are unaffected by the flag.
+ */
+describe("POST /api/strategies/create-with-key — sfox server gate (F2, SFOX_ENABLED off)", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    delete process.env.SFOX_ENABLED;
+    validateKeyMock.mockResolvedValue({ valid: true, read_only: true, permissions: ["read"] });
+    encryptKeyMock.mockResolvedValue({ api_key_encrypted: "encrypted-blob-base64" });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  it.each(["sfox", "sFOX", "SFOX"])(
+    "fails closed for %s (400 not-available, no live probe, no key saved)",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({
+          exchange,
+          api_key: "sfox-bearer-token-value",
+          label: "sfox key",
+          wizard_session_id: WIZARD_SESSION_ID,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.error).toBe("sFOX integration is not yet available.");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does NOT gate ccxt — binance runs normally with SFOX_ENABLED unset", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalled();
+  });
 });
 
 /**
