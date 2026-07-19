@@ -39,6 +39,7 @@ from services.deribit_txn import (
     _summary_coverage_windows,
     assert_balance_identity,
     classify_instrument,
+    correction_is_trading,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
     is_spot_extraction_leg,
@@ -643,20 +644,31 @@ def test_correction_funding_reason_is_cash_bearing_hand_derived_native() -> None
 
 @pytest.mark.parametrize(
     "capital_reason",
-    ["transfer correction", "deposit adjustment", "withdrawal reversal",
-     "wallet balance correction"],
+    [
+        "transfer correction",
+        "deposit adjustment",
+        "withdrawal reversal",
+        "wallet balance correction",
+        # WR-01 collision cases — a capital reason that ALSO contains a trading
+        # substring. These MUST still fail loud (denylist beats the substring); a
+        # plain substring allow-list would silently sum them. Non-trivial by design.
+        "transfer to funding account correction",   # contains "funding"
+        "withdrawal fee correction",                 # contains "fee"
+        "deposit settlement adjustment",             # contains "settlement"
+    ],
 )
 def test_correction_capital_reason_fails_loud(capital_reason: str) -> None:
-    """DERIBITFIX-02(b) — the NEW safety: a `correction` whose info.reason is
-    CAPITAL-flavored (a deposit/withdrawal/transfer/wallet fix) carrying real cash
-    must FAIL LOUD on BOTH aggregators — NEVER silently summed into realized PnL (a
-    capital adjustment miscounted as trading performance would corrupt returns). The
-    raise NAMES the reason.
+    """DERIBITFIX-02(b) / WR-01 — the money safety: a `correction` whose info.reason
+    is CAPITAL-flavored (deposit/withdrawal/transfer/wallet/capital) carrying real
+    cash must FAIL LOUD on BOTH aggregators — NEVER silently summed into realized PnL
+    (a capital adjustment miscounted as trading performance would corrupt returns).
+    The capital DENYLIST takes PRECEDENCE over any trading substring the reason may
+    also contain. The raise NAMES the reason.
 
-    REVERT-PROOF: the blanket-set classification from the prior round (type ∈
-    CASH_BEARING_TYPES) would SILENTLY SUM this capital correction — this test
-    reddens under that revert (no raise). Hand-derived money at risk: the -3.2469e-4
-    BTC would wrongly enter realized."""
+    REVERT-PROOF: removing the capital-denylist precedence (so the substring
+    allow-list matches "funding"/"fee"/"settlement" inside the capital reason) makes
+    the colliding cases SILENTLY SUM the -3.2469e-4 BTC — this test reddens (no
+    raise)."""
     row = _correction_row(capital_reason)
     with pytest.raises(LedgerValuationError) as exc_usd:
         txn_rows_to_daily_records([row])
@@ -664,6 +676,45 @@ def test_correction_capital_reason_fails_loud(capital_reason: str) -> None:
     with pytest.raises(LedgerValuationError) as exc_native:
         txn_rows_to_native_daily([row])
     assert capital_reason in str(exc_native.value)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "transfer to funding account correction",  # capital denylist beats "funding"
+        "withdrawal fee correction",               # capital denylist beats "fee"
+        "market data correction",                  # "mark" dropped + word-boundary
+    ],
+)
+def test_correction_reason_gate_denylist_precedence_and_word_boundary(
+    reason: str,
+) -> None:
+    """WR-01 / IN-01 (the untested dangerous case): a nonzero-change `correction`
+    whose reason contains a trading SUBSTRING but is NOT a trading correction MUST
+    FAIL LOUD on both paths.
+
+    - "transfer to funding account correction" / "withdrawal fee correction": a
+      CAPITAL reason that merely CONTAINS a trading substring — the capital denylist
+      takes precedence, so it is NOT summed as performance.
+    - "market data correction": contains "mark", which was DROPPED from the trading
+      allow-list (collides with market/benchmark) and word-boundary matching means
+      "market" no longer matches any trading token → unrecognized → fail loud.
+
+    REVERT-PROOF: restore substring matching (drop the `\\b` anchors) or re-add the
+    `mark` token / remove the capital denylist precedence → these silently sum and
+    the test reddens. Contrast: the REAL funding reason still classifies trading."""
+    settlement = {
+        "type": "settlement", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+        "change": 0.01, "index_price": 50000.0, "timestamp": _ms(_DAY_A), "id": 11,
+    }
+    bad = _correction_row(reason)
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_daily_records([settlement, bad])
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([settlement, bad])
+    # Contrast: the actual key3 FUNDING reason (no capital keyword) is still trading.
+    assert correction_is_trading(_correction_row())
+    assert not correction_is_trading(bad)
 
 
 def test_correction_unrecognized_or_missing_reason_fails_loud() -> None:

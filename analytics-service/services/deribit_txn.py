@@ -626,12 +626,32 @@ assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
 # ALREADY cash-bearing here (realized inside `settlement.change` — "session PnL +
 # perpetual funding"), so a funding-CALCULATION correction is an adjustment to
 # REALIZED trading cash and is summed like settlement/funding. It matches the
-# allow-list on "funding". A capital-correction (deposit/withdrawal/transfer/
-# wallet) does NOT match → fails loud, never miscounted as performance.
+# trading allow-list on "funding" (and no capital denylist keyword). A capital
+# correction (deposit/withdrawal/transfer/wallet/capital) fails loud, never
+# miscounted as performance — the capital denylist takes PRECEDENCE over any
+# trading substring the reason may also contain (WR-01; see below).
 #
-# BROAD keyword allow-list (substring match on the lowered reason) so normal
-# wording variation does not brittle-break; deliberately NOT a full reason
-# taxonomy (KISS): trading/PnL vocabulary only.
+# WR-01 (money-safety): a CAPITAL DENYLIST is checked FIRST and takes PRECEDENCE
+# over the trading allow-list. A correction whose reason names a capital movement is
+# NEVER trading performance — even if the reason ALSO contains a trading substring.
+# Without this precedence, "transfer to funding account correction" (contains
+# "funding"), "withdrawal fee correction" (contains "fee"), etc. would be silently
+# summed into realized PnL — the exact silent capital-as-performance corruption this
+# gate exists to prevent. Matched on WORD BOUNDARIES (see ``_reason_matches_any``).
+_CORRECTION_CAPITAL_REASON_KEYWORDS: tuple[str, ...] = (
+    "deposit",
+    "withdrawal",
+    "transfer",
+    "wallet",
+    "capital",
+)
+
+# BROAD trading/PnL allow-list, consulted ONLY after the capital denylist clears.
+# Matched on WORD BOUNDARIES so a short token cannot collide inside a larger word
+# (belt-and-suspenders on top of the denylist: e.g. `fee` must not match inside a
+# capital reason). `mark` is deliberately EXCLUDED (collides with market/benchmark/
+# earmarked and adds no real signal); the remaining tokens cover the observed +
+# plausible trading corrections. Deliberately NOT a full reason taxonomy (KISS).
 _CORRECTION_TRADING_REASON_KEYWORDS: tuple[str, ...] = (
     "funding",
     "settlement",
@@ -644,7 +664,6 @@ _CORRECTION_TRADING_REASON_KEYWORDS: tuple[str, ...] = (
     "interest",
     "liquidation",
     "premium",
-    "mark",
     "expiry",
 )
 
@@ -658,14 +677,32 @@ def _correction_reason_raw(row: Mapping[str, Any]) -> str:
     return str(info.get("reason", "") or "")
 
 
+def _reason_matches_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
+    """True iff the lowered reason contains ANY keyword on a WORD BOUNDARY (``\\b``)
+    — so a short token like ``fee`` never collides inside a larger word (``market``,
+    ``benchmark``) and ``transfer`` matches ``transfer`` but not ``transferable``."""
+    return any(
+        re.search(rf"\b{re.escape(kw)}\b", reason_lower) is not None
+        for kw in keywords
+    )
+
+
 def correction_is_trading(row: Mapping[str, Any]) -> bool:
     """True iff a ``type == "correction"`` row is a TRADING/PnL correction (realized
-    cash — summed like settlement/funding) per its ``info.reason``. False for a
-    capital-flavored / unrecognized / missing reason (the caller must then FAIL
-    LOUD via :func:`assert_correction_classifiable` — never silently count a
-    possible capital adjustment as trading performance). Pure / never raises."""
+    cash — summed like settlement/funding) per its ``info.reason``.
+
+    PRECEDENCE (WR-01): the CAPITAL denylist (deposit/withdrawal/transfer/wallet/
+    capital) is matched FIRST → a capital-flavored reason is NOT trading, even if it
+    also contains a trading substring ("transfer to funding account correction"
+    contains "funding" but is a capital transfer → False → the caller FAILS LOUD).
+    Only when NO capital keyword matches does a trading keyword make it cash-bearing.
+    ALL matching is word-boundary anchored. False for a capital / unrecognized /
+    missing reason (the caller must then FAIL LOUD via
+    :func:`assert_correction_classifiable`). Pure / never raises."""
     reason = _correction_reason_raw(row).lower()
-    return any(kw in reason for kw in _CORRECTION_TRADING_REASON_KEYWORDS)
+    if _reason_matches_any(reason, _CORRECTION_CAPITAL_REASON_KEYWORDS):
+        return False  # capital denylist beats ANY trading substring (WR-01)
+    return _reason_matches_any(reason, _CORRECTION_TRADING_REASON_KEYWORDS)
 
 
 def assert_correction_classifiable(row: Mapping[str, Any]) -> None:
