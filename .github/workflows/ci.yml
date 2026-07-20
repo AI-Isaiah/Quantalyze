@@ -662,13 +662,23 @@ jobs:
             name="${r%=*}"; result="${r#*=}"
             echo "$name: $result"
             if [ "$name" = "e2e-seeded" ]; then
-              # Phase 126 / FACTSHEET-02: e2e-seeded is BLOCKING (the
-              # sfox-badge legs are the go-live gate). It self-skips when
-              # E2E_TEST_DB_CONFIGURED is unset (fork PRs / unconfigured
-              # repos), so `skipped` is tolerated FOR THIS ROW ONLY. A real
-              # `failure` still fails the gate on the main repo where the
-              # variable is set and the job runs.
-              if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then fail=1; fi
+              # Phase 126 / FACTSHEET-02 + RT-01 canary: e2e-seeded is BLOCKING
+              # (the sfox-badge legs are the go-live gate). It legitimately
+              # self-skips ONLY on a FORK PR — a different head repo has no
+              # access to the test-DB variable. On a push to main OR a same-repo
+              # PR, a `skipped` result means E2E_TEST_DB_CONFIGURED was LOST
+              # (which ALSO silently disables sql-tests), so a skip there is NOT
+              # tolerated: the gate must redden rather than green-wash an
+              # untested go-live badge (RT-01 red-team H4 — the #1 silent-green).
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_fork_pr" = "true" ]; then
+                echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
+              else
+                echo "::error::e2e-seeded result=$result on a TRUSTED event (push/same-repo). The go-live badge gate MUST run here — E2E_TEST_DB_CONFIGURED may be unset (this also disables sql-tests). A skip is not tolerated."
+                fail=1
+              fi
             elif [ "$result" != "success" ]; then
               fail=1
             fi
@@ -1454,6 +1464,12 @@ jobs:
           need_anchor 'anon: a logged-out visitor sees the api_verified badge' 'anon non-owner badge-visible leg'
           need_anchor "admin: an elevated session reads the sfox strategy" 'admin non-owner badge-visible leg'
           need_anchor 'results.violations).toEqual([])' 'owner-leg axe zero-violations assertion'
+          # RT-01: pin the apiVerifiedBadge() helper SELECTOR too. The badge
+          # assertions above call the helper; redefining it to a vacuous locator
+          # (e.g. page.locator("body")) would keep every assertion textually
+          # present while making them pass trivially. Anchoring the real badge
+          # selector defeats that.
+          need_anchor 'data-trust-tier="api_verified"' 'apiVerifiedBadge helper selector (prevents redefining the helper to a vacuous locator)'
           # Title anchors alone are gameable: the test TITLES could survive while
           # the actual badge-visibility ASSERTIONS are gutted or downgraded (e.g.
           # swapping toBeVisible for a weaker matcher, or emptying a leg body) --
@@ -1467,6 +1483,17 @@ jobs:
           badge_count=$(grep -cF "$badge_assert" "$spec" || true)
           if [ "$badge_count" -lt "$min_badge" ]; then
             echo "::error::sfox-badge anti-mask guard: badge-visibility assertions dropped to ${badge_count} (need >= ${min_badge}) -- a non-owner api_verified badge assertion was deleted or weakened."
+            fail=1
+          fi
+          # RT-01 skip-token guard: the anchors above pin assertion TEXT, but a
+          # `test.skip(true …)` / `test.skip()` / `.fixme` / `test.only` /
+          # `describe.only|skip` would leave that text present while Playwright
+          # SKIPS the leg -> a green run that never asserted the badge. The ONLY
+          # legitimate skip here is the conditional `test.skip(!HAS_SEED_ENV, …)`
+          # (guards the seeded suite when the test DB isn't wired). Any
+          # unconditional skip/fixme/only is a tamper.
+          if grep -Eq 'test\.skip\(\s*true|test\.skip\(\s*\)|\.fixme\(|test\.only\(|describe\.only\(|describe\.skip\(' "$spec"; then
+            echo "::error::sfox-badge anti-mask guard: an unconditional skip/fixme/only (test.skip(true|), .fixme, test.only, describe.only/skip) is present in ${spec} -- a badge leg may not execute. Only test.skip(!HAS_SEED_ENV, …) is permitted."
             fail=1
           fi
           if [ "$fail" = "1" ]; then
