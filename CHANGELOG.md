@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.47.1.0] - 2026-07-20
+### v1.13 red-team fixes (post-merge adversarial pass)
+A Fable red-team pass over the merged v1.13 state (money / security / worker+CI)
+found three confirmed issues the specialist fan-out missed. Security held (no
+leak; the published-gate primitive is bulletproof on live prod).
+
+- **Money (128)**: the correction trading allow-list tokens `fee` and `interest`
+  name cash on BOTH the trading and capital sides, so capital-side corrections
+  ("network fee refund", "reward interest correction", "airdrop settlement",
+  "funding of insurance account", "subaccount funding correction") were silently
+  summed into realized PnL — and the balance-identity oracle is structurally blind
+  to a misroute. Dropped `fee`/`interest` (ambiguous, no live evidence → fail
+  loud); added capital-context denylist words; a non-string `info.reason` now fails
+  loud instead of being classified on its repr. RED-proven regression tests.
+- **Worker (125)**: the orphaned-`running` purge window was widened 2h → 4h
+  (migration `20260720120000`). A batch of 5 jobs shares one claim-time
+  `claimed_at` and dispatches sequentially, so a healthy worker's batch-tail job
+  (up to 2.5h) could be purged mid-flight → double-compute. 4h clears the max batch
+  wall-clock independent of the watchdog. Still DELETE (WR-02 stays a FLIP-01
+  decision).
+- **CI (126)**: losing the `E2E_TEST_DB_CONFIGURED` variable silently disabled the
+  go-live badge e2e AND the sql-tests suite with a green aggregator. The aggregator
+  now tolerates a skipped `e2e-seeded` only on fork PRs; a skip on push/same-repo
+  reddens. Added a skip-token tamper guard + helper-selector anchor to the
+  anti-mask check.
+
 ## [0.47.0.0] - 2026-07-20
 ### v1.13 Infra — sFOX go-live foundation + worker rebuild (Phases 125–130)
 The go-live foundation for the v1.12 sFOX adapter: a hardened dedicated backfill

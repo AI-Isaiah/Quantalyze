@@ -664,6 +664,15 @@ def test_correction_funding_reason_is_cash_bearing_hand_derived_native() -> None
         "withdrawals fee correction",                   # "withdrawal" inside "withdrawals"
         "wallets rebalance funding correction",         # "wallet" inside "wallets"
         "deposits reconciliation settlement",           # "deposit" inside "deposits"
+        # RT-01 (red team) — CAPITAL-CONTEXT reasons that name cash on the capital
+        # side but carry a trading token. The balance-identity oracle is BLIND to a
+        # misroute, so these must fail loud, not silently book capital as PnL.
+        "network fee refund",                # network withdrawal fee (capital flow)
+        "on-chain fee adjustment",           # on-chain fee (capital flow)
+        "reward interest correction",        # usdc_reward is an EXTERNAL FLOW
+        "airdrop settlement",                # airdrop payout, not trading settlement
+        "funding of insurance account",      # insurance-fund funding, not perp funding
+        "subaccount funding correction",     # internal subaccount move, not perp funding
     ],
 )
 def test_correction_capital_reason_fails_loud(capital_reason: str) -> None:
@@ -685,6 +694,50 @@ def test_correction_capital_reason_fails_loud(capital_reason: str) -> None:
     with pytest.raises(LedgerValuationError) as exc_native:
         txn_rows_to_native_daily([row])
     assert capital_reason in str(exc_native.value)
+
+
+@pytest.mark.parametrize(
+    "dropped_token_reason",
+    [
+        "mining fee correction",        # `fee` DROPPED (RT-01) + no capital keyword
+        "staking interest adjustment",  # `interest` DROPPED + no capital keyword
+    ],
+)
+def test_correction_rt01_dropped_ambiguous_fee_interest_tokens_fail_loud(
+    dropped_token_reason: str,
+) -> None:
+    """RT-01 (red team money-safety): `fee` and `interest` were DROPPED from the
+    trading allow-list — they name cash on BOTH the trading and capital sides
+    (network/withdrawal fee, usdc_reward interest) and there is NO oracle backstop
+    for a misroute. A correction whose only trading-ish token is fee/interest, with
+    no unambiguous trading token and no capital keyword, must now FAIL LOUD (classify
+    on evidence when it actually appears), not silently sum into realized PnL.
+
+    REVERT-PROOF: re-add `fee`/`interest` to _CORRECTION_TRADING_REASON_KEYWORDS and
+    these classify trading → silently sum → this test reddens."""
+    row = _correction_row(dropped_token_reason)
+    assert not correction_is_trading(row)
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_daily_records([row])
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([row])
+
+
+def test_correction_rt01_nonstring_reason_fails_loud() -> None:
+    """RT-01 (red team): a schema-drifted NON-STRING info.reason (a dict) must NOT be
+    str()-coerced and classified on its repr — str({"note": "session fix"}) contains
+    "session" and would falsely match the trading allow-list. It resolves to an empty
+    reason → FAIL LOUD (the safe direction for unexpected schema)."""
+    row: dict[str, object] = {
+        "type": "correction", "currency": "BTC", "change": _KEY3_CORRECTION_CHANGE_BTC,
+        "instrument_name": None, "timestamp": _ms(_DAY_A), "id": 999001,
+        "info": {"reason": {"note": "session fix"}},
+    }
+    assert not correction_is_trading(row)
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_daily_records([row])
+    with pytest.raises(LedgerValuationError):
+        txn_rows_to_native_daily([row])
 
 
 @pytest.mark.parametrize(
