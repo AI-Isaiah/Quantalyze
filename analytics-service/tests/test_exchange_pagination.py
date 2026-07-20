@@ -311,7 +311,7 @@ def _make_capped_transfer_fetcher(events: list[dict], cap: int):
     of 500. Rows are those with timestamp >= since_ms, ascending."""
     call_log: list[tuple[int, int]] = []
 
-    async def _fetch(_symbol, since_ms, _limit):
+    async def _fetch(_symbol, since_ms, _limit, _params=None):
         call_log.append((since_ms, _limit))
         matching = [e for e in events if e["timestamp"] >= since_ms]
         matching.sort(key=lambda e: e["timestamp"])
@@ -394,7 +394,7 @@ async def test_transfers_not_supported_returns_partial_not_raise() -> None:
     """WR-04 discipline preserved through the pagination fix: ccxt.NotSupported
     (feature detection) still short-circuits to whatever was collected, while
     any OTHER exception must bubble (asserted elsewhere via the handler path)."""
-    async def _raises_not_supported(_symbol, _since, _limit):
+    async def _raises_not_supported(_symbol, _since, _limit, _params=None):
         raise _ccxt.NotSupported("venue cannot enumerate transfers")
 
     exchange = MagicMock()
@@ -423,7 +423,7 @@ async def test_transfers_boundary_flow_not_double_counted() -> None:
          "amount": 1.0},
     ]
 
-    async def _fetch(_symbol, since_ms, _limit):
+    async def _fetch(_symbol, since_ms, _limit, _params=None):
         # Unbounded venue page (models a call that returns rows spilling past the
         # requested 90-day window end, as a real 90d-capped endpoint can when
         # `since` is mid-window).
@@ -463,7 +463,7 @@ async def test_transfers_page_ceiling_logs_warning_not_silent_truncation(
     now_ms = window_start_ms + 89 * 24 * 60 * 60 * 1000  # ONE 90-day window
     step = 1000  # ms the cursor advances per page (well within the window)
 
-    async def _never_terminating(_symbol, since_ms, _limit):
+    async def _never_terminating(_symbol, since_ms, _limit, _params=None):
         # Always a non-empty page whose max timestamp ADVANCES the cursor and
         # never reaches window_end → no natural break → the ceiling triggers.
         return [{"id": f"r{since_ms}", "timestamp": since_ms + step,
