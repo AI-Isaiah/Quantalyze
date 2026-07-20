@@ -1517,7 +1517,7 @@ async def test_wr_adv_02_fetch_transfers_paginates_within_window():
 
     call_log: list[tuple[int, int]] = []
 
-    async def _fake_fetch_deposits(_unused_symbol, since_ms, limit):
+    async def _fake_fetch_deposits(_unused_symbol, since_ms, limit, _params=None):
         call_log.append((since_ms, limit))
         # Filter events whose timestamp >= since_ms, return up to limit.
         matching = [e for e in all_events if e["timestamp"] >= since_ms]
@@ -5100,7 +5100,7 @@ async def test_equity_reconstruction_byte_identical_across_transfers_promotion(
     # since-filter keeps this pin a faithful stand-in for a live exchange and
     # byte-identical across the cursor-advance pagination fix.
     def _since_filtered(rows: list[dict]):
-        async def _fetch(_symbol, since_ms, _limit):
+        async def _fetch(_symbol, since_ms, _limit, _params=None):
             return [r for r in rows if int(r["timestamp"]) >= since_ms]
 
         return _fetch

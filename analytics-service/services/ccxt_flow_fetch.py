@@ -51,21 +51,36 @@ async def _rate_limit_sleep(exchange: Any) -> None:
 async def fetch_ccxt_transfers(
     exchange: Any, kind: str, since_ms: int, now_ms: int
 ) -> list[dict[str, Any]]:
-    """Paginate fetch_deposits or fetch_withdrawals via 90-day windows.
+    """Paginate fetch_deposits or fetch_withdrawals via per-venue windows.
 
-    Binance/OKX both cap per-call windows at 90 days (RESEARCH.md §1A/§1B).
-    We page forward through sliding 90-day windows and collect all rows.
+    Binance/OKX cap per-call windows at 90 days (RESEARCH.md §1A/§1B); Bybit's
+    deposit/withdraw record endpoints cap the startTime->endTime interval at 30
+    days (BYBIT-131002). We page forward through sliding windows sized to the
+    venue cap, passing an explicit endTime per window, and collect all rows.
     """
     fetcher_name = "fetch_deposits" if kind == "deposits" else "fetch_withdrawals"
     fetcher = getattr(exchange, fetcher_name, None)
     if fetcher is None:
         return []
 
-    window_ms = 90 * 24 * 60 * 60 * 1000
+    # BYBIT-131002: Bybit's deposit/withdraw record endpoints
+    # (/v5/asset/{deposit,withdraw}/query-record) cap the startTime->endTime
+    # interval at 30 days AND — unlike Binance/OKX — treat a startTime-only query
+    # as [startTime, now], so a backfill whose oldest window starts at
+    # ``now - BYBIT_DEPOSIT_TERMINUS_DAYS`` (365d) sends a 365-day implicit
+    # interval and Bybit rejects the whole call with retCode 131002 ("The
+    # interval between the startTime and endTime is incorrect"). A normal derive
+    # keyed off a recent checkpoint never tripped it; the Phase-35 full-history
+    # backfill does. Fix: size the window to the venue max range (Bybit 30d,
+    # Binance/OKX 90d) AND pass an explicit endTime per window so the exchange
+    # bounds the interval to [inner_cursor, window_end] instead of [start, now].
+    exchange_id = getattr(exchange, "id", "")
+    window_days = 30 if exchange_id == "bybit" else 90
+    window_ms = window_days * 24 * 60 * 60 * 1000
     page_limit = 500
     all_rows: list[dict[str, Any]] = []
-    # LOW-1: contiguous 90-day windows overlap at their inclusive boundary (the
-    # next window's `since` == the prior window's end, and a venue page may also
+    # LOW-1: contiguous venue-sized windows overlap at their inclusive boundary
+    # (the next window's `since` == the prior window's end, and a venue page may
     # spill rows a few ms past the requested window end). A boundary-timestamp
     # transfer therefore gets fetched in BOTH adjacent windows. Dedup by the ccxt
     # transfer `id` so such a flow is counted exactly once (a double-counted
@@ -75,7 +90,7 @@ async def fetch_ccxt_transfers(
     window_start = since_ms
     while window_start < now_ms:
         window_end = min(window_start + window_ms, now_ms)
-        # Paginate WITHIN each 90-day window so a bursty allocator with a
+        # Paginate WITHIN each venue-sized window so a bursty allocator with a
         # large per-window transfer count doesn't lose rows past page 1.
         inner_cursor = window_start
         # Safety ceiling only — real termination is cursor-non-advance /
@@ -93,7 +108,12 @@ async def fetch_ccxt_transfers(
             # that looked identical to "allocator has no transfers", which
             # caused zero-activity rows with no audit trail.
             try:
-                page = await fetcher(None, inner_cursor, page_limit)
+                # Pass an explicit endTime (ccxt ``until``) so the exchange bounds
+                # the query to [inner_cursor, window_end]; without it Bybit uses
+                # ``now`` and a >cap interval 131002s the whole crawl (BYBIT-131002).
+                page = await fetcher(
+                    None, inner_cursor, page_limit, {"until": window_end}
+                )
             except ccxt.NotSupported:
                 return all_rows
             page = page or []
