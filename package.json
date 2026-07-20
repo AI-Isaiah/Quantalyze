@@ -23,17 +23,17 @@
     "schema:functions:check": "tsx scripts/dump-sql-functions.ts --check"
   },
   "dependencies": {
-    "@radix-ui/react-tabs": "1.1.17",
-    "@sentry/nextjs": "^10.64.0",
+    "@radix-ui/react-tabs": "1.1.18",
+    "@sentry/nextjs": "^10.66.0",
     "@sparticuz/chromium": "^149.0.0",
-    "@supabase/ssr": "^0.12.0",
+    "@supabase/ssr": "^0.12.3",
     "@supabase/supabase-js": "^2.110.1",
     "@upstash/ratelimit": "^2.0.8",
     "@upstash/redis": "^1.38.0",
     "lightweight-charts": "^5.2.0",
     "next": "^16.2.10",
-    "posthog-js": "^1.398.2",
-    "posthog-node": "^5.40.0",
+    "posthog-js": "^1.404.1",
+    "posthog-node": "^5.45.2",
     "puppeteer-core": "^25.3.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
@@ -41,9 +41,9 @@
     "recharts": "^3.9.2",
     "rehype-sanitize": "6.0.0",
     "remark-gfm": "4.0.1",
-    "resend": "^6.17.1",
+    "resend": "^6.17.2",
     "server-only": "^0.0.1",
-    "svix": "^1.96.1",
+    "svix": "^1.98.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -63,12 +63,12 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.10",
     "jsdom": "^29.1.1",
-    "knip": "^6.25.0",
+    "knip": "^6.27.0",
     "tailwindcss": "^4",
-    "tsx": "^4.23.0",
+    "tsx": "^4.23.1",
     "typescript": "^6",
     "vitest": "^4.1.2",
-    "ws": "^8.21.0"
+    "ws": "^8.21.1"
   },
   "version": "0.47.2.2"
 }
