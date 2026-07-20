@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.47.2.1] - 2026-07-20
+### Scenario: discoverable "Connect a key" + "Scenario portfolio" rename
+Allocator UX. Two small changes to the Scenario tab so an allocator handed a
+fresh exchange key by a new team can find how to model it against their book.
+
+- **Connect-a-key discoverability** (`StrategyBrowseDrawer.tsx`): the `+ Strategy`
+  Browse drawer's only add-your-own entry point was a small "Can't find it? Add
+  your own" link *below* the results, and the empty state read "No strategies are
+  live yet — check back later" — so a user with their own key concluded there was
+  no way to add it. Added a prominent top-of-drawer **"Connect a key"** CTA
+  ("Got a read-only exchange API key from a new team? Connect it — or upload a CSV
+  — to add the strategy here and project how it fits your book") that opens the
+  existing ContributionWizardOverlay (which already defaults to the API-key
+  branch). It renders in every list state, including the empty state. The bottom
+  link stays as the in-context escape hatch. DESIGN.md: a Secondary button
+  (border-accent, not a second accent-fill competing with the per-row Add
+  buttons); `data-testid="browse-connect-own"` stays out of the `browse-add-*`
+  namespace so the e2e first-match "add the first strategy" locator can never bind
+  to it mid-load. 4 regression tests (CONNECT-01).
+- **Naming** (`ScenarioComposer.tsx`): the Scenario draft header "Portfolio" →
+  **"Scenario portfolio"** to disambiguate it from the live allocation/book. The
+  PROJECTED-hypothetical badge is unchanged.
+
 ## [0.47.2.0] - 2026-07-20
 ### Fix: Bybit capital-flow backfill 131002 (interval between startTime and endTime)
 The Phase-35 full-history backfill of a Bybit key's `derive_broker_dailies`
