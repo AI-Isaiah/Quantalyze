@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.47.2.0] - 2026-07-20
+### Fix: Bybit capital-flow backfill 131002 (interval between startTime and endTime)
+The Phase-35 full-history backfill of a Bybit key's `derive_broker_dailies`
+failed permanently with `bybit {"retCode":131002,"retMsg":"The interval between
+the startTime and endTime is incorrect"}`. Root cause: `fetch_ccxt_transfers`
+walked deposits/withdrawals in a fixed **90-day** window and passed **only
+`startTime`** (never an `endTime`). Bybit's `/v5/asset/{deposit,withdraw}/
+query-record` endpoints cap the interval at **30 days** and treat a
+startTime-only query as `[startTime, now]`, so the oldest window (`since = now −
+BYBIT_DEPOSIT_TERMINUS_DAYS` = 365d) sent a 365-day implicit interval and Bybit
+rejected the whole crawl. Realized (closed-pnl) and funding (transaction-log)
+were already 7-day windowed and unaffected; a normal derive keyed off a recent
+checkpoint never tripped it — only the full-history backfill did.
+
+- **Fix** (`analytics-service/services/ccxt_flow_fetch.py`): size the transfer
+  window to the venue cap (Bybit 30d, Binance/OKX keep 90d) and pass an explicit
+  `endTime` (ccxt `until`) per window so the exchange bounds the interval to
+  `[inner_cursor, window_end]` instead of `[start, now]`. Windows still tile the
+  full lookback (contiguous, deduped by transfer id).
+- **Regression** (`tests/test_ccxt_flow_fetch.py`): a fake Bybit exchange that
+  enforces the real 30-day interval cap 131002s the unfixed startTime-only crawl
+  and passes once every window carries a bounded `endTime`; plus contiguity and a
+  Binance-keeps-90d venue-scope guard. Reproduced + verified live on prod
+  (`derive_broker_dailies` job for api_key `e1c4e961`).
+
 ## [0.47.1.0] - 2026-07-20
 ### v1.13 red-team fixes (post-merge adversarial pass)
 A Fable red-team pass over the merged v1.13 state (money / security / worker+CI)
