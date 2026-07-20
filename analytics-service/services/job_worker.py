@@ -4302,16 +4302,42 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     ) -> tuple[pd.Series, bool, dict[str, Any]]:
         """One Deribit member's dense daily-return series for ``basis`` + its
         option-activity signal + the NavTWRMeta guard dict, through the EXISTING
-        per-key entry points."""
-        account_state = await fetch_deribit_native_account_state(ctx.exchange)
-        ledger, completeness = await build_deribit_native_ledger(
-            ctx.exchange,
-            account_state=account_state,
-            pnl_basis=basis,
-            exclude_spot_extraction=exclude_spot,
+        per-key entry points.
+
+        WEDGE-01 (Eclipse incident 2026-07-19): this composite arm ran on the
+        shared API/worker event loop with NONE of the derive path's protection —
+        a multi-key Deribit stitch reached the heavy per-member reconstruction,
+        the SYNCHRONOUS pandas assembly blocked the loop, the FLIPRETRY-04 healthz
+        heartbeat (main_worker.py:642, advances LAST_TICK_AT only when the loop is
+        SERVICING it) froze, and Railway 503-restarted the pod ~90s later —
+        orphaning the job 'running' under the dead worker, BEFORE the 1200s outer
+        wait_for could fire. Mirror the single-key derive path exactly: (a) HARD-
+        BOUND each live crawl with asyncio.wait_for (the FLIPRETRY-01 pattern,
+        run_derive_broker_dailies_job:2319/2386) so a slow read is a classified
+        TRANSIENT, never an unbounded wedge; (b) run the CPU-bound pandas combine
+        OFF the loop via asyncio.to_thread (the rescore pattern at :6398) so it
+        can never starve the heartbeat AND the outer wait_for stays able to fire.
+        """
+        account_state = await asyncio.wait_for(
+            fetch_deribit_native_account_state(ctx.exchange),
+            timeout=_BROKER_CRAWL_TIMEOUT_S,
+        )
+        ledger, completeness = await asyncio.wait_for(
+            build_deribit_native_ledger(
+                ctx.exchange,
+                account_state=account_state,
+                pnl_basis=basis,
+                exclude_spot_extraction=exclude_spot,
+            ),
+            timeout=_BROKER_CRAWL_TIMEOUT_S,
         )
         assert_ledger_complete(completeness)
-        returns, member_meta = combine_native_ledger(
+        # WEDGE-01: combine_native_ledger is SYNCHRONOUS CPU-bound pandas
+        # (broker_dailies.py:174). On the shared loop it blocks the healthz
+        # heartbeat → false-stale → restart. Offload to a worker thread (the
+        # awaits above stay on the loop — only this pure CPU work moves off).
+        returns, member_meta = await asyncio.to_thread(
+            combine_native_ledger,
             ledger,
             completeness.indexable_currencies,
             denominator_config=denominator_config,
@@ -4419,8 +4445,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         )
         # ccxt_rows_to_dated_flows raises NavReconstructionError (structural) on an
         # unpriceable non-stable flow — the routing catches it and DEGRADES.
-        external_flows = ccxt_rows_to_dated_flows(
-            _flow_rows, venue=venue, price_index=_price_index
+        # WEDGE-01: pure CPU-bound (ccxt_flows.py:164) — off the shared loop so it
+        # cannot starve the healthz heartbeat (mirrors the deribit arm).
+        external_flows = await asyncio.to_thread(
+            ccxt_rows_to_dated_flows, _flow_rows, venue=venue, price_index=_price_index
         )
 
         # FLOW-04 noise guard (Pitfall 5 / T-77-08): the open-uPnL wedge is only
@@ -4429,7 +4457,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         if balance_error or equity is None or abs(equity) <= DUST_NAV_FLOOR:
             open_unrealized_usd = 0.0
 
-        returns, meta = combine_realized_and_funding(
+        # WEDGE-01: combine_realized_and_funding is SYNCHRONOUS CPU-bound pandas
+        # (broker_dailies.py:141). Offload off the shared loop so it cannot starve
+        # the healthz heartbeat → false-stale restart (mirrors the deribit arm).
+        returns, meta = await asyncio.to_thread(
+            combine_realized_and_funding,
             realized,
             funding,
             account_balance=equity,
@@ -4799,6 +4831,22 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 )
             try:
                 returns, has_opt, member_meta = await _reconstruct_deribit(ctx, basis)
+            except asyncio.TimeoutError:
+                # WEDGE-01: a member crawl blew its per-crawl wait_for bound
+                # (_BROKER_CRAWL_TIMEOUT_S, set inside _reconstruct_deribit). Mirror
+                # the derive path's FLIPRETRY-01 disposition: a slow/hung LIVE read
+                # is a classified TRANSIENT (retryable whole-job), NEVER an unbounded
+                # wedge of the shared loop and never a PERMANENT failure. The
+                # `finally` still closes the exchange.
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: member crawl exceeded the "
+                        f"{_BROKER_CRAWL_TIMEOUT_S}s per-crawl bound — retrying "
+                        "rather than wedging the worker (WEDGE-01)"
+                    ),
+                    error_kind="transient",
+                )
             except _PERMANENT_LEDGER_ERRORS as exc:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_failed(

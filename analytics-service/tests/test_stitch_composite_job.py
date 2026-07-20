@@ -15,6 +15,7 @@ supabase / exchange mocks (no live DB / creds); run with
 from __future__ import annotations
 
 import logging
+import threading
 from contextlib import ExitStack
 from datetime import datetime
 from types import SimpleNamespace
@@ -562,6 +563,54 @@ async def test_happy_path_two_member_fanout_combined_scalars() -> None:
     cash = by_basis["cash_settlement"]
     assert cash["cumulative_return"] == pytest.approx(0.05)
     assert cash["max_drawdown"] == pytest.approx(-0.10)
+
+
+@pytest.mark.asyncio
+async def test_deribit_member_reconstruction_runs_off_event_loop() -> None:
+    """WEDGE-01 regression (Eclipse incident 2026-07-19): the SYNCHRONOUS CPU-bound
+    combine_native_ledger MUST run OFF the shared event-loop thread via
+    asyncio.to_thread, so a heavy multi-key Deribit stitch can never block the
+    FLIPRETRY-04 healthz heartbeat (main_worker.py:642 — it advances LAST_TICK_AT
+    only when the loop is SERVICING it). A blocked loop → healthz false-stale →
+    Railway 503-restart ~90s later → the job is orphaned 'running' under the dead
+    worker BEFORE the 1200s outer wait_for can fire (the exact Eclipse failure).
+
+    Intent (Rule 9), not incidental behaviour: proven by THREAD IDENTITY — the
+    combine executes in a worker thread (ident != the event-loop thread). Run
+    inline on the loop (the pre-fix code) the idents MATCH and this fails."""
+    loop_thread_id = threading.get_ident()
+    seen_threads: list[int] = []
+    _series = [
+        _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)]),
+        _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)]),
+    ]
+
+    def _combine(*_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
+        seen_threads.append(threading.get_ident())
+        return _series[len(seen_threads) - 1], {}
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    # Override the harness's combine MagicMock (innermost patch wins; the
+    # function-local `from services.broker_dailies import combine_native_ledger`
+    # resolves it at call time) with our thread-capturing sync stub.
+    with _apply(_deribit_patches(
+        fake, combine_returns=[], has_option_activity=True,
+    )), patch(
+        "services.broker_dailies.combine_native_ledger",
+        new=MagicMock(side_effect=_combine),
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(seen_threads) == 2, "both members' cash-pass combine must run"
+    assert all(t != loop_thread_id for t in seen_threads), (
+        "combine_native_ledger ran on the event-loop thread — it MUST be offloaded "
+        "via asyncio.to_thread (WEDGE-01) so CPU-bound pandas cannot starve the "
+        "healthz heartbeat and trip a Railway restart"
+    )
 
 
 @pytest.mark.asyncio
