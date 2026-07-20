@@ -672,3 +672,62 @@ describe("StrategyBrowseDrawer — 'Add your own' CTA (CONTRIB-05)", () => {
     ).not.toMatch(/^browse-add-/);
   });
 });
+
+/**
+ * CONNECT-01 — the prominent, top-of-drawer "Connect a key" CTA.
+ *
+ * WHY it exists: the bottom "Can't find it? Add your own" link (CONTRIB-05) was
+ * the ONLY add-your-own entry point, and it sat below the results — so an
+ * allocator handed a fresh exchange key by a new team clicked "+ Strategy", saw
+ * a browse list (or the "No strategies are live yet — check back later" empty
+ * state) and concluded there was no way to add a key. The hoisted CTA makes the
+ * connect-a-key path discoverable regardless of list state; both CTAs call the
+ * same onAddOwn.
+ */
+describe("StrategyBrowseDrawer — prominent 'Connect a key' CTA (CONNECT-01)", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("renders the prominent CTA when onAddOwn is provided; clicking fires it once", async () => {
+    const onAddOwn = vi.fn();
+    renderDrawer({ onAddOwn });
+    await flush();
+    const cta = screen.getByTestId("browse-connect-own");
+    expect(cta).toBeInTheDocument();
+    expect(cta).toHaveAttribute("type", "button");
+    fireEvent.click(cta);
+    expect(onAddOwn).toHaveBeenCalledTimes(1);
+  });
+
+  it("is absent without onAddOwn (optional-prop safety)", async () => {
+    renderDrawer();
+    await flush();
+    expect(screen.queryByTestId("browse-connect-own")).toBeNull();
+  });
+
+  it("surfaces the CTA in the no-strategies empty state — the exact miss it fixes", async () => {
+    const onAddOwn = vi.fn();
+    renderDrawer({ onAddOwn, fetchStrategies: async () => [] });
+    await flush();
+    // The dead-end empty copy is still shown, but the connect action now sits
+    // above it so the allocator with their own key is not told only to "wait".
+    expect(screen.getByText("No strategies are live yet.")).toBeInTheDocument();
+    expect(screen.getByTestId("browse-connect-own")).toBeInTheDocument();
+  });
+
+  it("keeps the prominent CTA OUT of the browse-add-* selector, even while strategies load", async () => {
+    const onAddOwn = vi.fn();
+    renderDrawer({ onAddOwn, fetchStrategies: () => new Promise(() => {}) });
+    await flush();
+    const cta = screen.getByTestId("browse-connect-own");
+    expect(cta.getAttribute("data-testid") ?? "").not.toMatch(/^browse-add-/);
+    expect(
+      document.querySelectorAll('[data-testid^="browse-add-"]'),
+    ).toHaveLength(0);
+  });
+});
