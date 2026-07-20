@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.47.2.2] - 2026-07-20
+### Fix: bound stitch_composite crawls + offload CPU work off the event loop (WEDGE-01)
+Worker stability. Root-cause fix for the "Eclipse" incident (2026-07-19) where a
+multi-key Deribit composite stitch orphaned itself `running` under a
+Railway-restarted worker, ~4.5 min into the crawl — well before the 1200s outer
+`asyncio.wait_for` could fire.
+
+- **Root cause** (`analytics-service/services/job_worker.py`,
+  `run_stitch_composite_job`): unlike the single-key derive path, the composite
+  arm ran its per-member reconstruction on the shared FastAPI/worker event loop
+  with none of the derive path's protection. The synchronous CPU-bound pandas
+  assembly (`combine_native_ledger`, `combine_realized_and_funding`,
+  `ccxt_rows_to_dated_flows`) blocked the loop, froze the FLIPRETRY-04 healthz
+  heartbeat (`main_worker.py:642`, which only advances `LAST_TICK_AT` when the
+  loop is servicing it), so Railway 503-restarted the pod ~90s later — orphaning
+  the job before the outer `wait_for` timer callback could ever run.
+- **Fix** mirrors two existing in-file patterns exactly: (a) FLIPRETRY-01
+  per-crawl `asyncio.wait_for(..., timeout=_BROKER_CRAWL_TIMEOUT_S)` bounds on the
+  live Deribit crawls (as at `:2319/:2386`), so a slow/hung read is a classified
+  transient (retryable whole-job) instead of an unbounded wedge; (b) the rescore
+  path's `asyncio.to_thread` (as at `:6398`) to move the CPU-bound pandas combines
+  off the loop, so they can no longer starve the heartbeat AND the outer
+  `wait_for` stays able to fire. New `except asyncio.TimeoutError` arm at the
+  member call site classifies a blown per-crawl bound as transient (never
+  permanent); the `finally` still closes the exchange.
+- **Regression test** (`tests/test_stitch_composite_job.py`,
+  `test_deribit_member_reconstruction_runs_off_event_loop`): asserts by thread
+  identity (Rule 9 — intent, not incidental behaviour) that the CPU-bound combine
+  runs off the event-loop thread; fails against the pre-fix inline code.
+
 ## [0.47.2.1] - 2026-07-20
 ### Scenario: discoverable "Connect a key" + "Scenario portfolio" rename
 Allocator UX. Two small changes to the Scenario tab so an allocator handed a
