@@ -452,6 +452,46 @@ export function StrategyBrowseDrawer({
           ))}
         </div>
 
+        {/*
+          CONNECT-01 — the prominent "add your own" entry point, hoisted ABOVE
+          the results so it is discoverable regardless of list state (including
+          the "No strategies are live yet" empty state, whose "check back as
+          strategy authors complete verification" copy otherwise dead-ends an
+          allocator who has their OWN key to add).
+          The bottom "Can't find it? Add your own" link (below the list) stays as
+          the in-context escape hatch; both call the same onAddOwn →
+          ContributionWizardOverlay (which defaults to the API-key branch).
+
+          DESIGN.md: a Secondary button (border-accent, transparent) — NOT a
+          second accent-FILL, which would compete with the per-row Add buttons.
+          Prominence comes from POSITION (top) + the framing panel, not colour.
+
+          data-testid is `browse-connect-own` (NOT the `browse-add-*` family) so
+          the "add the first strategy" first-match automation
+          (`[data-testid^="browse-add-"]`) never binds to this CTA during the
+          fetch-in-flight window — the same collision guard the bottom CTA notes.
+        */}
+        {onAddOwn && (
+          <div className="mt-5 rounded-lg border border-border p-4">
+            <div className="text-sm font-medium text-text-primary">
+              Add your own track record
+            </div>
+            <p className="mt-1 text-xs text-text-secondary">
+              Got a read-only exchange API key from a new team? Connect it — or
+              upload a CSV — to add the strategy here and project how it fits your
+              book.
+            </p>
+            <button
+              type="button"
+              onClick={onAddOwn}
+              data-testid="browse-connect-own"
+              className="mt-3 inline-flex items-center rounded-md border border-accent px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/5 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+            >
+              Connect a key
+            </button>
+          </div>
+        )}
+
         <div className="mt-6">
           {loading && (
             <div className="py-12 text-center text-sm text-text-muted">
