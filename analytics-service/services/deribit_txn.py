@@ -646,20 +646,51 @@ assert not (_NATIVE_CASH_BEARING_TYPES & _NATIVE_INFORMATIONAL_TYPES), (
 # (the safe direction — an operator hand-classifies), and NEVER silently counts
 # capital as performance. See ``_reason_contains_any`` vs the word-boundary
 # ``_reason_matches_any`` used for the allow-list.
+#
+# RT-01 (money-safety, red team): CAPITAL-CONTEXT words added below. A deribit
+# `correction` reason names cash on BOTH sides of the trading/capital line; the
+# original denylist only caught reasons that literally said deposit/withdrawal/
+# transfer/wallet. But "network fee refund", "reward interest correction", "funding
+# of insurance account", "subaccount funding correction" are capital/flow movements
+# (network/on-chain withdrawal fees ride the capital flow; `usdc_reward` is an
+# EXTERNAL FLOW; insurance-fund / subaccount funding is not the user's trading PnL) —
+# yet each contained a trading token and was silently summed into realized PnL with
+# NO backstop (the balance-identity oracle is structurally blind to a MISROUTE — it
+# and the computed side derive from the same predicate). These capital-context words
+# are checked FIRST (substring) → any match FAILS LOUD. Safe direction only.
 _CORRECTION_CAPITAL_REASON_KEYWORDS: tuple[str, ...] = (
     "deposit",
     "withdrawal",
     "transfer",
     "wallet",
     "capital",
+    # RT-01 capital-context (flow / non-trading cash that named a trading token):
+    "network",     # network/on-chain withdrawal fees ride the capital flow
+    "on-chain",
+    "onchain",
+    "reward",      # usdc_reward is an EXTERNAL FLOW, not realized PnL
+    "rebate",
+    "bonus",
+    "airdrop",
+    "insurance",   # insurance-fund funding is not the user's trading PnL
+    "subaccount",
+    "sub-account",
 )
 
 # BROAD trading/PnL allow-list, consulted ONLY after the capital denylist clears.
 # Matched on WORD BOUNDARIES so a short token cannot collide inside a larger word
-# (belt-and-suspenders on top of the denylist: e.g. `fee` must not match inside a
-# capital reason). `mark` is deliberately EXCLUDED (collides with market/benchmark/
-# earmarked and adds no real signal); the remaining tokens cover the observed +
-# plausible trading corrections. Deliberately NOT a full reason taxonomy (KISS).
+# (belt-and-suspenders on top of the denylist). `mark` is deliberately EXCLUDED
+# (collides with market/benchmark/earmarked). The remaining tokens name cash that is
+# UNAMBIGUOUSLY trading on a derivatives venue.
+#
+# RT-01 (money-safety, red team): `fee` and `interest` were DROPPED. Unlike the
+# other tokens they name cash on BOTH sides — trading (taker/maker/negative-balance
+# fee, funding interest) AND capital (network/withdrawal fee, `usdc_reward`
+# interest). With no oracle backstop for a misroute, an ambiguous token that has NO
+# live evidence behind it (the only observed correction is a BTC-PERPETUAL funding
+# calc) must FAIL LOUD, not silently classify. A real trading fee/interest correction
+# now fails loud and is classified against evidence when it actually appears — the
+# founder's "fail-loud > silent-wrong, classify on evidence not guesses" rule.
 _CORRECTION_TRADING_REASON_KEYWORDS: tuple[str, ...] = (
     "funding",
     "settlement",
@@ -668,8 +699,6 @@ _CORRECTION_TRADING_REASON_KEYWORDS: tuple[str, ...] = (
     "p&l",
     "delivery",
     "trade",
-    "fee",
-    "interest",
     "liquidation",
     "premium",
     "expiry",
@@ -678,11 +707,18 @@ _CORRECTION_TRADING_REASON_KEYWORDS: tuple[str, ...] = (
 
 def _correction_reason_raw(row: Mapping[str, Any]) -> str:
     """The RAW (un-lowered) ``info.reason`` of a row — defensive: ``info`` may be
-    absent / ``None`` / a non-Mapping. Empty string when unavailable."""
+    absent / ``None`` / a non-Mapping. Empty string when unavailable.
+
+    RT-01 (red team): a NON-STRING reason (e.g. a schema-drifted dict
+    ``{"note": "session fix"}``) returns "" — it must NOT be ``str()``-coerced and
+    classified on its repr (``str(dict)`` contains "session" → would falsely match
+    the trading allow-list). An empty reason falls through to FAIL LOUD, the safe
+    direction for structured/unexpected schema."""
     info = row.get("info")
     if not isinstance(info, Mapping):
         return ""
-    return str(info.get("reason", "") or "")
+    reason = info.get("reason")
+    return reason if isinstance(reason, str) else ""
 
 
 def _reason_matches_any(reason_lower: str, keywords: tuple[str, ...]) -> bool:
