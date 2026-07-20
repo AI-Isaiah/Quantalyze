@@ -1,9 +1,10 @@
 -- Test: retention_compute_jobs_orphaned_running purge cron (WORKER-04).
 --
 -- Guards migration
--- 20260719120000_retention_orphaned_running_compute_jobs.sql — the recurring
--- pg_cron job that DELETEs orphaned `running` compute_jobs older than a 2-hour
--- window.
+-- 20260719120000_retention_orphaned_running_compute_jobs.sql (+ the RT-01 window
+-- correction 20260720120000_retention_orphaned_running_window_4h.sql) — the
+-- recurring pg_cron job that DELETEs orphaned `running` compute_jobs older than a
+-- 4-hour window.
 --
 -- Why this cron exists (Rule 9 — the WHY, not just the WHAT)
 -- ----------------------------------------------------------
@@ -21,14 +22,18 @@
 -- to `running` by the next CI run and the collision returns. Only removal ends
 -- the daily re-pollution.
 --
--- The 2-hour window is SAFE on prod: the interactive worker's watchdog
--- (analytics-service/main_worker.py WATCHDOG_PER_KIND_OVERRIDES line 206) caps
--- the max per-kind stale threshold at process_key_long = 40 minutes, so a
--- `running` row older than 2h is definitively orphaned (worker down), never a
--- live in-flight job. NOTE: `retention_delete_guard` (mig 121) fires ONLY on
--- audit_log / audit_log_cold, NOT compute_jobs — there is no row-count ceiling
--- on this purge (the DELETE-vs-reset-on-outage tradeoff is the founder-deferred
--- WR-02 decision, resolved at FLIP).
+-- The 4-hour window is SAFE on prod (RT-01 corrected basis): a full batch of 5
+-- claimed jobs (main_worker p_batch_size=5) shares one CLAIM-time `claimed_at`
+-- and dispatches SEQUENTIALLY, so job #5 on a HEALTHY worker can be legitimately
+-- in-flight with `claimed_at` up to 5 x 30-min (process_key_long) = 2.5h old. A
+-- 4h window clears that ceiling with margin, so a `running` row older than 4h is
+-- genuinely orphaned (worker down / claim leaked), never a live batch-tail job —
+-- and this does NOT depend on the watchdog firing (its silent failure was the
+-- hole in the original 2h/40-min rationale). NOTE: `retention_delete_guard`
+-- (mig 121) fires ONLY on audit_log / audit_log_cold, NOT compute_jobs — there is
+-- no row-count ceiling on this purge. The DELETE-vs-reset-on-sustained-outage
+-- tradeoff (a genuinely-orphaned interactive one-shot removed with no terminal
+-- state) is the founder-deferred WR-02 decision, resolved at FLIP-01 go-live.
 --
 -- Oracle discipline: the behavioral section EXECUTEs the REAL deployed
 -- cron.job.command (not a re-typed copy of the predicate) so the test pins the
@@ -53,12 +58,14 @@ DECLARE
   v_command    TEXT;
   v_cron_hour  INT;
   uid          UUID := gen_random_uuid();
-  key_a        UUID;  -- orphaned running (3h old) — MUST be deleted
+  key_a        UUID;  -- orphaned running (5h old) — MUST be deleted
   key_b        UUID;  -- fresh running (now)       — MUST survive
-  key_c        UUID;  -- non-running done (3h old) — MUST survive
+  key_c        UUID;  -- non-running done (5h old) — MUST survive
+  key_d        UUID;  -- RT-01: running 3h old     — MUST survive (batch-tail)
   id_a         UUID;
   id_b         UUID;
   id_c         UUID;
+  id_d         UUID;
   row_cnt      INTEGER;
 BEGIN
   -- ----- PRESENCE GATE 1: pg_cron extension (local dev) ------------------
@@ -84,8 +91,11 @@ BEGIN
   IF v_command NOT ILIKE '%status = ''running''%' THEN
     RAISE EXCEPTION 'TEST FAILED (1): cron body does not scope to status = ''running''. command was: %', v_command;
   END IF;
-  IF v_command NOT ILIKE '%interval ''2 hours''%' THEN
-    RAISE EXCEPTION 'TEST FAILED (1): cron body does not use the 2-hour window (interval ''2 hours''). command was: %', v_command;
+  IF v_command NOT ILIKE '%interval ''4 hours''%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1): cron body does not use the RT-01-corrected 4-hour window (interval ''4 hours''). command was: %', v_command;
+  END IF;
+  IF v_command ILIKE '%interval ''2 hours''%' THEN
+    RAISE EXCEPTION 'TEST FAILED (1): cron body still carries the OLD 2-hour window — RT-01 window widening (mig 20260720120000) not applied. command was: %', v_command;
   END IF;
   IF v_command NOT ILIKE '%claimed_at%' THEN
     RAISE EXCEPTION 'TEST FAILED (1): cron body does not reference claimed_at. command was: %', v_command;
@@ -119,21 +129,29 @@ BEGIN
   VALUES (uid, 'binance', 'fresh b', 'x', TRUE) RETURNING id INTO key_b;
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
   VALUES (uid, 'binance', 'done c', 'x', TRUE) RETURNING id INTO key_c;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'binance', 'batchtail d', 'x', TRUE) RETURNING id INTO key_d;
 
-  -- (a) orphaned running, claimed 3h ago → MUST be deleted
+  -- (a) orphaned running, claimed 5h ago (beyond the 4h window) → MUST be deleted
   INSERT INTO compute_jobs (api_key_id, kind, status, claimed_at)
-  VALUES (key_a, 'derive_broker_dailies', 'running', now() - interval '3 hours')
+  VALUES (key_a, 'derive_broker_dailies', 'running', now() - interval '5 hours')
   RETURNING id INTO id_a;
   -- (b) fresh running, claimed now → MUST survive
   INSERT INTO compute_jobs (api_key_id, kind, status, claimed_at)
   VALUES (key_b, 'derive_broker_dailies', 'running', now())
   RETURNING id INTO id_b;
-  -- (c) non-running (done), aged 3h → MUST survive (predicate is status-scoped)
+  -- (c) non-running (done), aged 5h → MUST survive (predicate is status-scoped)
   INSERT INTO compute_jobs (api_key_id, kind, status, created_at, claimed_at)
-  VALUES (key_c, 'derive_broker_dailies', 'done', now() - interval '3 hours', now() - interval '3 hours')
+  VALUES (key_c, 'derive_broker_dailies', 'done', now() - interval '5 hours', now() - interval '5 hours')
   RETURNING id INTO id_c;
+  -- (d) RT-01 boundary: running, claimed 3h ago — aged past the OLD 2h window but
+  -- WITHIN the corrected 4h window → MUST survive (a healthy worker's batch-tail
+  -- job, exactly the row the 2h window would have wrongly purged).
+  INSERT INTO compute_jobs (api_key_id, kind, status, claimed_at)
+  VALUES (key_d, 'derive_broker_dailies', 'running', now() - interval '3 hours')
+  RETURNING id INTO id_d;
 
-  RAISE NOTICE 'Seed OK: orphan_running=% fresh_running=% aged_done=%', id_a, id_b, id_c;
+  RAISE NOTICE 'Seed OK: orphan_running=% fresh_running=% aged_done=% batchtail_3h=%', id_a, id_b, id_c, id_d;
 
   -- ----- ASSERTION 3: EXECUTE the DEPLOYED cron body (the oracle) --------
   -- Run the REAL stored command, not a re-typed predicate.
@@ -142,9 +160,9 @@ BEGIN
   -- (a) orphaned running row is GONE
   SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_a;
   IF row_cnt <> 0 THEN
-    RAISE EXCEPTION 'TEST FAILED (3): orphaned >2h running row survived the purge (count=%), expected 0', row_cnt;
+    RAISE EXCEPTION 'TEST FAILED (3): orphaned >4h running row survived the purge (count=%), expected 0', row_cnt;
   END IF;
-  -- (b) fresh running row SURVIVES (younger than the 2h window)
+  -- (b) fresh running row SURVIVES (younger than the 4h window)
   SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_b;
   IF row_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (3): fresh running row was deleted (count=%), expected 1 — window too aggressive', row_cnt;
@@ -154,8 +172,16 @@ BEGIN
   IF row_cnt <> 1 THEN
     RAISE EXCEPTION 'TEST FAILED (3): aged non-running (done) row was deleted (count=%), expected 1 — status scope broken', row_cnt;
   END IF;
+  -- (d) RT-01: the 3h batch-tail running row SURVIVES under the 4h window. This is
+  -- the regression: against the OLD 2h window it was DELETEd (a live worker''s
+  -- in-flight job wrongly purged → double-compute). RED-proof: revert the window to
+  -- 2h and this assertion reddens.
+  SELECT count(*) INTO row_cnt FROM compute_jobs WHERE id = id_d;
+  IF row_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (3/RT-01): 3h batch-tail running row was purged (count=%), expected 1 — window too tight, a live worker''s in-flight job would be deleted', row_cnt;
+  END IF;
 
-  RAISE NOTICE 'All retention_compute_jobs_orphaned_running assertions passed (registration + predicate + safe-hour + DELETE behavior).';
+  RAISE NOTICE 'All retention_compute_jobs_orphaned_running assertions passed (registration + 4h-window + safe-hour + DELETE behavior + RT-01 batch-tail survival).';
 
   -- ----- TEARDOWN (belt-and-suspenders; the outer ROLLBACK also discards) -
   DELETE FROM auth.users WHERE id = uid;
