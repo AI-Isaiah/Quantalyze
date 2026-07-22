@@ -845,10 +845,25 @@ _COVERAGE_DAY_MS: float = 24 * 60 * 60 * 1000.0
 #   book open across the ~2025-01-12 summary rollout) FAILS LOUD under this basis
 #   (no boundary-book V₀ anchor is computed; that machinery was removed as an
 #   invalid closed form). Use ``cash_settlement`` for such accounts.
+# ``smoothed_mtm`` (Phase 131, NEW third basis): the DAILY-MARK redistribution —
+#   each option row books its FULL cash ``change`` (like cash_settlement) AND the
+#   adapter (``build_deribit_native_ledger``) merges a per-(day,ccy) ΔMTM channel
+#   ``Book[d]−Book[d−1]`` (``Book[d]=Σ_instr position×mark[d]``) computed from the
+#   replayed option book and daily option marks. This SPREADS each session-lump
+#   option P&L across the days it accrued → the honest daily option worth, WITHOUT
+#   the mark_to_market summary-lump spikes. Total-preserving (telescoping):
+#   ``Σ_d native_pnl = Σchange + Book(last settlement)``; a FLAT terminal book ⇒
+#   the smoothed total equals the cash_settlement total EXACTLY. The
+#   ``options_settlement_summary`` channel does NOT drive attribution under this
+#   basis (it is retained ONLY as the Q3-3 reconciliation cross-check in
+#   ``assert_balance_identity``). For perp-only / USD-native books the replay is
+#   empty ⇒ no marks fetched ⇒ no-op merge ⇒ byte-identical to cash_settlement
+#   (SC-4). ADDITIVE — cash_settlement and mark_to_market stay byte-untouched.
 PNL_BASIS_CASH_SETTLEMENT: str = "cash_settlement"
 PNL_BASIS_MARK_TO_MARKET: str = "mark_to_market"
+PNL_BASIS_SMOOTHED_MTM: str = "smoothed_mtm"
 _PNL_BASES: frozenset[str] = frozenset(
-    {PNL_BASIS_CASH_SETTLEMENT, PNL_BASIS_MARK_TO_MARKET}
+    {PNL_BASIS_CASH_SETTLEMENT, PNL_BASIS_MARK_TO_MARKET, PNL_BASIS_SMOOTHED_MTM}
 )
 DEFAULT_PNL_BASIS: str = PNL_BASIS_CASH_SETTLEMENT
 
@@ -1959,10 +1974,20 @@ def txn_rows_to_native_daily(
             "unrecognized accrual basis"
         )
     use_mtm = pnl_basis == PNL_BASIS_MARK_TO_MARKET
+    # Phase 131 SMOOTHED_MTM: the cash channel here is BYTE-IDENTICAL to
+    # cash_settlement — option trade/delivery rows book their FULL cash `change`
+    # (coverage_windows below is empty for every non-mtm basis, so the coverage-
+    # gated −commission arm is never entered) and the summary channel contributes
+    # NOTHING (handled by the smoothed summary arm below, which still enforces
+    # change==0). The per-(day,ccy) ΔMTM redistribution is merged by the ADAPTER
+    # (``build_deribit_native_ledger``, Task 4), NOT here — keeping this module
+    # pandas/async-free (AST purity) and the signature marks-free (83-PLAN Q2).
+    use_smoothed = pnl_basis == PNL_BASIS_SMOOTHED_MTM
     # Phase 82 pre-pass (MARK_TO_MARKET only): per-currency options coverage
     # windows from this batch's own summary rows. Value-inert for perp-only /
-    # USD-native ledgers (no summaries → {}). In CASH_SETTLEMENT the summary
-    # channel is not consulted at all — options book their raw cash `change`.
+    # USD-native ledgers (no summaries → {}). In CASH_SETTLEMENT and SMOOTHED_MTM
+    # the summary channel is not consulted at all — options book their raw cash
+    # `change`.
     coverage_windows = _summary_coverage_windows(rows) if use_mtm else {}
     # Bug B — ALLOCATED PATH ONLY (``exclude_spot_extraction=True``, threaded from a
     # non-None ``returns_denominator_config``): the NET-DAILY spot-extraction
@@ -2030,6 +2055,28 @@ def txn_rows_to_native_daily(
                 )
             key = (day, ccy)
             by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
+            continue
+        # SMOOTHED_MTM only: options_settlement_summary does NOT drive attribution
+        # (the per-(day,ccy) ΔMTM book, merged by the adapter, does). It
+        # contributes NOTHING here — but its `change` is still ALWAYS 0.0; a
+        # nonzero change is semantics drift → fail loud (mirrors the mtm arm's
+        # _summary_contribution change guard, verbatim). Under smoothed the summary
+        # survives ONLY as the Q3-3 reconciliation cross-check in
+        # assert_balance_identity (the summaries stop driving attribution but keep
+        # policing it). Gated on use_smoothed → cash_settlement / mark_to_market
+        # are byte-untouched (SC-4).
+        if use_smoothed and row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            summary_change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            if summary_change != 0.0:
+                raise LedgerValuationError(
+                    f"options_settlement_summary Deribit row id={row.get('id')!r} "
+                    "carries a nonzero change under smoothed_mtm — the summary "
+                    "recap change is always 0.0 (option P&L is redistributed via "
+                    "the daily ΔMTM book); a nonzero change is semantics drift, "
+                    "classify against fresh evidence before ingesting"
+                )
             continue
         # Phase 128 (DERIBITFIX): a `correction` is gated PER ROW on info.reason —
         # the SAME gate as the USD sibling so the two paths never diverge on which
