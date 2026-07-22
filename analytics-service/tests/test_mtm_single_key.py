@@ -1710,6 +1710,53 @@ async def test_smoothed_third_pass_insufficient_budget_skips_cash_ships() -> Non
 
 
 @pytest.mark.asyncio
+async def test_smoothed_combine_runs_off_event_loop() -> None:
+    """LOW-03 (132 review) — WEDGE-01 class: the smoothed third pass's SYNCHRONOUS
+    CPU-bound combine_native_ledger (options ledgers are the largest books) must run
+    OFF the shared event-loop thread via asyncio.to_thread, like the composite arm —
+    a third on-loop full-book pandas combine linearly extends the heartbeat-
+    starvation window that got Eclipse's worker 503-restarted mid-job. Proven by
+    THREAD IDENTITY (Rule 9): the smoothed (third) combine executes in a worker
+    thread. The cash/MTM combines are byte-frozen pre-existing on-loop code — this
+    test deliberately does NOT pin them either way, so a future WEDGE-01 sweep that
+    offloads them cannot redden it. Run the smoothed combine inline on the loop (the
+    pre-fix code) → idents match → reddens."""
+    import threading
+
+    loop_thread_id = threading.get_ident()
+    seen_threads: list[int] = []
+    _outs = [
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ]
+
+    def _combine(*_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
+        seen_threads.append(threading.get_ident())
+        return _outs[len(seen_threads) - 1]
+
+    ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, _calls = _recording_ledger(reports)
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock,
+        combine_mock=MagicMock(side_effect=_combine),
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(seen_threads) == 3, "cash, MTM, and smoothed combines all ran"
+    assert seen_threads[2] != loop_thread_id, (
+        "the smoothed third-pass combine_native_ledger ran ON the event-loop "
+        "thread — it MUST be offloaded via asyncio.to_thread (WEDGE-01) so "
+        "CPU-bound pandas cannot starve the healthz heartbeat"
+    )
+
+
+@pytest.mark.asyncio
 async def test_smoothed_scalar_degrade_heals_series_row() -> None:
     """HIGH-02 (132 review) — Pitfall-5: an ATTEMPTED smoothed pass whose SCALAR
     compute degrades (derive_basis_series ValueError on the smoothed series only)

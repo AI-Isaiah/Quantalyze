@@ -2726,10 +2726,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             # cash/MTM objects. The smoothed meta guard flags are
                             # DISCARDED (the cash-pass flags are authoritative),
                             # mirroring the MTM Finding-9 discard.
-                            smoothed_returns, _smoothed_meta = combine_native_ledger(
-                                _smoothed_ledger,
-                                _smoothed_completeness.indexable_currencies,
-                                denominator_config=denominator_config,
+                            #
+                            # LOW-03 (132 review) / WEDGE-01: combine_native_ledger
+                            # is SYNCHRONOUS CPU-bound pandas and options ledgers
+                            # are the largest books — run it OFF the shared loop via
+                            # asyncio.to_thread (the composite-arm pattern) so this
+                            # third full-book combine cannot extend the heartbeat-
+                            # starvation window. (The cash/MTM combines are byte-
+                            # frozen pre-existing on-loop code — out of scope here;
+                            # flagged for the WEDGE-01 follow-up sweep.)
+                            smoothed_returns, _smoothed_meta = (
+                                await asyncio.to_thread(
+                                    combine_native_ledger,
+                                    _smoothed_ledger,
+                                    _smoothed_completeness.indexable_currencies,
+                                    denominator_config=denominator_config,
+                                )
                             )
                             # pre_mark_retention_option_days →
                             # complete_with_warnings: option marks aged past the
