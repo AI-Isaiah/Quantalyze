@@ -957,6 +957,18 @@ describe("SMTM-01 parseSmoothedSeriesPayload — smoothed-basis coercion + nan_d
     expect(out!.dailyReturns.length).toBe(3);
   });
 
+  it("IN-01 pin: an ABSENT basis key is TOLERATED (mirrors parseMtmSeriesPayload, which performs no basis check — an omitted optional field must never false-reject an otherwise-valid smoothed payload)", () => {
+    // Decision (Phase-133 review fix, orchestrator-directed): the guard rejects
+    // ONLY a present-but-wrong basis literal (the mislabel T-131-08 defends
+    // against); absence falls through to the shared coercion. Flipping this to a
+    // strict `basis === "smoothed_mtm"` requirement reddens this pin.
+    const { basis: _omitted, ...noBasis } = VALID;
+    const out = parseSmoothedSeriesPayload(noBasis);
+    expect(out).not.toBeNull();
+    expect(out!.dailyReturns.length).toBe(3);
+    expect(out!.gapSpans).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
+  });
+
   it("WRONG basis literal (mark_to_market row under the smoothed kind) → null + warn (never a mislabeled series)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
