@@ -2224,7 +2224,20 @@ async def build_deribit_native_ledger(
     # Under MARK_TO_MARKET the open book's value is ALREADY carried INTO native_pnl by
     # the summary channel, so adding it to the wedge would DOUBLE-COUNT — keep the
     # wedge = session uPnL only there (unchanged).
-    if pnl_basis == PNL_BASIS_MARK_TO_MARKET:
+    #
+    # WR-01: SMOOTHED_MTM joins the MARK_TO_MARKET arm for the same reason — the
+    # ΔMTM merge already carries the SETTLED open book into native_pnl
+    # (terminal_book == options_value − options_session_upl, book-channel-guarded
+    # above), so re-adding options_value would double-count it and strand a §5
+    # residual ≈ options_value on every healthy open-book account. From the M5
+    # anchor identity (equity − combined_session_upl == cash + options_value −
+    # options_session_upl): Σnative_pnl = cash′ + options_value −
+    # options_session_upl ⇒ required wedge = equity − Σflow − Σnative_pnl =
+    # futures_session_upl + options_session_upl — exactly the COMBINED session
+    # uPnL that ``state.native_upnl`` already reads (the two legs the settled
+    # daily marks exclude). §5 then closes exactly (pinned by the open-book
+    # smoothed §5-through test).
+    if pnl_basis in (PNL_BASIS_MARK_TO_MARKET, PNL_BASIS_SMOOTHED_MTM):
         terminal_upnl_native: Mapping[str, float] = state.native_upnl
     else:
         _wedge_ccys = (

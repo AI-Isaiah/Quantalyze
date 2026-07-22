@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from services import deribit_ingest as di
+from services.native_nav import reconstruct_native_nav_and_twr
 from services.allocated_capital import (
     ReturnsDenominatorConfigError,
     _VALID_PNL_BASES,
@@ -735,6 +736,51 @@ def test_smoothed_open_future_expiry_capped_at_last_settled_day(
     # excludes 01-18's) — never expiry (2027) and never now().
     (params,) = stub.chart_params
     assert params["end_timestamp"] == _ms("2026-01-18T00:00:00+00:00")
+
+
+# --- WR-01: H1 terminal wedge under smoothed — §5 inception closure -----------
+
+
+def test_smoothed_terminal_wedge_and_inception_closure_open_book(
+    monkeypatch: Any,
+) -> None:
+    """WR-01: under smoothed the ΔMTM merge ALREADY carries the settled open book
+    into native_pnl (terminal_book == options_value − options_session_upl, book-
+    channel-guarded), so the H1 terminal wedge must be the combined session uPnL
+    ONLY — adding ``options_value`` (the CASH arm's wedge) counts the settled
+    book TWICE and §5 permanently fails a healthy open-book account by
+    ≈ options_value.
+
+    Hand-derived Deribit economics (NOT the code's own formula), with BOTH
+    session legs nonzero so the combined-wedge decomposition is load-bearing:
+      settled book = 2.0 × mark(0.08) = 0.16
+      options_session_upl = 0.02 (current-session move) → options_value = 0.18
+      futures/base session_upl = 0.01;  cash = Σchange = −0.10
+      equity = cash + futures_session_upl + options_value = 0.09  (M5 anchor
+      identity: equity − combined_upl == cash + options_value − options_session_upl)
+      Σ native_pnl (smoothed) = cash + settled book = 0.06
+      required wedge = equity − Σnative_pnl = 0.03 = combined session uPnL —
+      exactly ``native_upnl``; the old arm's 0.03 + 0.18 = 0.21 strands a −0.12
+      §5 residual."""
+    summaries = [
+        {"currency": "BTC", "equity": 0.09, "session_upl": 0.01,
+         "options_value": 0.18, "options_session_upl": 0.02},
+    ]
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_HELD_ROWS,
+        summaries=summaries,
+        charts=_HELD_CHARTS,
+        pnl_basis="smoothed_mtm",
+    )
+    # The wedge is the COMBINED session uPnL only — never + options_value.
+    assert ledger.terminal_upnl_native["BTC"] == pytest.approx(0.03, abs=1e-12)
+    # §5-through: the inception reconciliation closes on the open book (the old
+    # wedge raised InceptionReconciliationError with residual ≈ options_value).
+    returns, _meta = reconstruct_native_nav_and_twr(
+        ledger, indexable_currencies=frozenset({"BTC"}), venue="deribit"
+    )
+    assert len(returns) > 0
 
 
 # --- Cash channel (strict, ALL currencies) -----------------------------------
