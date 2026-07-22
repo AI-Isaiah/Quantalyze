@@ -997,7 +997,24 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
         "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
     ):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+        # LOW-02 (132 review): grab the ACTIVE harness combine mock while the patch
+        # is still applied — the exact-count assertion below is the load-bearing
+        # pass-arity oracle.
+        import services.broker_dailies as _bd
+
+        _combine_mock = _bd.combine_native_ledger
     assert result.outcome == DispatchOutcome.DONE
+    # LOW-02 (132 review): the harness DOUBLES combine_returns for options
+    # composites, so a finite-list StopIteration no longer catches every extra
+    # fan-out (this caller sizes for both passes → 4 spare doubled entries would
+    # silently absorb a duplicate smoothed fan-out: same persisted output, doubled
+    # live crawls in production). Pin the EXACT arity: 2 members × (cash pass +
+    # smoothed pass) = 4 combines, MTM gated off. A duplicate smoothed fan-out (6)
+    # OR a silently-skipped pass (2) reddens here.
+    assert _combine_mock.call_count == 4, (
+        "an options composite runs EXACTLY one cash + one smoothed combine per "
+        "member (MTM gated off) — any extra/missing fan-out is a live-crawl bug"
+    )
     by_basis = _by_basis(fake)
     assert by_basis is not None
     assert set(by_basis) == {"cash_settlement", "smoothed_mtm"}, (
