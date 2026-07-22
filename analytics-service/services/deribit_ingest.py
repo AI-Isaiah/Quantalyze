@@ -1936,6 +1936,25 @@ def _option_expiry_iso(instrument: str) -> str | None:
         return None
 
 
+def _last_settled_option_mark_day() -> str:
+    """The UTC-day KEY of the most recent COMPLETED Deribit 1D option bar.
+
+    Deribit stamps a 1D bar at ``D 08:00 UTC`` (its settlement boundary — M7
+    evidence) and the bar COMPLETES at the NEXT boundary, ``D+1 08:00``; its close
+    is then the venue's settled mark for that boundary — the same settled basis
+    the anchor's ``options_value − options_session_upl`` decomposes to. The most
+    recent completed bar is therefore stamped ``(most recent 08:00 boundary) −
+    24h``. Capping an OPEN instrument's marks window here (CR-02) keeps the
+    current PARTIAL bar — whose live close still carries ``options_session_upl``
+    — OUT of the terminal book, so the book channel reconciles exactly at the
+    settled boundary."""
+    now = datetime.now(timezone.utc)
+    boundary = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if now < boundary:
+        boundary -= timedelta(days=1)
+    return (boundary - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
 async def _build_smoothed_option_mtm(
     exchange: Any,
     raw_rows: Sequence[Mapping[str, Any]],
@@ -1964,14 +1983,31 @@ async def _build_smoothed_option_mtm(
     kept_positions: dict[str, Mapping[str, Any]] = {}
     marks: dict[str, dict[str, float]] = {}
     pre_retention: set[tuple[str, str]] = set()
+    last_settled = _last_settled_option_mark_day()
     for instrument in sorted(positions):
         info = positions[instrument]
         first_day = str(info["first_day"])
         last_day = str(info["last_day"])
         expiry = _option_expiry_iso(instrument)
-        # Never fetch past expiry (a position cannot outlive its expiry, and the
-        # source only lists bars within the instrument's life).
-        newest = last_day if expiry is None else min(last_day, expiry)
+        # CR-02: an instrument whose FINAL replayed position is nonzero is OPEN —
+        # it stays exposed through the CURRENT settlement, not just its last
+        # event day. Fetch its marks through the last SETTLED bar day so (a) the
+        # ΔMTM series carries the book on every held day after the last trade
+        # (no silent truncation) and (b) the terminal book lands at the SAME
+        # settled boundary the anchor decomposes to — this also covers the days a
+        # LATER-trading sibling instrument extends the global grid across (a
+        # last-EVENT window there produced a spurious D-07 hole naming a healthy
+        # instrument). A CLOSED instrument (final position 0) still ends at its
+        # last event day. Never fetch past expiry either way (a position cannot
+        # outlive its expiry; the source only lists bars within the life). A
+        # same-day event past the last settled bar can still pull the window onto
+        # the current PARTIAL bar — the book channel then judges it (fail-loud,
+        # never silent).
+        event_positions = info["positions"]
+        terminal_pos = float(event_positions[max(event_positions)])
+        newest = last_day if terminal_pos == 0.0 else max(last_day, last_settled)
+        if expiry is not None:
+            newest = min(newest, expiry)
         instr_marks = await fetch_deribit_option_daily_marks(
             exchange, instrument, oldest_day=first_day, newest_day=newest, sleep=sleep
         )

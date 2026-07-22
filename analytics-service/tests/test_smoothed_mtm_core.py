@@ -598,6 +598,145 @@ def test_smoothed_book_channel_mark_is_load_bearing(monkeypatch: Any) -> None:
         )
 
 
+# --- CR-02: marks window reaches the last SETTLEMENT, not the last EVENT ------
+#
+# An OPEN instrument (final replayed position nonzero) stays exposed through the
+# current settlement boundary, not just its last trade day. The marks window must
+# therefore extend to min(last settled bar day, expiry) so (a) the ΔMTM series
+# carries the book on every held day after the last trade and (b) the terminal
+# book reconciles against the anchor's CURRENT settled book. Before the fix the
+# window ended at the last EVENT day: a lone open position truncated its series
+# and breached the book channel on any mark move, and a second instrument trading
+# LATER extended the global grid past the first one's fetched marks → a spurious
+# D-07 "structural hole" naming a healthy instrument.
+
+# Open call: bought 2.0 on 01-15 (premium 0.05/contract → change −0.10), HELD.
+# Venue bars through 01-17 with a MOVED mark (0.06 → 0.08); expiry 30JAN26 caps
+# the window deterministically. Settled book = 2.0 × 0.08 = 0.16.
+_HELD_INSTR = "BTC-30JAN26-100000-C"
+_HELD_ROWS = [
+    _opt_row(instrument=_HELD_INSTR, day="2026-01-15", change=-0.10, position=2.0, id=1),
+]
+_HELD_CHARTS = {
+    _HELD_INSTR: {"2026-01-15": 0.06, "2026-01-16": 0.07, "2026-01-17": 0.08}
+}
+# Deribit economics: equity = cash + futures_session_upl + options_value
+#                 = −0.10 + 0.0 + 0.16 = 0.06 (settled anchor 0.16 − 0.0 = 0.16).
+_HELD_SUMMARIES = [
+    {"currency": "BTC", "equity": 0.06, "session_upl": 0.0,
+     "options_value": 0.16, "options_session_upl": 0.0},
+]
+
+
+def test_smoothed_open_position_marked_through_last_settled_day(
+    monkeypatch: Any,
+) -> None:
+    """CR-02(a): an open position with ≥2 settled days after its last trade and a
+    MOVED mark builds green with the ΔMTM carried on EVERY held day — under the
+    old last-EVENT window the terminal book was stale (0.12 vs the anchor's 0.16)
+    and the book channel hard-failed a healthy account."""
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_HELD_ROWS,
+        summaries=_HELD_SUMMARIES,
+        charts=_HELD_CHARTS,
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    # cash −0.10 on 15; ΔMTM +0.12 (15), +0.02 (16), +0.02 (17).
+    assert got == pytest.approx(
+        {"2026-01-15": 0.02, "2026-01-16": 0.02, "2026-01-17": 0.02}, abs=1e-9
+    )
+    # M5: total == Σchange + Book(last settlement).
+    assert sum(got.values()) == pytest.approx(-0.10 + 0.16, abs=1e-9)
+
+
+def test_smoothed_interleaved_instruments_no_spurious_hole(
+    monkeypatch: Any,
+) -> None:
+    """CR-02(b): instrument A held OPEN past its last event while instrument B
+    trades later. The global grid runs to B's last day; A's marks must be fetched
+    through it — under the old per-instrument last-EVENT window A had no marks
+    past its own trade day and the hole guard falsely named A."""
+    instr_b = "BTC-20JAN26-90000-P"
+    rows = [
+        _opt_row(instrument=_HELD_INSTR, day="2026-01-15", change=-0.10, position=2.0, id=1),
+        _opt_row(instrument=instr_b, day="2026-01-18", change=-0.02, position=1.0, id=2),
+        _opt_row(
+            instrument=instr_b, day="2026-01-19", change=0.01, position=0.0, id=3,
+            type="delivery",
+        ),
+    ]
+    charts = {
+        _HELD_INSTR: {
+            "2026-01-15": 0.06, "2026-01-16": 0.07, "2026-01-17": 0.08,
+            "2026-01-18": 0.05, "2026-01-19": 0.09,
+        },
+        instr_b: {"2026-01-18": 0.02},
+    }
+    # cash = −0.10 − 0.02 + 0.01 = −0.11; settled book = 2.0 × 0.09 = 0.18 (B flat);
+    # equity = cash + options_value = 0.07.
+    summaries = [
+        {"currency": "BTC", "equity": 0.07, "session_upl": 0.0,
+         "options_value": 0.18, "options_session_upl": 0.0},
+    ]
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=rows,
+        summaries=summaries,
+        charts=charts,
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    # Book: 0.12, 0.14, 0.16, 2×0.05+1×0.02=0.12, 2×0.09=0.18 →
+    # ΔMTM: +0.12, +0.02, +0.02, −0.04, +0.06; cash: −0.10(15), −0.02(18), +0.01(19).
+    assert got == pytest.approx(
+        {
+            "2026-01-15": 0.02, "2026-01-16": 0.02, "2026-01-17": 0.02,
+            "2026-01-18": -0.06, "2026-01-19": 0.07,
+        },
+        abs=1e-9,
+    )
+    assert sum(got.values()) == pytest.approx(-0.11 + 0.18, abs=1e-9)
+
+
+def test_smoothed_open_future_expiry_capped_at_last_settled_day(
+    monkeypatch: Any,
+) -> None:
+    """CR-02: an open instrument whose expiry is in the FUTURE is fetched through
+    the last SETTLED bar day (bar stamped D 08:00 completes at D+1 08:00 — the
+    current partial bar is never ingested), NEVER through expiry or `now()`. The
+    stub scripts a bar PAST the settled day to prove the cap excludes it."""
+    monkeypatch.setattr(di, "_last_settled_option_mark_day", lambda: "2026-01-17")
+    instr = "BTC-26MAR27-100000-C"  # expiry 2027-03-26 — far future
+    rows = [
+        _opt_row(instrument=instr, day="2026-01-15", change=-0.10, position=2.0, id=1),
+    ]
+    charts = {
+        instr: {
+            "2026-01-15": 0.06, "2026-01-16": 0.07, "2026-01-17": 0.08,
+            # Stamped 2026-01-18 08:00 — the first bar past the settled window;
+            # ingesting it would poison the terminal book with an unsettled mark.
+            "2026-01-18": 0.50,
+        }
+    }
+    ledger, _report, stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=rows,
+        summaries=_HELD_SUMMARIES,
+        charts=charts,
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    assert got == pytest.approx(
+        {"2026-01-15": 0.02, "2026-01-16": 0.02, "2026-01-17": 0.02}, abs=1e-9
+    )
+    # The requested end bound is last_settled + 24h (covers 01-17's 08:00 bar,
+    # excludes 01-18's) — never expiry (2027) and never now().
+    (params,) = stub.chart_params
+    assert params["end_timestamp"] == _ms("2026-01-18T00:00:00+00:00")
+
+
 # --- Cash channel (strict, ALL currencies) -----------------------------------
 
 
