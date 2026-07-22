@@ -42,6 +42,7 @@ from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     DEFAULT_PNL_BASIS,
+    LedgerValuationError,
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
     _day_ccy_own_index,
@@ -2072,6 +2073,23 @@ async def build_deribit_native_ledger(
     The collapsed USD anchor stays available via
     :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
     Leak: no raw balances/marks/flows logged."""
+    # WR-05: the smoothed replay reconstructs ABSOLUTE option positions from the
+    # signed post-trade ``position`` field, so it is only correct over the FULL
+    # history (Deribit's txn-log reaches inception — ``full_history=True``
+    # below). A ``since_ms``-cropped crawl would see positions only from the
+    # first in-window row: earlier held days silently unmarked, the first
+    # in-window day absorbing a book jump, and the option-activity gate (ANY
+    # option-evidence row) disagreeing with the replay (trade/delivery rows
+    # only) — terminal_book {} vs a nonzero venue anchor. Fail loud before
+    # crawling rather than misattribute; the other bases keep accepting
+    # ``since_ms`` (SC-4).
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and since_ms is not None:
+        raise LedgerValuationError(
+            "smoothed_mtm requires a full-history crawl (since_ms=None): the "
+            "option-book replay reconstructs absolute positions from the signed "
+            "post-trade position field and a cropped window would silently "
+            "mis-state the daily MTM"
+        )
     _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
         exchange, since_ms, sleep=sleep
     )

@@ -247,6 +247,7 @@ def _run_options_ledger(
     summaries: list[dict[str, Any]],
     charts: dict[str, dict[str, float]],
     pnl_basis: str,
+    since_ms: int | None = None,
 ) -> tuple[Any, Any, _OptionsAdapterStub]:
     async def _enumerate_scopes(_ex: Any) -> list[Any]:
         return [di.Scope("main", None, True)]
@@ -282,7 +283,7 @@ def _run_options_ledger(
 
     stub = _OptionsAdapterStub(summaries, charts)
     ledger, report = asyncio.run(
-        di.build_deribit_native_ledger(stub, pnl_basis=pnl_basis)
+        di.build_deribit_native_ledger(stub, since_ms, pnl_basis=pnl_basis)
     )
     return ledger, report, stub
 
@@ -736,6 +737,37 @@ def test_smoothed_open_future_expiry_capped_at_last_settled_day(
     # excludes 01-18's) — never expiry (2027) and never now().
     (params,) = stub.chart_params
     assert params["end_timestamp"] == _ms("2026-01-18T00:00:00+00:00")
+
+
+def test_smoothed_requires_full_history_crawl(monkeypatch: Any) -> None:
+    """WR-05: the smoothed replay reconstructs ABSOLUTE option positions from
+    the signed post-trade ``position`` field, so it is only correct over the
+    FULL history. A ``since_ms``-cropped crawl would replay from the first
+    in-window row — earlier held days silently unmarked and the first in-window
+    day absorbing a book jump — and the activity gate (any option-evidence row)
+    can disagree with the replay (trade/delivery rows only) on a cropped slice.
+    Fail loud BEFORE crawling; the other bases keep accepting ``since_ms``."""
+    with pytest.raises(LedgerValuationError) as exc:
+        _run_options_ledger(
+            monkeypatch,
+            btc_rows=_IN_RET_ROWS,
+            summaries=_IN_RET_SUMMARIES,
+            charts=_IN_RET_CHARTS,
+            pnl_basis="smoothed_mtm",
+            since_ms=1,
+        )
+    assert "full-history" in str(exc.value)
+    # SC-4: cash_settlement with the SAME since_ms still builds (guard is
+    # smoothed-gated; the existing bases are byte-untouched).
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_IN_RET_ROWS,
+        summaries=_IN_RET_SUMMARIES,
+        charts=_IN_RET_CHARTS,
+        pnl_basis="cash_settlement",
+        since_ms=1,
+    )
+    assert "BTC" in ledger.native_pnl
 
 
 def test_smoothed_worthless_option_zero_close_is_not_a_hole(
