@@ -2172,11 +2172,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # only Deribit, and key-mode all leave them at these defaults (no third crawl, no
     # smoothed series/by-basis write) so SC-4 holds by construction (a no-option key
     # persists NO smoothed artifacts).
-    #   * smoothed_returns  — the smoothed daily-return Series (None ⇒ pass skipped)
-    #   * smoothed_attempted — True iff the third pass ran (options/strategy/cash-basis)
-    # There is deliberately NO smoothed_gated_reason: unlike the MTM pass (which
-    # DEGRADES to a machine reason), the smoothed pass is FAIL-LOUD — a started pass
-    # finishes or fails the whole job (never a silent two-basis fallback).
+    #   * smoothed_returns  — the smoothed daily-return Series (None ⇒ pass
+    #     skipped/degraded — budget refusal, bounded-crawl timeout, or scalar
+    #     compute-reject)
+    #   * smoothed_attempted — True iff the third pass was REACHED on an options
+    #     book (options/strategy/cash-basis) — set even when the budget floor
+    #     refuses the crawl, so the guarded persist can heal a stale series row
+    # There is deliberately NO smoothed_gated_reason channel yet (Phase 133 /
+    # LOW-01): a degraded smoothed pass signals by by-basis OMISSION + a log line.
+    # STRUCTURAL marks failures stay FAIL-LOUD (a holed-marks LedgerValuationError
+    # fails the whole job — never a silent two-basis fallback); only the budget/
+    # timeout and scalar-compute dispositions degrade (mirroring MTM's FIX-2).
     smoothed_returns: pd.Series | None = None
     smoothed_attempted: bool = False
     try:
@@ -2645,56 +2651,119 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # (returns / meta / _completeness / native_ledger) NOR the MTM-pass
                 # objects, so cash_settlement AND mark_to_market stay byte-identical.
                 #
-                # FAIL-LOUD (money-path), UNLIKE the MTM pass which DEGRADES: a smoothed
-                # pass that STARTS must finish or FAIL THE WHOLE JOB. A
-                # LedgerValuationError (holed marks — incl. the retention-STRADDLE /
-                # crawl-day cases pinned in 131-01a) is deliberately NOT caught here; it
-                # propagates to the outer permanent-FAILED handler (`except
-                # LedgerValuationError`) exactly like the cash pass, so the job fails
-                # loud BEFORE any persist and NO partial / interpolated smoothed basis
-                # is ever written (never a silent two-basis fallback). A crawl timeout
-                # likewise propagates to the outer transient arm (the whole derive
-                # retries). Each crawl is bounded by _BROKER_CRAWL_TIMEOUT_S (the
-                # FLIPRETRY-01 worker-wedge guard), mirroring the cash pass.
+                # FAIL-LOUD on STRUCTURE (money-path): a LedgerValuationError (holed
+                # marks — incl. the retention-STRADDLE / crawl-day cases pinned in
+                # 131-01a) is deliberately NOT caught here; it propagates to the outer
+                # permanent-FAILED handler (`except LedgerValuationError`) exactly
+                # like the cash pass, so the job fails loud BEFORE any persist and NO
+                # partial / interpolated smoothed basis is ever written (never a
+                # silent two-basis fallback).
+                #
+                # Timeout envelope (HIGH-01, 132 review — the FIX-2 sibling): this
+                # third pass is ANOTHER full-history crawl PLUS the dense-marks index
+                # fetch, inside the SAME fixed 15-min outer budget the cash + MTM
+                # passes already drew from. Bounding it at the fixed
+                # _BROKER_CRAWL_TIMEOUT_S (810s, sized for the CASH pass as
+                # outer-minus-reserve) guaranteed that a large options book whose
+                # legitimate cash crawl ran long hit the OUTER wait_for mid-smoothed-
+                # crawl → transient → 3 identical attempts → failed_final, sinking the
+                # healthy cash headline (the exact failure FIX-2 was engineered out of
+                # the MTM pass). Mirror the MTM FIX-2 machinery EXACTLY: bound the
+                # crawl to _MTM_SECOND_PASS_BUDGET_FRACTION of the REMAINING budget,
+                # REFUSE to start below the _MTM_SECOND_PASS_MIN_SECONDS floor, and on
+                # refusal/timeout DEGRADE (skip — the by-basis simply lacks
+                # smoothed_mtm; cash and MTM still ship DONE). There is no smoothed
+                # degrade-REASON channel yet (deferred to Phase 133 per LOW-01) — the
+                # by-basis omission is the signal; the degrade is logged.
                 if (
                     not is_key_mode
                     and pnl_basis == DEFAULT_PNL_BASIS
                     and _completeness.has_option_activity
                 ):
                     smoothed_attempted = True
-                    _smoothed_ledger, _smoothed_completeness = await asyncio.wait_for(
-                        build_deribit_native_ledger(
-                            ctx.exchange,
-                            account_state=account_state,
-                            pnl_basis=PNL_BASIS_SMOOTHED_MTM,
-                            exclude_spot_extraction=exclude_spot_extraction,
-                        ),
-                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    _smoothed_budget = float(
+                        TIMEOUT_PER_KIND.get("derive_broker_dailies", 15 * 60)
                     )
-                    assert_ledger_complete(_smoothed_completeness)
-                    # Bind to smoothed-only names — NEVER reassign the cash/MTM objects.
-                    # The smoothed meta guard flags are DISCARDED (the cash-pass flags
-                    # are authoritative), mirroring the MTM Finding-9 discard.
-                    smoothed_returns, _smoothed_meta = combine_native_ledger(
-                        _smoothed_ledger,
-                        _smoothed_completeness.indexable_currencies,
-                        denominator_config=denominator_config,
+                    _smoothed_remaining = _smoothed_budget - (
+                        asyncio.get_running_loop().time() - _derive_start
                     )
-                    # pre_mark_retention_option_days → complete_with_warnings: option
-                    # marks aged past the ~2.5yr retention horizon fell back to cash-
-                    # basis for those (day, ccy) buckets (partial marks are NEVER
-                    # interpolated — a straddler fails loud above). The redistribution
-                    # TOTAL stays honest (telescoping); only those daily attributions
-                    # are caveated. Stamp onto the AUTHORITATIVE cash-pass `meta` via
-                    # the SAME registered-warning-key mechanism as the retired
-                    # pre_summary_rollout_option_dailies stamp (NAV_TWR_GUARD_KEYS).
-                    if _smoothed_completeness.pre_mark_retention_option_days:
-                        meta["pre_mark_retention_option_dailies"] = [
-                            f"{ccy}:{day}"
-                            for ccy, day in (
-                                _smoothed_completeness.pre_mark_retention_option_days
+                    _smoothed_pass_timeout = (
+                        _smoothed_remaining * _MTM_SECOND_PASS_BUDGET_FRACTION
+                    )
+                    if _smoothed_pass_timeout < _MTM_SECOND_PASS_MIN_SECONDS:
+                        # The cash (+ MTM) passes already consumed most of the budget
+                        # — do NOT start a third full-history crawl that cannot
+                        # plausibly finish (it would only risk sinking the derive).
+                        # DEGRADE: smoothed_returns stays None → no smoothed compute,
+                        # no smoothed by-basis key; cash/MTM ship unaffected.
+                        logger.warning(
+                            "derive_broker_dailies: skipping smoothed_mtm third "
+                            "pass for strategy %s — only %.0fs of the %.0fs derive "
+                            "budget remained (below the %.0fs floor); degrading the "
+                            "additive smoothed object, cash derive unaffected",
+                            strategy_id, _smoothed_remaining, _smoothed_budget,
+                            _MTM_SECOND_PASS_MIN_SECONDS,
+                        )
+                    else:
+                        try:
+                            # Bound the full-history third crawl to its slice of the
+                            # remaining budget so it can never sink the whole derive.
+                            _smoothed_ledger, _smoothed_completeness = (
+                                await asyncio.wait_for(
+                                    build_deribit_native_ledger(
+                                        ctx.exchange,
+                                        account_state=account_state,
+                                        pnl_basis=PNL_BASIS_SMOOTHED_MTM,
+                                        exclude_spot_extraction=(
+                                            exclude_spot_extraction
+                                        ),
+                                    ),
+                                    timeout=_smoothed_pass_timeout,
+                                )
                             )
-                        ]
+                            assert_ledger_complete(_smoothed_completeness)
+                            # Bind to smoothed-only names — NEVER reassign the
+                            # cash/MTM objects. The smoothed meta guard flags are
+                            # DISCARDED (the cash-pass flags are authoritative),
+                            # mirroring the MTM Finding-9 discard.
+                            smoothed_returns, _smoothed_meta = combine_native_ledger(
+                                _smoothed_ledger,
+                                _smoothed_completeness.indexable_currencies,
+                                denominator_config=denominator_config,
+                            )
+                            # pre_mark_retention_option_days →
+                            # complete_with_warnings: option marks aged past the
+                            # ~2.5yr retention horizon fell back to cash-basis for
+                            # those (day, ccy) buckets (partial marks are NEVER
+                            # interpolated — a straddler fails loud above). The
+                            # redistribution TOTAL stays honest (telescoping); only
+                            # those daily attributions are caveated. Stamp onto the
+                            # AUTHORITATIVE cash-pass `meta` via the SAME registered-
+                            # warning-key mechanism as the retired
+                            # pre_summary_rollout_option_dailies stamp
+                            # (NAV_TWR_GUARD_KEYS).
+                            if _smoothed_completeness.pre_mark_retention_option_days:
+                                meta["pre_mark_retention_option_dailies"] = [
+                                    f"{ccy}:{day}"
+                                    for ccy, day in (
+                                        _smoothed_completeness
+                                        .pre_mark_retention_option_days
+                                    )
+                                ]
+                        except asyncio.TimeoutError:
+                            # HIGH-01: the bounded third crawl overran its slice of
+                            # the remaining budget. DEGRADE, attributed to the
+                            # SMOOTHED pass (never let it escape to the outer arm,
+                            # which blames the cash pass and retries the WHOLE derive
+                            # to failed_final, sinking the cash headline).
+                            smoothed_returns = None
+                            logger.warning(
+                                "derive_broker_dailies: smoothed_mtm third pass "
+                                "exceeded its bounded %.0fs budget for strategy %s "
+                                "— degrading the additive smoothed object, cash "
+                                "unaffected",
+                                _smoothed_pass_timeout, strategy_id,
+                            )
             except asyncio.TimeoutError:
                 # FLIPRETRY-01: the cash-pass crawl exceeded the per-crawl bound.
                 # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent, NEVER
@@ -2703,8 +2772,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # arms below: in Python 3.11+ asyncio.TimeoutError IS builtins.
                 # TimeoutError (an OSError subclass), so an earlier broader catch would
                 # mis-dispose the timeout as PERMANENT and defeat the retry intent. The
-                # MTM second pass (:2472) has its own local TimeoutError arm, so this
-                # only ever fires for the cash pass. The `finally: aclose_exchange`
+                # MTM second pass AND the smoothed third pass each have their own local
+                # TimeoutError arm (budget-sliced, degrade-on-expiry — HIGH-01), so
+                # this only ever fires for the cash pass. The `finally: aclose_exchange`
                 # below still runs. Mirrors the sfox FLIPRETRY-01 block (:2680): static
                 # scrubbed text only, never logger.exception / interpolated crawl
                 # content (H-3 HMAC-in-URL leak class).

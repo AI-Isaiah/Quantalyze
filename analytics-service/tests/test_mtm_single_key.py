@@ -1614,3 +1614,94 @@ async def test_pre_mark_retention_stamps_complete_with_warnings() -> None:
     assert prestamp["data_quality_flags"].get("pre_mark_retention_option_dailies") is True, (
         "the pre-retention bucket must stamp the warn flag (complete_with_warnings)"
     )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_third_pass_timeout_degrades_not_failed_final() -> None:
+    """HIGH-01 (132 review) — FIX-2 sibling for the THIRD pass: the smoothed crawl is
+    bounded to a slice of the REMAINING derive budget (the SAME machinery as the MTM
+    second pass). If it times out it must DEGRADE (skip — the by-basis simply lacks
+    smoothed_mtm) with the timeout attributed to the SMOOTHED pass — the cash headline
+    and the already-computed MTM object still ship DONE. It must NEVER escape to the
+    outer cash-pass TimeoutError arm as a transient that retries the WHOLE derive to
+    failed_final (total factsheet loss on a large options book). Simulated by the
+    THIRD (smoothed) ledger crawl raising asyncio.TimeoutError (what wait_for
+    propagates on expiry). Neuter (drop the smoothed-local TimeoutError arm) → the
+    outer arm returns FAILED/transient blaming the cash pass → reddens."""
+    import asyncio as _asyncio
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(
+        reports, side_effects=[None, None, _asyncio.TimeoutError()]
+    )
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a smoothed third-pass timeout must DEGRADE (cash ships DONE), never escape "
+        "as a transient that retries the whole derive to failed_final"
+    )
+    assert len(calls) == 3, "the smoothed crawl was attempted (then timed out)"
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    # MTM succeeded; ONLY smoothed degrades (its key absent — honest omission).
+    assert set(prestamp["metrics_json_by_basis"]) == {"mark_to_market"}
+    assert "mtm_gated_reason" not in prestamp["data_quality_flags"], (
+        "a SMOOTHED-pass timeout must not be mis-attributed to the MTM pass"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_third_pass_insufficient_budget_skips_cash_ships() -> None:
+    """HIGH-01 (132 review) — the refusal floor: when the cash crawl legitimately
+    consumed (nearly) the whole 15-min derive budget, the smoothed third pass must
+    REFUSE to start (same 60s floor as the MTM second pass), never launch a
+    full-history crawl bounded at the fixed 810s that the outer wait_for is
+    guaranteed to kill first (transient → 3 identical attempts → failed_final).
+    Budget exhaustion simulated by shrinking TIMEOUT_PER_KIND['derive_broker_dailies']
+    to 1s — both additive passes fall below their floor and refuse; ONLY the cash
+    crawl runs and the derive completes DONE. Neuter (keep the fixed
+    _BROKER_CRAWL_TIMEOUT_S bound with no remaining-budget check) → the smoothed
+    crawl STARTS (2 ledger calls, smoothed_mtm persisted) → reddens."""
+    from services.stitch_composite import MTM_REASON_SECOND_PASS_TIMEOUT
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch.dict(
+            "services.job_worker.TIMEOUT_PER_KIND",
+            {"derive_broker_dailies": 1.0},
+        ),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "an exhausted budget must DEGRADE the additive passes, never sink the derive"
+    )
+    assert len(calls) == 1, (
+        "below the budget floor NEITHER additive pass may start a full-history "
+        "crawl — only the cash crawl runs"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["metrics_json_by_basis"] is None, (
+        "no additive basis is persisted when both passes refuse on the budget floor"
+    )
+    # The MTM refusal stamps its distinct machine reason (pre-existing FIX-2).
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SECOND_PASS_TIMEOUT
+    )
