@@ -474,6 +474,50 @@ export function singleKeyBasisOpts(
 }
 
 /**
+ * Phase 133 review (WR-01/WR-02) — the ONE single-key basis ASSEMBLY both
+ * FactsheetView surfaces (`/factsheet/[id]/v2` + `/discovery/[slug]/[strategyId]`)
+ * call. It owns the WHOLE single-key basis story end-to-end: the cheap
+ * should-read predicates → the gated `mtm_daily_returns` / `smoothed_mtm_daily_returns`
+ * roundtrips → the {@link singleKeyBasisOpts} gate/scalar/series threading.
+ *
+ * Why it exists: {@link singleKeyBasisOpts} alone is only the LAST step; each page
+ * used to inline the predicate+read steps itself, and when Phase 133 added the
+ * smoothed sibling the discovery page's inline copy silently kept the old 4-arg
+ * call — the Smoothed segment rendered ENABLED there while its charts stayed cash
+ * PERMANENTLY (WR-01). With the assembly hoisted here, a page cannot thread the
+ * scalars without the series: the two surfaces are identical by construction, and
+ * a future fourth basis lands on both pages automatically.
+ *
+ * `getAdmin` is a thunk (not a client) so the hot non-options path — no by-basis
+ * object, or not DONE — never even CONSTRUCTS the service-role handle (preserving
+ * the discovery page's lazy `createAdminClient()` posture, byte-identical). It is
+ * memoized: at most ONE handle is created per call regardless of how many basis
+ * series are read. The handle MUST be service-role: `strategy_analytics_series` is
+ * deny-all RLS (see {@link readMtmSeries}); the caller owns the upstream
+ * published/owner visibility gate, exactly as before the hoist.
+ */
+export async function readSingleKeyBasisOpts(
+  getAdmin: () => SupabaseClient,
+  strategyId: string,
+  dqf: { mtm_gated_reason?: unknown } | null | undefined,
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): Promise<Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries">> {
+  let admin: SupabaseClient | undefined;
+  const resolveAdmin = () => (admin ??= getAdmin());
+  // MTM-04 (Phase 103): read the persisted MTM series only when the SHARED cheap
+  // predicate holds — a failed/malformed row degrades to no-bundle (charts stay cash).
+  const mtmSeries = shouldReadSingleKeyMtmSeries(metricsJsonByBasis, computationStatus)
+    ? await readMtmSeries(resolveAdmin(), strategyId)
+    : null;
+  // Phase 133 (SMTM-01): the smoothed sibling read, identically gated.
+  const smoothedSeries = shouldReadSingleKeySmoothedSeries(metricsJsonByBasis, computationStatus)
+    ? await readSmoothedSeries(resolveAdmin(), strategyId)
+    : null;
+  return singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
+}
+
+/**
  * Phase 103 (MTM-04) — the cheapest honest predicate deciding whether a single-key
  * strategy should incur the `mtm_daily_returns` DB roundtrip. Mirrors
  * {@link singleKeyBasisOpts}' F-4 gate: the raw `metrics_json_by_basis` carries a

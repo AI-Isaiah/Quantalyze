@@ -11,7 +11,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { DailyReturn, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { notFound, redirect } from "next/navigation";
@@ -113,33 +113,28 @@ export default async function StrategyDetailPage({
     // (`singleKeyDataQuality`) so this discovery surface and the factsheet route
     // can't diverge on the DQ opt (the composite "one path" lesson).
     //
-    // MTM-01 (Phase 102): mirror the factsheet route's single-key OPTIONS MTM read
-    // through the SAME shared owner (`singleKeyBasisOpts`) so the two surfaces
-    // cannot diverge. getStrategyDetail selects `strategy_analytics (*)`
-    // (queries.ts:416) so `computation_status` arrives on the row; `{}` for every
-    // non-options single-key strategy keeps the payload byte-identical.
-    //
-    // MTM-04 (Phase 103): mirror the factsheet route — read the persisted
-    // `mtm_daily_returns` series through the SAME shared predicate + reader so the
-    // two surfaces can't diverge. The series lives behind deny-all RLS, so it needs
-    // the service-role admin handle (created here only when the cheap gate holds —
-    // the hot non-options path stays roundtrip-free). Degrades to no-bundle on a
-    // failed/malformed row.
-    const mtmSeries = shouldReadSingleKeyMtmSeries(
-      analyticsRow?.metrics_json_by_basis,
-      analyticsRow?.computation_status,
-    )
-      ? await readMtmSeries(createAdminClient(), strategy.id)
-      : null;
+    // MTM-01/MTM-04 (Phases 102/103) + SMTM-01 (Phase 133, review WR-01): the
+    // single-key basis story (predicates → gated `mtm_daily_returns` /
+    // `smoothed_mtm_daily_returns` reads → gate/scalar/series threading) is
+    // assembled by the ONE shared owner `readSingleKeyBasisOpts`, so this
+    // surface and the factsheet route cannot diverge — WR-01 was exactly this
+    // page keeping an inline 4-arg copy when the smoothed 5th arg landed
+    // (Smoothed segment enabled, charts permanently cash). getStrategyDetail
+    // selects `strategy_analytics (*)` (queries.ts) so `computation_status`
+    // arrives on the row; `{}` for every non-options single-key strategy keeps
+    // the payload byte-identical. The series rows live behind deny-all RLS, so
+    // the assembly takes the service-role factory as a thunk — the handle is
+    // constructed only when a cheap gate holds (hot path stays roundtrip-free).
     buildOpts = {
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
-      ...singleKeyBasisOpts(
+      ...(await readSingleKeyBasisOpts(
+        createAdminClient,
+        strategy.id,
         dqf,
         analyticsRow?.metrics_json_by_basis,
         analyticsRow?.computation_status,
-        mtmSeries,
-      ),
+      )),
     };
   }
 

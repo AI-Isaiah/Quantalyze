@@ -14,6 +14,7 @@ import {
   parseSmoothedSeriesPayload,
   readMtmSeries,
   readSmoothedSeries,
+  readSingleKeyBasisOpts,
   shouldReadSingleKeyMtmSeries,
   shouldReadSingleKeySmoothedSeries,
   shouldReadCashSettlementSeries,
@@ -1162,6 +1163,127 @@ describe("SMTM-01 singleKeyBasisOpts — smoothed gate + series threading + exte
     expect(out.smoothedGate?.available).toBe(false);
     expect(out.metricsByBasis && "smoothed_mtm" in out.metricsByBasis).toBe(false);
     expect(out.smoothedSeries).toBeUndefined();
+  });
+});
+
+/**
+ * Phase 133 review WR-01/WR-02 — readSingleKeyBasisOpts: the ONE single-key
+ * basis ASSEMBLY both render surfaces call. These pin the assembly contract
+ * (predicates gate the reads; the reads' results reach the opts; the admin
+ * thunk stays uncalled on the hot path and is memoized to one handle). The
+ * per-PAGE call-site wiring is guarded separately by the two
+ * `page.smoothed-wiring.test.tsx` files — a page bypassing this assembly
+ * reddens those, not these.
+ */
+describe("WR-01 readSingleKeyBasisOpts — shared single-key assembly (predicates → reads → opts)", () => {
+  const MTM_FULL = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+  const SM_FULL = { cumulative_return: 0.6, volatility: 0.18, max_drawdown: -0.11, cagr: 0.5, sharpe: 1.9, sortino: 2.4, calmar: 0.7 };
+  const seriesPayload = (basis: "mark_to_market" | "smoothed_mtm") => ({
+    schema: 1,
+    basis,
+    rows: [
+      { date: "2025-08-01", return: 0.01 },
+      { date: "2025-08-02", return: -0.02 },
+    ],
+    gap_spans: [],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  });
+
+  /** Admin stub serving strategy_analytics_series by kind; records reads. */
+  function mockAdminByKind(byKind: Record<string, unknown>): {
+    admin: SupabaseClient;
+    reads: string[];
+  } {
+    const reads: string[] = [];
+    const from = (table: string) => {
+      let seenKind: string | undefined;
+      const chain = {
+        select: () => chain,
+        eq: (col: string, val: string) => {
+          if (col === "kind") seenKind = val;
+          return chain;
+        },
+        maybeSingle: () => {
+          if (table === "strategy_analytics_series" && seenKind) reads.push(seenKind);
+          return Promise.resolve(
+            table === "strategy_analytics_series" && seenKind && seenKind in byKind
+              ? { data: { payload: byKind[seenKind] }, error: null }
+              : { data: null, error: null },
+          );
+        },
+      };
+      return chain;
+    };
+    return { admin: { from } as unknown as SupabaseClient, reads };
+  }
+
+  it("both bases persisted + DONE → both series read and BOTH reach the opts (mtmSeries + smoothedSeries)", async () => {
+    const { admin, reads } = mockAdminByKind({
+      mtm_daily_returns: seriesPayload("mark_to_market"),
+      smoothed_mtm_daily_returns: seriesPayload("smoothed_mtm"),
+    });
+    const getAdmin = vi.fn(() => admin);
+    const out = await readSingleKeyBasisOpts(
+      getAdmin,
+      "s-1",
+      {},
+      { mark_to_market: MTM_FULL, smoothed_mtm: SM_FULL },
+      "complete",
+    );
+    expect(out.mtmGate).toEqual({ available: true, reason: undefined });
+    expect(out.smoothedGate).toEqual({ available: true, reason: undefined });
+    expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL, smoothed_mtm: SM_FULL });
+    expect(out.mtmSeries?.dailyReturns.length).toBe(2);
+    expect(out.smoothedSeries?.dailyReturns.length).toBe(2);
+    expect(reads.sort()).toEqual(["mtm_daily_returns", "smoothed_mtm_daily_returns"]);
+    // Thunk memoization: ONE service-role handle regardless of read count.
+    expect(getAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  it("hot non-options path: no by-basis keys → getAdmin NEVER called, {} returned (byte-identical)", async () => {
+    const getAdmin = vi.fn(() => {
+      throw new Error("admin handle must not be constructed on the hot path");
+    });
+    expect(await readSingleKeyBasisOpts(getAdmin, "s-1", {}, {}, "complete")).toEqual({});
+    expect(await readSingleKeyBasisOpts(getAdmin, "s-1", null, null, "complete")).toEqual({});
+    expect(getAdmin).not.toHaveBeenCalled();
+  });
+
+  it("not DONE → getAdmin never called; F-4 structural (no by-basis object threaded)", async () => {
+    const getAdmin = vi.fn(() => {
+      throw new Error("admin handle must not be constructed when not DONE");
+    });
+    for (const status of ["computing", "failed", null, undefined]) {
+      const out = await readSingleKeyBasisOpts(
+        getAdmin,
+        "s-1",
+        {},
+        { mark_to_market: MTM_FULL, smoothed_mtm: SM_FULL },
+        status,
+      );
+      expect(out.mtmGate?.available).toBe(false);
+      expect(out.smoothedGate?.available).toBe(false);
+      expect(out.mtmSeries).toBeUndefined();
+      expect(out.smoothedSeries).toBeUndefined();
+    }
+    expect(getAdmin).not.toHaveBeenCalled();
+  });
+
+  it("mtm-only row → only the mtm roundtrip fires; smoothed story honestly disabled", async () => {
+    const { admin, reads } = mockAdminByKind({
+      mtm_daily_returns: seriesPayload("mark_to_market"),
+    });
+    const out = await readSingleKeyBasisOpts(
+      () => admin,
+      "s-1",
+      { mtm_gated_reason: undefined },
+      { mark_to_market: MTM_FULL },
+      "complete",
+    );
+    expect(out.mtmSeries?.dailyReturns.length).toBe(2);
+    expect(out.smoothedSeries).toBeUndefined();
+    expect(out.smoothedGate).toEqual({ available: false, reason: "smoothed_basis_unavailable" });
+    expect(reads).toEqual(["mtm_daily_returns"]);
   });
 });
 
