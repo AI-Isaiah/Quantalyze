@@ -1949,7 +1949,10 @@ def replay_option_positions(
         if classify_instrument(instrument) != "option":
             continue
         per_instr.setdefault(instrument, []).append(row)
-        ccy_of[instrument] = str(row.get("currency", ""))
+        # WR-03: UPPERCASE like every other currency read site in this module —
+        # the adapter merges the day-keyed ΔMTM into the UPPERCASE-keyed
+        # native_pnl, so a raw-cased key would fork a phantom series bucket.
+        ccy_of[instrument] = str(row.get("currency", "")).upper()
     out: dict[str, dict[str, Any]] = {}
     for instrument, instr_rows in per_instr.items():
         ordered = sorted(

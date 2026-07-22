@@ -2918,6 +2918,23 @@ def test_replay_multi_instrument_multi_currency_separated() -> None:
     assert out[b]["positions"] == {"2026-01-15": -2.0}
 
 
+def test_replay_option_positions_uppercases_currency() -> None:
+    """WR-03: the replay normalizes currency casing like the ~20 other read
+    sites in this module (and the adapter's pre-retention path). A lowercase
+    venue ``"btc"`` must NOT survive raw — the adapter merges the day-keyed ΔMTM
+    into the UPPERCASE-keyed native_pnl, so a raw-cased key would fork a phantom
+    per-currency series bucket beside ``"BTC"`` and silently mis-split the daily
+    series (a drift the book channel cannot catch: it uppercases both sides
+    before comparing)."""
+    instr = "BTC-16JAN26-100000-C"
+    rows = [_opt_row(instrument=instr, ccy="btc", day="2026-01-15", position=1.0, id=1)]
+    out = replay_option_positions(rows)
+    assert out[instr]["currency"] == "BTC"
+    # And through the pure ΔMTM core: the merged keys are uppercase.
+    delta, terminal = option_mtm_daily(out, {instr: {"2026-01-15": 0.05}})
+    assert set(delta) == {"BTC"} and set(terminal) == {"BTC"}
+
+
 def test_replay_ignores_perp_future_spot_rows() -> None:
     rows = [
         {
