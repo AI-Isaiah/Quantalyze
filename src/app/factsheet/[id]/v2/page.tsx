@@ -9,7 +9,7 @@ import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries, shouldReadSingleKeySmoothedSeries, readSmoothedSeries } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -141,10 +141,23 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     )
       ? await readMtmSeries(supabase, id)
       : null;
+    // Phase 133 (SMTM-01): the smoothed sibling of the MTM-04 read above. Gated by
+    // the SHARED cheap predicate so the hot non-options path stays roundtrip-free;
+    // read via the SAME service-role admin `supabase` handle (deny-all RLS on
+    // strategy_analytics_series — no visibility widening, same gate as the scalar
+    // smoothed object) and threaded as the 5th arg. A failed/malformed row degrades
+    // to no-bundle (charts stay cash) — `{}` for every non-options single-key
+    // strategy → byte-identical.
+    const smoothedSeries = shouldReadSingleKeySmoothedSeries(
+      analytics?.metrics_json_by_basis,
+      analytics?.computation_status,
+    )
+      ? await readSmoothedSeries(supabase, id)
+      : null;
     buildOpts = {
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
-      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status, mtmSeries),
+      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status, mtmSeries, smoothedSeries),
     };
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API

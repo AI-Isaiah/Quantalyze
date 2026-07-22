@@ -11,8 +11,11 @@ import {
   singleKeyDataQuality,
   singleKeyBasisOpts,
   parseMtmSeriesPayload,
+  parseSmoothedSeriesPayload,
   readMtmSeries,
+  readSmoothedSeries,
   shouldReadSingleKeyMtmSeries,
+  shouldReadSingleKeySmoothedSeries,
   shouldReadCashSettlementSeries,
 } from "./composite-read-path";
 import type { ParsedMtmSeries } from "./composite-read-path";
@@ -912,5 +915,354 @@ describe("MED-1 shouldReadCashSettlementSeries — read-side status-gate (D3 sin
     expect(shouldReadCashSettlementSeries(null, "complete")).toBe(false);
     expect(shouldReadCashSettlementSeries([{ cash_settlement: CASH }], "complete")).toBe(false);
     expect(shouldReadCashSettlementSeries("garbage", "complete")).toBe(false);
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — parseSmoothedSeriesPayload: the smoothed sibling of
+ * parseMtmSeriesPayload. Same rows/gap_spans coercion, PLUS a defensive
+ * basis-literal guard (a wrong-basis payload — e.g. a mark_to_market row stored
+ * under the smoothed kind — must never render mislabeled) AND tolerance of the
+ * OPTIONAL `nan_dates` payload key (basis_series.py:360-361).
+ */
+describe("SMTM-01 parseSmoothedSeriesPayload — smoothed-basis coercion + nan_dates tolerance", () => {
+  const VALID = {
+    schema: 1,
+    basis: "smoothed_mtm",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+      { date: "2025-08-05", return: 0.03 },
+    ],
+    gap_spans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  it("valid smoothed payload → maps `return`→`value`, ascending rows + gapSpans", () => {
+    const out = parseSmoothedSeriesPayload(VALID);
+    expect(out).not.toBeNull();
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+      { date: "2025-08-05", value: 0.03 },
+    ]);
+    expect(out!.gapSpans).toEqual([{ start: "2025-08-03", end: "2025-08-04" }]);
+  });
+
+  it("TOLERATES the optional nan_dates key (Phase-105 composite-only) — parses fine", () => {
+    const withNan = { ...VALID, nan_dates: ["2025-08-04"] };
+    const out = parseSmoothedSeriesPayload(withNan);
+    expect(out).not.toBeNull();
+    expect(out!.dailyReturns.length).toBe(3);
+  });
+
+  it("WRONG basis literal (mark_to_market row under the smoothed kind) → null + warn (never a mislabeled series)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(parseSmoothedSeriesPayload({ ...VALID, basis: "mark_to_market" })).toBeNull();
+      expect(parseSmoothedSeriesPayload({ ...VALID, basis: "cash_settlement" })).toBeNull();
+      expect(parseSmoothedSeriesPayload({ ...VALID, basis: 42 })).toBeNull();
+      expect(warn).toHaveBeenCalled();
+      expect(warn.mock.calls[0]![0]).toContain("parseSmoothedSeriesPayload");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("shares the MTM parser's guards: non-object → null, <2 valid rows → null", () => {
+    for (const raw of [null, undefined, 42, "x", true, [VALID]]) {
+      expect(parseSmoothedSeriesPayload(raw as unknown)).toBeNull();
+    }
+    expect(parseSmoothedSeriesPayload({ ...VALID, rows: [{ date: "2025-08-01", return: 0.02 }] })).toBeNull();
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — readSmoothedSeries: service-role read of the
+ * `smoothed_mtm_daily_returns` row, degrade-never-throw (sibling of readMtmSeries).
+ */
+describe("SMTM-01 readSmoothedSeries — service-role direct read + degrade", () => {
+  const VALID_PAYLOAD = {
+    schema: 1,
+    basis: "smoothed_mtm",
+    rows: [
+      { date: "2025-08-01", return: 0.02 },
+      { date: "2025-08-02", return: -0.01 },
+    ],
+    gap_spans: [],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  function mockSeriesAdmin(
+    result: { data: { payload: unknown } | null; error: { message?: string } | null },
+  ): { admin: SupabaseClient; kind: () => string | undefined } {
+    let seenKind: string | undefined;
+    const chain = {
+      select: () => chain,
+      eq: (col: string, val: string) => {
+        if (col === "kind") seenKind = val;
+        return chain;
+      },
+      maybeSingle: () => Promise.resolve(result),
+    };
+    return { admin: { from: () => chain } as unknown as SupabaseClient, kind: () => seenKind };
+  }
+
+  it("valid row → ParsedMtmSeries; queries the smoothed_mtm_daily_returns kind", async () => {
+    const { admin, kind } = mockSeriesAdmin({ data: { payload: VALID_PAYLOAD }, error: null });
+    const out = await readSmoothedSeries(admin, "s1");
+    expect(out!.dailyReturns).toEqual([
+      { date: "2025-08-01", value: 0.02 },
+      { date: "2025-08-02", value: -0.01 },
+    ]);
+    expect(kind()).toBe("smoothed_mtm_daily_returns");
+  });
+
+  it("read error → null + console.error (degrade, never throw)", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { admin } = mockSeriesAdmin({ data: null, error: { message: "boom" } });
+    const out = await readSmoothedSeries(admin, "s1");
+    expect(out).toBeNull();
+    expect(err).toHaveBeenCalledOnce();
+    err.mockRestore();
+  });
+
+  it("wrong-basis row (mark_to_market payload) → null (defensive, no mislabel)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { admin } = mockSeriesAdmin({
+      data: { payload: { ...VALID_PAYLOAD, basis: "mark_to_market" } },
+      error: null,
+    });
+    expect(await readSmoothedSeries(admin, "s1")).toBeNull();
+    warn.mockRestore();
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — shouldReadSingleKeySmoothedSeries: the cheap DONE +
+ * smoothed_mtm-object read gate (sibling of shouldReadSingleKeyMtmSeries).
+ */
+describe("SMTM-01 shouldReadSingleKeySmoothedSeries — cheap shared read gate", () => {
+  const SM = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+
+  it("DONE + smoothed_mtm object → true", () => {
+    expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: SM }, "complete")).toBe(true);
+    expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: SM }, "complete_with_warnings")).toBe(true);
+  });
+
+  it("not DONE → false", () => {
+    for (const s of ["computing", "failed", undefined, null, "complete_x"]) {
+      expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: SM }, s)).toBe(false);
+    }
+  });
+
+  it("no smoothed_mtm object → false (hot non-options path stays roundtrip-free)", () => {
+    expect(shouldReadSingleKeySmoothedSeries({}, "complete")).toBe(false);
+    expect(shouldReadSingleKeySmoothedSeries({ mark_to_market: SM }, "complete")).toBe(false);
+    expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: null }, "complete")).toBe(false);
+    expect(shouldReadSingleKeySmoothedSeries({ smoothed_mtm: [SM] }, "complete")).toBe(false);
+    expect(shouldReadSingleKeySmoothedSeries(null, "complete")).toBe(false);
+    expect(shouldReadSingleKeySmoothedSeries("garbage", "complete")).toBe(false);
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — singleKeyBasisOpts smoothed threading + the MEDIUM-2
+ * extended-early-return edge. The smoothed sibling of the MTM-04 4th-arg threading,
+ * plus the plan-check MEDIUM-2 hardening: a {smoothed_mtm}-only by-basis row (MTM
+ * degraded reason-lessly) must survive the :364 early return, not be silently dropped.
+ */
+describe("SMTM-01 singleKeyBasisOpts — smoothed gate + series threading + extended early return", () => {
+  const MTM_FULL = { cumulative_return: 0.9, volatility: 0.25, max_drawdown: -0.18, cagr: 0.7, sharpe: 2.2, sortino: 2.9, calmar: 0.9 };
+  const SM_FULL = { cumulative_return: 0.6, volatility: 0.18, max_drawdown: -0.11, cagr: 0.5, sharpe: 1.9, sortino: 2.4, calmar: 0.7 };
+  const SMOOTHED_SERIES: ParsedMtmSeries = {
+    dailyReturns: [
+      { date: "2025-08-01", value: 0.01 },
+      { date: "2025-08-02", value: -0.02 },
+      { date: "2025-08-05", value: 0.015 },
+    ],
+    gapSpans: [{ start: "2025-08-03", end: "2025-08-04" }],
+  };
+
+  it("smoothed present (DONE + headline) → smoothedGate available + smoothed_mtm metrics threaded", () => {
+    const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL, smoothed_mtm: SM_FULL }, "complete");
+    expect(out.smoothedGate).toEqual({ available: true, reason: undefined });
+    expect(out.metricsByBasis).toEqual({ mark_to_market: MTM_FULL, smoothed_mtm: SM_FULL });
+  });
+
+  it("smoothed available + parsed series → threads buildOpts.smoothedSeries (5th arg)", () => {
+    const out = singleKeyBasisOpts(
+      {},
+      { mark_to_market: MTM_FULL, smoothed_mtm: SM_FULL },
+      "complete",
+      null,
+      SMOOTHED_SERIES,
+    );
+    expect(out.smoothedGate?.available).toBe(true);
+    expect(out.smoothedSeries).toBe(SMOOTHED_SERIES);
+  });
+
+  it("smoothed absent → smoothedGate disabled with a mapped reason (never a bare invention)", () => {
+    const out = singleKeyBasisOpts(
+      { mtm_gated_reason: "unsmoothed_options_book" },
+      { mark_to_market: MTM_FULL },
+      "complete",
+    );
+    expect(out.smoothedGate?.available).toBe(false);
+    expect(out.smoothedGate?.reason).toBe("smoothed_basis_unavailable");
+    // No smoothed_mtm scalar object threaded when unavailable.
+    expect(out.metricsByBasis && "smoothed_mtm" in out.metricsByBasis).toBe(false);
+  });
+
+  it("structural gate: a non-DONE status NEVER threads the smoothed series even when supplied", () => {
+    for (const status of ["failed", "computing", undefined, null]) {
+      const out = singleKeyBasisOpts(
+        {},
+        { smoothed_mtm: SM_FULL },
+        status,
+        null,
+        SMOOTHED_SERIES,
+      );
+      expect(out.smoothedGate?.available).toBe(false);
+      expect(out.smoothedSeries).toBeUndefined();
+    }
+  });
+
+  it("MEDIUM-2 WIRING-GUARD: a {smoothed_mtm}-only row (NO mark_to_market, NO mtm_gated_reason) survives the extended early return", () => {
+    // The un-extended :364 predicate (`mtm === undefined && reason === undefined → {}`)
+    // would DROP this fixture: no gate, no toggle, no series. Extending it to also check
+    // the smoothed key keeps the smoothed story alive. Neuter check: restore the
+    // two-term early return → this reddens (out becomes {}).
+    const out = singleKeyBasisOpts(
+      {},
+      { smoothed_mtm: SM_FULL },
+      "complete",
+      null,
+      SMOOTHED_SERIES,
+    );
+    expect(out).not.toEqual({});
+    expect(out.smoothedGate).toEqual({ available: true, reason: undefined });
+    expect(out.metricsByBasis).toEqual({ smoothed_mtm: SM_FULL });
+    // MTM story is honestly empty here (degraded reason-lessly), not fabricated.
+    expect(out.mtmGate).toEqual({ available: false, reason: undefined });
+    expect(out.metricsByBasis && "mark_to_market" in out.metricsByBasis).toBe(false);
+    // The read's result reaches the opts (the call-site contract, not just the helper).
+    expect(out.smoothedSeries).toBe(SMOOTHED_SERIES);
+  });
+
+  it("SILENT-1 preserved: no mtm key, no reason, NO smoothed key → EMPTY (byte-identical non-options path)", () => {
+    expect(singleKeyBasisOpts({}, {}, "complete")).toEqual({});
+    expect(singleKeyBasisOpts({}, {}, "complete", null, SMOOTHED_SERIES)).toEqual({});
+    expect(singleKeyBasisOpts(null, null, "complete", null, SMOOTHED_SERIES)).toEqual({});
+  });
+
+  it("degenerate smoothed object (fails hasBasisHeadline) with DONE → unavailable, no smoothed object", () => {
+    const DEGEN = { ...SM_FULL, cumulative_return: null as unknown as number };
+    const out = singleKeyBasisOpts({}, { mark_to_market: MTM_FULL, smoothed_mtm: DEGEN }, "complete", null, SMOOTHED_SERIES);
+    expect(out.smoothedGate?.available).toBe(false);
+    expect(out.metricsByBasis && "smoothed_mtm" in out.metricsByBasis).toBe(false);
+    expect(out.smoothedSeries).toBeUndefined();
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — readCompositeFactsheet threads the persisted smoothed series
+ * and gate. Smoothed key present → smoothedGate available + series read; absent →
+ * disabled gate + no roundtrip. mark_to_market handling byte-identical.
+ */
+describe("SMTM-01 readCompositeFactsheet — smoothed gate + gated series read", () => {
+  const SM_HEADLINE = { cumulative_return: 0.6, volatility: 0.18, max_drawdown: -0.11, cagr: 0.5, sharpe: 1.9, sortino: 2.4, calmar: 0.7 };
+  const SM_PAYLOAD = {
+    schema: 1,
+    basis: "smoothed_mtm",
+    rows: [
+      { date: "2025-08-01", return: 0.01 },
+      { date: "2025-08-02", return: -0.02 },
+      { date: "2025-08-05", return: 0.015 },
+    ],
+    gap_spans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
+  };
+
+  function mockAdminSmoothed(opts: {
+    smoothedPayload?: unknown;
+    smoothedError?: { message?: string } | null;
+  }): { admin: SupabaseClient; smoothedReads: () => number } {
+    let smoothedReadCount = 0;
+    const from = (table: string) => {
+      if (table === "strategy_analytics_series") {
+        let seenKind: string | undefined;
+        const chain = {
+          select: () => chain,
+          eq: (col: string, val: string) => {
+            if (col === "kind") seenKind = val;
+            return chain;
+          },
+          maybeSingle: () => {
+            if (seenKind === "smoothed_mtm_daily_returns") smoothedReadCount++;
+            return Promise.resolve({
+              data: seenKind === "smoothed_mtm_daily_returns" ? { payload: opts.smoothedPayload } : null,
+              error: seenKind === "smoothed_mtm_daily_returns" ? (opts.smoothedError ?? null) : null,
+            });
+          },
+        };
+        return chain;
+      }
+      const chain = {
+        select: () => chain,
+        eq: () => chain,
+        order: () => chain,
+        limit: () => Promise.resolve({ data: SPARSE_ROWS, error: null }),
+      };
+      return chain;
+    };
+    return { admin: { from } as unknown as SupabaseClient, smoothedReads: () => smoothedReadCount };
+  }
+
+  it("smoothed present → smoothedGate available + threads smoothedSeries", async () => {
+    const { admin, smoothedReads } = mockAdminSmoothed({ smoothedPayload: SM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH, smoothed_mtm: SM_HEADLINE },
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.smoothedGate).toEqual({ available: true, reason: undefined });
+    expect(out!.buildOpts.smoothedSeries).toEqual({
+      dailyReturns: [
+        { date: "2025-08-01", value: 0.01 },
+        { date: "2025-08-02", value: -0.02 },
+        { date: "2025-08-05", value: 0.015 },
+      ],
+      gapSpans: [{ start: "2025-08-03", end: "2025-08-04" }],
+    });
+    expect(smoothedReads()).toBe(1);
+  });
+
+  it("smoothed absent → smoothedGate disabled + NO smoothed roundtrip (mark_to_market untouched)", async () => {
+    const { admin, smoothedReads } = mockAdminSmoothed({ smoothedPayload: SM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: DQF,
+      metricsJsonByBasis: { cash_settlement: FULL_CASH }, // no smoothed_mtm
+      returnsDenominatorConfig: null,
+    });
+    expect(out!.buildOpts.smoothedGate).toEqual({ available: false, reason: "smoothed_basis_unavailable" });
+    expect("smoothedSeries" in out!.buildOpts).toBe(false);
+    expect(smoothedReads()).toBe(0);
+  });
+
+  it("the FLAGSHIP options case: MTM gated OFF (unsmoothed_options_book) but smoothed OPEN", async () => {
+    const { admin } = mockAdminSmoothed({ smoothedPayload: SM_PAYLOAD });
+    const out = await readCompositeFactsheet(admin, {
+      strategyId: "s1",
+      dqf: { ...DQF, mtm_gated_reason: "unsmoothed_options_book" },
+      metricsJsonByBasis: { cash_settlement: FULL_CASH, smoothed_mtm: SM_HEADLINE }, // no mark_to_market
+      returnsDenominatorConfig: null,
+    });
+    // MTM stays honestly gated with its existing reason.
+    expect(out!.buildOpts.mtmGate).toEqual({ available: false, reason: "unsmoothed_options_book" });
+    // Smoothed opens what MTM keeps closed.
+    expect(out!.buildOpts.smoothedGate).toEqual({ available: true, reason: undefined });
   });
 });

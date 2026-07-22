@@ -1,7 +1,7 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DailyReturn } from "./types";
-import { MTM_DAILY_RETURNS_SERIES_KIND } from "@/lib/types";
+import { MTM_DAILY_RETURNS_SERIES_KIND, SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND } from "@/lib/types";
 import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { hasBasisHeadline } from "./basis-metrics";
@@ -112,6 +112,55 @@ export async function readMtmSeries(
     return null;
   }
   return parseMtmSeriesPayload((data as { payload?: unknown } | null)?.payload);
+}
+
+/**
+ * Phase 133 (SMTM-01) — the smoothed sibling of {@link parseMtmSeriesPayload}.
+ * Reuses the exact rows/gap_spans coercion (so the optional Phase-105 `nan_dates`
+ * key is TOLERATED — extra keys are ignored, never a rejection), adding ONE
+ * smoothed-specific guard: a PRESENT-but-wrong `basis` literal (e.g. a
+ * `mark_to_market` row mistakenly stored under the smoothed kind) → null + warn,
+ * so a mislabeled series can never render under the smoothed label (T-131-08).
+ */
+export function parseSmoothedSeriesPayload(raw: unknown): ParsedMtmSeries | null {
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    const basis = (raw as Record<string, unknown>).basis;
+    // A present basis MUST be the smoothed literal; anything else is a mislabel we
+    // refuse to render (absent basis is tolerated — the shared coercion still applies).
+    if (basis !== undefined && basis !== "smoothed_mtm") {
+      console.warn("[factsheet] parseSmoothedSeriesPayload — wrong/malformed basis literal; refusing to render a mislabeled series", {
+        basis,
+      });
+      return null;
+    }
+  }
+  return parseMtmSeriesPayload(raw);
+}
+
+/**
+ * Phase 133 (SMTM-01) — the smoothed sibling of {@link readMtmSeries}: read the
+ * persisted `smoothed_mtm_daily_returns` series row. SAME service-role handle +
+ * deny-all RLS posture + degrade-to-null-never-throw discipline; parses through
+ * {@link parseSmoothedSeriesPayload} (wrong-basis defensive).
+ */
+export async function readSmoothedSeries(
+  admin: SupabaseClient,
+  strategyId: string,
+): Promise<ParsedMtmSeries | null> {
+  const { data, error } = await admin
+    .from("strategy_analytics_series")
+    .select("payload")
+    .eq("strategy_id", strategyId)
+    .eq("kind", SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND)
+    .maybeSingle();
+  if (error) {
+    console.error("[factsheet] readSmoothedSeries — smoothed_mtm_daily_returns read failed", {
+      strategyId,
+      errorMessage: error.message,
+    });
+    return null;
+  }
+  return parseSmoothedSeriesPayload((data as { payload?: unknown } | null)?.payload);
 }
 
 /**
@@ -251,6 +300,12 @@ export async function readCompositeFactsheet(
   const mtmAvailable = hasBasisHeadline(
     (metricsByBasis as { mark_to_market?: unknown } | undefined)?.mark_to_market,
   );
+  // Phase 133 (SMTM-01): the smoothed sibling of the MTM gate — available iff the
+  // persisted `smoothed_mtm` basis carries a trustworthy headline. On an options book
+  // this OPENS what the MTM gate honestly keeps closed (unsmoothed_options_book).
+  const smoothedAvailable = hasBasisHeadline(
+    (metricsByBasis as { smoothed_mtm?: unknown } | undefined)?.smoothed_mtm,
+  );
   const markers = deriveSegmentMarkers(dqf);
 
   // MTM-04 (Phase 103): read the persisted MTM daily series ONLY when the scalar
@@ -259,6 +314,9 @@ export async function readCompositeFactsheet(
   // like the scalar MTM object — the series rides the SAME published/owner + F2/M-1
   // gate, no visibility widening. A failed/malformed row degrades to no-bundle.
   const mtmSeries = mtmAvailable ? await readMtmSeries(admin, strategyId) : null;
+  // Phase 133 (SMTM-01): read the persisted smoothed series ONLY when the scalar
+  // smoothed gate is available (skip the roundtrip otherwise) — same gating as MTM.
+  const smoothedSeries = smoothedAvailable ? await readSmoothedSeries(admin, strategyId) : null;
 
   return {
     dailyReturns,
@@ -268,6 +326,7 @@ export async function readCompositeFactsheet(
       missingSegments: markers.missingSegments,
       metricsByBasis,
       ...(mtmSeries ? { mtmSeries } : {}),
+      ...(smoothedSeries ? { smoothedSeries } : {}),
       // HARD-04 (#67): server-truth short-window flag. Strict `=== true`
       // coercion so a malformed dqf value (string/object) can never render the
       // caveat (T-92-05).
@@ -283,6 +342,13 @@ export async function readCompositeFactsheet(
       mtmGate: {
         available: mtmAvailable,
         reason: typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined,
+      },
+      // Phase 133 (SMTM-01): the smoothed gate. There is no persisted smoothed-reason
+      // column (the worker only persists the smoothed key on a completed pass), so the
+      // disabled reason is the single closed-set default — never a per-row invention.
+      smoothedGate: {
+        available: smoothedAvailable,
+        reason: smoothedAvailable ? undefined : "smoothed_basis_unavailable",
       },
     },
   };
@@ -345,43 +411,65 @@ export function singleKeyBasisOpts(
   metricsJsonByBasis: unknown,
   computationStatus: unknown,
   mtmSeries?: ParsedMtmSeries | null,
-): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries"> {
-  // 1. Extract the persisted mark_to_market object iff the raw jsonb is a non-null
-  //    non-array object AND its `mark_to_market` value is a non-null non-array object.
-  let mtm: Record<string, number> | undefined;
-  if (
-    metricsJsonByBasis !== null &&
-    typeof metricsJsonByBasis === "object" &&
-    !Array.isArray(metricsJsonByBasis)
-  ) {
-    const cand = (metricsJsonByBasis as Record<string, unknown>).mark_to_market;
-    if (cand !== null && typeof cand === "object" && !Array.isArray(cand)) {
-      mtm = cand as Record<string, number>;
+  smoothedSeries?: ParsedMtmSeries | null,
+): Pick<BuildFactsheetOpts, "metricsByBasis" | "mtmGate" | "mtmSeries" | "smoothedGate" | "smoothedSeries"> {
+  // Extract a non-null non-array by-basis object under `key` from the untrusted jsonb.
+  const extractBasisObject = (key: string): Record<string, number> | undefined => {
+    if (
+      metricsJsonByBasis !== null &&
+      typeof metricsJsonByBasis === "object" &&
+      !Array.isArray(metricsJsonByBasis)
+    ) {
+      const cand = (metricsJsonByBasis as Record<string, unknown>)[key];
+      if (cand !== null && typeof cand === "object" && !Array.isArray(cand)) {
+        return cand as Record<string, number>;
+      }
     }
-  }
+    return undefined;
+  };
+  // 1. Extract the persisted mark_to_market + smoothed_mtm objects.
+  const mtm = extractBasisObject("mark_to_market");
+  const smoothed = extractBasisObject("smoothed_mtm");
   // 2. Extract the reason iff a string (same server-truth coercion as :169).
   const reason = typeof dqf?.mtm_gated_reason === "string" ? dqf.mtm_gated_reason : undefined;
-  // 3. Neither present → {} : every non-options single-key strategy hits this,
-  //    renders no toggle, and is byte-identical to today.
-  if (mtm === undefined && reason === undefined) return {};
+  // 3. MEDIUM-2 (plan-check): the early return now checks ALL THREE by-basis signals.
+  //    Returning {} ONLY when mtm, reason, AND smoothed are absent keeps every
+  //    non-options single-key path byte-identical (such rows have none of the three),
+  //    while a {smoothed_mtm}-only row (MTM degraded reason-lessly) is NO LONGER
+  //    silently dropped — it flows through to a constructed gate/metrics/series.
+  if (mtm === undefined && reason === undefined && smoothed === undefined) return {};
+  // Structural consequence: past this point the gates are ALWAYS constructed, so a
+  // payload with ANY by-basis story carries mtmGate — which is what lets
+  // FactsheetView's toggle-availability predicate (`payload.mtmGate != null`) stay
+  // unwidened while still rendering the toggle for the {smoothed_mtm}-only edge.
+  //
   // 4. F-4 DONE gate — exact runner terminal-success literals (no third success
   //    literal exists; verified against analytics_runner.py).
   const done = isComputedAnalytics(computationStatus as string | null | undefined);
-  // 5. Available iff DONE and the MTM object carries a trustworthy headline. A
-  //    degraded-MTM row still reports "complete" (Phase 101-02), so BOTH gates.
+  // 5. Available iff DONE and the object carries a trustworthy headline. A degraded
+  //    row still reports "complete" (Phase 101-02), so BOTH gates apply per basis.
   const available = done && hasBasisHeadline(mtm);
-  // 6. Thread ONLY the mark_to_market key, and ONLY when available. This makes F-4
-  //    structural (a failed row's payload carries NO MTM object) and closes the
-  //    stale-cash_settlement-key hazard by construction (SC-4).
-  // 7. MTM-04 (Phase 103): thread the persisted MTM daily series ONLY when
-  //    `available` AND the reader returned a parsed series — so a gated/degraded
-  //    row stays structurally MTM-series-free (the series rides the SAME F-4 gate
-  //    as the scalar object). Omitted (not undefined) when absent so the SILENT-1
-  //    empty-result path stays byte-identical.
+  const smoothedAvailable = done && hasBasisHeadline(smoothed);
+  // 6. Thread ONLY the available by-basis keys (F-4 structural: a failed row's payload
+  //    carries NO by-basis object), and NEVER a lingering cash_settlement key (SC-4).
+  const metricsByBasis: NonNullable<BuildFactsheetOpts["metricsByBasis"]> = {};
+  if (available && mtm) metricsByBasis.mark_to_market = mtm;
+  if (smoothedAvailable && smoothed) metricsByBasis.smoothed_mtm = smoothed;
+  const hasAnyBasisScalars = Object.keys(metricsByBasis).length > 0;
+  // 7. Thread the persisted daily series ONLY when the matching basis is available AND
+  //    the reader returned a parsed series (each rides its own F-4 gate). Omitted (not
+  //    undefined) when absent so the SILENT-1 empty-result path stays byte-identical.
   return {
-    metricsByBasis: available && mtm ? { mark_to_market: mtm } : undefined,
+    metricsByBasis: hasAnyBasisScalars ? metricsByBasis : undefined,
     mtmGate: { available, reason },
+    // No persisted smoothed-reason column exists (see FactsheetCommon.smoothedGate) —
+    // the disabled reason is the single closed-set default.
+    smoothedGate: {
+      available: smoothedAvailable,
+      reason: smoothedAvailable ? undefined : "smoothed_basis_unavailable",
+    },
     ...(available && mtmSeries ? { mtmSeries } : {}),
+    ...(smoothedAvailable && smoothedSeries ? { smoothedSeries } : {}),
   };
 }
 
@@ -414,6 +502,31 @@ export function shouldReadSingleKeyMtmSeries(
   }
   const mtm = (metricsJsonByBasis as Record<string, unknown>).mark_to_market;
   return mtm !== null && typeof mtm === "object" && !Array.isArray(mtm);
+}
+
+/**
+ * Phase 133 (SMTM-01) — the smoothed sibling of {@link shouldReadSingleKeyMtmSeries}:
+ * the cheap DONE + `smoothed_mtm`-object predicate deciding whether to incur the
+ * `smoothed_mtm_daily_returns` DB roundtrip. Same cheaper-than-hasBasisHeadline
+ * posture — a false positive wastes ONE read but `singleKeyBasisOpts` still applies
+ * the full `available` gate before threading. Keeps the hot non-options path
+ * roundtrip-free.
+ */
+export function shouldReadSingleKeySmoothedSeries(
+  metricsJsonByBasis: unknown,
+  computationStatus: unknown,
+): boolean {
+  const done = isComputedAnalytics(computationStatus as string | null | undefined);
+  if (!done) return false;
+  if (
+    metricsJsonByBasis === null ||
+    typeof metricsJsonByBasis !== "object" ||
+    Array.isArray(metricsJsonByBasis)
+  ) {
+    return false;
+  }
+  const smoothed = (metricsJsonByBasis as Record<string, unknown>).smoothed_mtm;
+  return smoothed !== null && typeof smoothed === "object" && !Array.isArray(smoothed);
 }
 
 /**

@@ -543,7 +543,8 @@ export type StrategyAnalyticsSeriesKind =
   | "rolling_volatility_3m" | "rolling_volatility_6m" | "rolling_volatility_12m"
   | "rolling_alpha" | "rolling_beta"
   | "exposure_series" | "turnover_series" | "log_returns_series"
-  | "mtm_daily_returns";
+  | "mtm_daily_returns"
+  | "smoothed_mtm_daily_returns";
 
 /**
  * The `strategy_analytics_series.kind` string for the persisted MTM daily-return
@@ -568,6 +569,35 @@ export type MtmDailyReturnsSeriesPayload = {
   rows: Array<{ date: string; return: number }>;
   gap_spans: Array<{ start: string; end: string }>;
   conventions: { periods_per_year: number; cumulative_method: string; day_basis: string };
+};
+
+/**
+ * The `strategy_analytics_series.kind` string for the persisted SMOOTHED-MTM
+ * daily-return series (Phase 132/133). SINGLE TS SOURCE of the literal — the
+ * reader (`composite-read-path.ts readSmoothedSeries`) references THIS constant,
+ * never a bare string (Python owner: `analytics-service/services/basis_series.py:118`
+ * `KIND_SMOOTHED_MTM`).
+ */
+export const SMOOTHED_MTM_DAILY_RETURNS_SERIES_KIND = "smoothed_mtm_daily_returns" as const;
+
+/**
+ * Persisted JSONB payload of a `smoothed_mtm_daily_returns` row (Phase 132). The
+ * smoothed sibling of {@link MtmDailyReturnsSeriesPayload}: SAME
+ * schema/rows/gap_spans/conventions shape, `basis: "smoothed_mtm"` literal (written
+ * by `basis_series.py persist_basis_series` with `basis="smoothed_mtm"`), plus the
+ * OPTIONAL Phase-105 `nan_dates` key (emitted only when the derive surfaced
+ * guard-NaN dates under zero_fill — `basis_series.py:360-361`). Untrusted-shape on
+ * read (DB JSONB → RSC boundary): `parseSmoothedSeriesPayload` coerces defensively
+ * (and rejects a wrong-`basis` payload) before it reaches the payload.
+ */
+export type SmoothedMtmDailyReturnsSeriesPayload = {
+  schema: number;
+  basis: "smoothed_mtm";
+  rows: Array<{ date: string; return: number }>;
+  gap_spans: Array<{ start: string; end: string }>;
+  conventions: { periods_per_year: number; cumulative_method: string; day_basis: string };
+  /** Phase 105 additive composite-only key — present only when guard-NaN dates were surfaced. */
+  nan_dates?: string[];
 };
 
 /**
@@ -616,6 +646,12 @@ export type StrategyAnalyticsSeriesRow =
       strategy_id: string;
       kind: "mtm_daily_returns";
       payload: MtmDailyReturnsSeriesPayload;
+      computed_at: string;
+    }
+  | {
+      strategy_id: string;
+      kind: "smoothed_mtm_daily_returns";
+      payload: SmoothedMtmDailyReturnsSeriesPayload;
       computed_at: string;
     };
 

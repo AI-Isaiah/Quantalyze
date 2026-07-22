@@ -61,6 +61,8 @@ export type BuildFactsheetOpts = {
   metricsByBasis?: FactsheetCommon["metricsByBasis"];
   dataQuality?: FactsheetCommon["dataQuality"];
   mtmGate?: FactsheetCommon["mtmGate"];
+  /** Phase 133 (SMTM-01) — the smoothed sibling of {@link mtmGate}. */
+  smoothedGate?: FactsheetCommon["smoothedGate"];
   /**
    * Phase 103 (MTM-04) — the persisted MTM daily series (read from the
    * `mtm_daily_returns` `strategy_analytics_series` row via
@@ -73,6 +75,18 @@ export type BuildFactsheetOpts = {
    * the Python-derived coverage mask — reused, never re-derived client-side.
    */
   mtmSeries?: {
+    dailyReturns: DailyReturn[];
+    gapSpans: Array<{ start: string; end: string }>;
+  };
+  /**
+   * Phase 133 (SMTM-01) — the smoothed sibling of {@link mtmSeries} (read from the
+   * `smoothed_mtm_daily_returns` row via `composite-read-path.ts readSmoothedSeries`).
+   * When present with ≥2 valid rows, `buildFactsheetPayload` emits
+   * `payload.seriesByBasis.smoothed_mtm` from the SAME `deriveSeriesBundle`. Threaded
+   * ONLY when the smoothed gate is `available`, so a gated/non-options strategy passes
+   * `undefined` and the payload stays byte-identical (SC-4).
+   */
+  smoothedSeries?: {
     dailyReturns: DailyReturn[];
     gapSpans: Array<{ start: string; end: string }>;
   };
@@ -441,6 +455,28 @@ export function buildFactsheetPayload(
       };
     }
   }
+  // Phase 133 (SMTM-01) — the smoothed sibling of the MTM bundle above, derived by
+  // the SAME function with its OWN axis + own Python-derived coverage mask. Additive:
+  // absent → seriesByBasis stays whatever the MTM arm produced (or undefined), so the
+  // cash/MTM payload is byte-identical (SC-4). Spreads over any existing MTM bundle so
+  // a payload can legitimately carry both mark_to_market and smoothed_mtm.
+  if (opts?.smoothedSeries) {
+    const smoothedClipped = normalizeDailyReturns(opts.smoothedSeries.dailyReturns);
+    if (smoothedClipped.length >= 2) {
+      seriesByBasis = {
+        ...seriesByBasis,
+        smoothed_mtm: deriveSeriesBundle(smoothedClipped, {
+          periodsPerYear,
+          isArithmetic,
+          markets: strategy.markets,
+          strategyName: strategy.name,
+          // comparatorAnnVol omitted → the smoothed comparator vol-matches the
+          // smoothed series' own computed vol (honest; no persisted cash overlay).
+          missingSegments: deriveSegmentMarkers({ gap_spans: opts.smoothedSeries.gapSpans }).missingSegments,
+        }),
+      };
+    }
+  }
 
   // Fields shared by both ingest arms. The discriminated FactsheetPayload (B6)
   // appends the synthesized api-only panels onto this for "api" strategies. The
@@ -495,6 +531,9 @@ export function buildFactsheetPayload(
     missingSegments: opts?.missingSegments,
     metricsByBasis: opts?.metricsByBasis,
     mtmGate: opts?.mtmGate,
+    // Phase 133 (SMTM-01) — additive smoothed gate passthrough (undefined dropped
+    // from the serialized blob when no smoothed story, so cash/MTM stays identical).
+    smoothedGate: opts?.smoothedGate,
     dataQuality: opts?.dataQuality,
     // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis so the client
     // leverage recompute annualizes on the SAME basis the server did. Additive-
