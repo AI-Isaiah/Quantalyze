@@ -6,7 +6,7 @@ import type { FactsheetPayload, RollWindowPick } from "@/lib/factsheet/types";
 import { ROLL_WINDOW_6MO, ROLL_WINDOW_90D } from "@/lib/factsheet/rolling";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { FactsheetProvider, useActiveComparator, useComparator, useDisplay, usePayload, useToggles, useXRange } from "./factsheet-context";
-import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, type Basis } from "./basis-context";
+import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSeriesView, useAppliedLeverage, leverageApplies, leverageEligibleFor, mtmDisabledReasonCopy, mtmReasonTone, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
 // Phase 90.5 (LEV-01, D1/D2) + Phase 107 (LEV-BB): ephemeral single-key leverage.
 // LeverageProvider wraps the body (transparent to GUARD-02); useLeverage drives the
 // ControlBar input AND the KpiStrip's levered-view gate. The KpiStrip now reads the
@@ -335,8 +335,15 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
   // renders CASH; gating on `basis` alone would label that cash rail
   // "MARK-TO-MARKET" (the mislabel). This mirrors the PerformanceCharts caption,
   // which is already gated on the same bundle presence.
+  // Phase 133 (SMTM-01): the eyebrow follows whichever persisted-overlay basis is
+  // ACTIVE with its bundle present — mark_to_market OR smoothed_mtm. Same F4 discipline
+  // as the MTM arm: gated on the ACTIVE basis's bundle presence so a bundle-absent read
+  // (rail renders cash) never earns a mislabeled non-cash eyebrow.
   const onMtm =
-    basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null;
+    (basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null) ||
+    (basis === "smoothed_mtm" && payload.seriesByBasis?.smoothed_mtm != null);
+  const basisEyebrowLabel =
+    basis === "smoothed_mtm" ? "BASIS · SMOOTHED MARK-TO-MARKET" : "BASIS · MARK-TO-MARKET";
   // A single-key options book that participates in the MTM basis story carries a
   // gate; every other single-key strategy has none. Gating the basis eyebrow on
   // this keeps NON-participants byte-identical (GUARD-02) — no reserved line.
@@ -359,7 +366,7 @@ function MetricsColumnWithBasis({ scenarioMode }: { scenarioMode: boolean }) {
           aria-hidden={!onMtm}
           className="text-micro uppercase tracking-wider text-text-muted"
         >
-          {onMtm ? "BASIS · MARK-TO-MARKET" : " "}
+          {onMtm ? basisEyebrowLabel : " "}
         </p>
         <MetricsColumn scenarioMode={scenarioMode} />
       </div>
@@ -422,6 +429,9 @@ function PerformanceCharts() {
   // Bundle presence decides the honest three-state caption: absent (stale cache /
   // not-yet-backfilled / gated) → charts fall back to cash + the "showing cash" copy.
   const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
+  // Phase 133 (SMTM-01): the smoothed sibling — bundle present ⇒ charts followed the
+  // smoothed series; absent ⇒ the honest cash fallback (summary-metrics-only) copy.
+  const smoothedBundlePresent = payload.seriesByBasis?.smoothed_mtm != null;
   // Defensive fallbacks: a cache entry created before the rollingWindow
   // fields were added would crash readers. The cache key was bumped in
   // the same commit so this should only hit during the 1h TTL drain; if
@@ -508,11 +518,19 @@ function PerformanceCharts() {
               re-derived/backfilled — Zavara pre-backfill) → cash charts + cash copy */}
       {mtmToggleAvailable && (
         <p role="status" className="text-caption text-text-secondary">
-          {basis !== "mark_to_market"
-            ? ""
-            : mtmBundlePresent
+          {/* Phase 133 (SMTM-01): the caption is now per-basis three-state. Cash → ""
+              (unchanged idiom); MTM → its byte-identical two copies; smoothed → the
+              smoothed sibling (present → smoothed-series copy; absent → the honest
+              cash-fallback "applies to summary metrics only" copy). */}
+          {basis === "mark_to_market"
+            ? mtmBundlePresent
               ? "Charts show the mark-to-market series."
-              : "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."}
+              : "Charts show the cash-settlement series. Mark-to-market applies to summary metrics only."
+            : basis === "smoothed_mtm"
+              ? smoothedBundlePresent
+                ? "Charts show the smoothed mark-to-market series."
+                : "Charts show the cash-settlement series. Smoothed mark-to-market applies to summary metrics only."
+              : ""}
         </p>
       )}
       {!roll.enough && (
@@ -757,6 +775,9 @@ function KpiStrip() {
   const view = useBasisSeriesView(payload);
   const { m: basisM } = useBasisMetrics(payload);
   const mtmBundlePresent = payload.seriesByBasis?.mark_to_market != null;
+  // Phase 133 (SMTM-01): the smoothed sibling — drives the smoothed suppressRelative
+  // arm (an absent-bundle smoothed view must never show the cash joint relatives).
+  const smoothedBundlePresent = payload.seriesByBasis?.smoothed_mtm != null;
   // WR-01 / IN-02 (Phase 107 review): read the DEFERRED applied leverage — the SAME
   // value `useBasisSeriesView` derived the displayed bundle from (107-03) — and gate
   // on the ONE shared `leverageApplies` predicate. This is the EXACT mirror of the
@@ -801,7 +822,13 @@ function KpiStrip() {
     //     payload by reference) yields the CASH joint; showing it under the MTM story
     //     would mislabel cash (the SAME discipline as the F4 rail eyebrow, which blanks
     //     when the bundle is absent). This is an orthogonal basis concern, not leverage.
-    const suppressRelative = basis === "mark_to_market" && !mtmBundlePresent;
+    // Phase 133 (SMTM-01): suppress under EITHER persisted-overlay basis when its own
+    // bundle is absent — a bundle-absent read yields the CASH joint, and showing it
+    // under a non-cash story mislabels cash (the F4 rail-eyebrow discipline). Cash is
+    // never suppressed. Each basis consults ITS OWN bundle-present flag.
+    const suppressRelative =
+      (basis === "mark_to_market" && !mtmBundlePresent) ||
+      (basis === "smoothed_mtm" && !smoothedBundlePresent);
     items.push({
       label: `α vs ${cn}`,
       value: suppressRelative ? "—" : pctSigned(j.alpha, 1),
@@ -838,7 +865,13 @@ function KpiStrip() {
       {composite && (
         <p className="mt-6 text-micro uppercase tracking-wider text-text-muted">
           BASIS ·{" "}
-          {basis === "mark_to_market" ? "MARK-TO-MARKET" : "CASH SETTLEMENT"}
+          {/* Phase 133 (SMTM-01): three-way — smoothed earns its own label, never the
+              binary-ternary "CASH SETTLEMENT" fallthrough under a smoothed basis. */}
+          {basis === "mark_to_market"
+            ? "MARK-TO-MARKET"
+            : basis === "smoothed_mtm"
+              ? "SMOOTHED MARK-TO-MARKET"
+              : "CASH SETTLEMENT"}
         </p>
       )}
       {/* Phase 107 (LEV-BB, UI-SPEC Copywriting + Color): the reworded what-if
@@ -1145,6 +1178,12 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
   const composite = payload.dataQuality?.composite === true;
   const mtmAvailable = payload.mtmGate?.available === true;
   const mtmReason = mtmDisabledReasonCopy(payload.mtmGate?.reason);
+  // Phase 133 (SMTM-01): the smoothed gate — enabled ⇔ the persisted smoothed_mtm
+  // basis is available; disabled → the mapped closed-set reason copy. Always a STEADY
+  // honest-empty condition (no self-healing transient), so the inline reason renders
+  // muted — no amber, no tone split.
+  const smoothedAvailable = payload.smoothedGate?.available === true;
+  const smoothedReason = smoothedDisabledReasonCopy(payload.smoothedGate?.reason);
   // Phase 102 (DESIGN.md tone split): amber --color-warning is reserved for
   // transient/recoverable reasons (timeout, anchor-race — the system re-attempts
   // on the next derive); steady-state honest-empty reasons render muted. Amber on
@@ -1272,6 +1311,16 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
                 disabled: !mtmAvailable,
                 disabledReason: mtmReason,
               },
+              // Phase 133 (SMTM-01): the third segment — sentence-case "Smoothed
+              // mark-to-market" (matches the "Mark-to-market" sibling's full-word
+              // casing per DESIGN.md, not an "MTM" abbreviation). Enabled ⇔ the
+              // persisted smoothed basis is available; honest-disabled otherwise.
+              {
+                id: "smoothed_mtm",
+                label: "Smoothed mark-to-market",
+                disabled: !smoothedAvailable,
+                disabledReason: smoothedReason,
+              },
             ]}
           />
           {!mtmAvailable &&
@@ -1287,6 +1336,11 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               // Steady-state honest-empty → muted (#64748B, WCAG-AA 4.85:1 on white).
               <p className="text-caption text-text-muted">{mtmReason}</p>
             ))}
+          {/* Phase 133 (SMTM-01): the smoothed disabled-reason paragraph — always
+              STEADY (never a self-healing transient), so muted only, never amber. */}
+          {!smoothedAvailable && (
+            <p className="text-caption text-text-muted">{smoothedReason}</p>
+          )}
         </div>
       )}
       <DisplayMenu />

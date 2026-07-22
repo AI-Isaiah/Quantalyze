@@ -125,10 +125,11 @@ export function PeerPercentilePanel() {
       {/* F6 (phase 103, no-invented-data): this is a CROSS-STRATEGY panel — the
           rank compares this book against a peer cohort computed on the
           cash-settlement basis. The cohort is NOT recomputed per basis (there is no
-          mark-to-market peer universe to rank against), so under MTM we surface an
-          HONEST note rather than fabricate an MTM cohort. Cash renders nothing
-          extra (byte-identical). */}
-      {basis === "mark_to_market" && (
+          mark-to-market peer universe to rank against), so under a NON-cash basis we
+          surface an HONEST note rather than fabricate a per-basis cohort. Phase 133
+          (SMTM-01): smoothed_mtm gets the SAME honest note as mark_to_market (there is
+          no smoothed peer universe either). Cash renders nothing extra (byte-identical). */}
+      {(basis === "mark_to_market" || basis === "smoothed_mtm") && (
         <p className="mt-1 text-micro text-text-muted">
           Peer rank is computed on the cash-settlement basis; the cohort is not recomputed per basis.
         </p>

@@ -565,6 +565,24 @@ export function mtmDisabledReasonCopy(reason?: string): string {
 }
 
 /**
+ * Phase 133 (SMTM-01) — the smoothed sibling of {@link mtmDisabledReasonCopy}.
+ * The worker persists NO smoothed-reason column (the smoothed key is written only on
+ * a completed options pass), so the gate carries a single closed-set default reason,
+ * `"smoothed_basis_unavailable"`, covering "not yet computed / marks missing /
+ * non-options book". DESIGN.md voice: factual, institutional, no contractions, never
+ * fabricating. Always a STEADY honest-empty condition (never a self-healing transient),
+ * so it renders muted — no amber, no `smoothedReasonTone` sibling needed.
+ */
+export function smoothedDisabledReasonCopy(reason?: string): string {
+  switch (reason) {
+    case "smoothed_basis_unavailable":
+      return "Smoothed mark-to-market unavailable: this basis has not been computed for this strategy.";
+    default:
+      return "Smoothed mark-to-market unavailable for this strategy.";
+  }
+}
+
+/**
  * DESIGN.md tone split for the MTM disabled-reason surface. `--color-warning`
  * amber is RESERVED for transient/recoverable states the system re-attempts on
  * its own — so ONLY the two reasons that self-heal on the next derive
