@@ -2888,6 +2888,32 @@ def test_replay_option_end_of_day_is_last_row_of_day() -> None:
     assert out[instr]["positions"] == {"2026-01-15": 2.0}
 
 
+def test_replay_option_same_ms_fills_numeric_id_tie_break() -> None:
+    """IN-01: same-millisecond fills (a market order sweeping levels) can carry
+    ids of DIFFERENT digit length — lexicographic ``str(id)`` ordering puts
+    ``"999"`` AFTER ``"1000"``, so the 'last row of the day' could be an
+    intermediate fill and the EOD position (hence two days' ΔMTM attribution)
+    would be wrong. The tie-break must be numeric-aware: the later fill
+    (id 1000, final position) wins over the earlier one (id 999)."""
+    instr = "BTC-16JAN26-100000-C"
+    ts = _ms("2026-01-15T10:00:00.123+00:00")
+    rows = [
+        {
+            "type": "trade", "instrument_name": instr, "currency": "BTC",
+            "position": 1.0, "timestamp": ts, "id": 999,  # intermediate fill
+        },
+        {
+            "type": "trade", "instrument_name": instr, "currency": "BTC",
+            "position": 2.0, "timestamp": ts, "id": 1000,  # final fill
+        },
+    ]
+    # Both concat orders must resolve identically (order-independence).
+    assert replay_option_positions(rows)[instr]["positions"] == {"2026-01-15": 2.0}
+    assert replay_option_positions(rows[::-1])[instr]["positions"] == {
+        "2026-01-15": 2.0
+    }
+
+
 def test_replay_option_sorts_out_of_order_input() -> None:
     # Crawl concat order is NOT trusted — replay sorts by (timestamp, id).
     instr = "BTC-17JAN26-100000-C"

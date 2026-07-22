@@ -1955,9 +1955,20 @@ def replay_option_positions(
         ccy_of[instrument] = str(row.get("currency", "")).upper()
     out: dict[str, dict[str, Any]] = {}
     for instrument, instr_rows in per_instr.items():
+        # IN-01: the same-instant tie-break is SHORTLEX on the id string
+        # (length, then value) — numeric ids of different digit length order
+        # numerically ("999" < "1000"), so same-ms multi-fills (a market order
+        # sweeping levels) resolve the TRUE last fill as the end-of-day
+        # position; plain lexicographic str ordering could pick an intermediate
+        # fill and misattribute two days' ΔMTM. Non-numeric ids stay
+        # deterministic under shortlex.
         ordered = sorted(
             instr_rows,
-            key=lambda r: (_row_utc_instant(r.get("timestamp")), str(r.get("id"))),
+            key=lambda r: (
+                _row_utc_instant(r.get("timestamp")),
+                len(str(r.get("id"))),
+                str(r.get("id")),
+            ),
         )
         positions: dict[str, float] = {}
         for r in ordered:
