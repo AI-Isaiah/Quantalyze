@@ -1526,6 +1526,10 @@ def assert_balance_identity(
     open_option_ccys: AbstractSet[str] = frozenset(),
     exclude_spot_extraction: bool = False,
     pnl_basis: str = DEFAULT_PNL_BASIS,
+    terminal_book: Mapping[str, float] | None = None,
+    native_options_value: Mapping[str, float] | None = None,
+    native_options_session_upl: Mapping[str, float] | None = None,
+    option_delta_mtm: Mapping[str, Mapping[str, float]] | None = None,
 ) -> None:
     """MANDATORY fail-loud reconcile guard (§1). Per currency ``c``, the computed
     total realized (Σ over ALL ``native_daily[c]`` day contributions) MUST equal
@@ -1682,6 +1686,154 @@ def assert_balance_identity(
                 f"class {residual / tol if tol else float('inf'):.1f}x) — "
                 f"{_cause}, never loosen the tolerance (silent P&L misattribution "
                 "risk)"
+            )
+
+    # SMOOTHED_MTM only (Phase 131 — additive, gated): the cash channel above ran
+    # STRICT over ALL currencies (open_option_ccys is frozenset() under this basis —
+    # every option row books its FULL cash change, so the flat-at-settlement identity
+    # closes exactly and no exemption is needed). Now the two smoothed-only channels:
+    #   (2) BOOK channel (anchor cross-check) — the replayed settled book
+    #       Book(last settlement) reconciles against the venue anchor's SETTLED book
+    #       (options_value − options_session_upl); an independent T-131-04 backstop
+    #       (a position-field replay drift surfaces here, never as a silent wrong MTM).
+    #   (3) SUMMARY cross-check (Q3-3) — over each summary coverage window,
+    #       Σ(rpl+upl) == Σ(option change + commission) inside the window + ΔBook;
+    #       the summaries stop DRIVING attribution but keep POLICING it.
+    # Both are inert (no terminal_book / no summary rows) for perp-only / USD-native
+    # ledgers → SC-4 byte-safe. cash_settlement / mark_to_market never enter here.
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and terminal_book is not None:
+        _assert_smoothed_book_channel(
+            terminal_book,
+            native_options_value or {},
+            native_options_session_upl or {},
+            floor,
+            throughput,
+        )
+        _assert_smoothed_summary_cross_check(
+            rows, option_delta_mtm or {}, floor, throughput
+        )
+
+
+def _assert_smoothed_book_channel(
+    terminal_book: Mapping[str, float],
+    native_options_value: Mapping[str, float],
+    native_options_session_upl: Mapping[str, float],
+    floor: Mapping[str, float],
+    throughput: Mapping[str, float],
+) -> None:
+    """SMOOTHED_MTM book channel (Q3-2): per currency the replayed settled option
+    book ``Book(last settlement)`` (replay × daily marks, the Task-4 terminal_book)
+    MUST reconcile against the anchor's SETTLED book =
+    ``native_options_value[c] − native_options_session_upl[c]`` (both off the SAME
+    summaries response), within ``max($1-equiv native floor, 1e-4·max(throughput,
+    |settled anchor|))``. The daily marks are 08:00-settlement closes so they
+    EXCLUDE the current session's unrealized move (which lives in
+    ``options_session_upl``) — the decomposition is exact at the settled boundary.
+    On breach → ``LedgerValuationError`` naming currency + a coarse magnitude class
+    only (leak discipline). A perturbed anchor (replay/mark drift) fires here."""
+    computed = {str(c).upper(): float(v) for c, v in terminal_book.items()}
+    opt_value = {str(c).upper(): float(v) for c, v in native_options_value.items()}
+    opt_sess = {
+        str(c).upper(): float(v) for c, v in native_options_session_upl.items()
+    }
+    for ccy in sorted(set(computed) | set(opt_value)):
+        settled_anchor = opt_value.get(ccy, 0.0) - opt_sess.get(ccy, 0.0)
+        residual = abs(computed.get(ccy, 0.0) - settled_anchor)
+        tol = max(
+            float(floor.get(ccy, 0.0)),
+            1e-4 * max(throughput.get(ccy, 0.0), abs(settled_anchor)),
+        )
+        if residual > tol:
+            raise LedgerValuationError(
+                f"Deribit smoothed_mtm book-channel breach for currency {ccy!r}: "
+                "the replayed settled option book diverges from the anchor's settled "
+                "book (options_value − options_session_upl) by more than "
+                f"max($1-equiv, 1e-4·throughput) (residual/tolerance class "
+                f"{residual / tol if tol else float('inf'):.1f}x) — a position-field "
+                "replay drift or a stale/mis-keyed daily mark; STOP and investigate "
+                "(never loosen the tolerance, silent MTM-misattribution risk)"
+            )
+
+
+def _assert_smoothed_summary_cross_check(
+    rows: Sequence[Mapping[str, Any]],
+    option_delta_mtm: Mapping[str, Mapping[str, float]],
+    floor: Mapping[str, float],
+    throughput: Mapping[str, float],
+) -> None:
+    """SMOOTHED_MTM summary cross-check (Q3-3): over each currency's
+    ``options_settlement_summary`` coverage window, Deribit's OWN session P&L
+    decomposition ``Σ(realized_pl + unrealized_pl)`` MUST reconcile against our
+    reconstruction ``Σ(option change + commission)`` inside the window PLUS the
+    smoothed book move ``ΔBook = Book(window end) − Book(window start)`` (the E3
+    closure generalised to non-flat window ends via the ΔMTM series). Under
+    smoothed the summaries no longer DRIVE attribution (the ΔMTM book does), so this
+    is a pure POLICING channel — a material breach means the summary stream and the
+    replay/mark reconstruction disagree → ``LedgerValuationError`` (currency +
+    magnitude class only). INERT (no windows) for perp-only / USD-native / pre-
+    rollout ledgers → SC-4 byte-safe. Never raises on undatable rows (skipped —
+    the cash + book channels are the money backstops)."""
+    windows = _summary_coverage_windows(rows)
+    if not windows:
+        return
+    summary_sum: dict[str, float] = {}
+    option_sum: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_type = str(row.get("type", ""))
+        ccy = str(row.get("currency", "")).upper()
+        window = windows.get(ccy)
+        if window is None:
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if not _ts_in_coverage(instant, window):
+            continue
+        if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            summary_sum[ccy] = summary_sum.get(ccy, 0.0) + _summary_contribution(row)
+        elif row_type in ("trade", "delivery") and classify_instrument(
+            str(row.get("instrument_name", ""))
+        ) == "option":
+            change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            option_sum[ccy] = (
+                option_sum.get(ccy, 0.0) + change + _option_commission(row)
+            )
+    for ccy, window in windows.items():
+        start_ms, end_ms = window
+        start_day = (
+            datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).date().isoformat()
+        )
+        end_day = (
+            datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).date().isoformat()
+        )
+        # ΔBook over the window = Book(end) − Book(start) = Σ ΔMTM on days strictly
+        # after the window-start day, through the window-end day (Book telescopes
+        # from the daily ΔMTM series).
+        delta_book = 0.0
+        for day, value in option_delta_mtm.get(ccy, {}).items():
+            if start_day < day <= end_day:
+                delta_book += float(value)
+        lhs = summary_sum.get(ccy, 0.0)
+        rhs = option_sum.get(ccy, 0.0) + delta_book
+        residual = abs(lhs - rhs)
+        tol = max(
+            float(floor.get(ccy, 0.0)),
+            1e-4 * max(throughput.get(ccy, 0.0), abs(lhs), abs(rhs)),
+        )
+        if residual > tol:
+            raise LedgerValuationError(
+                f"Deribit smoothed_mtm summary cross-check breach for currency "
+                f"{ccy!r}: Deribit's own Σ(realized_pl+unrealized_pl) over the "
+                "options coverage window diverges from Σ(option change+commission) + "
+                "ΔBook by more than max($1-equiv, 1e-4·throughput) (residual/tolerance "
+                f"class {residual / tol if tol else float('inf'):.1f}x) — the summary "
+                "stream and the replay/mark reconstruction disagree; STOP and "
+                "investigate (never loosen the tolerance, silent MTM drift risk)"
             )
 
 

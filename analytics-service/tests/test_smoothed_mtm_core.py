@@ -31,6 +31,7 @@ from services.deribit_txn import (
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
     _PNL_BASES,
+    assert_balance_identity,
     txn_rows_to_native_daily,
 )
 
@@ -480,3 +481,219 @@ def test_retention_straddler_partial_marks_not_bucketed_fails_loud(
             charts={_PRE_RET_INSTR: {"2023-06-20": 0.02}},  # 06-21 hole (pos 1.0)
             pnl_basis="smoothed_mtm",
         )
+
+
+# ===========================================================================
+# Task 5 — smoothed-only identity channels in assert_balance_identity +
+# native_options_session_upl on DeribitNativeAccountState.
+# ===========================================================================
+
+
+def test_state_field_defaults_empty_absent_zero() -> None:
+    """SC-4: native_options_session_upl is DEFAULTED — every existing 7-arg
+    positional constructor stays valid and an absent field reads 0.0."""
+    st = di.DeribitNativeAccountState({}, {}, None, 0.0, True, False, {})
+    assert st.native_options_session_upl == {}
+    assert st.native_options_session_upl.get("BTC", 0.0) == 0.0
+
+
+def test_state_reads_options_session_upl_off_summaries() -> None:
+    """The options-only session uPnL is read STRAIGHT off the SAME summaries
+    response; absent (perp-only / no open options) → 0.0 (never fabricated)."""
+
+    class _Stub:
+        async def private_get_get_account_summaries(self, params: Any) -> Any:
+            return {"result": {"summaries": [
+                {"currency": "BTC", "equity": 1.0, "session_upl": 0.0,
+                 "options_value": 0.2, "options_session_upl": 0.05},
+                {"currency": "ETH", "equity": 1.0, "session_upl": 0.0},  # absent leg
+            ]}}
+
+        async def public_get_get_index_price(self, params: Any) -> Any:
+            return {"result": {"index_price": 60000.0}}
+
+    state = asyncio.run(di.fetch_deribit_native_account_state(_Stub()))
+    assert state.native_options_session_upl["BTC"] == 0.05
+    assert state.native_options_session_upl["ETH"] == 0.0  # absent → 0.0
+
+
+# --- Book channel (anchor cross-check) through the real adapter ---------------
+
+_OPEN_INSTR = "BTC-30JAN26-100000-C"
+_OPEN_ROWS = [
+    _opt_row(instrument=_OPEN_INSTR, day="2026-01-15", change=-0.10, position=2.0, id=1),
+]
+_OPEN_CHARTS = {_OPEN_INSTR: {"2026-01-15": 0.06}}  # Book = 2.0 × 0.06 = 0.12
+# anchor settled book = options_value − options_session_upl = 0.15 − 0.03 = 0.12.
+_OPEN_SUMMARIES = [
+    {"currency": "BTC", "equity": 0.02, "session_upl": 0.0,
+     "options_value": 0.15, "options_session_upl": 0.03},
+]
+
+
+def test_smoothed_book_channel_reconciles_open_book(monkeypatch: Any) -> None:
+    """Open-at-crawl book: the replayed settled book (2.0 × 0.06 = 0.12) reconciles
+    against the anchor's settled book (options_value − options_session_upl = 0.12) →
+    build succeeds; the merged series telescopes cash(−0.10) + ΔBook(0.12) = 0.02."""
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_OPEN_ROWS,
+        summaries=_OPEN_SUMMARIES,
+        charts=_OPEN_CHARTS,
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    assert got == pytest.approx({"2026-01-15": 0.02}, abs=1e-9)
+
+
+def test_smoothed_book_channel_breach_fails_loud_no_leak(monkeypatch: Any) -> None:
+    """A perturbed anchor (options_value 0.15 → 0.50, settled 0.47 vs computed
+    0.12) breaches the book channel → LedgerValuationError naming the currency and
+    a magnitude CLASS only (never a held balance)."""
+    bad_summaries = [
+        {"currency": "BTC", "equity": 0.02, "session_upl": 0.0,
+         "options_value": 0.50, "options_session_upl": 0.03},
+    ]
+    with pytest.raises(LedgerValuationError) as exc:
+        _run_options_ledger(
+            monkeypatch,
+            btc_rows=_OPEN_ROWS,
+            summaries=bad_summaries,
+            charts=_OPEN_CHARTS,
+            pnl_basis="smoothed_mtm",
+        )
+    msg = str(exc.value)
+    assert "BTC" in msg and "book-channel" in msg
+    # Leak discipline: no raw settled balance echoed.
+    assert "0.50" not in msg and "0.47" not in msg and "0.12" not in msg
+
+
+def test_smoothed_book_channel_mark_is_load_bearing(monkeypatch: Any) -> None:
+    """Mutation-honesty: perturbing the daily MARK (0.06 → 0.20, Book 0.40 vs the
+    anchor's 0.12) breaches the book channel — the marks are load-bearing, not
+    decorative."""
+    with pytest.raises(LedgerValuationError):
+        _run_options_ledger(
+            monkeypatch,
+            btc_rows=_OPEN_ROWS,
+            summaries=_OPEN_SUMMARIES,
+            charts={_OPEN_INSTR: {"2026-01-15": 0.20}},  # mark perturbed
+            pnl_basis="smoothed_mtm",
+        )
+
+
+# --- Cash channel (strict, ALL currencies) -----------------------------------
+
+
+def test_smoothed_cash_channel_dropped_option_row_fails_loud() -> None:
+    """The strict cash channel runs over ALL currencies under smoothed (no
+    open-option exemption). Dropping one option trade contribution from native_daily
+    (while the row stays in the reference Σchange) breaches it — mutation-honesty
+    that the cash channel actually reconciles the option cash legs."""
+    rows = [
+        _opt_row(instrument=_IN_RET_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
+        _opt_row(
+            instrument=_IN_RET_INSTR, day="2026-01-17", change=0.03, position=0.0, id=2,
+            type="delivery",
+        ),
+    ]
+    native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+    # Green as-is (cash channel closes Σ==Σchange).
+    assert_balance_identity(rows, native_daily, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+    # Drop the +0.03 delivery contribution from native_daily → Σ mismatch → raise.
+    dropped = {"BTC": {"2026-01-15": -0.05}}
+    with pytest.raises(LedgerValuationError):
+        assert_balance_identity(rows, dropped, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+
+
+# --- Summary cross-check (Q3-3) ----------------------------------------------
+
+
+def _summary_row(*, day: str, hour: int, rpl: float, upl: float) -> dict[str, Any]:
+    return {
+        "type": "options_settlement_summary",
+        "instrument_name": _IN_RET_INSTR,
+        "currency": "BTC",
+        "change": 0.0,
+        "realized_pl": rpl,
+        "unrealized_pl": upl,
+        "timestamp": int(
+            pd.Timestamp(f"{day}T{hour:02d}:00:00", tz="UTC").timestamp() * 1000
+        ),
+        "id": 900,
+    }
+
+
+def _cross_check_rows() -> list[dict[str, Any]]:
+    # Summary on 01-16 08:00 → coverage window (01-15 08:00, 01-16 08:00). The
+    # option trade on 01-15 10:00 is IN window: change+commission = −0.05+0.01 = −0.04.
+    return [
+        _opt_row(instrument=_IN_RET_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
+        _summary_row(day="2026-01-16", hour=8, rpl=0.06, upl=0.0),
+    ]
+
+
+# ΔBook over the window = Σ ΔMTM on 01-15 < day <= 01-16 → only 01-16 (0.10).
+# Identity: Σ(rpl+upl)=0.06 == (option change+commission)=−0.04 + ΔBook=0.10.
+_CC_DELTA = {"BTC": {"2026-01-15": 0.05, "2026-01-16": 0.10}}
+_CC_TERMINAL = {"BTC": 0.15}
+_CC_OPT_VALUE = {"BTC": 0.15}
+_CC_OPT_SESS = {"BTC": 0.0}
+
+
+def test_smoothed_summary_cross_check_reconciles() -> None:
+    """Q3-3: Σ(rpl+upl) over the coverage window == Σ(option change+commission)
+    inside + ΔBook. Consistent summary + reconstruction → no raise."""
+    rows = _cross_check_rows()
+    native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+    assert_balance_identity(
+        rows,
+        native_daily,
+        pnl_basis=PNL_BASIS_SMOOTHED_MTM,
+        terminal_book=_CC_TERMINAL,
+        native_options_value=_CC_OPT_VALUE,
+        native_options_session_upl=_CC_OPT_SESS,
+        option_delta_mtm=_CC_DELTA,
+    )
+
+
+def test_smoothed_summary_cross_check_breach_fails_loud() -> None:
+    """The summaries keep POLICING: a summary whose rpl+upl diverges materially
+    from the cash+ΔBook reconstruction (0.06 → 0.50) raises."""
+    rows = [
+        _opt_row(instrument=_IN_RET_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
+        _summary_row(day="2026-01-16", hour=8, rpl=0.50, upl=0.0),  # perturbed
+    ]
+    native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+    with pytest.raises(LedgerValuationError) as exc:
+        assert_balance_identity(
+            rows,
+            native_daily,
+            pnl_basis=PNL_BASIS_SMOOTHED_MTM,
+            terminal_book=_CC_TERMINAL,
+            native_options_value=_CC_OPT_VALUE,
+            native_options_session_upl=_CC_OPT_SESS,
+            option_delta_mtm=_CC_DELTA,
+        )
+    assert "BTC" in str(exc.value) and "cross-check" in str(exc.value)
+
+
+def test_non_smoothed_bases_ignore_smoothed_channels() -> None:
+    """SC-4: passing terminal_book / anchors under cash_settlement or
+    mark_to_market is a NO-OP — the smoothed channels are pnl_basis-gated, so a
+    wildly-wrong terminal_book never fires on the existing bases."""
+    rows = [
+        _opt_row(instrument=_IN_RET_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
+    ]
+    native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_CASH_SETTLEMENT)
+    # A grossly-wrong terminal_book that WOULD breach the book channel under
+    # smoothed is silently ignored under cash_settlement.
+    assert_balance_identity(
+        rows,
+        native_daily,
+        pnl_basis=PNL_BASIS_CASH_SETTLEMENT,
+        terminal_book={"BTC": 999.0},
+        native_options_value={"BTC": 0.0},
+        native_options_session_upl={"BTC": 0.0},
+        option_delta_mtm={},
+    )

@@ -1490,6 +1490,16 @@ class DeribitNativeAccountState:
     # authoritative reconciliation. Absent on perp-only summaries → 0.0 (never
     # fabricated; SC-4 byte-safe). A failed/empty read yields an EMPTY map.
     native_options_value: Mapping[str, float]
+    # Phase 131 (SMOOTHED_MTM book-channel cross-check) — per-UPPERCASE-ccy
+    # ``options_session_upl`` read off the SAME summaries response (D5): the OPEN
+    # option book's CURRENT-session unrealized P&L, in NATIVE units. The book-channel
+    # guard reconciles the replayed settled book ``Book(last settlement)`` against the
+    # anchor's SETTLED book = ``native_options_value[c] − native_options_session_upl[c]``
+    # (the daily marks are 08:00-settlement closes, so they exclude the current
+    # session's unrealized move — which lives here). Absent on perp-only summaries →
+    # 0.0 (never fabricated; SC-4 byte-safe). Defaulted so every existing positional
+    # constructor stays valid. A failed/empty read yields an EMPTY map (→ 0.0).
+    native_options_session_upl: Mapping[str, float] = field(default_factory=dict)
 
 
 async def fetch_deribit_native_account_state(
@@ -1533,6 +1543,7 @@ async def fetch_deribit_native_account_state(
     native_equity: dict[str, float] = {}
     native_upnl: dict[str, float] = {}
     native_options_value: dict[str, float] = {}
+    native_options_session_upl: dict[str, float] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -1549,6 +1560,13 @@ async def fetch_deribit_native_account_state(
         # exempts this currency from the STRICT balance-identity guard (§5 becomes
         # authoritative on the open book).
         native_options_value[ccy] = float(summ.get("options_value", 0.0) or 0.0)
+        # Phase 131: the options-only session uPnL, read STRAIGHT off the SAME
+        # response (NOT the combined futures+options wedge above). Feeds the
+        # SMOOTHED_MTM book-channel settled-book anchor decomposition. Absent →
+        # 0.0 (never fabricated; SC-4 byte-safe).
+        native_options_session_upl[ccy] = float(
+            summ.get("options_session_upl", 0.0) or 0.0
+        )
 
     # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
     # anchor/wedge only (the native maps above never touch these).
@@ -1616,6 +1634,7 @@ async def fetch_deribit_native_account_state(
         return DeribitNativeAccountState(
             native_equity, native_upnl, None, 0.0, True, False,
             native_options_value,
+            native_options_session_upl,
         )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
@@ -1628,6 +1647,7 @@ async def fetch_deribit_native_account_state(
         False,
         upnl_unreadable,
         native_options_value,
+        native_options_session_upl,
     )
 
 
@@ -2022,15 +2042,16 @@ async def build_deribit_native_ledger(
     # basis ``series_daily is native_daily`` → byte-identical (SC-4).
     series_daily = native_daily
     smoothed_terminal_book: dict[str, float] = {}
+    smoothed_delta_mtm: dict[str, dict[str, float]] = {}
     if pnl_basis == PNL_BASIS_SMOOTHED_MTM and deribit_raw_rows_have_option_activity(
         raw_rows
     ):
-        delta_mtm, smoothed_terminal_book, pre_retention = (
+        smoothed_delta_mtm, smoothed_terminal_book, pre_retention = (
             await _build_smoothed_option_mtm(exchange, raw_rows, sleep=sleep)
         )
         report.pre_mark_retention_option_days = pre_retention
         series_daily = {ccy: dict(days) for ccy, days in native_daily.items()}
-        for ccy, day_map in delta_mtm.items():
+        for ccy, day_map in smoothed_delta_mtm.items():
             bucket = series_daily.setdefault(ccy, {})
             for day, change in day_map.items():
                 bucket[day] = bucket.get(day, 0.0) + change
@@ -2105,9 +2126,23 @@ async def build_deribit_native_ledger(
         if pnl_basis == PNL_BASIS_MARK_TO_MARKET
         else frozenset()
     )
+    # ``native_daily`` here is the PRE-merge CASH channel (option rows on full
+    # change), so the strict cash-channel identity closes Σ==Σchange exactly under
+    # every basis. Under SMOOTHED_MTM the additional book + summary cross-check
+    # channels reconcile the ΔMTM terminal book against the venue anchor's settled
+    # book and police the summary stream (all inert / None for the other bases →
+    # byte-identical, SC-4).
     assert_balance_identity(
         raw_rows, native_daily, native_floor=native_floor, open_option_ccys=open_opt,
         exclude_spot_extraction=exclude_spot_extraction, pnl_basis=pnl_basis,
+        terminal_book=(
+            smoothed_terminal_book
+            if pnl_basis == PNL_BASIS_SMOOTHED_MTM
+            else None
+        ),
+        native_options_value=state.native_options_value,
+        native_options_session_upl=state.native_options_session_upl,
+        option_delta_mtm=smoothed_delta_mtm,
     )
     # Surface the exempted currencies for logs/harness (an open book is the NORMAL
     # state — §5 guards it — so this is NOT promoted to complete_with_warnings;
