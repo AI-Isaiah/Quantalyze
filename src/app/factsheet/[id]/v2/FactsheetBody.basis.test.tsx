@@ -914,6 +914,28 @@ function fixtureCompositeSmoothedDisabled(): FactsheetPayload {
     smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
   } as unknown as FactsheetPayload;
 }
+// (o) NON-options composite, BOTH bases disabled (venue MTM reason) — the IN-02
+//     production shape: every existing perp/ccxt composite after Phase 133.
+function fixtureCompositeBothDisabledNonOptions(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH },
+    mtmGate: { available: false, reason: "mtm_basis_unavailable_for_venue" },
+    smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
+  } as unknown as FactsheetPayload;
+}
+// (p) OPTIONS composite, BOTH bases disabled (smoothed pass not yet persisted) —
+//     the honest-pending state where the smoothed line IS information.
+function fixtureCompositeOptionsBothDisabled(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH },
+    mtmGate: { available: false, reason: "unsmoothed_options_book" },
+    smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
+  } as unknown as FactsheetPayload;
+}
 
 // Distinct smoothed comparator joint (for the suppressRelative α/IR pins).
 const SMOOTHED_JOINT = {
@@ -1007,6 +1029,40 @@ describe("FactsheetBody — Phase 133 SMTM-01 smoothed basis render surfaces", (
     expect(sm.getAttribute("title")).toBe(expected);
     // The inline disabled-reason paragraph mirrors the same mapped copy.
     expect(within(container).getAllByText(expected).length).toBeGreaterThan(0);
+  });
+
+  it("IN-02: NON-options composite with BOTH bases disabled renders ONE inline reason (the specific MTM copy) — no stacked smoothed paragraph", () => {
+    const { container } = renderBody(fixtureCompositeBothDisabledNonOptions());
+    // The specific MTM reason paragraph renders (information the user needs).
+    expect(
+      within(container).getByText(mtmDisabledReasonCopy("mtm_basis_unavailable_for_venue")),
+    ).toBeTruthy();
+    // The smoothed "has not been computed" paragraph is SUPPRESSED — on a
+    // non-options book it reads as pending for a computation that will never
+    // run, and stacking it under the MTM reason is permanent density noise
+    // (DESIGN.md restraint). Neuter check: restore the unconditional
+    // `!smoothedAvailable` paragraph → this reddens.
+    const smoothedCopy = smoothedDisabledReasonCopy("smoothed_basis_unavailable");
+    expect(within(container).queryByText(smoothedCopy)).toBeNull();
+    // Honest-disabled is PRESERVED: the segment stays aria-disabled and still
+    // carries the mapped reason as its tooltip.
+    const sm = within(container).getByText(SMOOTHED_SEGMENT_LABEL);
+    expect(sm.getAttribute("aria-disabled")).toBe("true");
+    expect(sm.getAttribute("title")).toBe(smoothedCopy);
+  });
+
+  it("IN-02: OPTIONS composite with BOTH bases disabled keeps BOTH paragraphs (smoothed pending is honest information there)", () => {
+    const { container } = renderBody(fixtureCompositeOptionsBothDisabled());
+    // The options-book MTM reason stays intact (the mandated honest copy)…
+    expect(
+      within(container).getByText(mtmDisabledReasonCopy("unsmoothed_options_book")),
+    ).toBeTruthy();
+    // …AND the smoothed not-yet-computed line renders: on an options book the
+    // smoothed basis is the remedy that will open, so "has not been computed"
+    // is honest pending information, not noise.
+    expect(
+      within(container).getByText(smoothedDisabledReasonCopy("smoothed_basis_unavailable")),
+    ).toBeTruthy();
   });
 
   it("EYEBROW: the composite basis eyebrow reads SMOOTHED MARK-TO-MARKET under smoothed (three-way, not cash)", () => {

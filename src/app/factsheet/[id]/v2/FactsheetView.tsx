@@ -1336,11 +1336,22 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               // Steady-state honest-empty → muted (#64748B, WCAG-AA 4.85:1 on white).
               <p className="text-caption text-text-muted">{mtmReason}</p>
             ))}
-          {/* Phase 133 (SMTM-01): the smoothed disabled-reason paragraph — always
-              STEADY (never a self-healing transient), so muted only, never amber. */}
-          {!smoothedAvailable && (
-            <p className="text-caption text-text-muted">{smoothedReason}</p>
-          )}
+          {/* Phase 133 (SMTM-01, review IN-02): the smoothed disabled-reason
+              paragraph — always STEADY (never a self-healing transient), so muted
+              only, never amber. It renders ONLY when it adds information beyond
+              the MTM paragraph above: smoothed is the sole disabled basis (MTM
+              available), or the book is an options composite (the one state where
+              the smoothed basis is the specific remedy, so "has not been
+              computed" is honest pending information). On a non-options book with
+              MTM ALSO disabled, permanently stacking a second "unavailable" line
+              under the specific MTM reason is density noise (DESIGN.md restraint)
+              and reads as pending for a pass that will never run — the segment
+              itself stays honest-disabled with the mapped reason as its tooltip
+              (aria-disabled + title, SegmentedControl). */}
+          {!smoothedAvailable &&
+            (mtmAvailable || payload.mtmGate?.reason === "unsmoothed_options_book") && (
+              <p className="text-caption text-text-muted">{smoothedReason}</p>
+            )}
         </div>
       )}
       <DisplayMenu />
