@@ -455,6 +455,49 @@ def test_pre_retention_instrument_bucketed_stays_cash_basis(monkeypatch: Any) ->
     )
 
 
+def test_intraday_scalped_pre_retention_instrument_not_bucketed(
+    monkeypatch: Any,
+) -> None:
+    """IN-03: an old instrument opened AND closed the SAME day (every end-of-day
+    position 0.0) was never held across a settlement — no MTM was ever needed,
+    so its wholly-empty (pre-retention) marks response must NOT bucket its days
+    into pre_mark_retention_option_days (a spurious complete_with_warnings
+    stamp) and no marks fetch is needed at all. Its cash legs already carry the
+    full P&L."""
+    scalp_rows = [
+        _opt_row(
+            instrument=_PRE_RET_INSTR, day="2023-06-20", change=-0.01,
+            position=1.0, id=1,
+        ),
+        {
+            "type": "trade",
+            "instrument_name": _PRE_RET_INSTR,
+            "currency": "BTC",
+            "change": 0.02,
+            "commission": 0.0,
+            "position": 0.0,  # closed intraday at 14:00 → EOD flat
+            "timestamp": int(
+                pd.Timestamp("2023-06-20T14:00:00", tz="UTC").timestamp() * 1000
+            ),
+            "id": 2,
+        },
+    ]
+    summaries = [
+        {"currency": "BTC", "equity": 0.01, "session_upl": 0.0, "options_value": 0.0}
+    ]
+    ledger, report, stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=scalp_rows,
+        summaries=summaries,
+        charts={},  # venue would return wholly-empty — but no fetch is needed
+        pnl_basis="smoothed_mtm",
+    )
+    assert report.pre_mark_retention_option_days == []  # no spurious warning
+    assert stub.chart_calls == []  # no wasted marks request
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    assert got == pytest.approx({"2023-06-20": 0.01}, abs=1e-9)  # cash-only P&L
+
+
 def test_in_retention_empty_marks_fails_loud(monkeypatch: Any) -> None:
     """A wholly-EMPTY marks response for an instrument whose expiry is INSIDE the
     retention horizon (recent) → NOT bucketed → option_mtm_daily fails loud at

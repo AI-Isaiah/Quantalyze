@@ -2021,6 +2021,14 @@ async def _build_smoothed_option_mtm(
         # the current PARTIAL bar — the book channel then judges it (fail-loud,
         # never silent).
         event_positions = info["positions"]
+        # IN-03: an instrument with NO nonzero end-of-day position (opened and
+        # closed intraday, never held across a settlement) needs NO daily marks
+        # — it can contribute nothing to the ΔMTM book and can never hole. Skip
+        # the fetch entirely and NEVER bucket it as pre-retention: its cash legs
+        # already carry the full P&L, so a complete_with_warnings stamp would be
+        # spurious.
+        if not any(float(v) != 0.0 for v in event_positions.values()):
+            continue
         terminal_pos = float(event_positions[max(event_positions)])
         newest = last_day if terminal_pos == 0.0 else max(last_day, last_settled)
         if expiry is not None:
