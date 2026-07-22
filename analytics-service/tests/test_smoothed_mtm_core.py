@@ -13,6 +13,7 @@ DELETIONS are explicitly NOT performed under this third-basis framing.
 from __future__ import annotations
 
 import asyncio
+import struct
 from typing import Any
 
 import pandas as pd
@@ -697,3 +698,115 @@ def test_non_smoothed_bases_ignore_smoothed_channels() -> None:
         native_options_session_upl={"BTC": 0.0},
         option_delta_mtm={},
     )
+
+
+# ===========================================================================
+# Task 6 — SC-4 byte-identity pins + total-preservation acceptance (A–D). These
+# are the phase's CLOSING pins (tests only): if one reddens, the defect is
+# upstream in Tasks 3–5 and is fixed THERE, never here.
+# ===========================================================================
+
+# A multi-day option held to a FLAT delivery, with exact-binary marks/cash so the
+# telescoping is FLOAT-EXACT. Book 0.5→0.75→0.25→0 ⇒ ΔMTM +0.5,+0.25,−0.5,−0.25
+# (Σ = 0 = terminal). Cash: −0.25 premium (01-15), +0.125 payout (01-18).
+_A_INSTR = "BTC-18JAN26-100000-C"
+_A_ROWS = [
+    _opt_row(instrument=_A_INSTR, day="2026-01-15", change=-0.25, position=1.0, id=1),
+    _opt_row(
+        instrument=_A_INSTR, day="2026-01-18", change=0.125, position=0.0, id=2,
+        type="delivery",
+    ),
+]
+_A_CHARTS = {_A_INSTR: {"2026-01-15": 0.5, "2026-01-16": 0.75, "2026-01-17": 0.25}}
+_A_SUMMARIES = [
+    {"currency": "BTC", "equity": -0.125, "session_upl": 0.0, "options_value": 0.0}
+]
+
+
+def test_acceptance_A_redistribution_preserves_total(monkeypatch: Any) -> None:
+    """Acceptance A: a multi-day option with a FLAT terminal book → the smoothed_mtm
+    per-ccy total EXACTLY equals the cash_settlement total (redistribution preserves
+    the sum). Float-exact fixture (exact-binary marks/cash)."""
+    led_s, _rs, _ss = _run_options_ledger(
+        monkeypatch, btc_rows=_A_ROWS, summaries=_A_SUMMARIES, charts=_A_CHARTS,
+        pnl_basis="smoothed_mtm",
+    )
+    led_c, _rc, _sc = _run_options_ledger(
+        monkeypatch, btc_rows=_A_ROWS, summaries=_A_SUMMARIES, charts=_A_CHARTS,
+        pnl_basis="cash_settlement",
+    )
+    total_s = float(led_s.native_pnl["BTC"].sum())
+    total_c = float(led_c.native_pnl["BTC"].sum())
+    assert total_s == total_c == -0.125  # exact
+    assert struct.pack("<d", total_s) == struct.pack("<d", total_c)
+
+
+def test_acceptance_B_no_session_lumps(monkeypatch: Any) -> None:
+    """Acceptance B: the smoothed series SPREADS the option P&L across the held days
+    (each day ≈ its hand-computed mark delta) — NO day carries the whole session
+    swing. Contrast: cash_settlement lumps the premium on the single trade day."""
+    led_s, _r, _s = _run_options_ledger(
+        monkeypatch, btc_rows=_A_ROWS, summaries=_A_SUMMARIES, charts=_A_CHARTS,
+        pnl_basis="smoothed_mtm",
+    )
+    smoothed = _series_to_daymap(led_s.native_pnl["BTC"])
+    # cash(−0.25 on 15, +0.125 on 18) + ΔMTM(+0.5,+0.25,−0.5,−0.25) →
+    expected = {
+        "2026-01-15": 0.25, "2026-01-16": 0.25, "2026-01-17": -0.5, "2026-01-18": -0.125,
+    }
+    assert smoothed == pytest.approx(expected, abs=1e-12)
+    # Spread across ≥3 held days — no single session-lump day.
+    assert sum(1 for v in smoothed.values() if abs(v) > 1e-12) >= 3
+    # cash_settlement, by contrast, touches only the trade + delivery days.
+    led_c, _rc, _sc = _run_options_ledger(
+        monkeypatch, btc_rows=_A_ROWS, summaries=_A_SUMMARIES, charts=_A_CHARTS,
+        pnl_basis="cash_settlement",
+    )
+    cash = _series_to_daymap(led_c.native_pnl["BTC"])
+    assert set(cash) == {"2026-01-15", "2026-01-18"}
+
+
+def test_acceptance_C_non_flat_terminal_telescopes(monkeypatch: Any) -> None:
+    """Acceptance C: open-position-at-anchor → smoothed total == Σchange + Book(last
+    settlement), with the book-channel guard green on the settled-book anchor
+    decomposition (options_value − options_session_upl == terminal_book)."""
+    led_s, _r, _s = _run_options_ledger(
+        monkeypatch, btc_rows=_OPEN_ROWS, summaries=_OPEN_SUMMARIES,
+        charts=_OPEN_CHARTS, pnl_basis="smoothed_mtm",
+    )
+    total = float(led_s.native_pnl["BTC"].sum())
+    sigma_change = -0.10  # the sole option premium cash leg
+    terminal_book = 0.12  # 2.0 × 0.06
+    assert total == pytest.approx(sigma_change + terminal_book, abs=1e-12)
+
+
+_D_INSTR = "BTC-18JAN26-90000-C"
+_D_ROWS = [
+    _opt_row(instrument=_D_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
+    _opt_row(
+        instrument=_D_INSTR, day="2026-01-18", change=0.0, position=0.0, id=2,
+        type="delivery",
+    ),
+]
+
+
+def test_acceptance_D_sparse_mark_hole_fails_loud_naming_instrument_day(
+    monkeypatch: Any,
+) -> None:
+    """Acceptance D: a HOLE inside a listed instrument's life (in-retention, position
+    carried 1.0 on 01-16 but no bar) fails loud AT LEDGER BUILD naming instrument +
+    the earliest missing day — no interpolation, no session-lump fallback."""
+    summaries = [
+        {"currency": "BTC", "equity": -0.05, "session_upl": 0.0, "options_value": 0.0}
+    ]
+    with pytest.raises(LedgerValuationError) as exc:
+        _run_options_ledger(
+            monkeypatch,
+            btc_rows=_D_ROWS,
+            summaries=summaries,
+            # 01-16 missing while position is 1.0 → structural hole.
+            charts={_D_INSTR: {"2026-01-15": 0.05, "2026-01-17": 0.04}},
+            pnl_basis="smoothed_mtm",
+        )
+    msg = str(exc.value)
+    assert _D_INSTR in msg and "2026-01-16" in msg
