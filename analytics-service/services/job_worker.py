@@ -4085,16 +4085,29 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     await db_execute(_persist_cash_series)
 
     # ── SMTM-01 (Phase 132): additive smoothed_mtm SERIES persist ──
-    # GUARDED (unlike the always-heal MTM series persist above): persist ONLY when the
-    # third pass ran AND produced a computable object. A no-option / perp-only /
-    # key-mode / MTM-headline derive NEVER touches the smoothed_mtm series row — SC-4:
-    # a no-option key persists NO smoothed artifacts, and this write is byte-invisible
-    # there (the plan's "byte-identical persisted rows" requires NO smoothed RPC on a
-    # no-option key, so this is deliberately NOT an unconditional heal). A started-
-    # but-failed smoothed pass fails the WHOLE job upstream, so there is no
-    # attempted-but-null smoothed persist to heal here.
-    if smoothed_attempted and smoothed_metrics_json is not None:
-        _persist_smoothed_series_result = _smoothed_basis_result
+    # GUARDED on smoothed_ATTEMPTED (unlike the always-heal MTM series persist
+    # above): a no-option / perp-only / key-mode / MTM-headline derive NEVER touches
+    # the smoothed_mtm series row — SC-4: a no-option key persists NO smoothed
+    # artifacts and issues NO smoothed RPC (byte-invisible there).
+    #
+    # HIGH-02 (132 review, Pitfall 5): when the pass WAS attempted the persist runs
+    # UNCONDITIONALLY — fresh row on success, heal-DELETE (result=None) on the
+    # attempted-but-degraded paths (scalar compute-reject at :3915, budget refusal /
+    # bounded-crawl timeout in the third-pass envelope). Without the heal a prior
+    # successful derive's smoothed series row would outlive the authoritative
+    # by-basis scalar OMISSION indefinitely — a stale money series in a table
+    # consumers read by bare (strategy_id, kind), violating persist_basis_series's
+    # own Pitfall-5 invariant. smoothed_attempted is only ever True on
+    # option-activity keys, so this heal never relaxes SC-4. (The separate
+    # options→perp-only RECONFIGURATION stale case remains deferred: there the pass
+    # is NOT attempted and SC-4-as-written forbids the RPC; the by-basis scalar
+    # heals wholesale and Phase 133 must gate the series read on the scalar key.)
+    if smoothed_attempted:
+        _persist_smoothed_series_result = (
+            _smoothed_basis_result
+            if smoothed_metrics_json is not None
+            else None
+        )
 
         def _persist_smoothed_series(
             result: BasisSeriesResult | None = _persist_smoothed_series_result,

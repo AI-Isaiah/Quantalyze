@@ -1335,16 +1335,18 @@ async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
         MTM_REASON_SERIES_UNCOMPUTABLE
     )
     # The patched derive raises for the MTM, smoothed_mtm, AND the additive Phase-104
-    # cash calls. MTM heals (result=None) and cash heals (result=None); the smoothed
-    # series persist is GUARDED (only on a computed object), so a degraded smoothed
-    # metrics compute persists NOTHING (no heal) — leaving exactly TWO persist calls.
-    assert persist_spy.call_count == 2
+    # cash calls. ALL THREE heal (result=None): HIGH-02 (132 review) — the smoothed
+    # persist guard keys on smoothed_ATTEMPTED (an option-activity signal, so SC-4's
+    # no-RPC-on-a-no-option-key holds), and an attempted-but-degraded smoothed pass
+    # must heal-DELETE the stale smoothed_mtm series row exactly like MTM/cash
+    # (Pitfall 5: a stale money series must never outlive the scalar omission).
+    assert persist_spy.call_count == 3
     assert all(c.kwargs["result"] is None for c in persist_spy.call_args_list), (
         "a degraded derive must HEAL the stale series row (result=None), never "
         "persist a stale object next to an authoritative-NULL scalar write"
     )
     assert {c.kwargs["basis"] for c in persist_spy.call_args_list} == {
-        "mark_to_market", "cash_settlement",
+        "mark_to_market", "cash_settlement", "smoothed_mtm",
     }
 
 
@@ -1704,4 +1706,75 @@ async def test_smoothed_third_pass_insufficient_budget_skips_cash_ships() -> Non
     # The MTM refusal stamps its distinct machine reason (pre-existing FIX-2).
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SECOND_PASS_TIMEOUT
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_scalar_degrade_heals_series_row() -> None:
+    """HIGH-02 (132 review) — Pitfall-5: an ATTEMPTED smoothed pass whose SCALAR
+    compute degrades (derive_basis_series ValueError on the smoothed series only)
+    must heal-DELETE the smoothed_mtm series row
+    (persist_basis_series(basis='smoothed_mtm', result=None)). Otherwise a prior
+    successful derive's smoothed_mtm_daily_returns money-series row survives
+    indefinitely while the authoritative by-basis scalar says ABSENT — a stale
+    real-looking series in a table consumers read by bare (strategy_id, kind).
+    smoothed_attempted is only ever True on option-activity keys, so the heal RPC
+    never fires on a no-option key (SC-4 preserved — pinned separately by
+    test_perp_only_skips_smoothed_pass_sc4). Neuter (re-guard the persist on a
+    computed object) → no smoothed persist call → reddens."""
+    import services.basis_series as _bs
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    _real_derive = _bs.derive_basis_series
+    _derive_calls: list[int] = []
+
+    def _derive_reject_smoothed_only(*a: Any, **k: Any) -> Any:
+        # Seam call order: MTM (1st), smoothed_mtm (2nd), cash (3rd).
+        _derive_calls.append(1)
+        if len(_derive_calls) == 2:
+            raise ValueError("smoothed interior chain-break")
+        return _real_derive(*a, **k)
+
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch(
+            "services.basis_series.derive_basis_series",
+            new=MagicMock(side_effect=_derive_reject_smoothed_only),
+        ),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a smoothed scalar compute-reject degrades (honest omission), never fails "
+        "the cash headline"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    # MTM shipped; smoothed honestly ABSENT (scalar degraded).
+    assert set(prestamp["metrics_json_by_basis"]) == {"mark_to_market"}
+    # THE HEAL: the attempted-but-degraded smoothed pass deletes any stale series row.
+    _smoothed_persists = [
+        c for c in persist_spy.call_args_list if c.kwargs["basis"] == "smoothed_mtm"
+    ]
+    assert len(_smoothed_persists) == 1, (
+        "an ATTEMPTED smoothed pass must always reach the smoothed series persist "
+        "(fresh row on success, heal-DELETE on degrade)"
+    )
+    assert _smoothed_persists[0].kwargs["result"] is None, (
+        "attempted-but-degraded must heal-DELETE (result=None) — a stale smoothed "
+        "money series must never outlive the by-basis scalar omission (Pitfall 5)"
     )
