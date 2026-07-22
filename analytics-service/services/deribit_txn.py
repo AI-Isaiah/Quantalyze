@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 # Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
@@ -1723,6 +1723,169 @@ def _option_commission(row: Mapping[str, Any]) -> float:
             "present+numeric on every option row)"
         )
     return _coerce_float(raw, field="commission", row=row)
+
+
+def _iter_utc_days(first_day: str, last_day: str) -> list[str]:
+    """Every ISO ``YYYY-MM-DD`` in ``[first_day, last_day]`` inclusive — the DENSE
+    calendar grid the smoothed-MTM book carries positions across (pure stdlib
+    ``date`` arithmetic; the AST purity guard forbids pandas here)."""
+    start = date.fromisoformat(first_day)
+    end = date.fromisoformat(last_day)
+    out: list[str] = []
+    cursor = start
+    while cursor <= end:
+        out.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return out
+
+
+def replay_option_positions(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct the per-instrument, per-UTC-day signed OPEN option book by PURE
+    replay of the signed post-trade ``position`` field on option ``trade``/
+    ``delivery`` rows (M3 evidence: shorts negative, deliveries zero the position;
+    no Greeks, no settlement math). NOT yet called by any production path — the
+    ``smoothed_mtm`` basis wiring lands in 131-01b.
+
+    Gated on the EXISTING :func:`classify_instrument` option arm — perp / future /
+    spot rows are IGNORED (they carry their P&L on the cash ``change`` channel, not
+    a marked option book). Rows are sorted by ``(timestamp, id)`` WITHIN each
+    instrument before replay (crawl concat order is NOT trusted); the END-OF-DAY
+    position is the ``position`` of the LAST row on that UTC day. A partial-delivery
+    nonzero post-trade position is ACCEPTED as data (Deribit's call), never asserted
+    zero.
+
+    Returns ``{instrument: {currency, first_day, last_day, positions: {day:
+    signed_size}}}`` where ``positions`` is keyed ONLY on event days (the caller
+    :func:`option_mtm_daily` carries them forward across no-trade days).
+
+    Fail-loud (leak-safe): an option trade/delivery row whose ``position`` is
+    absent / null / blank / non-numeric raises ``LedgerValuationError`` naming the
+    row ``id``/``type`` ONLY (the field is the SOLE book source — fabricating it
+    would silently mis-state MTM; never echo the row payload or balances)."""
+    per_instr: dict[str, list[Mapping[str, Any]]] = {}
+    ccy_of: dict[str, str] = {}
+    for row in rows:
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        instrument = str(row.get("instrument_name", ""))
+        if classify_instrument(instrument) != "option":
+            continue
+        per_instr.setdefault(instrument, []).append(row)
+        ccy_of[instrument] = str(row.get("currency", ""))
+    out: dict[str, dict[str, Any]] = {}
+    for instrument, instr_rows in per_instr.items():
+        ordered = sorted(
+            instr_rows,
+            key=lambda r: (_row_utc_instant(r.get("timestamp")), str(r.get("id"))),
+        )
+        positions: dict[str, float] = {}
+        for r in ordered:
+            raw_pos = r.get("position", _MISSING)
+            if raw_pos is _MISSING or raw_pos is None or (
+                isinstance(raw_pos, str) and not raw_pos.strip()
+            ):
+                raise LedgerValuationError(
+                    f"option Deribit row id={r.get('id')!r} type={r.get('type')!r} "
+                    "has an absent/null/blank/non-numeric position — the signed "
+                    "post-trade position is the ONLY option-book source; refusing "
+                    "to fabricate it (schema drift would silently mis-state MTM)"
+                )
+            try:
+                pos = float(raw_pos)
+            except (TypeError, ValueError):
+                raise LedgerValuationError(
+                    f"option Deribit row id={r.get('id')!r} type={r.get('type')!r} "
+                    "has an absent/null/blank/non-numeric position — the signed "
+                    "post-trade position is the ONLY option-book source; refusing "
+                    "to fabricate it (schema drift would silently mis-state MTM)"
+                ) from None
+            day = _row_utc_day(r.get("timestamp"))
+            positions[day] = pos  # ascending order → last row of the day wins
+        days_sorted = sorted(positions)
+        out[instrument] = {
+            "currency": ccy_of[instrument],
+            "first_day": days_sorted[0],
+            "last_day": days_sorted[-1],
+            "positions": positions,
+        }
+    return out
+
+
+def option_mtm_daily(
+    positions: Mapping[str, Mapping[str, Any]],
+    marks: Mapping[str, Mapping[str, float]],
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    """Per-(currency, UTC-day) ΔMTM redistribution + terminal book from the replayed
+    option ``positions`` (from :func:`replay_option_positions`) and per-instrument
+    daily ``marks`` (from ``fetch_deribit_option_daily_marks``). PURE (pandas/async-
+    free — the AST purity guard enforces it); NOT yet called by any production path.
+
+    Day-grid convention (pinned 83-PLAN §2-Q1): ``mark[instr][D]`` is the close of
+    the 1D bar whose tick falls on UTC day ``D`` (the bar Deribit stamps at ``D``
+    08:00 — its settlement boundary), keyed by the SAME
+    ``strftime('%Y-%m-%d')`` UTC-day string the position replay grids on. The ≤8h
+    skew between the 08:00 bar boundary and native midnight is intraday attribution
+    noise WITHIN the one-day class; it cancels day-over-day so the telescoped TOTAL
+    is EXACT regardless.
+
+    Model: ``Book[c][d] = Σ_instr(currency c) position[instr][d] × mark[instr][d]``
+    over a DENSE calendar grid where positions CARRY FORWARD between events but marks
+    are NEVER filled; ``ΔMTM[c][d] = Book[c][d] − Book[c][d−1]``. Telescoping is
+    exact: ``Σ_d ΔMTM[c][d] = Book[c][terminal] − 0`` (flat terminal ⇒ 0 ⇒ the
+    ``smoothed_mtm`` total equals ``cash_settlement``). Returns
+    ``(delta_mtm: {ccy: {day: ΔMTM}}, terminal_book: {ccy: Book[terminal]})``; the
+    terminal book feeds 131-01b Task 5's book-channel anchor guard.
+
+    Fail-loud (D-07): a day inside a listed instrument's held life with a NONZERO
+    carried position and NO daily mark is a STRUCTURAL hole → ``LedgerValuationError``
+    naming instrument + the EARLIEST missing day. NO interpolation, NO session-lump
+    fallback (that lump IS the bug being removed). Instruments WHOLLY predating chart
+    retention are excluded upstream (131-01b Task 4); STRADDLERS are NOT — their
+    partial (head-hole) marks fall through to this same guard, so a currently-green
+    options key can begin hard-failing on future recomputes as the ~2.5yr retention
+    window advances (accepted D-07 consequence, surfaced in 131-02)."""
+    if not positions:
+        return {}, {}
+    known_ccys = {str(p["currency"]) for p in positions.values()}
+    global_first = min(str(p["first_day"]) for p in positions.values())
+    candidate_lasts: list[str] = [str(p["last_day"]) for p in positions.values()]
+    for instr_marks in marks.values():
+        if instr_marks:
+            candidate_lasts.append(max(instr_marks))
+    global_last = max(candidate_lasts)
+
+    instruments = sorted(positions)
+    cur_pos: dict[str, float] = {instr: 0.0 for instr in instruments}
+    prev_book: dict[str, float] = {ccy: 0.0 for ccy in known_ccys}
+    delta_mtm: dict[str, dict[str, float]] = {}
+    for day in _iter_utc_days(global_first, global_last):
+        book: dict[str, float] = {ccy: 0.0 for ccy in known_ccys}
+        for instr in instruments:
+            pos_map = positions[instr]["positions"]
+            if day in pos_map:
+                cur_pos[instr] = float(pos_map[day])
+            pos = cur_pos[instr]
+            if pos == 0.0:
+                continue
+            mark = marks.get(instr, {}).get(day)
+            if mark is None:
+                raise LedgerValuationError(
+                    f"option daily-MTM hole: instrument={instr} carries a nonzero "
+                    f"position on {day} but has NO daily mark (bar) — refusing to "
+                    "interpolate or fall back to the session lump (D-07: a missing "
+                    "bar inside a listed instrument's life is structural, fail loud)"
+                )
+            ccy = str(positions[instr]["currency"])
+            book[ccy] = book[ccy] + pos * float(mark)
+        for ccy in known_ccys:
+            change = book[ccy] - prev_book[ccy]
+            if change != 0.0:
+                delta_mtm.setdefault(ccy, {})[day] = change
+        prev_book = book
+    terminal_book = {ccy: prev_book[ccy] for ccy in known_ccys}
+    return delta_mtm, terminal_book
 
 
 def txn_rows_to_native_daily(
