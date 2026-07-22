@@ -1811,12 +1811,21 @@ def _assert_smoothed_summary_cross_check(
         end_day = (
             datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).date().isoformat()
         )
-        # ΔBook over the window = Book(end) − Book(start) = Σ ΔMTM on days strictly
-        # after the window-start day, through the window-end day (Book telescopes
-        # from the daily ΔMTM series).
+        # ΔBook over the window = Book(end boundary) − Book(start boundary),
+        # telescoped from the daily ΔMTM series. Marks are keyed by BAR-STAMP day
+        # (M4): the bar stamped ``D 08:00`` COMPLETES at ``D+1 08:00``, so the
+        # Book at a boundary instant ``day X 08:00`` is the day-keyed
+        # ``Book[X−1]`` — the slice is therefore ``[start_day, end_day)``, NOT
+        # ``(start_day, end_day]``. The old upper-shifted slice disagreed with
+        # the ms cash filter at the 08:00 boundary (WR-02): it DROPPED a
+        # coverage-era first trade's opening book entry (its cash IS inside the
+        # ms window) and swept IN a trailing crawl-day trade's book entry (its
+        # cash is OUTSIDE the ms window) — each mis-slicing the identity by a
+        # full position's book value on real accounts, contradicting the settled
+        # Phase-82 E3 flat-flat closure.
         delta_book = 0.0
         for day, value in option_delta_mtm.get(ccy, {}).items():
-            if start_day < day <= end_day:
+            if start_day <= day < end_day:
                 delta_book += float(value)
         lhs = summary_sum.get(ccy, 0.0)
         rhs = option_sum.get(ccy, 0.0) + delta_book

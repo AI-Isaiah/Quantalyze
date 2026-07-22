@@ -826,16 +826,29 @@ def _summary_row(*, day: str, hour: int, rpl: float, upl: float) -> dict[str, An
 
 
 def _cross_check_rows() -> list[dict[str, Any]]:
-    # Summary on 01-16 08:00 → coverage window (01-15 08:00, 01-16 08:00). The
+    # Summary on 01-16 08:00 → coverage window [01-15 08:00, 01-16 08:00]. The
     # option trade on 01-15 10:00 is IN window: change+commission = −0.05+0.01 = −0.04.
+    #
+    # WR-02 — the summary oracle is HAND-DERIVED from Deribit economics, never
+    # from the code's own slice formula: bought 1.0 intra-session at trade price
+    # 0.04 (cash change −0.05 = premium 0.04 + fee 0.01; E3: Σ(rpl+upl) is GROSS
+    # of fees since it closes against Σ(change+commission)); the session settles
+    # at the 01-16 08:00 boundary, whose settled mark is the close of the bar
+    # STAMPED 01-15 (M4) = 0.05. Nothing was closed → rpl = 0; upl = settlement
+    # mark − trade price = 0.05 − 0.04 = 0.01.
     return [
         _opt_row(instrument=_IN_RET_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
-        _summary_row(day="2026-01-16", hour=8, rpl=0.06, upl=0.0),
+        _summary_row(day="2026-01-16", hour=8, rpl=0.0, upl=0.01),
     ]
 
 
-# ΔBook over the window = Σ ΔMTM on 01-15 < day <= 01-16 → only 01-16 (0.10).
-# Identity: Σ(rpl+upl)=0.06 == (option change+commission)=−0.04 + ΔBook=0.10.
+# Marks (bar-stamp-day keyed, M4): 01-15 → 0.05, 01-16 → 0.15; position 1.0 from
+# 01-15 → ΔMTM {01-15: +0.05, 01-16: +0.10}; terminal book 0.15.
+# ΔBook over the window = Book(end boundary 01-16 08:00) − Book(start boundary
+# 01-15 08:00) = Book[01-15] − Book[01-14] → the day slice [01-15, 01-16) → 0.05
+# (the bar stamped D completes at D+1 08:00, so Book at a boundary "X 08:00" is
+# the day-keyed Book[X−1]).
+# Identity: Σ(rpl+upl)=0.01 == (option change+commission)=−0.04 + ΔBook=0.05.
 _CC_DELTA = {"BTC": {"2026-01-15": 0.05, "2026-01-16": 0.10}}
 _CC_TERMINAL = {"BTC": 0.15}
 _CC_OPT_VALUE = {"BTC": 0.15}
@@ -844,7 +857,11 @@ _CC_OPT_SESS = {"BTC": 0.0}
 
 def test_smoothed_summary_cross_check_reconciles() -> None:
     """Q3-3: Σ(rpl+upl) over the coverage window == Σ(option change+commission)
-    inside + ΔBook. Consistent summary + reconstruction → no raise."""
+    inside + ΔBook. Consistent summary + reconstruction → no raise. WR-02: the
+    first trade lands AFTER 08:00 on the window-start day, so its opening book
+    entry ΔMTM[start_day] MUST be inside the ΔBook slice exactly as its cash is
+    inside the ms window — the old (start_day, end_day] slice dropped it and
+    breached this economics-derived fixture by the position's full book value."""
     rows = _cross_check_rows()
     native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
     assert_balance_identity(
@@ -855,6 +872,75 @@ def test_smoothed_summary_cross_check_reconciles() -> None:
         native_options_value=_CC_OPT_VALUE,
         native_options_session_upl=_CC_OPT_SESS,
         option_delta_mtm=_CC_DELTA,
+    )
+
+
+def test_smoothed_summary_cross_check_trailing_trade_after_window() -> None:
+    """WR-02 boundary class 2: a trade on the window-END day AFTER the last
+    summary's 08:00 stamp is OUTSIDE the ms cash window — its book entry
+    ΔMTM[end_day] must be OUTSIDE the ΔBook slice too. The old slice summed it
+    and breached by ≈ the position's book value on any crawl-day trade."""
+    rows = _cross_check_rows() + [
+        {
+            "type": "trade",
+            "instrument_name": _IN_RET_INSTR,
+            "currency": "BTC",
+            "change": -0.07,
+            "commission": 0.01,
+            "position": 2.0,  # bought 1.0 more at 01-16 10:00 (post-summary)
+            "timestamp": int(
+                pd.Timestamp("2026-01-16T10:00:00", tz="UTC").timestamp() * 1000
+            ),
+            "id": 2,
+        }
+    ]
+    # EOD positions: 01-15 → 1.0, 01-16 → 2.0; marks 0.05 / 0.15 →
+    # Book 0.05 → 0.30, ΔMTM {01-15: +0.05, 01-16: +0.25}, terminal 0.30.
+    delta = {"BTC": {"2026-01-15": 0.05, "2026-01-16": 0.25}}
+    native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+    assert_balance_identity(
+        rows,
+        native_daily,
+        pnl_basis=PNL_BASIS_SMOOTHED_MTM,
+        terminal_book={"BTC": 0.30},
+        native_options_value={"BTC": 0.30},
+        native_options_session_upl={"BTC": 0.0},
+        option_delta_mtm=delta,
+    )
+
+
+def test_smoothed_summary_cross_check_flat_flat_closes_like_e3() -> None:
+    """Phase-82 E3 pin (<$1 flat-flat closure): a position opened AND closed
+    strictly inside the window (both boundaries flat) closes
+    Σ(rpl+upl) == Σ(change+commission) with ΔBook == 0 — the settled evidence
+    the boundary slice must never contradict. Hand-derived: buy 1.0 @0.04
+    (change −0.05, fee 0.01), sell @0.06 (change +0.05, fee 0.01) → session
+    rpl = 0.06 − 0.04 = 0.02 = (−0.04) + (+0.06)."""
+    rows = [
+        _opt_row(instrument=_IN_RET_INSTR, day="2026-01-15", change=-0.05, position=1.0, id=1),
+        {
+            "type": "trade",
+            "instrument_name": _IN_RET_INSTR,
+            "currency": "BTC",
+            "change": 0.05,
+            "commission": 0.01,
+            "position": 0.0,  # sold back at 01-15 14:00 → flat EOD
+            "timestamp": int(
+                pd.Timestamp("2026-01-15T14:00:00", tz="UTC").timestamp() * 1000
+            ),
+            "id": 2,
+        },
+        _summary_row(day="2026-01-16", hour=8, rpl=0.02, upl=0.0),
+    ]
+    native_daily = txn_rows_to_native_daily(rows, pnl_basis=PNL_BASIS_SMOOTHED_MTM)
+    assert_balance_identity(
+        rows,
+        native_daily,
+        pnl_basis=PNL_BASIS_SMOOTHED_MTM,
+        terminal_book={"BTC": 0.0},
+        native_options_value={"BTC": 0.0},
+        native_options_session_upl={"BTC": 0.0},
+        option_delta_mtm={},
     )
 
 
