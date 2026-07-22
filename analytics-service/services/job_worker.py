@@ -2166,6 +2166,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     mtm_returns: pd.Series | None = None
     mtm_gated_reason: str | None = None
     mtm_attempted: bool = False
+    # SMTM-01 (Phase 132): the additive single-key smoothed_mtm THIRD pass (Deribit
+    # options books only). Initialized at the branch-OUTER scope like the MTM pair so
+    # the post-branch persist reads them unconditionally on EVERY path — ccxt, perp-
+    # only Deribit, and key-mode all leave them at these defaults (no third crawl, no
+    # smoothed series/by-basis write) so SC-4 holds by construction (a no-option key
+    # persists NO smoothed artifacts).
+    #   * smoothed_returns  — the smoothed daily-return Series (None ⇒ pass skipped)
+    #   * smoothed_attempted — True iff the third pass ran (options/strategy/cash-basis)
+    # There is deliberately NO smoothed_gated_reason: unlike the MTM pass (which
+    # DEGRADES to a machine reason), the smoothed pass is FAIL-LOUD — a started pass
+    # finishes or fails the whole job (never a silent two-basis fallback).
+    smoothed_returns: pd.Series | None = None
+    smoothed_attempted: bool = False
     try:
         # Phase 105 (BB-02, MED-2): resolve the returns-denominator override HERE at the
         # branch-outer, VENUE-AGNOSTIC scope — mirroring run_csv_strategy_analytics
@@ -2290,6 +2303,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 DEFAULT_PNL_BASIS,
                 LedgerValuationError,
                 PNL_BASIS_MARK_TO_MARKET,
+                PNL_BASIS_SMOOTHED_MTM,
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.native_nav import InceptionReconciliationError
@@ -2620,6 +2634,67 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                                 strategy_id,
                                 scrub_freeform_string(str(_mtm_exc)),
                             )
+                # ── SMTM-01 (Phase 132): additive smoothed_mtm THIRD pass ──
+                # The single-key sibling of the composite third pass. Runs a THIRD
+                # ledger pass in smoothed_mtm basis and persists it ADDITIVELY into
+                # strategy_analytics.metrics_json_by_basis.smoothed_mtm (below). Gated
+                # on the SAME (not is_key_mode AND cash-headline AND
+                # has_option_activity) predicate as the MTM pass — NO new signal
+                # invented (perp-only ⇒ no third crawl ⇒ SC-4, a no-option key persists
+                # NO smoothed artifacts). It NEVER reassigns the cash-pass objects
+                # (returns / meta / _completeness / native_ledger) NOR the MTM-pass
+                # objects, so cash_settlement AND mark_to_market stay byte-identical.
+                #
+                # FAIL-LOUD (money-path), UNLIKE the MTM pass which DEGRADES: a smoothed
+                # pass that STARTS must finish or FAIL THE WHOLE JOB. A
+                # LedgerValuationError (holed marks — incl. the retention-STRADDLE /
+                # crawl-day cases pinned in 131-01a) is deliberately NOT caught here; it
+                # propagates to the outer permanent-FAILED handler (`except
+                # LedgerValuationError`) exactly like the cash pass, so the job fails
+                # loud BEFORE any persist and NO partial / interpolated smoothed basis
+                # is ever written (never a silent two-basis fallback). A crawl timeout
+                # likewise propagates to the outer transient arm (the whole derive
+                # retries). Each crawl is bounded by _BROKER_CRAWL_TIMEOUT_S (the
+                # FLIPRETRY-01 worker-wedge guard), mirroring the cash pass.
+                if (
+                    not is_key_mode
+                    and pnl_basis == DEFAULT_PNL_BASIS
+                    and _completeness.has_option_activity
+                ):
+                    smoothed_attempted = True
+                    _smoothed_ledger, _smoothed_completeness = await asyncio.wait_for(
+                        build_deribit_native_ledger(
+                            ctx.exchange,
+                            account_state=account_state,
+                            pnl_basis=PNL_BASIS_SMOOTHED_MTM,
+                            exclude_spot_extraction=exclude_spot_extraction,
+                        ),
+                        timeout=_BROKER_CRAWL_TIMEOUT_S,
+                    )
+                    assert_ledger_complete(_smoothed_completeness)
+                    # Bind to smoothed-only names — NEVER reassign the cash/MTM objects.
+                    # The smoothed meta guard flags are DISCARDED (the cash-pass flags
+                    # are authoritative), mirroring the MTM Finding-9 discard.
+                    smoothed_returns, _smoothed_meta = combine_native_ledger(
+                        _smoothed_ledger,
+                        _smoothed_completeness.indexable_currencies,
+                        denominator_config=denominator_config,
+                    )
+                    # pre_mark_retention_option_days → complete_with_warnings: option
+                    # marks aged past the ~2.5yr retention horizon fell back to cash-
+                    # basis for those (day, ccy) buckets (partial marks are NEVER
+                    # interpolated — a straddler fails loud above). The redistribution
+                    # TOTAL stays honest (telescoping); only those daily attributions
+                    # are caveated. Stamp onto the AUTHORITATIVE cash-pass `meta` via
+                    # the SAME registered-warning-key mechanism as the retired
+                    # pre_summary_rollout_option_dailies stamp (NAV_TWR_GUARD_KEYS).
+                    if _smoothed_completeness.pre_mark_retention_option_days:
+                        meta["pre_mark_retention_option_dailies"] = [
+                            f"{ccy}:{day}"
+                            for ccy, day in (
+                                _smoothed_completeness.pre_mark_retention_option_days
+                            )
+                        ]
             except asyncio.TimeoutError:
                 # FLIPRETRY-01: the cash-pass crawl exceeded the per-crawl bound.
                 # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent, NEVER
@@ -3718,6 +3793,68 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 strategy_id, scrub_freeform_string(str(_mtm_compute_exc)),
             )
 
+    # ── SMTM-01 (Phase 132): compute the additive smoothed_mtm metrics object ──
+    # Mirrors the MTM metrics compute above. The MONEY-PATH fail-loud discipline lives
+    # UPSTREAM at the LEDGER/marks reconstruction: a holed-marks / retention-straddle
+    # LedgerValuationError already failed the WHOLE job before this block (no
+    # fabricated basis, no silent two-basis fallback). THIS block is the downstream
+    # SCALAR compute over an already-honest smoothed daily series — a ValueError here
+    # is a math chain-break (a cumulative_method='simple' interior gap), NOT a
+    # marks/fabrication failure, so it DEGRADES symmetrically with MTM: omit the
+    # smoothed key (and skip its series persist below), never fail the cash headline
+    # over an uncomputable Sharpe. There is no smoothed_gated_reason channel yet
+    # (131-03) — the by-basis omission is the signal; the degrade is logged. The
+    # benchmark fetch stays guarded (the seven scalars are benchmark-invariant). The
+    # MTM/cash locals are untouched — this block reads ONLY smoothed_returns + config.
+    smoothed_metrics_json: dict[str, Any] | None = None
+    _smoothed_basis_result: BasisSeriesResult | None = None
+    if smoothed_returns is not None:
+        _smoothed_periods = periods_per_year_for_asset_class(
+            ctx.strategy_row.get("asset_class")
+            if isinstance(ctx.strategy_row, dict)
+            else None
+        )
+        if denominator_config is not None:
+            _smoothed_cumulative = denominator_config.cumulative_method
+            _smoothed_day_basis = metrics_day_basis(denominator_config.metrics_basis)
+        else:
+            _smoothed_cumulative = "geometric"
+            _smoothed_day_basis = "calendar"
+        from services.benchmark import get_benchmark_returns
+
+        _smoothed_benchmark_rets: pd.Series | None = None
+        try:
+            _smoothed_benchmark_rets, _ = await get_benchmark_returns("BTC")
+        except Exception as _bench_exc:  # noqa: BLE001
+            logger.warning(
+                "derive_broker_dailies: smoothed_mtm benchmark fetch failed for "
+                "strategy %s (computing smoothed_mtm without the benchmark family): "
+                "%s",
+                strategy_id, _bench_exc,
+            )
+        try:
+            _smoothed_basis_result = derive_basis_series(
+                smoothed_returns,
+                _smoothed_benchmark_rets,
+                periods_per_year=_smoothed_periods,
+                cumulative_method=_smoothed_cumulative,
+                day_basis=_smoothed_day_basis,
+                benchmark_symbol="BTC",
+            )
+            smoothed_metrics_json = dict(_smoothed_basis_result.metrics_json)
+        except ValueError as _smoothed_compute_exc:
+            # SCALAR compute reject (interior chain-break) — DEGRADE (mirror MTM): omit
+            # the smoothed key, keep the cash headline. The honest smoothed daily
+            # series was still built; only its scalar summary is uncomputable here.
+            smoothed_metrics_json = None
+            _smoothed_basis_result = None
+            logger.warning(
+                "derive_broker_dailies: smoothed_mtm metrics compute rejected the "
+                "series for strategy %s (interior chain-break) — degrading (omitting "
+                "the smoothed_mtm key), cash unaffected: %s",
+                strategy_id, scrub_freeform_string(str(_smoothed_compute_exc)),
+            )
+
     # DQ-02 + DQ-01 (v1.8): PRE-STAMP the coverage terminus flag AND the DQ-01
     # NAV-denominator guard flags (negative_nav_guard / dust_nav_guard /
     # flow_dominated_guard) onto strategy_analytics so the CSV analytics run
@@ -3877,6 +4014,27 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
 
     await db_execute(_persist_cash_series)
 
+    # ── SMTM-01 (Phase 132): additive smoothed_mtm SERIES persist ──
+    # GUARDED (unlike the always-heal MTM series persist above): persist ONLY when the
+    # third pass ran AND produced a computable object. A no-option / perp-only /
+    # key-mode / MTM-headline derive NEVER touches the smoothed_mtm series row — SC-4:
+    # a no-option key persists NO smoothed artifacts, and this write is byte-invisible
+    # there (the plan's "byte-identical persisted rows" requires NO smoothed RPC on a
+    # no-option key, so this is deliberately NOT an unconditional heal). A started-
+    # but-failed smoothed pass fails the WHOLE job upstream, so there is no
+    # attempted-but-null smoothed persist to heal here.
+    if smoothed_attempted and smoothed_metrics_json is not None:
+        _persist_smoothed_series_result = _smoothed_basis_result
+
+        def _persist_smoothed_series(
+            result: BasisSeriesResult | None = _persist_smoothed_series_result,
+        ) -> None:
+            persist_basis_series(
+                ctx.supabase, strategy_id, basis="smoothed_mtm", result=result,
+            )
+
+        await db_execute(_persist_smoothed_series)
+
     # 106-02 (D5 / carry-forward M2): the DONE-gating by-basis SCALAR prestamp lands
     # HERE — AFTER both basis series persist above — mirroring the composite seam
     # (cash series → MTM series → DONE-bearing scalar LAST). Ordering is load-bearing:
@@ -3917,11 +4075,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # no longer byte-identical (they now write metrics_json_by_basis=NULL) — an
     # accepted, deliberate change vs the prior column-untouched behavior, because a
     # surviving stale object is a WRONG-MONEY-NUMBER hazard for Phase 102.
-    _prestamp_payload["metrics_json_by_basis"] = (
-        {"mark_to_market": mtm_metrics_json}
-        if (mtm_attempted and mtm_metrics_json is not None)
-        else None
-    )
+    #
+    # SMTM-01 (Phase 132): the by-basis object gains the additive smoothed_mtm key. A
+    # key is present ONLY from a completed pass (same omission contract as
+    # mark_to_market — absent, never JSON null). Byte-identical to the prior write on
+    # every non-options path: perp-only / ccxt / key-mode / MTM-headline leave BOTH
+    # attempted flags False → the dict is empty → None (SQL NULL), exactly as before.
+    # On an options book smoothing OPENS what MTM may keep closed — mark_to_market can
+    # be ABSENT (degraded) while smoothed_mtm is PRESENT (the phase's value).
+    _by_basis_obj: dict[str, Any] = {}
+    if mtm_attempted and mtm_metrics_json is not None:
+        _by_basis_obj["mark_to_market"] = mtm_metrics_json
+    if smoothed_attempted and smoothed_metrics_json is not None:
+        _by_basis_obj["smoothed_mtm"] = smoothed_metrics_json
+    _prestamp_payload["metrics_json_by_basis"] = _by_basis_obj or None
 
     def _prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload) -> None:
         ctx.supabase.table("strategy_analytics").upsert(

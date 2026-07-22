@@ -111,9 +111,17 @@ async def _run_seam(
     _mtm = _mtm_series() if mtm_series is None else mtm_series
     ctx, capture = _ctx(strategy_row=strategy_row)
     if has_option_activity:
-        reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+        # Phase 132: an options book runs THREE passes (cash, mtm, smoothed_mtm); the
+        # third combine side-effect feeds the additive smoothed pass. The non-cash SC-4
+        # track (_noncash_track) is unaffected by the third basis.
+        reports = [
+            _report(has_option_activity=True),
+            _report(has_option_activity=True),
+            _report(has_option_activity=True),
+        ]
         combine = MagicMock(side_effect=[
             (_returns, {"used_heuristic_capital": False}),
+            (_mtm, {"used_heuristic_capital": False}),
             (_mtm, {"used_heuristic_capital": False}),
         ])
     else:
