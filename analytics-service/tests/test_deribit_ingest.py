@@ -3753,3 +3753,125 @@ async def test_allocated_path_spot_sell_excluded(monkeypatch: Any) -> None:
     )
     assert pd.Timestamp("2025-07-12") not in ledger.native_pnl["BTC"].index
     assert "USDC" not in ledger.native_pnl  # the +60,000 cash leg dropped too
+
+
+# ===========================================================================
+# 131-01a Task 1: fetch_deribit_option_daily_marks — greenfield clone of the
+# perp-index fetcher (deribit_ingest.py:597-691). Same public
+# get_tradingview_chart_data 1D endpoint, same transient-retry →
+# DeribitTransientReadError, same {}-on-structural-no-data, same tick→UTC-day
+# dedupe. Differences: takes the instrument name VERBATIM (no suffix synthesis)
+# and an EXPLICIT expiry-capped `newest_day` (never fetch past expiry). The
+# function stays an HONEST fetch — the fail-loud hole decision is the caller's.
+# ===========================================================================
+
+
+async def test_option_daily_marks_parses_maps_days_and_verbatim_instrument() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-06-01", 0.0210), ("2025-06-02", 0.0185)])]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-06-01": 0.0210, "2025-06-02": 0.0185}
+    # The instrument name is passed VERBATIM — no suffix synthesis.
+    assert stub.calls[0]["instrument_name"] == "BTC-27JUN25-100000-C"
+    assert stub.calls[0]["resolution"] == "1D"
+
+
+async def test_option_daily_marks_bounds_from_oldest_and_newest_day() -> None:
+    import pandas as pd
+
+    stub = _ChartDataStub([_chart_ok([("2025-06-01", 0.02)])])
+    await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-27",
+        sleep=_SleepSpy(),
+    )
+    # Bounds derive from oldest_day / newest_day — never `now()`. newest_day caps
+    # the span at expiry (never fetch past it).
+    assert stub.calls[0]["start_timestamp"] == int(
+        pd.Timestamp("2025-06-01", tz="UTC").timestamp() * 1000
+    )
+    assert stub.calls[0]["end_timestamp"] == int(
+        pd.Timestamp("2025-06-27", tz="UTC").timestamp() * 1000
+    )
+
+
+async def test_option_daily_marks_skips_nonpositive_close() -> None:
+    stub = _ChartDataStub(
+        [_chart_ok([("2025-06-01", 0.02), ("2025-06-02", 0.0), ("2025-06-03", -1.0)])]
+    )
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-03",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-06-01": 0.02}  # 0 and negative closes dropped
+
+
+async def test_option_daily_marks_dedupe_keeps_first_per_day() -> None:
+    # Two bars stamped on the SAME UTC day → keep the FIRST (defensive vs a dupe),
+    # exactly the sibling's setdefault dedupe.
+    stub = _ChartDataStub([_chart_ok([("2025-06-01", 0.02), ("2025-06-01", 0.03)])])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-01",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {"2025-06-01": 0.02}
+
+
+async def test_option_daily_marks_status_not_ok_returns_empty() -> None:
+    stub = _ChartDataStub([{"result": {"status": "no_data", "ticks": [], "close": []}}])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {}
+
+
+async def test_option_daily_marks_structural_nodata_returns_empty() -> None:
+    # The exchange RESPONDED (BadSymbol) → benign structural no-data → {} (NOT
+    # retried). The caller decides whether a hole is a fail-loud structural gap.
+    stub = _ChartDataStub([ccxt.BadSymbol("no such instrument")])
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27JUN25-100000-C",
+        oldest_day="2025-06-01",
+        newest_day="2025-06-02",
+        sleep=_SleepSpy(),
+    )
+    assert marks == {}
+    assert len(stub.calls) == 1  # structural → NOT retried
+
+
+async def test_option_daily_marks_transient_raises_retryable() -> None:
+    # A NetworkError is RETRYABLE: retry with backoff, then raise
+    # DeribitTransientReadError on budget exhaustion — never a silently-partial map.
+    stub = _ChartDataStub([ccxt.RequestTimeout("blip")] * 3)
+    spy = _SleepSpy()
+    with pytest.raises(DeribitTransientReadError):
+        await di.fetch_deribit_option_daily_marks(
+            stub,
+            "BTC-27JUN25-100000-C",
+            oldest_day="2025-06-01",
+            newest_day="2025-06-02",
+            sleep=spy,
+            max_retries=2,
+        )
+    assert len(stub.calls) == 3  # initial + 2 retries
+    assert spy.waits == [1.0, 2.0]  # exponential backoff
