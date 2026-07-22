@@ -42,6 +42,14 @@ from services.stitch_composite import MTM_REASON_OPTIONS
 from services.deribit_txn import LedgerValuationError
 
 
+# Phase 134 (smoothed_mtm kill-switch): the composite smoothed THIRD pass ships DARK
+# behind SMOOTHED_MTM_ENABLED (default OFF). The smoothed-assuming tests in this
+# module (4-combine fan-outs, a smoothed by-basis key, per-leg fail-loud) opt the
+# flag ON explicitly so the gate is VISIBLE here; the dark-launch (flag-OFF)
+# assertion below overrides with a per-test `monkeypatch.delenv` (read per-call).
+pytestmark = pytest.mark.usefixtures("smoothed_mtm_enabled")
+
+
 # ---------------------------------------------------------------------------
 # Task 1 — has_option_activity additive crawl signal
 # ---------------------------------------------------------------------------
@@ -1037,6 +1045,67 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
         if c.kwargs.get("pnl_basis") == "smoothed_mtm"
     ]
     assert smoothed_calls, "options composite must run a smoothed_mtm ledger pass"
+
+
+# ── Phase 134 (kill-switch): SMOOTHED_MTM_ENABLED off ⇒ composite pass is DARK ───
+
+@pytest.mark.asyncio
+async def test_smoothed_dark_launch_composite_skips_smoothed_pass(monkeypatch) -> None:
+    """KILL-SWITCH (composite): with SMOOTHED_MTM_ENABLED off (the dark default), an
+    options-member composite that WOULD persist a smoothed_mtm basis when the flag is
+    on (test_options_composite_persists_smoothed_while_mtm_gated) instead runs NO
+    smoothed pass at all — smoothed_ok is forced False before smoothed_mtm_available is
+    even consulted. Only the cash fan-out runs (2 members × 1 combine = 2 combines, MTM
+    honestly gated off), the by-basis object is {cash_settlement} with NO smoothed_mtm
+    key, and NO smoothed_mtm ledger crawl is issued. The MTM gate reason is byte-
+    unchanged. Neuter (remove the flag gate) → RED (4 combines, smoothed_mtm appears)."""
+    # Override the module-level opt-in: the flag is read per-call at run time.
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,
+    )))
+    # Only the cash fan-out should run when dark → size for ONE pass (2 members). The
+    # harness only DOUBLES combine_returns for has_option_activity, so we pass the flag
+    # through here but rely on the dark gate to consume exactly the cash half.
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {})],
+        has_option_activity=True,  # options book — MTM gated off; smoothed dark-OFF
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+        import services.broker_dailies as _bd
+
+        _combine_mock = _bd.combine_native_ledger
+    assert result.outcome == DispatchOutcome.DONE
+    assert _combine_mock.call_count == 2, (
+        "dark launch: only the cash fan-out runs (2 members × 1 combine) — the smoothed "
+        "THIRD pass must NOT fan out when SMOOTHED_MTM_ENABLED is off"
+    )
+    # NO smoothed_mtm ledger crawl was issued.
+    smoothed_calls = [
+        c for c in build_spy.await_args_list
+        if c.kwargs.get("pnl_basis") == "smoothed_mtm"
+    ]
+    assert not smoothed_calls, (
+        "dark launch: no smoothed_mtm ledger pass — a member mark-hole cannot fail "
+        "the job when the basis is dormant"
+    )
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert set(by_basis) == {"cash_settlement"}, (
+        "dark launch: only cash_settlement persists — NO smoothed_mtm key; the MTM "
+        "gate stays honestly closed (unsmoothed_options_book), cash byte-identical"
+    )
 
 
 @pytest.mark.asyncio

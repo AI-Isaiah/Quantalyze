@@ -77,6 +77,14 @@ from services.stitch_composite import (
     MTM_REASON_SUMMARY_COVERAGE,
 )
 
+# Phase 134 (smoothed_mtm kill-switch): the smoothed THIRD pass ships DARK behind
+# SMOOTHED_MTM_ENABLED (default OFF). Every test in this module was written when the
+# pass ran unconditionally and asserts it runs (3 ledger crawls, a smoothed by-basis
+# key, etc.), so the module opts the flag ON explicitly — the gate is VISIBLE here.
+# The dark-launch (flag-OFF) assertions live below and override with a per-test
+# `monkeypatch.delenv("SMOOTHED_MTM_ENABLED")` (the flag is read per-call at run time).
+pytestmark = pytest.mark.usefixtures("smoothed_mtm_enabled")
+
 _STRATEGY_ID = "strat-mtm-1"
 
 
@@ -1440,6 +1448,86 @@ async def test_options_book_runs_third_smoothed_pass_same_anchor() -> None:
         "the un-persisted headline"
     )
     assert pd.notna(by_basis["smoothed_mtm"]["cumulative_return"])
+
+
+# ── Phase 134 (kill-switch): SMOOTHED_MTM_ENABLED off ⇒ smoothed pass is DARK ────
+
+@pytest.mark.asyncio
+async def test_smoothed_dark_launch_options_book_skips_third_pass(monkeypatch) -> None:
+    """KILL-SWITCH (single-key): with SMOOTHED_MTM_ENABLED off (the dark default), an
+    options book runs EXACTLY TWO crawls (cash + mark_to_market) — the smoothed THIRD
+    pass is SKIPPED ENTIRELY: no third build_deribit_native_ledger call, and the
+    by-basis object carries ONLY mark_to_market (no smoothed_mtm key). This proves the
+    smoothed basis is fully dormant when dark. Neuter (drop the flag gate → smoothed
+    runs unconditionally) → RED (3 calls, smoothed_mtm key appears)."""
+    # Override the module-level `smoothed_mtm_enabled` opt-in: the flag is read
+    # per-call at run time, so deleting it here forces the dark (OFF) path.
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 2, (
+        "dark launch: an options book runs ONLY cash + mark_to_market — the smoothed "
+        "THIRD crawl must NOT run when SMOOTHED_MTM_ENABLED is off"
+    )
+    assert [c["pnl_basis"] for c in calls] == ["cash_settlement", "mark_to_market"]
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict)
+    assert set(by_basis.keys()) == {"mark_to_market"}, (
+        "dark launch: NO smoothed_mtm by-basis key — the basis is fully dormant; "
+        "cash/MTM are byte-identical to the pre-v1.14 two-pass path"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_dark_launch_mark_hole_cannot_fail_job(monkeypatch) -> None:
+    """THE KILL-SWITCH POINT (single-key): a structural smoothed mark-hole
+    (LedgerValuationError) that would FAIL THE WHOLE JOB when the flag is on
+    (test_smoothed_ledger_valuation_error_fails_job_loud) CANNOT fail the job when the
+    flag is off — the smoothed crawl is never even attempted, so the poisoned third
+    side-effect never fires and the job completes DONE on its cash/MTM headline. Neuter
+    (remove the flag gate) → RED (the LedgerValuationError fires and the job FAILS)."""
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        # cash ok, MTM ok — the THIRD (smoothed) side-effect is a structural mark-hole
+        # that would fail the job loud IF the smoothed pass ran. Dark ⇒ it never runs.
+        side_effects=[None, None, LedgerValuationError(
+            "instrument BTC-27JUN25-100000-C straddles the mark-retention horizon"
+        )],
+    )
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "dark launch: a smoothed structural mark-hole must NOT be able to fail a real "
+        "prod job — the smoothed pass is skipped before any ledger build"
+    )
+    assert len(calls) == 2, "smoothed crawl (the poisoned 3rd) must never be attempted"
 
 
 @pytest.mark.asyncio

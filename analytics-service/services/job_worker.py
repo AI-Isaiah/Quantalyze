@@ -83,6 +83,7 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     SFOX_DISABLED_DETAIL,
     PositionDirection as PositionDirection,
     Side as Side,
+    is_smoothed_mtm_enabled,
     sfox_enabled_server,
 )
 from services.db import db_execute, get_supabase, one, rows
@@ -2676,10 +2677,20 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # degrade-REASON channel yet (deferred to Phase 133 per LOW-01) — the
                 # by-basis omission is the signal; the degrade is logged.
                 if (
-                    not is_key_mode
+                    is_smoothed_mtm_enabled()
+                    and not is_key_mode
                     and pnl_basis == DEFAULT_PNL_BASIS
                     and _completeness.has_option_activity
                 ):
+                    # Phase 134 kill-switch: with SMOOTHED_MTM_ENABLED off (the dark
+                    # default) the smoothed THIRD pass is SKIPPED ENTIRELY — no third
+                    # ledger build, no dense-marks fetch, no assert_ledger_complete,
+                    # smoothed_attempted stays False and smoothed_returns stays None, so
+                    # the compute + series-persist blocks below (both guarded on those)
+                    # never run and no metrics_json_by_basis["smoothed_mtm"] key is
+                    # written. A structural mark-hole therefore cannot fail this job
+                    # until the founder flips the flag on. When on, behavior is exactly
+                    # as v1.14 built it (short-circuit first so a mark-hole is dark).
                     smoothed_attempted = True
                     _smoothed_budget = float(
                         TIMEOUT_PER_KIND.get("derive_broker_dailies", 15 * 60)
@@ -5537,7 +5548,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # and a metrics/overlap/degenerate failure stamps + returns here. NEVER a silent
     # two-basis fallback, NEVER a gate-close on a leg failure. A no-option composite
     # (smoothed_ok False) runs NO third pass and persists NO smoothed artifacts (SC-4).
-    smoothed_ok = smoothed_mtm_available(member_signals)
+    # Phase 134 kill-switch: with SMOOTHED_MTM_ENABLED off (the dark default) the
+    # composite smoothed THIRD pass is SKIPPED ENTIRELY — smoothed_ok is forced
+    # False so there is NO per-member smoothed reconstruction fan-out, no stitch, no
+    # derive_basis_series, no persist, and smoothed_metrics_json stays None so no
+    # metrics_json_by_basis["smoothed_mtm"] key is written. A structural mark-hole in
+    # a member leg therefore cannot fail this job until the founder flips the flag on.
+    # When on, the availability decision is exactly as v1.14 built it. Short-circuit
+    # FIRST (flag before availability) so a mark-hole never even reaches the predicate.
+    smoothed_ok = is_smoothed_mtm_enabled() and smoothed_mtm_available(member_signals)
     smoothed_metrics_json: dict[str, Any] | None = None
     _smoothed_basis_result: BasisSeriesResult | None = None
     # MED-01 (132 review): the smoothed-pass member metas are KEPT (no longer
