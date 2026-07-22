@@ -2006,11 +2006,26 @@ def replay_option_positions(
 def option_mtm_daily(
     positions: Mapping[str, Mapping[str, Any]],
     marks: Mapping[str, Mapping[str, float]],
+    *,
+    last_settled_day: str | None = None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
     """Per-(currency, UTC-day) ΔMTM redistribution + terminal book from the replayed
     option ``positions`` (from :func:`replay_option_positions`) and per-instrument
     daily ``marks`` (from ``fetch_deribit_option_daily_marks``). PURE (pandas/async-
     free — the AST purity guard enforces it); NOT yet called by any production path.
+
+    ``last_settled_day`` (NF-01) caps the dense grid at the last SETTLED bar day:
+    ``global_last = min(max(candidate_lasts), last_settled_day)``. An OPEN
+    instrument A is fetched only through ``last_settled`` (yesterday), but a
+    sibling B with ANY crawl-day event (delivery/settlement/trade) pushes the
+    UNCAPPED ``global_last`` to TODAY — a day on which A still carries a nonzero
+    position with NO settled mark → a SPURIOUS D-07 hole naming the healthy A.
+    Capping at the settled boundary is coherent with the book channel (the
+    anchor's settled book ``options_value − options_session_upl`` also excludes
+    post-boundary positions) and subsumes the crawl-day-open partial-bar case:
+    the crawl-day (unsettled) cash already books on the cash channel; that day is
+    simply never MTM-marked (it accrues from the next settlement onward). Default
+    ``None`` = no cap (byte-identical for the pure-core direct callers, SC-4).
 
     Day-grid convention (pinned 83-PLAN §2-Q1): ``mark[instr][D]`` is the close of
     the 1D bar whose tick falls on UTC day ``D`` (the bar Deribit stamps at ``D``
@@ -2045,6 +2060,12 @@ def option_mtm_daily(
         if instr_marks:
             candidate_lasts.append(max(instr_marks))
     global_last = max(candidate_lasts)
+    # NF-01: cap the grid at the last SETTLED bar day so a sibling's crawl-day
+    # event cannot drag the grid onto an unsettled day where another open
+    # instrument carries a nonzero position with no settled mark (a spurious
+    # D-07 hole). ISO ``YYYY-MM-DD`` strings order lexicographically = calendar.
+    if last_settled_day is not None and last_settled_day < global_last:
+        global_last = last_settled_day
 
     instruments = sorted(positions)
     cur_pos: dict[str, float] = {instr: 0.0 for instr in instruments}

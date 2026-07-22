@@ -333,7 +333,7 @@ def test_smoothed_merge_wiring_guard(monkeypatch: Any) -> None:
     smoothed series back to the pure cash channel — proving the merge is actually
     INVOKED at the adapter call site, not decorative."""
     monkeypatch.setattr(
-        di, "option_mtm_daily", lambda positions, marks: ({}, {})
+        di, "option_mtm_daily", lambda positions, marks, **_kw: ({}, {})
     )
     ledger, _report, _stub = _run_options_ledger(
         monkeypatch,
@@ -780,6 +780,83 @@ def test_smoothed_open_future_expiry_capped_at_last_settled_day(
     # excludes 01-18's) — never expiry (2027) and never now().
     (params,) = stub.chart_params
     assert params["end_timestamp"] == _ms("2026-01-18T00:00:00+00:00")
+
+
+def test_smoothed_crawl_day_sibling_does_not_hole_open_instrument(
+    monkeypatch: Any,
+) -> None:
+    """NF-01 (from CR-02): an OPEN instrument A is fetched only through the last
+    SETTLED bar day (yesterday), but a sibling B with a crawl-day (TODAY) event
+    pushes the UNCAPPED ΔMTM grid to today — where A still carries a nonzero
+    position with no settled mark → a SPURIOUS D-07 hole naming the healthy A.
+    Dates are relative to the REAL crawl reference (the historical fixtures never
+    exercise this because ``_last_settled_option_mark_day`` never constrains a
+    2026-01 grid). The cap fixes it: the crawl-day cash books on the cash channel
+    and today is simply never MTM-marked."""
+    from datetime import date, timedelta
+
+    today = date.fromisoformat(di._today_utc_iso())
+    last_settled = date.fromisoformat(di._last_settled_option_mark_day())
+    a_open = last_settled - timedelta(days=3)
+
+    a_instr = "BTC-26MAR27-100000-C"  # far-future expiry, held OPEN
+    b_instr = "BTC-26MAR27-90000-P"   # opened TODAY, still OPEN (crawl-day event)
+    a_open_iso = a_open.isoformat()
+    today_iso = today.isoformat()
+
+    def _row(instrument: str, day: str, change: float, position: float,
+             id_: int, hour: int, type_: str = "trade") -> dict[str, Any]:
+        return {
+            "type": type_, "instrument_name": instrument, "currency": "BTC",
+            "change": change, "commission": 0.0, "position": position,
+            "timestamp": int(
+                pd.Timestamp(f"{day}T{hour:02d}:00:00", tz="UTC").timestamp() * 1000
+            ),
+            "id": id_,
+        }
+
+    rows = [
+        # A: premium −0.10 for 2.0 contracts on a_open, then HELD (no later event).
+        _row(a_instr, a_open_iso, -0.10, 2.0, 1, 10),
+        # B: bought 1.0 TODAY and STILL OPEN (a crawl-day event with a nonzero EOD
+        # position → last_day == today AND a today mark bar; the uncapped grid
+        # runs to today, where A carries 2.0 with no settled mark → the D-07 hole
+        # NF-01 reproduces).
+        _row(b_instr, today_iso, -0.02, 1.0, 2, 10),
+    ]
+    # A flat @0.05 across its whole held span (settled book 2.0×0.05 = 0.10);
+    # B has a today (unsettled partial) bar. The range-respecting stub filters to
+    # each fetch's window, so A never receives a today bar.
+    a_marks = {}
+    cursor = a_open
+    while cursor <= today:
+        a_marks[cursor.isoformat()] = 0.05
+        cursor += timedelta(days=1)
+    charts = {a_instr: a_marks, b_instr: {today_iso: 0.02}}
+    # M5 anchor identity: B opened THIS session, so its whole value is the
+    # current-session unrealized move (options_session_upl) and its SETTLED value
+    # at last_settled was 0 → settled anchor = options_value − options_session_upl
+    # = (A 0.10 + B 0.02) − (B 0.02) = 0.10 == terminal_book (A only).
+    # equity = cash(−0.10 −0.02) + options_value(0.12) = 0.0.
+    summaries = [
+        {"currency": "BTC", "equity": 0.0, "session_upl": 0.0,
+         "options_value": 0.12, "options_session_upl": 0.02},
+    ]
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=rows,
+        summaries=summaries,
+        charts=charts,
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    # A: cash −0.10 + ΔMTM +0.10 on a_open (book 0→0.10), flat after; B: −0.02 cash
+    # TODAY (never MTM-marked — the grid is capped at last_settled; B's MTM
+    # accrues from the next settlement).
+    assert got.get(a_open_iso) == pytest.approx(0.0, abs=1e-9)
+    assert got.get(today_iso) == pytest.approx(-0.02, abs=1e-9)
+    # M5: total == Σchange + Book(last settlement).
+    assert sum(got.values()) == pytest.approx(-0.12 + 0.10, abs=1e-9)
 
 
 def test_smoothed_requires_full_history_crawl(monkeypatch: Any) -> None:

@@ -2049,7 +2049,15 @@ async def _build_smoothed_option_mtm(
         kept_positions[instrument] = info
         marks[instrument] = instr_marks
 
-    delta_mtm, terminal_book = option_mtm_daily(kept_positions, marks)
+    # NF-01: cap the ΔMTM grid at the last SETTLED bar day so a sibling
+    # instrument's crawl-day event (delivery/settlement/trade → last_day = today)
+    # cannot drag the dense grid onto TODAY, where another OPEN instrument still
+    # carries a nonzero position with no settled mark (a spurious D-07 hole
+    # naming the healthy instrument). The crawl-day cash already books on the
+    # cash channel; that day is simply never MTM-marked.
+    delta_mtm, terminal_book = option_mtm_daily(
+        kept_positions, marks, last_settled_day=last_settled
+    )
     return delta_mtm, terminal_book, sorted(pre_retention)
 
 
