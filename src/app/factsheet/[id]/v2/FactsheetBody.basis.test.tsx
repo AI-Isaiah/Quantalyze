@@ -1,4 +1,18 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+
+// Phase 134 (smoothed_mtm kill-switch): SMOOTHED_MTM_UI_ENABLED is a build-time
+// module-load const read from process.env at import time, so the flag must be set
+// BEFORE closed-sets is imported. vi.hoisted runs before all static imports — enable
+// it here so this suite's Phase-133 smoothed-segment assertions render the third
+// segment. The DARK (flag-OFF) default — the segment hidden entirely — is proven in
+// FactsheetBody.smoothed-killswitch.test.tsx. Cleaned up afterAll so the "true" does
+// not leak into a sibling file's fresh closed-sets import in the same worker.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED = "true";
+});
+afterAll(() => {
+  delete process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED;
+});
 import { render, fireEvent, within } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";

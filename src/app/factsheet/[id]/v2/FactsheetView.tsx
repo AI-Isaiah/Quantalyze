@@ -14,6 +14,7 @@ import { BasisProvider, useBasis, useBasisMetrics, useBasisOrCash, useBasisSerie
 import { LeverageProvider, useLeverage } from "./leverage-context";
 import { MAX_LEVERAGE } from "@/lib/leverage";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
+import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
@@ -1315,12 +1316,23 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               // mark-to-market" (matches the "Mark-to-market" sibling's full-word
               // casing per DESIGN.md, not an "MTM" abbreviation). Enabled ⇔ the
               // persisted smoothed basis is available; honest-disabled otherwise.
-              {
-                id: "smoothed_mtm",
-                label: "Smoothed mark-to-market",
-                disabled: !smoothedAvailable,
-                disabledReason: smoothedReason,
-              },
+              //
+              // Phase 134 kill-switch: the segment is HIDDEN (not rendered at all,
+              // never merely disabled) unless SMOOTHED_MTM_UI_ENABLED is on. With the
+              // dark default the worker never persists a smoothed basis, so the segment
+              // would only ever be honest-disabled — omitting it keeps the control
+              // byte-identical to the pre-v1.14 two-segment cash/MTM toggle. cash/MTM
+              // segments are untouched by the flag.
+              ...(SMOOTHED_MTM_UI_ENABLED
+                ? [
+                    {
+                      id: "smoothed_mtm",
+                      label: "Smoothed mark-to-market",
+                      disabled: !smoothedAvailable,
+                      disabledReason: smoothedReason,
+                    },
+                  ]
+                : []),
             ]}
           />
           {!mtmAvailable &&
@@ -1348,7 +1360,8 @@ function ControlBar({ scenarioMode = false }: { scenarioMode?: boolean }) {
               and reads as pending for a pass that will never run — the segment
               itself stays honest-disabled with the mapped reason as its tooltip
               (aria-disabled + title, SegmentedControl). */}
-          {!smoothedAvailable &&
+          {SMOOTHED_MTM_UI_ENABLED &&
+            !smoothedAvailable &&
             (mtmAvailable || payload.mtmGate?.reason === "unsmoothed_options_book") && (
               <p className="text-caption text-text-muted">{smoothedReason}</p>
             )}
