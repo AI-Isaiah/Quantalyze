@@ -4594,7 +4594,24 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             completeness.indexable_currencies,
             denominator_config=denominator_config,
         )
-        return returns, bool(completeness.has_option_activity), dict(member_meta)
+        _member_meta_out = dict(member_meta)
+        # MED-01 (132 review): bridge the SMOOTHED-pass completeness's pre-retention
+        # bucket into the returned member meta — single-key parity (the single-key
+        # third pass stamps the same registered NAV_TWR_GUARD_KEYS flag onto `meta`).
+        # Option marks aged past the ~2.5yr retention horizon fell back to cash-basis
+        # for those (day, ccy) buckets; the leg's composite must carry the SAME
+        # complete_with_warnings honesty caveat the identical book gets as a single
+        # key. Basis-gated: only the smoothed pass fetches marks, so only its report
+        # can carry the bucket (the cash-pass metas stay byte-identical).
+        if (
+            basis == PNL_BASIS_SMOOTHED_MTM
+            and completeness.pre_mark_retention_option_days
+        ):
+            _member_meta_out["pre_mark_retention_option_dailies"] = [
+                f"{ccy}:{day}"
+                for ccy, day in completeness.pre_mark_retention_option_days
+            ]
+        return returns, bool(completeness.has_option_activity), _member_meta_out
 
     async def _reconstruct_ccxt_member(
         ctx: Any, venue: str
@@ -5511,6 +5528,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     smoothed_ok = smoothed_mtm_available(member_signals)
     smoothed_metrics_json: dict[str, Any] | None = None
     _smoothed_basis_result: BasisSeriesResult | None = None
+    # MED-01 (132 review): the smoothed-pass member metas are KEPT (no longer
+    # discarded) solely to bridge the pre_mark_retention_option_dailies honesty
+    # caveat into the Finding-3 flag union below — single-key parity. Empty when
+    # the smoothed pass does not run (SC-4: nothing smoothed-flavoured touches a
+    # no-option composite).
+    smoothed_member_metas: list[dict[str, Any]] = []
     if smoothed_ok:
         smoothed_result = await _reconstruct_all(PNL_BASIS_SMOOTHED_MTM)
         if isinstance(smoothed_result, DispatchResult):
@@ -5521,6 +5544,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         clipped_smoothed, _sm_signals, _sm_venues, _sm_metas, _sm_degraded = (
             smoothed_result
         )
+        smoothed_member_metas = list(_sm_metas)
         # Degraded-member invariant (mirror the MTM pass): the smoothed pass must
         # exclude the SAME members as the authoritative cash pass, else the bases would
         # be computed over different member sets. Compare against degraded_members (the
@@ -5688,6 +5712,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         # a member whose NAV denominator fell back to a heuristic capital base.
         if _member_meta.get("used_heuristic_capital"):
             member_warn_flags["used_heuristic_capital"] = True
+            member_warned = True
+    # MED-01 (132 review): union the ONE smoothed-owned caveat from the smoothed-
+    # pass metas — the pre_mark_retention_option_dailies bucket bridged in
+    # _reconstruct_deribit (registered in NAV_TWR_GUARD_KEYS; single-key parity:
+    # the identical book gets this complete_with_warnings caveat as a single key).
+    # NARROW by design: every OTHER smoothed-pass guard flag stays discarded — the
+    # cash-pass metas remain authoritative (mirroring the MTM Finding-9 discard).
+    for _sm_meta in smoothed_member_metas:
+        if _sm_meta.get("pre_mark_retention_option_dailies"):
+            member_warn_flags["pre_mark_retention_option_dailies"] = True
             member_warned = True
 
     # HARD-05: a composite MISSING a member (a degraded ccxt member) IS warn-worthy —

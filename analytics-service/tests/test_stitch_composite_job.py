@@ -1114,6 +1114,84 @@ async def test_smoothed_composite_per_leg_failure_fails_job_loud() -> None:
 
 
 @pytest.mark.asyncio
+async def test_composite_pre_mark_retention_stamps_complete_with_warnings() -> None:
+    """MED-01 (132 review) — composite sibling of the single-key
+    test_pre_mark_retention_stamps_complete_with_warnings: a composite whose options
+    leg's SMOOTHED completeness report carries pre_mark_retention_option_days (marks
+    aged past the ~2.5yr retention horizon → those (day, ccy) buckets fell back to
+    cash-basis) must stamp the pre_mark_retention_option_dailies warn flag →
+    complete_with_warnings. Previously the composite discarded the smoothed metas and
+    the Finding-3 union ran over cash-pass metas only, so the identical book got the
+    honesty caveat as a single key but NOT as a composite leg — two disclosure levels
+    on the same public factsheet surface. The bucket rides ONLY the smoothed-basis
+    report (production: marks are fetched only in the smoothed pass) — an
+    implementation reading the cash-pass report finds no bucket → RED. The smoothed
+    metas' OTHER guard flags stay discarded (cash-pass metas remain authoritative) —
+    pinned by the smoothed-only twr_chain_broken NOT stamping."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    _report_plain = CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,
+    )
+    _report_retention = CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,
+        pre_mark_retention_option_days=[("BTC", "2022-01-03")],
+    )
+
+    async def _build(*_a: Any, **k: Any) -> Any:
+        # ONLY the smoothed pass surfaces the pre-retention bucket (the cash pass
+        # never fetches marks) — mirrors production, keeps the stamp basis-gated.
+        if k.get("pnl_basis") == "smoothed_mtm":
+            return (_stub_ledger(), _report_retention)
+        return (_stub_ledger(), _report_plain)
+
+    patches = _deribit_patches(
+        fake,
+        # cash pass (m1, m2) then smoothed pass (m1, m2); the smoothed metas' other
+        # guard flags (twr_chain_broken) must stay DISCARDED (cash authoritative).
+        combine_returns=[
+            (m1, {}), (m2, {}),
+            (m1, {"twr_chain_broken": True}), (m2, {}),
+        ],
+        has_option_activity=True,
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger",
+        new=AsyncMock(side_effect=_build),
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    headline = None
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and "metrics_json_by_basis" in payload
+        ):
+            headline = payload
+            break
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert dq.get("pre_mark_retention_option_dailies") is True, (
+        "the smoothed pass's pre-retention bucket must stamp the warn flag on the "
+        "composite (single-key parity — same data, same disclosure)"
+    )
+    assert headline["computation_status"] == "complete_with_warnings"
+    assert headline["computation_warned"] is True
+    # Narrow union: ONLY the retention caveat crosses over from the smoothed metas.
+    assert dq.get("twr_chain_broken") is None, (
+        "smoothed-pass guard flags other than the retention caveat must stay "
+        "discarded — the cash-pass metas are authoritative"
+    )
+
+
+@pytest.mark.asyncio
 async def test_dq_flags_merge_preserves_existing_key() -> None:
     """The additive DQ-flag write MERGES (read-modify-write) — a pre-existing
     flag key set by the headline CSV run survives the composite coverage-mask
