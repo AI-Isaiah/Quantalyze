@@ -32,7 +32,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 import ccxt
@@ -43,7 +43,9 @@ from services.deribit_txn import (
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     DEFAULT_PNL_BASIS,
     PNL_BASIS_MARK_TO_MARKET,
+    PNL_BASIS_SMOOTHED_MTM,
     _day_ccy_own_index,
+    _iter_utc_days,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
     _row_is_cash_bearing,
@@ -51,6 +53,8 @@ from services.deribit_txn import (
     classify_instrument,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
+    option_mtm_daily,
+    replay_option_positions,
     txn_rows_to_daily_records,
     txn_rows_to_native_daily,
 )
@@ -861,6 +865,21 @@ class CompletenessReport:
     # channel and no "pre-coverage fallback" (every option row books its raw cash
     # ``change`` by design), so the adapter suppresses this list entirely.
     pre_coverage_option_days: list[tuple[str, str]] = field(default_factory=list)
+    # Phase 131 (SMOOTHED_MTM basis only) — sorted-unique ``(currency, utc_day)``
+    # buckets for option instruments whose ENTIRE listed life predates the venue's
+    # ~2.5yr 1D-chart retention horizon (wholly-empty marks response AND expiry
+    # older than the horizon). Those instruments contribute NO daily ΔMTM (their
+    # days stay cash-basis ``change``); the worker stamps this as the
+    # ``pre_mark_retention_option_dailies`` warning (complete_with_warnings) in
+    # 131-02. A crawl artifact computed in ``build_deribit_native_ledger`` from the
+    # raw rows + the per-instrument marks probe. Empty for perp-only / fully-marked
+    # accounts — and ALWAYS empty under cash_settlement / mark_to_market (no ΔMTM
+    # channel, so no retention partition), keeping those bases byte-identical
+    # (SC-4). A retention-STRADDLING instrument (partial marks) is NEVER bucketed
+    # here — its head hole fails the ledger build loud (the D-07 consequence).
+    pre_mark_retention_option_days: list[tuple[str, str]] = field(
+        default_factory=list
+    )
     # CR-01 — sorted currencies EXEMPTED from the strict balance-identity guard
     # because their option book is provably OPEN at crawl (nonzero
     # ``native_options_value``) or has trailing option activity past the last
@@ -1852,6 +1871,96 @@ async def _build_dense_native_marks(
     return marks
 
 
+# Phase 131 — Deribit's public ``get_tradingview_chart_data`` 1D series retains
+# roughly 2.5 years of daily bars for expired option instruments (M7 live probe:
+# 401 daily bars each on Dec-24…Sep-25-expiry BTC options). An instrument whose
+# WHOLE listed life predates this horizon returns a wholly-empty 1D response —
+# that is the ONLY case that stays cash-basis (bounded fallback, Q4). An
+# instrument expiring INSIDE the horizon with no bars is a STRUCTURAL hole →
+# fail loud (never a silent cash fallback). ~2.5yr = 913 days.
+_OPTION_MARK_RETENTION_DAYS: int = 913
+# The dated-expiry segment of a Deribit option name, e.g. ``BTC-27JUN25-100000-C``
+# / ``BTC_USDC-27MAR26-50000-P`` → ``27JUN25``. Mid-name (unlike the ``$``-anchored
+# future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
+# strike + right suffix after the expiry.
+_OPTION_EXPIRY_RE: re.Pattern[str] = re.compile(r"-(\d{1,2}[A-Z]{3}\d{2})-")
+
+
+def _option_expiry_iso(instrument: str) -> str | None:
+    """The UTC-day ISO expiry (``YYYY-MM-DD``) parsed from a Deribit option
+    instrument name, or ``None`` if the name carries no dated-expiry segment.
+    Never guessed — the expiry caps the marks fetch span (never fetch past it) and
+    keys the pre-retention partition. Pure / never raises on untrusted input."""
+    match = _OPTION_EXPIRY_RE.search(instrument.upper())
+    if match is None:
+        return None
+    try:
+        return (
+            datetime.strptime(match.group(1), "%d%b%y")
+            .replace(tzinfo=timezone.utc)
+            .date()
+            .isoformat()
+        )
+    except ValueError:
+        return None
+
+
+async def _build_smoothed_option_mtm(
+    exchange: Any,
+    raw_rows: Sequence[Mapping[str, Any]],
+    *,
+    sleep: SleepFn,
+) -> tuple[dict[str, dict[str, float]], dict[str, float], list[tuple[str, str]]]:
+    """SMOOTHED_MTM ΔMTM channel (Task 4). Replay the option book, fetch each held
+    instrument's daily marks (ONE expiry-capped request per instrument), partition
+    off the pre-retention instruments (wholly-empty marks AND expiry older than the
+    ~2.5yr horizon → cash-basis bucket), and feed the rest to the PURE
+    ``option_mtm_daily`` (which fails loud on any hole inside a listed life —
+    including retention STRADDLERS, whose partial marks are never bucketed).
+
+    Returns ``(delta_mtm, terminal_book, pre_mark_retention_option_days)``. The
+    terminal book feeds the Task-5 book-channel anchor guard. Pure-core fail-loud
+    (``LedgerValuationError``) propagates verbatim — never swallowed."""
+    positions = replay_option_positions(raw_rows)
+    if not positions:
+        return {}, {}, []
+    today = _today_utc_iso()
+    retention_cutoff = (
+        datetime.strptime(today, "%Y-%m-%d")
+        - timedelta(days=_OPTION_MARK_RETENTION_DAYS)
+    ).date().isoformat()
+
+    kept_positions: dict[str, Mapping[str, Any]] = {}
+    marks: dict[str, dict[str, float]] = {}
+    pre_retention: set[tuple[str, str]] = set()
+    for instrument in sorted(positions):
+        info = positions[instrument]
+        first_day = str(info["first_day"])
+        last_day = str(info["last_day"])
+        expiry = _option_expiry_iso(instrument)
+        # Never fetch past expiry (a position cannot outlive its expiry, and the
+        # source only lists bars within the instrument's life).
+        newest = last_day if expiry is None else min(last_day, expiry)
+        instr_marks = await fetch_deribit_option_daily_marks(
+            exchange, instrument, oldest_day=first_day, newest_day=newest, sleep=sleep
+        )
+        # Partition on WHOLLY-empty AND expiry-past-retention (both required). Any
+        # other empty/holed response — in-retention wholly-empty, OR a straddler's
+        # PARTIAL (nonempty) marks — is KEPT so ``option_mtm_daily`` fails loud on
+        # the structural hole (D-07). A straddler is never wholly-empty (it returns
+        # partial marks) → never bucketed here.
+        if not instr_marks and expiry is not None and expiry < retention_cutoff:
+            ccy = str(info["currency"]).upper()
+            for day in info["positions"]:
+                pre_retention.add((ccy, day))
+            continue
+        kept_positions[instrument] = info
+        marks[instrument] = instr_marks
+
+    delta_mtm, terminal_book = option_mtm_daily(kept_positions, marks)
+    return delta_mtm, terminal_book, sorted(pre_retention)
+
+
 async def build_deribit_native_ledger(
     exchange: Any,
     since_ms: int | None = None,
@@ -1904,9 +2013,30 @@ async def build_deribit_native_ledger(
     native_daily = txn_rows_to_native_daily(
         raw_rows, pnl_basis=pnl_basis, exclude_spot_extraction=exclude_spot_extraction
     )
+    # ``native_daily`` is the CASH channel (option rows on FULL change; summary
+    # inert). It is the reference the STRICT balance-identity cash channel reconciles
+    # against (Σ==Σchange) BELOW — so keep it pre-merge. Under SMOOTHED_MTM the
+    # per-(day,ccy) ΔMTM book is merged into a SEPARATE ``series_daily`` dict that
+    # feeds the native_pnl series (and thus the dense-mark span); the book channel
+    # reconciles the ΔMTM terminal book against the anchor (Task 5). For every other
+    # basis ``series_daily is native_daily`` → byte-identical (SC-4).
+    series_daily = native_daily
+    smoothed_terminal_book: dict[str, float] = {}
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and deribit_raw_rows_have_option_activity(
+        raw_rows
+    ):
+        delta_mtm, smoothed_terminal_book, pre_retention = (
+            await _build_smoothed_option_mtm(exchange, raw_rows, sleep=sleep)
+        )
+        report.pre_mark_retention_option_days = pre_retention
+        series_daily = {ccy: dict(days) for ccy, days in native_daily.items()}
+        for ccy, day_map in delta_mtm.items():
+            bucket = series_daily.setdefault(ccy, {})
+            for day, change in day_map.items():
+                bucket[day] = bucket.get(day, 0.0) + change
     native_pnl: dict[str, pd.Series] = {
         ccy: _native_daily_to_series(day_map)
-        for ccy, day_map in native_daily.items()
+        for ccy, day_map in series_daily.items()
     }
     native_flows = report.dated_external_flows
     # Phase 86 (COMP-04) MTM-gate signal — additive crawl artifact set from the RAW
