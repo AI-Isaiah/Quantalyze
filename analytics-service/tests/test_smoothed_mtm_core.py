@@ -204,6 +204,7 @@ class _OptionsAdapterStub:
         self._charts = charts
         self._index_price = index_price
         self.chart_calls: list[str] = []
+        self.chart_params: list[dict[str, Any]] = []
 
     async def private_get_get_account_summaries(self, params: Any) -> Any:
         return {"result": {"summaries": self._summaries}}
@@ -212,15 +213,29 @@ class _OptionsAdapterStub:
         return {"result": {"index_price": self._index_price}}
 
     async def public_get_get_tradingview_chart_data(self, params: Any) -> Any:
+        # CR-01: the stub RESPECTS start_timestamp/end_timestamp and stamps bars
+        # at 08:00 UTC exactly as Deribit does (M7 evidence: bar_stamp_utc 08:00).
+        # The original stub ignored the requested range entirely — which is how
+        # the midnight end-bound bug (newest day's 08:00 bar never fetched)
+        # stayed test-blessed.
         self.chart_calls.append(str(params.get("instrument_name")))
+        self.chart_params.append(dict(params))
         marks = self._charts.get(str(params.get("instrument_name")), {})
-        if not marks:
+        start = int(params["start_timestamp"])
+        end = int(params["end_timestamp"])
+        bars = sorted(
+            (int(pd.Timestamp(f"{d}T08:00:00", tz="UTC").timestamp() * 1000), px)
+            for d, px in marks.items()
+        )
+        in_range = [(ts, px) for ts, px in bars if start <= ts <= end]
+        if not in_range:
             return {"result": {"status": "no_data", "ticks": [], "close": []}}
-        ticks = [
-            int(pd.Timestamp(d, tz="UTC").timestamp() * 1000) for d in marks
-        ]
         return {
-            "result": {"status": "ok", "ticks": ticks, "close": list(marks.values())}
+            "result": {
+                "status": "ok",
+                "ticks": [ts for ts, _ in in_range],
+                "close": [px for _, px in in_range],
+            }
         }
 
 

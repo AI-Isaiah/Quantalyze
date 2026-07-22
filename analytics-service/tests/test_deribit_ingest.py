@@ -3795,13 +3795,69 @@ async def test_option_daily_marks_bounds_from_oldest_and_newest_day() -> None:
         sleep=_SleepSpy(),
     )
     # Bounds derive from oldest_day / newest_day — never `now()`. newest_day caps
-    # the span at expiry (never fetch past it).
+    # the span at expiry (never fetch past it). CR-01: the END bound is
+    # newest_day + 24h, NOT newest_day 00:00 — Deribit stamps 1D bars at 08:00
+    # UTC (M7 evidence), so a midnight end bound would exclude newest_day's OWN
+    # bar and a single open position could never be marked on its last held day.
     assert stub.calls[0]["start_timestamp"] == int(
         pd.Timestamp("2025-06-01", tz="UTC").timestamp() * 1000
     )
     assert stub.calls[0]["end_timestamp"] == int(
         pd.Timestamp("2025-06-27", tz="UTC").timestamp() * 1000
+    ) + 24 * 3600 * 1000
+
+
+class _RangeRespectingChartStub:
+    """A chart stub that RESPECTS start_timestamp/end_timestamp — bars stamped at
+    08:00 UTC exactly as Deribit does (M7 evidence: `bar_stamp_utc: 08:00`). The
+    original scripted stubs ignored the requested range, which is precisely how
+    the CR-01 end-bound bug stayed test-blessed."""
+
+    def __init__(self, day_price: dict[str, float]) -> None:
+        import pandas as pd
+
+        self._bars = {
+            int(
+                pd.Timestamp(f"{d}T08:00:00", tz="UTC").timestamp() * 1000
+            ): p
+            for d, p in day_price.items()
+        }
+        self.calls: list[dict[str, Any]] = []
+
+    async def public_get_get_tradingview_chart_data(
+        self, params: dict[str, Any]
+    ) -> Any:
+        self.calls.append(dict(params))
+        start = int(params["start_timestamp"])
+        end = int(params["end_timestamp"])
+        ticks = sorted(ts for ts in self._bars if start <= ts <= end)
+        if not ticks:
+            return {"result": {"status": "no_data", "ticks": [], "close": []}}
+        return {
+            "result": {
+                "status": "ok",
+                "ticks": ticks,
+                "close": [self._bars[ts] for ts in ticks],
+            }
+        }
+
+
+async def test_option_daily_marks_newest_day_0800_bar_included() -> None:
+    """CR-01 regression: Deribit ticks 1D bars at 08:00 UTC, so the bar for
+    ``newest_day`` itself lives at ``newest_day 08:00`` — PAST a midnight end
+    bound. Against a range-RESPECTING stub, a single-day window ``[T, T]`` (one
+    open position, no later events) must still return day T's bar; under the old
+    ``newest_day 00:00`` bound it returned ZERO bars and the D-07 hole guard
+    hard-failed a healthy account."""
+    stub = _RangeRespectingChartStub({"2026-07-20": 0.031})
+    marks = await di.fetch_deribit_option_daily_marks(
+        stub,
+        "BTC-27MAR26-50000-C",
+        oldest_day="2026-07-20",
+        newest_day="2026-07-20",
+        sleep=_SleepSpy(),
     )
+    assert marks == {"2026-07-20": 0.031}
 
 
 async def test_option_daily_marks_skips_nonpositive_close() -> None:

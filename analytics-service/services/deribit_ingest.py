@@ -705,7 +705,7 @@ async def fetch_deribit_option_daily_marks(
 ) -> dict[str, float]:
     """Per-UTC-day mark for a single OPTION ``instrument`` from the DAILY CLOSE of
     Deribit's public ``get_tradingview_chart_data`` endpoint (``resolution=1D``),
-    for ``[oldest_day 00:00 UTC, newest_day 00:00 UTC]``.
+    for ``[oldest_day 00:00 UTC, newest_day 24:00 UTC]``.
 
     Greenfield clone of :func:`fetch_deribit_perp_daily_index` (same public
     endpoint, same tick→UTC-day dedupe, same read-error discipline) with two
@@ -730,7 +730,18 @@ async def fetch_deribit_option_daily_marks(
     Every ccxt error is scrubbed before logging.
     """
     start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
-    end_ms = int(pd.Timestamp(newest_day, tz="UTC").timestamp() * 1000)
+    # CR-01: Deribit stamps 1D bars at 08:00 UTC (M7 evidence: bar_stamp_utc
+    # 08:00), so ``newest_day``'s OWN bar lives at ``newest_day 08:00`` — PAST a
+    # midnight end bound. End at ``newest_day + 24h`` so the newest needed bar is
+    # always covered (the sibling perp fetcher achieves the same by ending at
+    # ``now()``); the NEXT day's 08:00 bar stays excluded, so the expiry cap is
+    # preserved. With the old ``newest_day 00:00`` bound a single open position
+    # (window ``[T, T]``) returned ZERO bars and the D-07 hole guard hard-failed
+    # a perfectly healthy account.
+    end_ms = (
+        int(pd.Timestamp(newest_day, tz="UTC").timestamp() * 1000)
+        + 24 * 3600 * 1000
+    )
     params: dict[str, Any] = {
         "instrument_name": instrument,
         "start_timestamp": start_ms,
