@@ -3921,6 +3921,49 @@ async def test_option_daily_marks_structural_nodata_returns_empty() -> None:
     assert len(stub.calls) == 1  # structural → NOT retried
 
 
+def test_option_expiry_iso_locale_independent() -> None:
+    """IN-02: ``strptime(%d%b%y)`` parses the LOCALE's month abbreviations —
+    under a non-C ``LC_TIME`` (de_DE: MAR/OCT/DEC fail) the expiry silently
+    parses to ``None``, the pre-retention partition can never bucket, and old
+    wholly-empty instruments hard-fail instead of warning. The parser must use
+    an explicit month map (no other services/ code uses ``%b``)."""
+    import locale
+
+    saved = locale.setlocale(locale.LC_TIME)
+    chosen = None
+    for cand in ("de_DE.UTF-8", "de_DE.utf8", "de_DE"):
+        try:
+            locale.setlocale(locale.LC_TIME, cand)
+            chosen = cand
+            break
+        except locale.Error:
+            continue
+    if chosen is None:
+        pytest.skip("no de_DE locale installed to prove locale-independence")
+    try:
+        assert di._option_expiry_iso("BTC-27MAR26-50000-C") == "2026-03-27"
+        assert di._option_expiry_iso("BTC-31OCT25-60000-P") == "2025-10-31"
+        assert di._option_expiry_iso("BTC-19DEC25-90000-C") == "2025-12-19"
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)
+
+
+def test_option_expiry_iso_all_months_and_rejections() -> None:
+    """IN-02 companion (runs everywhere): all 12 month tokens parse, 1- and
+    2-digit days parse, and a nonsense token / impossible date / non-dated
+    instrument stays ``None`` (never raises on untrusted input)."""
+    months = [
+        "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
+    ]
+    for i, mon in enumerate(months, start=1):
+        assert di._option_expiry_iso(f"BTC-15{mon}26-50000-C") == f"2026-{i:02d}-15"
+    assert di._option_expiry_iso("BTC-1SEP25-90000-P") == "2025-09-01"
+    assert di._option_expiry_iso("BTC-30FEB26-50000-C") is None  # impossible date
+    assert di._option_expiry_iso("BTC-15XXX26-50000-C") is None  # unknown month
+    assert di._option_expiry_iso("BTC-PERPETUAL") is None  # no dated segment
+
+
 async def test_option_daily_marks_transient_raises_retryable() -> None:
     # A NetworkError is RETRYABLE: retry with backoff, then raise
     # DeribitTransientReadError on budget exhaustion — never a silently-partial map.

@@ -32,7 +32,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 import ccxt
@@ -1923,23 +1923,32 @@ _OPTION_MARK_RETENTION_DAYS: int = 913
 # future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
 # strike + right suffix after the expiry.
 _OPTION_EXPIRY_RE: re.Pattern[str] = re.compile(r"-(\d{1,2}[A-Z]{3}\d{2})-")
+# IN-02: Deribit's month tokens are ENGLISH constants — never parse them with
+# ``strptime(%b)``, which consults the process locale (de_DE: MAR/OCT/DEC fail →
+# expiry None → the pre-retention partition can never bucket and old
+# wholly-empty instruments hard-fail instead of warning). No other services/
+# code uses ``%b``.
+_OPTION_EXPIRY_MONTHS: dict[str, int] = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
 
 
 def _option_expiry_iso(instrument: str) -> str | None:
     """The UTC-day ISO expiry (``YYYY-MM-DD``) parsed from a Deribit option
     instrument name, or ``None`` if the name carries no dated-expiry segment.
     Never guessed — the expiry caps the marks fetch span (never fetch past it) and
-    keys the pre-retention partition. Pure / never raises on untrusted input."""
+    keys the pre-retention partition. Locale-independent (explicit English month
+    map — IN-02). Pure / never raises on untrusted input."""
     match = _OPTION_EXPIRY_RE.search(instrument.upper())
     if match is None:
         return None
+    token = match.group(1)  # e.g. "27JUN25": day (1-2 digits), month, 2-digit year
+    month = _OPTION_EXPIRY_MONTHS.get(token[-5:-2])
+    if month is None:
+        return None
     try:
-        return (
-            datetime.strptime(match.group(1), "%d%b%y")
-            .replace(tzinfo=timezone.utc)
-            .date()
-            .isoformat()
-        )
+        return date(2000 + int(token[-2:]), month, int(token[:-5])).isoformat()
     except ValueError:
         return None
 
