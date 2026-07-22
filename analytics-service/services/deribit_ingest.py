@@ -690,6 +690,102 @@ async def fetch_deribit_perp_daily_index(
     return prices
 
 
+async def fetch_deribit_option_daily_marks(
+    exchange: Any,
+    instrument: str,
+    *,
+    oldest_day: str,
+    newest_day: str,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> dict[str, float]:
+    """Per-UTC-day mark for a single OPTION ``instrument`` from the DAILY CLOSE of
+    Deribit's public ``get_tradingview_chart_data`` endpoint (``resolution=1D``),
+    for ``[oldest_day 00:00 UTC, newest_day 00:00 UTC]``.
+
+    Greenfield clone of :func:`fetch_deribit_perp_daily_index` (same public
+    endpoint, same tick→UTC-day dedupe, same read-error discipline) with two
+    deliberate differences for the daily-option-MTM (``smoothed_mtm``) basis:
+
+    * The ``instrument`` name is taken VERBATIM — no suffix synthesis. Callers pass
+      the exact expired-option instrument (e.g. ``BTC-27JUN25-100000-C``), the
+      1D-chart source PROVEN to serve daily closes for long-expired options
+      (Phase 131 probe: 4 expired BTC options, status=ok, 401 daily bars each).
+    * An EXPLICIT ``newest_day`` caps the fetched span at the instrument's
+      expiry — never fetch past expiry (a position cannot outlive its expiry, and
+      the source only lists a bar within the instrument's life).
+
+    This function stays an HONEST fetch, exactly like its sibling: a TRANSIENT read
+    is retried with exponential backoff and RAISES ``DeribitTransientReadError`` on
+    ``max_retries`` exhaustion (retryable) — NEVER a silently-partial map; a GENUINE
+    benign no-data (the exchange RESPONDED — ``BadSymbol`` or ``status != "ok"``)
+    returns ``{}``. The STRUCTURAL-gap / fail-loud decision (a hole inside a listed
+    instrument's held life → ``LedgerValuationError``) belongs to the CALLER
+    (``option_mtm_daily`` in ``deribit_txn.py``), not to this fetch. A 1D series
+    spans at most a few thousand points, so ONE request suffices (no pagination).
+    Every ccxt error is scrubbed before logging.
+    """
+    start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
+    end_ms = int(pd.Timestamp(newest_day, tz="UTC").timestamp() * 1000)
+    params: dict[str, Any] = {
+        "instrument_name": instrument,
+        "start_timestamp": start_ms,
+        "end_timestamp": end_ms,
+        "resolution": _PERP_DAILY_RESOLUTION,
+    }
+    retries = 0
+    while True:
+        try:
+            resp = await exchange.public_get_get_tradingview_chart_data(params)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if _is_transient_read_error(exc):
+                retries += 1
+                if retries > max_retries:
+                    raise DeribitTransientReadError(
+                        "deribit get_tradingview_chart_data transient read budget "
+                        f"({max_retries}) exhausted for instrument={instrument} — "
+                        "refusing a silently-partial daily-mark map (retryable)"
+                    ) from None
+                await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+                continue
+            logger.warning(
+                "deribit get_tradingview_chart_data structural no-data for "
+                "instrument=%s (%s); returning no daily marks",
+                instrument,
+                scrub_freeform_string(str(exc)),
+            )
+            return {}
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
+    if not isinstance(result, Mapping) or result.get("status") != "ok":
+        return {}
+    ticks = result.get("ticks", [])
+    close = result.get("close", [])
+    if (
+        not isinstance(ticks, Sequence)
+        or isinstance(ticks, (str, bytes))
+        or not isinstance(close, Sequence)
+        or isinstance(close, (str, bytes))
+        or len(ticks) != len(close)
+    ):
+        return {}
+    marks: dict[str, float] = {}
+    for raw_ts, raw_price in zip(ticks, close):
+        try:
+            ts_ms = int(raw_ts)
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+        # One 1D bar per UTC day; setdefault keeps the FIRST (defensive vs a dupe).
+        marks.setdefault(day, price)
+    return marks
+
+
 def _price_map_has_gap(
     price_map: Mapping[str, float], oldest_day: str, newest_day: str
 ) -> bool:
