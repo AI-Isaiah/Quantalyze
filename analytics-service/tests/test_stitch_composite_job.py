@@ -39,6 +39,7 @@ from services.metrics import (
     periods_per_year_for_asset_class,
 )
 from services.stitch_composite import MTM_REASON_OPTIONS
+from services.deribit_txn import LedgerValuationError
 
 
 # ---------------------------------------------------------------------------
@@ -359,14 +360,37 @@ def _deribit_patches(
 ) -> list:
     """Patch set driving run_stitch_composite_job over stubbed per-key ledgers.
     ``combine_returns`` is the (returns, meta) each combine_native_ledger call
-    yields in seq order (cash pass, then MTM pass if the gate opens)."""
+    yields in seq order (cash pass, then MTM pass if the gate opens).
+
+    Phase 132: an options book (``has_option_activity=True``) additionally runs the
+    smoothed_mtm THIRD pass, which re-crawls the SAME Deribit members in the same order
+    (combine is fully mocked here, so its stub output is basis-independent). Rather than
+    force every options-composite caller to hand-double its ``combine_returns``, the
+    harness REPEATS the provided sequence for the smoothed fan-out — deterministic and
+    order-preserving within each pass. Callers still size ``combine_returns`` for ONE
+    Deribit fan-out; the doubling is transparent. (Perp-only composites run cash + MTM
+    and are unchanged — their callers already provide both passes explicitly.)"""
     report = CompletenessReport(
         total_return_rows=2,
         indexable_currencies=frozenset({"BTC"}),
         has_option_activity=has_option_activity,
     )
+    _combine_side_effects = (
+        list(combine_returns) + list(combine_returns)
+        if has_option_activity
+        else list(combine_returns)
+    )
     if preflight_side_effect is not None:
-        preflight = AsyncMock(side_effect=preflight_side_effect)
+        # Phase 132: the smoothed_mtm THIRD pass re-crawls the SAME members (its own
+        # per-member preflight fan-out), so an options composite consumes the preflight
+        # side-effect list TWICE. Repeat it for has_option_activity so a per-member
+        # preflight list sized for one fan-out still resolves the smoothed re-crawl.
+        _preflight_effects = (
+            list(preflight_side_effect) + list(preflight_side_effect)
+            if has_option_activity and isinstance(preflight_side_effect, list)
+            else preflight_side_effect
+        )
+        preflight = AsyncMock(side_effect=_preflight_effects)
     else:
         preflight = AsyncMock(return_value=_ctx(ctx_exchange))
     return [
@@ -390,7 +414,7 @@ def _deribit_patches(
         patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
         patch(
             "services.broker_dailies.combine_native_ledger",
-            new=MagicMock(side_effect=list(combine_returns)),
+            new=MagicMock(side_effect=_combine_side_effects),
         ),
         patch(
             "services.analytics_runner.run_csv_strategy_analytics",
@@ -587,7 +611,9 @@ async def test_deribit_member_reconstruction_runs_off_event_loop() -> None:
 
     def _combine(*_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
         seen_threads.append(threading.get_ident())
-        return _series[len(seen_threads) - 1], {}
+        # Phase 132: an options composite runs cash + smoothed passes → the two members
+        # are combined twice each; cycle the 2-series fixture across the 4 calls.
+        return _series[(len(seen_threads) - 1) % len(_series)], {}
 
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-02-01"),
@@ -605,7 +631,8 @@ async def test_deribit_member_reconstruction_runs_off_event_loop() -> None:
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
 
     assert result.outcome == DispatchOutcome.DONE
-    assert len(seen_threads) == 2, "both members' cash-pass combine must run"
+    # Phase 132: 2 members × (cash pass + smoothed pass) = 4 off-loop combines.
+    assert len(seen_threads) == 4, "both members' cash + smoothed combines must run"
     assert all(t != loop_thread_id for t in seen_threads), (
         "combine_native_ledger ran on the event-loop thread — it MUST be offloaded "
         "via asyncio.to_thread (WEDGE-01) so CPU-bound pandas cannot starve the "
@@ -921,7 +948,9 @@ async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
         await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     by_basis = _by_basis(fake)
     assert by_basis is not None
-    assert list(by_basis) == ["cash_settlement"]  # exactly one key, no null
+    # Phase 132: an options composite now ALSO persists smoothed_mtm (smoothing OPENS
+    # what MTM keeps closed); cash_settlement + smoothed_mtm, still NO mark_to_market.
+    assert set(by_basis) == {"cash_settlement", "smoothed_mtm"}
     # Phase 102 MTM-02 (Option A, COMPOSE-2): an options-member composite persists
     # NO mark_to_market key (never a JSON null in the by-basis object) — the honest-
     # disabled contract, tied to the value-imported constant (rename-decouple guard).
@@ -936,6 +965,152 @@ async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
             break
     assert dq is not None
     assert dq.get("mtm_gated_reason") == MTM_REASON_OPTIONS == "unsmoothed_options_book"
+
+
+# ── Phase 132 (SMTM-01): the composite smoothed_mtm THIRD pass OPENS the gate ────
+
+
+@pytest.mark.asyncio
+async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
+    """THE PHASE POINT (composite): an options-member composite keeps mark_to_market
+    honestly GATED OFF (reason unsmoothed_options_book, key ABSENT) YET persists a
+    smoothed_mtm basis — smoothed OPENS what the MTM gate keeps closed. The by-basis
+    object is {cash_settlement, smoothed_mtm}; the mtm gate reason is UNCHANGED. Neuter
+    (skip the smoothed pass / let smoothed 'fix' the mtm reason) → RED."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # cash pass (m1, m2) then SMOOTHED pass (m1, m2) → 4 combine calls (MTM gated off).
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,
+    )))
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=True,  # MTM gate CLOSED; smoothed gate OPEN
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert set(by_basis) == {"cash_settlement", "smoothed_mtm"}, (
+        "an options composite persists cash + smoothed_mtm; MTM stays gated off"
+    )
+    assert "mark_to_market" not in by_basis  # never JSON null; honestly gated off
+    # The MTM gate decision is BYTE-UNCHANGED — the reason stays unsmoothed_options_book.
+    dq = None
+    for table, payload, _ in reversed(fake.upserts):
+        if table == "strategy_analytics" and isinstance(payload, dict) \
+                and "data_quality_flags" in payload \
+                and "metrics_json_by_basis" in payload:
+            dq = payload["data_quality_flags"]
+            break
+    assert dq is not None
+    assert dq.get("mtm_gated_reason") == MTM_REASON_OPTIONS == "unsmoothed_options_book"
+    # The smoothed pass built the ledger with the smoothed_mtm basis.
+    smoothed_calls = [
+        c for c in build_spy.await_args_list
+        if c.kwargs.get("pnl_basis") == "smoothed_mtm"
+    ]
+    assert smoothed_calls, "options composite must run a smoothed_mtm ledger pass"
+
+
+@pytest.mark.asyncio
+async def test_perp_only_composite_persists_no_smoothed_artifacts() -> None:
+    """SC-4 (composite): a perp-only (no option activity) composite persists NO
+    smoothed_mtm artifacts — the by-basis object is {cash_settlement, mark_to_market}
+    (MTM gate OPEN), smoothed_mtm ABSENT, and NO smoothed_mtm series row is written.
+    Neuter (run the smoothed pass unconditionally) → RED."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=False,
+    )))
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=False,  # MTM gate OPEN; smoothed gate CLOSED (no options)
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert set(by_basis) == {"cash_settlement", "mark_to_market"}, (
+        "a perp-only composite persists NO smoothed_mtm (SC-4)"
+    )
+    assert "smoothed_mtm" not in by_basis
+    # No smoothed_mtm ledger pass was run.
+    assert not any(
+        c.kwargs.get("pnl_basis") == "smoothed_mtm"
+        for c in build_spy.await_args_list
+    ), "a no-option composite must NOT run a smoothed_mtm ledger pass"
+
+
+@pytest.mark.asyncio
+async def test_smoothed_composite_per_leg_failure_fails_job_loud() -> None:
+    """FAIL-LOUD (composite): a per-leg smoothed reconstruction failure
+    (LedgerValuationError on the smoothed_mtm crawl — holed marks / retention straddle)
+    fails the WHOLE composite job PERMANENT with a terminal stamp — it does NOT silently
+    close the smoothed gate, degrade to two bases, or persist a partial smoothed
+    composite. Neuter (catch-and-degrade the smoothed leg) → RED."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    _report_opt = CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,
+    )
+
+    async def _build(*_a: Any, **k: Any) -> Any:
+        # The smoothed (third) pass's per-leg build raises a holed-marks failure.
+        if k.get("pnl_basis") == "smoothed_mtm":
+            raise LedgerValuationError(
+                "instrument BTC-27JUN25-100000-C straddles the mark-retention horizon"
+            )
+        return (_stub_ledger(), _report_opt)
+
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=True,
+    )
+    with _apply(patches), patch(
+        "services.deribit_ingest.build_deribit_native_ledger",
+        new=AsyncMock(side_effect=_build),
+    ):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "a holed-marks smoothed leg is structural/permanent, not a retry"
+    )
+    # Terminal 'failed' stamp so the wizard poller reaches a gate.
+    assert any(
+        isinstance(p, dict) and p.get("computation_status") == "failed"
+        for _t, p, _c in fake.upserts
+    ), "a failed smoothed leg must stamp a terminal failed row"
+    # NO silent two-basis fallback: no by-basis object shipped.
+    assert not any(
+        isinstance(p, dict) and "metrics_json_by_basis" in p
+        for _t, p, _c in fake.upserts
+    ), "a failed smoothed leg must NOT persist a partial by-basis object"
 
 
 @pytest.mark.asyncio

@@ -4265,6 +4265,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         clip_to_window,
         coverage_mask,
         mark_to_market_available,
+        smoothed_mtm_available,
         stitch_clipped_series,
     )
     from services.broker_dailies import (
@@ -4283,6 +4284,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     from services.deribit_txn import (
         DEFAULT_PNL_BASIS,
         PNL_BASIS_MARK_TO_MARKET,
+        PNL_BASIS_SMOOTHED_MTM,
         LedgerValuationError,
     )
     from services.allocated_capital import (
@@ -5410,6 +5412,101 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 error_kind="permanent",
             )
 
+    # 6b. SMTM-01 (Phase 132): additive smoothed_mtm THIRD pass. A SEPARATE
+    # availability decision (smoothed_mtm_available) that OPENS exactly what the MTM
+    # gate honestly keeps closed on an un-smoothed options book — it keys on
+    # option-activity ALONE and does NOT consult or mutate mtm_ok / mtm_reason (the MTM
+    # gate decision above stays byte-identical). Mirrors the MTM second pass: a THIRD
+    # per-Deribit-member ledger fan-out in smoothed_mtm basis, stitched through the ONE
+    # shared derive_basis_series. FAIL-LOUD throughout (mirroring the composite MTM
+    # pass, which also fails the whole job rather than degrading): a per-leg
+    # reconstruction failure surfaces as a DispatchResult from _reconstruct_all (its
+    # _PERMANENT_LEDGER_ERRORS handler — LedgerValuationError included — stamps failed),
+    # and a metrics/overlap/degenerate failure stamps + returns here. NEVER a silent
+    # two-basis fallback, NEVER a gate-close on a leg failure. A no-option composite
+    # (smoothed_ok False) runs NO third pass and persists NO smoothed artifacts (SC-4).
+    smoothed_ok = smoothed_mtm_available(member_signals)
+    smoothed_metrics_json: dict[str, Any] | None = None
+    _smoothed_basis_result: BasisSeriesResult | None = None
+    if smoothed_ok:
+        smoothed_result = await _reconstruct_all(PNL_BASIS_SMOOTHED_MTM)
+        if isinstance(smoothed_result, DispatchResult):
+            # A per-leg smoothed reconstruction failure (holed marks / retention
+            # straddle → LedgerValuationError) already stamped failed inside
+            # _reconstruct_all — fail the WHOLE job loud, never a silent fallback.
+            return smoothed_result
+        clipped_smoothed, _sm_signals, _sm_venues, _sm_metas, _sm_degraded = (
+            smoothed_result
+        )
+        # Degraded-member invariant (mirror the MTM pass): the smoothed pass must
+        # exclude the SAME members as the authoritative cash pass, else the bases would
+        # be computed over different member sets. Compare against degraded_members (the
+        # cash pass's list) directly — _cash_degraded_seqs is scoped inside the mtm_ok
+        # arm above and is undefined on the gated (options) path this pass serves.
+        _sm_degraded_seqs = {int(d["seq"]) for d in _sm_degraded}
+        if _sm_degraded_seqs != {int(d["seq"]) for d in degraded_members}:
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: smoothed_mtm pass degraded-member set "
+                    f"{sorted(_sm_degraded_seqs)} diverges from the cash pass — the "
+                    "bases would span different member sets; retry to re-crawl both"
+                ),
+                error_kind="transient",
+            )
+        try:
+            stitched_smoothed = stitch_clipped_series(clipped_smoothed)
+            if int(stitched_smoothed.notna().sum()) < 2:
+                await _stamp_failed(
+                    "Composite smoothed-MTM series has fewer than two interpretable "
+                    "days after stitching, so smoothed metrics cannot be computed."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "run_stitch_composite_job: smoothed_mtm series degenerate-"
+                        "length (< 2 interpretable days after stitching)"
+                    ),
+                    error_kind="permanent",
+                )
+            _smoothed_basis_result = derive_basis_series(
+                stitched_smoothed,
+                benchmark_rets,
+                periods_per_year=periods_per_year,
+                cumulative_method=cumulative_method,
+                day_basis=day_basis,
+                benchmark_symbol="BTC",
+            )
+            smoothed_metrics_json = dict(_smoothed_basis_result.metrics_json)
+        except CompositeOverlapError as exc:
+            scrubbed = str(scrub_freeform_string(str(exc)))
+            await _stamp_failed(
+                "Composite smoothed-MTM member series collide on a calendar day. "
+                + scrubbed
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: smoothed_mtm post-clip day collision — "
+                    + scrubbed
+                ),
+                error_kind="permanent",
+            )
+        except ValueError as exc:
+            scrubbed = str(scrub_freeform_string(str(exc)))
+            await _stamp_failed(
+                "Composite smoothed-MTM metrics compute rejected the stitched series "
+                "(interior chain-break under the arithmetic convention). " + scrubbed
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=(
+                    "run_stitch_composite_job: smoothed_mtm metrics ValueError — "
+                    + scrubbed
+                ),
+                error_kind="permanent",
+            )
+
     # 7. PERSIST (OQ-3 ordering): (1) csv_daily_returns, (2) headline CSV analytics,
     # (3) additive metrics_json_by_basis + merged DQ flags.
     #
@@ -5478,6 +5575,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     metrics_json_by_basis: dict[str, Any] = {"cash_settlement": cash_metrics_json}
     if mtm_metrics_json is not None:
         metrics_json_by_basis["mark_to_market"] = mtm_metrics_json
+    # SMTM-01 (Phase 132): the additive smoothed_mtm key — present ONLY from a
+    # completed smoothed pass (same omission contract as mark_to_market: absent, never
+    # JSON null). Smoothing OPENS what MTM keeps closed, so on an options composite
+    # mark_to_market is ABSENT here while smoothed_mtm is PRESENT.
+    if smoothed_metrics_json is not None:
+        metrics_json_by_basis["smoothed_mtm"] = smoothed_metrics_json
 
     # Finding 3: union each member's NavTWRMeta guard flags into the composite DQ
     # flags and promote to complete_with_warnings — mirror the single-key bridge in
@@ -5668,6 +5771,26 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         )
 
     await db_execute(_persist_mtm_series)
+
+    # SMTM-01 (Phase 132): persist the stitched smoothed_mtm daily-return series BEFORE
+    # the DONE-bearing headline/by-basis scalar upsert (same ordering discipline as the
+    # cash/MTM series above). GUARDED (unlike the always-heal MTM persist): written ONLY
+    # when the third pass ran AND produced a computable object — a no-option composite
+    # (smoothed_ok False) touches the smoothed_mtm series row not at all (SC-4: NO
+    # smoothed artifacts, byte-invisible). A started-but-failed smoothed pass fails the
+    # whole job upstream, so there is no attempted-but-null smoothed persist to heal.
+    if smoothed_metrics_json is not None:
+        _smoothed_persist_result = _smoothed_basis_result
+
+        def _persist_smoothed_series() -> None:
+            persist_basis_series(
+                supabase,
+                strategy_id,
+                basis="smoothed_mtm",
+                result=_smoothed_persist_result,
+            )
+
+        await db_execute(_persist_smoothed_series)
 
     def _write_headline_and_by_basis() -> None:
         supabase.table("strategy_analytics").upsert(

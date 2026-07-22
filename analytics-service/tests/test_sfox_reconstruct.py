@@ -1009,11 +1009,11 @@ def _stripped_job_worker_source() -> str:
 def test_one_path_derive_basis_series_call_sites_unchanged():
     """ONE-path proof: the sfox branch adds ZERO new backbone call sites. The
     comment-stripped job_worker.py contains the 4 cash+MTM derive_basis_series( call
-    sites (single-key + composite) PLUS the Phase-132 single-key smoothed_mtm site = 5
-    (the composite smoothed site is added in the same phase's Task 3). The sfox branch
-    itself still adds none — it feeds the SAME shared derive/persist as the ccxt path."""
+    sites (single-key + composite) PLUS the 2 Phase-132 smoothed_mtm sites (single-key
+    + composite) = 6. The sfox branch itself still adds none — it feeds the SAME shared
+    derive/persist as the ccxt path."""
     stripped = _stripped_job_worker_source()
-    assert stripped.count("derive_basis_series(") == 5
+    assert stripped.count("derive_basis_series(") == 6
 
 
 def test_sfox_branch_has_two_bounded_crawls():

@@ -326,3 +326,26 @@ def mark_to_market_available(
     if any(m.venue.strip().lower() != _NATIVE_VENUE for m in members):
         return (False, MTM_REASON_VENUE)
     return (True, None)
+
+
+def smoothed_mtm_available(members: Sequence[MemberBasisSignal]) -> bool:
+    """The Phase-132 smoothed_mtm admissibility gate — a SEPARATE decision from
+    ``mark_to_market_available`` that OPENS exactly what the MTM gate honestly keeps
+    closed on an un-smoothed options book (``MTM_REASON_OPTIONS`` /
+    ``"unsmoothed_options_book"``). Daily ΔMTM redistribution has no session-lump
+    spikes, so an options book IS admissible under ``smoothed_mtm``.
+
+    Availability is decided by OPTION ACTIVITY ALONE. It deliberately does NOT consult
+    or mutate ``mark_to_market_available`` / ``MTM_REASON_OPTIONS`` (the MTM gate
+    decision stays byte-identical), and — unlike the MTM gate — it does NOT close on a
+    non-native (ccxt) venue: a ccxt leg simply passes through as cash (it has no option
+    ΔMTM), while a Deribit options leg redistributes, so a mixed book is still
+    smoothed-available whenever ANY member has option activity.
+
+    A per-leg smoothed reconstruction FAILURE is NOT an availability input: it RAISES
+    (``LedgerValuationError`` → the composite fails loud via the caller's
+    ``_PERMANENT_LEDGER_ERRORS`` handler), never silently closing this gate. Returns
+    ``True`` iff any member has option activity — a perp-only / USD-native book has no
+    ΔMTM to redistribute (``smoothed`` ≡ ``cash`` there), so there is nothing additive
+    to persist (SC-4)."""
+    return any(m.has_option_activity for m in members)
