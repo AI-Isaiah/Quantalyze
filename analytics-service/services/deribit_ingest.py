@@ -791,7 +791,14 @@ async def fetch_deribit_option_daily_marks(
             price = float(raw_price)
         except (TypeError, ValueError):
             continue
-        if price <= 0:
+        # WR-04: unlike the perp-INDEX sibling (where a non-positive price is
+        # nonsense), a 0.0 daily close on a deep-OTM option near expiry is
+        # economically LEGITIMATE — dropping it would delete the day from the
+        # marks map and the D-07 hole guard would hard-fail a held worthless
+        # position with a misleading "missing bar" message. Keep 0.0 (the
+        # premium collapse is real ΔMTM); only a NEGATIVE close (impossible for
+        # an option price) is dropped.
+        if price < 0:
             continue
         day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
             "%Y-%m-%d"

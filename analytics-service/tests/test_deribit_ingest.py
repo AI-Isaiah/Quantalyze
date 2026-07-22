@@ -3860,7 +3860,13 @@ async def test_option_daily_marks_newest_day_0800_bar_included() -> None:
     assert marks == {"2026-07-20": 0.031}
 
 
-async def test_option_daily_marks_skips_nonpositive_close() -> None:
+async def test_option_daily_marks_keeps_zero_close_drops_negative() -> None:
+    """WR-04: unlike the perp-INDEX sibling (where a non-positive price is
+    nonsense), a 0.0 daily close on a deep-OTM option near expiry is
+    economically legitimate — dropping it would delete the day from the marks
+    map and the D-07 guard would hard-fail a held WORTHLESS position as a
+    'structural hole' (a spurious fail-loud with a misleading message). Keep
+    0.0; only a NEGATIVE close (impossible for an option price) is dropped."""
     stub = _ChartDataStub(
         [_chart_ok([("2025-06-01", 0.02), ("2025-06-02", 0.0), ("2025-06-03", -1.0)])]
     )
@@ -3871,7 +3877,7 @@ async def test_option_daily_marks_skips_nonpositive_close() -> None:
         newest_day="2025-06-03",
         sleep=_SleepSpy(),
     )
-    assert marks == {"2025-06-01": 0.02}  # 0 and negative closes dropped
+    assert marks == {"2025-06-01": 0.02, "2025-06-02": 0.0}  # 0.0 kept, <0 dropped
 
 
 async def test_option_daily_marks_dedupe_keeps_first_per_day() -> None:

@@ -738,6 +738,39 @@ def test_smoothed_open_future_expiry_capped_at_last_settled_day(
     assert params["end_timestamp"] == _ms("2026-01-18T00:00:00+00:00")
 
 
+def test_smoothed_worthless_option_zero_close_is_not_a_hole(
+    monkeypatch: Any,
+) -> None:
+    """WR-04 wiring: a held deep-OTM option whose daily bar closes at 0.0 is a
+    LEGITIMATE worthless mark, not a missing bar. The old fetcher dropped the
+    0.0 close (cloned from the perp-index sibling) and the D-07 guard then
+    hard-failed the healthy position as a 'structural hole'. The premium
+    collapse must instead be BOOKED: ΔMTM carries −Book on the worthless day."""
+    instr = "BTC-17JAN26-100000-C"
+    rows = [
+        _opt_row(instrument=instr, day="2026-01-15", change=-0.05, position=1.0, id=1),
+        _opt_row(
+            instrument=instr, day="2026-01-17", change=0.0, position=0.0, id=2,
+            type="delivery",
+        ),
+    ]
+    charts = {instr: {"2026-01-15": 0.05, "2026-01-16": 0.0}}  # worthless on 16
+    summaries = [
+        {"currency": "BTC", "equity": -0.05, "session_upl": 0.0, "options_value": 0.0}
+    ]
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=rows,
+        summaries=summaries,
+        charts=charts,
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    # cash −0.05 (15) + ΔMTM +0.05 (15), −0.05 (16, the premium collapse).
+    assert got == pytest.approx({"2026-01-15": 0.0, "2026-01-16": -0.05}, abs=1e-9)
+    assert sum(got.values()) == pytest.approx(-0.05, abs=1e-9)
+
+
 # --- WR-01: H1 terminal wedge under smoothed — §5 inception closure -----------
 
 
