@@ -51,9 +51,11 @@ from services.ingestion.adapter import (
 )
 from services.mt5_client import Mt5Client, Mt5ClientError
 from services.mt5_validation import (
+    Mt5ValidationError,
     classify_mt5_login_error,
     is_trade_capable,
     mt5_probe_request,
+    parse_mt5_credentials,
 )
 
 
@@ -94,28 +96,26 @@ class Mt5Adapter:
     SOURCE: str = "mt5"
 
     async def validate(self, req: KeySubmissionRequest) -> ValidationResult:
-        # Credential-slot reuse (the one MT5-specific wrinkle, documented LOUDLY at
-        # the encrypt chokepoint in plan 135-03): login -> api_key, investor
-        # password -> api_secret, broker server -> passphrase. Trim login/server at
-        # this chokepoint per the v1.11 credential-trim convention.
-        raw_login = str(req.context.get("api_key") or "").strip()
-        if not raw_login:
-            # A blank login cannot authenticate — fail CLOSED (never a client ctor).
-            return _auth_failed()
+        # Offline pre-probe credential-shape validation via the ONE mt5_validation
+        # seam — the IDENTICAL guard set + ordering the router's _validate_mt5_key
+        # uses (WR-01). Credential-slot reuse (the one MT5 wrinkle, documented
+        # LOUDLY at the encrypt chokepoint in plan 135-03): login -> api_key,
+        # investor password -> api_secret, broker server -> passphrase. A blank
+        # password (previously unguarded here) now fails CLOSED offline instead of
+        # burning a live RPyC probe, and a doubly-blank login+server classifies the
+        # SAME way it does through the router.
         try:
-            login = int(raw_login)
-        except ValueError:
-            # A non-numeric MT5 login cannot authenticate; classify as AUTH_FAILED
-            # rather than a server misconfig — it is a bad credential, not our env.
+            login, investor_pw, server = parse_mt5_credentials(
+                req.context.get("api_key"),
+                req.context.get("api_secret"),
+                req.context.get("passphrase"),
+            )
+        except Mt5ValidationError as e:
+            # Fail CLOSED with the SAME classification the router emits — never a
+            # client ctor: wrong_server -> MT5_WRONG_SERVER, auth -> AUTH_FAILED.
+            if e.kind == "wrong_server":
+                return _wrong_server()
             return _auth_failed()
-        # Password passed through verbatim (never trimmed — MT5 passwords may be
-        # space-significant; the wizard client already trims at submit).
-        investor_pw = str(req.context.get("api_secret") or "")
-        server = str(req.context.get("passphrase") or "").strip()
-        if not server:
-            # Broker server is REQUIRED for MT5 (a login without a server cannot
-            # resolve); this is distinct from a bad-password failure (F4 honesty).
-            return _wrong_server()
 
         host = os.getenv("MT5_GATEWAY_HOST")
         port_raw = os.getenv("MT5_GATEWAY_PORT")

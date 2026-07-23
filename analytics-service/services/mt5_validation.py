@@ -54,6 +54,67 @@ _AUTH_TOKENS: tuple[str, ...] = (
 )
 
 
+class Mt5ValidationError(Exception):
+    """Fail-CLOSED classification of an OFFLINE pre-probe credential-shape failure.
+
+    ``kind`` is the login-failure class that BOTH call sites — the FastAPI
+    ``_validate_mt5_key`` router branch (plan 135-03) and the
+    ``Mt5Adapter.validate`` worker branch (plan 135-01) — map onto their own
+    transport (an ``HTTPException`` detail / a ``ValidationResult``), so a
+    missing/blank credential combination classifies IDENTICALLY on both paths.
+    This is the single-seam guarantee WR-01 exists to enforce: the guard set and
+    ordering live HERE, once, and cannot drift between the two hand-written
+    copies they replaced.
+    """
+
+    def __init__(self, kind: Literal["auth", "wrong_server"]) -> None:
+        self.kind = kind
+        super().__init__(kind)
+
+
+def parse_mt5_credentials(
+    api_key: str | None, api_secret: str | None, passphrase: str | None
+) -> tuple[int, str, str]:
+    """Fail-CLOSED OFFLINE parse of the reused MT5 credential slots into
+    ``(login: int, investor_pw: str, server: str)``.
+
+    Credential-slot reuse (the one MT5 wrinkle, documented LOUDLY at the encrypt
+    chokepoint): login -> ``api_key``, investor password -> ``api_secret``,
+    broker server -> ``passphrase``. Raises ``Mt5ValidationError(kind)`` for any
+    structurally-invalid request so NO live RPyC probe is burned on a request
+    that can be rejected offline.
+
+    The check ORDERING is the HTTP-boundary router's (server -> login ->
+    password): the wizard copy + the 135-03/135-04 tests are aligned to it, so it
+    is the canonical ordering both call sites defer to (WR-01 — the adapter was
+    reconciled TO this ordering, not vice-versa).
+
+      * blank/missing broker server -> ``"wrong_server"`` (a login without a
+        server cannot resolve; distinct from a bad-password failure — F4 honesty)
+      * blank/missing/non-numeric login -> ``"auth"`` (a bad credential, never
+        our env; the SAME AUTH_FAILED classification a bad ccxt key emits)
+      * blank investor password -> ``"auth"``
+
+    The password is returned VERBATIM (never trimmed — MT5 passwords may be
+    space-significant; the wizard client trims at submit); only its blank-ness is
+    tested via ``.strip()``. Login and server ARE trimmed (the v1.11
+    credential-trim convention)."""
+    server = (passphrase or "").strip()
+    if not server:
+        raise Mt5ValidationError("wrong_server")
+    raw_login = (api_key or "").strip()
+    if not raw_login:
+        raise Mt5ValidationError("auth")
+    try:
+        login = int(raw_login)
+    except ValueError:
+        raise Mt5ValidationError("auth") from None
+    investor_pw = api_secret or ""
+    if not investor_pw.strip():
+        raise Mt5ValidationError("auth")
+    return login, investor_pw, server
+
+
 def mt5_probe_request(symbol: str = "EURUSD") -> dict:
     """A minimal market-order-shaped request for ``order_check`` (PROBE ONLY —
     never submitted). ``order_check`` validates margin/funds and does NOT place an

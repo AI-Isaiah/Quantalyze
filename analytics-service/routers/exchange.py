@@ -21,9 +21,11 @@ from services.closed_sets import (
 )
 from services.mt5_client import Mt5Client, Mt5ClientError, MT5_REQUEST_TIMEOUT_S
 from services.mt5_validation import (
+    Mt5ValidationError,
     classify_mt5_login_error,
     is_trade_capable,
     mt5_probe_request,
+    parse_mt5_credentials,
 )
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
@@ -176,32 +178,24 @@ async def _validate_mt5_key(
     the grep gate stays clean) is NEVER wrapped — the probe is ``order_check``
     only.
     """
-    # Broker server is REQUIRED and distinct from a bad-password failure (F4
-    # honesty): a login without a server cannot resolve. Guard BEFORE any client
-    # construction — never a live probe on a structurally-invalid request. The
-    # server-distinct copy also covers this required-field case (distinguishable
-    # from bad-password by wording).
-    server = (passphrase or "").strip()
-    if not server:
-        raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
-
-    # Login coercion (mirrors the sfox IN-01 up-front guard rationale): a
-    # non-numeric or empty MT5 login cannot authenticate — fail CLOSED with the
-    # SAME AUTH_FAILED string a bad ccxt key emits (-> KEY_AUTH_FAILED), never an
-    # unhandled 500, BEFORE constructing a client.
-    raw_login = (api_key or "").strip()
-    if not raw_login:
-        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+    # Offline pre-probe credential-shape validation via the ONE mt5_validation
+    # seam (server-required, numeric login, non-blank password, in the canonical
+    # server->login->password ordering). BOTH this router and Mt5Adapter.validate
+    # call parse_mt5_credentials, so every missing/blank combination classifies
+    # IDENTICALLY on the two paths and cannot drift (WR-01). Guard BEFORE any
+    # client construction — never a live probe on a structurally-invalid request.
     try:
-        login = int(raw_login)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
-
-    # An empty/blank investor password likewise cannot authenticate. (The password
-    # itself is passed through verbatim below — MT5 passwords may be
-    # space-significant; the wizard client already trims at submit.)
-    investor_pw = api_secret or ""
-    if not investor_pw.strip():
+        login, investor_pw, server = parse_mt5_credentials(
+            api_key, api_secret, passphrase
+        )
+    except Mt5ValidationError as e:
+        # wrong_server -> the required/mismatched broker-server copy
+        # (distinguishable from bad-password by wording, so the wizard surfaces a
+        # distinct remedy); auth -> the byte-identical AUTH_FAILED string a bad
+        # ccxt key emits (-> KEY_AUTH_FAILED, zero TS edits). Both fail CLOSED with
+        # a 400, never a 500, never {"valid": true}.
+        if e.kind == "wrong_server":
+            raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
 
     # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
