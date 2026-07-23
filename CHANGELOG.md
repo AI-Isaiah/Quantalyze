@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.48.0.0] - 2026-07-23
+### v1.14 — Smoothed options MTM (third factsheet basis), ships DARK behind a kill-switch
+Adds `smoothed_mtm` as a THIRD selectable factsheet `pnl_basis` alongside
+`cash_settlement` (default/headline, unchanged) and `mark_to_market` (unchanged).
+An un-smoothed options book lumps a whole session's option P&L onto the single
+settlement day; `smoothed_mtm` redistributes each lump across the days it accrued
+via daily option marks (`Book[d]−Book[d−1]`, total-preserving) so the daily worth
+is real. Additive: the existing two bases stay BYTE-IDENTICAL on every fixture
+(SC-4). Ships dark behind two kill-switch flags, both default OFF —
+`SMOOTHED_MTM_ENABLED` (worker: gates the smoothed third derive pass) and
+`NEXT_PUBLIC_SMOOTHED_MTM_ENABLED` (client: hides the third segment).
+
+- **Analytics core** (`deribit_txn`/`deribit_ingest`/`allocated_capital`/`nav_twr`):
+  `fetch_deribit_option_daily_marks` (source `get_tradingview_chart_data` 1D, works
+  for expired options), pure `replay_option_positions` + `option_mtm_daily`
+  (bar-tick-day grid, last-settled cap), adapter ΔMTM merge. Sparse marks inside a
+  listed instrument's life FAIL LOUD (no interpolation); a whole life predating the
+  ~2.5yr chart-retention horizon → cash-basis + warning.
+- **Worker persistence** (`job_worker`/`basis_series`/`stitch_composite`): the
+  smoothed daily series + scalars persist in BOTH routes (single-key + composite),
+  keyed `smoothed_mtm_daily_returns`, exposed as `metrics_json_by_basis.smoothed_mtm`,
+  behind a SEPARATE availability predicate that never mutates the `mark_to_market`
+  gate.
+- **Factsheet** (TS): third "Smoothed mark-to-market" SegmentedControl option + every
+  basis-dependent surface (series swap, eyebrow, chart caption, disabled-with-reason,
+  leverage eligibility), single-key + composite, via the shared `readSingleKeyBasisOpts`
+  helper. No surface renders smoothed numbers under a wrong basis label.
+- **Landing safety (/ship review):** the smoothed passes now DEGRADE (omit the
+  smoothed basis, keep the cash+MTM headline) instead of failing the whole derive
+  job — single-key + composite catch `LedgerValuationError`/structural errors like the
+  MTM pass (GLB-2), the composite smoothed fan-out is budget-bounded via `wait_for`
+  (GLB-3), a flaky HTTP-200 mark fetch is retryable not silently-empty (GLB-4), and
+  the mark-retention horizon is env-overridable with near-cutoff softening (GLB-5).
+  The kill-switch also gates the allocated-capital headline path so a `smoothed_mtm`
+  denominator config cannot bypass the flag (RT-4). Live acceptance on a real options
+  book (Phoenix) + the expiry-day book-channel boundary reconciliation (GLB-1) are
+  the go-live follow-ups; both now degrade safely rather than failing.
+
 ## [0.47.2.2] - 2026-07-20
 ### Fix: bound stitch_composite crawls + offload CPU work off the event loop (WEDGE-01)
 Worker stability. Root-cause fix for the "Eclipse" incident (2026-07-19) where a
