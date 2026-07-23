@@ -102,6 +102,7 @@ class _FakeMt5Transport:
         hang_s: float = 0.0,
         shutdown_hang_s: float = 0.0,
         second_account: dict | None = None,
+        post_read_exc: Exception | None = None,
     ) -> None:
         self._account = account
         self._deals = deals
@@ -119,6 +120,10 @@ class _FakeMt5Transport:
         # this snapshot — a mid-read terminal re-login/hijack that the POST login
         # bracket must catch independently of the PRE bracket.
         self._second_account = second_account
+        # IN-01: when set, the SECOND (and later) account_info() call — i.e. the
+        # ASSERTION-ONLY POST login bracket re-read — RAISES this, simulating a
+        # transient transport blip AFTER the correct account's deals were fetched.
+        self._post_read_exc = post_read_exc
         self._account_info_calls = 0
         self.calls: list[str] = []
 
@@ -129,8 +134,11 @@ class _FakeMt5Transport:
     def account_info(self):
         self.calls.append("account_info")
         self._account_info_calls += 1
-        if self._account_info_calls >= 2 and self._second_account is not None:
-            return _NT(self._second_account)
+        if self._account_info_calls >= 2:
+            if self._post_read_exc is not None:
+                raise self._post_read_exc
+            if self._second_account is not None:
+                return _NT(self._second_account)
         return _NT(self._account)
 
     def history_deals_get(self, from_ts, to_ts):  # noqa: ANN001
@@ -968,6 +976,59 @@ async def test_mt5_login_field_missing_fails_loud(monkeypatch) -> None:
     _persisted_nothing(capture)
     # The PRE bracket fired before the deal read (missing field never reaches it).
     assert "history_deals_get" not in transport.calls
+
+
+# ---------------------------------------------------------------------------
+# 15 — IN-01: a TRANSIENT transport blip on the ASSERTION-ONLY POST login bracket
+# re-read (the correct account's deals were ALREADY fetched) must be classified
+# TRANSIENT (re-queue), NOT routed through the permanent login-failure classify/
+# stamp arm. A generic post-read blip whose scrubbed text classifies as
+# auth/wrong_server would otherwise burn the job to a PERMANENT user-blame 'failed'
+# even though the economic read of the correct account succeeded.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> None:
+    """The PRE bracket + login + deal fetch all succeed on the CORRECT account; the
+    POST re-read then hits a transient transport blip ("connection reset ...") that
+    ``classify_mt5_login_error`` would read as ``wrong_server`` (the "connect" token)
+    → PERMANENT + user-blame stamp under the old shared-arm routing. IN-01 reroutes
+    it: a failure to RE-CONFIRM the already-verified account is a retry-worthy
+    verification gap, so the job is TRANSIENT with NOTHING stamped.
+
+    Reds against the pre-fix code (error_kind == "permanent" and a strategy_analytics
+    'failed' stamp present). Trust is untouched: a genuine wrong-account POST read
+    raises Mt5AccountMismatchError (covered by test_mt5_login_bracket_post_hijack),
+    not the transient blip exercised here.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=_canonical_deals(),
+        # A raw transport blip on the POST re-read. The client wraps it into a
+        # scrubbed Mt5ClientError; its text carries the "connect" token, so the
+        # login-failure classifier would call it wrong_server (permanent) — exactly
+        # the mis-classification IN-01 prevents.
+        post_read_exc=RuntimeError("connection reset during account re-read"),
+    )
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    # THE IN-01 assertion: a POST-read blip is retry-worthy, never a permanent
+    # credential verdict.
+    assert result.error_kind == "transient"
+    # The blip fired on the POST re-read: the full 4-call read sequence ran (login →
+    # PRE account_info → deal fetch → POST account_info which raised).
+    assert transport.calls == [
+        "login",
+        "account_info",
+        "history_deals_get",
+        "account_info",
+    ]
+    # NO permanent user-blame stamp and NO partial series (the economic read
+    # succeeded but we refuse to persist an unconfirmed-account result).
+    _persisted_nothing(capture)
 
 
 # ---------------------------------------------------------------------------

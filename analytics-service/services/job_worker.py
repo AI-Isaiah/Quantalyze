@@ -387,6 +387,29 @@ def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
     return _MT5_TERMINAL_LOCKS.setdefault(terminal_key, asyncio.Lock())
 
 
+class _Mt5PostReadVerificationError(Exception):
+    """IN-01 — a transient transport blip on the ASSERTION-ONLY POST login bracket.
+
+    The POST bracket re-reads ``account_info()`` purely to re-assert the account
+    AFTER the correct account's deals were already fetched successfully. A genuine
+    network/terminal blip on that re-read surfaces as an ``Mt5ClientError``. Routing
+    it through the shared ``except Mt5ClientError`` classify/stamp arm risks a
+    PERMANENT user-attributed ``failed`` stamp (if ``classify_mt5_login_error``
+    reads it as ``auth``/``wrong_server``) even though the economic read of the
+    CORRECT account succeeded — a credential verdict for a mere verification gap.
+
+    Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass, so the
+    classify/stamp arm is structurally UNABLE to absorb it: it routes instead to a
+    dedicated TRANSIENT (re-queue), no-stamp branch. It carries only the already-
+    secret-scrubbed ``Mt5ClientError`` text.
+
+    It does NOT weaken the trust guarantee: a genuine wrong-account POST read raises
+    ``Mt5AccountMismatchError`` (a different type, raised by ``_assert_expected_login``
+    OUTSIDE the wrapped ``account_info()`` call), which still routes to the
+    mismatch arm — so ``api_verified`` can never be stamped on the wrong account.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Circuit breaker: per-exchange cooldown after 429
 # ---------------------------------------------------------------------------
@@ -3427,7 +3450,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # cross-replica gap). The PRE _info stays the returned economic
                 # anchor (equity/balance byte-preserved from 136); this POST read is
                 # assertion-only and its dict is discarded.
-                _assert_expected_login(_mt5_session.client.account_info())
+                # IN-01: the re-read is ASSERTION-ONLY — the correct account's deals
+                # were already fetched. A transient transport blip HERE
+                # (Mt5ClientError) is a retry-worthy verification gap, NOT a
+                # credential fault, so re-signal it as a distinct transient-only type
+                # rather than let it flow into the permanent-stamp classify arm. Only
+                # the account_info() CALL is wrapped; a real mismatch still raises
+                # Mt5AccountMismatchError from _assert_expected_login below, so the
+                # never-stamp-the-wrong-account guarantee is untouched.
+                try:
+                    _post_info = _mt5_session.client.account_info()
+                except Mt5ClientError as exc:
+                    raise _Mt5PostReadVerificationError(str(exc)) from exc
+                _assert_expected_login(_post_info)
                 return _info, _deals
 
             # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
@@ -3500,6 +3535,36 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         error_message=(
                             "derive_broker_dailies: mt5 terminal account mismatch — "
                             + str(exc)
+                        ),
+                        error_kind="transient",
+                    )
+                except _Mt5PostReadVerificationError as exc:
+                    # IN-01 — a transient transport blip on the ASSERTION-ONLY POST
+                    # re-read. The economic read of the CORRECT account already
+                    # succeeded (login + PRE bracket + deal fetch all passed), so a
+                    # failure to RE-CONFIRM the account is a retry-worthy verification
+                    # gap, NEVER a credential fault: classify TRANSIENT with NO
+                    # permanent stamp and NO terminal stamp (mirrors the generic
+                    # transient client-error arm below — no user-blame analytics row
+                    # for what is a bridge/terminal blip). Because
+                    # _Mt5PostReadVerificationError is NOT an Mt5ClientError, the
+                    # classify/stamp arm below can never absorb it; and a genuine
+                    # wrong-account POST read is Mt5AccountMismatchError (handled
+                    # above), never this — so the trust guarantee is intact. The
+                    # message is already secret-scrubbed (it wraps the Mt5ClientError
+                    # text).
+                    logger.warning(
+                        "derive_broker_dailies: mt5 POST-read account re-assertion "
+                        "hit a transient client error (label=%s) — the economic read "
+                        "already succeeded on the correct account; classified "
+                        "transient, retrying (no stamp) (IN-01)",
+                        funding_label,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 POST-read account "
+                            "re-assertion transient error — retrying"
                         ),
                         error_kind="transient",
                     )
