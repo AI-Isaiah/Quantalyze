@@ -17,6 +17,7 @@ import {
   STRATEGY_ANALYTICS_COMPUTATION_STATUSES,
   isComputedAnalytics,
   isCryptoExchange,
+  CRYPTO_EXCHANGES,
   annualizationPeriods,
   blendPeriodsPerYear,
   calendarYears,
@@ -68,25 +69,62 @@ describe("closed-sets registry", () => {
       expect(annualizationPeriods("")).toBe(252);
     });
 
-    it("isCryptoExchange: every SUPPORTED exchange is crypto (case-insensitive)", () => {
-      for (const ex of SUPPORTED_EXCHANGES) {
+    it("isCryptoExchange: the five crypto venues true, mt5 false (case-insensitive) — MT5RECON-02", () => {
+      // The crypto signal is now membership in the EXPLICIT CRYPTO_EXCHANGES
+      // subset, NOT the wider SUPPORTED_EXCHANGES allowlist — mt5 is a supported
+      // venue but is forex/CFD = TRADITIONAL √252.
+      for (const ex of CRYPTO_EXCHANGES) {
         expect(isCryptoExchange(ex)).toBe(true);
         expect(isCryptoExchange(ex.toUpperCase())).toBe(true);
       }
+      // mt5 is traditional (forex/CFD √252), NOT crypto. This is the MT5RECON-02
+      // narrowing + the DEFERRED unknown→crypto latent-bug guard: an MT5 series
+      // annualized on √365 would inflate its Sharpe ~×1.20 vs peers.
+      expect(isCryptoExchange("mt5")).toBe(false);
+      expect(isCryptoExchange("MT5")).toBe(false);
       expect(isCryptoExchange("nyse")).toBe(false);
       expect(isCryptoExchange(null)).toBe(false);
       expect(isCryptoExchange(undefined)).toBe(false);
       expect(isCryptoExchange("")).toBe(false);
     });
 
-    it("wizard default: a detected crypto exchange annualizes √365, a CSV/unknown one √252", () => {
+    it("CRYPTO_EXCHANGES mirrors Python CRYPTO_VENUES member-for-member (no silent drift) — MT5RECON-02 / T-136-07", () => {
+      // The TS crypto subset must equal analytics-service/services/closed_sets.py
+      // CRYPTO_VENUES value-for-value; a venue admitted to one registry only would
+      // split the √365/√252 clock silently. Literal pin on the TS side (the Python
+      // literal is pinned by plan 136-01's registry test).
+      expect([...CRYPTO_EXCHANGES].sort()).toEqual([
+        "binance",
+        "bybit",
+        "deribit",
+        "okx",
+        "sfox",
+      ]);
+      // CRYPTO_EXCHANGES ⊂ SUPPORTED_EXCHANGES (compile-time via `satisfies`,
+      // asserted at runtime too): every crypto venue is a supported venue…
+      for (const ex of CRYPTO_EXCHANGES) {
+        expect((SUPPORTED_EXCHANGES as readonly string[]).includes(ex)).toBe(
+          true,
+        );
+      }
+      // …but mt5 is a SUPPORTED venue deliberately EXCLUDED from the crypto subset.
+      expect((SUPPORTED_EXCHANGES as readonly string[]).includes("mt5")).toBe(
+        true,
+      );
+      expect((CRYPTO_EXCHANGES as readonly string[]).includes("mt5")).toBe(
+        false,
+      );
+    });
+
+    it("wizard default: a detected crypto exchange annualizes √365, mt5/CSV/unknown √252", () => {
       // The MetadataStep default (isCryptoExchange(detectedExchange) → 'crypto'
       // else 'traditional') composed with annualizationPeriods must give 365 for
-      // a real exchange and 252 for the CSV/no-exchange path.
+      // a crypto exchange and 252 for mt5 and the CSV/no-exchange path.
       const fromExchange = (ex: string | null) =>
         annualizationPeriods(isCryptoExchange(ex) ? "crypto" : "traditional");
       expect(fromExchange("binance")).toBe(365);
       expect(fromExchange("deribit")).toBe(365);
+      expect(fromExchange("mt5")).toBe(252); // MT5 = forex/CFD = traditional √252
       expect(fromExchange(null)).toBe(252); // CSV upload, no exchange
     });
 
