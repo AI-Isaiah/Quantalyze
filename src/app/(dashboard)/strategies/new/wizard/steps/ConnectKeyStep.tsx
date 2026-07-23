@@ -234,6 +234,19 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   }, [onDraftChange, exchange, nickname, apiKey, apiSecret, passphrase]);
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
+  // WR-01: the per-exchange "setup guide" SubAnchors for the flag-gated venues
+  // (sfox #sfox-readonly, mt5 #mt5-readonly) are gated on their SERVER go-live
+  // flags (isSfoxEnabledServer / isMt5EnabledServer), while this wizard card is
+  // gated on the CLIENT flag. In the documented card-visible / guide-dark
+  // half-state those per-exchange anchors do not render, so a deep link to them
+  // lands on /security top with no guide. Point those venues at the
+  // UNCONDITIONAL #readonly-key section anchor (the parent "Creating a read-only
+  // API key" Section, always rendered) — matching the error-envelope link — so
+  // the link is never dead. Other venues keep their per-exchange anchor.
+  const guideAnchor =
+    exchange === "sfox" || exchange === "mt5"
+      ? "readonly-key"
+      : `${exchange}-readonly`;
   const requiresPassphrase = activeExchange?.requiresPassphrase ?? false;
   // Absent requiresSecret → true (every ccxt exchange). sFOX is token-only.
   const requiresSecret = activeExchange?.requiresSecret ?? true;
@@ -398,7 +411,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           <p className="mt-2 text-micro text-text-muted">
             Need help creating a read-only key?{" "}
             <Link
-              href={`/security#${exchange}-readonly`}
+              href={`/security#${guideAnchor}`}
               className="underline-offset-4 hover:underline"
               target="_blank"
               rel="noopener"

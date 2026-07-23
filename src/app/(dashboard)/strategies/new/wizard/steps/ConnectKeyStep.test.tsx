@@ -293,11 +293,15 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(body.passphrase).toBeNull();
   });
 
-  it("points the sFOX setup-guide link at /security#sfox-readonly", async () => {
+  // WR-01: sFOX's per-exchange #sfox-readonly SubAnchor is server-flag-gated
+  // (isSfoxEnabledServer), so it is dark in the card-visible / guide-dark
+  // half-state. The setup-guide link must target the UNCONDITIONAL #readonly-key
+  // Section anchor (always rendered) so it is never a dead link.
+  it("points the sFOX setup-guide link at the unconditional /security#readonly-key", async () => {
     await renderWithFlagOn();
     fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
     const link = screen.getByRole("link", { name: /sFOX setup guide/ });
-    expect(link).toHaveAttribute("href", "/security#sfox-readonly");
+    expect(link).toHaveAttribute("href", "/security#readonly-key");
   });
 
   it("renders the F3-honest read-only claim for sFOX — never a scope-verification claim", async () => {
@@ -546,11 +550,16 @@ describe("Phase 138 — MT5 wizard card (MT5UI-01+02)", () => {
     );
   });
 
-  it("points the MT5 setup-guide link at /security#mt5-readonly", async () => {
+  // WR-01: MT5's per-exchange #mt5-readonly SubAnchor is server-flag-gated
+  // (isMt5EnabledServer), so in the documented card-visible / guide-dark
+  // half-state (NEXT_PUBLIC_MT5_ENABLED set, MT5_ENABLED unset) it does not
+  // render and a deep link to it lands on /security top with no guide. The link
+  // must target the UNCONDITIONAL #readonly-key Section anchor (always rendered).
+  it("points the MT5 setup-guide link at the unconditional /security#readonly-key", async () => {
     await renderWithMt5On();
     fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
     const link = screen.getByRole("link", { name: /MT5 setup guide/ });
-    expect(link).toHaveAttribute("href", "/security#mt5-readonly");
+    expect(link).toHaveAttribute("href", "/security#readonly-key");
   });
 
   it("swaps the 'What we reject' trust atom to the MT5-honest body (mt5 only)", async () => {
