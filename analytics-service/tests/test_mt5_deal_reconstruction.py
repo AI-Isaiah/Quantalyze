@@ -32,10 +32,13 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from services.broker_dailies import combine_mt5_deal_ledger
+from services.closed_sets import CRYPTO_VENUES
+from services.metrics import compute_all_metrics, periods_per_year_for_asset_class
 from services.mt5_deals import (
     Mt5DealClassificationError,
     _MT5_EXTERNAL_FLOW_DEAL_TYPES,
@@ -307,3 +310,78 @@ def test_combiner_returns_sibling_shape() -> None:
     assert returns.index.is_monotonic_increasing
     assert returns.index.dtype == "datetime64[us]"
     assert isinstance(meta, dict)
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — √252-not-√365 mutation guard + Python crypto-registry guard +
+#          quantstats price-detection guard
+# ---------------------------------------------------------------------------
+
+# The canonical fixture's HAND return values (Task 2), written as literals — the
+# oracle NEVER regenerated from the combiner or from compute_all_metrics.
+_CANONICAL_RETURNS = [0.0040, 0.0, 300 / 100_400, -200 / 110_700]
+
+# sqrt(252) and sqrt(365) — the verified constants (test_mt5_golden_fixtures T1
+# uses sqrt(252) = 15.8745078663877). MT5 is a TRADITIONAL asset class, so risk
+# annualizes on the √252 (weekday) clock, NOT the √365 crypto clock.
+_SQRT_252 = math.sqrt(252)  # 15.874507866387544
+_SQRT_365 = math.sqrt(365)  # 19.10497317454280
+
+
+def test_annualizes_252_not_365() -> None:
+    """MUTATION GUARD. The reconstructed MT5 series annualizes volatility on √252.
+    If the engine ever resolves MT5 onto the crypto √365 clock, the SUT volatility
+    becomes std×√365 = std×√252 × √(365/252) — a DIFFERENT number — and the
+    ``== expected_vol_252`` assert below turns RED (the Sharpe/vol jump is the
+    mutation kill).
+
+    Volatility literal, hand-derived from the fixture returns via an INDEPENDENT
+    sample-std (numpy ddof=1) — independent of both the combiner AND quantstats:
+        r = [0.0040, 0.0, 0.00298804780876..., -0.00180668473351...]
+        n = 4;  mean = Σr / 4;  sample var = Σ(r−mean)² / (n−1)
+        expected_vol_252 = sqrt(sample var) × sqrt(252)
+        expected_vol_365 = sqrt(sample var) × sqrt(365)   (the crypto-clock value)
+    """
+    sample_std = float(np.std(np.array(_CANONICAL_RETURNS), ddof=1))
+    expected_vol_252 = sample_std * _SQRT_252
+    expected_vol_365 = sample_std * _SQRT_365
+
+    # MT5 = traditional → 252 (the guard against the unknown→crypto √365 trap).
+    periods = periods_per_year_for_asset_class("traditional")
+    assert periods == 252
+
+    series = pd.Series(
+        _CANONICAL_RETURNS,
+        index=pd.date_range("2025-06-02", periods=4, freq="D").as_unit("us"),
+        name="returns",
+    )
+    result = compute_all_metrics(series, periods_per_year=periods)
+
+    # (1) the SUT rides the √252 clock — the load-bearing assert a clock-flip reddens.
+    assert result["volatility"] == pytest.approx(expected_vol_252, rel=1e-9)
+    # (2) the √365 clock is a DEMONSTRABLY DIFFERENT literal (documents the kill).
+    assert expected_vol_252 != pytest.approx(expected_vol_365, rel=1e-9)
+    assert expected_vol_365 == pytest.approx(
+        expected_vol_252 * math.sqrt(365 / 252), rel=1e-12
+    )
+
+
+def test_mt5_not_in_python_crypto_registry() -> None:
+    """'mt5' must stay OUT of the single-sourced Python √365 registry
+    (``services.closed_sets.CRYPTO_VENUES``, the MD-01 source). This guards the
+    DEFERRED unknown→crypto latent-bug class: a future 'add mt5 to CRYPTO_VENUES'
+    regression reddens HERE before it can silently annualize MT5 on √365."""
+    assert "mt5" not in CRYPTO_VENUES
+
+
+def test_returns_series_unambiguous_for_quantstats() -> None:
+    """Pitfall 4 / the DEFERRED quantstats Sharpe sign-flip bug: quantstats 0.0.81
+    ``_prepare_returns`` mis-reads an all-non-negative series with a >100% day as
+    PRICES. The reconstructed MT5 series must carry at least one strictly negative
+    value and no value > 1.0 so the price-vs-returns heuristic can never flip."""
+    returns, _meta = combine_mt5_deal_ledger(
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+    )
+    vals = returns.to_numpy()
+    assert (vals < 0).any()      # at least one strictly negative day
+    assert (vals <= 1.0).all()   # no > 100% day → cannot be mistaken for prices
