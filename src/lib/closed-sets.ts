@@ -98,6 +98,32 @@ export const SMOOTHED_MTM_UI_ENABLED =
   process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED === "true";
 
 /**
+ * Feature flag for the public MT5 add-key offer (Phase 138 / MT5UI-01). A
+ * verbatim clone of SFOX_UI_ENABLED: strict equality against the EXACT string
+ * "true" — fail-closed ("1" / "TRUE" / "on" / "" / unset all read OFF). Next.js
+ * inlines the full static `process.env.NEXT_PUBLIC_MT5_ENABLED` member
+ * expression into the client bundle at build time, so this MUST stay a single
+ * static member access (never dynamic `process.env[...]` indexing) or the
+ * inlining breaks and the flag reads undefined in the browser.
+ *
+ * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates ONLY the
+ * MT5 venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array).
+ * Flag OFF ⇒ the wizard is BYTE-IDENTICAL to today (no MT5 pixel); a test pins
+ * this (ConnectKeyStep.test.tsx + closed-sets.mt5-flag.test.ts).
+ *
+ * DISTINCT from the server gate isMt5EnabledServer() below (env MT5_ENABLED,
+ * NOT NEXT_PUBLIC): that admits the CONNECT at the three key routes. Both flip
+ * in Phase 139; either alone is an intentional SAFE half-state (card hidden but
+ * gated, or card shown but connect fails closed 400).
+ *
+ * mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES /
+ * CRYPTO_EXCHANGES regardless of this flag — the manager-surface <Select> must
+ * not silently widen (UI-SPEC §MT5-Manager-Parity; the closed-sets.mt5-flag
+ * no-widening pin enforces it).
+ */
+export const MT5_UI_ENABLED = process.env.NEXT_PUBLIC_MT5_ENABLED === "true";
+
+/**
  * SERVER-SIDE sFOX go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
  *
  * DISTINCT from SFOX_UI_ENABLED above: that is the NEXT_PUBLIC *client-build*
@@ -140,9 +166,10 @@ export function isSfoxEnabledServer(): boolean {
  * KEY_AUTH_FAILED, never a live probe) until the founder sets MT5_ENABLED=true
  * at go-live (Phase 139).
  *
- * The UI-facing NEXT_PUBLIC_MT5_ENABLED offer flag is Phase 138 — deliberately
- * NOT defined here (mt5 stays OUT of UI_EXCHANGE_CODES / the offered set this
- * phase; the seam ships dark).
+ * The UI-facing NEXT_PUBLIC_MT5_ENABLED offer flag landed in Phase 138 as the
+ * MT5_UI_ENABLED client const above — DISTINCT from this server gate. mt5 still
+ * stays OUT of UI_EXCHANGE_CODES / the offered set (the MT5 card rides
+ * MT5_UI_ENABLED in ConnectKeyStep's local array, not the manager <Select>).
  *
  * Read as a FUNCTION (never a module-load const) so it is evaluated per-request
  * server-side and is never inlined into the client bundle; on the client
