@@ -719,6 +719,23 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
     expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("mt5");
   });
 
+  it("stamps asset_class='traditional' for mt5 (√252, MT5RECON-02) — NOT the crypto default", async () => {
+    // MT5RECON-02: mt5 is forex/CFD = TRADITIONAL √252. The draft force-derive is
+    // now venue-aware (isCryptoExchange(exchange) ? 'crypto' : 'traditional'), so
+    // an mt5 draft must NOT inherit the crypto default that every crypto venue
+    // gets. WIRING test: a neutered call site (reverting to the unconditional
+    // 'crypto' literal) persists 'crypto' here and reddens this. The okx test
+    // above pins the crypto venue stays byte-identical ('crypto').
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_BODY));
+
+    expect(res.status).toBe(200);
+    expect(assetClassUpdateMock).toHaveBeenCalledTimes(1);
+    expect(assetClassUpdateMock).toHaveBeenCalledWith({
+      asset_class: "traditional",
+    });
+  });
+
   it("flows the api_secret-REQUIRED path — mt5 with NO api_secret is a 400 (no sfox relaxation leak)", async () => {
     const POST = await importPost();
     const res = await POST(

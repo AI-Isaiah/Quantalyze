@@ -679,6 +679,42 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     fetchSpy.mockRestore();
   });
 
+  // MT5RECON-02 — the venue-aware single-key derive. An API-keyed draft whose
+  // linked api_keys.exchange is 'mt5' must persist 'traditional' (forex/CFD √252),
+  // NOT 'crypto'. This is the finalize seam that would otherwise overwrite the
+  // create-with-key 'traditional' stamp back to crypto. WIRING test: neutering the
+  // derive (reverting the apiKeyId arm to the unconditional 'crypto' literal)
+  // persists 'crypto' → this reddens.
+  it("MT5RECON-02: persists 'traditional' for an API-keyed draft on an mt5 venue", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID }; // single api-keyed draft
+    STATE.adminApiKeysExchange = "mt5"; // linked key is an MT5 (forex/CFD) venue
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "traditional" });
+    // The crypto default must NOT have leaked in for an mt5 venue.
+    expect(STATE.assetClassUpdates).not.toContainEqual({ asset_class: "crypto" });
+    fetchSpy.mockRestore();
+  });
+
+  // Regression: a crypto single-key venue stays byte-identical to today ('crypto')
+  // even when 'traditional' is submitted — the force-derive still applies, keyed
+  // off the venue rather than an unconditional literal.
+  it("MT5RECON-02: still FORCE-DERIVES 'crypto' for a crypto (bybit) single-key venue", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "bybit"; // crypto venue
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
+    fetchSpy.mockRestore();
+  });
+
   it("persists 'crypto' for a CSV draft when the body sends asset_class: 'crypto'", async () => {
     const fetchSpy = okProbe();
     STATE.strategyRow = { api_key_id: null }; // CSV branch (probe skipped)
