@@ -30,6 +30,25 @@ Behaviors:
   * test_reconstruction_reconciles_to_equity — reconstructed terminal NAV equals
     account_info().equity within max($1, 1e-6·|terminal|), asserted DIRECTLY at
     the mt5 job seam against a hand-derived oracle (reddens on anchor drift).
+
+Phase-137 hardening (MT5CONC-01/02):
+  * test_mt5_hung_read_restart_on_timeout — a wedged read blows the wall-clock
+    bound → the terminal is ACTIVELY restarted (shutdown + re-connect) → transient,
+    nothing persisted, the event loop stays live (137-01).
+  * test_mt5_restart_itself_bounded — the restart's own shutdown also hangs but is
+    bounded, so the job still returns transient promptly (never a nested wedge,
+    137-01).
+  * test_mt5_concurrent_syncs_serialized — two concurrent mt5 syncs CANNOT
+    interleave on the ONE shared terminal (module-level per-terminal asyncio.Lock);
+    embedded neutered-lock negative control proves the guarantee is not vacuous
+    (MT5CONC-02).
+  * test_mt5_login_bracket_pre_mismatch — the PRE-read login bracket rejects a
+    wrong-account terminal → transient + restart, persist NOTHING, no user-blame,
+    message carries only the two int logins (MT5CONC-02).
+  * test_mt5_login_bracket_post_hijack — the POST-read bracket independently rejects
+    a mid-read terminal re-login (MT5CONC-02).
+  * test_mt5_login_field_missing_fails_loud — a missing "login" field fails loud,
+    never default-matches (MT5CONC-02, Pitfall 3).
 """
 from __future__ import annotations
 
