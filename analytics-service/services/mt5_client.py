@@ -309,11 +309,26 @@ class Mt5Client:
     def restart(self) -> None:
         """Tear down a wedged terminal and re-establish the transport (MT5CONC-01).
 
-        A blocked RPyC/Wine pipe will NOT self-unblock, so the remote terminal is
-        told to shut down and the transport is re-established via the stored
-        ``_connect`` factory. Best-effort teardown: a wedged/raising ``shutdown()``
+        A blocked RPyC/Wine pipe will NOT self-unblock, so the transport is
+        re-established via the stored ``_connect`` factory and the stale connection
+        is told to shut down. Best-effort teardown: a wedged/raising ``shutdown()``
         is swallowed with a logged warning (mirroring ``close()``) — a terminal too
         broken to tear down cleanly must still be rebuilt, never left un-restartable.
+
+        ORDERING (WR-01): the fresh connection is built and swapped in as the live
+        connection FIRST, and only THEN is the stale connection disposed. This is
+        load-bearing for restart RELIABILITY under the abandon-thread recovery model.
+        When restart is triggered by the derive read-timeout branch, the timed-out
+        ``_mt5_read`` OS thread is ABANDONED but keeps running and may still be
+        driving the SAME rpyc connection. rpyc classic is not concurrent-request-safe,
+        so issuing ``shutdown()`` on that stale connection can itself HANG. Were the
+        shutdown done FIRST (the old ordering), a hanging stale-shutdown would be
+        abandoned by the bounded caller (``_mt5_bounded_restart``'s ``wait_for``)
+        BEFORE the reconnect ran — leaving NO fresh terminal for the next retry and
+        defeating the restart's whole purpose. Reconnecting first guarantees the
+        client holds a FRESH usable connection whenever a connect is possible, EVEN
+        IF the stale connection's shutdown would block; the abandoned stale shutdown
+        can no longer prevent the reconnect.
 
         Unlike ``close()`` this does NOT gate on ``self._closed`` and NEVER calls
         ``close()``: restart's contract is teardown+rebuild regardless of prior
@@ -323,18 +338,25 @@ class Mt5Client:
         job_worker ``_mt5_bounded_restart``) so restart can never itself nest-wedge
         the worker.
 
-        Live ``initialize()`` semantics are [ASSUMED] (A1) pending the Phase-139
-        spike; against the offline ``_connect`` double, ``shutdown()`` + re-connect
-        is the full exercised surface.
+        Live ``initialize()`` semantics — and specifically whether ``shutdown()`` on
+        a connection an abandoned reader is still parked on is safe or must be freed
+        out-of-band — are [ASSUMED] (A1) pending the Phase-139 gateway spike; against
+        the offline ``_connect`` double, reconnect + best-effort ``shutdown()`` is
+        the full exercised surface.
         """
-        try:
-            self._mt5.shutdown()
-        except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
-            logger.warning("Mt5Client.restart: shutdown() raised; swallowing.")
+        stale = self._mt5
+        # Rebuild + swap in the fresh connection FIRST (see ORDERING above).
         self._mt5 = self._connect(
             host=self._host, port=self._port, timeout=self._request_timeout_s
         )
         self._closed = False
+        # Best-effort dispose of the stale connection AFTER the fresh one is live, so
+        # a shutdown() that blocks (an abandoned reader still driving `stale`) can
+        # never prevent the reconnect. A raising teardown is swallowed like close().
+        try:
+            stale.shutdown()
+        except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
+            logger.warning("Mt5Client.restart: stale shutdown() raised; swallowing.")
 
     @property
     def terminal_key(self) -> str:

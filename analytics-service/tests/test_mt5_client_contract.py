@@ -35,6 +35,8 @@ Regression gates — WHY each case matters (Rule 9):
 from __future__ import annotations
 
 import sys
+import threading
+import time
 
 import pytest
 
@@ -404,6 +406,85 @@ def test_restart_survives_shutdown_raise():
     client.restart()  # must NOT raise even though shutdown() boom-s
 
     assert record["connects"] == 2  # reconnect happened despite the teardown raise
+
+
+def test_restart_reconnects_before_stale_shutdown_can_block():
+    """WR-01: restart() must rebuild + swap in the fresh connection BEFORE it tries
+    to tear down the stale one, so a stale shutdown() that BLOCKS can never defeat
+    the restart.
+
+    WHY (Rule 9): a restart triggered by the derive read-timeout branch runs while
+    the timed-out `_mt5_read` OS thread is ABANDONED but still driving the SAME rpyc
+    connection. rpyc classic is not concurrent-request-safe, so shutdown() on that
+    stale connection can itself HANG. Under the OLD shutdown-first ordering a hanging
+    stale-shutdown was abandoned by the bounded caller (`_mt5_bounded_restart`'s
+    wait_for) BEFORE the reconnect ran — leaving NO fresh terminal for the next retry
+    and defeating the restart. The invariant this pins: by the time the stale
+    shutdown blocks, the fresh connection is ALREADY the live connection.
+
+    Offline + BOUNDED: the stale shutdown blocks on a test-controlled Event that is
+    released and the thread joined, so CI never really hangs. (The true live rpyc
+    concurrency behavior — whether shutdown() on a connection an abandoned reader is
+    parked on is safe — is validated in the Phase-139 gateway spike [ASSUMED].)
+
+    Fails against the shutdown-FIRST ordering: connect is never reached while the
+    stale shutdown blocks, so the second connect never happens (connects stays 1).
+    """
+    release = threading.Event()
+
+    class _BlockingShutdownFake:
+        def __init__(self, *, equity: float) -> None:
+            self._equity = equity
+            self.shutdown_calls = 0
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+            # Bounded park: released by the test below; the 5s ceiling means even a
+            # broken join can never wedge CI indefinitely.
+            release.wait(5.0)
+
+        def account_info(self):
+            return _FakeNamedTuple(login=123, equity=self._equity)
+
+        def last_error(self):
+            return (0, "unknown")
+
+    stale = _BlockingShutdownFake(equity=1000.0)
+    fresh = _BlockingShutdownFake(equity=2000.0)
+    conns = {"n": 0}
+
+    def _connect(*, host, port, timeout):
+        conns["n"] += 1
+        # ctor gets the stale connection; restart's rebuild gets the fresh one.
+        return stale if conns["n"] == 1 else fresh
+
+    client = Mt5Client("host", 18812, _connect=_connect)
+    assert conns["n"] == 1
+
+    restart_thread = threading.Thread(target=client.restart)
+    restart_thread.start()
+    try:
+        # Wait (bounded) until the restart thread is parked in the STALE shutdown —
+        # under the fix, reconnect + swap already completed before this point.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and stale.shutdown_calls == 0:
+            time.sleep(0.005)
+        assert stale.shutdown_calls == 1, "restart never reached the stale teardown"
+
+        # The reconnect must have happened BEFORE the (now-blocking) stale shutdown.
+        # Under the old shutdown-first ordering this is still 1 and the test reds.
+        assert conns["n"] == 2, (
+            "restart must rebuild the transport BEFORE the stale shutdown can block; "
+            f"connect invocations={conns['n']!r}"
+        )
+        # And the fresh connection is the LIVE one: a read now hits `fresh`, not the
+        # wedged `stale` connection — so the next retry has a usable terminal.
+        assert fresh.shutdown_calls == 0
+        assert client.account_info()["equity"] == 2000.0
+    finally:
+        release.set()
+        restart_thread.join(5.0)
+        assert not restart_thread.is_alive(), "restart thread failed to drain"
 
 
 def test_restart_clears_closed():
