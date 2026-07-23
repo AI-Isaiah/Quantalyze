@@ -166,8 +166,17 @@ class Mt5Client:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
         and raise a typed, secret-scrubbed error."""
         err = self._mt5.last_error()
-        code, text = (err[0], err[1]) if err else (0, "unknown")
-        raise Mt5ClientError(int(code), str(text))
+        if not err:
+            raise Mt5ClientError(0, "unknown")
+        # A truthy-but-malformed shape (wrong-length tuple, non-subscriptable
+        # scalar, dict, non-int code) must NOT escape as a raw
+        # IndexError/TypeError/KeyError/ValueError — that would bypass the single
+        # typed fail-loud choke point. Coerce defensively.
+        try:
+            code, text = int(err[0]), str(err[1])
+        except (TypeError, IndexError, KeyError, ValueError):
+            code, text = 0, "unknown (malformed last_error shape)"
+        raise Mt5ClientError(code, text)
 
     def _guarded_read(self, call: Callable[[], Any]) -> Any:
         """Run a raw transport read, converting ANY transport-RAISED exception

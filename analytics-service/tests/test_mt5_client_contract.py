@@ -246,6 +246,28 @@ def test_account_info_none_raises_via_last_error():
     assert exc_info.value.code == 5
 
 
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        ("only-one",),          # wrong-length tuple -> err[1] IndexError
+        42,                     # non-subscriptable scalar -> err[0] TypeError
+        {"code": 1},            # dict without int keys -> err[0] KeyError
+        ("not-an-int", "text"), # err[0] present but int() fails -> ValueError
+    ],
+)
+def test_raise_last_malformed_shape_still_typed(malformed):
+    """WR-02: `_raise_last` is the SINGLE fail-loud choke point. A truthy-but-
+    malformed `last_error()` shape (wrong-length tuple, non-subscriptable scalar,
+    dict, non-int code) must still yield a typed, scrubbed Mt5ClientError — never a
+    raw IndexError/TypeError/KeyError/ValueError that bypasses the typed-error
+    discipline the design leans on. Fails against the unguarded `err[0]/err[1]` +
+    `int(code)` unpack (raw exception escapes)."""
+    connect, _fake, _rec = _make({"account": None, "last_error": malformed})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.account_info()
+
+
 def test_account_info_materialized_to_native_dict():
     """account_info() netref -> a plain native dict (never the live proxy)."""
     connect, _fake, _rec = _make(
