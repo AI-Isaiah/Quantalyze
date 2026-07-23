@@ -5,7 +5,11 @@ import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
-import { isSupportedExchange, isSfoxEnabledServer } from "@/lib/closed-sets";
+import {
+  isSupportedExchange,
+  isSfoxEnabledServer,
+  isCryptoExchange,
+} from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
@@ -332,26 +336,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       );
     }
 
-    // #597 — force-derive 'crypto' on the freshly-created draft row. The
+    // #597 — force-derive the asset class on the freshly-created draft row. The
     // SECURITY DEFINER `create_wizard_strategy` RPC signature cannot carry
     // asset_class, so the row sits at the NOT NULL DEFAULT 'traditional' until
     // finalize force-derives it. Any compute fired during the wizard window
-    // (e.g. sync-preview) would otherwise annualize a crypto strategy on √252.
-    // Every create-with-key strategy is API-keyed and every supported exchange
-    // (binance/okx/bybit/deribit) is a crypto venue, so 'crypto' is unconditional
-    // here. Owner-scoped (RLS + belt-and-braces user_id filter). Mirrors the
-    // migration backfill (api_key_id IS NOT NULL → crypto) and finalize's
-    // force-derive; closes the draft-preview √252 window.
+    // (e.g. sync-preview) would otherwise annualize on the wrong clock.
+    //
+    // MT5RECON-02: the stamp is now VENUE-AWARE — a crypto venue
+    // (binance/okx/bybit/deribit/sfox) is 'crypto' (√365, byte-identical to
+    // before), but mt5 is forex/CFD = 'traditional' (√252). "Every supported
+    // exchange is crypto" is no longer true (mt5 joined SUPPORTED_EXCHANGES in
+    // Phase 135), so `isCryptoExchange` (narrowed to the explicit CRYPTO_EXCHANGES
+    // subset) is the single source of truth here. Owner-scoped (RLS +
+    // belt-and-braces user_id filter). Mirrors finalize's venue-aware derive; an
+    // mt5 draft annualized on √365 would inflate its Sharpe ~×1.20 vs peers.
     //
     // Non-blocking on failure: the column default leaves the row on √252 until
-    // finalize re-derives it to crypto, so a transient write fault must not fail
-    // the whole draft creation — just surface it for debugging (Rule 12).
+    // finalize re-derives it, so a transient write fault must not fail the whole
+    // draft creation — just surface it for debugging (Rule 12).
     // @audit-skip: non-security annualization metadata (√365 crypto / √252
     // traditional) on a draft row that is NOT user-visible until finalize (which
     // audits the user-visible creation) — mirrors the finalize-wizard skip.
     const { error: assetClassErr } = await supabase
       .from("strategies")
-      .update({ asset_class: "crypto" })
+      .update({
+        asset_class: isCryptoExchange(exchange) ? "crypto" : "traditional",
+      })
       .eq("id", row.strategy_id)
       .eq("user_id", user.id);
     if (assetClassErr) {
