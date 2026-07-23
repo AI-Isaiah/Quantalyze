@@ -305,6 +305,50 @@ def test_validate_missing_gateway_env_raises_server_misconfig(monkeypatch) -> No
         asyncio.run(Mt5Adapter().validate(_req()))
 
 
+def test_validate_probe_hang_bounded_by_wait_for_ceiling(monkeypatch) -> None:
+    """WR-02 (WEDGE-01 defense-in-depth): a probe that blocks PAST the outer
+    ceiling must raise (TimeoutError) rather than let the sequential worker await
+    a hung thread unbounded — matching the router's wait_for guard. close() still
+    runs so the terminal session never leaks.
+
+    Against the pre-fix unbounded ``await asyncio.to_thread(_probe)`` there is NO
+    ``_MT5_PROBE_TIMEOUT_S`` ceiling: the probe runs to completion (no
+    TimeoutError, disposition wrong) — the exact WEDGE-01 divergence this closes.
+    """
+    import time
+
+    class _BlockingClient:
+        def __init__(self) -> None:
+            self.shutdown_calls = 0
+
+        def login(self, *a, **k):
+            # Block LONGER than the (monkeypatched-tiny) ceiling so wait_for fires
+            # first. This stands in for a hang outside a bounded rpyc round-trip.
+            time.sleep(1.0)
+
+        def account_info(self):
+            return {"trade_allowed": False}
+
+        def order_check(self, request):
+            return {"retcode": 10027}
+
+        def close(self):
+            self.shutdown_calls += 1
+
+    client = _BlockingClient()
+    monkeypatch.setattr(
+        "services.ingestion.mt5._build_client", lambda host, port: client
+    )
+    # Shrink the last-resort ceiling so the test does not wait the real ~35s.
+    monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.1)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(Mt5Adapter().validate(_req()))
+    assert client.shutdown_calls == 1  # close() ran even though the probe was cut off
+
+
 # --------------------------------------------------------------------------- #
 # Execution-detail axis — delegation, not re-implementation
 # --------------------------------------------------------------------------- #

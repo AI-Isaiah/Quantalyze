@@ -49,7 +49,11 @@ from services.ingestion.adapter import (
     Trade,
     ValidationResult,
 )
-from services.mt5_client import Mt5Client, Mt5ClientError
+from services.mt5_client import (
+    MT5_REQUEST_TIMEOUT_S,
+    Mt5Client,
+    Mt5ClientError,
+)
 from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
@@ -57,6 +61,15 @@ from services.mt5_validation import (
     mt5_probe_request,
     parse_mt5_credentials,
 )
+
+# The event-loop bound for the SYNCHRONOUS Mt5Client probe (login+read+order_check
+# run off the loop via asyncio.to_thread). A margin above the client's own rpyc
+# sync_request_timeout so a hung terminal fails its round-trip first and this outer
+# wait_for is the LAST-RESORT ceiling — a hang OUTSIDE a bounded round-trip (e.g.
+# netref materialization) must NEVER let the sequential worker await unbounded (the
+# v1.11 WEDGE-01 failure class). Mirrors routers/exchange.py:_MT5_PROBE_TIMEOUT_S so
+# the adapter and router paths do not diverge (WR-02).
+_MT5_PROBE_TIMEOUT_S = MT5_REQUEST_TIMEOUT_S + 5.0
 
 
 def _build_client(host: str, port: int) -> Mt5Client:
@@ -140,7 +153,21 @@ class Mt5Adapter:
                 return info, probe
 
             try:
-                info, probe = await asyncio.to_thread(_probe)
+                # LAST-RESORT event-loop ceiling (WR-02): to_thread already keeps
+                # the loop free, but with no wait_for a hang OUTSIDE a bounded rpyc
+                # round-trip (e.g. netref materialization) would let the sequential
+                # worker await unbounded — the router path already guards this, and
+                # the two must not diverge (v1.11 WEDGE-01 class).
+                info, probe = await asyncio.wait_for(
+                    asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                # Timeout == a hung terminal, NOT the user's credentials. Take the
+                # adapter's transient disposition: PROPAGATE untouched (never
+                # auth-failed, never valid, never wrong_server); the caller
+                # classifies it honestly (sFOX F4 posture). close() still runs in
+                # the finally below, so the terminal session never leaks.
+                raise
             except Mt5ClientError as e:
                 kind = classify_mt5_login_error(e)
                 if kind == "auth":
