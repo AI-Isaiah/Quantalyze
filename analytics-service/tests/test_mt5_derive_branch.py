@@ -911,13 +911,16 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "transient"
     assert len(connects) == 2, "the POST-bracket mismatch must also restart"
-    # The deal read DID run (PRE passed), then the POST bracket re-read and rejected.
-    assert transport.calls == [
+    # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
+    # — the first four terminal calls are the full read sequence (a trailing
+    # "shutdown" from the bounded restart follows).
+    assert transport.calls[:4] == [
         "login",
         "account_info",
         "history_deals_get",
         "account_info",
     ]
+    assert "shutdown" in transport.calls  # the bounded restart fired
     _persisted_nothing(capture)
     msg = result.error_message or ""
     assert "123456" in msg and "999999" in msg

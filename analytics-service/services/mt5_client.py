@@ -98,6 +98,33 @@ class Mt5ClientError(RuntimeError):
         super().__init__(f"MT5 client error (code={code}): {scrub_freeform_string(detail)}")
 
 
+class Mt5AccountMismatchError(Exception):
+    """MT5CONC-02 — the live terminal presented an account whose ``login`` does NOT
+    match the connected key's expected login (or omitted the field entirely).
+
+    Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass: a
+    mismatch is a mis-routed/stale-terminal INFRA fault, never a user-credential
+    fault, so the job-worker's ``except Mt5ClientError`` classify/stamp arm (which
+    can write a user-attributed permanent ``failed`` analytics row) must be
+    structurally UNABLE to absorb it. It routes instead to a dedicated no-stamp,
+    no-persist, transient+restart branch — THE guarantee that ``api_verified`` is
+    never stamped on the wrong account's numbers.
+
+    Secret hygiene: the message carries ONLY the two login values (an account
+    number is an ``int``, not a secret). The broker server and password are NEVER
+    interpolated, so — unlike ``Mt5ClientError`` — no scrubbing dependency applies
+    (nothing freeform enters the message).
+    """
+
+    def __init__(self, expected: object, actual: object) -> None:
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            f"MT5 account mismatch: expected login {expected}, "
+            f"terminal presented {actual}"
+        )
+
+
 def _default_connect(*, host: str, port: int, timeout: float) -> Any:
     """Construct the real `mt5linux.MetaTrader5` transport.
 

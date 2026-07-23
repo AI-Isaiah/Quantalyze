@@ -3376,7 +3376,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             from services.broker_dailies import combine_mt5_deal_ledger
-            from services.mt5_client import Mt5ClientError
+            from services.mt5_client import Mt5AccountMismatchError, Mt5ClientError
             from services.mt5_deals import (
                 Mt5DealClassificationError,
                 classify_deal,
@@ -3393,6 +3393,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # history (epoch 0 → now + one day margin so a same-day deal near the
             # boundary is never clipped). Each round-trip is already rpyc-bounded
             # inside Mt5Client; this bound catches a hang OUTSIDE a bounded call.
+            def _assert_expected_login(info: dict[str, Any]) -> None:
+                # MT5CONC-02 login bracket: the live terminal's account MUST be the
+                # connected key's account (mt5_session.login is the parsed api_key
+                # slot, mt5_validation.py:75). STRICT equality; a MISSING "login"
+                # field (info.get → None) must FAIL LOUD, never default-match
+                # (Pitfall 3). A mismatch is a mis-routed/stale-terminal INFRA fault
+                # → Mt5AccountMismatchError (NOT an Mt5ClientError, so the classify/
+                # stamp arm can never absorb it) → the dedicated no-stamp/no-persist
+                # transient+restart branch below.
+                _actual_login = info.get("login")
+                if _actual_login != _mt5_session.login:
+                    raise Mt5AccountMismatchError(_mt5_session.login, _actual_login)
+
             def _mt5_read() -> tuple[dict[str, Any], list[dict[str, Any]]]:
                 _mt5_session.client.login(
                     _mt5_session.login,
@@ -3402,9 +3415,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 _info = _mt5_session.client.account_info()  # None→typed raise
                 # None (error) is a typed raise inside the client; () → [] honest
                 # empty. NO fabricated flat account can enter here.
+                # PRE-read login bracket (MT5CONC-02): refuse the read before the
+                # deal fetch if the terminal is on the wrong account.
+                _assert_expected_login(_info)
                 _deals = _mt5_session.client.history_deals_get(
                     0, int(_mt5_now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
                 )
+                # POST-read login bracket (MT5CONC-02): re-read account_info and
+                # re-assert, catching a mid-read terminal re-login by another actor
+                # (the cross-process net for the module-level lock's documented
+                # cross-replica gap). The PRE _info stays the returned economic
+                # anchor (equity/balance byte-preserved from 136); this POST read is
+                # assertion-only and its dict is discarded.
+                _assert_expected_login(_mt5_session.client.account_info())
                 return _info, _deals
 
             # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
@@ -3445,6 +3468,38 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             "derive_broker_dailies: mt5 read exceeded the per-read "
                             "wall-clock bound — retrying rather than wedging the "
                             "worker (FLIPRETRY-01)"
+                        ),
+                        error_kind="transient",
+                    )
+                except Mt5AccountMismatchError as exc:
+                    # MT5CONC-02 — THE structural trust guarantee of the phase: the
+                    # live terminal presented a DIFFERENT account (or omitted the
+                    # login field) than the connected key. This is a mis-routed/
+                    # stale-terminal INFRA fault, NEVER user-blame, so:
+                    #   * NO _stamp_strategy_analytics_failed (contrast the auth arm
+                    #     below at classify): we never write a user-attributed
+                    #     'failed' analytics row for a server fault;
+                    #   * NO combine / NO persist of ANY kind reached — api_verified
+                    #     can NEVER be stamped on the wrong account's numbers;
+                    #   * classify TRANSIENT + bounded restart (a mis-routed terminal
+                    #     is exactly the stale pipe a restart heals). A genuinely
+                    #     persistent mis-map exhausts the DB backoff to failed_final
+                    #     WITHOUT ever stamping or persisting the wrong account's
+                    #     numbers. Because Mt5AccountMismatchError is NOT an
+                    #     Mt5ClientError, the classify/stamp arm below cannot absorb
+                    #     it. The message carries ONLY the two int logins.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 login bracket rejected a "
+                        "mismatched terminal account (%s) — classified transient, "
+                        "restarting the terminal; NOTHING persisted (MT5CONC-02)",
+                        str(exc),
+                    )
+                    await _mt5_bounded_restart(_mt5_session.client)
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 terminal account mismatch — "
+                            + str(exc)
                         ),
                         error_kind="transient",
                     )
