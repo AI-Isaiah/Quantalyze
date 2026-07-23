@@ -32,8 +32,10 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 
+import pandas as pd
 import pytest
 
+from services.broker_dailies import combine_mt5_deal_ledger
 from services.mt5_deals import (
     Mt5DealClassificationError,
     _MT5_EXTERNAL_FLOW_DEAL_TYPES,
@@ -159,3 +161,149 @@ def test_deal_cash_effect_rejects_non_finite_or_non_numeric(bad_deal: dict) -> N
     'complete' track record (the nav_twr._coerce_float discipline)."""
     with pytest.raises(Mt5DealClassificationError):
         deal_cash_effect(bad_deal)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — combine_mt5_deal_ledger (anchor-to-equity, flow-in-numerator)
+#
+# THE CANONICAL HAND FIXTURE (all arithmetic paper-derived; NEVER regenerated
+# from the combiner). Deals fall on 5 UTC days:
+#   day1 (06-01): no deals            → the reconstructed initial-capital anchor
+#   day2 (06-02): BUY close profit +500, commission −100        → day PnL +400
+#   day3 (06-03): no deals                                      → flat (0.0)
+#   day4 (06-04): BALANCE +10_000 (deposit) AND SELL profit +300 → PnL +300, flow +10_000
+#   day5 (06-05): SELL profit −200                              → day PnL −200
+#
+# Anchor equity 110_500, balance 110_500 (no open positions ⇒ open_unrealized 0):
+#   initial = 110_500 − Σpnl(400+0+300−200=500) − Σflow(10_000) = 100_000
+# NAV closes (backward-rolled from the 110_500 anchor):
+#   100_000 / 100_400 / 100_400 / 110_700 / 110_500
+# Flow-in-numerator returns r_t = (NAV_t − NAV_{t−1} − F_t)/NAV_{t−1}:
+#   day2: (100_400 − 100_000 − 0)/100_000      = 400/100_000   = 0.0040
+#   day3: flat                                                 = 0.0
+#   day4: (110_700 − 100_400 − 10_000)/100_400 = 300/100_400   (deposit is NOT a spike)
+#   day5: (110_500 − 110_700 − 0)/110_700      = −200/110_700
+# ---------------------------------------------------------------------------
+
+
+def _epoch(year: int, month: int, day: int, hour: int = 12) -> int:
+    """A broker-server-time epoch (seconds) at ``hour`` UTC on the given day. The
+    fixtures use server_utc_offset_s=0, so the server clock == UTC and the deal
+    buckets to its own calendar day."""
+    return int(datetime(year, month, day, hour, tzinfo=timezone.utc).timestamp())
+
+
+def _canonical_deposit_deals() -> list[dict]:
+    return [
+        # day2 — BUY close: profit +500, commission −100 → cash effect +400
+        {"type": 0, "entry": 1, "profit": 500.0, "swap": 0.0,
+         "commission": -100.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        # day4 — BALANCE deposit +10_000 (external flow, never a return)
+        {"type": 2, "profit": 10_000.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 4)},
+        # day4 — SELL close: profit +300 → cash effect +300
+        {"type": 1, "entry": 1, "profit": 300.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 4)},
+        # day5 — SELL close: profit −200 → cash effect −200
+        {"type": 1, "entry": 1, "profit": -200.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 5)},
+    ]
+
+
+def test_deposit_day_is_not_a_return_spike() -> None:
+    """The load-bearing money oracle: a +10_000 deposit landing the SAME UTC day
+    as +300 of trading PnL books the trading return 300/100_400, NEVER the
+    (110_700−100_400)/100_400 ≈ +10.26% cash spike."""
+    returns, _meta = combine_mt5_deal_ledger(
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+    )
+    vals = returns.to_numpy()
+    assert len(returns) == 4  # day2..day5 dense (day3 gap-filled)
+    assert vals[0] == pytest.approx(400 / 100_000, abs=1e-12)   # 0.0040
+    assert vals[1] == pytest.approx(0.0, abs=1e-12)             # flat day
+    assert vals[2] == pytest.approx(300 / 100_400, abs=1e-12)   # deposit-day REAL return
+    assert vals[3] == pytest.approx(-200 / 110_700, abs=1e-12)
+    # The spike the flow-in-numerator identity defeats:
+    spike = (110_700 - 100_400) / 100_400  # ≈ +0.1026
+    assert vals[2] != pytest.approx(spike, abs=1e-6)
+
+
+def test_withdrawal_day_neither_depresses_nor_inflates() -> None:
+    """A −5_000 withdrawal on the same day as +300 PnL still books 300/100_400 —
+    the outflow sits in the numerator, so it neither depresses nor inflates.
+
+    Hand arithmetic (anchor equity 95_500, no open positions):
+      initial = 95_500 − Σpnl(500) − Σflow(−5_000) = 95_500 − 500 + 5_000 = 100_000
+      NAV: 100_000 / 100_400 / 100_400 / 95_700 / 95_500
+      day4: (95_700 − 100_400 − (−5_000))/100_400 = 300/100_400
+      day5: (95_500 − 95_700)/95_700              = −200/95_700
+    """
+    deals = _canonical_deposit_deals()
+    deals[1] = {**deals[1], "profit": -5_000.0}  # BALANCE withdrawal on day4
+    returns, _meta = combine_mt5_deal_ledger(
+        deals, account_equity=95_500.0, account_balance=95_500.0
+    )
+    vals = returns.to_numpy()
+    assert vals[0] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert vals[2] == pytest.approx(300 / 100_400, abs=1e-12)   # withdrawal not a dip
+    assert vals[3] == pytest.approx(-200 / 95_700, abs=1e-12)
+
+
+def test_zero_cash_rotation_flow_is_zero() -> None:
+    """No BALANCE deals ⇒ external flow F = 0 on every day; returns equal the pure
+    hand PnL literals.
+
+    Hand arithmetic (drop the deposit; anchor equity = initial + Σpnl = 100_000 +
+    500 = 100_500, no open positions):
+      NAV: 100_000 / 100_400 / 100_400 / 100_700 / 100_500
+      day2: 400/100_000 = 0.0040
+      day4: 300/100_400
+      day5: −200/100_700
+    """
+    deals = [d for d in _canonical_deposit_deals() if d["type"] != 2]
+    returns, _meta = combine_mt5_deal_ledger(
+        deals, account_equity=100_500.0, account_balance=100_500.0
+    )
+    vals = returns.to_numpy()
+    assert len(returns) == 4
+    assert vals[0] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert vals[1] == pytest.approx(0.0, abs=1e-12)
+    assert vals[2] == pytest.approx(300 / 100_400, abs=1e-12)
+    assert vals[3] == pytest.approx(-200 / 100_700, abs=1e-12)
+
+
+def test_no_activity_day_is_flat_ledger_complete() -> None:
+    """MT5 is a ledger-COMPLETE venue: a no-deal interior day is genuinely flat
+    (0.0), not an unknown gap (contrast sFOX's sampled NAV). Day3 carries no
+    deals and must read exactly 0.0."""
+    returns, _meta = combine_mt5_deal_ledger(
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+    )
+    # Day3 = 2025-06-03 (the interior no-activity day).
+    day3 = pd.Timestamp("2025-06-03")
+    assert returns.loc[day3] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_unknown_deal_type_kills_the_whole_combine() -> None:
+    """A single unclassifiable deal (CORRECTION=5) inside an otherwise-valid
+    ledger raises BEFORE any series is produced — nothing partial is returned."""
+    deals = _canonical_deposit_deals()
+    deals.append(
+        {"type": 5, "profit": 1.23, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": _epoch(2025, 6, 5)}
+    )
+    with pytest.raises(Mt5DealClassificationError):
+        combine_mt5_deal_ledger(deals, account_equity=110_500.0, account_balance=110_500.0)
+
+
+def test_combiner_returns_sibling_shape() -> None:
+    """The combiner returns the byte-identical sibling shape: a float Series on an
+    ascending daily DatetimeIndex (unit [us]) + a plain dict meta."""
+    returns, meta = combine_mt5_deal_ledger(
+        _canonical_deposit_deals(), account_equity=110_500.0, account_balance=110_500.0
+    )
+    assert isinstance(returns, pd.Series)
+    assert str(returns.dtype) == "float64"
+    assert returns.index.is_monotonic_increasing
+    assert returns.index.dtype == "datetime64[us]"
+    assert isinstance(meta, dict)
