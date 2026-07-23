@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 from datetime import datetime, timezone
 from typing import Any
 from fastapi import APIRouter, HTTPException, Request
@@ -9,13 +11,33 @@ from services.exchange import aclose_exchange, create_exchange, validate_key_per
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
-from services.closed_sets import sfox_enabled_server, SFOX_DISABLED_DETAIL
+from services.closed_sets import (
+    sfox_enabled_server,
+    SFOX_DISABLED_DETAIL,
+    mt5_enabled_server,
+    MT5_DISABLED_DETAIL,
+    MT5_MASTER_PASSWORD_DETAIL,
+    MT5_WRONG_SERVER_DETAIL,
+)
+from services.mt5_client import Mt5Client, Mt5ClientError, MT5_REQUEST_TIMEOUT_S
+from services.mt5_validation import (
+    classify_mt5_login_error,
+    is_trade_capable,
+    mt5_probe_request,
+)
 from services.db import get_supabase, db_execute, one, rows
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
 logger = logging.getLogger("quantalyze.analytics")
 limiter = Limiter(key_func=get_remote_address)
+
+# The event-loop bound for the SYNCHRONOUS Mt5Client probe (login+read+order_check
+# run off the loop via asyncio.to_thread). A margin above the client's own rpyc
+# sync_request_timeout so a hung terminal fails its round-trip first and this outer
+# wait_for is the last-resort ceiling — a hung RPyC pipe must NEVER wedge the
+# event loop / healthz (the v1.11 WEDGE-01 failure class, T-135-12).
+_MT5_PROBE_TIMEOUT_S = MT5_REQUEST_TIMEOUT_S + 5.0
 
 
 class EncryptKeyRequest(BaseModel):
@@ -116,6 +138,145 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         await client.aclose()
 
 
+async def _validate_mt5_key(
+    api_key: str, api_secret: str, passphrase: str | None
+) -> dict[str, Any]:
+    """Validate an MT5 investor login via the Phase-134 read-only ``Mt5Client``
+    (RPyC facade) — the MT5SRC-02 worker half.
+
+    This is the ``is_mt5`` clone of ``_validate_sfox_key`` (same fail-CLOSED
+    posture: every arm 400s and NEVER returns ``{"valid": true}`` on any failure),
+    with the MT5-specific divergences:
+
+    Credential-slot reuse (the ONE MT5 wrinkle, documented LOUDLY at the encrypt
+    chokepoint below): login -> ``api_key``, investor password -> ``api_secret``,
+    broker server -> ``passphrase``. No new columns; the Next.js caller populates
+    these slots in this order and this branch reads them back identically.
+
+    read_only=True is asserted STRUCTURALLY (the sFOX A1 posture): ``Mt5Client``
+    composes ONLY read methods + the ``order_check`` probe, exposes no trade
+    surface and no ``__getattr__`` passthrough — so this NEVER emits a probed
+    ``{read, trade, withdraw}`` scope triple. On TOP of that structural guarantee
+    it runs a BEHAVIORAL investor-vs-master probe sFOX has no analog for: a
+    trade-capable (master) login is REJECTED with a targeted 400 and is NEVER
+    persisted (the TS caller only proceeds to /encrypt-key after ``valid:true``).
+
+    THREE distinguishable failure paths (each pinned to the exact 135-01 contract
+    string so the TS ``classifyKeyValidationError`` substring matcher routes them
+    with zero TS edits):
+      * bad creds -> ``AUTH_FAILED_DETAIL`` (KEY_AUTH_FAILED byte-identity)
+      * master (trade-capable) login -> ``MT5_MASTER_PASSWORD_DETAIL`` (persisted
+        NOTHING)
+      * wrong / missing broker server -> ``MT5_WRONG_SERVER_DETAIL``
+
+    The synchronous RPyC probe runs off the event loop
+    (``asyncio.to_thread`` + a ``wait_for`` ceiling) — a blocking round-trip on
+    the loop reopens the v1.11 WEDGE-01 wedge (T-135-12). The forbidden
+    trade-submit method (named here in prose only, without call parentheses, so
+    the grep gate stays clean) is NEVER wrapped — the probe is ``order_check``
+    only.
+    """
+    # Broker server is REQUIRED and distinct from a bad-password failure (F4
+    # honesty): a login without a server cannot resolve. Guard BEFORE any client
+    # construction — never a live probe on a structurally-invalid request. The
+    # server-distinct copy also covers this required-field case (distinguishable
+    # from bad-password by wording).
+    server = (passphrase or "").strip()
+    if not server:
+        raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+
+    # Login coercion (mirrors the sfox IN-01 up-front guard rationale): a
+    # non-numeric or empty MT5 login cannot authenticate — fail CLOSED with the
+    # SAME AUTH_FAILED string a bad ccxt key emits (-> KEY_AUTH_FAILED), never an
+    # unhandled 500, BEFORE constructing a client.
+    raw_login = (api_key or "").strip()
+    if not raw_login:
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+    try:
+        login = int(raw_login)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+
+    # An empty/blank investor password likewise cannot authenticate. (The password
+    # itself is passed through verbatim below — MT5 passwords may be
+    # space-significant; the wizard client already trims at submit.)
+    investor_pw = api_secret or ""
+    if not investor_pw.strip():
+        raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+
+    # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
+    # SERVER misconfig, NEVER the user's key — mirror the sfox construction-time
+    # 503 posture. Log secret-free (no login/pw/server values) and fail as a clean
+    # 503, never a 500, never a misleading AUTH_FAILED. (Phase 139 sets these live;
+    # unset now = the server-misconfig path.)
+    host = os.getenv("MT5_GATEWAY_HOST")
+    port_raw = os.getenv("MT5_GATEWAY_PORT")
+    if not host or not port_raw:
+        logger.error("validate_key: MT5 gateway not configured (server misconfig)")
+        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+    try:
+        port = int(port_raw)
+    except ValueError:
+        logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
+        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+
+    client = Mt5Client(host, port)
+    try:
+        # Mt5Client is SYNCHRONOUS blocking RPyC. Run the login+read+probe body off
+        # the event loop and bound it with a wait_for ceiling so a hung terminal
+        # can never wedge the loop / healthz (WEDGE-01, T-135-12). The terminal-
+        # restart recovery machinery is Phase 137 — not built here.
+        def _probe() -> tuple[dict[str, Any], dict[str, Any]]:
+            client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
+            info = client.account_info()  # proves auth + read
+            probe = client.order_check(mt5_probe_request())  # PROBE ONLY
+            return info, probe
+
+        try:
+            info, probe = await asyncio.wait_for(
+                asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            # A hung upstream bridge — transient, not the user's key. Fail CLOSED
+            # with the shared NETWORK detail (mirrors the sfox transient arm);
+            # WARNING (not exception) so a blip does not spam Sentry.
+            logger.warning("validate_key: MT5 probe timed out (upstream bridge hung)")
+            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+        except Mt5ClientError as e:
+            # Classify via the ONE mt5_validation seam. NEVER log the interpolated
+            # remote text (it can carry the scrubbed code only) and never
+            # login/pw/server values.
+            kind = classify_mt5_login_error(e)
+            if kind == "auth":
+                raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
+            if kind == "wrong_server":
+                raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+            # transient -> fail CLOSED with the shared NETWORK detail (sfox F4
+            # posture: never auth-failed, never valid). WARNING with the scrubbed
+            # code only.
+            logger.warning(
+                "validate_key: MT5 transient upstream failure (code=%s)", e.code
+            )
+            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+
+        if is_trade_capable(info, probe):
+            # Master (trade-capable) login REJECTED — never persisted (the TS
+            # caller only encrypts after valid:true). The EoP gate (T-135-09).
+            raise HTTPException(
+                status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
+            )
+
+        # Investor (read-only) login. read_only=True is STRUCTURAL (Mt5Client
+        # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
+        # investor-vs-master probe above that sfox lacks.
+        return {"valid": True, "read_only": True}
+    finally:
+        # Idempotent close on EVERY path after construction (success,
+        # master-reject, auth/server fail, transient/timeout) so the terminal
+        # session never leaks.
+        client.close()
+
+
 @router.post("/validate-key")
 @limiter.limit("100/hour")
 async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, Any]:
@@ -147,6 +308,21 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
         if not sfox_enabled_server():
             raise HTTPException(status_code=400, detail=SFOX_DISABLED_DETAIL)
         return await _validate_sfox_key(req.api_key)
+
+    # MT5SRC-02 (Phase 135): MT5 is NOT a ccxt exchange — it speaks RPyC to a
+    # terminal bridge, never ccxt — so it must NOT route through
+    # create_exchange/EXCHANGE_CLASSES. Intercept BEFORE the ccxt path (cloning the
+    # sfox intercept shape + F2 gate comment) and validate via the Phase-134
+    # read-only Mt5Client. The ccxt branch below stays byte-for-byte unchanged.
+    if req.exchange == "mt5":
+        # Go-dark gate (Q-C, mirrors the sfox F2 gate): MT5 is founder-gated until
+        # go-live (Phase 139). Fail CLOSED with an honest "not yet available" 400
+        # BEFORE any client construction or live probe — never a live probe when
+        # disabled, never a false AUTH_FAILED. Mirrors the TS isMt5EnabledServer()
+        # gate at the key routes; defense-in-depth for any direct/worker caller.
+        if not mt5_enabled_server():
+            raise HTTPException(status_code=400, detail=MT5_DISABLED_DETAIL)
+        return await _validate_mt5_key(req.api_key, req.api_secret, req.passphrase)
 
     try:
         exchange = create_exchange(req.exchange, req.api_key, req.api_secret, req.passphrase)
@@ -192,6 +368,22 @@ async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any
     except RuntimeError:
         raise HTTPException(status_code=503, detail="Encryption not configured")
 
+    # ==============================================================================
+    # MT5 CREDENTIAL-SLOT MAPPING (MT5SRC-02, CONTEXT-locked) — THE ONE CHOKEPOINT
+    # ------------------------------------------------------------------------------
+    # For exchange == 'mt5' the three MT5 login fields REUSE the existing encrypted
+    # credential slots — NO new columns:
+    #     login            -> api_key
+    #     investor password -> api_secret
+    #     broker server     -> passphrase
+    # The Next.js key wizard populates these slots in exactly this order, and the
+    # worker is_mt5 validate branch (_validate_mt5_key above) reads them back
+    # identically (api_key=login, api_secret=investor pw, passphrase=broker server).
+    # encrypt_credentials is exchange-agnostic — it just encrypts whatever three
+    # fields it is handed — so there is deliberately NO mt5 carve-out here; this
+    # comment IS the contract. Change the slot order on ONE side and MT5 validate
+    # silently breaks, so the mapping lives loudly at this single chokepoint.
+    # ==============================================================================
     encrypted = encrypt_credentials(req.api_key, req.api_secret, req.passphrase, kek)
     return encrypted
 
