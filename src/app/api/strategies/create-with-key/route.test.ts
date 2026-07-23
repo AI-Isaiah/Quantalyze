@@ -657,6 +657,100 @@ describe("POST /api/strategies/create-with-key — sfox server gate (F2, SFOX_EN
 });
 
 /**
+ * Phase 135 (MT5SRC-03) — mt5 acceptance. 'mt5' was auto-widened into
+ * SUPPORTED_EXCHANGES in plan 135-02, so isSupportedExchange admits it with
+ * ZERO route.ts edits. mt5 is the MIRROR-IMAGE of the sfox carve-out: it flows
+ * the api_secret-REQUIRED path (no sfox-style relaxation), and an invalid
+ * exchange value is STILL rejected (defense-in-depth: TS enum → pydantic
+ * Literal → SQL CHECK). The worker's is_mt5 branch + its mt5_enabled_server()
+ * go-dark gate are the authoritative live-probe controls behind this route.
+ */
+describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    assetClassUpdateMock.mockClear();
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  const MT5_BODY = {
+    exchange: "mt5",
+    api_key: "500123456", // login → api_key slot (≥8 chars)
+    api_secret: "investor-password-123", // investor password → api_secret slot
+    passphrase: "MetaQuotes-Demo", // broker server → passphrase slot
+    label: "mt5 key",
+    wizard_session_id: WIZARD_SESSION_ID,
+  };
+
+  it("accepts exchange=mt5 (clears isSupportedExchange) and stamps p_exchange='mt5' into the RPC", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_BODY));
+
+    expect(res.status).toBe(200);
+    // login/api_key, investor pw/api_secret, broker server/passphrase — the
+    // exact slot mapping the worker's is_mt5 branch reads back.
+    expect(validateKeyMock).toHaveBeenCalledWith(
+      "mt5",
+      "500123456",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+    );
+    const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
+    expect(rpcName).toBe("create_wizard_strategy");
+    expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("mt5");
+  });
+
+  it("flows the api_secret-REQUIRED path — mt5 with NO api_secret is a 400 (no sfox relaxation leak)", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        exchange: "mt5",
+        api_key: "500123456",
+        passphrase: "MetaQuotes-Demo",
+        label: "mt5 key",
+        wizard_session_id: WIZARD_SESSION_ID,
+      }),
+    );
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.error).toBe("api_secret is required");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("STILL 400s an invalid exchange value (three-layer lockstep: bogus never admitted)", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...MT5_BODY, exchange: "notanexchange" }));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.error).toBe("Unsupported exchange");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
  * F6 (H-0304/H-0311) — pre-Railway idempotency fence. A double-submit or
  * browser retry carrying the same wizard_session_id must NOT spin a second
  * live-exchange validate + key encryption; the route returns the existing
