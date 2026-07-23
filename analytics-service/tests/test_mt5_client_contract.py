@@ -70,6 +70,8 @@ class _FakeMt5:
       order_check      -> value order_check() returns
       last_error       -> tuple last_error() returns (default (0, "unknown"))
       shutdown_raises  -> if truthy, shutdown() raises
+      login_raises     -> if set, login() RAISES this exception (transport error)
+      account_raises   -> if set, account_info() RAISES this exception
     """
 
     def __init__(self, scenario: dict) -> None:
@@ -79,9 +81,15 @@ class _FakeMt5:
 
     def login(self, login, **kwargs):
         self.login_calls.append((login, kwargs))
+        exc = self._scenario.get("login_raises")
+        if exc is not None:
+            raise exc
         return self._scenario.get("login", True)
 
     def account_info(self):
+        exc = self._scenario.get("account_raises")
+        if exc is not None:
+            raise exc
         return self._scenario.get("account")
 
     def history_deals_get(self, from_ts, to_ts):
@@ -142,6 +150,46 @@ def test_login_failure_raises_typed_error_no_secret():
         client.login(123, password="s3cr3t-pw", server="Broker-Demo")
     assert "s3cr3t-pw" not in str(exc_info.value)
     assert exc_info.value.code == 134
+
+
+def test_login_transport_raise_is_scrubbed_and_typed():
+    """CR-01: a transport-RAISED exception (not a falsy return) whose text embeds
+    the interpolated credentials must be caught and re-raised as a scrubbed,
+    typed Mt5ClientError. This is the exact disclosure vector the module docstring
+    names: mt5linux f-string-interpolates the password into the remotely-eval'd
+    code, so a leaked rpyc remote-traceback string is a real credential
+    disclosure. The client OWNS the scrub for this path; it must not rely on a
+    caller routing the exception through the redact processor. Fails against the
+    unwrapped `self._mt5.login(...)` call (raw RuntimeError escapes untyped)."""
+    connect, _fake, _rec = _make(
+        {
+            "login_raises": RuntimeError(
+                "rpyc remote error while eval'ing "
+                "login(123, password='hunter2', server='Broker-Demo')"
+            )
+        }
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.login(123, password="hunter2", server="Broker-Demo")
+    msg = str(exc_info.value)
+    assert "hunter2" not in msg
+    assert "Broker-Demo" not in msg
+    assert "123" not in msg
+
+
+def test_read_transport_raise_is_scrubbed_and_typed():
+    """CR-01: the transport-raise wrap covers EVERY raw read, not just login. A
+    non-login read that raises at the transport must also surface as a scrubbed,
+    typed Mt5ClientError rather than a raw untyped transport exception. Fails
+    against the unwrapped `self._mt5.account_info()` call."""
+    connect, _fake, _rec = _make(
+        {"account_raises": RuntimeError("rpyc timeout; apikey=SUPERSECRET leaked")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.account_info()
+    assert "SUPERSECRET" not in str(exc_info.value)
 
 
 def test_login_passes_ipc_timeout_below_rpyc_timeout():

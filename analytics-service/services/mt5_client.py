@@ -154,20 +154,54 @@ class Mt5Client:
         code, text = (err[0], err[1]) if err else (0, "unknown")
         raise Mt5ClientError(int(code), str(text))
 
+    def _guarded_read(self, call: Callable[[], Any]) -> Any:
+        """Run a raw transport read, converting ANY transport-RAISED exception
+        into a scrubbed, typed `Mt5ClientError` (T-134-01). `mt5linux` speaks rpyc
+        classic: a round-trip that raises (a remote traceback carrying the
+        interpolated `code` source line, a mid-handshake abort, an rpyc timeout)
+        would otherwise escape UNSCRUBBED — the exact credential-disclosure class
+        the module docstring flags. This is fail-loud, just scrubbed: the error
+        still propagates, never swallowed. An `Mt5ClientError` we constructed
+        (e.g. a `_materialize` degenerate-shape raise) passes through unchanged.
+        Only RAISES are intercepted — the `None` (error) vs `()` (honest empty)
+        RETURN discipline is untouched (the returned value is handed straight
+        back)."""
+        try:
+            return call()
+        except Mt5ClientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
+            raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
+
     def login(self, login: int, password: str, server: str) -> None:
         """Log the terminal into the broker account. A falsy return (bad
         credentials / wrong server — both surface as an opaque False) -> typed
-        raise. The MT5 IPC login timeout is passed explicitly and stays below the
-        rpyc request timeout (Pitfall 3)."""
-        ok = self._mt5.login(
-            login, password=password, server=server, timeout=MT5_LOGIN_TIMEOUT_MS
-        )
+        raise. A transport-RAISED exception is caught and re-raised as a scrubbed
+        typed error — `mt5linux` f-string-interpolates the password into the
+        remotely-eval'd code, so a raw rpyc remote traceback is a real credential
+        disclosure (T-134-01). Because the credential values are in scope here,
+        they are ALSO redacted by value (login/server, not just `password=`
+        shapes) on top of the shape-based `scrub_freeform_string`. The MT5 IPC
+        login timeout is passed explicitly and stays below the rpyc request
+        timeout (Pitfall 3)."""
+        try:
+            ok = self._mt5.login(
+                login, password=password, server=server, timeout=MT5_LOGIN_TIMEOUT_MS
+            )
+        except Mt5ClientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
+            safe = scrub_freeform_string(str(exc))
+            for literal in (str(login), password, server):
+                if literal:
+                    safe = safe.replace(literal, "[REDACTED]")
+            raise Mt5ClientError(0, safe) from None
         if not ok:
             self._raise_last()
 
     def account_info(self) -> dict:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
-        info = self._mt5.account_info()
+        info = self._guarded_read(self._mt5.account_info)
         if info is None:
             self._raise_last()
         return _materialize(info)
@@ -179,7 +213,7 @@ class Mt5Client:
         dicts. The raw
         server-time `time`/`time_msc` epochs are returned VERBATIM — the
         normalize-to-UTC seam is Phase 136, not this client."""
-        deals = self._mt5.history_deals_get(from_ts, to_ts)
+        deals = self._guarded_read(lambda: self._mt5.history_deals_get(from_ts, to_ts))
         if deals is None:
             self._raise_last()
         return [_materialize(d) for d in deals]
@@ -195,7 +229,7 @@ class Mt5Client:
         [ASSUMED] pending MT5SPIKE-01 leg 2 — the Phase-135 rule must combine the
         order_check retcode/comment WITH account_info().trade_allowed (Pitfall 4).
         """
-        result = self._mt5.order_check(request)
+        result = self._guarded_read(lambda: self._mt5.order_check(request))
         if result is None:
             self._raise_last()
         return _materialize(result)
