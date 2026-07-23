@@ -366,7 +366,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         <Card key={key.id}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <span className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary">
+              <span
+                data-testid={`api-key-avatar-${key.exchange}`}
+                className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary"
+              >
                 {exchangeIcon[key.exchange] ?? "?"}
               </span>
               <div>

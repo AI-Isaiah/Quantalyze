@@ -126,10 +126,14 @@ test.describe("Plan 138-03 — connected-MT5 badge + tag (MT5UI-02)", () => {
     // ApiKeyManager lists the logged-in user's api_keys; the mt5 key renders the
     // "MT5" mono tag in its card avatar (138-03 Task 1). It must be the real tag,
     // never the "?" unknown-exchange fallback.
-    await expect(page.getByText("MT5", { exact: true }).first()).toBeVisible({
-      timeout: 10_000,
-    });
-    await expect(page.getByText("?", { exact: true })).toHaveCount(0);
+    //
+    // IN-02: scope the negative check to the mt5 key-card avatar itself rather
+    // than a page-global getByText("?") count. Asserting the avatar's text is
+    // exactly "MT5" simultaneously proves it is NOT the "?" fallback, and a stray
+    // "?" glyph elsewhere on the edit page can no longer false-RED this test.
+    const mt5Avatar = page.getByTestId("api-key-avatar-mt5");
+    await expect(mt5Avatar).toBeVisible({ timeout: 10_000 });
+    await expect(mt5Avatar).toHaveText("MT5");
   });
 
   test("owner: the strategy factsheet shows the api_verified badge (+ axe)", async ({
