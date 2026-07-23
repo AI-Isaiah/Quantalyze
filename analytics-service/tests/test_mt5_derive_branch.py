@@ -33,6 +33,8 @@ Behaviors:
 """
 from __future__ import annotations
 
+import asyncio
+import time
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -77,6 +79,8 @@ class _FakeMt5Transport:
         deals_none: bool = False,
         read_exc: Exception | None = None,
         last_error: tuple = (0, "unknown"),
+        hang_s: float = 0.0,
+        shutdown_hang_s: float = 0.0,
     ) -> None:
         self._account = account
         self._deals = deals
@@ -84,6 +88,12 @@ class _FakeMt5Transport:
         self._deals_none = deals_none
         self._read_exc = read_exc
         self._last_error = last_error
+        # MT5CONC-01: a BOUNDED real sleep (never an unbounded threading.Event) so a
+        # broken regression drains and can never itself hang CI. hang_s simulates a
+        # wedged history_deals_get; shutdown_hang_s a terminal too wedged to even
+        # tear down (the restart-itself-bounded case).
+        self._hang_s = hang_s
+        self._shutdown_hang_s = shutdown_hang_s
         self.calls: list[str] = []
 
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
@@ -96,6 +106,8 @@ class _FakeMt5Transport:
 
     def history_deals_get(self, from_ts, to_ts):  # noqa: ANN001
         self.calls.append("history_deals_get")
+        if self._hang_s:
+            time.sleep(self._hang_s)  # simulate a wedged Wine/RPyC pipe
         if self._read_exc is not None:
             raise self._read_exc
         if self._deals_none:
@@ -111,10 +123,25 @@ class _FakeMt5Transport:
 
     def shutdown(self):
         self.calls.append("shutdown")
+        if self._shutdown_hang_s:
+            time.sleep(self._shutdown_hang_s)  # a teardown too wedged to complete
 
 
-def _session(transport: _FakeMt5Transport) -> Mt5Session:
-    client = Mt5Client("h", 1, _connect=lambda *, host, port, timeout: transport)
+def _session(
+    transport: _FakeMt5Transport, *, connects: list | None = None
+) -> Mt5Session:
+    """Build an Mt5Session over the offline transport double. When ``connects`` is
+    provided, every connect() invocation appends to it so restart's re-connect is
+    countable (len == 2 after one restart) — the single shared transport keeps its
+    call log across the rebuild, so ``"shutdown" in transport.calls`` still proves
+    the teardown happened."""
+
+    def _connect(*, host, port, timeout):  # noqa: ANN001
+        if connects is not None:
+            connects.append(1)
+        return transport
+
+    client = Mt5Client("h", 1, _connect=_connect)
     return Mt5Session(
         client=client, login=123456, investor_password="pw", server="Broker-Live"
     )
@@ -124,11 +151,14 @@ def _session(transport: _FakeMt5Transport) -> Mt5Session:
 # ctx / capture harness (mirrors test_derive_broker_dailies_dualmode._build_ctx).
 # ---------------------------------------------------------------------------
 def _build_ctx(
-    transport: _FakeMt5Transport, *, asset_class: str = "traditional"
+    transport: _FakeMt5Transport,
+    *,
+    asset_class: str = "traditional",
+    connects: list | None = None,
 ) -> tuple[MagicMock, dict]:
     capture: dict = {"upserts": [], "rpc_calls": [], "deletes": []}
     ctx = MagicMock()
-    ctx.exchange = _session(transport)
+    ctx.exchange = _session(transport, connects=connects)
     ctx.supabase = MagicMock()
     ctx.strategy_row = {"id": "strat-mt5", "user_id": "u1", "asset_class": asset_class}
     ctx.key_row = {"id": "key-mt5", "user_id": "u1", "exchange": "mt5"}
@@ -557,6 +587,100 @@ async def test_reconstruction_reconciles_to_equity(monkeypatch) -> None:
         rows, initial=initial + 2.0, flows_by_day=flows_by_day
     )
     assert abs(drifted - terminal_equity) > tol
+
+
+# ---------------------------------------------------------------------------
+# 9 — MT5CONC-01: a hung terminal read times out, is ACTIVELY restarted, and the
+# job returns transient — never wedging the worker, never persisting anything.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_hung_read_restart_on_timeout(monkeypatch) -> None:
+    """A wedged history_deals_get blows past the read bound → the wait_for fires →
+    the terminal is ACTIVELY restarted (connect re-invoked AND shutdown called) →
+    the job returns transient with NOTHING persisted, while a concurrent ticker
+    proves the event loop never blocked. This is a WIRING test: it reddens if the
+    _mt5_bounded_restart call is removed from the TimeoutError branch."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    # Read bound well under the hang so the wait_for fires; the hang is a BOUNDED
+    # real sleep so the abandoned reader thread drains and can never hang CI.
+    monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0},
+        deals=_canonical_deals(),
+        hang_s=1.0,
+    )
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    assert len(connects) == 1  # the Mt5Client ctor connected once
+
+    # A loop-liveness ticker: if the read blocked the event loop (rather than
+    # running off it via to_thread), this task could never advance during the hang.
+    ticks = {"n": 0}
+
+    async def _ticker() -> None:
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.01)
+
+    ticker_task = asyncio.create_task(_ticker())
+    try:
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+    finally:
+        ticker_task.cancel()
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"  # NEVER permanent from a single hang
+    # The terminal was ACTIVELY restarted: shutdown fired AND connect re-invoked so
+    # the next retry hits a fresh terminal (fails if the restart call is removed).
+    assert "shutdown" in transport.calls
+    assert len(connects) == 2, (
+        f"the timeout branch must actively restart (re-connect) the terminal; "
+        f"connect invocations={len(connects)!r}"
+    )
+    # The event loop stayed live throughout the in-thread hang.
+    assert ticks["n"] > 0, "the event loop was blocked during the mt5 read hang"
+    # NO fabricated partial series and NO terminal stamp on the timeout path.
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert not any(u[0] == "strategy_analytics" for u in capture["upserts"])
+
+
+# ---------------------------------------------------------------------------
+# 10 — MT5CONC-01: the restart is ITSELF bounded — a terminal too wedged to even
+# tear down can never nest-wedge the worker; the job still returns transient fast.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
+    """The read hangs (→ restart), and the restart's own shutdown ALSO hangs past a
+    tiny restart bound. The job must STILL return transient PROMPTLY (bounded wall-
+    clock, well under the summed genuine hang durations) — the never-nested-wedge
+    proof. Without the to_thread + wait_for bound on the restart, the hung shutdown
+    would wedge the sequential worker exactly as the original read hang would."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
+    monkeypatch.setattr(jw, "_MT5_RESTART_TIMEOUT_S", 0.05)
+    read_hang, shutdown_hang = 0.3, 0.5  # genuine hangs the bounds must cut short
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0},
+        deals=_canonical_deals(),
+        hang_s=read_hang,
+        shutdown_hang_s=shutdown_hang,
+    )
+    ctx, capture = _build_ctx(transport)
+
+    start = time.monotonic()
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+    elapsed = time.monotonic() - start
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    # Both bounds fired: wall-clock is far under the summed genuine hangs (0.8s), so
+    # neither the read hang nor the restart-shutdown hang ran to completion inline.
+    assert elapsed < (read_hang + shutdown_hang), (
+        f"the bounded read + bounded restart must return well under the summed "
+        f"genuine hang durations; elapsed={elapsed:.3f}s"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -75,6 +75,11 @@ if TYPE_CHECKING:
     # `-> "pd.Series"` return annotation needs the name resolvable under mypy.
     import pandas as pd
 
+    # MT5CONC-01: the bounded restart helper is typed against Mt5Client. The value
+    # is only ever a client already held by the live Mt5Session; a type-only import
+    # keeps the module-import-does-not-require-mt5linux contract intact.
+    from services.mt5_client import Mt5Client
+
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
@@ -278,13 +283,27 @@ _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "m
 # MT5_REQUEST_TIMEOUT_S inside Mt5Client; this outer wait_for is the FLIPRETRY-01
 # baseline so a hang OUTSIDE a bounded round-trip (netref materialization, a wedged
 # Wine terminal) becomes a CLASSIFIED TRANSIENT at the bound, never an unbounded
-# wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening
-# (restart-on-timeout, per-terminal lock) is Phase 137 by locked scope. Derived
+# wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening is
+# delivered incrementally: restart-on-timeout landed in Phase 137 plan 01 (the
+# _MT5_RESTART_TIMEOUT_S / _mt5_bounded_restart pair below + the TimeoutError-branch
+# invocation), and the per-terminal lock + login bracket land in plan 137-02. Derived
 # from MT5_REQUEST_TIMEOUT_S (+10s margin) so a retuned rpyc bound carries through
 # — mirrors ingestion/mt5.py:_MT5_PROBE_TIMEOUT_S so the derive and probe paths
 # never diverge (WR-02).
 _MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
     os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
+)
+
+# MT5CONC-01 (Phase 137 plan 01): the wall-clock ceiling on an ACTIVE terminal
+# restart (bounded shutdown + re-connect) invoked on the derive read-timeout
+# branch. The 10s magnitude mirrors exchange.py:_ACLOSE_TIMEOUT_S — a bounded
+# teardown+rebuild is the same order as a bounded close. It MUST stay far under
+# TIMEOUT_PER_KIND["derive_broker_dailies"] (15 min) so a hung restart can never
+# itself push the job into the outer dispatch ceiling: the restart is best-effort
+# recovery, and a restart that wedged is abandoned at this bound exactly like the
+# hung read (never a nested wedge of the sequential worker).
+_MT5_RESTART_TIMEOUT_S: Final[float] = float(
+    os.getenv("MT5_RESTART_TIMEOUT_S", "10.0")
 )
 
 # WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
@@ -306,6 +325,31 @@ assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
 )
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
+
+
+async def _mt5_bounded_restart(client: "Mt5Client") -> None:
+    """MT5CONC-01 — ACTIVELY restart a wedged MT5 terminal, bounded so it can never
+    itself nest-wedge the SEQUENTIAL worker.
+
+    ``Mt5Client.restart()`` is blocking RPyC (like the read), so it runs OFF the
+    event loop via ``to_thread`` and is capped by ``_MT5_RESTART_TIMEOUT_S`` (~10s,
+    far under the 15-min dispatch ceiling). A hung restart is ABANDONED at the bound
+    exactly like a hung read — the thread is never joined. Best-effort recovery: any
+    failure (the ``wait_for`` firing, a transport raise) is logged and SWALLOWED so
+    the restart can never mask or replace the caller's transient classification.
+    Kept module-level (not nested in the branch) because plan 137-02 reuses it for
+    the login-mismatch branch.
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S
+        )
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — best-effort recovery
+        logger.warning(
+            "derive_broker_dailies: bounded mt5 terminal restart did not complete "
+            "within its wall-clock bound — abandoning it; the transient retry will "
+            "reconnect on the next attempt (MT5CONC-01)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -3337,11 +3381,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
                 # NEVER an unbounded wedge, NO terminal stamp (FLIPRETRY-01). The
                 # finally: aclose_exchange below still runs (bounded mt5 close).
+                # MT5CONC-01: a blocked RPyC/Wine pipe will NOT self-unblock, so
+                # ACTIVELY restart the terminal (itself bounded — never a nested
+                # wedge) BEFORE the transient return, so the next DB-backoff retry
+                # hits a FRESH terminal instead of inheriting the same wedge across
+                # all attempts and burning to failed_final.
                 logger.warning(
                     "derive_broker_dailies: mt5 read exceeded its wall-clock bound "
-                    "(label=%s) — classified transient, retrying (FLIPRETRY-01)",
+                    "(label=%s) — classified transient, actively restarting the "
+                    "terminal and retrying (FLIPRETRY-01, MT5CONC-01)",
                     funding_label,
                 )
+                await _mt5_bounded_restart(_mt5_session.client)
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
