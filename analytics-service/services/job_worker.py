@@ -101,7 +101,10 @@ from services.exchange import (
 )
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
-from services.mt5_client import Mt5Session  # type annotations only (mt5 holder)
+from services.mt5_client import (  # mt5 holder + the rpyc bound the derive margins off
+    Mt5Session,
+    MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S,
+)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 
@@ -268,6 +271,21 @@ _SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
 # ccxt combine would run on empty realized/funding streams and CLOBBER the
 # reconstructed mt5 TWR with a flat series.
 _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "mt5"})
+
+# MT5RECON-01 (Phase 136): the last-resort event-loop ceiling on the mt5 derive
+# read block (login → account_info → history_deals_get, run OFF the loop via
+# asyncio.to_thread). Each RPyC round-trip is already rpyc-bounded by
+# MT5_REQUEST_TIMEOUT_S inside Mt5Client; this outer wait_for is the FLIPRETRY-01
+# baseline so a hang OUTSIDE a bounded round-trip (netref materialization, a wedged
+# Wine terminal) becomes a CLASSIFIED TRANSIENT at the bound, never an unbounded
+# wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening
+# (restart-on-timeout, per-terminal lock) is Phase 137 by locked scope. Derived
+# from MT5_REQUEST_TIMEOUT_S (+10s margin) so a retuned rpyc bound carries through
+# — mirrors ingestion/mt5.py:_MT5_PROBE_TIMEOUT_S so the derive and probe paths
+# never diverge (WR-02).
+_MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
+    os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
+)
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -3234,6 +3252,275 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # the SAME list[ExternalFlow] type (sfox_read.py:238), so the downstream
             # consumer accepts it identically. Shape parity CONFIRMED.
             external_flows = _flow_evidence
+        elif venue == "mt5":
+            # ── MT5RECON-01/03: the MT5 deal-ledger broker-dailies ONE-path ──
+            # MT5 is single-currency (broker deposit ccy, USD-family) with a LIVE
+            # account_info().equity anchor — structurally closest to sFOX (no
+            # per-currency coin reconstruction), but the return series comes from a
+            # deal LEDGER (history_deals_get), reconstructed against equity by
+            # combine_mt5_deal_ledger. Modeled line-for-line on the sfox branch:
+            # (a) kill-switch gate FIRST, (b) ONE bounded read block, (c) equity/
+            # balance extraction + the realized-vs-MTM uPnL wedge, (d) material-
+            # equity floor, (e) the combine + typed dispositions, feeding the
+            # UNCHANGED derive/persist below (excluded from the ccxt combine via
+            # _NATIVE_RETURNS_VENUES).
+            #
+            # (a) SFOX-06 parity kill-switch chokepoint: the QUEUE-executed path
+            # must honor the founder go-dark gate too. The DB CHECK admits 'mt5'
+            # unconditionally, so after MT5_ENABLED is turned off (an incident
+            # rollback) a stored mt5 key would keep firing live RPyC deal reads
+            # here every run. Gate BEFORE any decrypt/login/read. Permanent (the
+            # founder disabled it deliberately — retrying is wrong): fails cleanly
+            # and stops, never a live read while disabled.
+            if not mt5_enabled_server():
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=f"derive_broker_dailies: {MT5_DISABLED_DETAIL}",
+                    error_kind="permanent",
+                )
+            from services.broker_dailies import combine_mt5_deal_ledger
+            from services.mt5_client import Mt5ClientError
+            from services.mt5_deals import (
+                Mt5DealClassificationError,
+                classify_deal,
+                deal_utc_day,
+            )
+            from services.mt5_validation import classify_mt5_login_error
+            from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
+
+            _mt5_session = ctx.exchange  # Mt5Session (parsed creds + Mt5Client)
+            _mt5_now = datetime.now(timezone.utc)
+            # (b) ONE synchronous read block off the event loop (Mt5Client is
+            # blocking RPyC) wrapped in asyncio.wait_for — the FLIPRETRY-01 baseline
+            # ceiling. login → account_info → history_deals_get over the FULL
+            # history (epoch 0 → now + one day margin so a same-day deal near the
+            # boundary is never clipped). Each round-trip is already rpyc-bounded
+            # inside Mt5Client; this bound catches a hang OUTSIDE a bounded call.
+            def _mt5_read() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                _mt5_session.client.login(
+                    _mt5_session.login,
+                    _mt5_session.investor_password,
+                    _mt5_session.server,
+                )
+                _info = _mt5_session.client.account_info()  # None→typed raise
+                # None (error) is a typed raise inside the client; () → [] honest
+                # empty. NO fabricated flat account can enter here.
+                _deals = _mt5_session.client.history_deals_get(
+                    0, int(_mt5_now.timestamp()) + 86_400
+                )
+                return _info, _deals
+
+            try:
+                _mt5_info, _mt5_deals = await asyncio.wait_for(
+                    asyncio.to_thread(_mt5_read),
+                    timeout=_MT5_DERIVE_READ_TIMEOUT_S,
+                )
+            except asyncio.TimeoutError:
+                # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
+                # NEVER an unbounded wedge, NO terminal stamp (FLIPRETRY-01). The
+                # finally: aclose_exchange below still runs (bounded mt5 close).
+                logger.warning(
+                    "derive_broker_dailies: mt5 read exceeded its wall-clock bound "
+                    "(label=%s) — classified transient, retrying (FLIPRETRY-01)",
+                    funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 read exceeded the per-read "
+                        "wall-clock bound — retrying rather than wedging the worker "
+                        "(FLIPRETRY-01)"
+                    ),
+                    error_kind="transient",
+                )
+            except Mt5ClientError as exc:
+                # Classify via the ONE mt5_validation seam: auth/wrong_server are
+                # PERMANENT (a stored bad/wrong-server key never self-heals) +
+                # terminal stamp; anything else degrades to TRANSIENT (a bridge/
+                # terminal blip may succeed next attempt — no terminal stamp). The
+                # message is already secret-scrubbed at Mt5ClientError construction.
+                _kind = classify_mt5_login_error(exc)
+                _scrubbed = str(scrub_freeform_string(str(exc)))
+                if _kind in ("auth", "wrong_server"):
+                    await _stamp_strategy_analytics_failed(
+                        "MT5 login/read was rejected (bad credentials or wrong "
+                        "broker server). " + _scrubbed
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 login/read rejected — "
+                            + _scrubbed
+                        ),
+                        error_kind="permanent",
+                    )
+                logger.warning(
+                    "derive_broker_dailies: mt5 read hit a transient client error "
+                    "(label=%s) — retrying (no terminal stamp)",
+                    funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 read transient error — retrying"
+                    ),
+                    error_kind="transient",
+                )
+
+            # (c) Extract equity + balance, fail-loud on non-finite (a NaN/Inf
+            # anchor would sail past every downstream NAV-denominator guard as a
+            # silent-NaN 'complete' series). open_unrealized_usd = equity − balance
+            # is the directly-observable MT5 realized-vs-MTM wedge (v1.8 convention:
+            # account_info().equity = balance + floating uPnL of open positions).
+            try:
+                _mt5_equity = float(_mt5_info["equity"])
+                _mt5_balance = float(_mt5_info["balance"])
+            except (KeyError, TypeError, ValueError) as exc:
+                await _stamp_strategy_analytics_failed(
+                    "MT5 account snapshot was missing or carried a non-numeric "
+                    "equity/balance."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 account_info missing/non-numeric "
+                        "equity/balance — " + str(scrub_freeform_string(str(exc)))
+                    ),
+                    error_kind="permanent",
+                )
+            if not (math.isfinite(_mt5_equity) and math.isfinite(_mt5_balance)):
+                await _stamp_strategy_analytics_failed(
+                    "MT5 account snapshot carried a non-finite equity/balance "
+                    "(NaN/Inf); refusing a poisoned anchor."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 equity/balance non-finite — "
+                        "refusing a poisoned anchor"
+                    ),
+                    error_kind="permanent",
+                )
+
+            # (e) THE combine: the deal ledger → cashflow-neutral daily TWR via the
+            # EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard set)
+            # anchored to the LIVE equity. server_utc_offset_s is the [ASSUMED A2]
+            # env-threaded broker offset (confirmed at the 134/139 live spike; plan
+            # 136-05 checkpoint). An unclassifiable DEAL_TYPE (the deribit
+            # 'correction' lesson) raises Mt5DealClassificationError → PERMANENT +
+            # stamp (never retry an unknown type forever); a structural NAV/TWR
+            # refusal raises NavReconstructionError → the SHARED terminal
+            # disposition (sfox :3156 / ccxt :2934 parity).
+            try:
+                returns, meta = combine_mt5_deal_ledger(
+                    _mt5_deals,
+                    account_equity=_mt5_equity,
+                    account_balance=_mt5_balance,
+                    server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                )
+            except Mt5DealClassificationError as exc:
+                _scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_strategy_analytics_failed(
+                    "MT5 deal ledger contained a deal type that could not be "
+                    "classified (an ambiguous/unknown DEAL_TYPE, or a non-finite "
+                    "money/time field). " + _scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 deal unclassifiable — "
+                        + _scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+            except NavReconstructionError as exc:
+                return await _dispose_broker_nav_error(
+                    exc,
+                    stamp_detail=(
+                        "MT5 NAV/TWR reconstruction refused a structural input "
+                        "(an undatable deal or a non-finite NAV/flow amount). "
+                    ),
+                    result_detail=(
+                        "derive_broker_dailies: mt5 NAV/TWR reconstruction failed "
+                        "structurally — "
+                    ),
+                )
+
+            open_unrealized_usd = _mt5_equity - _mt5_balance
+
+            # (d) Material-equity floor (the deribit C2 / sfox :3116 analog,
+            # venue-agnostic): a materially-funded account that produced <2 usable
+            # daily-return days is a silently-empty (green) track record (broken
+            # key / wrong account), NOT genuine "insufficient history". Fail loud
+            # PERMANENT. A genuinely tiny/empty account (equity below the floor)
+            # instead flows to the honest downstream <2-day gate (:3680) — no
+            # invented rows. Judged AFTER the combine (the combine is pure and its
+            # gap-fill defines the usable-day count the downstream gate also uses).
+            _mt5_usable_days = int(returns.notna().sum())
+            if (
+                abs(_mt5_equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
+                and _mt5_usable_days < 2
+            ):
+                await _stamp_strategy_analytics_failed(
+                    "MT5 account holds material equity but produced no "
+                    "interpretable daily history."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 account holds material equity "
+                        f"(~{abs(_mt5_equity):.0f} USD) but produced <2 usable "
+                        "daily-return days — refusing an empty-but-green track record"
+                    ),
+                    error_kind="permanent",
+                )
+
+            # (f) Belt-and-braces uPnL-wedge flag: combine_mt5_deal_ledger already
+            # threads open_unrealized_usd through the honest core (which sets
+            # unrealized_pnl_in_anchor when the core judged the wedge material), but
+            # re-apply the deribit :2496-2503 condition here defensively so a
+            # material realized-vs-MTM wedge on a trustworthy anchor promotes to
+            # complete_with_warnings even if the core's own flag were ever missed.
+            # Never silently reconciled (the v1.8 realized-basis convention).
+            if (
+                _mt5_equity > DUST_NAV_FLOOR
+                and abs(open_unrealized_usd) / _mt5_equity
+                > UNREALIZED_MATERIALITY_RATIO
+            ):
+                meta["unrealized_pnl_in_anchor"] = True
+
+            # Build the ExternalFlow evidence list from the SAME classify pass the
+            # combine ran (all deals already classified cleanly — combine raised
+            # otherwise), so the downstream DQ-02 terminus / key-mode key_inputs
+            # contract sees honest evidence. The flow numerator was ALREADY applied
+            # INSIDE combine_mt5_deal_ledger; this list is evidence only (mt5 has no
+            # retention cap → the DQ-02 terminus is None, so it never re-segments).
+            _mt5_flow_by_day: dict[str, float] = {}
+            for _deal in _mt5_deals:
+                if classify_deal(_deal) == "external_flow":
+                    _fday = deal_utc_day(
+                        _deal.get("time"),
+                        int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                    )
+                    _mt5_flow_by_day[_fday] = _mt5_flow_by_day.get(_fday, 0.0) + float(
+                        _deal.get("profit", 0.0)
+                    )
+
+            # Set the shared downstream variables EXACTLY as the sfox branch does so
+            # the post-dispatch code runs unchanged. balance_error is False (a live
+            # read that reached here succeeded); upnl_unreadable is False (the MT5
+            # wedge is DIRECTLY observable as equity − balance, never a missing
+            # field); funding/realized are empty (mt5 returns are NATIVE, already
+            # TWR from the ledger reconstruction — no ccxt realized/funding record).
+            equity = _mt5_equity
+            balance_error = False
+            upnl_unreadable = False
+            funding = []
+            realized = []
+            external_flows = [
+                ExternalFlow(utc_day_iso=_day, usd_signed=_amt)
+                for _day, _amt in sorted(_mt5_flow_by_day.items())
+            ]
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside
