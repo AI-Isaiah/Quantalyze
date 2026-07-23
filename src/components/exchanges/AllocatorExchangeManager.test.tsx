@@ -186,6 +186,33 @@ describe("AllocatorExchangeManager — Sync now button wires POST to /api/alloca
     expect(screen.getByText("BNB")).toBeInTheDocument();
   });
 
+  // 138-03 / MT5UI-02 — the connected mt5 key row renders the mono tag from the
+  // EXCHANGE_TAGS map. NOTE: "mt5".slice(0,3).toUpperCase() === "MT5", so the
+  // generic fallback yields the SAME label — the map entry is distinguished only
+  // by its neutral-slate near-black navy fg (#0F172A) vs the fallback's slate-600
+  // (#475569). This asserts the map entry's fg colour (SFOX-09 provenance
+  // precedent, unconditional), so it FAILS RED on the fallback despite the
+  // coincident label, while proving an existing venue (binance → "BNB") is
+  // unchanged.
+  it("renders the MT5 mono tag (neutral-slate navy fg) for an mt5 key, binance unchanged (138-03)", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey({ id: "key-mt5-1", exchange: "mt5", label: "My MT5" }),
+          makeKey({ id: "key-bnb-1", exchange: "binance", label: "My Binance" }),
+        ]}
+      />,
+    );
+    // mt5 renders the canonical mono tag with the neutral-slate navy fg — the
+    // fallback would use #475569, so this fg pins the EXCHANGE_TAGS entry.
+    const mt5Tag = screen.getByLabelText("mt5");
+    expect(mt5Tag).toHaveTextContent("MT5");
+    expect(mt5Tag).toHaveStyle({ color: "#0F172A", backgroundColor: "#F1F5F9" });
+    // Existing venue is byte-unchanged.
+    expect(screen.getByText("BNB")).toBeInTheDocument();
+  });
+
   it("clicking Sync now POSTs to /api/allocator/holdings/sync with { api_key_id }", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: true,
