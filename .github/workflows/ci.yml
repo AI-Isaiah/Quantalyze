@@ -1555,6 +1555,7 @@ jobs:
               e2e/composite-onboarding.spec.ts \
               e2e/composite-factsheet-render.spec.ts \
               e2e/sfox-badge.spec.ts \
+              e2e/mt5-badge.spec.ts \
               e2e/admin-compute-jobs-axe.spec.ts \
               e2e/mobile-drawer-keyboard.spec.ts \
               e2e/reflow-sweep-authed.spec.ts \
