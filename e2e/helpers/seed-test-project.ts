@@ -1047,24 +1047,77 @@ const SFOX_BOUNDARY_MIGRATION =
   "supabase/migrations/20260718182056_sfox_exchange_boundary_checks.sql";
 
 /**
+ * 138-03 (MT5UI-02): the mt5 twin of the SFOX-04 widen — the migration that
+ * widens the exchange/source boundary CHECKs to admit 'mt5'. Named in the mt5
+ * fail-loud message so a missing precondition on the TEST project is
+ * unambiguous — never a bare 23514.
+ */
+const MT5_BOUNDARY_MIGRATION =
+  "supabase/migrations/20260723172032_mt5_exchange_boundary_checks.sql";
+
+/**
  * True when a PostgREST error is a `23514` CHECK violation on one of the
- * exchange/source boundary constraints the SFOX-04 migration widens. We match
- * on the SQLSTATE (`23514` = check_violation) AND the constraint/message text
- * so an unrelated 23514 (e.g. a future check on another column) is NOT
- * misattributed to the sfox precondition.
+ * exchange/source boundary constraints a venue's boundary-widen migration
+ * widens. We match on the SQLSTATE (`23514` = check_violation) AND the
+ * constraint/message text (generic "exchange"/"source" OR the venue token) so
+ * an unrelated 23514 (e.g. a future check on another column) is NOT
+ * misattributed to the venue precondition. (138-03: parameterized over `venue`
+ * — the sfox + mt5 detectors are thin wrappers so both call-site behaviours
+ * stay byte-identical.)
+ */
+function isExchangeBoundaryViolation(
+  err: {
+    code?: string;
+    message?: string;
+    details?: string;
+  } | null,
+  venue: string,
+): boolean {
+  if (!err || err.code !== "23514") return false;
+  const haystack = `${err.message ?? ""} ${err.details ?? ""}`.toLowerCase();
+  return (
+    haystack.includes("exchange") ||
+    haystack.includes("source") ||
+    haystack.includes(venue)
+  );
+}
+
+/**
+ * Shared fail-loud thrower — names the venue's constraint-widening migration as
+ * the missing precondition. Parameterized so the sfox + mt5 seeds emit the same
+ * shape; the per-venue wrappers below pin the exact wording (the sfox message
+ * stays byte-identical to its pre-138-03 form).
+ */
+function throwExchangePreconditionError(
+  ctx: {
+    seedFn: string;
+    venue: string;
+    migration: string;
+    label: string;
+    seedLabel: string;
+  },
+  where: string,
+  err: { message?: string } | null,
+): never {
+  throw new Error(
+    `[seed] ${ctx.seedFn}: ${where} rejected '${ctx.venue}' with a 23514 CHECK ` +
+      `violation — the ${ctx.label} constraint-widening migration (${ctx.migration}) ` +
+      `is NOT applied on this Supabase project. Apply it to the TEST project ` +
+      `(qmnijlgmdhviwzwfyzlc) before running the ${ctx.seedLabel} seed. Raw error: ` +
+      `${err?.message ?? String(err)}`,
+  );
+}
+
+/**
+ * True when a PostgREST error is a `23514` CHECK violation on one of the
+ * exchange/source boundary constraints the SFOX-04 migration widens.
  */
 function isSfoxBoundaryViolation(err: {
   code?: string;
   message?: string;
   details?: string;
 } | null): boolean {
-  if (!err || err.code !== "23514") return false;
-  const haystack = `${err.message ?? ""} ${err.details ?? ""}`.toLowerCase();
-  return (
-    haystack.includes("exchange") ||
-    haystack.includes("source") ||
-    haystack.includes("sfox")
-  );
+  return isExchangeBoundaryViolation(err, "sfox");
 }
 
 /** Fail loud, naming the phase-119 SFOX-04 migration as the missing precondition. */
@@ -1072,12 +1125,46 @@ function throwSfoxPreconditionError(
   where: string,
   err: { message?: string } | null,
 ): never {
-  throw new Error(
-    `[seed] seedSfoxVerifiedStrategy: ${where} rejected 'sfox' with a 23514 CHECK ` +
-      `violation — the phase-119 SFOX-04 constraint-widening migration (${SFOX_BOUNDARY_MIGRATION}) ` +
-      `is NOT applied on this Supabase project. Apply it to the TEST project ` +
-      `(qmnijlgmdhviwzwfyzlc) before running the sfox-badge seed. Raw error: ` +
-      `${err?.message ?? String(err)}`,
+  throwExchangePreconditionError(
+    {
+      seedFn: "seedSfoxVerifiedStrategy",
+      venue: "sfox",
+      migration: SFOX_BOUNDARY_MIGRATION,
+      label: "phase-119 SFOX-04",
+      seedLabel: "sfox-badge",
+    },
+    where,
+    err,
+  );
+}
+
+/**
+ * True when a PostgREST error is a `23514` CHECK violation on one of the
+ * exchange/source boundary constraints the mt5 boundary-widen migration widens.
+ */
+function isMt5BoundaryViolation(err: {
+  code?: string;
+  message?: string;
+  details?: string;
+} | null): boolean {
+  return isExchangeBoundaryViolation(err, "mt5");
+}
+
+/** Fail loud, naming the mt5 boundary-widen migration as the missing precondition. */
+function throwMt5PreconditionError(
+  where: string,
+  err: { message?: string } | null,
+): never {
+  throwExchangePreconditionError(
+    {
+      seedFn: "seedMt5VerifiedStrategy",
+      venue: "mt5",
+      migration: MT5_BOUNDARY_MIGRATION,
+      label: "phase-135 / 138-03 mt5",
+      seedLabel: "mt5-badge",
+    },
+    where,
+    err,
   );
 }
 
@@ -1269,6 +1356,191 @@ export async function cleanupSfoxVerifiedStrategy(
   if (error) {
     console.warn(
       `[seed] cleanupSfoxVerifiedStrategy api_key delete failed (non-fatal): ${error.message}`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 138-03 (MT5UI-02) — connected-MT5 badge + tag seed (clone of the sfox trio).
+//
+// Proves the provenance-blind trust_tier projection rides MT5: a seeded
+// api_verified MT5-backed strategy renders the shipped VerifiedBadge /
+// TrustTierLabel (ZERO visual change) for owner/allocator/admin/anon, and the
+// owner edit surface renders the real "MT5" mono tag (138-03 Task 1). MT5 =
+// forex/CFD, but this seeds a BADGE-rendering proof, not an economics oracle —
+// the √252 vs √365 divergence is Phase 136's and gated there, so the fixture
+// keeps the sfox seed's BTC/spot shape verbatim (no invented forex analytics,
+// no-invented-data). Every mutation routes through the same getAdmin() client
+// (assertNotProductionSupabaseUrl fires before any write — TEST project only);
+// the only ciphertext-shaped literal is the gitleaks-safe placeholder idiom.
+// ---------------------------------------------------------------------------
+
+export interface SeededMt5VerifiedStrategy {
+  /** Owner ("both" role): owns BOTH the manager /strategies/[id]/edit surface AND the allocator surfaces. */
+  owner: SeededAllocator;
+  /** A separate admin-elevated session (profiles.is_admin = TRUE) for the admin leg. */
+  admin: SeededAllocator;
+  strategyId: string;
+  apiKeyId: string;
+  /** The strategy `name` (unique per seed) — pass to cleanupMt5VerifiedStrategy / cleanupStrategiesByNamePrefix. */
+  namePrefix: string;
+}
+
+/**
+ * Seed ONE connected-MT5 strategy for e2e/mt5-badge.spec.ts (138-03 / MT5UI-02),
+ * a line-for-line clone of seedSfoxVerifiedStrategy with exchange/source 'mt5',
+ * supported_exchanges ['mt5'], and 'e2e-mt5-…' labels/prefixes:
+ *
+ *   - an owner ("both" role) sweeping the manager edit page AND the
+ *     allocator/browse surfaces with no requireRolePage redirect;
+ *   - a SEPARATE admin-elevated user (is_admin) for the admin-review leg;
+ *   - an `api_keys` row with `exchange='mt5'` owned by the owner (drives the
+ *     "MT5" mono tag in ApiKeyManager on /strategies/[id]/edit — 138-03 Task 1);
+ *   - a `published` `strategies` row owned by the owner, `source='mt5'`,
+ *     `api_key_id` linked (the browse-page VerifiedBadge is gated on
+ *     `strategy.api_key_id`), with enough analytics to render the factsheet;
+ *   - a `strategy_analytics` row (`computation_status='complete'`);
+ *   - a `strategy_verifications` row `{ source:'mt5', trust_tier:'api_verified' }`
+ *     — projected onto `strategy.trust_tier` to drive VerifiedBadge +
+ *     TrustTierLabel.
+ *
+ * The mt5-bearing inserts are wrapped in the mt5 boundary-widen fail-loud
+ * translation: a 23514 throws a message naming the 20260723172032 migration
+ * instead of a bare postgres error.
+ *
+ * @param opts.name strategy name (default `e2e-mt5-verified-<suffix>`; keep a
+ *                   unique prefix so cleanupStrategiesByNamePrefix collects it).
+ */
+export async function seedMt5VerifiedStrategy(opts?: {
+  name?: string;
+}): Promise<SeededMt5VerifiedStrategy> {
+  const admin = getAdmin();
+
+  // 1. Owner ("both") + a separate admin-elevated reviewer.
+  const owner = await seedTestAllocator({ role: "both" });
+  const adminUser = await seedTestAllocator({ role: "both", isAdmin: true });
+
+  // 2. mt5 api_keys row owned by the owner (placeholder ciphertext). Fail loud
+  //    on the mt5 boundary-widen miss (api_keys_exchange_check).
+  const apiKeyLabel = `e2e-mt5-key-${uniqueSuffix(6)}`;
+  const { data: key, error: kErr } = await admin
+    .from("api_keys")
+    .insert({
+      user_id: owner.userId,
+      exchange: "mt5",
+      label: apiKeyLabel,
+      api_key_encrypted: "e2e-placeholder-ciphertext",
+      is_active: true,
+    })
+    .select("id")
+    .single();
+  if (kErr || !key) {
+    if (isMt5BoundaryViolation(kErr)) {
+      throwMt5PreconditionError("api_keys.exchange", kErr);
+    }
+    throw new Error(`[seed] seedMt5VerifiedStrategy (api_key) failed: ${kErr?.message}`);
+  }
+  const apiKeyId = key.id as string;
+
+  // 3. Published strategy owned by the owner, linked to the mt5 key,
+  //    source='mt5'. Deterministic 120d date window so the factsheet analytics
+  //    render (no RNG). Fail loud on the boundary-widen miss (strategies_source_check).
+  //    Fixture shape (BTC/spot) matches the sfox seed deliberately — this is a
+  //    badge proof, not a forex economics oracle (no-invented-data).
+  const name = opts?.name ?? `e2e-mt5-verified-${uniqueSuffix(6)}`;
+  const days = 120;
+  const anchorMs = Date.now();
+  const startDate = new Date(anchorMs - days * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+  const { data: strategy, error: sErr } = await admin
+    .from("strategies")
+    .insert({
+      user_id: owner.userId,
+      name,
+      status: "published",
+      source: "mt5",
+      api_key_id: apiKeyId,
+      benchmark: "BTC",
+      start_date: startDate,
+      supported_exchanges: ["mt5"],
+      strategy_types: ["spot"],
+      subtypes: [],
+      markets: ["BTC"],
+    })
+    .select("id")
+    .single();
+  if (sErr || !strategy) {
+    if (isMt5BoundaryViolation(sErr)) {
+      throwMt5PreconditionError("strategies.source", sErr);
+    }
+    throw new Error(`[seed] seedMt5VerifiedStrategy (strategy) failed: ${sErr?.message}`);
+  }
+  const strategyId = strategy.id as string;
+
+  // 4. strategy_analytics row (complete) — deterministic sin() series, no RNG.
+  const series = Array.from({ length: days }, (_, i) => ({
+    date: new Date(anchorMs - (days - i) * 86_400_000).toISOString().slice(0, 10),
+    value: 1 + Math.sin(i / 30) * 0.05 * (i / days),
+  }));
+  const { error: aErr } = await admin.from("strategy_analytics").insert({
+    strategy_id: strategyId,
+    computation_status: "complete",
+    benchmark: "BTC",
+    returns_series: series,
+    cumulative_return: series[series.length - 1].value - 1,
+    cagr: 0.12,
+    sharpe: 1.4,
+    sortino: 1.8,
+    max_drawdown: -0.08,
+    volatility: 0.18,
+    sparkline_returns: [0.01, -0.02, 0.03, 0.01, -0.005, 0.015],
+  });
+  if (aErr) {
+    throw new Error(`[seed] seedMt5VerifiedStrategy (analytics) failed: ${aErr.message}`);
+  }
+
+  // 5. strategy_verifications row → source='mt5', trust_tier='api_verified'.
+  //    Projected onto strategy.trust_tier → VerifiedBadge + TrustTierLabel.
+  //    Fail loud on the boundary-widen miss (strategy_verifications_source_check).
+  const { error: vErr } = await admin.from("strategy_verifications").insert({
+    strategy_id: strategyId,
+    wizard_session_id: crypto.randomUUID(),
+    status: "validated",
+    trust_tier: "api_verified",
+    flow_type: "onboard",
+    source: "mt5",
+  });
+  if (vErr) {
+    if (isMt5BoundaryViolation(vErr)) {
+      throwMt5PreconditionError("strategy_verifications.source", vErr);
+    }
+    throw new Error(`[seed] seedMt5VerifiedStrategy (verification) failed: ${vErr.message}`);
+  }
+
+  return {
+    owner,
+    admin: adminUser,
+    strategyId,
+    apiKeyId,
+    namePrefix: name,
+  };
+}
+
+/**
+ * Teardown for seedMt5VerifiedStrategy — mirrors cleanupSfoxVerifiedStrategy:
+ * delete the strategy by unique name (analytics + verifications cascade), then
+ * the mt5 api_key. Best-effort; the seeded users are intentionally left around.
+ */
+export async function cleanupMt5VerifiedStrategy(
+  seeded: Pick<SeededMt5VerifiedStrategy, "namePrefix" | "apiKeyId">,
+): Promise<void> {
+  const admin = getAdmin();
+  await cleanupStrategiesByNamePrefix(seeded.namePrefix);
+  const { error } = await admin.from("api_keys").delete().eq("id", seeded.apiKeyId);
+  if (error) {
+    console.warn(
+      `[seed] cleanupMt5VerifiedStrategy api_key delete failed (non-fatal): ${error.message}`,
     );
   }
 }
