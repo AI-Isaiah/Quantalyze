@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -46,7 +47,6 @@ from services.deribit_txn import (
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
     _day_ccy_own_index,
-    _iter_utc_days,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
     _row_is_cash_bearing,
@@ -598,6 +598,63 @@ async def fetch_deribit_settlement_index(
 _PERP_DAILY_INSTRUMENT_SUFFIX = "_USDC-PERPETUAL"
 _PERP_DAILY_RESOLUTION = "1D"
 
+# Deribit's ``get_tradingview_chart_data`` stamps an EXPLICIT ``status == "no_data"``
+# on a 200 when the requested window holds no bars (an instrument wholly outside
+# the 1D-chart retention horizon, or a legitimately quiet span). That is the ONLY
+# non-``ok`` status that is a genuine BUSINESS "no data" answer — every other
+# non-``ok`` 200 body is a flaky/error response (see _FlakyChartResponse / GLB-4).
+_CHART_NO_DATA_STATUS = "no_data"
+
+
+class _FlakyChartResponse(RuntimeError):
+    """Internal marker: a ``get_tradingview_chart_data`` HTTP-200 whose body is
+    NEITHER a clean ``status == "ok"`` series NOR the explicit ``no_data`` marker
+    (a rate-limit / maintenance / error payload, a non-Mapping result, or an
+    ``ok`` body with malformed/mismatched ``ticks``/``close`` arrays).
+
+    GLB-4: such a body is a TRANSIENT/flaky response, not a business no-data
+    answer — the option-mark reader retries it on the SAME transient budget as a
+    thrown network error rather than silently returning ``{}`` (which would let a
+    single blip permanently fail a held-position options strategy via the
+    downstream D-07 hole guard). Never surfaces to callers: it is converted to
+    ``DeribitTransientReadError`` on budget exhaustion."""
+
+
+def _validate_chart_ok_arrays(
+    resp: Any,
+) -> tuple[Sequence[Any], Sequence[Any]] | None:
+    """Classify a ``get_tradingview_chart_data`` 200 body for the daily-mark readers.
+
+    * Genuine no-data — an explicit ``status == "no_data"`` marker — returns
+      ``None`` (benign; the reader yields an empty map and the caller's D-07 hole
+      guard decides whether that gap is a fail-loud).
+    * A clean ``status == "ok"`` body with well-formed EQUAL-LENGTH ``ticks`` /
+      ``close`` sequences returns ``(ticks, close)``.
+    * ANY OTHER 200 — a ``status`` present but neither ``ok`` nor ``no_data``, a
+      non-Mapping ``result``, or an ``ok`` body whose ``ticks``/``close`` are the
+      wrong type or mismatched length — raises :class:`_FlakyChartResponse` so the
+      reader RETRIES it on the transient budget (GLB-4) instead of silently
+      returning an empty map."""
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else None
+    if not isinstance(result, Mapping):
+        raise _FlakyChartResponse("result missing or not a mapping")
+    status = result.get("status")
+    if status == _CHART_NO_DATA_STATUS:
+        return None
+    if status != "ok":
+        raise _FlakyChartResponse(f"unexpected status={status!r}")
+    ticks = result.get("ticks", [])
+    close = result.get("close", [])
+    if (
+        not isinstance(ticks, Sequence)
+        or isinstance(ticks, (str, bytes))
+        or not isinstance(close, Sequence)
+        or isinstance(close, (str, bytes))
+        or len(ticks) != len(close)
+    ):
+        raise _FlakyChartResponse("malformed ok body (ticks/close shape mismatch)")
+    return ticks, close
+
 
 async def fetch_deribit_perp_daily_index(
     exchange: Any,
@@ -722,13 +779,20 @@ async def fetch_deribit_option_daily_marks(
 
     This function stays an HONEST fetch, exactly like its sibling: a TRANSIENT read
     is retried with exponential backoff and RAISES ``DeribitTransientReadError`` on
-    ``max_retries`` exhaustion (retryable) — NEVER a silently-partial map; a GENUINE
-    benign no-data (the exchange RESPONDED — ``BadSymbol`` or ``status != "ok"``)
-    returns ``{}``. The STRUCTURAL-gap / fail-loud decision (a hole inside a listed
-    instrument's held life → ``LedgerValuationError``) belongs to the CALLER
-    (``option_mtm_daily`` in ``deribit_txn.py``), not to this fetch. A 1D series
-    spans at most a few thousand points, so ONE request suffices (no pagination).
-    Every ccxt error is scrubbed before logging.
+    ``max_retries`` exhaustion (retryable) — NEVER a silently-partial map. A GENUINE
+    benign no-data — the exchange RESPONDED with ``BadSymbol`` (thrown) or an
+    explicit ``status == "no_data"`` 200 — returns ``{}`` (the caller's D-07 hole
+    guard decides whether that empty map is a fail-loud). GLB-4: a FLAKY 200 whose
+    body is neither ``ok`` nor ``no_data`` (a rate-limit / maintenance / error
+    payload, or an ``ok`` body with malformed ``ticks``/``close``) is NOT a
+    business no-data answer — it is retried on the SAME transient budget (so a
+    healthy re-fetch is seen) rather than silently yielding ``{}`` and letting a
+    single blip permanently fail a held-position options strategy downstream. The
+    STRUCTURAL-gap / fail-loud decision (a hole inside a listed instrument's held
+    life → ``LedgerValuationError``) belongs to the CALLER (``option_mtm_daily`` in
+    ``deribit_txn.py``), not to this fetch. A 1D series spans at most a few thousand
+    points, so ONE request suffices (no pagination). Every ccxt error is scrubbed
+    before logging.
     """
     start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
     # CR-01: Deribit stamps 1D bars at 08:00 UTC (M7 evidence: bar_stamp_utc
@@ -753,7 +817,23 @@ async def fetch_deribit_option_daily_marks(
     while True:
         try:
             resp = await exchange.public_get_get_tradingview_chart_data(params)
+            # GLB-4: classify the 200 body INSIDE the loop so a flaky/error 200
+            # (rate-limit, maintenance, truncated arrays) raises _FlakyChartResponse
+            # and is retried on the SAME budget as a thrown transient — never
+            # silently returned as {}. A genuine ``no_data`` → arrays is None → {}.
+            arrays = _validate_chart_ok_arrays(resp)
             break
+        except _FlakyChartResponse as exc:
+            retries += 1
+            if retries > max_retries:
+                raise DeribitTransientReadError(
+                    "deribit get_tradingview_chart_data returned a flaky/unexpected "
+                    f"200 body across {max_retries} retries for "
+                    f"instrument={instrument} ({exc}) — refusing a silently-empty "
+                    "daily-mark map (retryable)"
+                ) from None
+            await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+            continue
         except Exception as exc:  # noqa: BLE001
             if _is_transient_read_error(exc):
                 retries += 1
@@ -772,19 +852,9 @@ async def fetch_deribit_option_daily_marks(
                 scrub_freeform_string(str(exc)),
             )
             return {}
-    result = resp.get("result", {}) if isinstance(resp, Mapping) else {}
-    if not isinstance(result, Mapping) or result.get("status") != "ok":
+    if arrays is None:  # explicit no_data → benign empty map
         return {}
-    ticks = result.get("ticks", [])
-    close = result.get("close", [])
-    if (
-        not isinstance(ticks, Sequence)
-        or isinstance(ticks, (str, bytes))
-        or not isinstance(close, Sequence)
-        or isinstance(close, (str, bytes))
-        or len(ticks) != len(close)
-    ):
-        return {}
+    ticks, close = arrays
     marks: dict[str, float] = {}
     for raw_ts, raw_price in zip(ticks, close):
         try:
@@ -1917,7 +1987,44 @@ async def _build_dense_native_marks(
 # that is the ONLY case that stays cash-basis (bounded fallback, Q4). An
 # instrument expiring INSIDE the horizon with no bars is a STRUCTURAL hole →
 # fail loud (never a silent cash fallback). ~2.5yr = 913 days.
-_OPTION_MARK_RETENTION_DAYS: int = 913
+#
+# GLB-5: 913 is a ONE-PROBE point estimate of an UNCONTRACTED Deribit behaviour,
+# so it is env-overridable via ``DERIBIT_OPTION_MARK_RETENTION_DAYS`` (positive
+# int; mirrors the ``COMPOSITE_MAX_MEMBERS`` override in job_worker.py) — ops can
+# SHORTEN it without a redeploy if the real horizon proves shorter, instead of a
+# currently-green key spontaneously hard-failing as its history ages into the band.
+_OPTION_MARK_RETENTION_DAYS_DEFAULT: int = 913
+# GLB-5: the near-cutoff tolerance band. A WHOLLY-EMPTY marks response for an
+# instrument whose expiry is within this many days NEWER than the retention cutoff
+# is treated as pre-retention (cash fallback + loud warning) rather than a D-07
+# structural hole — the horizon is uncertain, so an expiry a touch inside the
+# probed 913d that returns no bars is far more likely a slightly-shorter real
+# horizon than a genuine data hole. A still-recent wholly-empty expiry (past this
+# band) and any partial-marks straddler STILL fail loud.
+_OPTION_MARK_RETENTION_TOLERANCE_DAYS: int = 30
+
+
+def _option_mark_retention_days() -> int:
+    """The chart-retention horizon (days) beyond which a wholly-empty 1D option
+    response is treated as pre-retention (cash fallback) rather than a structural
+    hole. Defaults to the Phase-131 ~2.5yr probe (913d); env-overridable via
+    ``DERIBIT_OPTION_MARK_RETENTION_DAYS`` (positive int) — a non-positive / non-int
+    override is ignored with a warning (GLB-5)."""
+    override = os.environ.get("DERIBIT_OPTION_MARK_RETENTION_DAYS")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+        logger.warning(
+            "DERIBIT_OPTION_MARK_RETENTION_DAYS=%r is not a positive int; using "
+            "the %d-day default",
+            override,
+            _OPTION_MARK_RETENTION_DAYS_DEFAULT,
+        )
+    return _OPTION_MARK_RETENTION_DAYS_DEFAULT
 # The dated-expiry segment of a Deribit option name, e.g. ``BTC-27JUN25-100000-C``
 # / ``BTC_USDC-27MAR26-50000-P`` → ``27JUN25``. Mid-name (unlike the ``$``-anchored
 # future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
@@ -1981,9 +2088,10 @@ async def _build_smoothed_option_mtm(
     """SMOOTHED_MTM ΔMTM channel (Task 4). Replay the option book, fetch each held
     instrument's daily marks (ONE expiry-capped request per instrument), partition
     off the pre-retention instruments (wholly-empty marks AND expiry older than the
-    ~2.5yr horizon → cash-basis bucket), and feed the rest to the PURE
-    ``option_mtm_daily`` (which fails loud on any hole inside a listed life —
-    including retention STRADDLERS, whose partial marks are never bucketed).
+    env-overridable ~2.5yr horizon — plus a GLB-5 tolerance band just inside it —
+    → cash-basis bucket), and feed the rest to the PURE ``option_mtm_daily`` (which
+    fails loud on any hole inside a listed life — including retention STRADDLERS,
+    whose partial marks are never bucketed).
 
     Returns ``(delta_mtm, terminal_book, pre_mark_retention_option_days)``. The
     terminal book feeds the Task-5 book-channel anchor guard. Pure-core fail-loud
@@ -1992,9 +2100,18 @@ async def _build_smoothed_option_mtm(
     if not positions:
         return {}, {}, []
     today = _today_utc_iso()
+    retention_days = _option_mark_retention_days()  # GLB-5: env-overridable
+    today_date = datetime.strptime(today, "%Y-%m-%d")
     retention_cutoff = (
-        datetime.strptime(today, "%Y-%m-%d")
-        - timedelta(days=_OPTION_MARK_RETENTION_DAYS)
+        today_date - timedelta(days=retention_days)
+    ).date().isoformat()
+    # GLB-5: the softened boundary — ``_OPTION_MARK_RETENTION_TOLERANCE_DAYS``
+    # NEWER than the hard cutoff. A wholly-empty response whose expiry is older
+    # than THIS (i.e. either clearly pre-retention, or inside the uncertain
+    # tolerance band just past the cutoff) buckets to cash rather than D-07.
+    soft_cutoff = (
+        today_date
+        - timedelta(days=max(0, retention_days - _OPTION_MARK_RETENTION_TOLERANCE_DAYS))
     ).date().isoformat()
 
     kept_positions: dict[str, Mapping[str, Any]] = {}
@@ -2036,12 +2153,32 @@ async def _build_smoothed_option_mtm(
         instr_marks = await fetch_deribit_option_daily_marks(
             exchange, instrument, oldest_day=first_day, newest_day=newest, sleep=sleep
         )
-        # Partition on WHOLLY-empty AND expiry-past-retention (both required). Any
-        # other empty/holed response — in-retention wholly-empty, OR a straddler's
-        # PARTIAL (nonempty) marks — is KEPT so ``option_mtm_daily`` fails loud on
-        # the structural hole (D-07). A straddler is never wholly-empty (it returns
-        # partial marks) → never bucketed here.
-        if not instr_marks and expiry is not None and expiry < retention_cutoff:
+        # Partition on WHOLLY-empty AND expiry at-or-before the SOFT cutoff (both
+        # required). GLB-5: ``soft_cutoff`` widens the hard retention cutoff by the
+        # tolerance band, so a wholly-empty response whose expiry sits just INSIDE
+        # the probed 913d horizon (the uncertain band, most likely a slightly
+        # shorter real horizon) buckets to cash-basis rather than hard-failing
+        # D-07. Any other empty/holed response — a still-recent wholly-empty
+        # expiry (past the band), OR a straddler's PARTIAL (nonempty) marks — is
+        # KEPT so ``option_mtm_daily`` fails loud on the structural hole (D-07). A
+        # straddler is never wholly-empty (it returns partial marks) → never
+        # bucketed here.
+        if not instr_marks and expiry is not None and expiry < soft_cutoff:
+            if expiry >= retention_cutoff:
+                # Near-cutoff softening: expiry is NEWER than the hard cutoff but
+                # inside the tolerance band. Loud (this is the uncertain case) so
+                # ops can shorten DERIBIT_OPTION_MARK_RETENTION_DAYS if it recurs.
+                logger.warning(
+                    "deribit option %s returned wholly-empty 1D marks with expiry "
+                    "%s within %d days of the %dd retention cutoff %s — bucketing "
+                    "as pre-retention cash-basis (GLB-5 near-cutoff softening); if "
+                    "this recurs, shorten DERIBIT_OPTION_MARK_RETENTION_DAYS",
+                    instrument,
+                    expiry,
+                    _OPTION_MARK_RETENTION_TOLERANCE_DAYS,
+                    retention_days,
+                    retention_cutoff,
+                )
             ccy = str(info["currency"]).upper()
             for day in info["positions"]:
                 pre_retention.add((ccy, day))

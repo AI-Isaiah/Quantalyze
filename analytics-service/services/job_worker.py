@@ -344,6 +344,11 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
 }
 
+# Fallback derive budget (seconds) used when TIMEOUT_PER_KIND lacks
+# "derive_broker_dailies". Single-sourced so the MTM second pass and the smoothed
+# third pass can never drift; TIMEOUT_PER_KIND stays the real source of truth.
+_DERIVE_BUDGET_DEFAULT_S = 15 * 60
+
 # FIX-2 (Fable): the single-key MTM SECOND pass is a FULL-HISTORY crawl that runs
 # INSIDE the same derive_broker_dailies budget as the cash pass. Bound it to a
 # fraction of the REMAINING budget (never a blind global ceiling bump, which would
@@ -2379,6 +2384,31 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 if denominator_config is not None
                 else DEFAULT_PNL_BASIS
             )
+            # RT-4 (kill-switch integrity): smoothed_mtm is an ADDITIVE basis shipped
+            # DARK behind SMOOTHED_MTM_ENABLED. allocated_capital._VALID_PNL_BASES
+            # ACCEPTS it (config parsing stays flag-agnostic), so a strategy whose
+            # returns_denominator_config pins pnl_basis='smoothed_mtm' would otherwise
+            # drive the HEADLINE native-ledger crawl in the smoothed basis with the flag
+            # OFF — persisting smoothed marks into the cash headline slot and defeating
+            # the dark launch (the flag's only other gates are the additive MTM/smoothed
+            # third-pass sites). FAIL LOUD PERMANENT before any crawl: a config value is
+            # structural, never a retry. When the flag is ON the basis is admissible as
+            # the v1.14 milestone built it.
+            if pnl_basis == PNL_BASIS_SMOOTHED_MTM and not is_smoothed_mtm_enabled():
+                await _stamp_strategy_analytics_failed(
+                    "The smoothed_mtm basis is behind the SMOOTHED_MTM_ENABLED "
+                    "kill-switch; a strategy cannot use it as a headline basis while "
+                    "the flag is off."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: strategy pnl_basis='smoothed_mtm' is "
+                        "behind the SMOOTHED_MTM_ENABLED kill-switch (flag off) — "
+                        "refusing to run the smoothed basis as the headline"
+                    ),
+                    error_kind="permanent",
+                )
             # Bug B (spot-extraction exclusion) is ALLOCATED-PATH ONLY. It rides the
             # SAME signal (`denominator_config is not None`) that selects the
             # allocated returns path in `combine_native_ledger` below — so the
@@ -2531,7 +2561,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 ):
                     mtm_attempted = True
                     _derive_budget = float(
-                        TIMEOUT_PER_KIND.get("derive_broker_dailies", 15 * 60)
+                        TIMEOUT_PER_KIND.get(
+                            "derive_broker_dailies", _DERIVE_BUDGET_DEFAULT_S
+                        )
                     )
                     _mtm_remaining = _derive_budget - (
                         asyncio.get_running_loop().time() - _derive_start
@@ -2652,13 +2684,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # (returns / meta / _completeness / native_ledger) NOR the MTM-pass
                 # objects, so cash_settlement AND mark_to_market stay byte-identical.
                 #
-                # FAIL-LOUD on STRUCTURE (money-path): a LedgerValuationError (holed
-                # marks — incl. the retention-STRADDLE / crawl-day cases pinned in
-                # 131-01a) is deliberately NOT caught here; it propagates to the outer
-                # permanent-FAILED handler (`except LedgerValuationError`) exactly
-                # like the cash pass, so the job fails loud BEFORE any persist and NO
-                # partial / interpolated smoothed basis is ever written (never a
-                # silent two-basis fallback).
+                # GLB-2 (v1.14 kill-switch safety): a STRUCTURAL smoothed
+                # reconstruction failure (a holed-marks LedgerValuationError — incl.
+                # the retention-STRADDLE / expiry-day book-channel boundary cases
+                # pinned in 131-01a — or any of the MTM pass's structural tuple)
+                # DEGRADES, mirroring the MTM SECOND pass's structural arm (:2628)
+                # EXACTLY. The smoothed basis is ADDITIVE and NEVER load-bearing, so a
+                # structural mark-hole omits the smoothed key (smoothed_returns → None,
+                # attempted-persist heals any stale row) while the cash (+ MTM) headline
+                # still ships DONE. It is caught HERE (the inner try) so it can NEVER
+                # reach the outer permanent `except LedgerValuationError` (:2876) — which
+                # would _stamp_strategy_analytics_failed and sink the WHOLE derive,
+                # destroying the already-computed cash+MTM factsheet the instant
+                # SMOOTHED_MTM_ENABLED is flipped ON for an options book carrying a single
+                # structural mark-hole. NO partial / interpolated smoothed basis is ever
+                # written (a straddler fails loud INSIDE the combine, which lands here as
+                # a degrade — never a silent two-basis fallback).
                 #
                 # Timeout envelope (HIGH-01, 132 review — the FIX-2 sibling): this
                 # third pass is ANOTHER full-history crawl PLUS the dense-marks index
@@ -2693,7 +2734,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     # as v1.14 built it (short-circuit first so a mark-hole is dark).
                     smoothed_attempted = True
                     _smoothed_budget = float(
-                        TIMEOUT_PER_KIND.get("derive_broker_dailies", 15 * 60)
+                        TIMEOUT_PER_KIND.get(
+                            "derive_broker_dailies", _DERIVE_BUDGET_DEFAULT_S
+                        )
                     )
                     _smoothed_remaining = _smoothed_budget - (
                         asyncio.get_running_loop().time() - _derive_start
@@ -2786,6 +2829,40 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                                 "— degrading the additive smoothed object, cash "
                                 "unaffected",
                                 _smoothed_pass_timeout, strategy_id,
+                            )
+                        except (
+                            LedgerValuationError,
+                            NavReconstructionError,
+                            LedgerCompletenessError,
+                            LedgerTruncatedError,
+                            CurrencyEnumerationError,
+                            ScopeAuthError,
+                        ) as _smoothed_exc:
+                            # GLB-2: a STRUCTURAL smoothed reconstruction failure
+                            # DEGRADES — the SAME structural tuple the MTM second pass
+                            # catches (:2628), disposed IDENTICALLY. The cash (+ MTM)
+                            # headline ships DONE; the smoothed basis is OMITTED
+                            # (smoothed_returns → None → no smoothed compute, no smoothed
+                            # by-basis key; the attempted-persist at :4162 heals any
+                            # stale row). This catch is what keeps a smoothed
+                            # LedgerValuationError OFF the outer permanent arm (:2876) —
+                            # never sinking the healthy cash+MTM factsheet when the
+                            # kill-switch is flipped ON. We do NOT catch bare ValueError
+                            # / json.JSONDecodeError (nor DeribitTransientReadError / ccxt
+                            # network errors / RateLimitExceeded): a transient
+                            # network/parse failure escaping the third crawl MUST stay
+                            # transient-retryable (the outer arm / dispatcher retries the
+                            # WHOLE derive), NEVER be swallowed as a coverage degrade.
+                            # There is no smoothed degrade-REASON channel yet (Phase 133 /
+                            # LOW-01) — the by-basis omission is the signal; the degrade
+                            # is logged (scrubbed text only, T-74-03).
+                            smoothed_returns = None
+                            logger.warning(
+                                "derive_broker_dailies: smoothed_mtm third pass "
+                                "degraded for strategy %s (structural reconstruction "
+                                "failure) — cash/MTM derive unaffected: %s",
+                                strategy_id,
+                                scrub_freeform_string(str(_smoothed_exc)),
                             )
             except asyncio.TimeoutError:
                 # FLIPRETRY-01: the cash-pass crawl exceeded the per-crawl bound.
@@ -4410,6 +4487,14 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     supabase = get_supabase()
 
+    # GLB-3(b): stamp the stitch start on the event-loop monotonic clock so the
+    # smoothed THIRD pass can bound its fan-out to the REMAINING slice of the fixed
+    # stitch_composite wall-clock budget (mirror the single-key derive's FIX-2
+    # _derive_start). Stamped as EARLY as possible so it captures the setup +
+    # cash + MTM passes' elapsed time by the time the smoothed pass computes its
+    # remaining budget.
+    _stitch_start = asyncio.get_running_loop().time()
+
     async def _stamp_failed(message: str) -> None:
         """Terminal 'failed' stamp so the wizard poller reaches a gate instead of
         an infinite 'computing' spinner (mirrors the derive path). Scrubbed
@@ -4816,7 +4901,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         return returns, False, dict(meta)
 
     async def _reconstruct_all(
-        basis: str, report_progress: bool = False
+        basis: str,
+        report_progress: bool = False,
+        structural_degrade: bool = False,
     ) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
         list[dict[str, Any]], list[dict[str, Any]],
@@ -4828,6 +4915,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         stitch with a machine-readable DQ reason), or a DispatchResult on a
         preflight FAILED/DEFERRED or a typed permanent / transient reconstruction
         error.
+
+        GLB-3(a): with ``structural_degrade`` True (the ADDITIVE smoothed third
+        pass ONLY) a Deribit member's structural ledger error
+        (``_PERMANENT_LEDGER_ERRORS`` — LedgerValuationError included) is RE-RAISED
+        to the caller instead of ``_stamp_failed`` + return-permanent, so the
+        smoothed call-site DEGRADES the whole smoothed basis (omit the by-basis key,
+        keep the cash+MTM composite) rather than sinking the whole job. The cash +
+        MTM passes leave it False → their existing fail-loud permanent disposition
+        is byte-unchanged.
 
         PROG-02: when ``report_progress`` is True (the CASH pass only — Pitfall 1:
         the MTM second pass must NOT restart the per-member counter), publish
@@ -5140,6 +5236,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="transient",
                 )
             except _PERMANENT_LEDGER_ERRORS as exc:
+                if structural_degrade:
+                    # GLB-3(a): the ADDITIVE smoothed third pass must DEGRADE the
+                    # WHOLE smoothed basis (omit the by-basis key, keep the cash+MTM
+                    # composite) on a structural member failure (holed option marks) —
+                    # NEVER _stamp_failed or fail the whole job. Re-raise the typed
+                    # error (the `finally` below still closes THIS member's exchange;
+                    # earlier members were closed in their own iterations' `finally`)
+                    # for the smoothed call-site's degrade catch. Only ever set on the
+                    # smoothed pass; cash + MTM keep the fail-loud permanent
+                    # disposition below.
+                    raise
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_failed(
                     "Composite member reconstruction failed structurally "
@@ -5541,21 +5648,40 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # option-activity ALONE and does NOT consult or mutate mtm_ok / mtm_reason (the MTM
     # gate decision above stays byte-identical). Mirrors the MTM second pass: a THIRD
     # per-Deribit-member ledger fan-out in smoothed_mtm basis, stitched through the ONE
-    # shared derive_basis_series. FAIL-LOUD throughout (mirroring the composite MTM
-    # pass, which also fails the whole job rather than degrading): a per-leg
-    # reconstruction failure surfaces as a DispatchResult from _reconstruct_all (its
-    # _PERMANENT_LEDGER_ERRORS handler — LedgerValuationError included — stamps failed),
-    # and a metrics/overlap/degenerate failure stamps + returns here. NEVER a silent
-    # two-basis fallback, NEVER a gate-close on a leg failure. A no-option composite
-    # (smoothed_ok False) runs NO third pass and persists NO smoothed artifacts (SC-4).
+    # shared derive_basis_series.
+    #
+    # GLB-3 (v1.14 kill-switch safety): the smoothed basis is ADDITIVE and NEVER
+    # load-bearing, so this pass DEGRADES (omit the smoothed by-basis key, keep the
+    # cash+MTM composite + persist) rather than sinking the whole job — mirroring the
+    # single-key third pass (GLB-2) and the MTM second pass's structural arm, so
+    # flipping SMOOTHED_MTM_ENABLED ON can NEVER sink a healthy options book's
+    # composite factsheet. Two degrade triggers:
+    #   (a) STRUCTURE: a per-member LedgerValuationError / structural ledger error
+    #       (holed option marks) is caught here and DEGRADES. _reconstruct_all is
+    #       called with structural_degrade=True so a Deribit member arm RE-RAISES the
+    #       typed error (never _stamp_failed / return-permanent) for this catch, and
+    #       the stitch/derive-stage failures below (degenerate-length / day-collision /
+    #       compute chain-break) DEGRADE too — single-key parity (:3915/:3972, where
+    #       the identical book's smoothed compute-reject omits the key, cash unaffected).
+    #   (b) BUDGET: this third per-member fan-out (+ dense-marks fetch) runs inside the
+    #       SAME fixed stitch_composite wall-clock budget the cash + MTM passes already
+    #       drew from. An at-cap options composite could push the smoothed fan-out past
+    #       the outer dispatch wait_for → transient → retried forever → failed_final,
+    #       sinking the healthy cash headline. Mirror the single-key FIX-2: bound the
+    #       fan-out to _MTM_SECOND_PASS_BUDGET_FRACTION of the REMAINING budget, REFUSE
+    #       below the _MTM_SECOND_PASS_MIN_SECONDS floor, degrade on timeout.
+    # A TRANSIENT reconstruction result (429 / geo-block) or a preflight/unsupported-
+    # venue permanent DispatchResult still SURFACES (whole-job retry / fail-loud),
+    # exactly as the cash pass — those are not smoothed-structural degrades. There is
+    # no smoothed degrade-REASON channel yet (Phase 133 / LOW-01) — the by-basis
+    # omission is the signal; every degrade is logged (scrubbed text only).
+    #
     # Phase 134 kill-switch: with SMOOTHED_MTM_ENABLED off (the dark default) the
     # composite smoothed THIRD pass is SKIPPED ENTIRELY — smoothed_ok is forced
     # False so there is NO per-member smoothed reconstruction fan-out, no stitch, no
     # derive_basis_series, no persist, and smoothed_metrics_json stays None so no
-    # metrics_json_by_basis["smoothed_mtm"] key is written. A structural mark-hole in
-    # a member leg therefore cannot fail this job until the founder flips the flag on.
-    # When on, the availability decision is exactly as v1.14 built it. Short-circuit
-    # FIRST (flag before availability) so a mark-hole never even reaches the predicate.
+    # metrics_json_by_basis["smoothed_mtm"] key is written. Short-circuit FIRST (flag
+    # before availability) so a mark-hole never even reaches the predicate.
     smoothed_ok = is_smoothed_mtm_enabled() and smoothed_mtm_available(member_signals)
     smoothed_metrics_json: dict[str, Any] | None = None
     _smoothed_basis_result: BasisSeriesResult | None = None
@@ -5563,87 +5689,153 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # discarded) solely to bridge the pre_mark_retention_option_dailies honesty
     # caveat into the Finding-3 flag union below — single-key parity. Empty when
     # the smoothed pass does not run (SC-4: nothing smoothed-flavoured touches a
-    # no-option composite).
+    # no-option composite) OR when it DEGRADED before producing metas.
     smoothed_member_metas: list[dict[str, Any]] = []
     if smoothed_ok:
-        smoothed_result = await _reconstruct_all(PNL_BASIS_SMOOTHED_MTM)
-        if isinstance(smoothed_result, DispatchResult):
-            # A per-leg smoothed reconstruction failure (holed marks / retention
-            # straddle → LedgerValuationError) already stamped failed inside
-            # _reconstruct_all — fail the WHOLE job loud, never a silent fallback.
-            return smoothed_result
-        clipped_smoothed, _sm_signals, _sm_venues, _sm_metas, _sm_degraded = (
-            smoothed_result
+        # GLB-3(b): bound the smoothed fan-out to its slice of the REMAINING
+        # stitch_composite budget so an at-cap options composite degrades gracefully
+        # instead of overrunning the outer dispatch wait_for.
+        _stitch_budget = float(TIMEOUT_PER_KIND.get("stitch_composite", 20 * 60))
+        _smoothed_remaining = _stitch_budget - (
+            asyncio.get_running_loop().time() - _stitch_start
         )
-        smoothed_member_metas = list(_sm_metas)
-        # Degraded-member invariant (mirror the MTM pass): the smoothed pass must
-        # exclude the SAME members as the authoritative cash pass, else the bases would
-        # be computed over different member sets. Compare against degraded_members (the
-        # cash pass's list) directly — _cash_degraded_seqs is scoped inside the mtm_ok
-        # arm above and is undefined on the gated (options) path this pass serves.
-        _sm_degraded_seqs = {int(d["seq"]) for d in _sm_degraded}
-        if _sm_degraded_seqs != {int(d["seq"]) for d in degraded_members}:
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message=(
-                    "run_stitch_composite_job: smoothed_mtm pass degraded-member set "
-                    f"{sorted(_sm_degraded_seqs)} diverges from the cash pass — the "
-                    "bases would span different member sets; retry to re-crawl both"
-                ),
-                error_kind="transient",
+        _smoothed_pass_timeout = (
+            _smoothed_remaining * _MTM_SECOND_PASS_BUDGET_FRACTION
+        )
+        smoothed_result: (
+            tuple[
+                list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
+                list[dict[str, Any]], list[dict[str, Any]],
+            ]
+            | DispatchResult
+            | None
+        ) = None
+        if _smoothed_pass_timeout < _MTM_SECOND_PASS_MIN_SECONDS:
+            # The cash (+ MTM) passes already consumed most of the budget — do NOT
+            # start a third full fan-out that cannot plausibly finish. DEGRADE:
+            # smoothed_result stays None → no smoothed compute, no by-basis key;
+            # cash/MTM composite ships unaffected.
+            logger.warning(
+                "run_stitch_composite_job: skipping smoothed_mtm third pass for "
+                "strategy %s — only %.0fs of the %.0fs stitch budget remained "
+                "(below the %.0fs floor); degrading the additive smoothed object, "
+                "cash/MTM composite unaffected",
+                strategy_id, _smoothed_remaining, _stitch_budget,
+                _MTM_SECOND_PASS_MIN_SECONDS,
             )
-        try:
-            stitched_smoothed = stitch_clipped_series(clipped_smoothed)
-            if int(stitched_smoothed.notna().sum()) < 2:
-                await _stamp_failed(
-                    "Composite smoothed-MTM series has fewer than two interpretable "
-                    "days after stitching, so smoothed metrics cannot be computed."
+        else:
+            try:
+                smoothed_result = await asyncio.wait_for(
+                    _reconstruct_all(
+                        PNL_BASIS_SMOOTHED_MTM, structural_degrade=True
+                    ),
+                    timeout=_smoothed_pass_timeout,
                 )
+            except asyncio.TimeoutError:
+                # GLB-3(b): the bounded fan-out overran its slice. DEGRADE (never let
+                # it escape to the outer dispatch wait_for, which retries the WHOLE
+                # composite to failed_final and sinks the cash headline).
+                smoothed_result = None
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm third pass exceeded its "
+                    "bounded %.0fs budget for strategy %s — degrading the additive "
+                    "smoothed object, cash/MTM composite unaffected",
+                    _smoothed_pass_timeout, strategy_id,
+                )
+            except _PERMANENT_LEDGER_ERRORS as _sm_exc:
+                # GLB-3(a): a STRUCTURAL member reconstruction failure (holed option
+                # marks) re-raised by _reconstruct_all(structural_degrade=True).
+                # DEGRADE — the cash/MTM composite ships DONE; the smoothed basis is
+                # omitted. Bare ValueError / transient network errors are NOT in this
+                # tuple, so a transient stays retryable (it would escape and be
+                # dispositioned by the outer worker dispatcher).
+                smoothed_result = None
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm third pass degraded for "
+                    "strategy %s (structural member reconstruction failure) — "
+                    "cash/MTM composite unaffected: %s",
+                    strategy_id, scrub_freeform_string(str(_sm_exc)),
+                )
+        if isinstance(smoothed_result, DispatchResult):
+            # A per-leg TRANSIENT (429 / geo-block) or a preflight / unsupported-venue
+            # PERMANENT result — NOT a smoothed-structural degrade. Surface it: a
+            # transient re-runs the whole job (and re-converges), a permanent config
+            # error fails loud, exactly as the cash pass would on the same condition.
+            return smoothed_result
+        if smoothed_result is not None:
+            clipped_smoothed, _sm_signals, _sm_venues, _sm_metas, _sm_degraded = (
+                smoothed_result
+            )
+            smoothed_member_metas = list(_sm_metas)
+            # Degraded-member invariant (mirror the MTM pass): the smoothed pass must
+            # exclude the SAME members as the authoritative cash pass, else the bases
+            # would be computed over different member sets. The `degraded` list only
+            # ever carries ccxt members (Deribit structural failures re-raise under
+            # structural_degrade), and ccxt reconstruction is basis-independent, so a
+            # divergence is only ever a LIVE-READ race → TRANSIENT (retry re-crawls
+            # both passes and re-converges; never a permanent sink).
+            _sm_degraded_seqs = {int(d["seq"]) for d in _sm_degraded}
+            if _sm_degraded_seqs != {int(d["seq"]) for d in degraded_members}:
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
-                        "run_stitch_composite_job: smoothed_mtm series degenerate-"
-                        "length (< 2 interpretable days after stitching)"
+                        "run_stitch_composite_job: smoothed_mtm pass degraded-member "
+                        f"set {sorted(_sm_degraded_seqs)} diverges from the cash pass "
+                        "— the bases would span different member sets; retry to "
+                        "re-crawl both"
                     ),
-                    error_kind="permanent",
+                    error_kind="transient",
                 )
-            _smoothed_basis_result = derive_basis_series(
-                stitched_smoothed,
-                benchmark_rets,
-                periods_per_year=periods_per_year,
-                cumulative_method=cumulative_method,
-                day_basis=day_basis,
-                benchmark_symbol="BTC",
-            )
-            smoothed_metrics_json = dict(_smoothed_basis_result.metrics_json)
-        except CompositeOverlapError as exc:
-            scrubbed = str(scrub_freeform_string(str(exc)))
-            await _stamp_failed(
-                "Composite smoothed-MTM member series collide on a calendar day. "
-                + scrubbed
-            )
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message=(
-                    "run_stitch_composite_job: smoothed_mtm post-clip day collision — "
-                    + scrubbed
-                ),
-                error_kind="permanent",
-            )
-        except ValueError as exc:
-            scrubbed = str(scrub_freeform_string(str(exc)))
-            await _stamp_failed(
-                "Composite smoothed-MTM metrics compute rejected the stitched series "
-                "(interior chain-break under the arithmetic convention). " + scrubbed
-            )
-            return DispatchResult(
-                outcome=DispatchOutcome.FAILED,
-                error_message=(
-                    "run_stitch_composite_job: smoothed_mtm metrics ValueError — "
-                    + scrubbed
-                ),
-                error_kind="permanent",
-            )
+            try:
+                stitched_smoothed = stitch_clipped_series(clipped_smoothed)
+                if int(stitched_smoothed.notna().sum()) < 2:
+                    # GLB-3(a): a degenerate-length smoothed series DEGRADES (single-
+                    # key parity — the identical book's smoothed compute raises on
+                    # <2 rows and degrades at :3972). smoothed_metrics_json stays
+                    # None → the by-basis key is omitted; cash/MTM ships DONE.
+                    logger.warning(
+                        "run_stitch_composite_job: smoothed_mtm series has fewer than "
+                        "two interpretable days after stitching for strategy %s — "
+                        "degrading (omitting the smoothed_mtm key), cash/MTM "
+                        "composite unaffected",
+                        strategy_id,
+                    )
+                else:
+                    _smoothed_basis_result = derive_basis_series(
+                        stitched_smoothed,
+                        benchmark_rets,
+                        periods_per_year=periods_per_year,
+                        cumulative_method=cumulative_method,
+                        day_basis=day_basis,
+                        benchmark_symbol="BTC",
+                    )
+                    smoothed_metrics_json = dict(_smoothed_basis_result.metrics_json)
+            except CompositeOverlapError as exc:
+                # GLB-3(a): a smoothed post-clip day collision DEGRADES. (Structurally
+                # near-impossible when the cash pass — same disjoint windows, same
+                # clip — did not collide, but the additive basis never fails the job.)
+                _smoothed_basis_result = None
+                smoothed_metrics_json = None
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm member series collide on "
+                    "a calendar day for strategy %s — degrading (omitting the "
+                    "smoothed_mtm key), cash/MTM composite unaffected: %s",
+                    strategy_id, scrub_freeform_string(str(exc)),
+                )
+            except ValueError as exc:
+                # GLB-3(a): a smoothed simple-basis interior chain-break DEGRADES —
+                # single-key parity (:3972). The cash compute's OWN ValueError already
+                # returned via the F-5 arm above, so this can only be the additive
+                # smoothed series; omit the key, keep the cash/MTM headline.
+                _smoothed_basis_result = None
+                smoothed_metrics_json = None
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm metrics compute rejected "
+                    "the stitched series for strategy %s (interior chain-break) — "
+                    "degrading (omitting the smoothed_mtm key), cash/MTM composite "
+                    "unaffected: %s",
+                    strategy_id, scrub_freeform_string(str(exc)),
+                )
 
     # 7. PERSIST (OQ-3 ordering): (1) csv_daily_returns, (2) headline CSV analytics,
     # (3) additive metrics_json_by_basis + merged DQ flags.
@@ -5922,20 +6114,30 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     # SMTM-01 (Phase 132): persist the stitched smoothed_mtm daily-return series BEFORE
     # the DONE-bearing headline/by-basis scalar upsert (same ordering discipline as the
-    # cash/MTM series above). GUARDED (unlike the always-heal MTM persist): written ONLY
-    # when the third pass ran AND produced a computable object — a no-option composite
-    # (smoothed_ok False) touches the smoothed_mtm series row not at all (SC-4: NO
-    # smoothed artifacts, byte-invisible). A started-but-failed smoothed pass fails the
-    # whole job upstream, so there is no attempted-but-null smoothed persist to heal.
-    if smoothed_metrics_json is not None:
-        _smoothed_persist_result = _smoothed_basis_result
+    # cash/MTM series above).
+    #
+    # GLB-3 (Pitfall 5, single-key parity :4162): when the smoothed pass was ATTEMPTED
+    # (smoothed_ok) the persist runs UNCONDITIONALLY — the fresh row on success, a
+    # heal-DELETE (result=None) on the DEGRADED paths (budget refusal / bounded-fan-out
+    # timeout / structural member failure / degenerate-length / compute chain-break).
+    # Without the heal a prior successful stitch's smoothed series row would outlive the
+    # authoritative by-basis scalar OMISSION — a stale money series read by bare
+    # (strategy_id, kind). smoothed_ok is only True on an options composite with the
+    # flag ON, so this never relaxes SC-4: a no-option / flag-off composite leaves
+    # smoothed_ok False → the smoothed_mtm series row is untouched (byte-invisible).
+    if smoothed_ok:
+        _smoothed_persist_result = (
+            _smoothed_basis_result if smoothed_metrics_json is not None else None
+        )
 
-        def _persist_smoothed_series() -> None:
+        def _persist_smoothed_series(
+            result: BasisSeriesResult | None = _smoothed_persist_result,
+        ) -> None:
             persist_basis_series(
                 supabase,
                 strategy_id,
                 basis="smoothed_mtm",
-                result=_smoothed_persist_result,
+                result=result,
             )
 
         await db_execute(_persist_smoothed_series)

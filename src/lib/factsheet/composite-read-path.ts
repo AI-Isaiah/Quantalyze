@@ -313,10 +313,14 @@ export async function readCompositeFactsheet(
   // thread it so buildFactsheetPayload emits the per-basis bundle. Gated exactly
   // like the scalar MTM object — the series rides the SAME published/owner + F2/M-1
   // gate, no visibility widening. A failed/malformed row degrades to no-bundle.
-  const mtmSeries = mtmAvailable ? await readMtmSeries(admin, strategyId) : null;
   // Phase 133 (SMTM-01): read the persisted smoothed series ONLY when the scalar
   // smoothed gate is available (skip the roundtrip otherwise) — same gating as MTM.
-  const smoothedSeries = smoothedAvailable ? await readSmoothedSeries(admin, strategyId) : null;
+  // The two reads are independent; fire them concurrently (each still gated so a
+  // skipped read stays skipped — resolves to null without a roundtrip).
+  const [mtmSeries, smoothedSeries] = await Promise.all([
+    mtmAvailable ? readMtmSeries(admin, strategyId) : Promise.resolve(null),
+    smoothedAvailable ? readSmoothedSeries(admin, strategyId) : Promise.resolve(null),
+  ]);
 
   return {
     dailyReturns,
@@ -507,13 +511,18 @@ export async function readSingleKeyBasisOpts(
   const resolveAdmin = () => (admin ??= getAdmin());
   // MTM-04 (Phase 103): read the persisted MTM series only when the SHARED cheap
   // predicate holds — a failed/malformed row degrades to no-bundle (charts stay cash).
-  const mtmSeries = shouldReadSingleKeyMtmSeries(metricsJsonByBasis, computationStatus)
-    ? await readMtmSeries(resolveAdmin(), strategyId)
-    : null;
-  // Phase 133 (SMTM-01): the smoothed sibling read, identically gated.
-  const smoothedSeries = shouldReadSingleKeySmoothedSeries(metricsJsonByBasis, computationStatus)
-    ? await readSmoothedSeries(resolveAdmin(), strategyId)
-    : null;
+  // Phase 133 (SMTM-01): the smoothed sibling read, identically gated. The two reads
+  // are independent; fire them concurrently (each still gated so a skipped read stays
+  // skipped — resolves to null without a roundtrip). resolveAdmin memoizes
+  // synchronously, so a shared client is created at most once.
+  const [mtmSeries, smoothedSeries] = await Promise.all([
+    shouldReadSingleKeyMtmSeries(metricsJsonByBasis, computationStatus)
+      ? readMtmSeries(resolveAdmin(), strategyId)
+      : Promise.resolve(null),
+    shouldReadSingleKeySmoothedSeries(metricsJsonByBasis, computationStatus)
+      ? readSmoothedSeries(resolveAdmin(), strategyId)
+      : Promise.resolve(null),
+  ]);
   return singleKeyBasisOpts(dqf, metricsJsonByBasis, computationStatus, mtmSeries, smoothedSeries);
 }
 

@@ -1401,10 +1401,11 @@ async def test_single_key_not_attempted_heals_series_row() -> None:
 # a smoothed_mtm series (KIND_SMOOTHED_MTM), and writes
 # metrics_json_by_basis["smoothed_mtm"] alongside mark_to_market. Gated on the SAME
 # has_option_activity signal as the MTM pass (no new signal invented) — perp-only /
-# key-mode / ccxt / MTM-configured-headline all skip it (SC-4). UNLIKE the MTM pass
-# (which DEGRADES on a structural failure so cash still ships), the smoothed pass is
-# FAIL-LOUD: a LedgerValuationError (holed marks — incl. the retention-STRADDLE /
-# crawl-day cases) fails the WHOLE job (never a silent two-basis fallback).
+# key-mode / ccxt / MTM-configured-headline all skip it (SC-4). GLB-2 (v1.14): the
+# smoothed pass now DEGRADES LIKE the MTM pass — a structural LedgerValuationError
+# (holed marks — incl. the retention-STRADDLE / crawl-day cases) omits the additive
+# smoothed key while the cash+MTM headline still ships DONE (never a silent two-basis
+# fallback, and never a whole-job FAILED that destroys the healthy cash factsheet).
 
 
 @pytest.mark.asyncio
@@ -1450,6 +1451,59 @@ async def test_options_book_runs_third_smoothed_pass_same_anchor() -> None:
     assert pd.notna(by_basis["smoothed_mtm"]["cumulative_return"])
 
 
+@pytest.mark.asyncio
+async def test_structural_smoothed_failure_degrades_keeps_cash_mtm() -> None:
+    """GLB-2: a LedgerValuationError on the THIRD (smoothed) crawl DEGRADES — the
+    derive still completes DONE with the cash headline + the mark_to_market by-basis
+    key, and the smoothed_mtm key is OMITTED. This proves flipping SMOOTHED_MTM_ENABLED
+    ON can never sink a healthy options book whose smoothed marks have a structural hole.
+    Neuter the new smoothed structural-degrade catch (let the LedgerValuationError reach
+    the outer permanent `except LedgerValuationError`) → RED: the job FAILS permanent and
+    no by-basis object ships."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    # Raise ONLY on the third (smoothed) crawl — cash + mark_to_market build cleanly.
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        side_effects=[
+            None,
+            None,
+            LedgerValuationError("expiry-day book-channel boundary: no smoothed mark"),
+        ],
+    )
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    # The smoothed structural failure DEGRADES — cash+MTM headline SURVIVES DONE.
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a structural smoothed third-pass failure must DEGRADE (cash+MTM ship), "
+        "never fail the whole derive"
+    )
+    assert len(calls) == 3, "all three crawls are attempted (cash, mtm, smoothed)"
+    assert calls[2]["pnl_basis"] == "smoothed_mtm"
+    # No terminal failed stamp — the healthy cash factsheet is untouched.
+    assert _find_failed_stamp(capture) is None, (
+        "a smoothed structural degrade must NOT stamp the analytics row failed"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict)
+    assert set(by_basis.keys()) == {"mark_to_market"}, (
+        "the smoothed_mtm key is OMITTED on a structural degrade; mark_to_market "
+        "(from the healthy second pass) survives"
+    )
+
+
 # ── Phase 134 (kill-switch): SMOOTHED_MTM_ENABLED off ⇒ smoothed pass is DARK ────
 
 @pytest.mark.asyncio
@@ -1493,14 +1547,144 @@ async def test_smoothed_dark_launch_options_book_skips_third_pass(monkeypatch) -
     )
 
 
+# A strategy whose returns_denominator_config pins the HEADLINE basis to smoothed_mtm.
+# allocated_capital._VALID_PNL_BASES accepts it (config parsing is flag-agnostic), so
+# this is the RT-4 kill-switch-bypass vector: with the flag OFF it must NOT reach the
+# headline crawl.
+_SMOOTHED_HEADLINE_CONFIG = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "smoothed_mtm",
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+    "capital_schedule": [
+        {"effective_from": "2024-01-01", "capital_usd": 100000.0},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_smoothed_headline_config_flag_off_fails_loud_no_crawl(monkeypatch) -> None:
+    """RT-4 KILL-SWITCH BYPASS: a strategy configured with pnl_basis='smoothed_mtm'
+    as its HEADLINE basis must NOT run the smoothed native-ledger crawl when
+    SMOOTHED_MTM_ENABLED is off — the derive must FAIL LOUD PERMANENT before any crawl,
+    never persist a smoothed headline into the cash slot. Without the guard the headline
+    build_deribit_native_ledger would run in the smoothed basis (bypassing the flag) and
+    the job would complete DONE → RED. The two additive-pass gates never even engage
+    because the headline is smoothed (not cash), so the flag's only defence here is this
+    headline guard."""
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    ctx, capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _SMOOTHED_HEADLINE_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "a smoothed_mtm headline behind the OFF kill-switch is a structural config "
+        "refusal, never a retry"
+    )
+    assert result.error_message is not None
+    assert "SMOOTHED_MTM_ENABLED" in result.error_message
+    # The guard fires BEFORE any live crawl — no smoothed (or any) ledger build ran.
+    assert calls == [], (
+        "the headline smoothed crawl must NOT run when the flag is off — the guard "
+        "must short-circuit before build_deribit_native_ledger"
+    )
+    # A terminal failed stamp lands so the poller reaches a gate; no by-basis object.
+    failed = _find_failed_stamp(capture)
+    assert failed is not None, "the kill-switch refusal must stamp a terminal failed row"
+    assert not any(
+        isinstance(p, dict) and p.get("metrics_json_by_basis")
+        for _n, p, _c in capture["upserts"]
+    ), "no smoothed by-basis object may ship on the kill-switch refusal"
+
+
+@pytest.mark.asyncio
+async def test_smoothed_headline_config_flag_on_allowed() -> None:
+    """RT-4 companion: with SMOOTHED_MTM_ENABLED ON (the module default) a strategy
+    configured with pnl_basis='smoothed_mtm' as its HEADLINE basis is ALLOWED — the
+    guard must NOT over-fire. The headline native-ledger crawl runs in the smoothed
+    basis and the derive completes DONE (no permanent kill-switch refusal). This pins
+    the guard's precise scope: it fires ONLY when the flag is off. (The additive MTM /
+    smoothed passes never engage here — both require a CASH headline — so exactly ONE
+    crawl runs, in the smoothed basis.)"""
+    # The module-level `smoothed_mtm_enabled` fixture leaves the flag ON — no delenv.
+    ctx, capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _SMOOTHED_HEADLINE_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a smoothed_mtm headline is admissible when the kill-switch is ON — the guard "
+        "must not over-fire"
+    )
+    assert _find_failed_stamp(capture) is None, (
+        "no kill-switch refusal may stamp failed when the flag is ON"
+    )
+    # Exactly ONE crawl, in the smoothed basis (the additive passes require a cash
+    # headline, so neither the MTM nor the smoothed additive pass engages here).
+    assert [c["pnl_basis"] for c in calls] == ["smoothed_mtm"], (
+        "the headline crawl runs in the configured smoothed_mtm basis when the flag "
+        "is ON"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_headline_config_flag_on_allowed() -> None:
+    """RT-4 companion: with SMOOTHED_MTM_ENABLED ON (module default), the SAME
+    pnl_basis='smoothed_mtm' headline config IS admissible — the derive runs the
+    headline native-ledger crawl in the smoothed basis and completes DONE. This proves
+    the guard is a pure flag gate (it refuses ONLY when the flag is off), not a blanket
+    ban on the basis. Exactly ONE crawl runs (a smoothed headline is not cash, so the
+    additive MTM/smoothed passes — both gated on the cash headline — never engage)."""
+    ctx, _capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _SMOOTHED_HEADLINE_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "with the flag ON, a smoothed_mtm headline is admissible and completes"
+    )
+    assert len(calls) == 1, "a smoothed headline runs exactly one crawl (no additive passes)"
+    assert calls[0]["pnl_basis"] == "smoothed_mtm", (
+        "the headline crawl must run in the configured smoothed_mtm basis when allowed"
+    )
+
+
 @pytest.mark.asyncio
 async def test_smoothed_dark_launch_mark_hole_cannot_fail_job(monkeypatch) -> None:
     """THE KILL-SWITCH POINT (single-key): a structural smoothed mark-hole
-    (LedgerValuationError) that would FAIL THE WHOLE JOB when the flag is on
-    (test_smoothed_ledger_valuation_error_fails_job_loud) CANNOT fail the job when the
-    flag is off — the smoothed crawl is never even attempted, so the poisoned third
-    side-effect never fires and the job completes DONE on its cash/MTM headline. Neuter
-    (remove the flag gate) → RED (the LedgerValuationError fires and the job FAILS)."""
+    (LedgerValuationError) CANNOT touch a job when the flag is off — the smoothed crawl
+    is never even attempted, so the poisoned third side-effect never fires and the job
+    completes DONE on its cash/MTM headline with only TWO crawls. (Since GLB-2 the same
+    mark-hole DEGRADES rather than fails even when the flag is ON — see
+    test_structural_smoothed_failure_degrades_keeps_cash_mtm — but the dark path proves
+    the pass is skipped ENTIRELY, not merely degraded.) Neuter (remove the flag gate) →
+    RED: the poisoned 3rd crawl fires (len(calls) == 3)."""
     monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [
@@ -1568,43 +1752,6 @@ async def test_smoothed_persisted_when_mtm_degrades() -> None:
     # the MTM degrade reason still stamps (MTM stays honestly gated off)
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SUMMARY_COVERAGE
-    )
-
-
-@pytest.mark.asyncio
-async def test_smoothed_ledger_valuation_error_fails_job_loud() -> None:
-    """FAIL-LOUD (money-path): a LedgerValuationError on the SMOOTHED (third) crawl —
-    the retention-straddle / crawl-day / holed-marks case — fails the WHOLE job
-    PERMANENT (the outer LedgerValuationError handler stamps failed), NEVER a silent
-    two-basis fallback. No prestamp by-basis object is persisted (the failure is
-    BEFORE the persist seam). Neuter (catch-and-degrade the smoothed pass) → RED."""
-    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [
-        _report(has_option_activity=True),
-        _report(has_option_activity=True),
-    ]
-    ledger_mock, calls = _recording_ledger(
-        reports,
-        # cash ok, MTM ok, smoothed (idx 2) raises → whole job must fail loud
-        side_effects=[None, None, LedgerValuationError(
-            "instrument BTC-27JUN25-100000-C straddles the mark-retention horizon"
-        )],
-    )
-    combine = MagicMock(return_value=(_mtm_series(), {"used_heuristic_capital": False}))
-    with _apply(_base_patches(
-        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
-    ) + [_patch_benchmark()]):
-        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
-    assert result.outcome == DispatchOutcome.FAILED
-    assert result.error_kind == "permanent", (
-        "a holed-marks smoothed failure is structural/permanent, not a retry"
-    )
-    assert len(calls) == 3, "smoothed pass must be ATTEMPTED (the 3rd crawl) before failing"
-    # the terminal failed stamp fired — the wizard reaches a gate, not a spinner
-    assert _find_failed_stamp(capture) is not None
-    # NO silent two-basis persist: the additive by-basis prestamp never ran
-    assert _find_prestamp(capture) is None, (
-        "a failed smoothed pass must NOT persist a partial two-basis object"
     )
 
 
