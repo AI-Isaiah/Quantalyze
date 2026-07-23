@@ -59,8 +59,10 @@ from services.allocated_capital import (
     ReturnsDenominatorConfig,
     allocated_capital_returns_and_metrics,
 )
+from services.external_flows import ExternalFlow
+from services.mt5_deals import classify_deal, deal_cash_effect, deal_utc_day
 from services.native_nav import NativeLedger, reconstruct_native_nav_and_twr
-from services.nav_twr import _build_nav_meta, chain_linked_twr
+from services.nav_twr import _build_nav_meta, _coerce_float, chain_linked_twr
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger(__name__)
@@ -387,3 +389,105 @@ def combine_sfox_balance_history(
         meta["nav_coverage_gap_days"] = nav_gap_days
         meta["computation_status_hint"] = "complete_with_warnings"
     return returns, meta
+
+
+def combine_mt5_deal_ledger(
+    deals: Sequence[Mapping[str, Any]],
+    account_equity: float,
+    account_balance: float,
+    *,
+    server_utc_offset_s: int = 0,
+) -> tuple[pd.Series, dict[str, Any]]:
+    """The MT5 sibling of ``combine_native_ledger`` (:174) and
+    ``combine_sfox_balance_history`` (:230) — the THIRD broker-dailies combiner.
+    Fold an MT5 ``history_deals_get`` ledger into the byte-identical
+    ``(returns, meta)`` shape the other two produce (a gap-filled float Series on
+    an ascending daily DatetimeIndex unit ``[us]`` + a plain ``NavTWRMeta`` dict),
+    so EVERYTHING downstream — ``derive_basis_series``, ``compute_all_metrics``,
+    persistence, the factsheet — is untouched.
+
+    MT5 is single-currency (broker deposit ccy, USD-family) with a LIVE
+    ``account_info().equity`` anchor — there is NO per-currency coin-margined
+    reconstruction (deribit's ``native_nav`` machinery). It is structurally
+    CLOSEST to sFOX, but unlike sFOX's SAMPLED NAV it is a ledger-COMPLETE venue,
+    so a no-activity interior day is genuinely flat (0.0 via ``gap_fill``), never
+    an UNKNOWN gap.
+
+    Steps:
+      1. classify every deal via ``services.mt5_deals.classify_deal`` — an
+         unclassifiable / ambiguous ``DEAL_TYPE`` raises
+         ``Mt5DealClassificationError`` BEFORE any series is produced (nothing
+         partial; the deribit-``correction`` fail-loud lesson);
+      2. bucket per UTC day via ``deal_utc_day(time, server_utc_offset_s)`` — the
+         ONE server-time→UTC normalize seam (Pitfall 1; offset is ``[ASSUMED A2]``
+         until the live spike);
+      3. daily trading PnL = Σ ``deal_cash_effect`` (``profit+swap+commission+fee``,
+         [ASSUMED A3]) over trading-type rows per day; daily external flow = Σ the
+         ``profit`` field of external-flow-type (BALANCE/CREDIT/BONUS) rows per day
+         (a BALANCE deal books the deposit/withdrawal amount in ``profit``);
+      4. anchor to the LIVE ``account_equity`` (anchor-to-today, reconstruct
+         backward — the module's :26-32 convention) and produce flow-in-numerator
+         returns ``r_t = (NAV_t − NAV_{t−1} − F_t)/NAV_{t−1}``.
+
+    Cashflow separation (economically load-bearing): the external flow F sits in
+    the NUMERATOR, so a deposit day books its REAL trading PnL, NEVER the deposit
+    itself (a ``pct_change()`` on the equity curve would count the deposit as a
+    return — the highest-severity money bug for this source).
+
+    Realized-basis + uPnL wedge (v1.8 FLOW-04): the realized deal ledger books
+    CLOSED PnL only, while ``account_info().equity`` = balance + floating uPnL of
+    open positions. We anchor to equity and pass ``open_unrealized_usd =
+    account_equity − account_balance`` so the honest core flags a material wedge
+    (``unrealized_pnl_in_anchor``) rather than silently reconciling it.
+
+    Composition: the per-day trading PnL is shaped into ``fetch_daily_pnl``-style
+    ``daily_pnl`` records and the per-day flows into dated ``ExternalFlow`` entries,
+    then delegated to ``combine_realized_and_funding`` so the anchor roll, the
+    flow numerator, the DQ-01 guard set, the uPnL-wedge flag and ``gap_fill`` all
+    come from the ONE shared engine — a bespoke ``r_t`` loop is FORBIDDEN
+    (Don't Hand-Roll). The two existing siblings are NEVER touched.
+    """
+    trading_by_day: dict[str, float] = {}
+    flow_by_day: dict[str, float] = {}
+    for deal in deals:
+        # classify_deal raises on an unknown/ambiguous type — it propagates so the
+        # whole combine fails loud (nothing partial), never a silent drop/coerce.
+        kind = classify_deal(deal)
+        day = deal_utc_day(deal.get("time"), server_utc_offset_s)
+        if kind == "trading":
+            trading_by_day[day] = trading_by_day.get(day, 0.0) + deal_cash_effect(deal)
+        else:  # external_flow — capital in/out, subtracted from the return numerator
+            amount = _coerce_float(
+                deal.get("profit", 0.0), field="mt5_flow_profit", row={"day": day}
+            )
+            flow_by_day[day] = flow_by_day.get(day, 0.0) + amount
+
+    # Shape per-day trading PnL into daily_pnl records (the funding_rows_to_daily_pnl
+    # _records shape at :108-121: side encodes the sign, price is the |USD| amount).
+    records = [
+        {
+            "exchange": "",
+            "symbol": "MT5_DAILY",
+            "side": "buy" if pnl >= 0 else "sell",
+            "price": abs(pnl),
+            "quantity": 1,
+            "fee": 0,
+            "fee_currency": "USD",
+            "timestamp": f"{day}T00:00:00+00:00",
+            "order_type": "daily_pnl",
+        }
+        for day, pnl in sorted(trading_by_day.items())
+    ]
+    # Dated external flows (deposit +, withdrawal −); USD-family so quantity == usd.
+    flows = [
+        ExternalFlow(utc_day_iso=day, usd_signed=amount)
+        for day, amount in sorted(flow_by_day.items())
+    ]
+
+    return combine_realized_and_funding(
+        records,
+        [],
+        account_balance=account_equity,
+        external_flows=flows,
+        open_unrealized_usd=account_equity - account_balance,
+    )
