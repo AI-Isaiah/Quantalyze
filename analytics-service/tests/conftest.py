@@ -74,6 +74,23 @@ def _reset_fail_loud_traceback_dedupe():
     _reset_fail_loud_traceback_dedupe_for_tests()
 
 
+# Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
+# behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
+# default OFF. The Phase 131-133 tests were written when the pass ran
+# unconditionally, so they assert smoothed runs. Rather than silently defaulting
+# the flag ON in tests (which would hide the gate), the smoothed-assuming modules
+# opt in EXPLICITLY via `pytestmark = pytest.mark.usefixtures("smoothed_mtm_enabled")`
+# — making the gate VISIBLE at the top of each such module. A dark-launch test can
+# still `monkeypatch.delenv("SMOOTHED_MTM_ENABLED")` in its own body to override
+# (the flag is read per-call at job-run time), which is how the kill-switch's
+# flag-OFF assertions run inside those same modules.
+@pytest.fixture
+def smoothed_mtm_enabled(monkeypatch):
+    """Enable the SMOOTHED_MTM_ENABLED worker kill-switch for the duration of a
+    test (auto-reverted by monkeypatch). See the module note above."""
+    monkeypatch.setenv("SMOOTHED_MTM_ENABLED", "true")
+
+
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 

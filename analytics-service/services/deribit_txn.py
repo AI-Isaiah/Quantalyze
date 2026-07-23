@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 # Pure, I/O-free venue-agnostic dated-flow contract (Plan 75-01). Importing it
@@ -845,10 +845,25 @@ _COVERAGE_DAY_MS: float = 24 * 60 * 60 * 1000.0
 #   book open across the ~2025-01-12 summary rollout) FAILS LOUD under this basis
 #   (no boundary-book V₀ anchor is computed; that machinery was removed as an
 #   invalid closed form). Use ``cash_settlement`` for such accounts.
+# ``smoothed_mtm`` (Phase 131, NEW third basis): the DAILY-MARK redistribution —
+#   each option row books its FULL cash ``change`` (like cash_settlement) AND the
+#   adapter (``build_deribit_native_ledger``) merges a per-(day,ccy) ΔMTM channel
+#   ``Book[d]−Book[d−1]`` (``Book[d]=Σ_instr position×mark[d]``) computed from the
+#   replayed option book and daily option marks. This SPREADS each session-lump
+#   option P&L across the days it accrued → the honest daily option worth, WITHOUT
+#   the mark_to_market summary-lump spikes. Total-preserving (telescoping):
+#   ``Σ_d native_pnl = Σchange + Book(last settlement)``; a FLAT terminal book ⇒
+#   the smoothed total equals the cash_settlement total EXACTLY. The
+#   ``options_settlement_summary`` channel does NOT drive attribution under this
+#   basis (it is retained ONLY as the Q3-3 reconciliation cross-check in
+#   ``assert_balance_identity``). For perp-only / USD-native books the replay is
+#   empty ⇒ no marks fetched ⇒ no-op merge ⇒ byte-identical to cash_settlement
+#   (SC-4). ADDITIVE — cash_settlement and mark_to_market stay byte-untouched.
 PNL_BASIS_CASH_SETTLEMENT: str = "cash_settlement"
 PNL_BASIS_MARK_TO_MARKET: str = "mark_to_market"
+PNL_BASIS_SMOOTHED_MTM: str = "smoothed_mtm"
 _PNL_BASES: frozenset[str] = frozenset(
-    {PNL_BASIS_CASH_SETTLEMENT, PNL_BASIS_MARK_TO_MARKET}
+    {PNL_BASIS_CASH_SETTLEMENT, PNL_BASIS_MARK_TO_MARKET, PNL_BASIS_SMOOTHED_MTM}
 )
 DEFAULT_PNL_BASIS: str = PNL_BASIS_CASH_SETTLEMENT
 
@@ -1511,6 +1526,10 @@ def assert_balance_identity(
     open_option_ccys: AbstractSet[str] = frozenset(),
     exclude_spot_extraction: bool = False,
     pnl_basis: str = DEFAULT_PNL_BASIS,
+    terminal_book: Mapping[str, float] | None = None,
+    native_options_value: Mapping[str, float] | None = None,
+    native_options_session_upl: Mapping[str, float] | None = None,
+    option_delta_mtm: Mapping[str, Mapping[str, float]] | None = None,
 ) -> None:
     """MANDATORY fail-loud reconcile guard (§1). Per currency ``c``, the computed
     total realized (Σ over ALL ``native_daily[c]`` day contributions) MUST equal
@@ -1669,6 +1688,163 @@ def assert_balance_identity(
                 "risk)"
             )
 
+    # SMOOTHED_MTM only (Phase 131 — additive, gated): the cash channel above ran
+    # STRICT over ALL currencies (open_option_ccys is frozenset() under this basis —
+    # every option row books its FULL cash change, so the flat-at-settlement identity
+    # closes exactly and no exemption is needed). Now the two smoothed-only channels:
+    #   (2) BOOK channel (anchor cross-check) — the replayed settled book
+    #       Book(last settlement) reconciles against the venue anchor's SETTLED book
+    #       (options_value − options_session_upl); an independent T-131-04 backstop
+    #       (a position-field replay drift surfaces here, never as a silent wrong MTM).
+    #   (3) SUMMARY cross-check (Q3-3) — over each summary coverage window,
+    #       Σ(rpl+upl) == Σ(option change + commission) inside the window + ΔBook;
+    #       the summaries stop DRIVING attribution but keep POLICING it.
+    # Both are inert (no terminal_book / no summary rows) for perp-only / USD-native
+    # ledgers → SC-4 byte-safe. cash_settlement / mark_to_market never enter here.
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and terminal_book is not None:
+        _assert_smoothed_book_channel(
+            terminal_book,
+            native_options_value or {},
+            native_options_session_upl or {},
+            floor,
+            throughput,
+        )
+        _assert_smoothed_summary_cross_check(
+            rows, option_delta_mtm or {}, floor, throughput
+        )
+
+
+def _assert_smoothed_book_channel(
+    terminal_book: Mapping[str, float],
+    native_options_value: Mapping[str, float],
+    native_options_session_upl: Mapping[str, float],
+    floor: Mapping[str, float],
+    throughput: Mapping[str, float],
+) -> None:
+    """SMOOTHED_MTM book channel (Q3-2): per currency the replayed settled option
+    book ``Book(last settlement)`` (replay × daily marks, the Task-4 terminal_book)
+    MUST reconcile against the anchor's SETTLED book =
+    ``native_options_value[c] − native_options_session_upl[c]`` (both off the SAME
+    summaries response), within ``max($1-equiv native floor, 1e-4·max(throughput,
+    |settled anchor|))``. The daily marks are 08:00-settlement closes so they
+    EXCLUDE the current session's unrealized move (which lives in
+    ``options_session_upl``) — the decomposition is exact at the settled boundary.
+    On breach → ``LedgerValuationError`` naming currency + a coarse magnitude class
+    only (leak discipline). A perturbed anchor (replay/mark drift) fires here."""
+    computed = {str(c).upper(): float(v) for c, v in terminal_book.items()}
+    opt_value = {str(c).upper(): float(v) for c, v in native_options_value.items()}
+    opt_sess = {
+        str(c).upper(): float(v) for c, v in native_options_session_upl.items()
+    }
+    for ccy in sorted(set(computed) | set(opt_value)):
+        settled_anchor = opt_value.get(ccy, 0.0) - opt_sess.get(ccy, 0.0)
+        residual = abs(computed.get(ccy, 0.0) - settled_anchor)
+        tol = max(
+            float(floor.get(ccy, 0.0)),
+            1e-4 * max(throughput.get(ccy, 0.0), abs(settled_anchor)),
+        )
+        if residual > tol:
+            raise LedgerValuationError(
+                f"Deribit smoothed_mtm book-channel breach for currency {ccy!r}: "
+                "the replayed settled option book diverges from the anchor's settled "
+                "book (options_value − options_session_upl) by more than "
+                f"max($1-equiv, 1e-4·throughput) (residual/tolerance class "
+                f"{residual / tol if tol else float('inf'):.1f}x) — a position-field "
+                "replay drift or a stale/mis-keyed daily mark; STOP and investigate "
+                "(never loosen the tolerance, silent MTM-misattribution risk)"
+            )
+
+
+def _assert_smoothed_summary_cross_check(
+    rows: Sequence[Mapping[str, Any]],
+    option_delta_mtm: Mapping[str, Mapping[str, float]],
+    floor: Mapping[str, float],
+    throughput: Mapping[str, float],
+) -> None:
+    """SMOOTHED_MTM summary cross-check (Q3-3): over each currency's
+    ``options_settlement_summary`` coverage window, Deribit's OWN session P&L
+    decomposition ``Σ(realized_pl + unrealized_pl)`` MUST reconcile against our
+    reconstruction ``Σ(option change + commission)`` inside the window PLUS the
+    smoothed book move ``ΔBook = Book(window end) − Book(window start)`` (the E3
+    closure generalised to non-flat window ends via the ΔMTM series). Under
+    smoothed the summaries no longer DRIVE attribution (the ΔMTM book does), so this
+    is a pure POLICING channel — a material breach means the summary stream and the
+    replay/mark reconstruction disagree → ``LedgerValuationError`` (currency +
+    magnitude class only). INERT (no windows) for perp-only / USD-native / pre-
+    rollout ledgers → SC-4 byte-safe. Never raises on undatable rows (skipped —
+    the cash + book channels are the money backstops)."""
+    windows = _summary_coverage_windows(rows)
+    if not windows:
+        return
+    summary_sum: dict[str, float] = {}
+    option_sum: dict[str, float] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        row_type = str(row.get("type", ""))
+        ccy = str(row.get("currency", "")).upper()
+        window = windows.get(ccy)
+        if window is None:
+            continue
+        try:
+            instant = _row_utc_instant(row.get("timestamp"))
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if not _ts_in_coverage(instant, window):
+            continue
+        if row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            summary_sum[ccy] = summary_sum.get(ccy, 0.0) + _summary_contribution(row)
+        elif row_type in ("trade", "delivery") and classify_instrument(
+            str(row.get("instrument_name", ""))
+        ) == "option":
+            change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            option_sum[ccy] = (
+                option_sum.get(ccy, 0.0) + change + _option_commission(row)
+            )
+    for ccy, window in windows.items():
+        start_ms, end_ms = window
+        start_day = (
+            datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).date().isoformat()
+        )
+        end_day = (
+            datetime.fromtimestamp(end_ms / 1000, tz=timezone.utc).date().isoformat()
+        )
+        # ΔBook over the window = Book(end boundary) − Book(start boundary),
+        # telescoped from the daily ΔMTM series. Marks are keyed by BAR-STAMP day
+        # (M4): the bar stamped ``D 08:00`` COMPLETES at ``D+1 08:00``, so the
+        # Book at a boundary instant ``day X 08:00`` is the day-keyed
+        # ``Book[X−1]`` — the slice is therefore ``[start_day, end_day)``, NOT
+        # ``(start_day, end_day]``. The old upper-shifted slice disagreed with
+        # the ms cash filter at the 08:00 boundary (WR-02): it DROPPED a
+        # coverage-era first trade's opening book entry (its cash IS inside the
+        # ms window) and swept IN a trailing crawl-day trade's book entry (its
+        # cash is OUTSIDE the ms window) — each mis-slicing the identity by a
+        # full position's book value on real accounts, contradicting the settled
+        # Phase-82 E3 flat-flat closure.
+        delta_book = 0.0
+        for day, value in option_delta_mtm.get(ccy, {}).items():
+            if start_day <= day < end_day:
+                delta_book += float(value)
+        lhs = summary_sum.get(ccy, 0.0)
+        rhs = option_sum.get(ccy, 0.0) + delta_book
+        residual = abs(lhs - rhs)
+        tol = max(
+            float(floor.get(ccy, 0.0)),
+            1e-4 * max(throughput.get(ccy, 0.0), abs(lhs), abs(rhs)),
+        )
+        if residual > tol:
+            raise LedgerValuationError(
+                f"Deribit smoothed_mtm summary cross-check breach for currency "
+                f"{ccy!r}: Deribit's own Σ(realized_pl+unrealized_pl) over the "
+                "options coverage window diverges from Σ(option change+commission) + "
+                "ΔBook by more than max($1-equiv, 1e-4·throughput) (residual/tolerance "
+                f"class {residual / tol if tol else float('inf'):.1f}x) — the summary "
+                "stream and the replay/mark reconstruction disagree; STOP and "
+                "investigate (never loosen the tolerance, silent MTM drift risk)"
+            )
+
 
 def _required_summary_field(row: Mapping[str, Any], field: str) -> float:
     """Read a REQUIRED numeric summary field (``realized_pl`` / ``unrealized_pl``)
@@ -1723,6 +1899,204 @@ def _option_commission(row: Mapping[str, Any]) -> float:
             "present+numeric on every option row)"
         )
     return _coerce_float(raw, field="commission", row=row)
+
+
+def _iter_utc_days(first_day: str, last_day: str) -> list[str]:
+    """Every ISO ``YYYY-MM-DD`` in ``[first_day, last_day]`` inclusive — the DENSE
+    calendar grid the smoothed-MTM book carries positions across (pure stdlib
+    ``date`` arithmetic; the AST purity guard forbids pandas here)."""
+    start = date.fromisoformat(first_day)
+    end = date.fromisoformat(last_day)
+    out: list[str] = []
+    cursor = start
+    while cursor <= end:
+        out.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return out
+
+
+def replay_option_positions(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Reconstruct the per-instrument, per-UTC-day signed OPEN option book by PURE
+    replay of the signed post-trade ``position`` field on option ``trade``/
+    ``delivery`` rows (M3 evidence: shorts negative, deliveries zero the position;
+    no Greeks, no settlement math). NOT yet called by any production path — the
+    ``smoothed_mtm`` basis wiring lands in 131-01b.
+
+    Gated on the EXISTING :func:`classify_instrument` option arm — perp / future /
+    spot rows are IGNORED (they carry their P&L on the cash ``change`` channel, not
+    a marked option book). Rows are sorted by ``(timestamp, id)`` WITHIN each
+    instrument before replay (crawl concat order is NOT trusted); the END-OF-DAY
+    position is the ``position`` of the LAST row on that UTC day. A partial-delivery
+    nonzero post-trade position is ACCEPTED as data (Deribit's call), never asserted
+    zero.
+
+    Returns ``{instrument: {currency, first_day, last_day, positions: {day:
+    signed_size}}}`` where ``positions`` is keyed ONLY on event days (the caller
+    :func:`option_mtm_daily` carries them forward across no-trade days).
+
+    Fail-loud (leak-safe): an option trade/delivery row whose ``position`` is
+    absent / null / blank / non-numeric raises ``LedgerValuationError`` naming the
+    row ``id``/``type`` ONLY (the field is the SOLE book source — fabricating it
+    would silently mis-state MTM; never echo the row payload or balances)."""
+    per_instr: dict[str, list[Mapping[str, Any]]] = {}
+    ccy_of: dict[str, str] = {}
+    for row in rows:
+        if str(row.get("type", "")) not in ("trade", "delivery"):
+            continue
+        instrument = str(row.get("instrument_name", ""))
+        if classify_instrument(instrument) != "option":
+            continue
+        per_instr.setdefault(instrument, []).append(row)
+        # WR-03: UPPERCASE like every other currency read site in this module —
+        # the adapter merges the day-keyed ΔMTM into the UPPERCASE-keyed
+        # native_pnl, so a raw-cased key would fork a phantom series bucket.
+        ccy_of[instrument] = str(row.get("currency", "")).upper()
+    out: dict[str, dict[str, Any]] = {}
+    for instrument, instr_rows in per_instr.items():
+        # IN-01: the same-instant tie-break is SHORTLEX on the id string
+        # (length, then value) — numeric ids of different digit length order
+        # numerically ("999" < "1000"), so same-ms multi-fills (a market order
+        # sweeping levels) resolve the TRUE last fill as the end-of-day
+        # position; plain lexicographic str ordering could pick an intermediate
+        # fill and misattribute two days' ΔMTM. Non-numeric ids stay
+        # deterministic under shortlex.
+        ordered = sorted(
+            instr_rows,
+            key=lambda r: (
+                _row_utc_instant(r.get("timestamp")),
+                len(str(r.get("id"))),
+                str(r.get("id")),
+            ),
+        )
+        positions: dict[str, float] = {}
+        for r in ordered:
+            raw_pos = r.get("position", _MISSING)
+            if raw_pos is _MISSING or raw_pos is None or (
+                isinstance(raw_pos, str) and not raw_pos.strip()
+            ):
+                raise LedgerValuationError(
+                    f"option Deribit row id={r.get('id')!r} type={r.get('type')!r} "
+                    "has an absent/null/blank/non-numeric position — the signed "
+                    "post-trade position is the ONLY option-book source; refusing "
+                    "to fabricate it (schema drift would silently mis-state MTM)"
+                )
+            try:
+                pos = float(raw_pos)
+            except (TypeError, ValueError):
+                raise LedgerValuationError(
+                    f"option Deribit row id={r.get('id')!r} type={r.get('type')!r} "
+                    "has an absent/null/blank/non-numeric position — the signed "
+                    "post-trade position is the ONLY option-book source; refusing "
+                    "to fabricate it (schema drift would silently mis-state MTM)"
+                ) from None
+            day = _row_utc_day(r.get("timestamp"))
+            positions[day] = pos  # ascending order → last row of the day wins
+        days_sorted = sorted(positions)
+        out[instrument] = {
+            "currency": ccy_of[instrument],
+            "first_day": days_sorted[0],
+            "last_day": days_sorted[-1],
+            "positions": positions,
+        }
+    return out
+
+
+def option_mtm_daily(
+    positions: Mapping[str, Mapping[str, Any]],
+    marks: Mapping[str, Mapping[str, float]],
+    *,
+    last_settled_day: str | None = None,
+) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
+    """Per-(currency, UTC-day) ΔMTM redistribution + terminal book from the replayed
+    option ``positions`` (from :func:`replay_option_positions`) and per-instrument
+    daily ``marks`` (from ``fetch_deribit_option_daily_marks``). PURE (pandas/async-
+    free — the AST purity guard enforces it); NOT yet called by any production path.
+
+    ``last_settled_day`` (NF-01) caps the dense grid at the last SETTLED bar day:
+    ``global_last = min(max(candidate_lasts), last_settled_day)``. An OPEN
+    instrument A is fetched only through ``last_settled`` (yesterday), but a
+    sibling B with ANY crawl-day event (delivery/settlement/trade) pushes the
+    UNCAPPED ``global_last`` to TODAY — a day on which A still carries a nonzero
+    position with NO settled mark → a SPURIOUS D-07 hole naming the healthy A.
+    Capping at the settled boundary is coherent with the book channel (the
+    anchor's settled book ``options_value − options_session_upl`` also excludes
+    post-boundary positions) and subsumes the crawl-day-open partial-bar case:
+    the crawl-day (unsettled) cash already books on the cash channel; that day is
+    simply never MTM-marked (it accrues from the next settlement onward). Default
+    ``None`` = no cap (byte-identical for the pure-core direct callers, SC-4).
+
+    Day-grid convention (pinned 83-PLAN §2-Q1): ``mark[instr][D]`` is the close of
+    the 1D bar whose tick falls on UTC day ``D`` (the bar Deribit stamps at ``D``
+    08:00 — its settlement boundary), keyed by the SAME
+    ``strftime('%Y-%m-%d')`` UTC-day string the position replay grids on. The ≤8h
+    skew between the 08:00 bar boundary and native midnight is intraday attribution
+    noise WITHIN the one-day class; it cancels day-over-day so the telescoped TOTAL
+    is EXACT regardless.
+
+    Model: ``Book[c][d] = Σ_instr(currency c) position[instr][d] × mark[instr][d]``
+    over a DENSE calendar grid where positions CARRY FORWARD between events but marks
+    are NEVER filled; ``ΔMTM[c][d] = Book[c][d] − Book[c][d−1]``. Telescoping is
+    exact: ``Σ_d ΔMTM[c][d] = Book[c][terminal] − 0`` (flat terminal ⇒ 0 ⇒ the
+    ``smoothed_mtm`` total equals ``cash_settlement``). Returns
+    ``(delta_mtm: {ccy: {day: ΔMTM}}, terminal_book: {ccy: Book[terminal]})``; the
+    terminal book feeds 131-01b Task 5's book-channel anchor guard.
+
+    Fail-loud (D-07): a day inside a listed instrument's held life with a NONZERO
+    carried position and NO daily mark is a STRUCTURAL hole → ``LedgerValuationError``
+    naming instrument + the EARLIEST missing day. NO interpolation, NO session-lump
+    fallback (that lump IS the bug being removed). Instruments WHOLLY predating chart
+    retention are excluded upstream (131-01b Task 4); STRADDLERS are NOT — their
+    partial (head-hole) marks fall through to this same guard, so a currently-green
+    options key can begin hard-failing on future recomputes as the ~2.5yr retention
+    window advances (accepted D-07 consequence, surfaced in 131-02)."""
+    if not positions:
+        return {}, {}
+    known_ccys = {str(p["currency"]) for p in positions.values()}
+    global_first = min(str(p["first_day"]) for p in positions.values())
+    candidate_lasts: list[str] = [str(p["last_day"]) for p in positions.values()]
+    for instr_marks in marks.values():
+        if instr_marks:
+            candidate_lasts.append(max(instr_marks))
+    global_last = max(candidate_lasts)
+    # NF-01: cap the grid at the last SETTLED bar day so a sibling's crawl-day
+    # event cannot drag the grid onto an unsettled day where another open
+    # instrument carries a nonzero position with no settled mark (a spurious
+    # D-07 hole). ISO ``YYYY-MM-DD`` strings order lexicographically = calendar.
+    if last_settled_day is not None and last_settled_day < global_last:
+        global_last = last_settled_day
+
+    instruments = sorted(positions)
+    cur_pos: dict[str, float] = {instr: 0.0 for instr in instruments}
+    prev_book: dict[str, float] = {ccy: 0.0 for ccy in known_ccys}
+    delta_mtm: dict[str, dict[str, float]] = {}
+    for day in _iter_utc_days(global_first, global_last):
+        book: dict[str, float] = {ccy: 0.0 for ccy in known_ccys}
+        for instr in instruments:
+            pos_map = positions[instr]["positions"]
+            if day in pos_map:
+                cur_pos[instr] = float(pos_map[day])
+            pos = cur_pos[instr]
+            if pos == 0.0:
+                continue
+            mark = marks.get(instr, {}).get(day)
+            if mark is None:
+                raise LedgerValuationError(
+                    f"option daily-MTM hole: instrument={instr} carries a nonzero "
+                    f"position on {day} but has NO daily mark (bar) — refusing to "
+                    "interpolate or fall back to the session lump (D-07: a missing "
+                    "bar inside a listed instrument's life is structural, fail loud)"
+                )
+            ccy = str(positions[instr]["currency"])
+            book[ccy] = book[ccy] + pos * float(mark)
+        for ccy in known_ccys:
+            change = book[ccy] - prev_book[ccy]
+            if change != 0.0:
+                delta_mtm.setdefault(ccy, {})[day] = change
+        prev_book = book
+    terminal_book = {ccy: prev_book[ccy] for ccy in known_ccys}
+    return delta_mtm, terminal_book
 
 
 def txn_rows_to_native_daily(
@@ -1796,10 +2170,20 @@ def txn_rows_to_native_daily(
             "unrecognized accrual basis"
         )
     use_mtm = pnl_basis == PNL_BASIS_MARK_TO_MARKET
+    # Phase 131 SMOOTHED_MTM: the cash channel here is BYTE-IDENTICAL to
+    # cash_settlement — option trade/delivery rows book their FULL cash `change`
+    # (coverage_windows below is empty for every non-mtm basis, so the coverage-
+    # gated −commission arm is never entered) and the summary channel contributes
+    # NOTHING (handled by the smoothed summary arm below, which still enforces
+    # change==0). The per-(day,ccy) ΔMTM redistribution is merged by the ADAPTER
+    # (``build_deribit_native_ledger``, Task 4), NOT here — keeping this module
+    # pandas/async-free (AST purity) and the signature marks-free (83-PLAN Q2).
+    use_smoothed = pnl_basis == PNL_BASIS_SMOOTHED_MTM
     # Phase 82 pre-pass (MARK_TO_MARKET only): per-currency options coverage
     # windows from this batch's own summary rows. Value-inert for perp-only /
-    # USD-native ledgers (no summaries → {}). In CASH_SETTLEMENT the summary
-    # channel is not consulted at all — options book their raw cash `change`.
+    # USD-native ledgers (no summaries → {}). In CASH_SETTLEMENT and SMOOTHED_MTM
+    # the summary channel is not consulted at all — options book their raw cash
+    # `change`.
     coverage_windows = _summary_coverage_windows(rows) if use_mtm else {}
     # Bug B — ALLOCATED PATH ONLY (``exclude_spot_extraction=True``, threaded from a
     # non-None ``returns_denominator_config``): the NET-DAILY spot-extraction
@@ -1867,6 +2251,28 @@ def txn_rows_to_native_daily(
                 )
             key = (day, ccy)
             by_day_ccy[key] = by_day_ccy.get(key, 0.0) + contribution
+            continue
+        # SMOOTHED_MTM only: options_settlement_summary does NOT drive attribution
+        # (the per-(day,ccy) ΔMTM book, merged by the adapter, does). It
+        # contributes NOTHING here — but its `change` is still ALWAYS 0.0; a
+        # nonzero change is semantics drift → fail loud (mirrors the mtm arm's
+        # _summary_contribution change guard, verbatim). Under smoothed the summary
+        # survives ONLY as the Q3-3 reconciliation cross-check in
+        # assert_balance_identity (the summaries stop driving attribution but keep
+        # policing it). Gated on use_smoothed → cash_settlement / mark_to_market
+        # are byte-untouched (SC-4).
+        if use_smoothed and row_type in _NATIVE_OPTIONS_SUMMARY_TYPES:
+            summary_change = _coerce_float(
+                row.get("change", 0.0) or 0.0, field="change", row=row
+            )
+            if summary_change != 0.0:
+                raise LedgerValuationError(
+                    f"options_settlement_summary Deribit row id={row.get('id')!r} "
+                    "carries a nonzero change under smoothed_mtm — the summary "
+                    "recap change is always 0.0 (option P&L is redistributed via "
+                    "the daily ΔMTM book); a nonzero change is semantics drift, "
+                    "classify against fresh evidence before ingesting"
+                )
             continue
         # Phase 128 (DERIBITFIX): a `correction` is gated PER ROW on info.reason —
         # the SAME gate as the USD sibling so the two paths never diverge on which

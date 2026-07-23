@@ -173,6 +173,19 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # withholds warned accounts automatically). Registered in NAV_TWR_GUARD_KEYS so
     # the flag alone promotes the status (Q6).
     pre_summary_rollout_option_dailies: list[str]
+    # Phase 132 (SMTM-01) — the smoothed_mtm THIRD basis: option instruments whose
+    # daily marks have aged past the ~2.5yr Deribit mark-retention horizon fell back
+    # to cash-basis `change` for those (ccy, day) buckets (the ΔMTM redistribution
+    # cannot reach un-fetchable marks; partial marks are NEVER interpolated — they
+    # fail loud). The redistribution TOTAL stays honest (telescoping); only those
+    # daily attributions are caveated. The in-core value is the sorted list of
+    # affected ``"{ccy}:{day}"`` buckets; set by the broker wiring (job_worker's
+    # smoothed pass), NOT the pure core — the SAME worker-stamped pattern as
+    # ``pre_summary_rollout_option_dailies``. F3: the LIST does NOT survive to the
+    # factsheet — at the broker→CSV boundary it COLLAPSES to a boolean DQ-flag
+    # exactly like every other guard key. Registered in NAV_TWR_GUARD_KEYS so the
+    # flag alone promotes the status.
+    pre_mark_retention_option_dailies: list[str]
 
 
 # SHOULD-1 (specialist-types): the ONE source of truth for the additive
@@ -195,6 +208,7 @@ NAV_TWR_GUARD_KEYS: tuple[str, ...] = (
     "unrealized_pnl_unreadable",
     "twr_chain_broken",
     "pre_summary_rollout_option_dailies",
+    "pre_mark_retention_option_dailies",
 )
 
 

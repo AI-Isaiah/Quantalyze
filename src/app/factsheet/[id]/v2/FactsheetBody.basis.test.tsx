@@ -1,4 +1,18 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+
+// Phase 134 (smoothed_mtm kill-switch): SMOOTHED_MTM_UI_ENABLED is a build-time
+// module-load const read from process.env at import time, so the flag must be set
+// BEFORE closed-sets is imported. vi.hoisted runs before all static imports — enable
+// it here so this suite's Phase-133 smoothed-segment assertions render the third
+// segment. The DARK (flag-OFF) default — the segment hidden entirely — is proven in
+// FactsheetBody.smoothed-killswitch.test.tsx. Cleaned up afterAll so the "true" does
+// not leak into a sibling file's fresh closed-sets import in the same worker.
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED = "true";
+});
+afterAll(() => {
+  delete process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED;
+});
 import { render, fireEvent, within } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
@@ -7,8 +21,10 @@ import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/wid
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
-import { mtmDisabledReasonCopy } from "./basis-context";
+import { BasisProvider, useBasis, mtmDisabledReasonCopy, smoothedDisabledReasonCopy, type Basis } from "./basis-context";
+import { PeerPercentilePanel } from "./BatchDPanels";
 import { pct } from "./format";
+import { useEffect } from "react";
 
 /**
  * Phase 90 Wave-0 (90-02 Task 2) — TDD RED scaffold for the FS-03 cash/MTM
@@ -842,5 +858,305 @@ describe("FactsheetBody — Phase 103 MTM-04 dailies-derivable rail follow-throu
     // bundle sentinel -7.77. Neuter §I (`m` → payload) → §I reverts to cash → RED.
     expect(railValue(container, "Main Metrics", "Skew")).toBe("-7.77");
     expect(extSection().textContent).toContain("-7.77");
+  });
+});
+
+/**
+ * Phase 133 (SMTM-01) — the third "Smoothed mark-to-market" segment + a decided
+ * smoothed posture at EVERY basis-consuming render surface. Cash/MTM byte-identity
+ * is pinned by the untouched suites above; these pin the smoothed sibling postures.
+ */
+
+// Sentinel smoothed scalars — deliberately distinct from CASH and MTM so a wrong-arm
+// swap is observable (cum 0.44 → +44.0%, sharpe 1.7 → 1.70).
+const SMOOTHED = {
+  cumulative_return: 0.44,
+  volatility: 0.09,
+  max_drawdown: -0.03,
+  cagr: 0.22,
+  sharpe: 1.7,
+  sortino: 2.4,
+  calmar: 3.3,
+};
+const SMOOTHED_SERIES = makeReturnsSeries(70, 0.0007);
+const SMOOTHED_BUNDLE = deriveSeriesBundle(
+  SMOOTHED_SERIES.map((p) => ({ date: p.date, value: p.value })),
+  { periodsPerYear: 365, isArithmetic: false, markets: [], strategyName: "Scenario" },
+);
+const SMOOTHED_SEGMENT_LABEL = "Smoothed mark-to-market";
+
+// (k) composite FLAGSHIP options case: MTM gated OFF (unsmoothed_options_book),
+//     smoothed OPEN with a persisted bundle — the phase render proof.
+function fixtureCompositeSmoothedFlagship(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH, smoothed_mtm: SMOOTHED },
+    seriesByBasis: { smoothed_mtm: SMOOTHED_BUNDLE },
+    mtmGate: { available: false, reason: "unsmoothed_options_book" },
+    smoothedGate: { available: true },
+  } as unknown as FactsheetPayload;
+}
+// (l) {smoothed_mtm}-only single-key: MTM degraded reason-lessly (mtmGate present but
+//     unavailable, no reason), smoothed open — the MEDIUM-2 edge rendered.
+function fixtureSingleKeySmoothedOnly(): FactsheetPayload {
+  return {
+    ...base(),
+    metricsByBasis: { smoothed_mtm: SMOOTHED },
+    seriesByBasis: { smoothed_mtm: SMOOTHED_BUNDLE },
+    mtmGate: { available: false },
+    smoothedGate: { available: true },
+  } as unknown as FactsheetPayload;
+}
+// (m) composite, smoothed gate available but NO series bundle (charts fall back to cash).
+function fixtureCompositeSmoothedNoBundle(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH, smoothed_mtm: SMOOTHED },
+    mtmGate: { available: false, reason: "unsmoothed_options_book" },
+    smoothedGate: { available: true },
+  } as unknown as FactsheetPayload;
+}
+// (n) composite, smoothed DISABLED (gate unavailable) — MTM available.
+function fixtureCompositeSmoothedDisabled(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH, mark_to_market: MTM },
+    mtmGate: { available: true },
+    smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
+  } as unknown as FactsheetPayload;
+}
+// (o) NON-options composite, BOTH bases disabled (venue MTM reason) — the IN-02
+//     production shape: every existing perp/ccxt composite after Phase 133.
+function fixtureCompositeBothDisabledNonOptions(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH },
+    mtmGate: { available: false, reason: "mtm_basis_unavailable_for_venue" },
+    smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
+  } as unknown as FactsheetPayload;
+}
+// (p) OPTIONS composite, BOTH bases disabled (smoothed pass not yet persisted) —
+//     the honest-pending state where the smoothed line IS information.
+function fixtureCompositeOptionsBothDisabled(): FactsheetPayload {
+  return {
+    ...base(),
+    dataQuality: { composite: true },
+    metricsByBasis: { cash_settlement: CASH },
+    mtmGate: { available: false, reason: "unsmoothed_options_book" },
+    smoothedGate: { available: false, reason: "smoothed_basis_unavailable" },
+  } as unknown as FactsheetPayload;
+}
+
+// Distinct smoothed comparator joint (for the suppressRelative α/IR pins).
+const SMOOTHED_JOINT = {
+  alpha: 3.0, beta: 2.22, corr: -0.8, r2: 0.7, info_ratio: 5.55,
+  treynor: 0.4, tracking_error: 0.06, up_capture: 1.4, down_capture: 0.5,
+};
+function fixtureSmoothedJoint(withBundle: boolean): FactsheetPayload {
+  const cash = base();
+  const sm = buildScenarioFactsheetPayload({
+    portfolioDaily: makeReturnsSeries(200, 0.004),
+    benchmark: null,
+  }) as unknown as FactsheetPayload;
+  const smBundle = bundleFromScenario(sm);
+  return {
+    ...cash,
+    activeComparator: "btc",
+    comparators: {
+      ...cash.comparators,
+      btc: { ...cash.comparators.btc, joint: CASH_JOINT },
+    },
+    metricsByBasis: { smoothed_mtm: SMOOTHED },
+    mtmGate: { available: false },
+    smoothedGate: { available: true },
+    ...(withBundle
+      ? {
+          seriesByBasis: {
+            smoothed_mtm: {
+              ...smBundle,
+              comparators: {
+                ...smBundle.comparators,
+                btc: { ...smBundle.comparators.btc, joint: SMOOTHED_JOINT },
+              },
+            },
+          },
+        }
+      : {}),
+  } as unknown as FactsheetPayload;
+}
+
+// Read the α-vs-comparator KPI cell (label carries a live comparator short name).
+function alphaCell(container: HTMLElement): string {
+  const label = within(container).getAllByText(/α vs/)[0]!;
+  const cell = label.parentElement as HTMLElement;
+  return cell.querySelector("p:last-child")?.textContent ?? "";
+}
+
+describe("FactsheetBody — Phase 133 SMTM-01 smoothed basis render surfaces", () => {
+  it("THREE segments render; Cash active by default, MTM disabled (options), Smoothed enabled", () => {
+    const { container } = renderBody(fixtureCompositeSmoothedFlagship());
+    const group = container.querySelector('[role="group"][aria-label="Metrics basis"]');
+    expect(group).not.toBeNull();
+    const g = within(group as HTMLElement);
+    const cash = g.getByText("Cash settlement");
+    const mtm = g.getByText("Mark-to-market");
+    const sm = g.getByText(SMOOTHED_SEGMENT_LABEL);
+    // Cash active by default (D5).
+    expect(cash.getAttribute("aria-pressed")).toBe("true");
+    // MTM honestly gated OFF with its EXISTING options copy.
+    expect(mtm.getAttribute("aria-disabled")).toBe("true");
+    expect(mtm.getAttribute("title")).toBe(mtmDisabledReasonCopy("unsmoothed_options_book"));
+    // Smoothed OPEN — enabled, not disabled.
+    expect(sm.getAttribute("aria-disabled")).not.toBe("true");
+  });
+
+  it("RENDER PROOF: selecting Smoothed overlays the persisted smoothed KPI scalars", () => {
+    const { container } = renderBody(fixtureCompositeSmoothedFlagship());
+    fireEvent.click(within(container).getByText(SMOOTHED_SEGMENT_LABEL));
+    // The seven mapped scalars relabel from the PERSISTED smoothed_mtm object
+    // (SMOOTHED.cumulative_return 0.44 → +44.0%; SMOOTHED.sharpe 1.7 → 1.70), never cash/MTM.
+    expect(kpiValue(container, "Cum. Return")).toBe("+44.0%");
+    expect(kpiValue(container, "Sharpe")).toBe("1.70");
+  });
+
+  it("{smoothed_mtm}-only single-key renders the toggle: MTM disabled, Smoothed enabled + selectable", () => {
+    const { container } = renderBody(fixtureSingleKeySmoothedOnly());
+    const group = container.querySelector('[role="group"][aria-label="Metrics basis"]');
+    expect(group, "the {smoothed_mtm}-only toggle group").not.toBeNull();
+    const g = within(group as HTMLElement);
+    expect(g.getByText("Mark-to-market").getAttribute("aria-disabled")).toBe("true");
+    const sm = g.getByText(SMOOTHED_SEGMENT_LABEL);
+    expect(sm.getAttribute("aria-disabled")).not.toBe("true");
+    fireEvent.click(sm);
+    expect(kpiValue(container, "Cum. Return")).toBe("+44.0%");
+  });
+
+  it("smoothed DISABLED → aria-disabled with the mapped closed-set reason copy inline", () => {
+    const { container } = renderBody(fixtureCompositeSmoothedDisabled());
+    const sm = within(container).getByText(SMOOTHED_SEGMENT_LABEL);
+    expect(sm.getAttribute("aria-disabled")).toBe("true");
+    const expected = smoothedDisabledReasonCopy("smoothed_basis_unavailable");
+    expect(sm.getAttribute("title")).toBe(expected);
+    // The inline disabled-reason paragraph mirrors the same mapped copy.
+    expect(within(container).getAllByText(expected).length).toBeGreaterThan(0);
+  });
+
+  it("IN-02: NON-options composite with BOTH bases disabled renders ONE inline reason (the specific MTM copy) — no stacked smoothed paragraph", () => {
+    const { container } = renderBody(fixtureCompositeBothDisabledNonOptions());
+    // The specific MTM reason paragraph renders (information the user needs).
+    expect(
+      within(container).getByText(mtmDisabledReasonCopy("mtm_basis_unavailable_for_venue")),
+    ).toBeTruthy();
+    // The smoothed "has not been computed" paragraph is SUPPRESSED — on a
+    // non-options book it reads as pending for a computation that will never
+    // run, and stacking it under the MTM reason is permanent density noise
+    // (DESIGN.md restraint). Neuter check: restore the unconditional
+    // `!smoothedAvailable` paragraph → this reddens.
+    const smoothedCopy = smoothedDisabledReasonCopy("smoothed_basis_unavailable");
+    expect(within(container).queryByText(smoothedCopy)).toBeNull();
+    // Honest-disabled is PRESERVED: the segment stays aria-disabled and still
+    // carries the mapped reason as its tooltip.
+    const sm = within(container).getByText(SMOOTHED_SEGMENT_LABEL);
+    expect(sm.getAttribute("aria-disabled")).toBe("true");
+    expect(sm.getAttribute("title")).toBe(smoothedCopy);
+  });
+
+  it("IN-02: OPTIONS composite with BOTH bases disabled keeps BOTH paragraphs (smoothed pending is honest information there)", () => {
+    const { container } = renderBody(fixtureCompositeOptionsBothDisabled());
+    // The options-book MTM reason stays intact (the mandated honest copy)…
+    expect(
+      within(container).getByText(mtmDisabledReasonCopy("unsmoothed_options_book")),
+    ).toBeTruthy();
+    // …AND the smoothed not-yet-computed line renders: on an options book the
+    // smoothed basis is the remedy that will open, so "has not been computed"
+    // is honest pending information, not noise.
+    expect(
+      within(container).getByText(smoothedDisabledReasonCopy("smoothed_basis_unavailable")),
+    ).toBeTruthy();
+  });
+
+  it("EYEBROW: the composite basis eyebrow reads SMOOTHED MARK-TO-MARKET under smoothed (three-way, not cash)", () => {
+    const { container } = renderBody(fixtureCompositeSmoothedFlagship());
+    // Default cash → the cash eyebrow.
+    expect(container.textContent).toContain("CASH SETTLEMENT");
+    fireEvent.click(within(container).getByText(SMOOTHED_SEGMENT_LABEL));
+    // Under smoothed the eyebrow says SMOOTHED MARK-TO-MARKET, NOT the binary-ternary
+    // "CASH SETTLEMENT" fallthrough (neuter the three-way → RED).
+    expect(container.textContent).toContain("SMOOTHED MARK-TO-MARKET");
+  });
+
+  it("CAPTION: smoothed + bundle present → the smoothed chart caption", () => {
+    const { container } = renderBody(fixtureCompositeSmoothedFlagship());
+    fireEvent.click(within(container).getByText(SMOOTHED_SEGMENT_LABEL));
+    expect(
+      within(container).getByText("Charts show the smoothed mark-to-market series."),
+    ).toBeTruthy();
+  });
+
+  it("CAPTION: smoothed + bundle ABSENT → the honest cash-fallback caption (no cash charts under a smoothed label)", () => {
+    const { container } = renderBody(fixtureCompositeSmoothedNoBundle());
+    fireEvent.click(within(container).getByText(SMOOTHED_SEGMENT_LABEL));
+    expect(
+      within(container).getByText(
+        "Charts show the cash-settlement series. Smoothed mark-to-market applies to summary metrics only.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("suppressRelative: smoothed + ABSENT bundle hides α/IR (never cash relatives under a smoothed label)", () => {
+    const { container } = renderBody(fixtureSmoothedJoint(false));
+    fireEvent.click(within(container).getByText(SMOOTHED_SEGMENT_LABEL));
+    // No smoothed bundle → the joint would be the CASH joint; showing it under the
+    // smoothed story mislabels cash, so α is suppressed to "—".
+    expect(alphaCell(container)).toBe("—");
+  });
+
+  it("suppressRelative: smoothed + PRESENT bundle shows α/IR (the smoothed joint, not suppressed)", () => {
+    const { container } = renderBody(fixtureSmoothedJoint(true));
+    fireEvent.click(within(container).getByText(SMOOTHED_SEGMENT_LABEL));
+    // Bundle present → the smoothed joint follows; α is the smoothed alpha, not "—".
+    expect(alphaCell(container)).not.toBe("—");
+    expect(alphaCell(container)).toBe(pct(SMOOTHED_JOINT.alpha, 1).replace(/^/, "+"));
+  });
+});
+
+// The peer-rank note lives in PeerPercentilePanel (BatchDPanels); render it directly
+// (it needs a scenarioPeer payload the full body base() does not carry).
+function SmoothedBasisSetter({ basis }: { basis: Basis }) {
+  const { setBasis } = useBasis();
+  useEffect(() => {
+    setBasis(basis);
+  }, [basis, setBasis]);
+  return null;
+}
+function renderPeerPanel(basis: Basis) {
+  const payload = {
+    ...base(),
+    ingestSource: "csv",
+    scenarioPeer: { cohortSize: 12, sharpe: 60, sortino: 55, max_dd: 40 },
+  } as unknown as FactsheetPayload;
+  return render(
+    <FactsheetProvider payload={payload} persist={false}>
+      <BasisProvider>
+        <SmoothedBasisSetter basis={basis} />
+        <PeerPercentilePanel />
+      </BasisProvider>
+    </FactsheetProvider>,
+  );
+}
+
+describe("FactsheetBody — Phase 133 SMTM-01 peer-rank note under smoothed", () => {
+  const NOTE = "Peer rank is computed on the cash-settlement basis; the cohort is not recomputed per basis.";
+  it("smoothed renders the honest cash-basis peer-rank note (F6 no-invented-data)", () => {
+    const { container } = renderPeerPanel("smoothed_mtm");
+    expect(container.textContent).toContain(NOTE);
+  });
+  it("cash renders nothing extra (byte-identical)", () => {
+    const { container } = renderPeerPanel("cash_settlement");
+    expect(container.textContent).not.toContain(NOTE);
   });
 });

@@ -289,3 +289,115 @@ describe("basis-context", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * Phase 133 (SMTM-01) — the smoothed_mtm THIRD arm: overlay + series-view, exact
+ * structural clones of the mark_to_market arms. Cash/MTM byte-identity is pinned by
+ * the untouched Tests 1-11 above; these pin the smoothed sibling posture.
+ */
+describe("SMTM-01 basis-context — smoothed_mtm third arm", () => {
+  // Distinct-from-MTM persisted smoothed scalars so a wrong-arm swap is observable.
+  const SMOOTHED_SCALARS = {
+    cumulative_return: 0.55,
+    volatility: 0.17,
+    max_drawdown: -0.09,
+    cagr: 0.44,
+    sharpe: 1.7,
+    sortino: 2.1,
+    calmar: 0.6,
+  };
+  const LOCAL_CASH_DATES = ["2023-01-01", "2023-01-02", "2023-01-03"];
+  const LOCAL_CASH_QUANTILES = { p05: -0.05, p25: -0.01, p50: 0.0, p75: 0.01, p95: 0.05, min: -0.1, max: 0.1, mean: 0.0 };
+  const LOCAL_CASH_CORRELATIONS = [{ name: "BTC", rho: 0.42 }];
+  const SMOOTHED_DATES = ["2023-02-01", "2023-02-02", "2023-02-03", "2023-02-04"];
+  const SMOOTHED_QUANTILES = { p05: -0.07, p25: -0.015, p50: 0.005, p75: 0.02, p95: 0.06, min: -0.15, max: 0.15, mean: 0.005 };
+
+  function makeSmoothedPayload(withBundle: boolean): FactsheetPayload {
+    const bundle = {
+      dates: SMOOTHED_DATES,
+      quantiles: SMOOTHED_QUANTILES,
+      calmarByYear: [{ year: "2023", ret: 0.15, max_dd: -0.03, calmar: 5, days: 250 }],
+    };
+    return {
+      ingestSource: "csv",
+      strategyMetrics: CASH_METRICS,
+      metricsByBasis: { mark_to_market: MTM_SCALARS, smoothed_mtm: SMOOTHED_SCALARS },
+      dates: LOCAL_CASH_DATES,
+      quantiles: LOCAL_CASH_QUANTILES,
+      correlations: LOCAL_CASH_CORRELATIONS,
+      calmarByYear: [{ year: "2023", ret: 0.1, max_dd: -0.02, calmar: 5, days: 250 }],
+      ...(withBundle ? { seriesByBasis: { smoothed_mtm: bundle } } : {}),
+    } as unknown as FactsheetPayload;
+  }
+
+  function useProbe(payload: FactsheetPayload) {
+    const ctx = useBasis();
+    const bm = useBasisMetrics(payload);
+    const view = useBasisSeriesView(payload);
+    return { ctx, bm, view };
+  }
+
+  it("useBasisMetrics: smoothed_mtm overlays ONLY the seven mapped scalars; unmapped survive", () => {
+    const payload = makeSmoothedPayload(false);
+    const { result } = renderHook(() => useProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("smoothed_mtm"));
+    const m = result.current.bm.m as unknown as Record<string, number>;
+    expect(result.current.bm.m).not.toBe(payload.strategyMetrics);
+    // Swaps to the SMOOTHED scalars, NOT the MTM ones (distinct values prove the arm).
+    expect(m.cum_ret).toBe(0.55);
+    expect(m.ann_vol).toBe(0.17);
+    expect(m.max_dd).toBe(-0.09);
+    expect(m.cagr).toBe(0.44);
+    expect(m.sharpe).toBe(1.7);
+    expect(m.sortino).toBe(2.1);
+    expect(m.calmar).toBe(0.6);
+    // Unmapped keys keep their cash value — never displayed under a smoothed label.
+    expect(m.alpha).toBe(0.42);
+    expect(m.information_ratio).toBe(0.33);
+  });
+
+  it("useBasisMetrics: absent smoothed_mtm object → all seven mapped scalars render '—' (NaN, no cash fallback)", () => {
+    const payload = {
+      strategyMetrics: CASH_METRICS,
+      metricsByBasis: { mark_to_market: MTM_SCALARS }, // no smoothed_mtm
+    } as unknown as FactsheetPayload;
+    const { result } = renderHook(() => useProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("smoothed_mtm"));
+    const m = result.current.bm.m as unknown as Record<string, number>;
+    // Strict overlay with `?? {}` → the seven mapped scalars are NaN, never cash.
+    expect(Number.isNaN(m.cum_ret)).toBe(true);
+    expect(Number.isNaN(m.sharpe)).toBe(true);
+    // Unmapped keys still survive from cash.
+    expect(m.alpha).toBe(0.42);
+  });
+
+  it("useBasisSeriesView: smoothed WITH bundle serves the smoothed bundle (own axis + stats)", () => {
+    const payload = makeSmoothedPayload(true);
+    const { result } = renderHook(() => useProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("smoothed_mtm"));
+    const v = result.current.view;
+    expect(v).not.toBe(payload);
+    expect(v.dates).toEqual(SMOOTHED_DATES);
+    expect(v.quantiles).toEqual(SMOOTHED_QUANTILES);
+    // F3 overlay: strategyMetrics carries the seven persisted smoothed scalars.
+    expect(v.strategyMetrics).not.toBe(payload.strategyMetrics);
+    expect(v.strategyMetrics.cum_ret).toBe(SMOOTHED_SCALARS.cumulative_return);
+    expect(v.strategyMetrics.sharpe).toBe(SMOOTHED_SCALARS.sharpe);
+    // Unmapped survives.
+    expect((v.strategyMetrics as unknown as { alpha: number }).alpha).toBe(0.42);
+  });
+
+  it("useBasisSeriesView: smoothed WITHOUT a bundle falls back to the ORIGINAL payload by reference", () => {
+    const payload = makeSmoothedPayload(false);
+    const { result } = renderHook(() => useProbe(payload), { wrapper });
+    act(() => result.current.ctx.setBasis("smoothed_mtm"));
+    expect(result.current.view).toBe(payload);
+  });
+
+  it("default stays cash_settlement on a payload carrying a smoothed basis (D5)", () => {
+    const payload = makeSmoothedPayload(true);
+    const { result } = renderHook(() => useProbe(payload), { wrapper });
+    expect(result.current.ctx.basis).toBe("cash_settlement");
+    expect(result.current.view).toBe(payload);
+  });
+});

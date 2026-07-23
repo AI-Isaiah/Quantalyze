@@ -1454,8 +1454,9 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
     # No duplicate keys in the single source.
     assert len(NAV_TWR_GUARD_KEYS) == len(set(NAV_TWR_GUARD_KEYS))
     # The v1.8 warn flags + the v1.9 DQ-03 chain-break key + the Phase 82
-    # pre-coverage option-dailies flag + the Phase 92 HARD-01 P&L-dominated guard
-    # are all present (regression pin on the closed set).
+    # pre-coverage option-dailies flag + the Phase 92 HARD-01 P&L-dominated guard +
+    # the Phase 132 smoothed_mtm pre-mark-retention bucket are all present (regression
+    # pin on the closed set).
     assert set(NAV_TWR_GUARD_KEYS) == {
         "dust_nav_guard",
         "negative_nav_guard",
@@ -1466,6 +1467,7 @@ def test_nav_twr_guard_keys_are_declared_and_single_sourced() -> None:
         "unrealized_pnl_unreadable",
         "twr_chain_broken",
         "pre_summary_rollout_option_dailies",
+        "pre_mark_retention_option_dailies",
     }
 
 

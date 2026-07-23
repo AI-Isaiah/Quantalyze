@@ -842,6 +842,68 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
     ).toBeEnabled();
   });
 
+  it("IN-03 (Phase-133 review): MTM-gated caveat notes the persisted Smoothed mark-to-market basis when its headline exists", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        metrics_json_by_basis: {
+          cash_settlement: {},
+          // A FULL smoothed headline (all seven server keys + finite
+          // cumulative_return) — the same hasBasisHeadline gate the factsheet
+          // surfaces trust. Server truth, never derived from the gated reason.
+          smoothed_mtm: {
+            cumulative_return: 0.3,
+            volatility: 0.2,
+            max_drawdown: -0.1,
+            cagr: 0.4,
+            sharpe: 1.5,
+            sortino: 2.0,
+            calmar: 1.1,
+          },
+        },
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          mtm_gated_reason: "unsmoothed_options_book",
+        },
+      }),
+    });
+
+    // The existing MTM copy stays byte-identical…
+    expect(
+      screen.getByText(
+        /Mark-to-market view unavailable — unsmoothed_options_book\. Cash-settlement basis shown\./,
+      ),
+    ).toBeInTheDocument();
+    // …and the smoothed-aware addendum renders (neuter the smoothedMtmAvailable
+    // threading OR the render clause → this reddens).
+    expect(
+      screen.getByText(
+        /A Smoothed mark-to-market view is available on the published factsheet\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("IN-03: NO persisted smoothed headline → the MTM caveat carries NO smoothed addendum (no invented availability)", async () => {
+    await renderPassed({
+      analyticsRow: defaultAnalyticsRow({
+        data_quality_flags: {
+          ...DEFAULT_DQ,
+          gap_spans: [],
+          gap_day_count: 0,
+          mtm_gated_reason: "unsmoothed_options_book",
+        },
+      }),
+    });
+
+    expect(
+      screen.getByText(/Mark-to-market view unavailable — unsmoothed_options_book/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Smoothed mark-to-market view is available/),
+    ).not.toBeInTheDocument();
+  });
+
   it("renders the benchmark-unavailable DQ caveat", async () => {
     await renderPassed({
       analyticsRow: defaultAnalyticsRow({

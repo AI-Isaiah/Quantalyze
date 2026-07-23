@@ -362,7 +362,7 @@ class _DeribitAdapterStub:
 
 
 def _real_adapter_ledger(
-    fx: _Fixture, monkeypatch: Any
+    fx: _Fixture, monkeypatch: Any, *, pnl_basis: str = "cash_settlement",
 ) -> tuple[NativeLedger, di.CompletenessReport]:
     """Build a NativeLedger via the REAL build_deribit_native_ledger from synthetic
     Deribit rows/summaries — settlement rows → native pnl, external-flow rows →
@@ -420,7 +420,7 @@ def _real_adapter_ledger(
         )
 
     stub = _DeribitAdapterStub(summaries)
-    return asyncio.run(di.build_deribit_native_ledger(stub))
+    return asyncio.run(di.build_deribit_native_ledger(stub, pnl_basis=pnl_basis))
 
 
 def _native_real(
@@ -828,3 +828,29 @@ def test_inverse_perp_only_ledger_byte_identical_real_adapter(
     # option days (the option arms are never consulted on this inverse ledger).
     assert _summary_coverage_windows(btc_rows) == {}
     assert _pre_coverage_option_days(btc_rows) == []
+
+
+# ===========================================================================
+# Phase 131 Task 6 — SC-4 keystone for the NEW smoothed_mtm basis. An all-USD-
+# family (no-option) ledger under smoothed_mtm has an EMPTY option replay ⇒ NO
+# marks fetched (the _DeribitAdapterStub has NO chart endpoint — an AttributeError
+# would fire if the basis wrongly tried to fetch) ⇒ empty ΔMTM merge (no-op) ⇒
+# native_pnl BIT-EXACT to the cash_settlement run. This is the reframe's keystone:
+# smoothed is a THIRD branch that leaves the existing bases byte-untouched.
+# ===========================================================================
+
+
+@pytest.mark.parametrize("fx", _FIXTURES, ids=lambda f: f.name)
+def test_usd_native_smoothed_bit_exact_to_cash(fx: _Fixture, monkeypatch: Any) -> None:
+    led_cash, _rc = _real_adapter_ledger(fx, monkeypatch, pnl_basis="cash_settlement")
+    led_smoothed, _rs = _real_adapter_ledger(
+        fx, monkeypatch, pnl_basis="smoothed_mtm"
+    )
+    assert set(led_cash.native_pnl) == set(led_smoothed.native_pnl)
+    for ccy, cash_series in led_cash.native_pnl.items():
+        pd.testing.assert_series_equal(
+            cash_series, led_smoothed.native_pnl[ccy], check_exact=True,
+            check_names=False,
+        )
+    # No pre-retention bucket on a no-option ledger (SC-4 byte-safe).
+    assert _rs.pre_mark_retention_option_days == []

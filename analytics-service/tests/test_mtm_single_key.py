@@ -77,6 +77,14 @@ from services.stitch_composite import (
     MTM_REASON_SUMMARY_COVERAGE,
 )
 
+# Phase 134 (smoothed_mtm kill-switch): the smoothed THIRD pass ships DARK behind
+# SMOOTHED_MTM_ENABLED (default OFF). Every test in this module was written when the
+# pass ran unconditionally and asserts it runs (3 ledger crawls, a smoothed by-basis
+# key, etc.), so the module opts the flag ON explicitly — the gate is VISIBLE here.
+# The dark-launch (flag-OFF) assertions live below and override with a per-test
+# `monkeypatch.delenv("SMOOTHED_MTM_ENABLED")` (the flag is read per-call at run time).
+pytestmark = pytest.mark.usefixtures("smoothed_mtm_enabled")
+
 _STRATEGY_ID = "strat-mtm-1"
 
 
@@ -174,12 +182,21 @@ def _stub_native_ledger() -> NativeLedger:
     )
 
 
-def _report(*, has_option_activity: bool) -> CompletenessReport:
-    """A COMPLETE report (empty ``expected`` → assert_ledger_complete passes)."""
+def _report(
+    *,
+    has_option_activity: bool,
+    pre_mark_retention_option_days: list[tuple[str, str]] | None = None,
+) -> CompletenessReport:
+    """A COMPLETE report (empty ``expected`` → assert_ledger_complete passes).
+
+    ``pre_mark_retention_option_days`` (Phase 132, defaulted so every pre-existing
+    caller is byte-unchanged) carries the smoothed-pass pre-retention bucket that
+    promotes the job to complete_with_warnings."""
     return CompletenessReport(
         total_return_rows=2,
         indexable_currencies=frozenset({"BTC"}),
         has_option_activity=has_option_activity,
+        pre_mark_retention_option_days=pre_mark_retention_option_days or [],
     )
 
 
@@ -276,10 +293,19 @@ async def test_options_book_runs_second_mtm_pass_same_anchor() -> None:
     is called EXACTLY TWICE — cash then mark_to_market — and BOTH calls receive the
     SAME account_state object (80-06 one-anchor-read)."""
     ctx, _ = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    # Phase 132: an options book now runs THREE passes (cash, mtm, smoothed_mtm) — the
+    # third combine side-effect + report accommodate the additive smoothed pass. This
+    # test still pins the SECOND (mark_to_market) pass; the third-pass anchor identity
+    # is pinned by test_options_book_runs_third_smoothed_pass_same_anchor.
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     with _apply(_base_patches(
@@ -287,7 +313,7 @@ async def test_options_book_runs_second_mtm_pass_same_anchor() -> None:
     )):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    assert len(calls) == 2, "options book must run a SECOND mark_to_market pass"
+    assert len(calls) == 3, "options book runs cash + mark_to_market + smoothed_mtm"
     assert calls[0]["pnl_basis"] == "cash_settlement"
     assert calls[1]["pnl_basis"] == "mark_to_market"
     assert calls[0]["account_state"] is calls[1]["account_state"], (
@@ -344,7 +370,8 @@ async def test_structural_mtm_failure_degrades_with_reason() -> None:
     )):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    assert len(calls) == 2, "MTM pass must be ATTEMPTED before degrading"
+    # Phase 132: cash + the ATTEMPTED-then-degraded MTM pass + the smoothed pass.
+    assert len(calls) == 3, "MTM pass must be ATTEMPTED before degrading"
     # csv_daily_returns cash rows still written
     assert any(
         name == "csv_daily_returns" and op == "upsert"
@@ -430,7 +457,8 @@ async def test_inception_reconciliation_on_mtm_stamps_anchor_race() -> None:
     assert result.outcome == DispatchOutcome.DONE, (
         "a mid-crawl anchor race must DEGRADE (cash ships), never retry-to-failed"
     )
-    assert len(calls) == 2, "MTM pass must be ATTEMPTED before the race degrade"
+    # Phase 132: cash + the ATTEMPTED-then-degraded MTM pass + the smoothed pass.
+    assert len(calls) == 3, "MTM pass must be ATTEMPTED before the race degrade"
     # cash still ships: csv rows upserted + compute job enqueued
     assert any(
         name == "csv_daily_returns" and op == "upsert"
@@ -442,8 +470,10 @@ async def test_inception_reconciliation_on_mtm_stamps_anchor_race() -> None:
     # the DISTINCT transient reason, NOT the coverage stamp
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == MTM_REASON_ANCHOR_RACE
     assert MTM_REASON_ANCHOR_RACE != MTM_REASON_SUMMARY_COVERAGE
-    # authoritative SQL NULL for the by-basis object (stale-heal)
-    assert prestamp["metrics_json_by_basis"] is None
+    # Phase 132: MTM degraded (its key healed/absent) but the smoothed pass SUCCEEDED,
+    # so the by-basis object carries smoothed_mtm — smoothing OPENS what MTM keeps
+    # closed. (Pre-132 this was an authoritative SQL NULL.)
+    assert set(prestamp["metrics_json_by_basis"]) == {"smoothed_mtm"}
 
 
 @pytest.mark.asyncio
@@ -468,7 +498,8 @@ async def test_non_inception_structural_mtm_failure_keeps_coverage_reason() -> N
     )):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    assert len(calls) == 2
+    # Phase 132: cash + the ATTEMPTED-then-degraded MTM pass + the smoothed pass.
+    assert len(calls) == 3
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
@@ -535,10 +566,15 @@ async def test_finite_mtm_object_persisted() -> None:
     cumulative_return and NO cash_settlement key. compute_all_metrics runs for real
     over the MTM series."""
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     with _apply(_base_patches(
@@ -550,9 +586,11 @@ async def test_finite_mtm_object_persisted() -> None:
     assert prestamp is not None
     by_basis = prestamp.get("metrics_json_by_basis")
     assert isinstance(by_basis, dict), "must persist a metrics_json_by_basis object"
-    assert set(by_basis.keys()) == {"mark_to_market"}, (
-        "single-key by-basis must carry ONLY mark_to_market — a cash_settlement "
-        "key would activate the recomputed cash overlay and risk SC-4 divergence"
+    # Phase 132: an options book carries BOTH mark_to_market and smoothed_mtm; cash
+    # is STILL absent (it would activate the recomputed cash overlay / SC-4 divergence).
+    assert set(by_basis.keys()) == {"mark_to_market", "smoothed_mtm"}, (
+        "single-key by-basis carries mark_to_market + smoothed_mtm (never a "
+        "cash_settlement key, which would risk SC-4 divergence)"
     )
     mtm = by_basis["mark_to_market"]
     for _k in _SEVEN_SCALARS:
@@ -565,15 +603,20 @@ async def test_finite_mtm_object_persisted() -> None:
 
 @pytest.mark.asyncio
 async def test_degraded_mtm_persists_null_and_reason() -> None:
-    """Wave-0 gap 3: a degraded MTM pass persists metrics_json_by_basis IS None
-    (SQL NULL — heals a stale key) AND data_quality_flags.mtm_gated_reason."""
+    """Wave-0 gap 3 (Phase-132 contract): a degraded MTM pass HEALS its own
+    mark_to_market key (absent from the by-basis object) AND stamps
+    data_quality_flags.mtm_gated_reason. Post-132 the object is NOT NULL when the
+    smoothed pass succeeds — smoothing opens what MTM keeps closed — so the invariant
+    this test pins is 'mark_to_market absent + reason stamped', not 'object is NULL'
+    (the NULL-heal-when-nothing-succeeds case is pinned by
+    test_perp_only_skips_smoothed_pass_sc4)."""
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
     reports = [_report(has_option_activity=True)]
     ledger_mock, _calls = _recording_ledger(
         reports,
         side_effects=[None, LedgerValuationError("summary hole mid-window")],
     )
-    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    combine = MagicMock(return_value=(_mtm_series(), {"used_heuristic_capital": False}))
     with _apply(_base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
     ) + [_patch_benchmark()]):
@@ -582,10 +625,13 @@ async def test_degraded_mtm_persists_null_and_reason() -> None:
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
     assert "metrics_json_by_basis" in prestamp, (
-        "an ATTEMPTED-but-degraded pass must WRITE the column (SQL NULL) to heal "
-        "a stale mark_to_market key from a prior successful derive"
+        "an ATTEMPTED-but-degraded pass must WRITE the column to heal a stale "
+        "mark_to_market key from a prior successful derive"
     )
-    assert prestamp["metrics_json_by_basis"] is None
+    # MTM degraded → its key is HEALED (absent); the smoothed pass succeeded → present.
+    assert "mark_to_market" not in (prestamp["metrics_json_by_basis"] or {}), (
+        "a degraded MTM pass must heal (omit) its mark_to_market key"
+    )
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SUMMARY_COVERAGE
     )
@@ -651,10 +697,15 @@ async def test_benchmark_failure_never_gates_mtm() -> None:
     scalars are benchmark-invariant, so a finite mark_to_market object still
     persists (computed with benchmark_rets=None)."""
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     with _apply(_base_patches(
@@ -713,12 +764,20 @@ async def test_sc4_cash_parity_mtm_on_vs_off() -> None:
     combine returns a DISTINCT MTM series, so a mutation that reassigns the cash
     `returns`/`meta`/`native_ledger` to the MTM pass would perturb the csv payload or
     the delete span and FAIL this test."""
-    # Run A: options book, MTM pass runs + succeeds (distinct MTM series).
+    # Run A: options book, MTM + smoothed passes run + succeed (distinct MTM series).
+    # Phase 132: the third combine side-effect feeds the additive smoothed pass; the
+    # cash track (_cash_track) EXCLUDES metrics_json_by_basis, so cash parity is
+    # unaffected by the third basis.
     ctx_a, cap_a = _ctx(strategy_row={"asset_class": "crypto"})
-    reports_a = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports_a = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_a, _ = _recording_ledger(reports_a)
     combine_a = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     with _apply(_base_patches(
@@ -803,10 +862,15 @@ async def test_mtm_object_uses_allocated_capital_conventions() -> None:
             "returns_denominator_config": _ALLOC_CONFIG,
         }
     )
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     with _apply(_base_patches(
@@ -817,7 +881,10 @@ async def test_mtm_object_uses_allocated_capital_conventions() -> None:
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
     by_basis = prestamp.get("metrics_json_by_basis")
-    assert isinstance(by_basis, dict) and set(by_basis) == {"mark_to_market"}
+    # Phase 132: options book → mark_to_market + smoothed_mtm.
+    assert isinstance(by_basis, dict) and set(by_basis) == {
+        "mark_to_market", "smoothed_mtm",
+    }
     assert pd.notna(by_basis["mark_to_market"]["cumulative_return"])
 
 
@@ -837,10 +904,15 @@ async def test_mtm_compute_valueerror_degrades() -> None:
     # The two reasons are genuinely distinct machine constants.
     assert MTM_REASON_SERIES_UNCOMPUTABLE != MTM_REASON_SUMMARY_COVERAGE
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     with _apply(_base_patches(
@@ -860,6 +932,10 @@ async def test_mtm_compute_valueerror_degrades() -> None:
     assert result.outcome == DispatchOutcome.DONE
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
+    # Phase 132: the global compute reject degrades BOTH mark_to_market AND smoothed_mtm
+    # (the smoothed SCALAR compute degrades symmetrically — a math chain-break over an
+    # honest series is NOT a marks/fabrication failure), so the by-basis object heals
+    # to SQL NULL exactly as before.
     assert prestamp["metrics_json_by_basis"] is None
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SERIES_UNCOMPUTABLE
@@ -948,10 +1024,15 @@ async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
     # Run the derive with that REAL projected strategy_row; capture the periods
     # the MTM compute_all_metrics receives.
     ctx, _capture = _ctx(strategy_row=strategy_row)
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
 
@@ -977,14 +1058,15 @@ async def test_mtm_periods_uses_crypto_clock_from_real_select() -> None:
     ]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    # Phase 104 added an additive cash derive at the SAME seam that ALSO runs
-    # compute_all_metrics (crypto → √365), so the spy sees TWO entries: MTM (first)
-    # then cash (second). Both MUST be 365 — dropping asset_class → [252, 252] reddens.
-    assert seen_periods == [365, 365], (
+    # Phase 104 added an additive cash derive and Phase 132 a smoothed_mtm derive at
+    # the SAME seam, each running compute_all_metrics (crypto → √365), so the spy sees
+    # THREE entries: MTM (first), smoothed_mtm (second), cash (third). ALL MUST be 365
+    # — dropping asset_class → [252, 252, 252] reddens.
+    assert seen_periods == [365, 365, 365], (
         f"compute_all_metrics received periods_per_year={seen_periods} — a "
-        "crypto/Deribit book MUST annualize both the MTM and cash series on √365 "
-        "(#597), not the 252 default; asset_class was dropped from the single-key "
-        "_load_strategy select"
+        "crypto/Deribit book MUST annualize the MTM, smoothed_mtm, and cash series "
+        "on √365 (#597), not the 252 default; asset_class was dropped from the "
+        "single-key _load_strategy select"
     )
 
 
@@ -1138,7 +1220,9 @@ async def test_mtm_second_pass_timeout_degrades_loud_not_failed_final() -> None:
     )
     prestamp = _find_prestamp(capture)
     assert prestamp is not None
-    assert prestamp["metrics_json_by_basis"] is None
+    # Phase 132: the MTM second-pass TIMEOUT degrades (its key absent) but the smoothed
+    # THIRD pass still runs + succeeds → by-basis carries smoothed_mtm (pre-132: NULL).
+    assert set(prestamp["metrics_json_by_basis"]) == {"smoothed_mtm"}
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SECOND_PASS_TIMEOUT
     ), "a bounded second-pass timeout must stamp the distinct timeout reason"
@@ -1164,10 +1248,15 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
     import services.basis_series as _bs
 
     ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     _real_derive = _bs.derive_basis_series
@@ -1189,10 +1278,11 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
     ]):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
-    # Phase 104 added an additive cash_settlement derive+persist at the SAME seam, so
-    # the shared helper is now called TWICE — MTM (first) then cash (second). The MTM
-    # wiring this test pins is the FIRST call.
-    assert derive_spy.call_count == 2
+    # Phase 104 added an additive cash_settlement derive+persist and Phase 132 a
+    # smoothed_mtm derive+persist at the SAME seam, so the shared helper is now called
+    # THREE times — MTM (first), smoothed_mtm (second), cash (third). The MTM wiring
+    # this test pins is the FIRST call.
+    assert derive_spy.call_count == 3
     _mtm_call = derive_spy.call_args_list[0]
     pd.testing.assert_series_equal(_mtm_call.args[0], _mtm_series())
     assert _mtm_call.args[1] is None, "benchmark_rets must be None (patched fetch → (None, True))"
@@ -1200,14 +1290,18 @@ async def test_single_key_routes_through_shared_derive_and_persists() -> None:
     assert _mtm_call.kwargs["cumulative_method"] == "geometric"
     assert _mtm_call.kwargs["day_basis"] == "calendar"
     # persist got the EXACT BasisSeriesResult the MTM derive produced — never a
-    # separately-computed object (that would bypass the anti-divergence guard).
-    assert persist_spy.call_count == 2
+    # separately-computed object (that would bypass the anti-divergence guard). The
+    # persist order is MTM (0), cash (1), smoothed_mtm (2).
+    assert persist_spy.call_count == 3
     _mtm_persist = persist_spy.call_args_list[0]
     assert _mtm_persist.kwargs["basis"] == "mark_to_market"
     assert _mtm_persist.kwargs["result"] is _results[0]
     # the SECOND persist is the additive Phase-104 cash series (SERIES-ONLY, dark).
     _cash_persist = persist_spy.call_args_list[1]
     assert _cash_persist.kwargs["basis"] == "cash_settlement"
+    # the THIRD persist is the additive Phase-132 smoothed_mtm series.
+    _smoothed_persist = persist_spy.call_args_list[2]
+    assert _smoothed_persist.kwargs["basis"] == "smoothed_mtm"
 
 
 @pytest.mark.asyncio
@@ -1218,10 +1312,15 @@ async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
     (persist_basis_series(..., result=None)). Proves the seam INVOKES the helper —
     a parallel inline compute would ignore the patch and persist a live object."""
     ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
-    reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
     ledger_mock, _calls = _recording_ledger(reports)
     combine = MagicMock(side_effect=[
         (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
         (_mtm_series(), {"used_heuristic_capital": False}),
     ])
     persist_spy = MagicMock()
@@ -1243,15 +1342,19 @@ async def test_single_key_derive_helper_valueerror_degrades_and_heals() -> None:
     assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
         MTM_REASON_SERIES_UNCOMPUTABLE
     )
-    # The patched derive raises for BOTH the MTM and the additive Phase-104 cash
-    # call, so BOTH persist calls heal (result=None) — MTM (mark_to_market) and cash.
-    assert persist_spy.call_count == 2
+    # The patched derive raises for the MTM, smoothed_mtm, AND the additive Phase-104
+    # cash calls. ALL THREE heal (result=None): HIGH-02 (132 review) — the smoothed
+    # persist guard keys on smoothed_ATTEMPTED (an option-activity signal, so SC-4's
+    # no-RPC-on-a-no-option-key holds), and an attempted-but-degraded smoothed pass
+    # must heal-DELETE the stale smoothed_mtm series row exactly like MTM/cash
+    # (Pitfall 5: a stale money series must never outlive the scalar omission).
+    assert persist_spy.call_count == 3
     assert all(c.kwargs["result"] is None for c in persist_spy.call_args_list), (
         "a degraded derive must HEAL the stale series row (result=None), never "
         "persist a stale object next to an authoritative-NULL scalar write"
     )
     assert {c.kwargs["basis"] for c in persist_spy.call_args_list} == {
-        "mark_to_market", "cash_settlement",
+        "mark_to_market", "cash_settlement", "smoothed_mtm",
     }
 
 
@@ -1288,4 +1391,672 @@ async def test_single_key_not_attempted_heals_series_row() -> None:
     )
     assert _cash_persist.kwargs["result"] is not None, (
         "the additive cash series persists its derived rows (not a heal) on a clean derive"
+    )
+
+
+# ── Phase 132 (SMTM-01): the additive smoothed_mtm THIRD pass ───────────────────
+#
+# The single-key sibling of the composite third pass. On a Deribit options book the
+# derive now runs a THIRD ledger pass (pnl_basis="smoothed_mtm"), derives + persists
+# a smoothed_mtm series (KIND_SMOOTHED_MTM), and writes
+# metrics_json_by_basis["smoothed_mtm"] alongside mark_to_market. Gated on the SAME
+# has_option_activity signal as the MTM pass (no new signal invented) — perp-only /
+# key-mode / ccxt / MTM-configured-headline all skip it (SC-4). GLB-2 (v1.14): the
+# smoothed pass now DEGRADES LIKE the MTM pass — a structural LedgerValuationError
+# (holed marks — incl. the retention-STRADDLE / crawl-day cases) omits the additive
+# smoothed key while the cash+MTM headline still ships DONE (never a silent two-basis
+# fallback, and never a whole-job FAILED that destroys the healthy cash factsheet).
+
+
+@pytest.mark.asyncio
+async def test_options_book_runs_third_smoothed_pass_same_anchor() -> None:
+    """Options book: build_deribit_native_ledger is called EXACTLY THREE times —
+    cash, then mark_to_market, then smoothed_mtm — ALL on the SAME one-read
+    account_state. The by-basis object carries BOTH mark_to_market and smoothed_mtm;
+    the cash headline stays the un-persisted default. Neuter (drop the third pass /
+    gate it off has_option_activity) → RED."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 3, "options book must run a THIRD smoothed_mtm pass"
+    assert calls[0]["pnl_basis"] == "cash_settlement"
+    assert calls[1]["pnl_basis"] == "mark_to_market"
+    assert calls[2]["pnl_basis"] == "smoothed_mtm"
+    assert (
+        calls[0]["account_state"] is calls[1]["account_state"]
+        is calls[2]["account_state"]
+    ), "all three passes must anchor on the SAME one-read account_state"
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict)
+    assert set(by_basis.keys()) == {"mark_to_market", "smoothed_mtm"}, (
+        "an options book persists BOTH mark_to_market and smoothed_mtm; cash stays "
+        "the un-persisted headline"
+    )
+    assert pd.notna(by_basis["smoothed_mtm"]["cumulative_return"])
+
+
+@pytest.mark.asyncio
+async def test_structural_smoothed_failure_degrades_keeps_cash_mtm() -> None:
+    """GLB-2: a LedgerValuationError on the THIRD (smoothed) crawl DEGRADES — the
+    derive still completes DONE with the cash headline + the mark_to_market by-basis
+    key, and the smoothed_mtm key is OMITTED. This proves flipping SMOOTHED_MTM_ENABLED
+    ON can never sink a healthy options book whose smoothed marks have a structural hole.
+    Neuter the new smoothed structural-degrade catch (let the LedgerValuationError reach
+    the outer permanent `except LedgerValuationError`) → RED: the job FAILS permanent and
+    no by-basis object ships."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    # Raise ONLY on the third (smoothed) crawl — cash + mark_to_market build cleanly.
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        side_effects=[
+            None,
+            None,
+            LedgerValuationError("expiry-day book-channel boundary: no smoothed mark"),
+        ],
+    )
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    # The smoothed structural failure DEGRADES — cash+MTM headline SURVIVES DONE.
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a structural smoothed third-pass failure must DEGRADE (cash+MTM ship), "
+        "never fail the whole derive"
+    )
+    assert len(calls) == 3, "all three crawls are attempted (cash, mtm, smoothed)"
+    assert calls[2]["pnl_basis"] == "smoothed_mtm"
+    # No terminal failed stamp — the healthy cash factsheet is untouched.
+    assert _find_failed_stamp(capture) is None, (
+        "a smoothed structural degrade must NOT stamp the analytics row failed"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict)
+    assert set(by_basis.keys()) == {"mark_to_market"}, (
+        "the smoothed_mtm key is OMITTED on a structural degrade; mark_to_market "
+        "(from the healthy second pass) survives"
+    )
+
+
+# ── Phase 134 (kill-switch): SMOOTHED_MTM_ENABLED off ⇒ smoothed pass is DARK ────
+
+@pytest.mark.asyncio
+async def test_smoothed_dark_launch_options_book_skips_third_pass(monkeypatch) -> None:
+    """KILL-SWITCH (single-key): with SMOOTHED_MTM_ENABLED off (the dark default), an
+    options book runs EXACTLY TWO crawls (cash + mark_to_market) — the smoothed THIRD
+    pass is SKIPPED ENTIRELY: no third build_deribit_native_ledger call, and the
+    by-basis object carries ONLY mark_to_market (no smoothed_mtm key). This proves the
+    smoothed basis is fully dormant when dark. Neuter (drop the flag gate → smoothed
+    runs unconditionally) → RED (3 calls, smoothed_mtm key appears)."""
+    # Override the module-level `smoothed_mtm_enabled` opt-in: the flag is read
+    # per-call at run time, so deleting it here forces the dark (OFF) path.
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 2, (
+        "dark launch: an options book runs ONLY cash + mark_to_market — the smoothed "
+        "THIRD crawl must NOT run when SMOOTHED_MTM_ENABLED is off"
+    )
+    assert [c["pnl_basis"] for c in calls] == ["cash_settlement", "mark_to_market"]
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict)
+    assert set(by_basis.keys()) == {"mark_to_market"}, (
+        "dark launch: NO smoothed_mtm by-basis key — the basis is fully dormant; "
+        "cash/MTM are byte-identical to the pre-v1.14 two-pass path"
+    )
+
+
+# A strategy whose returns_denominator_config pins the HEADLINE basis to smoothed_mtm.
+# allocated_capital._VALID_PNL_BASES accepts it (config parsing is flag-agnostic), so
+# this is the RT-4 kill-switch-bypass vector: with the flag OFF it must NOT reach the
+# headline crawl.
+_SMOOTHED_HEADLINE_CONFIG = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "smoothed_mtm",
+    "metrics_basis": "active_day",
+    "cumulative_method": "simple",
+    "capital_schedule": [
+        {"effective_from": "2024-01-01", "capital_usd": 100000.0},
+    ],
+}
+
+
+@pytest.mark.asyncio
+async def test_smoothed_headline_config_flag_off_fails_loud_no_crawl(monkeypatch) -> None:
+    """RT-4 KILL-SWITCH BYPASS: a strategy configured with pnl_basis='smoothed_mtm'
+    as its HEADLINE basis must NOT run the smoothed native-ledger crawl when
+    SMOOTHED_MTM_ENABLED is off — the derive must FAIL LOUD PERMANENT before any crawl,
+    never persist a smoothed headline into the cash slot. Without the guard the headline
+    build_deribit_native_ledger would run in the smoothed basis (bypassing the flag) and
+    the job would complete DONE → RED. The two additive-pass gates never even engage
+    because the headline is smoothed (not cash), so the flag's only defence here is this
+    headline guard."""
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    ctx, capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _SMOOTHED_HEADLINE_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "a smoothed_mtm headline behind the OFF kill-switch is a structural config "
+        "refusal, never a retry"
+    )
+    assert result.error_message is not None
+    assert "SMOOTHED_MTM_ENABLED" in result.error_message
+    # The guard fires BEFORE any live crawl — no smoothed (or any) ledger build ran.
+    assert calls == [], (
+        "the headline smoothed crawl must NOT run when the flag is off — the guard "
+        "must short-circuit before build_deribit_native_ledger"
+    )
+    # A terminal failed stamp lands so the poller reaches a gate; no by-basis object.
+    failed = _find_failed_stamp(capture)
+    assert failed is not None, "the kill-switch refusal must stamp a terminal failed row"
+    assert not any(
+        isinstance(p, dict) and p.get("metrics_json_by_basis")
+        for _n, p, _c in capture["upserts"]
+    ), "no smoothed by-basis object may ship on the kill-switch refusal"
+
+
+@pytest.mark.asyncio
+async def test_smoothed_headline_config_flag_on_allowed() -> None:
+    """RT-4 companion: with SMOOTHED_MTM_ENABLED ON (the module default) a strategy
+    configured with pnl_basis='smoothed_mtm' as its HEADLINE basis is ALLOWED — the
+    guard must NOT over-fire. The headline native-ledger crawl runs in the smoothed
+    basis and the derive completes DONE (no permanent kill-switch refusal). This pins
+    the guard's precise scope: it fires ONLY when the flag is off. (The additive MTM /
+    smoothed passes never engage here — both require a CASH headline — so exactly ONE
+    crawl runs, in the smoothed basis.)"""
+    # The module-level `smoothed_mtm_enabled` fixture leaves the flag ON — no delenv.
+    ctx, capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _SMOOTHED_HEADLINE_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a smoothed_mtm headline is admissible when the kill-switch is ON — the guard "
+        "must not over-fire"
+    )
+    assert _find_failed_stamp(capture) is None, (
+        "no kill-switch refusal may stamp failed when the flag is ON"
+    )
+    # Exactly ONE crawl, in the smoothed basis (the additive passes require a cash
+    # headline, so neither the MTM nor the smoothed additive pass engages here).
+    assert [c["pnl_basis"] for c in calls] == ["smoothed_mtm"], (
+        "the headline crawl runs in the configured smoothed_mtm basis when the flag "
+        "is ON"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_headline_config_flag_on_allowed() -> None:
+    """RT-4 companion: with SMOOTHED_MTM_ENABLED ON (module default), the SAME
+    pnl_basis='smoothed_mtm' headline config IS admissible — the derive runs the
+    headline native-ledger crawl in the smoothed basis and completes DONE. This proves
+    the guard is a pure flag gate (it refuses ONLY when the flag is off), not a blanket
+    ban on the basis. Exactly ONE crawl runs (a smoothed headline is not cash, so the
+    additive MTM/smoothed passes — both gated on the cash headline — never engage)."""
+    ctx, _capture = _ctx(
+        strategy_row={
+            "asset_class": "crypto",
+            "returns_denominator_config": _SMOOTHED_HEADLINE_CONFIG,
+        }
+    )
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "with the flag ON, a smoothed_mtm headline is admissible and completes"
+    )
+    assert len(calls) == 1, "a smoothed headline runs exactly one crawl (no additive passes)"
+    assert calls[0]["pnl_basis"] == "smoothed_mtm", (
+        "the headline crawl must run in the configured smoothed_mtm basis when allowed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_dark_launch_mark_hole_cannot_fail_job(monkeypatch) -> None:
+    """THE KILL-SWITCH POINT (single-key): a structural smoothed mark-hole
+    (LedgerValuationError) CANNOT touch a job when the flag is off — the smoothed crawl
+    is never even attempted, so the poisoned third side-effect never fires and the job
+    completes DONE on its cash/MTM headline with only TWO crawls. (Since GLB-2 the same
+    mark-hole DEGRADES rather than fails even when the flag is ON — see
+    test_structural_smoothed_failure_degrades_keeps_cash_mtm — but the dark path proves
+    the pass is skipped ENTIRELY, not merely degraded.) Neuter (remove the flag gate) →
+    RED: the poisoned 3rd crawl fires (len(calls) == 3)."""
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        # cash ok, MTM ok — the THIRD (smoothed) side-effect is a structural mark-hole
+        # that would fail the job loud IF the smoothed pass ran. Dark ⇒ it never runs.
+        side_effects=[None, None, LedgerValuationError(
+            "instrument BTC-27JUN25-100000-C straddles the mark-retention horizon"
+        )],
+    )
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "dark launch: a smoothed structural mark-hole must NOT be able to fail a real "
+        "prod job — the smoothed pass is skipped before any ledger build"
+    )
+    assert len(calls) == 2, "smoothed crawl (the poisoned 3rd) must never be attempted"
+
+
+@pytest.mark.asyncio
+async def test_smoothed_persisted_when_mtm_degrades() -> None:
+    """THE FEATURE VALUE: the MTM pass structurally DEGRADES (LedgerValuationError →
+    mtm_gated_reason, by-basis mark_to_market absent) yet the smoothed pass SUCCEEDS,
+    so by-basis == {"smoothed_mtm"} (NOT None). Smoothing is exactly the fix for the
+    un-smoothed book that MTM honestly gates off. Neuter (skip smoothed when MTM
+    degrades / fall back to None) → RED."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(
+        reports,
+        # cash ok, MTM raises (degrades), smoothed (idx 2) ok
+        side_effects=[None, LedgerValuationError("summary hole mid-window")],
+    )
+    combine = MagicMock(return_value=(_mtm_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 3, "smoothed pass must run EVEN WHEN MTM degrades"
+    assert calls[2]["pnl_basis"] == "smoothed_mtm"
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    by_basis = prestamp.get("metrics_json_by_basis")
+    assert isinstance(by_basis, dict), (
+        "a degraded-MTM + successful-smoothed book must persist a by-basis object, "
+        "NOT NULL — smoothing opens what MTM keeps closed"
+    )
+    assert set(by_basis.keys()) == {"smoothed_mtm"}, (
+        "MTM degraded → its key is absent; smoothed succeeded → its key is present"
+    )
+    # the MTM degrade reason still stamps (MTM stays honestly gated off)
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SUMMARY_COVERAGE
+    )
+
+
+@pytest.mark.asyncio
+async def test_perp_only_skips_smoothed_pass_sc4() -> None:
+    """Perp-only (has_option_activity=False): ONE cash crawl only — NO smoothed pass,
+    NO smoothed series persist (SC-4: no option activity ⇒ no smoothed artifacts),
+    by-basis authoritatively NULL. Neuter (run smoothed unconditionally) → RED."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=False)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(calls) == 1, "perp-only book must NOT run a smoothed crawl"
+    # NO smoothed series persist AT ALL (not even a heal) — byte-identical to pre-phase
+    assert all(
+        c.kwargs["basis"] != "smoothed_mtm" for c in persist_spy.call_args_list
+    ), "a no-option key must persist NO smoothed_mtm artifacts (SC-4)"
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None and prestamp["metrics_json_by_basis"] is None
+
+
+@pytest.mark.asyncio
+async def test_smoothed_series_persisted_via_smoothed_kind() -> None:
+    """The smoothed pass persists its derived series through persist_basis_series with
+    basis="smoothed_mtm" (KIND_SMOOTHED_MTM), a fresh result (not a heal) on success.
+    Neuter (drop the smoothed series persist) → RED."""
+    ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    _smoothed_persist = next(
+        (c for c in persist_spy.call_args_list
+         if c.kwargs["basis"] == "smoothed_mtm"),
+        None,
+    )
+    assert _smoothed_persist is not None, "smoothed pass must persist a smoothed_mtm series"
+    assert _smoothed_persist.kwargs["result"] is not None, (
+        "a successful smoothed pass persists its derived rows (not a heal)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_pre_mark_retention_stamps_complete_with_warnings() -> None:
+    """The smoothed completeness report's pre_mark_retention_option_days bucket
+    (marks aged past the retention horizon → those days fell back to cash-basis)
+    stamps the pre_mark_retention_option_dailies warn flag via the existing
+    NAV_TWR_GUARD_KEYS mechanism → complete_with_warnings. Neuter (drop the stamp /
+    unregister the key) → RED."""
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(
+            has_option_activity=True,
+            pre_mark_retention_option_days=[("BTC", "2022-01-03")],
+        ),
+    ]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["data_quality_flags"].get("pre_mark_retention_option_dailies") is True, (
+        "the pre-retention bucket must stamp the warn flag (complete_with_warnings)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_third_pass_timeout_degrades_not_failed_final() -> None:
+    """HIGH-01 (132 review) — FIX-2 sibling for the THIRD pass: the smoothed crawl is
+    bounded to a slice of the REMAINING derive budget (the SAME machinery as the MTM
+    second pass). If it times out it must DEGRADE (skip — the by-basis simply lacks
+    smoothed_mtm) with the timeout attributed to the SMOOTHED pass — the cash headline
+    and the already-computed MTM object still ship DONE. It must NEVER escape to the
+    outer cash-pass TimeoutError arm as a transient that retries the WHOLE derive to
+    failed_final (total factsheet loss on a large options book). Simulated by the
+    THIRD (smoothed) ledger crawl raising asyncio.TimeoutError (what wait_for
+    propagates on expiry). Neuter (drop the smoothed-local TimeoutError arm) → the
+    outer arm returns FAILED/transient blaming the cash pass → reddens."""
+    import asyncio as _asyncio
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, calls = _recording_ledger(
+        reports, side_effects=[None, None, _asyncio.TimeoutError()]
+    )
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a smoothed third-pass timeout must DEGRADE (cash ships DONE), never escape "
+        "as a transient that retries the whole derive to failed_final"
+    )
+    assert len(calls) == 3, "the smoothed crawl was attempted (then timed out)"
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    # MTM succeeded; ONLY smoothed degrades (its key absent — honest omission).
+    assert set(prestamp["metrics_json_by_basis"]) == {"mark_to_market"}
+    assert "mtm_gated_reason" not in prestamp["data_quality_flags"], (
+        "a SMOOTHED-pass timeout must not be mis-attributed to the MTM pass"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_third_pass_insufficient_budget_skips_cash_ships() -> None:
+    """HIGH-01 (132 review) — the refusal floor: when the cash crawl legitimately
+    consumed (nearly) the whole 15-min derive budget, the smoothed third pass must
+    REFUSE to start (same 60s floor as the MTM second pass), never launch a
+    full-history crawl bounded at the fixed 810s that the outer wait_for is
+    guaranteed to kill first (transient → 3 identical attempts → failed_final).
+    Budget exhaustion simulated by shrinking TIMEOUT_PER_KIND['derive_broker_dailies']
+    to 1s — both additive passes fall below their floor and refuse; ONLY the cash
+    crawl runs and the derive completes DONE. Neuter (keep the fixed
+    _BROKER_CRAWL_TIMEOUT_S bound with no remaining-budget check) → the smoothed
+    crawl STARTS (2 ledger calls, smoothed_mtm persisted) → reddens."""
+    from services.stitch_composite import MTM_REASON_SECOND_PASS_TIMEOUT
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [_report(has_option_activity=True)]
+    ledger_mock, calls = _recording_ledger(reports)
+    combine = MagicMock(return_value=(_cash_series(), {"used_heuristic_capital": False}))
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch.dict(
+            "services.job_worker.TIMEOUT_PER_KIND",
+            {"derive_broker_dailies": 1.0},
+        ),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "an exhausted budget must DEGRADE the additive passes, never sink the derive"
+    )
+    assert len(calls) == 1, (
+        "below the budget floor NEITHER additive pass may start a full-history "
+        "crawl — only the cash crawl runs"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    assert prestamp["metrics_json_by_basis"] is None, (
+        "no additive basis is persisted when both passes refuse on the budget floor"
+    )
+    # The MTM refusal stamps its distinct machine reason (pre-existing FIX-2).
+    assert prestamp["data_quality_flags"]["mtm_gated_reason"] == (
+        MTM_REASON_SECOND_PASS_TIMEOUT
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_combine_runs_off_event_loop() -> None:
+    """LOW-03 (132 review) — WEDGE-01 class: the smoothed third pass's SYNCHRONOUS
+    CPU-bound combine_native_ledger (options ledgers are the largest books) must run
+    OFF the shared event-loop thread via asyncio.to_thread, like the composite arm —
+    a third on-loop full-book pandas combine linearly extends the heartbeat-
+    starvation window that got Eclipse's worker 503-restarted mid-job. Proven by
+    THREAD IDENTITY (Rule 9): the smoothed (third) combine executes in a worker
+    thread. The cash/MTM combines are byte-frozen pre-existing on-loop code — this
+    test deliberately does NOT pin them either way, so a future WEDGE-01 sweep that
+    offloads them cannot redden it. Run the smoothed combine inline on the loop (the
+    pre-fix code) → idents match → reddens."""
+    import threading
+
+    loop_thread_id = threading.get_ident()
+    seen_threads: list[int] = []
+    _outs = [
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ]
+
+    def _combine(*_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
+        seen_threads.append(threading.get_ident())
+        return _outs[len(seen_threads) - 1]
+
+    ctx, _capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, _calls = _recording_ledger(reports)
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock,
+        combine_mock=MagicMock(side_effect=_combine),
+    ) + [_patch_benchmark()]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    assert len(seen_threads) == 3, "cash, MTM, and smoothed combines all ran"
+    assert seen_threads[2] != loop_thread_id, (
+        "the smoothed third-pass combine_native_ledger ran ON the event-loop "
+        "thread — it MUST be offloaded via asyncio.to_thread (WEDGE-01) so "
+        "CPU-bound pandas cannot starve the healthz heartbeat"
+    )
+
+
+@pytest.mark.asyncio
+async def test_smoothed_scalar_degrade_heals_series_row() -> None:
+    """HIGH-02 (132 review) — Pitfall-5: an ATTEMPTED smoothed pass whose SCALAR
+    compute degrades (derive_basis_series ValueError on the smoothed series only)
+    must heal-DELETE the smoothed_mtm series row
+    (persist_basis_series(basis='smoothed_mtm', result=None)). Otherwise a prior
+    successful derive's smoothed_mtm_daily_returns money-series row survives
+    indefinitely while the authoritative by-basis scalar says ABSENT — a stale
+    real-looking series in a table consumers read by bare (strategy_id, kind).
+    smoothed_attempted is only ever True on option-activity keys, so the heal RPC
+    never fires on a no-option key (SC-4 preserved — pinned separately by
+    test_perp_only_skips_smoothed_pass_sc4). Neuter (re-guard the persist on a
+    computed object) → no smoothed persist call → reddens."""
+    import services.basis_series as _bs
+
+    ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
+    reports = [
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+        _report(has_option_activity=True),
+    ]
+    ledger_mock, _calls = _recording_ledger(reports)
+    combine = MagicMock(side_effect=[
+        (_cash_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+        (_mtm_series(), {"used_heuristic_capital": False}),
+    ])
+    _real_derive = _bs.derive_basis_series
+    _derive_calls: list[int] = []
+
+    def _derive_reject_smoothed_only(*a: Any, **k: Any) -> Any:
+        # Seam call order: MTM (1st), smoothed_mtm (2nd), cash (3rd).
+        _derive_calls.append(1)
+        if len(_derive_calls) == 2:
+            raise ValueError("smoothed interior chain-break")
+        return _real_derive(*a, **k)
+
+    persist_spy = MagicMock()
+    with _apply(_base_patches(
+        ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
+    ) + [
+        _patch_benchmark(),
+        patch(
+            "services.basis_series.derive_basis_series",
+            new=MagicMock(side_effect=_derive_reject_smoothed_only),
+        ),
+        patch("services.basis_series.persist_basis_series", new=persist_spy),
+    ]):
+        result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a smoothed scalar compute-reject degrades (honest omission), never fails "
+        "the cash headline"
+    )
+    prestamp = _find_prestamp(capture)
+    assert prestamp is not None
+    # MTM shipped; smoothed honestly ABSENT (scalar degraded).
+    assert set(prestamp["metrics_json_by_basis"]) == {"mark_to_market"}
+    # THE HEAL: the attempted-but-degraded smoothed pass deletes any stale series row.
+    _smoothed_persists = [
+        c for c in persist_spy.call_args_list if c.kwargs["basis"] == "smoothed_mtm"
+    ]
+    assert len(_smoothed_persists) == 1, (
+        "an ATTEMPTED smoothed pass must always reach the smoothed series persist "
+        "(fresh row on success, heal-DELETE on degrade)"
+    )
+    assert _smoothed_persists[0].kwargs["result"] is None, (
+        "attempted-but-degraded must heal-DELETE (result=None) — a stale smoothed "
+        "money series must never outlive the by-basis scalar omission (Pitfall 5)"
     )

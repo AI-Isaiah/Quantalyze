@@ -9,7 +9,7 @@ import type { DisclosureTier } from "@/lib/types";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { buildFactsheetPayload, deriveIngestSource } from "@/lib/factsheet/build-payload";
 import type { BuildFactsheetOpts } from "@/lib/factsheet/build-payload";
-import { readCompositeFactsheet, singleKeyDataQuality, singleKeyBasisOpts, shouldReadSingleKeyMtmSeries, readMtmSeries } from "@/lib/factsheet/composite-read-path";
+import { readCompositeFactsheet, singleKeyDataQuality, readSingleKeyBasisOpts } from "@/lib/factsheet/composite-read-path";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/allocator-portfolio-payload";
 import type { FactsheetPayload, TrustTierKind, IngestSource } from "@/lib/factsheet/types";
 import { FactsheetView } from "./FactsheetView";
@@ -119,32 +119,34 @@ async function fetchAndBuildPayload(id: string): Promise<FactsheetPayload | null
     // diverge on the DQ opt (the composite "one path" lesson).
     //
     // MTM-01 (Phase 102): a single-key OPTIONS strategy also persists its MTM
-    // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason,
-    // read through the SAME shared owner (`singleKeyBasisOpts`) both surfaces use.
+    // basis (`metrics_json_by_basis.mark_to_market`) + an honest degrade reason.
     // The F-4 `computation_status`-DONE gate rides the `${id}::${computedAt}` cache
     // key (:344) because a re-derive stamps a fresh computed_at; status is
     // public-safe on a published row (unchanged RLS boundary — the outer
-    // request-scoped signature probe stays the auth gate). singleKeyBasisOpts
-    // returns `{}` for every non-options single-key strategy → byte-identical.
+    // request-scoped signature probe stays the auth gate). The assembly returns
+    // `{}` for every non-options single-key strategy → byte-identical.
     //
-    // MTM-04 (Phase 103): additionally read the persisted `mtm_daily_returns`
-    // series so charts follow the toggle. Gated by the SHARED cheap predicate
-    // (`shouldReadSingleKeyMtmSeries`) so the hot non-options path stays
-    // roundtrip-free and both surfaces read identically; the series is read via
-    // the SAME service-role admin `supabase` handle (deny-all RLS on
-    // strategy_analytics_series — no visibility widening, same gate as the scalar
-    // MTM object) and threaded as the 4th arg. A failed/malformed row degrades to
+    // MTM-04 (Phase 103) + SMTM-01 (Phase 133, review WR-01): the persisted
+    // `mtm_daily_returns` / `smoothed_mtm_daily_returns` series reads (so charts
+    // follow the toggle) and the gate/scalar/series threading are assembled by
+    // the ONE shared owner `readSingleKeyBasisOpts` — the SAME assembly the
+    // discovery detail page calls, so the two surfaces cannot diverge (WR-01 was
+    // exactly a per-page inline copy drifting). The reads ride the SAME
+    // service-role admin `supabase` handle (deny-all RLS on
+    // strategy_analytics_series — no visibility widening, same gate as the
+    // scalar objects), gated by the shared cheap predicates so the hot
+    // non-options path stays roundtrip-free. A failed/malformed row degrades to
     // no-bundle (charts stay cash).
-    const mtmSeries = shouldReadSingleKeyMtmSeries(
-      analytics?.metrics_json_by_basis,
-      analytics?.computation_status,
-    )
-      ? await readMtmSeries(supabase, id)
-      : null;
     buildOpts = {
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
-      ...singleKeyBasisOpts(dqf, analytics?.metrics_json_by_basis, analytics?.computation_status, mtmSeries),
+      ...(await readSingleKeyBasisOpts(
+        () => supabase,
+        id,
+        dqf,
+        analytics?.metrics_json_by_basis,
+        analytics?.computation_status,
+      )),
     };
   }
   // Warn when both daily_returns (CSV indicator) and returns_series (API

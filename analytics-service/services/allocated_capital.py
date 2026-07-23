@@ -53,7 +53,9 @@ _VALID_DENOMINATORS: frozenset[str] = frozenset({DENOMINATOR_ALLOCATED_CAPITAL})
 # The accrual bases a config may name (mirrors deribit_txn._PNL_BASES; imported
 # lazily-by-value here to keep this module ccxt/supabase-free — the string set is
 # the contract, validated identically).
-_VALID_PNL_BASES: frozenset[str] = frozenset({"cash_settlement", "mark_to_market"})
+_VALID_PNL_BASES: frozenset[str] = frozenset(
+    {"cash_settlement", "mark_to_market", "smoothed_mtm"}
+)
 METRICS_BASIS_ACTIVE_DAY: str = "active_day"
 METRICS_BASIS_CALENDAR_DAY: str = "calendar_day"
 _VALID_METRICS_BASES: frozenset[str] = frozenset(

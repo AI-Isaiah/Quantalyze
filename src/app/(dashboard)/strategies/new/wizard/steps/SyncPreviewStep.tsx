@@ -36,6 +36,7 @@ import {
   partitionAttribution,
   attributionBasisFromConfig,
 } from "@/lib/composite/compositeAttribution";
+import { hasBasisHeadline } from "@/lib/factsheet/basis-metrics";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { parseIsoDay, utcEpoch } from "@/lib/dateday";
 import type {
@@ -154,6 +155,14 @@ export interface CompositePreviewData {
   gapSpans: { start: string; end: string }[]; // inclusive both ends — render verbatim
   gapDayCount: number;
   mtmGatedReason: string | null;
+  /**
+   * Phase 133 review IN-03: whether the persisted `metrics_json_by_basis.smoothed_mtm`
+   * object carries a trustworthy headline (the SAME `hasBasisHeadline` gate the
+   * factsheet surfaces trust). Server truth only — never derived from the gated
+   * reason. Lets the MTM caveat note that the smoothed basis opens what MTM keeps
+   * closed on an options book, without inventing availability.
+   */
+  smoothedMtmAvailable: boolean;
   benchmarkUnavailable: boolean;
   benchmarkNote: string | null;
   // HARD-04 (#67): server-truth sub-90-day annualization-window flag
@@ -853,6 +862,19 @@ export function SyncPreviewStep({
               ? (analyticsRow!.sparkline_returns as number[])
               : series.map((d) => d.daily_return);
 
+            // Phase 133 review IN-03: strict extraction of the persisted smoothed
+            // headline from the untrusted jsonb (mirrors the factsheet read side's
+            // coercion posture — a malformed column yields `false`, never a caveat
+            // inventing availability).
+            const metricsJsonByBasis = analyticsRow?.metrics_json_by_basis;
+            const smoothedMtmAvailable = hasBasisHeadline(
+              metricsJsonByBasis !== null &&
+                typeof metricsJsonByBasis === "object" &&
+                !Array.isArray(metricsJsonByBasis)
+                ? (metricsJsonByBasis as Record<string, unknown>).smoothed_mtm
+                : undefined,
+            );
+
             const compositeSnapshot: SyncPreviewSnapshot = {
               tradeCount: 0,
               csvRowCount: series.length,
@@ -870,6 +892,7 @@ export function SyncPreviewStep({
                 gapDayCount:
                   typeof dq.gap_day_count === "number" ? dq.gap_day_count : 0,
                 mtmGatedReason: dq.mtm_gated_reason ?? null,
+                smoothedMtmAvailable,
                 benchmarkUnavailable: dq.benchmark_unavailable === true,
                 benchmarkNote: dq.benchmark_note ?? null,
                 // HARD-04 (#67): strict server-truth coercion (mirror
@@ -1475,6 +1498,12 @@ export function SyncPreviewStep({
                     <p>
                       Mark-to-market view unavailable — {composite.mtmGatedReason}
                       . Cash-settlement basis shown.
+                      {/* Phase 133 review IN-03: on an options book the smoothed
+                          basis opens what MTM keeps closed — say so, but ONLY on
+                          the persisted server truth (hasBasisHeadline), never an
+                          invented promise. */}
+                      {composite.smoothedMtmAvailable &&
+                        " A Smoothed mark-to-market view is available on the published factsheet."}
                     </p>
                   )}
                   {hasBenchmarkCaveat && (

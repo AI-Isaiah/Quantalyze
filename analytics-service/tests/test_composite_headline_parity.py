@@ -282,7 +282,10 @@ def _patches(
         patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
         patch(
             "services.broker_dailies.combine_native_ledger",
-            new=MagicMock(side_effect=list(combine_returns)),
+            # Phase 132: has_option_activity=True → the smoothed_mtm THIRD pass re-crawls
+            # the SAME members (basis-independent stub output), so repeat the provided
+            # combine sequence for that second fan-out.
+            new=MagicMock(side_effect=list(combine_returns) + list(combine_returns)),
         ),
     ]
 

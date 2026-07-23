@@ -69,6 +69,30 @@ def sfox_enabled_server() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# smoothed_mtm worker kill-switch (Phase 134 — SAFE ROLLOUT of the v1.14 basis).
+#
+# The worker computes a THIRD factsheet basis (`smoothed_mtm`) at derive time for
+# every options book (Phases 131-133). A STRUCTURAL mark-hole in that pass
+# (`LedgerValuationError`) fails the WHOLE job — cash + MTM headlines included.
+# This flag lets the smoothed pass ship DARK: gated OFF (the default), the
+# smoothed THIRD pass is SKIPPED ENTIRELY in both the single-key and composite
+# derive routes (no ledger build, no dense-marks fetch, no assert_ledger_complete,
+# no persist, no metrics_json_by_basis["smoothed_mtm"] key), so a structural
+# mark-hole can NEVER fail a real prod job until the founder flips it on after
+# monitoring. Flag ON → behavior is exactly as v1.14 built it.
+#
+# Read per-call (never a module-load const) so a test / go-live env change takes
+# effect without a reimport. Fail-CLOSED with the SAME .strip().lower() == "true"
+# normalization as sfox_enabled_server above: unset / "" / "1" / "on" / "TRUE "
+# all read OFF; only an explicit "true" enables (the ENABLE-only tolerance is safe
+# — it can only turn the dark basis on, the founder's explicit go-live intent).
+# ---------------------------------------------------------------------------
+def is_smoothed_mtm_enabled() -> bool:
+    """True iff SMOOTHED_MTM_ENABLED is set to "true" (fail-closed; see note)."""
+    return (os.getenv("SMOOTHED_MTM_ENABLED") or "").strip().lower() == "true"
+
+
+# ---------------------------------------------------------------------------
 # Trade side — the {buy, sell} fill action.
 # Mirror of the DB CHECK on ``trades.side`` (migration 112). This is the
 # action taken on a fill; it is NOT the resulting position direction (a

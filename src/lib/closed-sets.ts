@@ -74,6 +74,29 @@ export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 export const SFOX_UI_ENABLED = process.env.NEXT_PUBLIC_SFOX_ENABLED === "true";
 
 /**
+ * Feature flag for the v1.14 smoothed_mtm factsheet basis UI (Phase 134 — the
+ * DARK-LAUNCH kill-switch). Mirror of SFOX_UI_ENABLED: strict equality against the
+ * EXACT string "true" — fail-closed ("1" / "TRUE" / "on" / "" all read OFF). Next.js
+ * inlines the full static `process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED` member
+ * expression into the client bundle at build time, so this MUST stay a single static
+ * member access (never dynamic `process.env[...]` indexing) or the inlining breaks
+ * and the flag reads undefined in the browser.
+ *
+ * DEFAULT OFF. The smoothed mark-to-market SegmentedControl segment is built READY
+ * but HIDDEN (not merely disabled — not rendered at all) until the founder sets
+ * NEXT_PUBLIC_SMOOTHED_MTM_ENABLED=true in Vercel. This is the UI half of the
+ * kill-switch whose worker half is SMOOTHED_MTM_ENABLED (analytics-service
+ * services.closed_sets.is_smoothed_mtm_enabled): with the worker flag off the
+ * smoothed basis is never computed OR persisted, so the segment would only ever be
+ * honest-disabled anyway — hiding it keeps the two-segment cash/MTM control
+ * byte-identical to pre-v1.14 while the basis ships dark. When ON, the segment
+ * renders enabled/disabled per the persisted smoothed bundle presence (as v1.14
+ * built it). cash / MTM segments are unaffected by this flag.
+ */
+export const SMOOTHED_MTM_UI_ENABLED =
+  process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED === "true";
+
+/**
  * SERVER-SIDE sFOX go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
  *
  * DISTINCT from SFOX_UI_ENABLED above: that is the NEXT_PUBLIC *client-build*

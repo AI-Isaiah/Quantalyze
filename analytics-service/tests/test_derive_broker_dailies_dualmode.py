@@ -1071,10 +1071,17 @@ class TestCashSettlementSeriesPersist:
         )
 
         ctx, capture = _ctx(strategy_row={"asset_class": "crypto"})
-        reports = [_report(has_option_activity=True), _report(has_option_activity=True)]
+        # Phase 132: an options book runs THREE passes (cash, mtm, smoothed_mtm); the
+        # third combine side-effect feeds the additive smoothed pass.
+        reports = [
+            _report(has_option_activity=True),
+            _report(has_option_activity=True),
+            _report(has_option_activity=True),
+        ]
         ledger_mock, _calls = _recording_ledger(reports)
         combine = MagicMock(side_effect=[
             (_cash_series(), {"used_heuristic_capital": False}),
+            (_mtm_series(), {"used_heuristic_capital": False}),
             (_mtm_series(), {"used_heuristic_capital": False}),
         ])
         with _apply(_base_patches(

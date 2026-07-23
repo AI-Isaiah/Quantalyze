@@ -2811,3 +2811,393 @@ def test_summary_blank_currency_fails_loud() -> None:
     missing = {k: v for k, v in blank.items() if k != "currency"}
     with pytest.raises(LedgerValuationError):
         txn_rows_to_native_daily([missing], pnl_basis="mark_to_market")
+
+
+# ===========================================================================
+# 131-01a Task 2: replay_option_positions + option_mtm_daily — the PURE core
+# of the smoothed_mtm third factsheet basis. Pandas/async-free (the AST purity
+# guard at test_option_enters_via_cash_delta_not_perp stays green). NOT yet
+# invoked by any production path — dormant until 131-01b wires the branch.
+# ===========================================================================
+
+
+from services.deribit_txn import (  # noqa: E402
+    option_mtm_daily,
+    replay_option_positions,
+)
+
+
+def _opt_row(
+    *, instrument: str, ccy: str, day: str, position: object, id: int, type: str = "trade"
+) -> dict[str, object]:
+    """A minimal Deribit option trade/delivery row carrying a signed post-trade
+    `position` — the ONLY field replay_option_positions reads for the book."""
+    return {
+        "type": type,
+        "instrument_name": instrument,
+        "currency": ccy,
+        "position": position,
+        "timestamp": _ms(f"{day}T08:00:00+00:00"),
+        "id": id,
+    }
+
+
+# --- replay_option_positions -------------------------------------------------
+
+
+def test_replay_option_long_build_reduce_close() -> None:
+    instr = "BTC-16JAN26-100000-C"
+    rows = [
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=2.0, id=1),
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-16", position=1.0, id=2),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-17", position=0.0, id=3,
+            type="delivery",
+        ),
+    ]
+    out = replay_option_positions(rows)
+    assert out == {
+        instr: {
+            "currency": "BTC",
+            "first_day": "2026-01-15",
+            "last_day": "2026-01-17",
+            "positions": {
+                "2026-01-15": 2.0,
+                "2026-01-16": 1.0,
+                "2026-01-17": 0.0,
+            },
+        }
+    }
+
+
+def test_replay_option_short_positions_negative() -> None:
+    instr = "BTC-16JAN26-100000-P"
+    rows = [_opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=-3.0, id=1)]
+    out = replay_option_positions(rows)
+    assert out[instr]["positions"]["2026-01-15"] == -3.0
+
+
+def test_replay_option_end_of_day_is_last_row_of_day() -> None:
+    # Two trades on the SAME UTC day → end-of-day position = the LAST (by id) row.
+    instr = "BTC-16JAN26-100000-C"
+    rows = [
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=2.0, id=2),
+    ]
+    out = replay_option_positions(rows)
+    assert out[instr]["positions"] == {"2026-01-15": 2.0}
+
+
+def test_replay_option_same_ms_fills_numeric_id_tie_break() -> None:
+    """IN-01: same-millisecond fills (a market order sweeping levels) can carry
+    ids of DIFFERENT digit length — lexicographic ``str(id)`` ordering puts
+    ``"999"`` AFTER ``"1000"``, so the 'last row of the day' could be an
+    intermediate fill and the EOD position (hence two days' ΔMTM attribution)
+    would be wrong. The tie-break must be numeric-aware: the later fill
+    (id 1000, final position) wins over the earlier one (id 999)."""
+    instr = "BTC-16JAN26-100000-C"
+    ts = _ms("2026-01-15T10:00:00.123+00:00")
+    rows = [
+        {
+            "type": "trade", "instrument_name": instr, "currency": "BTC",
+            "position": 1.0, "timestamp": ts, "id": 999,  # intermediate fill
+        },
+        {
+            "type": "trade", "instrument_name": instr, "currency": "BTC",
+            "position": 2.0, "timestamp": ts, "id": 1000,  # final fill
+        },
+    ]
+    # Both concat orders must resolve identically (order-independence).
+    assert replay_option_positions(rows)[instr]["positions"] == {"2026-01-15": 2.0}
+    assert replay_option_positions(rows[::-1])[instr]["positions"] == {
+        "2026-01-15": 2.0
+    }
+
+
+def test_replay_option_sorts_out_of_order_input() -> None:
+    # Crawl concat order is NOT trusted — replay sorts by (timestamp, id).
+    instr = "BTC-17JAN26-100000-C"
+    rows = [
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-17", position=0.0, id=3,
+            type="delivery",
+        ),
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+    ]
+    out = replay_option_positions(rows)
+    assert out[instr]["first_day"] == "2026-01-15"
+    assert out[instr]["last_day"] == "2026-01-17"
+    assert out[instr]["positions"] == {"2026-01-15": 1.0, "2026-01-17": 0.0}
+
+
+def test_replay_multi_instrument_multi_currency_separated() -> None:
+    a = "BTC-16JAN26-100000-C"
+    b = "ETH-16JAN26-4000-P"
+    rows = [
+        _opt_row(instrument=a, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(instrument=b, ccy="ETH", day="2026-01-15", position=-2.0, id=2),
+    ]
+    out = replay_option_positions(rows)
+    assert out[a]["currency"] == "BTC"
+    assert out[b]["currency"] == "ETH"
+    assert out[a]["positions"] == {"2026-01-15": 1.0}
+    assert out[b]["positions"] == {"2026-01-15": -2.0}
+
+
+def test_replay_option_positions_uppercases_currency() -> None:
+    """WR-03: the replay normalizes currency casing like the ~20 other read
+    sites in this module (and the adapter's pre-retention path). A lowercase
+    venue ``"btc"`` must NOT survive raw — the adapter merges the day-keyed ΔMTM
+    into the UPPERCASE-keyed native_pnl, so a raw-cased key would fork a phantom
+    per-currency series bucket beside ``"BTC"`` and silently mis-split the daily
+    series (a drift the book channel cannot catch: it uppercases both sides
+    before comparing)."""
+    instr = "BTC-16JAN26-100000-C"
+    rows = [_opt_row(instrument=instr, ccy="btc", day="2026-01-15", position=1.0, id=1)]
+    out = replay_option_positions(rows)
+    assert out[instr]["currency"] == "BTC"
+    # And through the pure ΔMTM core: the merged keys are uppercase.
+    delta, terminal = option_mtm_daily(out, {instr: {"2026-01-15": 0.05}})
+    assert set(delta) == {"BTC"} and set(terminal) == {"BTC"}
+
+
+def test_replay_ignores_perp_future_spot_rows() -> None:
+    rows = [
+        {
+            "type": "trade", "instrument_name": "BTC-PERPETUAL", "currency": "BTC",
+            "position": 5.0, "timestamp": _ms("2026-01-15T08:00:00+00:00"), "id": 1,
+        },
+        {
+            "type": "trade", "instrument_name": "BTC-27MAR26", "currency": "BTC",
+            "position": 5.0, "timestamp": _ms("2026-01-15T08:00:00+00:00"), "id": 2,
+        },
+        {
+            "type": "trade", "instrument_name": "BTC_USDC", "currency": "USDC",
+            "position": 5.0, "timestamp": _ms("2026-01-15T08:00:00+00:00"), "id": 3,
+        },
+    ]
+    assert replay_option_positions(rows) == {}
+
+
+def test_replay_delivery_nonzero_position_accepted_as_data() -> None:
+    # A partial-delivery nonzero post-trade position is Deribit's call — accepted
+    # as DATA, never asserted zero (M3 evidence).
+    instr = "BTC-16JAN26-100000-C"
+    rows = [
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=2.0, id=1),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-16", position=0.5, id=2,
+            type="delivery",
+        ),
+    ]
+    out = replay_option_positions(rows)
+    assert out[instr]["positions"]["2026-01-16"] == 0.5
+
+
+@pytest.mark.parametrize("bad", [_MISSING_SENTINEL := object(), None, "", "abc"])
+def test_replay_option_position_drift_fails_loud(bad: object) -> None:
+    # Absent / None / "" / non-numeric position → LedgerValuationError. The field
+    # is the ONLY book source; fabricating it mis-states MTM. id/type-only message.
+    instr = "BTC-16JAN26-100000-C"
+    row: dict[str, object] = {
+        "type": "trade", "instrument_name": instr, "currency": "BTC",
+        "timestamp": _ms("2026-01-15T08:00:00+00:00"), "id": 77,
+    }
+    if bad is not _MISSING_SENTINEL:
+        row["position"] = bad
+    with pytest.raises(LedgerValuationError) as exc:
+        replay_option_positions([row])
+    msg = str(exc.value)
+    assert "77" in msg and "position" in msg  # id + field named
+    assert "100000" not in msg  # no instrument/row payload leak
+
+
+# --- option_mtm_daily --------------------------------------------------------
+
+
+def test_option_mtm_telescopes_to_flat_terminal_zero() -> None:
+    """A single long option held to delivery: ΔMTM sums to Book(T) − 0 = 0 on a
+    FLOAT-EXACT fixture. Book 10→12→0 (delivery zeroes the position, no mark
+    needed at expiry); ΔMTM 10, +2, −12; Σ = 0 = terminal (redistribution
+    preserves the total)."""
+    instr = "BTC-17JAN26-100000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-17", position=0.0, id=3,
+            type="delivery",
+        ),
+    ])
+    marks = {instr: {"2026-01-15": 10.0, "2026-01-16": 12.0}}
+    delta_mtm, terminal = option_mtm_daily(positions, marks)
+    assert delta_mtm == {
+        "BTC": {"2026-01-15": 10.0, "2026-01-16": 2.0, "2026-01-17": -12.0}
+    }
+    assert terminal == {"BTC": 0.0}
+    assert sum(delta_mtm["BTC"].values()) == terminal["BTC"]  # telescoping exact
+
+
+def test_option_mtm_telescopes_to_open_terminal_book() -> None:
+    """Open at crawl: ΔMTM telescopes to the terminal (non-flat) book EXACTLY."""
+    instr = "BTC-30JAN26-100000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=2.0, id=1),
+    ])
+    marks = {instr: {"2026-01-15": 5.0, "2026-01-16": 7.0}}
+    delta_mtm, terminal = option_mtm_daily(positions, marks)
+    assert delta_mtm == {"BTC": {"2026-01-15": 10.0, "2026-01-16": 4.0}}
+    assert terminal == {"BTC": 14.0}
+    assert sum(delta_mtm["BTC"].values()) == terminal["BTC"]
+
+
+def test_option_mtm_short_signs_invert() -> None:
+    instr = "BTC-30JAN26-100000-P"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=-1.0, id=1),
+    ])
+    marks = {instr: {"2026-01-15": 10.0, "2026-01-16": 8.0}}
+    delta_mtm, terminal = option_mtm_daily(positions, marks)
+    assert delta_mtm == {"BTC": {"2026-01-15": -10.0, "2026-01-16": 2.0}}
+    assert terminal == {"BTC": -8.0}
+
+
+def test_option_mtm_multi_currency_separate_books() -> None:
+    a = "BTC-30JAN26-100000-C"
+    b = "ETH-30JAN26-4000-P"
+    positions = replay_option_positions([
+        _opt_row(instrument=a, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(instrument=b, ccy="ETH", day="2026-01-15", position=1.0, id=2),
+    ])
+    marks = {a: {"2026-01-15": 10.0}, b: {"2026-01-15": 20.0}}
+    delta_mtm, terminal = option_mtm_daily(positions, marks)
+    assert terminal == {"BTC": 10.0, "ETH": 20.0}
+    assert delta_mtm == {"BTC": {"2026-01-15": 10.0}, "ETH": {"2026-01-15": 20.0}}
+
+
+def test_option_mtm_positions_carry_forward_marks_never_filled() -> None:
+    """Positions carry forward across no-trade days; marks are NEVER filled. A held
+    day inside the life with no bar is a HOLE (see the fail-loud test) — carry
+    applies to POSITIONS, not to marks."""
+    instr = "BTC-19JAN26-100000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-19", position=0.0, id=9,
+            type="delivery",
+        ),
+    ])
+    marks = {
+        instr: {
+            "2026-01-15": 4.0,
+            "2026-01-16": 4.0,
+            "2026-01-17": 4.0,
+            "2026-01-18": 4.0,
+        }
+    }
+    delta_mtm, terminal = option_mtm_daily(positions, marks)
+    # Position carried at 1.0 across 16/17/18 (no trade) → flat book, zero ΔMTM
+    # on those days (only the open on 15 and the close on 19 move the book).
+    assert delta_mtm == {"BTC": {"2026-01-15": 4.0, "2026-01-19": -4.0}}
+    assert terminal == {"BTC": 0.0}
+
+
+def test_day_grid_convention_bar_tick_day() -> None:
+    """mark[instr][D] = close of the 1D bar whose tick falls on UTC day D (bar
+    stamped D 08:00) — the pinned 83-PLAN §2-Q1 convention. Book[D] uses the mark
+    keyed by that same UTC-day string the position replay grids on."""
+    instr = "BTC-30JAN26-100000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=3.0, id=1),
+    ])
+    marks = {instr: {"2026-01-15": 2.0}}  # Book = 3 * 2 = 6 on 2026-01-15
+    delta_mtm, terminal = option_mtm_daily(positions, marks)
+    assert delta_mtm["BTC"]["2026-01-15"] == 6.0
+    assert terminal["BTC"] == 6.0
+
+
+def test_option_mtm_hole_inside_life_fails_loud() -> None:
+    """A day inside [first_held, last_held] with nonzero position and NO bar →
+    LedgerValuationError naming instrument + day (D-07: NO interpolation, NO
+    session-lump fallback)."""
+    instr = "BTC-19JAN26-100000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-19", position=0.0, id=9,
+            type="delivery",
+        ),
+    ])
+    # Bar for 2026-01-17 DROPPED from an otherwise-dense held window.
+    marks = {
+        instr: {
+            "2026-01-15": 4.0,
+            "2026-01-16": 4.0,
+            "2026-01-18": 4.0,
+        }
+    }
+    with pytest.raises(LedgerValuationError) as exc:
+        option_mtm_daily(positions, marks)
+    msg = str(exc.value)
+    assert instr in msg and "2026-01-17" in msg
+
+
+def test_option_mtm_hole_guard_is_load_bearing_mutation() -> None:
+    """Mutation-honesty: the SAME fixture is GREEN with a dense window and REDDENS
+    when one bar is dropped — proving the hole guard is load-bearing, not vacuous."""
+    instr = "BTC-19JAN26-100000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2026-01-15", position=1.0, id=1),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2026-01-19", position=0.0, id=9,
+            type="delivery",
+        ),
+    ])
+    dense = {
+        instr: {
+            "2026-01-15": 4.0,
+            "2026-01-16": 4.0,
+            "2026-01-17": 4.0,
+            "2026-01-18": 4.0,
+        }
+    }
+    # GREEN with the full window.
+    delta_mtm, _terminal = option_mtm_daily(positions, dense)
+    assert sum(delta_mtm["BTC"].values()) == 0.0
+    # REDDENS when a single bar is removed.
+    dropped = {instr: {d: v for d, v in dense[instr].items() if d != "2026-01-17"}}
+    with pytest.raises(LedgerValuationError):
+        option_mtm_daily(positions, dropped)
+
+
+def test_option_mtm_retention_straddle_fails_loud_via_hole_guard() -> None:
+    """RETENTION-STRADDLE (plan-check MEDIUM-3, D-07 consequence PINNED):
+
+    An instrument whose life STRADDLES the ~2.5yr chart-retention horizon yields
+    PARTIAL marks — the HEAD days of the held window have no bar (they predate the
+    horizon) — and MUST raise LedgerValuationError via the SAME hole guard as any
+    interior hole. NO head-trim, NO special case, NO interpolation.
+
+    ACCEPTED CONSEQUENCE (pinned here so it is not a surprise): as the retention
+    window moves forward in real time, a currently-GREEN options key can begin
+    hard-failing ALL persisted analytics on future recomputes once a held
+    instrument's life comes to straddle the horizon. This conforms to locked D-07
+    (fail loud over fabricate). Only WHOLLY pre-retention instruments are excluded
+    upstream (131-01b Task 4 partition) — STRADDLERS are never excluded; their
+    partial marks fall through to this guard. The founder-visible operational
+    trade-off is surfaced in 131-02.
+    """
+    instr = "BTC-05JAN23-20000-C"
+    positions = replay_option_positions([
+        _opt_row(instrument=instr, ccy="BTC", day="2023-01-01", position=1.0, id=1),
+        _opt_row(
+            instrument=instr, ccy="BTC", day="2023-01-05", position=0.0, id=9,
+            type="delivery",
+        ),
+    ])
+    # Marks present ONLY from the horizon onward (03/04); the head (01/02) is holes.
+    marks = {instr: {"2023-01-03": 5.0, "2023-01-04": 5.0}}
+    with pytest.raises(LedgerValuationError) as exc:
+        option_mtm_daily(positions, marks)
+    msg = str(exc.value)
+    # Fails naming the instrument + the EARLIEST missing day (the head of the life).
+    assert instr in msg and "2023-01-01" in msg

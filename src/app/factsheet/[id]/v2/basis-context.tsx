@@ -30,7 +30,7 @@ import { LeverageContext } from "./leverage-context";
  * `FactsheetBody.guard04-no-bleed.test.tsx` (no factsheet-keyspace write) and
  * `FactsheetBody.basis.test.tsx` (no-persistence-on-toggle).
  */
-export type Basis = "cash_settlement" | "mark_to_market";
+export type Basis = "cash_settlement" | "mark_to_market" | "smoothed_mtm";
 
 /**
  * WR-01 hardening (Phase 107 review) — a BRANDED leverage value that has passed the
@@ -96,6 +96,10 @@ export function useBasisOrCash(): Basis {
  *     `metrics_json_by_basis.mark_to_market`. α/IR and every unmapped key keep
  *     their cash value — they are never displayed under an MTM label (the seven
  *     relabeled KpiStrip cells are exactly the mapped ones; D5, no-invented-data).
+ *   - `smoothed_mtm` (Phase 133, SMTM-01) → the exact smoothed sibling of the MTM
+ *     arm: overlay the same seven mapped scalars from the PERSISTED
+ *     `metrics_json_by_basis.smoothed_mtm`, `?? {}` so an absent object renders all
+ *     seven "—" (never a cash fallback under a smoothed label).
  */
 export function useBasisMetrics(payload: FactsheetPayload): {
   basis: Basis;
@@ -103,16 +107,17 @@ export function useBasisMetrics(payload: FactsheetPayload): {
 } {
   const { basis } = useBasis();
   const m = useMemo<ComputeSummary>(() => {
-    if (basis === "mark_to_market") {
+    if (basis === "mark_to_market" || basis === "smoothed_mtm") {
       // F2 (no-invented-data): STRICT overlay — any of the seven mapped scalars
-      // absent / non-finite in the persisted MTM object renders "—" (NaN), NEVER
-      // the cash fallback. The `?? {}` makes an entirely-absent MTM object render
+      // absent / non-finite in the persisted per-basis object renders "—" (NaN),
+      // NEVER the cash fallback. The `?? {}` makes an entirely-absent object render
       // all-seven "—" (the strict overlay's absent-branch keeps `base` for the
-      // single-key/cash path, so MTM must force a present-empty object here).
-      return overlayBasisScalars(
-        payload.strategyMetrics,
-        payload.metricsByBasis?.mark_to_market ?? {},
-      );
+      // single-key/cash path, so a non-cash basis must force a present-empty object).
+      const persisted =
+        basis === "mark_to_market"
+          ? payload.metricsByBasis?.mark_to_market
+          : payload.metricsByBasis?.smoothed_mtm;
+      return overlayBasisScalars(payload.strategyMetrics, persisted ?? {});
     }
     return payload.strategyMetrics;
   }, [basis, payload]);
@@ -226,21 +231,33 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
   // dropping back to L=1 restores the by-reference base as soon as React catches up.
   const leverage = useDeferredValue(rawLeverage);
   return useMemo<FactsheetPayload>(() => {
-    // --- Layer 1: active-basis series merge (Phase 103, unchanged) ---
-    const bundle = payload.seriesByBasis?.mark_to_market;
+    // --- Layer 1: active-basis series merge (Phase 103; Phase 133 SMTM-01 adds the
+    // smoothed sibling). The active bundle + persisted scalars are chosen by basis:
+    // cash → none (payload by reference), mark_to_market / smoothed_mtm → their own
+    // seriesByBasis bundle + metricsByBasis scalars. Additive: a cash/MTM payload
+    // selects exactly what it did before (byte-identical). ---
+    const bundle =
+      basis === "mark_to_market"
+        ? payload.seriesByBasis?.mark_to_market
+        : basis === "smoothed_mtm"
+          ? payload.seriesByBasis?.smoothed_mtm
+          : undefined;
     const base: FactsheetPayload = ((): FactsheetPayload => {
-      if (basis !== "mark_to_market" || !bundle) return payload;
+      if (basis === "cash_settlement" || !bundle) return payload;
       // F3 (phase 103): overlay the SEVEN persisted headline scalars onto the merged
       // `strategyMetrics` so the rail's §I headline == the KpiStrip BY CONSTRUCTION
       // (both = the persisted-dense-Python cache), killing the sparse-vs-dense AND the
       // arithmetic-vs-geometric (`cumulative_method:"simple"`) divergence for every
-      // cross-surface scalar. Mirrors `useBasisMetrics`: an absent MTM object → `{}`
-      // → the STRICT overlay renders all seven "—", never a bundle-TS recompute. Only
-      // the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
+      // cross-surface scalar. Mirrors `useBasisMetrics`: an absent per-basis object →
+      // `{}` → the STRICT overlay renders all seven "—", never a bundle-TS recompute.
+      // Only the seven `BASIS_KPI_MAP` scalars are overlaid — the rail-only extended /
       // series-derived metrics (skew/VaR/quantiles/best-week/…) STAY bundle-TS-derived
       // (they have no cross-surface counterpart on the KpiStrip, exactly as the rail
       // already works for cash: only the seven have a persisted authoritative cache).
-      const mtmScalars = payload.metricsByBasis?.mark_to_market ?? {};
+      const mtmScalars =
+        (basis === "mark_to_market"
+          ? payload.metricsByBasis?.mark_to_market
+          : payload.metricsByBasis?.smoothed_mtm) ?? {};
       // Narrow on the ingest discriminant before spreading: the bundle has no
       // `ingestSource`, so spreading over the bare union would widen the
       // discriminant and break FactsheetPayload assignability. Each arm's spread
@@ -322,8 +339,15 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
     // pin only when L > 0; at L=0 let the honest derived zeros stand.
     const strategyMetrics = ((): typeof lb.strategyMetrics => {
-      if (basis !== "mark_to_market" || L <= 0) return lb.strategyMetrics;
-      const persisted = payload.metricsByBasis?.mark_to_market as
+      // Phase 133 (SMTM-01): the re-pin applies under BOTH persisted-overlay bases
+      // (mark_to_market and smoothed_mtm) — each pins Sharpe/Sortino to its OWN
+      // persisted scalar cache so the L=1↔L≠1 boundary is continuous for the two
+      // invariant metrics. Cash carries no persisted per-basis overlay, so it is
+      // excluded (its L=1 KPIs already equal the client recompute).
+      if (basis === "cash_settlement" || L <= 0) return lb.strategyMetrics;
+      const persisted = (basis === "mark_to_market"
+        ? payload.metricsByBasis?.mark_to_market
+        : payload.metricsByBasis?.smoothed_mtm) as
         | Record<string, unknown>
         | undefined
         | null;
@@ -421,6 +445,16 @@ export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): bo
       basis === "mark_to_market" &&
       (payload.seriesByBasis?.mark_to_market == null ||
         payload.metricsByBasis?.mark_to_market == null)
+    ) &&
+    // Phase 133 (SMTM-01): the smoothed sibling of the MTM clause — under smoothed,
+    // eligible ⇔ BOTH the smoothed series bundle AND the persisted smoothed scalar
+    // cache are present. An absent-bundle smoothed view is leverage-INeligible (never
+    // a re-pin against missing scalars; symmetric with guard 4), so the view returns
+    // base by-reference and the KPIs stay "—" at every L.
+    !(
+      basis === "smoothed_mtm" &&
+      (payload.seriesByBasis?.smoothed_mtm == null ||
+        payload.metricsByBasis?.smoothed_mtm == null)
     )
   );
 }
@@ -527,6 +561,24 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       return "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.";
     default:
       return "Mark-to-market unavailable for this strategy.";
+  }
+}
+
+/**
+ * Phase 133 (SMTM-01) — the smoothed sibling of {@link mtmDisabledReasonCopy}.
+ * The worker persists NO smoothed-reason column (the smoothed key is written only on
+ * a completed options pass), so the gate carries a single closed-set default reason,
+ * `"smoothed_basis_unavailable"`, covering "not yet computed / marks missing /
+ * non-options book". DESIGN.md voice: factual, institutional, no contractions, never
+ * fabricating. Always a STEADY honest-empty condition (never a self-healing transient),
+ * so it renders muted — no amber, no `smoothedReasonTone` sibling needed.
+ */
+export function smoothedDisabledReasonCopy(reason?: string): string {
+  switch (reason) {
+    case "smoothed_basis_unavailable":
+      return "Smoothed mark-to-market unavailable: this basis has not been computed for this strategy.";
+    default:
+      return "Smoothed mark-to-market unavailable for this strategy.";
   }
 }
 

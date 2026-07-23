@@ -28,11 +28,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 import ccxt
@@ -42,7 +43,9 @@ from services.deribit_txn import (
     _INVERSE_CURRENCIES,
     _NATIVE_OPTIONS_SUMMARY_TYPES,
     DEFAULT_PNL_BASIS,
+    LedgerValuationError,
     PNL_BASIS_MARK_TO_MARKET,
+    PNL_BASIS_SMOOTHED_MTM,
     _day_ccy_own_index,
     _option_activity_after_coverage,
     _pre_coverage_option_days,
@@ -51,6 +54,8 @@ from services.deribit_txn import (
     classify_instrument,
     deribit_dated_external_flows_usd,
     inverse_days_needing_index,
+    option_mtm_daily,
+    replay_option_positions,
     txn_rows_to_daily_records,
     txn_rows_to_native_daily,
 )
@@ -593,6 +598,63 @@ async def fetch_deribit_settlement_index(
 _PERP_DAILY_INSTRUMENT_SUFFIX = "_USDC-PERPETUAL"
 _PERP_DAILY_RESOLUTION = "1D"
 
+# Deribit's ``get_tradingview_chart_data`` stamps an EXPLICIT ``status == "no_data"``
+# on a 200 when the requested window holds no bars (an instrument wholly outside
+# the 1D-chart retention horizon, or a legitimately quiet span). That is the ONLY
+# non-``ok`` status that is a genuine BUSINESS "no data" answer — every other
+# non-``ok`` 200 body is a flaky/error response (see _FlakyChartResponse / GLB-4).
+_CHART_NO_DATA_STATUS = "no_data"
+
+
+class _FlakyChartResponse(RuntimeError):
+    """Internal marker: a ``get_tradingview_chart_data`` HTTP-200 whose body is
+    NEITHER a clean ``status == "ok"`` series NOR the explicit ``no_data`` marker
+    (a rate-limit / maintenance / error payload, a non-Mapping result, or an
+    ``ok`` body with malformed/mismatched ``ticks``/``close`` arrays).
+
+    GLB-4: such a body is a TRANSIENT/flaky response, not a business no-data
+    answer — the option-mark reader retries it on the SAME transient budget as a
+    thrown network error rather than silently returning ``{}`` (which would let a
+    single blip permanently fail a held-position options strategy via the
+    downstream D-07 hole guard). Never surfaces to callers: it is converted to
+    ``DeribitTransientReadError`` on budget exhaustion."""
+
+
+def _validate_chart_ok_arrays(
+    resp: Any,
+) -> tuple[Sequence[Any], Sequence[Any]] | None:
+    """Classify a ``get_tradingview_chart_data`` 200 body for the daily-mark readers.
+
+    * Genuine no-data — an explicit ``status == "no_data"`` marker — returns
+      ``None`` (benign; the reader yields an empty map and the caller's D-07 hole
+      guard decides whether that gap is a fail-loud).
+    * A clean ``status == "ok"`` body with well-formed EQUAL-LENGTH ``ticks`` /
+      ``close`` sequences returns ``(ticks, close)``.
+    * ANY OTHER 200 — a ``status`` present but neither ``ok`` nor ``no_data``, a
+      non-Mapping ``result``, or an ``ok`` body whose ``ticks``/``close`` are the
+      wrong type or mismatched length — raises :class:`_FlakyChartResponse` so the
+      reader RETRIES it on the transient budget (GLB-4) instead of silently
+      returning an empty map."""
+    result = resp.get("result", {}) if isinstance(resp, Mapping) else None
+    if not isinstance(result, Mapping):
+        raise _FlakyChartResponse("result missing or not a mapping")
+    status = result.get("status")
+    if status == _CHART_NO_DATA_STATUS:
+        return None
+    if status != "ok":
+        raise _FlakyChartResponse(f"unexpected status={status!r}")
+    ticks = result.get("ticks", [])
+    close = result.get("close", [])
+    if (
+        not isinstance(ticks, Sequence)
+        or isinstance(ticks, (str, bytes))
+        or not isinstance(close, Sequence)
+        or isinstance(close, (str, bytes))
+        or len(ticks) != len(close)
+    ):
+        raise _FlakyChartResponse("malformed ok body (ticks/close shape mismatch)")
+    return ticks, close
+
 
 async def fetch_deribit_perp_daily_index(
     exchange: Any,
@@ -690,6 +752,133 @@ async def fetch_deribit_perp_daily_index(
     return prices
 
 
+async def fetch_deribit_option_daily_marks(
+    exchange: Any,
+    instrument: str,
+    *,
+    oldest_day: str,
+    newest_day: str,
+    sleep: SleepFn = asyncio.sleep,
+    max_retries: int = PUBLIC_READ_MAX_RETRIES,
+) -> dict[str, float]:
+    """Per-UTC-day mark for a single OPTION ``instrument`` from the DAILY CLOSE of
+    Deribit's public ``get_tradingview_chart_data`` endpoint (``resolution=1D``),
+    for ``[oldest_day 00:00 UTC, newest_day 24:00 UTC]``.
+
+    Greenfield clone of :func:`fetch_deribit_perp_daily_index` (same public
+    endpoint, same tick→UTC-day dedupe, same read-error discipline) with two
+    deliberate differences for the daily-option-MTM (``smoothed_mtm``) basis:
+
+    * The ``instrument`` name is taken VERBATIM — no suffix synthesis. Callers pass
+      the exact expired-option instrument (e.g. ``BTC-27JUN25-100000-C``), the
+      1D-chart source PROVEN to serve daily closes for long-expired options
+      (Phase 131 probe: 4 expired BTC options, status=ok, 401 daily bars each).
+    * An EXPLICIT ``newest_day`` caps the fetched span at the instrument's
+      expiry — never fetch past expiry (a position cannot outlive its expiry, and
+      the source only lists a bar within the instrument's life).
+
+    This function stays an HONEST fetch, exactly like its sibling: a TRANSIENT read
+    is retried with exponential backoff and RAISES ``DeribitTransientReadError`` on
+    ``max_retries`` exhaustion (retryable) — NEVER a silently-partial map. A GENUINE
+    benign no-data — the exchange RESPONDED with ``BadSymbol`` (thrown) or an
+    explicit ``status == "no_data"`` 200 — returns ``{}`` (the caller's D-07 hole
+    guard decides whether that empty map is a fail-loud). GLB-4: a FLAKY 200 whose
+    body is neither ``ok`` nor ``no_data`` (a rate-limit / maintenance / error
+    payload, or an ``ok`` body with malformed ``ticks``/``close``) is NOT a
+    business no-data answer — it is retried on the SAME transient budget (so a
+    healthy re-fetch is seen) rather than silently yielding ``{}`` and letting a
+    single blip permanently fail a held-position options strategy downstream. The
+    STRUCTURAL-gap / fail-loud decision (a hole inside a listed instrument's held
+    life → ``LedgerValuationError``) belongs to the CALLER (``option_mtm_daily`` in
+    ``deribit_txn.py``), not to this fetch. A 1D series spans at most a few thousand
+    points, so ONE request suffices (no pagination). Every ccxt error is scrubbed
+    before logging.
+    """
+    start_ms = int(pd.Timestamp(oldest_day, tz="UTC").timestamp() * 1000)
+    # CR-01: Deribit stamps 1D bars at 08:00 UTC (M7 evidence: bar_stamp_utc
+    # 08:00), so ``newest_day``'s OWN bar lives at ``newest_day 08:00`` — PAST a
+    # midnight end bound. End at ``newest_day + 24h`` so the newest needed bar is
+    # always covered (the sibling perp fetcher achieves the same by ending at
+    # ``now()``); the NEXT day's 08:00 bar stays excluded, so the expiry cap is
+    # preserved. With the old ``newest_day 00:00`` bound a single open position
+    # (window ``[T, T]``) returned ZERO bars and the D-07 hole guard hard-failed
+    # a perfectly healthy account.
+    end_ms = (
+        int(pd.Timestamp(newest_day, tz="UTC").timestamp() * 1000)
+        + 24 * 3600 * 1000
+    )
+    params: dict[str, Any] = {
+        "instrument_name": instrument,
+        "start_timestamp": start_ms,
+        "end_timestamp": end_ms,
+        "resolution": _PERP_DAILY_RESOLUTION,
+    }
+    retries = 0
+    while True:
+        try:
+            resp = await exchange.public_get_get_tradingview_chart_data(params)
+            # GLB-4: classify the 200 body INSIDE the loop so a flaky/error 200
+            # (rate-limit, maintenance, truncated arrays) raises _FlakyChartResponse
+            # and is retried on the SAME budget as a thrown transient — never
+            # silently returned as {}. A genuine ``no_data`` → arrays is None → {}.
+            arrays = _validate_chart_ok_arrays(resp)
+            break
+        except _FlakyChartResponse as exc:
+            retries += 1
+            if retries > max_retries:
+                raise DeribitTransientReadError(
+                    "deribit get_tradingview_chart_data returned a flaky/unexpected "
+                    f"200 body across {max_retries} retries for "
+                    f"instrument={instrument} ({exc}) — refusing a silently-empty "
+                    "daily-mark map (retryable)"
+                ) from None
+            await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            if _is_transient_read_error(exc):
+                retries += 1
+                if retries > max_retries:
+                    raise DeribitTransientReadError(
+                        "deribit get_tradingview_chart_data transient read budget "
+                        f"({max_retries}) exhausted for instrument={instrument} — "
+                        "refusing a silently-partial daily-mark map (retryable)"
+                    ) from None
+                await sleep(PUBLIC_READ_BACKOFF_BASE_SECONDS * (2 ** (retries - 1)))
+                continue
+            logger.warning(
+                "deribit get_tradingview_chart_data structural no-data for "
+                "instrument=%s (%s); returning no daily marks",
+                instrument,
+                scrub_freeform_string(str(exc)),
+            )
+            return {}
+    if arrays is None:  # explicit no_data → benign empty map
+        return {}
+    ticks, close = arrays
+    marks: dict[str, float] = {}
+    for raw_ts, raw_price in zip(ticks, close):
+        try:
+            ts_ms = int(raw_ts)
+            price = float(raw_price)
+        except (TypeError, ValueError):
+            continue
+        # WR-04: unlike the perp-INDEX sibling (where a non-positive price is
+        # nonsense), a 0.0 daily close on a deep-OTM option near expiry is
+        # economically LEGITIMATE — dropping it would delete the day from the
+        # marks map and the D-07 hole guard would hard-fail a held worthless
+        # position with a misleading "missing bar" message. Keep 0.0 (the
+        # premium collapse is real ΔMTM); only a NEGATIVE close (impossible for
+        # an option price) is dropped.
+        if price < 0:
+            continue
+        day = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d"
+        )
+        # One 1D bar per UTC day; setdefault keeps the FIRST (defensive vs a dupe).
+        marks.setdefault(day, price)
+    return marks
+
+
 def _price_map_has_gap(
     price_map: Mapping[str, float], oldest_day: str, newest_day: str
 ) -> bool:
@@ -765,6 +954,21 @@ class CompletenessReport:
     # channel and no "pre-coverage fallback" (every option row books its raw cash
     # ``change`` by design), so the adapter suppresses this list entirely.
     pre_coverage_option_days: list[tuple[str, str]] = field(default_factory=list)
+    # Phase 131 (SMOOTHED_MTM basis only) — sorted-unique ``(currency, utc_day)``
+    # buckets for option instruments whose ENTIRE listed life predates the venue's
+    # ~2.5yr 1D-chart retention horizon (wholly-empty marks response AND expiry
+    # older than the horizon). Those instruments contribute NO daily ΔMTM (their
+    # days stay cash-basis ``change``); the worker stamps this as the
+    # ``pre_mark_retention_option_dailies`` warning (complete_with_warnings) in
+    # 131-02. A crawl artifact computed in ``build_deribit_native_ledger`` from the
+    # raw rows + the per-instrument marks probe. Empty for perp-only / fully-marked
+    # accounts — and ALWAYS empty under cash_settlement / mark_to_market (no ΔMTM
+    # channel, so no retention partition), keeping those bases byte-identical
+    # (SC-4). A retention-STRADDLING instrument (partial marks) is NEVER bucketed
+    # here — its head hole fails the ledger build loud (the D-07 consequence).
+    pre_mark_retention_option_days: list[tuple[str, str]] = field(
+        default_factory=list
+    )
     # CR-01 — sorted currencies EXEMPTED from the strict balance-identity guard
     # because their option book is provably OPEN at crawl (nonzero
     # ``native_options_value``) or has trailing option activity past the last
@@ -1375,6 +1579,16 @@ class DeribitNativeAccountState:
     # authoritative reconciliation. Absent on perp-only summaries → 0.0 (never
     # fabricated; SC-4 byte-safe). A failed/empty read yields an EMPTY map.
     native_options_value: Mapping[str, float]
+    # Phase 131 (SMOOTHED_MTM book-channel cross-check) — per-UPPERCASE-ccy
+    # ``options_session_upl`` read off the SAME summaries response (D5): the OPEN
+    # option book's CURRENT-session unrealized P&L, in NATIVE units. The book-channel
+    # guard reconciles the replayed settled book ``Book(last settlement)`` against the
+    # anchor's SETTLED book = ``native_options_value[c] − native_options_session_upl[c]``
+    # (the daily marks are 08:00-settlement closes, so they exclude the current
+    # session's unrealized move — which lives here). Absent on perp-only summaries →
+    # 0.0 (never fabricated; SC-4 byte-safe). Defaulted so every existing positional
+    # constructor stays valid. A failed/empty read yields an EMPTY map (→ 0.0).
+    native_options_session_upl: Mapping[str, float] = field(default_factory=dict)
 
 
 async def fetch_deribit_native_account_state(
@@ -1418,6 +1632,7 @@ async def fetch_deribit_native_account_state(
     native_equity: dict[str, float] = {}
     native_upnl: dict[str, float] = {}
     native_options_value: dict[str, float] = {}
+    native_options_session_upl: dict[str, float] = {}
     for summ in summaries:
         if not isinstance(summ, Mapping):
             continue
@@ -1434,6 +1649,13 @@ async def fetch_deribit_native_account_state(
         # exempts this currency from the STRICT balance-identity guard (§5 becomes
         # authoritative on the open book).
         native_options_value[ccy] = float(summ.get("options_value", 0.0) or 0.0)
+        # Phase 131: the options-only session uPnL, read STRAIGHT off the SAME
+        # response (NOT the combined futures+options wedge above). Feeds the
+        # SMOOTHED_MTM book-channel settled-book anchor decomposition. Absent →
+        # 0.0 (never fabricated; SC-4 byte-safe).
+        native_options_session_upl[ccy] = float(
+            summ.get("options_session_upl", 0.0) or 0.0
+        )
 
     # Resolve one {ccy}_usd index per held non-linear currency for the COLLAPSED
     # anchor/wedge only (the native maps above never touch these).
@@ -1501,6 +1723,7 @@ async def fetch_deribit_native_account_state(
         return DeribitNativeAccountState(
             native_equity, native_upnl, None, 0.0, True, False,
             native_options_value,
+            native_options_session_upl,
         )
     open_unrealized_usd, upnl_unreadable = _deribit_session_upl_to_usd(
         summaries, index_prices
@@ -1513,6 +1736,7 @@ async def fetch_deribit_native_account_state(
         False,
         upnl_unreadable,
         native_options_value,
+        native_options_session_upl,
     )
 
 
@@ -1756,6 +1980,224 @@ async def _build_dense_native_marks(
     return marks
 
 
+# Phase 131 — Deribit's public ``get_tradingview_chart_data`` 1D series retains
+# roughly 2.5 years of daily bars for expired option instruments (M7 live probe:
+# 401 daily bars each on Dec-24…Sep-25-expiry BTC options). An instrument whose
+# WHOLE listed life predates this horizon returns a wholly-empty 1D response —
+# that is the ONLY case that stays cash-basis (bounded fallback, Q4). An
+# instrument expiring INSIDE the horizon with no bars is a STRUCTURAL hole →
+# fail loud (never a silent cash fallback). ~2.5yr = 913 days.
+#
+# GLB-5: 913 is a ONE-PROBE point estimate of an UNCONTRACTED Deribit behaviour,
+# so it is env-overridable via ``DERIBIT_OPTION_MARK_RETENTION_DAYS`` (positive
+# int; mirrors the ``COMPOSITE_MAX_MEMBERS`` override in job_worker.py) — ops can
+# SHORTEN it without a redeploy if the real horizon proves shorter, instead of a
+# currently-green key spontaneously hard-failing as its history ages into the band.
+_OPTION_MARK_RETENTION_DAYS_DEFAULT: int = 913
+# GLB-5: the near-cutoff tolerance band. A WHOLLY-EMPTY marks response for an
+# instrument whose expiry is within this many days NEWER than the retention cutoff
+# is treated as pre-retention (cash fallback + loud warning) rather than a D-07
+# structural hole — the horizon is uncertain, so an expiry a touch inside the
+# probed 913d that returns no bars is far more likely a slightly-shorter real
+# horizon than a genuine data hole. A still-recent wholly-empty expiry (past this
+# band) and any partial-marks straddler STILL fail loud.
+_OPTION_MARK_RETENTION_TOLERANCE_DAYS: int = 30
+
+
+def _option_mark_retention_days() -> int:
+    """The chart-retention horizon (days) beyond which a wholly-empty 1D option
+    response is treated as pre-retention (cash fallback) rather than a structural
+    hole. Defaults to the Phase-131 ~2.5yr probe (913d); env-overridable via
+    ``DERIBIT_OPTION_MARK_RETENTION_DAYS`` (positive int) — a non-positive / non-int
+    override is ignored with a warning (GLB-5)."""
+    override = os.environ.get("DERIBIT_OPTION_MARK_RETENTION_DAYS")
+    if override:
+        try:
+            parsed = int(override)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+        logger.warning(
+            "DERIBIT_OPTION_MARK_RETENTION_DAYS=%r is not a positive int; using "
+            "the %d-day default",
+            override,
+            _OPTION_MARK_RETENTION_DAYS_DEFAULT,
+        )
+    return _OPTION_MARK_RETENTION_DAYS_DEFAULT
+# The dated-expiry segment of a Deribit option name, e.g. ``BTC-27JUN25-100000-C``
+# / ``BTC_USDC-27MAR26-50000-P`` → ``27JUN25``. Mid-name (unlike the ``$``-anchored
+# future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
+# strike + right suffix after the expiry.
+_OPTION_EXPIRY_RE: re.Pattern[str] = re.compile(r"-(\d{1,2}[A-Z]{3}\d{2})-")
+# IN-02: Deribit's month tokens are ENGLISH constants — never parse them with
+# ``strptime(%b)``, which consults the process locale (de_DE: MAR/OCT/DEC fail →
+# expiry None → the pre-retention partition can never bucket and old
+# wholly-empty instruments hard-fail instead of warning). No other services/
+# code uses ``%b``.
+_OPTION_EXPIRY_MONTHS: dict[str, int] = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _option_expiry_iso(instrument: str) -> str | None:
+    """The UTC-day ISO expiry (``YYYY-MM-DD``) parsed from a Deribit option
+    instrument name, or ``None`` if the name carries no dated-expiry segment.
+    Never guessed — the expiry caps the marks fetch span (never fetch past it) and
+    keys the pre-retention partition. Locale-independent (explicit English month
+    map — IN-02). Pure / never raises on untrusted input."""
+    match = _OPTION_EXPIRY_RE.search(instrument.upper())
+    if match is None:
+        return None
+    token = match.group(1)  # e.g. "27JUN25": day (1-2 digits), month, 2-digit year
+    month = _OPTION_EXPIRY_MONTHS.get(token[-5:-2])
+    if month is None:
+        return None
+    try:
+        return date(2000 + int(token[-2:]), month, int(token[:-5])).isoformat()
+    except ValueError:
+        return None
+
+
+def _last_settled_option_mark_day() -> str:
+    """The UTC-day KEY of the most recent COMPLETED Deribit 1D option bar.
+
+    Deribit stamps a 1D bar at ``D 08:00 UTC`` (its settlement boundary — M7
+    evidence) and the bar COMPLETES at the NEXT boundary, ``D+1 08:00``; its close
+    is then the venue's settled mark for that boundary — the same settled basis
+    the anchor's ``options_value − options_session_upl`` decomposes to. The most
+    recent completed bar is therefore stamped ``(most recent 08:00 boundary) −
+    24h``. Capping an OPEN instrument's marks window here (CR-02) keeps the
+    current PARTIAL bar — whose live close still carries ``options_session_upl``
+    — OUT of the terminal book, so the book channel reconciles exactly at the
+    settled boundary."""
+    now = datetime.now(timezone.utc)
+    boundary = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    if now < boundary:
+        boundary -= timedelta(days=1)
+    return (boundary - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+async def _build_smoothed_option_mtm(
+    exchange: Any,
+    raw_rows: Sequence[Mapping[str, Any]],
+    *,
+    sleep: SleepFn,
+) -> tuple[dict[str, dict[str, float]], dict[str, float], list[tuple[str, str]]]:
+    """SMOOTHED_MTM ΔMTM channel (Task 4). Replay the option book, fetch each held
+    instrument's daily marks (ONE expiry-capped request per instrument), partition
+    off the pre-retention instruments (wholly-empty marks AND expiry older than the
+    env-overridable ~2.5yr horizon — plus a GLB-5 tolerance band just inside it —
+    → cash-basis bucket), and feed the rest to the PURE ``option_mtm_daily`` (which
+    fails loud on any hole inside a listed life — including retention STRADDLERS,
+    whose partial marks are never bucketed).
+
+    Returns ``(delta_mtm, terminal_book, pre_mark_retention_option_days)``. The
+    terminal book feeds the Task-5 book-channel anchor guard. Pure-core fail-loud
+    (``LedgerValuationError``) propagates verbatim — never swallowed."""
+    positions = replay_option_positions(raw_rows)
+    if not positions:
+        return {}, {}, []
+    today = _today_utc_iso()
+    retention_days = _option_mark_retention_days()  # GLB-5: env-overridable
+    today_date = datetime.strptime(today, "%Y-%m-%d")
+    retention_cutoff = (
+        today_date - timedelta(days=retention_days)
+    ).date().isoformat()
+    # GLB-5: the softened boundary — ``_OPTION_MARK_RETENTION_TOLERANCE_DAYS``
+    # NEWER than the hard cutoff. A wholly-empty response whose expiry is older
+    # than THIS (i.e. either clearly pre-retention, or inside the uncertain
+    # tolerance band just past the cutoff) buckets to cash rather than D-07.
+    soft_cutoff = (
+        today_date
+        - timedelta(days=max(0, retention_days - _OPTION_MARK_RETENTION_TOLERANCE_DAYS))
+    ).date().isoformat()
+
+    kept_positions: dict[str, Mapping[str, Any]] = {}
+    marks: dict[str, dict[str, float]] = {}
+    pre_retention: set[tuple[str, str]] = set()
+    last_settled = _last_settled_option_mark_day()
+    for instrument in sorted(positions):
+        info = positions[instrument]
+        first_day = str(info["first_day"])
+        last_day = str(info["last_day"])
+        expiry = _option_expiry_iso(instrument)
+        # CR-02: an instrument whose FINAL replayed position is nonzero is OPEN —
+        # it stays exposed through the CURRENT settlement, not just its last
+        # event day. Fetch its marks through the last SETTLED bar day so (a) the
+        # ΔMTM series carries the book on every held day after the last trade
+        # (no silent truncation) and (b) the terminal book lands at the SAME
+        # settled boundary the anchor decomposes to — this also covers the days a
+        # LATER-trading sibling instrument extends the global grid across (a
+        # last-EVENT window there produced a spurious D-07 hole naming a healthy
+        # instrument). A CLOSED instrument (final position 0) still ends at its
+        # last event day. Never fetch past expiry either way (a position cannot
+        # outlive its expiry; the source only lists bars within the life). A
+        # same-day event past the last settled bar can still pull the window onto
+        # the current PARTIAL bar — the book channel then judges it (fail-loud,
+        # never silent).
+        event_positions = info["positions"]
+        # IN-03: an instrument with NO nonzero end-of-day position (opened and
+        # closed intraday, never held across a settlement) needs NO daily marks
+        # — it can contribute nothing to the ΔMTM book and can never hole. Skip
+        # the fetch entirely and NEVER bucket it as pre-retention: its cash legs
+        # already carry the full P&L, so a complete_with_warnings stamp would be
+        # spurious.
+        if not any(float(v) != 0.0 for v in event_positions.values()):
+            continue
+        terminal_pos = float(event_positions[max(event_positions)])
+        newest = last_day if terminal_pos == 0.0 else max(last_day, last_settled)
+        if expiry is not None:
+            newest = min(newest, expiry)
+        instr_marks = await fetch_deribit_option_daily_marks(
+            exchange, instrument, oldest_day=first_day, newest_day=newest, sleep=sleep
+        )
+        # Partition on WHOLLY-empty AND expiry at-or-before the SOFT cutoff (both
+        # required). GLB-5: ``soft_cutoff`` widens the hard retention cutoff by the
+        # tolerance band, so a wholly-empty response whose expiry sits just INSIDE
+        # the probed 913d horizon (the uncertain band, most likely a slightly
+        # shorter real horizon) buckets to cash-basis rather than hard-failing
+        # D-07. Any other empty/holed response — a still-recent wholly-empty
+        # expiry (past the band), OR a straddler's PARTIAL (nonempty) marks — is
+        # KEPT so ``option_mtm_daily`` fails loud on the structural hole (D-07). A
+        # straddler is never wholly-empty (it returns partial marks) → never
+        # bucketed here.
+        if not instr_marks and expiry is not None and expiry < soft_cutoff:
+            if expiry >= retention_cutoff:
+                # Near-cutoff softening: expiry is NEWER than the hard cutoff but
+                # inside the tolerance band. Loud (this is the uncertain case) so
+                # ops can shorten DERIBIT_OPTION_MARK_RETENTION_DAYS if it recurs.
+                logger.warning(
+                    "deribit option %s returned wholly-empty 1D marks with expiry "
+                    "%s within %d days of the %dd retention cutoff %s — bucketing "
+                    "as pre-retention cash-basis (GLB-5 near-cutoff softening); if "
+                    "this recurs, shorten DERIBIT_OPTION_MARK_RETENTION_DAYS",
+                    instrument,
+                    expiry,
+                    _OPTION_MARK_RETENTION_TOLERANCE_DAYS,
+                    retention_days,
+                    retention_cutoff,
+                )
+            ccy = str(info["currency"]).upper()
+            for day in info["positions"]:
+                pre_retention.add((ccy, day))
+            continue
+        kept_positions[instrument] = info
+        marks[instrument] = instr_marks
+
+    # NF-01: cap the ΔMTM grid at the last SETTLED bar day so a sibling
+    # instrument's crawl-day event (delivery/settlement/trade → last_day = today)
+    # cannot drag the dense grid onto TODAY, where another OPEN instrument still
+    # carries a nonzero position with no settled mark (a spurious D-07 hole
+    # naming the healthy instrument). The crawl-day cash already books on the
+    # cash channel; that day is simply never MTM-marked.
+    delta_mtm, terminal_book = option_mtm_daily(
+        kept_positions, marks, last_settled_day=last_settled
+    )
+    return delta_mtm, terminal_book, sorted(pre_retention)
+
+
 async def build_deribit_native_ledger(
     exchange: Any,
     since_ms: int | None = None,
@@ -1793,6 +2235,23 @@ async def build_deribit_native_ledger(
     The collapsed USD anchor stays available via
     :func:`fetch_deribit_native_account_state` for the 80-04 parity panel.
     Leak: no raw balances/marks/flows logged."""
+    # WR-05: the smoothed replay reconstructs ABSOLUTE option positions from the
+    # signed post-trade ``position`` field, so it is only correct over the FULL
+    # history (Deribit's txn-log reaches inception — ``full_history=True``
+    # below). A ``since_ms``-cropped crawl would see positions only from the
+    # first in-window row: earlier held days silently unmarked, the first
+    # in-window day absorbing a book jump, and the option-activity gate (ANY
+    # option-evidence row) disagreeing with the replay (trade/delivery rows
+    # only) — terminal_book {} vs a nonzero venue anchor. Fail loud before
+    # crawling rather than misattribute; the other bases keep accepting
+    # ``since_ms`` (SC-4).
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and since_ms is not None:
+        raise LedgerValuationError(
+            "smoothed_mtm requires a full-history crawl (since_ms=None): the "
+            "option-book replay reconstructs absolute positions from the signed "
+            "post-trade position field and a cropped window would silently "
+            "mis-state the daily MTM"
+        )
     _daily_records, raw_rows, indexable, report = await _crawl_deribit_ledger(
         exchange, since_ms, sleep=sleep
     )
@@ -1808,9 +2267,31 @@ async def build_deribit_native_ledger(
     native_daily = txn_rows_to_native_daily(
         raw_rows, pnl_basis=pnl_basis, exclude_spot_extraction=exclude_spot_extraction
     )
+    # ``native_daily`` is the CASH channel (option rows on FULL change; summary
+    # inert). It is the reference the STRICT balance-identity cash channel reconciles
+    # against (Σ==Σchange) BELOW — so keep it pre-merge. Under SMOOTHED_MTM the
+    # per-(day,ccy) ΔMTM book is merged into a SEPARATE ``series_daily`` dict that
+    # feeds the native_pnl series (and thus the dense-mark span); the book channel
+    # reconciles the ΔMTM terminal book against the anchor (Task 5). For every other
+    # basis ``series_daily is native_daily`` → byte-identical (SC-4).
+    series_daily = native_daily
+    smoothed_terminal_book: dict[str, float] = {}
+    smoothed_delta_mtm: dict[str, dict[str, float]] = {}
+    if pnl_basis == PNL_BASIS_SMOOTHED_MTM and deribit_raw_rows_have_option_activity(
+        raw_rows
+    ):
+        smoothed_delta_mtm, smoothed_terminal_book, pre_retention = (
+            await _build_smoothed_option_mtm(exchange, raw_rows, sleep=sleep)
+        )
+        report.pre_mark_retention_option_days = pre_retention
+        series_daily = {ccy: dict(days) for ccy, days in native_daily.items()}
+        for ccy, day_map in smoothed_delta_mtm.items():
+            bucket = series_daily.setdefault(ccy, {})
+            for day, change in day_map.items():
+                bucket[day] = bucket.get(day, 0.0) + change
     native_pnl: dict[str, pd.Series] = {
         ccy: _native_daily_to_series(day_map)
-        for ccy, day_map in native_daily.items()
+        for ccy, day_map in series_daily.items()
     }
     native_flows = report.dated_external_flows
     # Phase 86 (COMP-04) MTM-gate signal — additive crawl artifact set from the RAW
@@ -1879,9 +2360,23 @@ async def build_deribit_native_ledger(
         if pnl_basis == PNL_BASIS_MARK_TO_MARKET
         else frozenset()
     )
+    # ``native_daily`` here is the PRE-merge CASH channel (option rows on full
+    # change), so the strict cash-channel identity closes Σ==Σchange exactly under
+    # every basis. Under SMOOTHED_MTM the additional book + summary cross-check
+    # channels reconcile the ΔMTM terminal book against the venue anchor's settled
+    # book and police the summary stream (all inert / None for the other bases →
+    # byte-identical, SC-4).
     assert_balance_identity(
         raw_rows, native_daily, native_floor=native_floor, open_option_ccys=open_opt,
         exclude_spot_extraction=exclude_spot_extraction, pnl_basis=pnl_basis,
+        terminal_book=(
+            smoothed_terminal_book
+            if pnl_basis == PNL_BASIS_SMOOTHED_MTM
+            else None
+        ),
+        native_options_value=state.native_options_value,
+        native_options_session_upl=state.native_options_session_upl,
+        option_delta_mtm=smoothed_delta_mtm,
     )
     # Surface the exempted currencies for logs/harness (an open book is the NORMAL
     # state — §5 guards it — so this is NOT promoted to complete_with_warnings;
@@ -1916,7 +2411,20 @@ async def build_deribit_native_ledger(
     # Under MARK_TO_MARKET the open book's value is ALREADY carried INTO native_pnl by
     # the summary channel, so adding it to the wedge would DOUBLE-COUNT — keep the
     # wedge = session uPnL only there (unchanged).
-    if pnl_basis == PNL_BASIS_MARK_TO_MARKET:
+    #
+    # WR-01: SMOOTHED_MTM joins the MARK_TO_MARKET arm for the same reason — the
+    # ΔMTM merge already carries the SETTLED open book into native_pnl
+    # (terminal_book == options_value − options_session_upl, book-channel-guarded
+    # above), so re-adding options_value would double-count it and strand a §5
+    # residual ≈ options_value on every healthy open-book account. From the M5
+    # anchor identity (equity − combined_session_upl == cash + options_value −
+    # options_session_upl): Σnative_pnl = cash′ + options_value −
+    # options_session_upl ⇒ required wedge = equity − Σflow − Σnative_pnl =
+    # futures_session_upl + options_session_upl — exactly the COMBINED session
+    # uPnL that ``state.native_upnl`` already reads (the two legs the settled
+    # daily marks exclude). §5 then closes exactly (pinned by the open-book
+    # smoothed §5-through test).
+    if pnl_basis in (PNL_BASIS_MARK_TO_MARKET, PNL_BASIS_SMOOTHED_MTM):
         terminal_upnl_native: Mapping[str, float] = state.native_upnl
     else:
         _wedge_ccys = (

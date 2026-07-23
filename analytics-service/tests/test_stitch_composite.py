@@ -29,6 +29,7 @@ from services.stitch_composite import (
     clip_to_window,
     coverage_mask,
     mark_to_market_available,
+    smoothed_mtm_available,
     stitch_clipped_series,
     windows_overlap,
 )
@@ -239,6 +240,66 @@ def test_mtm_gate_options_activity_takes_precedence_over_ccxt_venue() -> None:
         MemberBasisSignal(2, "deribit", has_option_activity=True),
     ]
     assert mark_to_market_available(members) == (False, "unsmoothed_options_book")
+
+
+# --------------------------------------------------------------------------- #
+# smoothed_mtm_available — the Phase-132 gate that OPENS what MTM keeps closed
+# --------------------------------------------------------------------------- #
+def test_smoothed_gate_options_active_is_available() -> None:
+    """THE PHASE POINT: an options-active book — which mark_to_market_available
+    honestly gates OFF (unsmoothed_options_book) — IS admissible under smoothed_mtm.
+    Availability keys on option-activity ALONE. Neuter (return False for options /
+    consult the MTM gate) → RED."""
+    members = [MemberBasisSignal(1, "deribit", has_option_activity=True)]
+    assert smoothed_mtm_available(members) is True
+    # ... while the MTM gate stays honestly CLOSED with its unchanged reason.
+    assert mark_to_market_available(members) == (False, MTM_REASON_OPTIONS)
+
+
+def test_smoothed_gate_perp_only_not_available() -> None:
+    """A perp-only / USD-native book has NO option ΔMTM to redistribute (smoothed ≡
+    cash there), so smoothed is NOT available — nothing additive to persist (SC-4).
+    Neuter (return True unconditionally) → RED."""
+    members = [
+        MemberBasisSignal(1, "deribit", has_option_activity=False),
+        MemberBasisSignal(2, "deribit", has_option_activity=False),
+    ]
+    assert smoothed_mtm_available(members) is False
+
+
+@pytest.mark.parametrize("venue", ["binance", "okx", "bybit"])
+def test_smoothed_gate_ccxt_only_not_available(venue: str) -> None:
+    """A ccxt-only composite (no option activity) has no smoothed basis — smoothed ≡
+    cash. Availability keys on option-activity, never a smoothed-of-cash artifact."""
+    members = [MemberBasisSignal(1, venue, has_option_activity=False)]
+    assert smoothed_mtm_available(members) is False
+
+
+def test_smoothed_gate_mixed_ccxt_and_options_is_available() -> None:
+    """UNLIKE the MTM gate (which the ccxt venue closes with MTM_REASON_VENUE), the
+    smoothed gate keys on OPTION ACTIVITY ALONE: a composite with a ccxt member AND an
+    options-active Deribit member IS smoothed-available (the ccxt leg passes through as
+    cash, the Deribit leg redistributes ΔMTM). Neuter (gate off on the ccxt venue) →
+    RED."""
+    members = [
+        MemberBasisSignal(1, "binance", has_option_activity=False),
+        MemberBasisSignal(2, "deribit", has_option_activity=True),
+    ]
+    assert smoothed_mtm_available(members) is True
+
+
+def test_smoothed_availability_never_mutates_the_mtm_gate() -> None:
+    """The smoothed decision must NOT consult or alter mark_to_market_available /
+    MTM_REASON_OPTIONS — the MTM gate decision stays BYTE-IDENTICAL whether or not the
+    smoothed gate is evaluated first. Neuter (fold smoothed into the MTM tuple) → RED."""
+    members = [
+        MemberBasisSignal(1, "deribit", has_option_activity=True),
+        MemberBasisSignal(2, "deribit", has_option_activity=False),
+    ]
+    mtm_before = mark_to_market_available(members)
+    _ = smoothed_mtm_available(members)
+    mtm_after = mark_to_market_available(members)
+    assert mtm_before == mtm_after == (False, MTM_REASON_OPTIONS)
 
 
 # --------------------------------------------------------------------------- #

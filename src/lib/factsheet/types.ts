@@ -568,6 +568,14 @@ export type FactsheetCommon = {
   metricsByBasis?: {
     cash_settlement?: Record<string, number>;
     mark_to_market?: Record<string, number>;
+    /**
+     * Phase 132/133 (SMTM-01) — the smoothed daily-mark basis. SAME omission
+     * contract as `mark_to_market`: present ONLY when the Phase-132 worker's
+     * smoothed pass completed on an options-activity book (absent, never JSON
+     * null, otherwise). Drives the third SegmentedControl segment + KpiStrip
+     * overlay.
+     */
+    smoothed_mtm?: Record<string, number>;
   };
   /**
    * FS-03 — server-truth MTM gate (D1). `available` = the `mark_to_market` key
@@ -578,6 +586,19 @@ export type FactsheetCommon = {
   mtmGate?: {
     available: boolean;
     reason?: "unsmoothed_options_book" | "mtm_basis_unavailable_for_venue" | string;
+  };
+  /**
+   * Phase 133 (SMTM-01) — server-truth SMOOTHED gate, the sibling of {@link mtmGate}.
+   * `available` = the `smoothed_mtm` key is present in `metrics_json_by_basis` with a
+   * trustworthy headline. There is NO persisted smoothed-reason column (the worker
+   * only persists the smoothed key on a completed options pass), so the disabled
+   * `reason` is a single closed-set default — `"smoothed_basis_unavailable"`
+   * ("not yet computed / marks missing / non-options book") — never a bare
+   * per-row string invention. `smoothedDisabledReasonCopy` maps it to honest copy.
+   */
+  smoothedGate?: {
+    available: boolean;
+    reason?: "smoothed_basis_unavailable" | string;
   };
   /**
    * Server-truth composite discriminator (`data_quality_flags.composite`).
@@ -608,7 +629,17 @@ export type FactsheetCommon = {
    * follows the basis; see {@link BasisSeriesBundle}). The KpiStrip's seven persisted
    * headline scalars are the only surface the merge does NOT own (Phase 102).
    */
-  seriesByBasis?: { mark_to_market?: BasisSeriesBundle };
+  seriesByBasis?: {
+    mark_to_market?: BasisSeriesBundle;
+    /**
+     * Phase 132/133 (SMTM-01) — the persisted smoothed daily-mark series bundle
+     * (kind `smoothed_mtm_daily_returns`), derived by the SAME `deriveSeriesBundle`
+     * as cash/MTM with its OWN axis + coverage mask. Additive-only: absent → the
+     * cash/MTM payload is byte-identical (SC-4). The client view-merge
+     * (`useBasisSeriesView`) swaps to this bundle under the `smoothed_mtm` basis.
+     */
+    smoothed_mtm?: BasisSeriesBundle;
+  };
 };
 
 /**
