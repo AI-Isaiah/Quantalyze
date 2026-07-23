@@ -272,3 +272,83 @@ def test_close_is_idempotent_and_swallows_shutdown_errors():
     client.close()  # must not raise even though shutdown() boom-s
     client.close()  # idempotent no-op
     assert fake.shutdown_calls == 1
+
+
+# -- order_check: probe only (investor-vs-master signal is a live unknown) ----
+
+
+def test_order_check_none_raises_via_last_error():
+    """order_check() None is an error -> typed raise carrying last_error() code."""
+    connect, _fake, _rec = _make(
+        {"order_check": None, "last_error": (7, "no connection")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.order_check({"action": 0})
+    assert exc_info.value.code == 7
+
+
+def test_order_check_materializes_result():
+    """order_check() netref -> native dict with retcode/comment intact.
+
+    The EXACT investor-vs-master retcode is [ASSUMED] until MT5SPIKE-01 leg 2 runs
+    live: the client only exposes the materialized probe result. The decision rule
+    is a Phase 135 call-site concern combining order_check retcode/comment with
+    account_info().trade_allowed — NEVER a call to the trade path.
+    """
+    connect, _fake, _rec = _make(
+        {"order_check": _FakeNamedTuple(retcode=10027, comment="Trade disabled")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    result = client.order_check({"action": 0})
+    assert isinstance(result, dict)
+    assert result["retcode"] == 10027
+    assert result["comment"] == "Trade disabled"
+
+
+# -- structural read-only surface guards -------------------------------------
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    [
+        "order_send",
+        "order_send_async",
+        "positions_get",
+        "orders_get",
+        "positions_total",
+        "orders_total",
+        "history_orders_get",
+        "copy_rates_from",
+        "symbol_info_tick",
+        "initialize",
+    ],
+)
+def test_read_only_surface_no_trade_methods(forbidden):
+    """Read-only by CONSTRUCTION: no trade/raw-surface method may exist on the
+    class. mt5linux exposes the full trading surface; a trade method appearing here
+    is a trust-integrity footgun for the whole `api_verified` value prop."""
+    assert not hasattr(Mt5Client, forbidden)
+
+
+def test_no_getattr_passthrough():
+    """No __getattr__ passthrough: a generic attribute-forwarding facade would
+    silently re-expose the full mt5linux surface, including the trade path."""
+    assert "__getattr__" not in vars(Mt5Client)
+
+
+def test_public_surface_is_exactly_the_contract():
+    """The public callable surface is EXACTLY the contract. Any accidental widening
+    (a new public method wrapping the mt5linux surface) fails loud here."""
+    public = {
+        name
+        for name in vars(Mt5Client)
+        if not name.startswith("_") and callable(getattr(Mt5Client, name))
+    }
+    assert public == {
+        "login",
+        "account_info",
+        "history_deals_get",
+        "order_check",
+        "close",
+    }
