@@ -82,6 +82,7 @@ class _FakeMt5Transport:
         last_error: tuple = (0, "unknown"),
         hang_s: float = 0.0,
         shutdown_hang_s: float = 0.0,
+        second_account: dict | None = None,
     ) -> None:
         self._account = account
         self._deals = deals
@@ -95,6 +96,11 @@ class _FakeMt5Transport:
         # tear down (the restart-itself-bounded case).
         self._hang_s = hang_s
         self._shutdown_hang_s = shutdown_hang_s
+        # MT5CONC-02: when set, the SECOND (and later) account_info() call returns
+        # this snapshot — a mid-read terminal re-login/hijack that the POST login
+        # bracket must catch independently of the PRE bracket.
+        self._second_account = second_account
+        self._account_info_calls = 0
         self.calls: list[str] = []
 
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
@@ -103,6 +109,9 @@ class _FakeMt5Transport:
 
     def account_info(self):
         self.calls.append("account_info")
+        self._account_info_calls += 1
+        if self._account_info_calls >= 2 and self._second_account is not None:
+            return _NT(self._second_account)
         return _NT(self._account)
 
     def history_deals_get(self, from_ts, to_ts):  # noqa: ANN001
@@ -300,7 +309,7 @@ def _reset_mt5_terminal_locks():
 async def test_mt5_disabled_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("MT5_ENABLED", raising=False)
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0}, deals=_canonical_deals()
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -323,7 +332,7 @@ async def test_mt5_disabled_fails_closed(monkeypatch) -> None:
 async def test_mt5_routes_one_backbone(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0}, deals=_canonical_deals()
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport, asset_class="traditional")
     series_conventions: dict = {}
@@ -331,9 +340,16 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
         result = await run_derive_broker_dailies_job(_job())
 
     assert result.outcome == DispatchOutcome.DONE
-    # The live read actually happened at the JOB level (proves the wiring, not
-    # just the helper): login → account_info → history_deals_get.
-    assert transport.calls[:3] == ["login", "account_info", "history_deals_get"]
+    # The live read actually happened at the JOB level (proves the wiring, not just
+    # the helper). The EXACT 4-call sequence is pinned: login → account_info (PRE
+    # login bracket) → history_deals_get → account_info (POST login bracket,
+    # MT5CONC-02). Silent deletion of the POST bracket reds this healthy-path test.
+    assert transport.calls == [
+        "login",
+        "account_info",
+        "history_deals_get",
+        "account_info",
+    ]
 
     rows = _csv_rows(capture)
     # Hand literals (NEVER read back from the SUT). day3 is a gap-filled flat 0.0.
@@ -363,7 +379,7 @@ async def test_upnl_wedge_flags(monkeypatch) -> None:
     # equity 110_000, balance 100_000 → wedge 10_000; 10_000/110_000 ≈ 0.0909 > 0.05.
     # The canonical 4-day ledger keeps >=2 usable days (floor not tripped).
     transport = _FakeMt5Transport(
-        account={"equity": 110_000.0, "balance": 100_000.0}, deals=_canonical_deals()
+        account={"equity": 110_000.0, "balance": 100_000.0, "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -384,7 +400,7 @@ async def test_upnl_wedge_flags(monkeypatch) -> None:
 async def test_read_error_fails_whole_job(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0},
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=[],
         read_exc=RuntimeError("kaboom mid-read"),  # unrecognized → transient
     )
@@ -415,7 +431,7 @@ async def test_unclassifiable_deal_permanent(monkeypatch) -> None:
          "time": _epoch(2025, 6, 5)}
     )
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0}, deals=deals
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=deals
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -447,7 +463,7 @@ async def test_missing_window_masked(monkeypatch) -> None:
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 5)},
     ]
     transport = _FakeMt5Transport(
-        account={"equity": 100_250.0, "balance": 100_250.0}, deals=deals
+        account={"equity": 100_250.0, "balance": 100_250.0, "login": 123456}, deals=deals
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -567,7 +583,7 @@ async def test_reconstruction_reconciles_to_equity(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     terminal_equity = 110_500.0  # account_info().equity — the ground truth
     transport = _FakeMt5Transport(
-        account={"equity": terminal_equity, "balance": terminal_equity},
+        account={"equity": terminal_equity, "balance": terminal_equity, "login": 123456},
         deals=_canonical_deals(),
     )
     ctx, capture = _build_ctx(transport)
@@ -616,7 +632,7 @@ async def test_mt5_hung_read_restart_on_timeout(monkeypatch) -> None:
     # real sleep so the abandoned reader thread drains and can never hang CI.
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0},
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=_canonical_deals(),
         hang_s=1.0,
     )
@@ -672,7 +688,7 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     monkeypatch.setattr(jw, "_MT5_RESTART_TIMEOUT_S", 0.05)
     read_hang, shutdown_hang = 0.3, 0.5  # genuine hangs the bounds must cut short
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0},
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=_canonical_deals(),
         hang_s=read_hang,
         shutdown_hang_s=shutdown_hang,
@@ -823,6 +839,113 @@ async def test_mt5_concurrent_syncs_serialized(monkeypatch) -> None:
         f"with the lock neutered the concurrent syncs MUST interleave (else the "
         f"positive assertion is vacuous); got {neutered!r}"
     )
+
+
+def _persisted_nothing(capture: dict) -> None:
+    """MT5CONC-02 assertion helper: a login-bracket mismatch persists NOTHING — no
+    daily series AND (critically) no user-attributed strategy_analytics 'failed'
+    stamp (a mismatch is a terminal/infra fault, never user-blame)."""
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"]), (
+        f"a login-bracket mismatch must NOT persist any daily series; "
+        f"upserts={[u[0] for u in capture['upserts']]!r}"
+    )
+    assert not any(u[0] == "strategy_analytics" for u in capture["upserts"]), (
+        f"a login-bracket mismatch must NOT stamp a user-blame analytics row; "
+        f"upserts={[u[0] for u in capture['upserts']]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 12 — MT5CONC-02: the PRE-read login bracket. The terminal presents a DIFFERENT
+# account than the connected key → fail loud (transient), restart, persist NOTHING,
+# never user-blame; the message carries ONLY the two int logins, never a secret.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_login_bracket_pre_mismatch(monkeypatch) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    # account_info().login (999999) != the connected key's login (123456).
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 999_999},
+        deals=_canonical_deals(),
+    )
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    # A mis-routed terminal is a stale-pipe INFRA fault → transient + restart (A3),
+    # never a permanent user-blame failure.
+    assert result.error_kind == "transient"
+    assert "shutdown" in transport.calls  # bounded restart fired
+    assert len(connects) == 2, "the mismatch branch must actively restart (re-connect)"
+    _persisted_nothing(capture)
+    # The message names BOTH int logins but NEVER the server/password.
+    msg = result.error_message or ""
+    assert "123456" in msg and "999999" in msg
+    assert "Broker-Live" not in msg and "pw" not in msg
+    # The PRE bracket fired BEFORE the deal read — history_deals_get never ran.
+    assert "history_deals_get" not in transport.calls
+
+
+# ---------------------------------------------------------------------------
+# 13 — MT5CONC-02: the POST-read login bracket (independent of the PRE bracket). A
+# mid-read terminal re-login (account_info returns the right login first, a wrong
+# one second) is caught AFTER the deal read → same fail-loud/persist-nothing outcome.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    # PRE account_info → login 123456 (matches); POST account_info → login 999999
+    # (a mid-read hijack). Only the POST bracket can catch this.
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=_canonical_deals(),
+        second_account={"equity": 110_500.0, "balance": 110_500.0, "login": 999_999},
+    )
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert len(connects) == 2, "the POST-bracket mismatch must also restart"
+    # The deal read DID run (PRE passed), then the POST bracket re-read and rejected.
+    assert transport.calls == [
+        "login",
+        "account_info",
+        "history_deals_get",
+        "account_info",
+    ]
+    _persisted_nothing(capture)
+    msg = result.error_message or ""
+    assert "123456" in msg and "999999" in msg
+    assert "Broker-Live" not in msg and "pw" not in msg
+
+
+# ---------------------------------------------------------------------------
+# 14 — MT5CONC-02: a MISSING login field must FAIL LOUD (never default-match). A
+# terminal snapshot without "login" is a degenerate/mis-routed read — treat it
+# exactly like a mismatch (Pitfall 3), never silently accept it.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_mt5_login_field_missing_fails_loud(monkeypatch) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    # No "login" key at all — the bracket must NOT default-match against the key.
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0},
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    _persisted_nothing(capture)
+    # The PRE bracket fired before the deal read (missing field never reaches it).
+    assert "history_deals_get" not in transport.calls
 
 
 # ---------------------------------------------------------------------------
