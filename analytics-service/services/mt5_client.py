@@ -14,9 +14,10 @@ Contract:
     STRUCTURAL property, not a probed scope claim: the underlying `mt5linux`
     client exposes the FULL trading surface (order_send, positions_get,
     orders_get, ...), but this facade composes ONLY the read methods plus the
-    order_check probe and NEVER wraps the trade path. There is NO `__getattr__`
-    passthrough — a generic attribute-forwarding facade would silently re-expose
-    that trade path and defeat the whole `api_verified` trust story. The forbidden
+    order_check probe and NEVER wraps the trade path. There is NO generic
+    attribute-forwarding passthrough (no dunder getattr hook) — such a facade would
+    silently re-expose that trade path and defeat the whole `api_verified` trust
+    story. The forbidden
     trade method (referred to here without call parentheses so the grep gate stays
     clean) is intentionally absent.
 
@@ -182,6 +183,22 @@ class Mt5Client:
         if deals is None:
             self._raise_last()
         return [_materialize(d) for d in deals]
+
+    def order_check(self, request: dict) -> dict:
+        """PROBE ONLY. Materialize an `order_check` result to a native dict; `None`
+        (error) -> typed raise.
+
+        This exists solely for the Phase-135 validate-time investor-vs-master
+        rejection (MT5SRC-02); this facade never wraps the trade path (referred to
+        here without call parentheses). `order_check` validates margin/funds and
+        does NOT place an order. The exact investor retcode/comment signal is
+        [ASSUMED] pending MT5SPIKE-01 leg 2 — the Phase-135 rule must combine the
+        order_check retcode/comment WITH account_info().trade_allowed (Pitfall 4).
+        """
+        result = self._mt5.order_check(request)
+        if result is None:
+            self._raise_last()
+        return _materialize(result)
 
     def close(self) -> None:
         """Bounded, idempotent shutdown of the terminal session. A teardown failure
