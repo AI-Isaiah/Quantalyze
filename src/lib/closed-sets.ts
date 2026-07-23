@@ -235,16 +235,40 @@ export function isSupportedExchange(value: string): boolean {
 // √252 traditional).
 
 /**
- * Is this exchange a crypto venue? Today EVERY supported exchange
- * (binance / okx / bybit / deribit / sfox) is crypto, so membership in the
- * allowlist IS the crypto signal. Case-insensitive. When a non-crypto
- * (equities/FX) venue is ever added to SUPPORTED_EXCHANGES this must be
- * narrowed to an explicit crypto subset — until then, allowlist membership
- * is the honest single source of truth.
+ * The crypto-venue subset of SUPPORTED_EXCHANGES — the "annualize on the crypto
+ * (√365) clock" set (#597). The TS mirror of the single-sourced Python registry
+ * `analytics-service/services/closed_sets.py::CRYPTO_VENUES`, pinned value-for-value
+ * by the literal-mirror test in closed-sets.test.ts (and, on the Python side, by
+ * plan 136-01's registry test) so the two #597 registries cannot silently drift.
+ *
+ * MT5RECON-02: `mt5` is a SUPPORTED venue (it clears the key-save allowlist) but is
+ * forex/CFD = TRADITIONAL √252, so it is deliberately EXCLUDED here. This is the TS
+ * half of the "MT5 = √252" divergence and it closes the MT5 instance of the DEFERRED
+ * unknown→crypto latent bug: an MT5 series can no longer be mis-annualized on √365,
+ * which would inflate its Sharpe ~×1.20 vs crypto peers on the allocator-facing
+ * ranking (a trust-integrity defect). `satisfies readonly SupportedExchange[]` makes
+ * a typo or a non-supported member a COMPILE error and keeps CRYPTO_EXCHANGES a
+ * subset of SUPPORTED_EXCHANGES.
+ */
+export const CRYPTO_EXCHANGES = [
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+  "sfox",
+] as const satisfies readonly SupportedExchange[];
+
+/**
+ * Is this exchange a crypto venue (the √365 clock, #597)? Membership in the
+ * EXPLICIT CRYPTO_EXCHANGES subset — NOT the wider SUPPORTED_EXCHANGES allowlist,
+ * which now includes the traditional forex/CFD venue `mt5` (MT5RECON-02). The
+ * "when a non-crypto venue is ever added" future-note is NOW: mt5 is that venue, so
+ * this returns FALSE for mt5 (and any non-crypto venue) and, unchanged, for
+ * null/undefined/''. Case-insensitive.
  */
 export function isCryptoExchange(exchange: string | null | undefined): boolean {
   if (!exchange) return false;
-  return (SUPPORTED_EXCHANGES as readonly string[]).includes(
+  return (CRYPTO_EXCHANGES as readonly string[]).includes(
     exchange.toLowerCase(),
   );
 }
