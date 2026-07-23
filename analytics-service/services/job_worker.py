@@ -286,7 +286,9 @@ _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "m
 # wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening is
 # delivered incrementally: restart-on-timeout landed in Phase 137 plan 01 (the
 # _MT5_RESTART_TIMEOUT_S / _mt5_bounded_restart pair below + the TimeoutError-branch
-# invocation), and the per-terminal lock + login bracket land in plan 137-02. Derived
+# invocation), and the module-level per-terminal lock (_MT5_TERMINAL_LOCKS /
+# _mt5_terminal_lock_for) + the account_info().login bracket (pre+post read) landed
+# in plan 137-02 — both Phase-137 deltas now delivered. Derived
 # from MT5_REQUEST_TIMEOUT_S (+10s margin) so a retuned rpyc bound carries through
 # — mirrors ingestion/mt5.py:_MT5_PROBE_TIMEOUT_S so the derive and probe paths
 # never diverge (WR-02).
@@ -350,6 +352,39 @@ async def _mt5_bounded_restart(client: "Mt5Client") -> None:
             "within its wall-clock bound — abandoning it; the transient retry will "
             "reconnect on the next attempt (MT5CONC-01)"
         )
+
+
+# MT5CONC-02 (Phase 137 plan 02): module-level per-terminal asyncio.Lock registry,
+# keyed by the process-wide terminal identity (host:port via Mt5Client.terminal_key),
+# mirroring position_reconstruction.py:308-317. It MUST be module-level, NOT a
+# Mt5Session attribute: _make_mt5_session builds a FRESH Mt5Session + Mt5Client per
+# job, so a Session-attached lock would be a brand-new Lock object per job and
+# serialize NOTHING (the Pitfall-1 anti-pattern). Keyed by terminal_key so every job
+# hitting the ONE shared Wine terminal contends on the SAME Lock.
+#
+# The dict grows unboundedly BY DESIGN (same rationale as the reconstruct registry):
+# evicting a Lock with waiters parked on it would silently break serialization, and
+# terminal cardinality is bounded (v1 = ONE gateway terminal, O(1) keys).
+#
+# v1 SCOPE — a DOCUMENTED gap, not silently assumed: an asyncio.Lock is
+# SINGLE-EVENT-LOOP. It serializes the shared terminal only WITHIN one worker
+# process's event loop. The sequential main_worker.py:606 dispatch loop runs jobs
+# one-at-a-time in-process, so in-process interleave is structurally impossible;
+# ACROSS worker replicas / the separate FastAPI validate process it does NOT
+# serialize. Cross-process serialization of the ONE gateway is a DOCUMENTED v1 gap
+# (v1 = one serialized terminal, one worker replica); the plan-02 login bracket
+# (account_info().login == expected, asserted pre+post the read) is the cross-process
+# safety net. The dispatch-epilogue aclose_exchange close also sits OUTSIDE this lock
+# — safe under the sequential per-process loop (no terminal IPC contends with it).
+_MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
+    # setdefault is atomic across coroutine resumption — there is no await between
+    # the lookup and the insert, so within one event loop two simultaneous first-
+    # callers for the same terminal cannot end up with two different Lock objects.
+    # Single-event-loop safe (see the cross-process gap noted above).
+    return _MT5_TERMINAL_LOCKS.setdefault(terminal_key, asyncio.Lock())
 
 
 # ---------------------------------------------------------------------------
@@ -3372,69 +3407,81 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 )
                 return _info, _deals
 
-            try:
-                _mt5_info, _mt5_deals = await asyncio.wait_for(
-                    asyncio.to_thread(_mt5_read),
-                    timeout=_MT5_DERIVE_READ_TIMEOUT_S,
-                )
-            except asyncio.TimeoutError:
-                # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
-                # NEVER an unbounded wedge, NO terminal stamp (FLIPRETRY-01). The
-                # finally: aclose_exchange below still runs (bounded mt5 close).
-                # MT5CONC-01: a blocked RPyC/Wine pipe will NOT self-unblock, so
-                # ACTIVELY restart the terminal (itself bounded — never a nested
-                # wedge) BEFORE the transient return, so the next DB-backoff retry
-                # hits a FRESH terminal instead of inheriting the same wedge across
-                # all attempts and burning to failed_final.
-                logger.warning(
-                    "derive_broker_dailies: mt5 read exceeded its wall-clock bound "
-                    "(label=%s) — classified transient, actively restarting the "
-                    "terminal and retrying (FLIPRETRY-01, MT5CONC-01)",
-                    funding_label,
-                )
-                await _mt5_bounded_restart(_mt5_session.client)
-                return DispatchResult(
-                    outcome=DispatchOutcome.FAILED,
-                    error_message=(
-                        "derive_broker_dailies: mt5 read exceeded the per-read "
-                        "wall-clock bound — retrying rather than wedging the worker "
-                        "(FLIPRETRY-01)"
-                    ),
-                    error_kind="transient",
-                )
-            except Mt5ClientError as exc:
-                # Classify via the ONE mt5_validation seam: auth/wrong_server are
-                # PERMANENT (a stored bad/wrong-server key never self-heals) +
-                # terminal stamp; anything else degrades to TRANSIENT (a bridge/
-                # terminal blip may succeed next attempt — no terminal stamp). The
-                # message is already secret-scrubbed at Mt5ClientError construction.
-                _kind = classify_mt5_login_error(exc)
-                _scrubbed = str(scrub_freeform_string(str(exc)))
-                if _kind in ("auth", "wrong_server"):
-                    await _stamp_strategy_analytics_failed(
-                        "MT5 login/read was rejected (bad credentials or wrong "
-                        "broker server). " + _scrubbed
+            # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
+            # AND every except branch's terminal touch — the 137-01 TimeoutError
+            # restart, the Mt5ClientError classify) against the ONE shared Wine
+            # terminal via the module-level per-terminal lock. A concurrent job can
+            # never log in mid-read OR mid-restart. Returns INSIDE the async-with are
+            # fine — the lock releases on exit. The post-read PURE computation (equity
+            # extraction, combine, persist below) stays OUTSIDE the lock: it does no
+            # terminal IPC, and holding the terminal through the combine would
+            # needlessly serialize CPU work that needs no terminal.
+            async with _mt5_terminal_lock_for(_mt5_session.client.terminal_key):
+                try:
+                    _mt5_info, _mt5_deals = await asyncio.wait_for(
+                        asyncio.to_thread(_mt5_read),
+                        timeout=_MT5_DERIVE_READ_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
+                    # NEVER an unbounded wedge, NO terminal stamp (FLIPRETRY-01). The
+                    # finally: aclose_exchange below still runs (bounded mt5 close).
+                    # MT5CONC-01: a blocked RPyC/Wine pipe will NOT self-unblock, so
+                    # ACTIVELY restart the terminal (itself bounded — never a nested
+                    # wedge) BEFORE the transient return, so the next DB-backoff retry
+                    # hits a FRESH terminal instead of inheriting the same wedge
+                    # across all attempts and burning to failed_final.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 read exceeded its wall-clock "
+                        "bound (label=%s) — classified transient, actively "
+                        "restarting the terminal and retrying (FLIPRETRY-01, "
+                        "MT5CONC-01)",
+                        funding_label,
+                    )
+                    await _mt5_bounded_restart(_mt5_session.client)
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 read exceeded the per-read "
+                            "wall-clock bound — retrying rather than wedging the "
+                            "worker (FLIPRETRY-01)"
+                        ),
+                        error_kind="transient",
+                    )
+                except Mt5ClientError as exc:
+                    # Classify via the ONE mt5_validation seam: auth/wrong_server are
+                    # PERMANENT (a stored bad/wrong-server key never self-heals) +
+                    # terminal stamp; anything else degrades to TRANSIENT (a bridge/
+                    # terminal blip may succeed next attempt — no terminal stamp).
+                    # The message is already secret-scrubbed at construction.
+                    _kind = classify_mt5_login_error(exc)
+                    _scrubbed = str(scrub_freeform_string(str(exc)))
+                    if _kind in ("auth", "wrong_server"):
+                        await _stamp_strategy_analytics_failed(
+                            "MT5 login/read was rejected (bad credentials or wrong "
+                            "broker server). " + _scrubbed
+                        )
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=(
+                                "derive_broker_dailies: mt5 login/read rejected — "
+                                + _scrubbed
+                            ),
+                            error_kind="permanent",
+                        )
+                    logger.warning(
+                        "derive_broker_dailies: mt5 read hit a transient client "
+                        "error (label=%s) — retrying (no terminal stamp)",
+                        funding_label,
                     )
                     return DispatchResult(
                         outcome=DispatchOutcome.FAILED,
                         error_message=(
-                            "derive_broker_dailies: mt5 login/read rejected — "
-                            + _scrubbed
+                            "derive_broker_dailies: mt5 read transient error — "
+                            "retrying"
                         ),
-                        error_kind="permanent",
+                        error_kind="transient",
                     )
-                logger.warning(
-                    "derive_broker_dailies: mt5 read hit a transient client error "
-                    "(label=%s) — retrying (no terminal stamp)",
-                    funding_label,
-                )
-                return DispatchResult(
-                    outcome=DispatchOutcome.FAILED,
-                    error_message=(
-                        "derive_broker_dailies: mt5 read transient error — retrying"
-                    ),
-                    error_kind="transient",
-                )
 
             # (c) Extract equity + balance, fail-loud on non-finite (a NaN/Inf
             # anchor would sail past every downstream NAV-denominator guard as a

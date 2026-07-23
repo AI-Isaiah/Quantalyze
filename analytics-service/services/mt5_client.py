@@ -309,6 +309,21 @@ class Mt5Client:
         )
         self._closed = False
 
+    @property
+    def terminal_key(self) -> str:
+        """Process-wide terminal identity (``host:port``) — the key for the
+        Phase-137 per-terminal serialization lock registry
+        (``job_worker._MT5_TERMINAL_LOCKS``, MT5CONC-02).
+
+        Two ``Mt5Client`` instances built for the SAME gateway (every job builds a
+        fresh client via ``_make_mt5_session``) share this key, so a single
+        module-level ``asyncio.Lock`` serializes every terminal-IPC region against
+        the ONE shared Wine terminal. It must be derived from the construction
+        identity (``_host``/``_port``, stored in ``__init__``), never from a
+        per-Session attribute that would differ per job and serialize nothing.
+        """
+        return f"{self._host}:{self._port}"
+
 
 @dataclass
 class Mt5Session:
