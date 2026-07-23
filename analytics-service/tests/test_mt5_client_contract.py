@@ -109,14 +109,18 @@ class _FakeMt5:
 
 def _make(scenario: dict):
     """Return (connect, fake, record). `record` captures the connect kwargs so the
-    rpyc sync_request_timeout wiring can be asserted; `fake` exposes call logs."""
+    rpyc sync_request_timeout wiring can be asserted; `fake` exposes call logs.
+    `record["connects"]` counts connect() invocations so restart's re-connect
+    (connects == 2 after one restart) is provable while the single shared `fake`
+    keeps its call logs (shutdown_calls, login_calls) across the rebuild."""
     fake = _FakeMt5(scenario)
-    record: dict = {}
+    record: dict = {"connects": 0}
 
     def _connect(*, host, port, timeout):
         record["host"] = host
         record["port"] = port
         record["timeout"] = timeout
+        record["connects"] += 1
         return fake
 
     return _connect, fake, record
@@ -366,6 +370,59 @@ def test_close_is_idempotent_and_swallows_shutdown_errors():
     assert fake.shutdown_calls == 1
 
 
+# -- restart: bounded-by-caller shutdown + re-connect (MT5CONC-01) -----------
+
+
+def test_restart_reconnects():
+    """restart() tears down the wedged terminal (shutdown once) and re-establishes
+    the transport via the stored _connect factory (connects == 2 after one
+    restart), leaving a working read surface. A blocked RPyC pipe never self-
+    unblocks, so the ACTIVE teardown + rebuild is what makes the next DB-backoff
+    retry productive rather than three wasted attempts into failed_final."""
+    connect, fake, record = _make(
+        {"account": _FakeNamedTuple(login=123, equity=1000.0)}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    assert record["connects"] == 1  # ctor connected once
+
+    client.restart()
+
+    assert fake.shutdown_calls == 1  # old transport told to shut down
+    assert record["connects"] == 2  # factory re-invoked → fresh transport
+    # The rebuilt transport is live: a read works against the returned fake.
+    assert client.account_info()["equity"] == 1000.0
+
+
+def test_restart_survives_shutdown_raise():
+    """A wedged pipe that RAISES on teardown must never abort the recovery:
+    restart() swallows the shutdown error (mirroring close()'s posture) and STILL
+    reconnects (connects == 2). Without this, a terminal too broken to shut down
+    cleanly would also be too broken to ever restart — the worst case."""
+    connect, _fake, record = _make({"shutdown_raises": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+
+    client.restart()  # must NOT raise even though shutdown() boom-s
+
+    assert record["connects"] == 2  # reconnect happened despite the teardown raise
+
+
+def test_restart_clears_closed():
+    """restart() resets the idempotency latch: after close() (which latches
+    _closed) then restart(), a subsequent close() must actually reach shutdown()
+    again (shutdown_calls advances), proving restart cleared _closed. A restart
+    that left _closed set would leave the fresh terminal un-closable, leaking the
+    session on the next teardown."""
+    connect, fake, _record = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+
+    client.close()
+    assert fake.shutdown_calls == 1  # close() reached shutdown
+    client.restart()
+    assert fake.shutdown_calls == 2  # restart's own teardown
+    client.close()
+    assert fake.shutdown_calls == 3  # _closed was cleared → close() works again
+
+
 # -- order_check: probe only (investor-vs-master signal is a live unknown) ----
 
 
@@ -443,4 +500,5 @@ def test_public_surface_is_exactly_the_contract():
         "history_deals_get",
         "order_check",
         "close",
+        "restart",
     }
