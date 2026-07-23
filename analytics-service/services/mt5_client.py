@@ -160,6 +160,14 @@ class Mt5Client:
         # suite (mirrors SfoxClient's _clock/_sleep injection). Default is the
         # lazy real transport.
         connect = _connect or _default_connect
+        # Store the construction identity so restart() (MT5CONC-01) can rebuild the
+        # transport with the SAME wiring. A blocked RPyC pipe never self-unblocks,
+        # so recovering a wedged terminal means telling it to shut down and re-
+        # establishing the transport — which requires the resolved factory + args.
+        self._connect = connect
+        self._host = host
+        self._port = port
+        self._request_timeout_s = request_timeout_s
         self._mt5 = connect(host=host, port=port, timeout=request_timeout_s)
         self._closed = False
 
@@ -270,6 +278,36 @@ class Mt5Client:
             self._mt5.shutdown()
         except Exception:  # noqa: BLE001 — a close error must not mask caller errors
             logger.warning("Mt5Client.close: shutdown() raised; swallowing.")
+
+    def restart(self) -> None:
+        """Tear down a wedged terminal and re-establish the transport (MT5CONC-01).
+
+        A blocked RPyC/Wine pipe will NOT self-unblock, so the remote terminal is
+        told to shut down and the transport is re-established via the stored
+        ``_connect`` factory. Best-effort teardown: a wedged/raising ``shutdown()``
+        is swallowed with a logged warning (mirroring ``close()``) — a terminal too
+        broken to tear down cleanly must still be rebuilt, never left un-restartable.
+
+        Unlike ``close()`` this does NOT gate on ``self._closed`` and NEVER calls
+        ``close()``: restart's contract is teardown+rebuild regardless of prior
+        state, and it clears ``self._closed`` so the fresh session is closable
+        again. It never sleeps, retries, or joins the abandoned hung reader thread
+        — the CALLER bounds this call with ``to_thread`` + ``wait_for`` (see
+        job_worker ``_mt5_bounded_restart``) so restart can never itself nest-wedge
+        the worker.
+
+        Live ``initialize()`` semantics are [ASSUMED] (A1) pending the Phase-139
+        spike; against the offline ``_connect`` double, ``shutdown()`` + re-connect
+        is the full exercised surface.
+        """
+        try:
+            self._mt5.shutdown()
+        except Exception:  # noqa: BLE001 — a wedged teardown must not abort recovery
+            logger.warning("Mt5Client.restart: shutdown() raised; swallowing.")
+        self._mt5 = self._connect(
+            host=self._host, port=self._port, timeout=self._request_timeout_s
+        )
+        self._closed = False
 
 
 @dataclass
