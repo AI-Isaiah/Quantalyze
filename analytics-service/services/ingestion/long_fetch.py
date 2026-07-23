@@ -48,7 +48,18 @@ log = structlog.get_logger("quantalyze.analytics.long_fetch")
 # compute_metrics BY DESIGN, so the fill steps must be skipped and the factsheet
 # produced by the derive_broker_dailies tail. deribit = txn-log ledger; sfox =
 # balance-history usd_value series (both feed the broker-dailies ONE-path).
-_LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox"})
+#
+# MT5RECON-01 (Phase 136): mt5 is ALSO ledger-backed — its returns come from the
+# history_deals_get deal ledger reconstructed against account_info().equity via
+# combine_mt5_deal_ledger (the THIRD combiner sibling), fed through the SAME
+# broker-dailies ONE-path. Mt5Adapter.fetch_raw + compute_metrics both raise
+# NotImplementedError BY DESIGN (there is no fill-based mt5 consumer — a fill path
+# would reopen the BYB-02 corruption class the sfox F1 incident exposed: sfox once
+# fell into the fill branch → fetch_raw NotImplementedError crashed EVERY onboard
+# in prod). Admitting mt5 here routes onboard/resync to run validate + encrypt +
+# the state machine and enqueue the derive_broker_dailies tail, never the fill
+# steps — exactly like deribit and sfox.
+_LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox", "mt5"})
 
 
 async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":

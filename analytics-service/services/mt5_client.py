@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Callable, NoReturn
 
 from services.redact import scrub_freeform_string
@@ -269,3 +270,27 @@ class Mt5Client:
             self._mt5.shutdown()
         except Exception:  # noqa: BLE001 — a close error must not mask caller errors
             logger.warning("Mt5Client.close: shutdown() raised; swallowing.")
+
+
+@dataclass
+class Mt5Session:
+    """MT5RECON-01 (Phase 136) — the worker's non-ccxt exchange holder for mt5.
+
+    The job-worker's ``_make_exchange_client`` construction chokepoint builds this
+    (the mt5 analog of the raw ``SfoxClient`` the sfox arm returns) so the derive
+    branch can ``login`` + read + ``close`` a terminal session. It bundles the
+    read-only ``Mt5Client`` with the PARSED credentials (login/investor password/
+    broker server) resolved from the reused api_key/api_secret/passphrase slots
+    (the 135 convention), because — unlike a ccxt exchange or the sfox Bearer
+    client — an MT5 read requires an explicit per-account ``login(...)`` call at
+    read time, not just at construction.
+
+    ``aclose_exchange`` (the single close chokepoint) isinstance-routes this to
+    ``client.close()`` (bounded via ``asyncio.to_thread`` — the sync facade), so
+    every job-worker close site becomes mt5-safe with zero per-site edits.
+    """
+
+    client: Mt5Client
+    login: int
+    investor_password: str
+    server: str

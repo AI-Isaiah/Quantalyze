@@ -80,10 +80,12 @@ from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
     CRYPTO_VENUES,
+    MT5_DISABLED_DETAIL,
     SFOX_DISABLED_DETAIL,
     PositionDirection as PositionDirection,
     Side as Side,
     is_smoothed_mtm_enabled,
+    mt5_enabled_server,
     sfox_enabled_server,
 )
 from services.db import db_execute, get_supabase, one, rows
@@ -99,6 +101,7 @@ from services.exchange import (
 )
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
+from services.mt5_client import Mt5Session  # type annotations only (mt5 holder)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 
@@ -258,7 +261,13 @@ _SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
 # money-critical fix (SFOX-05): without it, combine_realized_and_funding runs on
 # empty streams and clobbers the reconstructed sfox TWR. deribit stays byte
 # -identical (it was, and remains, excluded).
-_NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox"})
+# MT5RECON-01 (Phase 136): mt5's daily-return series is produced NATIVELY inside
+# the venue dispatch (combine_mt5_deal_ledger, the deal-ledger reconstruction)
+# rather than by the ccxt USD-space combine_realized_and_funding pass below.
+# Excluding it here is money-critical (the sfox SFOX-05 lesson): without it, the
+# ccxt combine would run on empty realized/funding streams and CLOBBER the
+# reconstructed mt5 TWR with a flat series.
+_NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "mt5"})
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
@@ -752,8 +761,43 @@ class _ExchangeContext:
     key_row: dict[str, Any]
     # SFOX-05: sfox is a non-ccxt venue read through the GET-only SfoxClient. The
     # preflights construct that instead of a ccxt.Exchange; aclose_exchange routes
-    # it to SfoxClient.aclose() at the single close chokepoint.
-    exchange: ccxt.Exchange | SfoxClient
+    # it to SfoxClient.aclose() at the single close chokepoint. MT5RECON-01: mt5 is
+    # likewise non-ccxt — read through the RPyC Mt5Client wrapped in an Mt5Session
+    # holder (the parsed login/investor-password/server + the client), routed to
+    # client.close() at the same chokepoint.
+    exchange: ccxt.Exchange | SfoxClient | Mt5Session
+
+
+def _make_mt5_session(
+    api_key: str, api_secret: str, passphrase: str | None
+) -> Mt5Session:
+    """MT5RECON-01 — build the mt5 exchange holder from the reused credential
+    slots + the gateway env, mirroring Mt5Adapter.validate's construction posture
+    (ingestion/mt5.py:133-144).
+
+    Credential-slot reuse (the one MT5 wrinkle, the 135 convention): login ->
+    api_key, investor password -> api_secret, broker server -> passphrase. The
+    parse is fail-CLOSED OFFLINE via the ONE mt5_validation seam (a structurally
+    invalid slot combo raises before any live RPyC probe). A missing
+    MT5_GATEWAY_HOST/PORT is a SERVER misconfig (never blames the user's creds),
+    propagated as a RuntimeError exactly like the adapter."""
+    from services.mt5_client import Mt5Client
+    from services.mt5_validation import parse_mt5_credentials
+
+    login, investor_pw, server = parse_mt5_credentials(api_key, api_secret, passphrase)
+    host = os.getenv("MT5_GATEWAY_HOST")
+    port_raw = os.getenv("MT5_GATEWAY_PORT")
+    if not host or not port_raw:
+        raise RuntimeError(
+            "MT5 gateway not configured: MT5_GATEWAY_HOST / MT5_GATEWAY_PORT are "
+            "unset. This is a server misconfiguration, never a credential failure."
+        )
+    return Mt5Session(
+        client=Mt5Client(host, int(port_raw)),
+        login=login,
+        investor_password=investor_pw,
+        server=server,
+    )
 
 
 def _make_exchange_client(
@@ -761,10 +805,10 @@ def _make_exchange_client(
     api_key: str,
     api_secret: str,
     passphrase: str | None,
-) -> ccxt.Exchange | SfoxClient:
+) -> ccxt.Exchange | SfoxClient | Mt5Session:
     """SFOX-05 — the SINGLE preflight construction chokepoint. Both
     _exchange_preflight and _allocator_key_preflight route through here, so the
-    sfox-vs-ccxt decision lives in exactly ONE place.
+    sfox-vs-mt5-vs-ccxt decision lives in exactly ONE place.
 
     sFOX is NOT a ccxt exchange: create_exchange RAISES ValueError for it
     (EXCHANGE_CLASSES holds only ccxt classes). Construct the GET-only
@@ -773,10 +817,16 @@ def _make_exchange_client(
     passed. The .strip() mirrors the validate/exchange-router credential
     chokepoint (a trailing-newline token must authenticate identically).
 
+    MT5RECON-01: mt5 is ALSO non-ccxt — build an Mt5Session (parsed creds + the
+    RPyC Mt5Client) via _make_mt5_session. Its login/investor-password/server come
+    from the reused api_key/api_secret/passphrase slots (the 135 convention).
+
     Every ccxt venue is BYTE-IDENTICAL to the prior inline create_exchange call.
     """
     if exchange_name == "sfox":
         return make_sfox_client(api_key.strip())
+    if exchange_name == "mt5":
+        return _make_mt5_session(api_key, api_secret, passphrase)
     return create_exchange(exchange_name, api_key, api_secret, passphrase)
 
 

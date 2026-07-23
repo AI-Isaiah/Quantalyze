@@ -7,14 +7,18 @@ surface) behind the 5-method ``IngestionAdapter`` Protocol, mirroring
 + ``SUPPORTED_SOURCES`` + ``_FACTORIES`` in lockstep with this module landing (the
 SFOX-01 pin precedent: the Literal must not widen ahead of the registry).
 
-CRITICAL correctness invariant — ``compute_metrics`` FAILS LOUD:
+CRITICAL correctness invariant — ``compute_metrics`` FAILS LOUD BY DESIGN:
   MT5 returns are reconstructed from the deal-ledger daily-NAV series
-  (``combine_mt5_deal_ledger`` in Phase 136) fed through the broker-dailies ONE
-  backbone, exactly like Deribit's/sFOX's ledger-backed returns. A fill-based
+  (``combine_mt5_deal_ledger``) fed through the broker-dailies ONE backbone,
+  exactly like Deribit's/sFOX's ledger-backed returns. A fill-based
   ``MetricsSnapshot`` produced here would be a silently-empty/wrong track record
   persisted by ``long_fetch.process_key`` — the BYB-02 corruption class.
-  Therefore this method RAISES until Phase 136 rather than delegating to the
-  shared ``EquityCurveBuilder`` (doing so would reopen the corruption path).
+  Therefore this method RAISES PERMANENTLY (not "until Phase 136") rather than
+  delegating to the shared ``EquityCurveBuilder``: mt5 rides the ledger-backed
+  long-fetch tail (``_LEDGER_BACKED_SOURCES``), which routes AROUND the fill
+  steps entirely, so implementing a fill path would reopen the corruption class,
+  not close a gap. This is the permanent by-design posture, mirroring
+  ``SfoxAdapter``.
 
 ``fetch_raw`` is likewise fail-loud: no synchronous flow routes mt5 to a bespoke
 deal → ``Trade`` normalization. MT5 ingestion is a long-fetch flow that routes
@@ -217,19 +221,22 @@ class Mt5Adapter:
         )
 
     def compute_metrics(self, trades: list[Trade]) -> MetricsSnapshot:
-        # FAIL LOUD — MT5 returns are deal-ledger-backed, NEVER fill-derived. MT5
-        # returns come from the deal-ledger daily-NAV reconstruction
-        # (combine_mt5_deal_ledger, Phase 136) fed through the broker-dailies ONE
-        # backbone. A fill-based MetricsSnapshot would be a silently-empty/wrong
-        # track record persisted by long_fetch.process_key (the BYB-02 corruption
-        # class). This method must NOT delegate to EquityCurveBuilder — that
-        # reopens the corruption path.
+        # FAIL LOUD BY DESIGN (permanent) — MT5 returns are deal-ledger-backed,
+        # NEVER fill-derived. MT5 returns come from the deal-ledger daily-NAV
+        # reconstruction (combine_mt5_deal_ledger) fed through the broker-dailies
+        # ONE backbone. A fill-based MetricsSnapshot would be a silently-empty/
+        # wrong track record persisted by long_fetch.process_key (the BYB-02
+        # corruption class). mt5 rides the ledger-backed long-fetch tail
+        # (_LEDGER_BACKED_SOURCES) which routes AROUND the fill steps, so this
+        # method must NOT delegate to EquityCurveBuilder — doing so reopens the
+        # corruption path. This is the PERMANENT posture, not a Phase-136 stopgap.
         raise NotImplementedError(
-            "Mt5Adapter.compute_metrics is intentionally fail-loud until Phase "
-            "136: MT5 returns come from the deal-ledger daily-NAV reconstruction "
+            "Mt5Adapter.compute_metrics is intentionally fail-loud BY DESIGN: MT5 "
+            "returns come from the deal-ledger daily-NAV reconstruction "
             "(combine_mt5_deal_ledger) via the broker-dailies ONE backbone, never "
-            "from fill metrics. A fill-based snapshot would be a silently-empty/"
-            "wrong track record (the BYB-02 corruption class)."
+            "from fill metrics. mt5 is a ledger-backed long-fetch source; a "
+            "fill-based snapshot would be a silently-empty/wrong track record (the "
+            "BYB-02 corruption class). This raise is permanent, not a stopgap."
         )
 
     def compute_fingerprint(

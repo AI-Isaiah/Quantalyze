@@ -1655,6 +1655,162 @@ def test_resolve_asset_class_sfox_is_crypto_365():
     fake.table.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# MT5RECON-01 (Phase 136) — mt5 enqueue-path admission + the EXPLICIT
+# api_verified proof at the mt5 seam (mirror of the sfox analog above, venue
+# swapped to mt5). These prove the phase-goal stamp is earned at the mt5 seam,
+# NOT merely inherited.
+# ---------------------------------------------------------------------------
+def test_h11_mt5_admitted_to_onboard_and_resync_only(monkeypatch):
+    """MT5RECON-01: `mt5` is admitted to the onboard + resync source whitelists
+    ONLY (mirroring the P72 deribit / SFOX-05 sfox posture), and stays REJECTED
+    for teaser/internal_report/csv — Mt5Adapter.compute_metrics/fetch_raw fail
+    loud by design (returns come from the mt5 broker-dailies branch, not fills).
+
+    Admission ALSO requires the server go-dark flag MT5_ENABLED — pinned ON
+    here; the disabled default is covered by the fail-closed test below."""
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    Body = process_key_router._ProcessKeyBody
+
+    # ACCEPTED: resync (resolves the stored key server-side, no creds in body).
+    Body(flow_type="resync", source="mt5", context={"strategy_id": "s1"})
+    # ACCEPTED: onboard (creds supplied — login/investor-pw in the reused slots —
+    # so the required-keys model_validator does not mask the whitelist).
+    Body(
+        flow_type="onboard",
+        source="mt5",
+        context={"strategy_id": "s1", "api_key": "1234567", "api_secret": "pw"},
+    )
+
+    # REJECTED: mt5 on the fill-based / synchronous flows.
+    for flow in ("teaser", "internal_report", "csv"):
+        with pytest.raises(ValidationError, match="H-11"):
+            Body(
+                flow_type=flow,
+                source="mt5",
+                context={"strategy_id": "s1", "api_key": "1234567", "api_secret": "pw"},
+            )
+
+
+def test_mt5_source_fails_closed_when_server_flag_off(monkeypatch):
+    """MT5RECON-01 (the go-dark gate, mirror of the sfox F2 fail-closed test):
+    with MT5_ENABLED off (default), an mt5 onboard/resync body is REJECTED at the
+    wire boundary (ValidationError) BEFORE any compute_job is enqueued or any live
+    RPyC deal read runs — never a live probe, never a false-verified draft. Other
+    sources stay admitted."""
+    from pydantic import ValidationError
+
+    monkeypatch.delenv("MT5_ENABLED", raising=False)
+    Body = process_key_router._ProcessKeyBody
+
+    for flow in ("onboard", "resync"):
+        with pytest.raises(ValidationError, match="MT5-F2"):
+            Body(
+                flow_type=flow,
+                source="mt5",
+                context={"strategy_id": "s1", "api_key": "1234567", "api_secret": "pw"},
+            )
+
+    # A non-exact flag value stays fail-closed (only exact 'true' enables).
+    for flag in ("1", "on", "", "false"):
+        monkeypatch.setenv("MT5_ENABLED", flag)
+        with pytest.raises(ValidationError, match="MT5-F2"):
+            Body(flow_type="resync", source="mt5", context={"strategy_id": "s1"})
+
+    # ccxt sources are UNAFFECTED by the flag (still admitted to onboard/resync).
+    monkeypatch.delenv("MT5_ENABLED", raising=False)
+    Body(flow_type="resync", source="okx", context={"strategy_id": "s1"})
+
+
+def test_process_key_mt5_onboard_draft_carries_trust_tier_api_verified(
+    client, monkeypatch
+):
+    """MT5RECON-01 (the phase-goal stamp, EXPLICITLY proven at the mt5 seam — NOT
+    inherited): an onboard flow with source='mt5' inserts a strategy_verifications
+    draft carrying trust_tier='api_verified' — with ZERO stamp-code edits (mt5 is
+    non-csv → the existing `"csv_uploaded" if source=="csv" else "api_verified"`
+    at process_key.py:847 earns it FREE), and the draft is a long-fetch enqueue so
+    get_published_trust_signals (reads the most-recent row) surfaces api_verified.
+
+    Phase 136 / F2: mt5 admission requires MT5_ENABLED — pinned ON here."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-mt5")
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "mt5",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-mt5-1",
+                    "api_key": "1234567",
+                    "api_secret": "pw",
+                },
+            },
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["queued"] is True
+    insert_payloads = [
+        c.args[0] for c in fake.table.return_value.insert.call_args_list if c.args
+    ]
+    drafts = [p for p in insert_payloads if p.get("source") == "mt5"]
+    assert drafts, "no strategy_verifications draft insert captured for mt5 onboard"
+    assert drafts[0]["trust_tier"] == "api_verified"
+    assert drafts[0]["status"] == "draft"
+
+
+def test_process_key_mt5_resync_draft_carries_trust_tier_api_verified(
+    client, monkeypatch
+):
+    """MT5RECON-01: the SAME api_verified stamp is earned on a resync (not just
+    onboard) — resync mints a wizard_session_id server-side (no creds in body) and
+    still inserts an api_verified draft that the validated-transition + long-fetch
+    tail carry through. Proven at the mt5 seam so the badge can never silently fall
+    back to self_reported on a re-sync path."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-mt5-resync")
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "resync",
+                "source": "mt5",
+                "context": {"strategy_id": "s1"},
+            },
+            headers=_auth_headers(),
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["queued"] is True
+    insert_payloads = [
+        c.args[0] for c in fake.table.return_value.insert.call_args_list if c.args
+    ]
+    drafts = [p for p in insert_payloads if p.get("source") == "mt5"]
+    assert drafts, "no strategy_verifications draft insert captured for mt5 resync"
+    assert drafts[0]["trust_tier"] == "api_verified"
+    assert drafts[0]["flow_type"] == "resync"
+
+
+def test_resolve_asset_class_mt5_is_traditional_252():
+    """MT5RECON-02 (the Python half): mt5 is NOT in CRYPTO_VENUES, so
+    _resolve_asset_class returns None → periods_per_year_for_asset_class(None) =
+    252 (the DB 'traditional' default). This closes the DEFERRED unknown→crypto
+    latent bug for the mt5 leg — an mt5 series can never annualize on √365."""
+    from routers.process_key import _resolve_asset_class
+    from services.closed_sets import CRYPTO_VENUES
+    from services.metrics import periods_per_year_for_asset_class
+
+    assert "mt5" not in CRYPTO_VENUES
+    fake = MagicMock()
+    # Non-csv, non-crypto source → None WITHOUT a DB read (fail-soft to 252).
+    assert _resolve_asset_class("mt5", "s1", fake) is None
+    fake.table.assert_not_called()
+    assert periods_per_year_for_asset_class(None) == 252
+
+
 def test_resolve_asset_class_venue_and_csv():
     """Test R (FLAG C resolver, unit): crypto venues resolve WITHOUT touching
     supabase; csv reads strategies.asset_class; a failed/empty lookup → None."""
