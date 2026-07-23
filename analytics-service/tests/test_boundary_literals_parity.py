@@ -51,6 +51,16 @@ _SFOX_BOUNDARY_MIGRATION = (
     / "migrations"
     / "20260718182056_sfox_exchange_boundary_checks.sql"
 )
+# Phase 135 (MT5SRC-03) — the mt5 constraint-widen migration cloning the sfox
+# precedent above. Pinned the same way (byte-parity read of the ADD CONSTRAINT
+# CHECK bodies) so a future drop of mt5 from any of the four boundary CHECKs
+# reds this test.
+_MT5_BOUNDARY_MIGRATION = (
+    _REPO_ROOT
+    / "supabase"
+    / "migrations"
+    / "20260723172032_mt5_exchange_boundary_checks.sql"
+)
 _PROCESS_KEY = (
     Path(__file__).resolve().parents[1] / "routers" / "process_key.py"
 )
@@ -224,6 +234,39 @@ class TestSfoxMigrationWidensEveryKeyBoundaryCheck:
             )
             assert "'sfox'" in m.group(1), (
                 f"{name} CHECK must admit 'sfox' but its IN-list does not: "
+                f"{m.group(1).strip()}"
+            )
+
+
+class TestMt5MigrationWidensEveryKeyBoundaryCheck:
+    """Phase 135 (MT5SRC-03) — the mt5 constraint-widen migration admits 'mt5'
+    at each of the four canonical key-save boundary CHECKs. Mirrors the deribit
+    / sfox migration-parity pattern above against the new migration file.
+    """
+
+    def test_mt5_migration_file_exists(self) -> None:
+        assert _MT5_BOUNDARY_MIGRATION.is_file(), (
+            f"Phase 135 mt5 boundary migration missing: {_MT5_BOUNDARY_MIGRATION}"
+        )
+
+    def test_each_widened_constraint_admits_mt5_exactly_once(self) -> None:
+        sql = _MT5_BOUNDARY_MIGRATION.read_text(encoding="utf-8")
+        for name in _WIDENED_CONSTRAINTS:
+            add_count = sql.count(f"ADD CONSTRAINT {name}")
+            assert add_count == 1, (
+                f"expected exactly 1 'ADD CONSTRAINT {name}' in the Phase 135 "
+                f"mt5 migration, found {add_count}"
+            )
+            m = re.search(
+                rf"ADD CONSTRAINT {name}\s+CHECK\s*\((.*?)\)\s*;",
+                sql,
+                re.DOTALL,
+            )
+            assert m is not None, (
+                f"could not locate the CHECK body for {name} in the mt5 migration"
+            )
+            assert "'mt5'" in m.group(1), (
+                f"{name} CHECK must admit 'mt5' but its IN-list does not: "
                 f"{m.group(1).strip()}"
             )
 
