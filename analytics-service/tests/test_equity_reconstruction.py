@@ -3195,9 +3195,13 @@ async def test_v0_15_4_2_anchor_offsets_reconstructed_series_to_exchange_balance
             class R: data = []
             return R()
 
+    # Window is relative to today so start_ms never crosses the real-wall-clock
+    # OKX 90-day trade terminus (which would skip the anchor and defeat this
+    # test). The stubbed _compute_daily_equity ignores these dates and returns
+    # fixed replay rows, so only the terminus check depends on them.
     rows, _terminus, _telemetry = await _fetch_and_price_window(
         FakeExchange(), "okx", StubSupabase(),
-        date(2026, 4, 22), date(2026, 4, 24),
+        date.today() - timedelta(days=2), date.today(),
     )
 
     # NEW-C01-05: OKX is a unified-margin venue — fetch_balance['total']
@@ -3319,9 +3323,11 @@ async def test_e1_anchor_skipped_when_unknown_perp_symbols_present(monkeypatch):
     # Exchange reports a 4x-inflated anchor (4800 vs replay last 1200) — well
     # within the 5x implausibility gate, so ONLY the unreliable-replay skip
     # can save the curve here.
+    # Relative window: keep start_ms inside the real-wall-clock OKX 90-day
+    # terminus so only the unreliable-replay skip (unknown perp) can fire here.
     rows, _terminus, telemetry = await _fetch_and_price_window(
         _anchor_skip_fake_exchange(4800.0), "okx", _AnchorStubSupabase(),
-        date(2026, 4, 22), date(2026, 4, 23),
+        date.today() - timedelta(days=2), date.today(),
     )
 
     # Anchor skipped: last row stays at the replayed 1200, NOT lifted to 4800.
@@ -3392,9 +3398,12 @@ async def test_e1_clean_account_still_anchors(monkeypatch):
         "services.equity_reconstruction._compute_daily_equity", _fake_clean,
     )
 
+    # Relative window: keep start_ms inside the real-wall-clock OKX 90-day
+    # terminus so the clean-account anchor path is exercised (not the terminus
+    # skip). The stubbed _compute_daily_equity ignores these dates.
     rows, _terminus, telemetry = await _fetch_and_price_window(
         _anchor_skip_fake_exchange(1500.0), "okx", _AnchorStubSupabase(),
-        date(2026, 4, 22), date(2026, 4, 23),
+        date.today() - timedelta(days=2), date.today(),
     )
 
     # Anchor applied: last row lifted to 1500 (offset = 1500 - 1200 = 300).

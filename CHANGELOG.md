@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.48.0.1] - 2026-07-23
+### fix(test): make equity_reconstruction OKX anchor tests time-independent
+Three `test_equity_reconstruction.py` tests (`test_v0_15_4_2_anchor_offsets_...`,
+`test_e1_anchor_skipped_when_unknown_perp_symbols_present`,
+`test_e1_clean_account_still_anchors`) passed hardcoded absolute window dates
+(`2026-04-22`..`2026-04-24`) to `_fetch_and_price_window`. As the calendar
+advanced past those dates + 90 days, `start_ms` crossed the real-wall-clock
+**OKX 90-day trade terminus** (`now_ms - 90d`), so the anchor was skipped
+("pre-terminus balance unknown") and the anchor assertions failed. This was a
+latent time-bomb that tripped on 2026-07-22 (start 92 days ago), coinciding with
+the v1.14 merge but unrelated to it. Fix: derive the window from `date.today()`
+so `start_ms` always sits inside the terminus. The stubbed `_compute_daily_equity`
+ignores these dates, so only the terminus check depended on them. No production
+code changed; assertions unchanged.
+
 ## [0.48.0.0] - 2026-07-23
 ### v1.14 — Smoothed options MTM (third factsheet basis), ships DARK behind a kill-switch
 Adds `smoothed_mtm` as a THIRD selectable factsheet `pnl_basis` alongside
