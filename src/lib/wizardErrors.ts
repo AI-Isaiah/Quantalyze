@@ -28,6 +28,18 @@ export type WizardErrorCode =
   // is wrong / regenerated / whitespace-mangled. Honest copy, no unobserved
   // "which half" claim (mirrors the KEY_NOT_READ_ONLY DOGFOOD-3 discipline).
   | "KEY_AUTH_FAILED"
+  // Phase 135 / MT5SRC-02 (resolved Q-B): MT5's login accepts a MASTER
+  // (trade-capable) password AND fails opaquely on a wrong broker server —
+  // both would collapse to KEY_AUTH_FAILED and tell the user to fix the wrong
+  // thing. Following the KEY_AUTH_FAILED DOGFOOD discipline (honest, no
+  // unobserved claim), these are DISTINCT user mistakes with targeted copy:
+  //   KEY_MT5_MASTER_PASSWORD — the login worked but can place trades, so it
+  //     was refused and NEVER stored; the fix is the read-only investor
+  //     password (the master password was not "wrong").
+  //   KEY_MT5_WRONG_SERVER — the exact broker server name did not resolve; the
+  //     fix is the server string shown in the MT5 terminal login window.
+  | "KEY_MT5_MASTER_PASSWORD"
+  | "KEY_MT5_WRONG_SERVER"
   | "KEY_INVALID_FORMAT"
   | "KEY_IP_ALLOWLIST"
   | "KEY_RATE_LIMIT"
@@ -209,6 +221,40 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "If the secret was only shown once at creation, create a fresh read-only key and paste both values here.",
     ],
     docsHref: "/security#regenerate-key",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  KEY_MT5_MASTER_PASSWORD: {
+    // Honest copy (Phase 135 / MT5SRC-02): the password was CORRECT — it was
+    // refused because it is a MASTER login that can place trades, not because
+    // it was wrong. Never assert "your password was wrong" here (that is the
+    // KEY_AUTH_FAILED path). Nothing was stored.
+    title: "This MT5 login can place trades.",
+    cause:
+      "This is a master password — it authenticated, but it can place and modify trades. Quantalyze connects to read-only accounts only, so we refused it and stored nothing. MT5 gives every account a second, read-only investor password for exactly this.",
+    fix: [
+      "Open your MT5 terminal and find this account's investor (read-only) password — it is separate from the master password you just used.",
+      "If you do not have it, ask your broker to issue or reset the investor password for this account.",
+      "Reconnect here using the login, the investor password, and the same broker server.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
+  KEY_MT5_WRONG_SERVER: {
+    // Phase 135 / MT5SRC-02: a wrong/unknown broker server fails opaquely on
+    // MT5, indistinguishable from a bad password at the protocol level — so we
+    // surface it as its own actionable code rather than a generic bad-creds
+    // message. The exact server string is broker- and often region-specific.
+    title: "We could not find that broker server.",
+    cause:
+      "MT5 could not connect to the broker server name you entered. Server names are exact and broker-specific (often with a region or Demo/Live suffix), so a small mismatch fails the same way a wrong password would.",
+    fix: [
+      "Open your MT5 terminal's login window and copy the server name exactly as it appears there.",
+      "Watch for trailing spaces, the wrong region, or a Demo vs Live suffix.",
+      "Paste the exact server name here and reconnect with the same login and investor password.",
+    ],
+    docsHref: "/security#readonly-key",
     actions: ["clear_and_retry", "request_call"],
   },
 
@@ -866,6 +912,23 @@ export function classifyKeyValidationError(message: string): {
     lower.includes("invalid_credentials")
   ) {
     return { code: "KEY_AUTH_FAILED", status: 400 };
+  }
+  // Phase 135 / MT5SRC-02: the worker emits MT5_MASTER_PASSWORD_DETAIL
+  // ("MT5 master password detected …") and MT5_WRONG_SERVER_DETAIL
+  // ("Broker server not found …") from services/closed_sets.py. Kept AFTER the
+  // KEY_AUTH_FAILED branch and BEFORE the ip/allow branch. Collision invariant
+  // (re-run if EITHER side is reworded): neither worker string contains
+  // "signature", "invalid secret", "authentication failed", "invalid_credentials",
+  // "ip"+"allow", "rate", "429", "timeout", "etimedout", "could not verify",
+  // "permission scope", "probe", "trading", or "withdraw" — so no earlier or
+  // later branch shadows these, and these do not shadow any of those. Both are
+  // client faults (fixable by the user) → 400. The raw message is still never
+  // returned to the client (H-0305) — only the code.
+  if (lower.includes("master password")) {
+    return { code: "KEY_MT5_MASTER_PASSWORD", status: 400 };
+  }
+  if (lower.includes("broker server")) {
+    return { code: "KEY_MT5_WRONG_SERVER", status: 400 };
   }
   if (lower.includes("ip") && lower.includes("allow")) {
     // Exchange IP-allowlist rejection — upstream policy, 502.
