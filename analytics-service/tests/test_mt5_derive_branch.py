@@ -34,6 +34,7 @@ Behaviors:
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -280,6 +281,16 @@ def _dq_flags(capture: dict) -> dict:
             if isinstance(f, dict):
                 flags = f
     return flags
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_terminal_locks():
+    """MT5CONC-02: clear the module-level per-terminal asyncio.Lock registry between
+    tests so a Lock created by one test (e.g. the concurrent-serialization test) can
+    never leak into another and mask a regression."""
+    jw._MT5_TERMINAL_LOCKS.clear()
+    yield
+    jw._MT5_TERMINAL_LOCKS.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -680,6 +691,137 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     assert elapsed < (read_hang + shutdown_hang), (
         f"the bounded read + bounded restart must return well under the summed "
         f"genuine hang durations; elapsed={elapsed:.3f}s"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11 — MT5CONC-02: two concurrent mt5 syncs CANNOT interleave on the ONE shared
+# terminal — serialized by the module-level per-terminal asyncio.Lock keyed by
+# host:port. Deterministic in BOTH directions (embedded negative control): with the
+# lock the first job's terminal block is contiguous (its exit precedes the second
+# job's enter); with a neutered lock (a fresh Lock per call — the Session-attached
+# anti-pattern) the second job's login is DRIVEN into the first job's read window
+# and the contiguity guarantee reddens. Bounded waits ONLY — a broken lock reds,
+# never hangs CI.
+# ---------------------------------------------------------------------------
+class _OrderedMt5Transport(_FakeMt5Transport):
+    """Records an (tag, enter/exit) bracket into a SHARED cross-job order log so a
+    cross-job interleave on the terminal is observable. Job A parks (bounded) in its
+    read until job B logs in; under the lock B cannot log in while A holds it, so A
+    times out and its block stays contiguous."""
+
+    def __init__(self, tag, *, order, b_login_done, **kw):  # noqa: ANN001
+        super().__init__(**kw)
+        self._tag = tag
+        self._order = order
+        self._b_login_done = b_login_done
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        self._order.append((self._tag, "enter"))
+        if self._tag == "B":
+            self._b_login_done.set()
+        return super().login(login, password, server, timeout)
+
+    def history_deals_get(self, from_ts, to_ts):  # noqa: ANN001
+        if self._tag == "A":
+            # Bounded park: under the lock, B is blocked on the SAME terminal lock
+            # and can never set this, so A times out and its block stays contiguous.
+            # Without the lock, B logs in during this park and the interleave is
+            # recorded. 0.25s bound → a broken lock reds, never hangs CI.
+            self._b_login_done.wait(0.25)
+        out = super().history_deals_get(from_ts, to_ts)
+        self._order.append((self._tag, "exit"))
+        return out
+
+
+async def _run_two_concurrent_mt5(neuter_lock: bool) -> list:
+    order: list = []
+    b_login_done = threading.Event()
+
+    def _mk(tag: str):
+        t = _OrderedMt5Transport(
+            tag,
+            order=order,
+            b_login_done=b_login_done,
+            account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+            deals=_canonical_deals(),
+        )
+        ctx, _cap = _build_ctx(t)
+        return ctx
+
+    ctx_by_sid = {"strat-a": _mk("A"), "strat-b": _mk("B")}
+
+    async def _preflight(job, _name):  # noqa: ANN001
+        return ctx_by_sid[job["strategy_id"]]
+
+    patchers = [
+        patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(side_effect=_preflight),
+        ),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+    ]
+    if neuter_lock:
+        # A FRESH Lock per call serializes NOTHING — this is exactly what a
+        # Session-attached lock (fresh session per job) would do.
+        patchers.append(
+            patch(
+                "services.job_worker._mt5_terminal_lock_for",
+                new=lambda _k: asyncio.Lock(),
+            )
+        )
+
+    async def _run_a():
+        return await run_derive_broker_dailies_job(
+            {"id": "j-a", "kind": "derive_broker_dailies", "strategy_id": "strat-a"}
+        )
+
+    async def _run_b():
+        # A tiny head start for A so the ordering under test is deterministic (A
+        # acquires the terminal lock first); bounded and independent of the lock.
+        await asyncio.sleep(0.05)
+        return await run_derive_broker_dailies_job(
+            {"id": "j-b", "kind": "derive_broker_dailies", "strategy_id": "strat-b"}
+        )
+
+    with _apply(patchers):
+        await asyncio.gather(_run_a(), _run_b())
+    return order
+
+
+@pytest.mark.asyncio
+async def test_mt5_concurrent_syncs_serialized(monkeypatch) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+
+    # WITH the lock: the first job to enter completes its terminal block (exit)
+    # before the second job enters — no interleave on the shared terminal.
+    order = await _run_two_concurrent_mt5(neuter_lock=False)
+    first_tag = order[0][0]
+    first_exit = order.index((first_tag, "exit"))
+    other_enter = next(
+        i for i, (t, ev) in enumerate(order) if t != first_tag and ev == "enter"
+    )
+    assert other_enter > first_exit, (
+        f"two concurrent mt5 syncs interleaved on the ONE shared terminal — the "
+        f"per-terminal lock did not serialize them: {order!r}"
+    )
+
+    # TEETH (embedded negative control): neuter the lock (a fresh Lock per call) and
+    # the second job's login is driven into the first job's read window — the
+    # contiguity guarantee reddens, proving the positive assertion is not vacuous.
+    neutered = await _run_two_concurrent_mt5(neuter_lock=True)
+    n_first = neutered[0][0]
+    n_first_exit = neutered.index((n_first, "exit"))
+    n_other_enter = next(
+        i for i, (t, ev) in enumerate(neutered) if t != n_first and ev == "enter"
+    )
+    assert n_other_enter < n_first_exit, (
+        f"with the lock neutered the concurrent syncs MUST interleave (else the "
+        f"positive assertion is vacuous); got {neutered!r}"
     )
 
 
