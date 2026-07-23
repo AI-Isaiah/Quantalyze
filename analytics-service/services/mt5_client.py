@@ -140,6 +140,21 @@ class Mt5Client:
         _connect: Callable[..., Any] | None = None,
         request_timeout_s: float = MT5_REQUEST_TIMEOUT_S,
     ) -> None:
+        # Enforce the load-bearing dual-timeout ORDERING (Pitfall 3 / T-134-04)
+        # where the two effective values finally meet: the MT5 login IPC timeout
+        # (ms) MUST stay strictly BELOW the rpyc sync_request_timeout (s -> ms) so
+        # MT5 fails its own pipe first and rpyc surfaces a clean error instead of a
+        # raw mid-handshake abort. A too-small request_timeout_s (ctor arg or a low
+        # MT5_REQUEST_TIMEOUT_S env) silently inverts it and reopens the v1.11
+        # WEDGE-01 wedge class, so fail loud at construction rather than at a hung
+        # live login.
+        if MT5_LOGIN_TIMEOUT_MS >= request_timeout_s * 1000:
+            raise ValueError(
+                "MT5 login IPC timeout must be strictly below the rpyc request "
+                f"timeout ({MT5_LOGIN_TIMEOUT_MS}ms >= "
+                f"{request_timeout_s * 1000:.0f}ms) — this inversion reopens the "
+                "v1.11 WEDGE-01 wedge class."
+            )
         # `_connect` is the injectable transport seam for the offline contract
         # suite (mirrors SfoxClient's _clock/_sleep injection). Default is the
         # lazy real transport.

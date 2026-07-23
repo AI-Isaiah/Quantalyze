@@ -206,10 +206,32 @@ def test_login_passes_ipc_timeout_below_rpyc_timeout():
 
 def test_connect_receives_request_timeout():
     """The ctor request_timeout_s must be threaded into connect(timeout=...) — that
-    is the rpyc sync_request_timeout knob."""
+    is the rpyc sync_request_timeout knob. The value stays strictly ABOVE the MT5
+    login IPC timeout (20000ms) so the WR-01 dual-timeout ordering guard passes."""
     connect, _fake, record = _make({})
-    Mt5Client("host", 18812, _connect=connect, request_timeout_s=12.5)
-    assert record["timeout"] == 12.5
+    Mt5Client("host", 18812, _connect=connect, request_timeout_s=25.0)
+    assert record["timeout"] == 25.0
+
+
+def test_inverting_request_timeout_is_rejected():
+    """WR-01: a request_timeout_s that puts the rpyc round-trip ceiling AT OR BELOW
+    the MT5 login IPC timeout inverts the load-bearing dual-timeout ordering
+    (`MT5_LOGIN_TIMEOUT_MS < request_timeout_s*1000`), reopening the v1.11 WEDGE-01
+    wedge class the docstring warns against. It must fail loud at construction, not
+    silently. Fails against the unguarded __init__ (constructs without raising)."""
+    connect, _fake, _rec = _make({})
+    # login IPC timeout is 20000ms; a 10s rpyc ceiling (10000ms) is below it.
+    with pytest.raises(ValueError):
+        Mt5Client("host", 18812, _connect=connect, request_timeout_s=10.0)
+
+
+def test_default_construction_satisfies_timeout_ordering():
+    """WR-01: the DEFAULT construction must NOT trip the ordering guard (20000ms
+    login IPC timeout < 30000ms rpyc ceiling), so the guard rejects only genuine
+    inversions."""
+    connect, _fake, _rec = _make({})
+    Mt5Client("host", 18812, _connect=connect)  # must not raise
+    assert MT5_LOGIN_TIMEOUT_MS < MT5_REQUEST_TIMEOUT_S * 1000
 
 
 # -- account_info: None -> raise; populated -> native dict -------------------
