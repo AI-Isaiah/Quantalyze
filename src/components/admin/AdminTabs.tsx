@@ -34,6 +34,7 @@ const SOURCE_BADGE_LABEL: Record<StrategySource, string> = {
   bybit: "bybit",
   deribit: "deribit",
   sfox: "sfox",
+  mt5: "mt5",
 };
 
 const TABS = ["Intro Requests", "Strategy Review", "Allocators", "Managers", "Compute Jobs"] as const;

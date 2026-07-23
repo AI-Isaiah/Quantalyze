@@ -36,7 +36,7 @@ import { z } from "zod";
 // deribit key clears the allowlist; the FUNDING and USER-FACING UI surfaces are
 // DECOUPLED below (FUNDING_EXCHANGES / UI_EXCHANGE_CODES) and stay 3-exchange —
 // widening this base MUST NOT auto-widen those (OQ4 gate + Pitfall 2).
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit", "sfox"] as const;
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit", "sfox", "mt5"] as const;
 export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
 export const exchangeEnum = z.enum(SUPPORTED_EXCHANGES);
 
@@ -51,6 +51,7 @@ export const EXCHANGE_DISPLAY = {
   bybit: "Bybit",
   deribit: "Deribit",
   sfox: "sFOX",
+  mt5: "MT5",
 } as const satisfies Record<SupportedExchange, string>;
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
@@ -122,6 +123,33 @@ export const SMOOTHED_MTM_UI_ENABLED =
  */
 export function isSfoxEnabledServer(): boolean {
   return process.env.SFOX_ENABLED === "true";
+}
+
+/**
+ * SERVER-SIDE MT5 go-live gate (Phase 135 / MT5SRC-03 — the STRUCTURAL gate).
+ *
+ * A verbatim clone of isSfoxEnabledServer above (the sFOX seam shipped
+ * FLAG-OFF; the MT5 seam ships DARK the same way). Server/runtime-only
+ * (deliberately NOT NEXT_PUBLIC): gates whether an mt5 CONNECT is admitted at
+ * the three key routes (validate-and-encrypt, create-with-key,
+ * composite/add-key) — the Python worker enforces the mirror gate
+ * (services/closed_sets.py::mt5_enabled_server, landed in plan 135-01).
+ * Fail-CLOSED with strict equality against the EXACT string "true": unset /
+ * "1" / "TRUE" / "on" / "" all read OFF, so an mt5 connect FAILS CLOSED
+ * honestly ("not yet available", a clean 4xx — never a crash, never a false
+ * KEY_AUTH_FAILED, never a live probe) until the founder sets MT5_ENABLED=true
+ * at go-live (Phase 139).
+ *
+ * The UI-facing NEXT_PUBLIC_MT5_ENABLED offer flag is Phase 138 — deliberately
+ * NOT defined here (mt5 stays OUT of UI_EXCHANGE_CODES / the offered set this
+ * phase; the seam ships dark).
+ *
+ * Read as a FUNCTION (never a module-load const) so it is evaluated per-request
+ * server-side and is never inlined into the client bundle; on the client
+ * `process.env.MT5_ENABLED` is undefined, so this reads false there.
+ */
+export function isMt5EnabledServer(): boolean {
+  return process.env.MT5_ENABLED === "true";
 }
 
 /**
