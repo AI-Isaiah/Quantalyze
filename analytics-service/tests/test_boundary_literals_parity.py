@@ -55,10 +55,13 @@ _PROCESS_KEY = (
     Path(__file__).resolve().parents[1] / "routers" / "process_key.py"
 )
 
-# The canonical 5-value key-save allowlist — the pydantic mirror of the TS
-# SUPPORTED_EXCHANGES single source of truth. Phase 119 (SFOX-04) added 'sfox'.
-# Drift on either side breaks the set-equality pin below.
-_KEY_SAVE_EXCHANGES = {"binance", "okx", "bybit", "deribit", "sfox"}
+# The canonical key-save allowlist — the pydantic mirror of the TS
+# SUPPORTED_EXCHANGES single source of truth. Phase 119 (SFOX-04) added 'sfox';
+# Phase 135 (MT5SRC-01) added 'mt5'. Drift on either side breaks the set-equality
+# pin below. (The mt5 SQL-migration byte-parity class is NOT added here — the
+# constraint migration file lands in plan 135-02; adding it now would red-read a
+# non-existent file.)
+_KEY_SAVE_EXCHANGES = {"binance", "okx", "bybit", "deribit", "sfox", "mt5"}
 
 # The four canonical `<table>_<column>_check` constraint names the Phase 68
 # migration widens (LOAD-BEARING: the vitest resolveColumnCheck resolves these
@@ -126,6 +129,30 @@ class TestPydanticLiteralsContainDeribit:
         assert "sfox" in get_args(Source), (
             "ingestion.adapter.Source must admit 'sfox' now that Phase 120 ships "
             "the sfox ingestion factory (keeps Source == SUPPORTED_SOURCES parity)."
+        )
+
+    def test_verify_request_exchange_literal_contains_mt5(self) -> None:
+        args = get_args(VerifyStrategyRequest.model_fields["exchange"].annotation)
+        assert "mt5" in args, (
+            "VerifyStrategyRequest.exchange Literal must admit 'mt5' (Phase 135 "
+            "MT5SRC-01) — the pydantic key-verify boundary mirroring TS "
+            "SUPPORTED_EXCHANGES."
+        )
+
+    def test_broker_literal_contains_mt5(self) -> None:
+        assert "mt5" in get_args(Broker), (
+            "debug_key_flow.Broker Literal must admit 'mt5' (Phase 135 MT5SRC-01)."
+        )
+
+    def test_source_literal_includes_mt5(self) -> None:
+        # Phase 135 (MT5SRC-01, 135-01) SHIPS the mt5 ingestion factory, so 'mt5'
+        # joins the ingestion Source Literal + the registry TOGETHER (the lockstep
+        # pinned by test_source_literal_and_registry_agree — the factory landed in
+        # the same change, no Literal-ahead-of-registry split). Membership pin
+        # (Source also carries 'csv').
+        assert "mt5" in get_args(Source), (
+            "ingestion.adapter.Source must admit 'mt5' now that Phase 135 ships "
+            "the mt5 ingestion factory (keeps Source == SUPPORTED_SOURCES parity)."
         )
 
 
