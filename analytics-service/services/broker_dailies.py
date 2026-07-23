@@ -60,9 +60,18 @@ from services.allocated_capital import (
     allocated_capital_returns_and_metrics,
 )
 from services.external_flows import ExternalFlow
-from services.mt5_deals import classify_deal, deal_cash_effect, deal_utc_day
+from services.mt5_deals import (
+    _coerce_money,
+    classify_deal,
+    deal_cash_effect,
+    deal_utc_day,
+)
 from services.native_nav import NativeLedger, reconstruct_native_nav_and_twr
-from services.nav_twr import _build_nav_meta, _coerce_float, chain_linked_twr
+from services.nav_twr import (
+    _build_nav_meta,
+    chain_linked_twr,
+    reconstruct_nav_and_twr,
+)
 from services.transforms import trades_to_daily_returns_with_status
 
 logger = logging.getLogger(__name__)
@@ -440,12 +449,22 @@ def combine_mt5_deal_ledger(
     account_equity − account_balance`` so the honest core flags a material wedge
     (``unrealized_pnl_in_anchor``) rather than silently reconciling it.
 
-    Composition: the per-day trading PnL is shaped into ``fetch_daily_pnl``-style
-    ``daily_pnl`` records and the per-day flows into dated ``ExternalFlow`` entries,
-    then delegated to ``combine_realized_and_funding`` so the anchor roll, the
-    flow numerator, the DQ-01 guard set, the uPnL-wedge flag and ``gap_fill`` all
-    come from the ONE shared engine — a bespoke ``r_t`` loop is FORBIDDEN
-    (Don't Hand-Roll). The two existing siblings are NEVER touched.
+    Composition (CR-01): the per-day trading PnL is shaped into an ascending daily
+    ``daily_pnl`` Series and the per-day flows into dated ``ExternalFlow`` entries,
+    then handed to the honest core ``nav_twr.reconstruct_nav_and_twr`` DIRECTLY —
+    so the anchor roll, the flow numerator, the DQ-01 guard set, the uPnL-wedge flag
+    all come from the ONE shared engine (a bespoke ``r_t`` loop is FORBIDDEN —
+    Don't Hand-Roll), while ``gap_fill`` is applied here as the two siblings do. We
+    do NOT delegate to ``combine_realized_and_funding`` →
+    ``trades_to_daily_returns_with_status``: that CSV/ccxt path carries a
+    dust→heuristic-capital fallback (any anchor ≤ $1000 → fabricated ≥$10k base)
+    that is correct for a balance-less CSV upload but WRONG for MT5, whose
+    ``account_info().equity`` is ALWAYS authoritative. Anchoring straight to the
+    core keeps the heuristic base unreachable so a real sub-$1000 anchor is honored
+    (scaled correctly) and a genuinely dust account fails the DQ-01 dust guard
+    honestly — never a silent rescale (mirrors how ``combine_native_ledger`` /
+    ``combine_sfox_balance_history`` anchor to their real venue NAV). The two
+    existing siblings are NEVER touched.
     """
     trading_by_day: dict[str, float] = {}
     flow_by_day: dict[str, float] = {}
@@ -457,37 +476,66 @@ def combine_mt5_deal_ledger(
         if kind == "trading":
             trading_by_day[day] = trading_by_day.get(day, 0.0) + deal_cash_effect(deal)
         else:  # external_flow — capital in/out, subtracted from the return numerator
-            amount = _coerce_float(
-                deal.get("profit", 0.0), field="mt5_flow_profit", row={"day": day}
-            )
+            # WR-01: route the flow amount through the SAME bool-rejecting money
+            # coercer the trading fold uses (``mt5_deals._coerce_money``, via
+            # ``deal_cash_effect``), NOT ``nav_twr._coerce_float``. ``_coerce_float``
+            # accepts ``bool`` (``float(True) == 1.0`` is finite), so a schema-drifted
+            # bool ``profit`` on a BALANCE/CREDIT/BONUS deal would be silently folded
+            # as a $1 capital flow instead of failing loud like the trading path. Both
+            # channels now share ONE fail-loud contract (the mt5_deals module's whole
+            # reason to exist). A missing field defaults to 0.0, mirroring
+            # ``deal_cash_effect``'s None-skip.
+            raw = deal.get("profit", 0.0)
+            amount = 0.0 if raw is None else _coerce_money(raw, field="mt5_flow_profit")
             flow_by_day[day] = flow_by_day.get(day, 0.0) + amount
 
-    # Shape per-day trading PnL into daily_pnl records (the funding_rows_to_daily_pnl
-    # _records shape at :108-121: side encodes the sign, price is the |USD| amount).
-    records = [
-        {
-            "exchange": "",
-            "symbol": "MT5_DAILY",
-            "side": "buy" if pnl >= 0 else "sell",
-            "price": abs(pnl),
-            "quantity": 1,
-            "fee": 0,
-            "fee_currency": "USD",
-            "timestamp": f"{day}T00:00:00+00:00",
-            "order_type": "daily_pnl",
-        }
-        for day, pnl in sorted(trading_by_day.items())
-    ]
+    # Per-day trading PnL as an ascending daily Series (unit ``[us]``, the canonical
+    # analytics unit) — the DIRECT input to the honest core (below), not the
+    # CSV-shaped ``daily_pnl`` records the dust-gated combiner consumes.
+    trading_days = sorted(trading_by_day)
+    daily_pnl_series = pd.Series(
+        [trading_by_day[day] for day in trading_days],
+        index=pd.DatetimeIndex(
+            [pd.Timestamp(day) for day in trading_days]
+        ).as_unit("us"),
+        name="daily_pnl",
+    )
     # Dated external flows (deposit +, withdrawal −); USD-family so quantity == usd.
     flows = [
         ExternalFlow(utc_day_iso=day, usd_signed=amount)
         for day, amount in sorted(flow_by_day.items())
     ]
 
-    return combine_realized_and_funding(
-        records,
-        [],
-        account_balance=account_equity,
+    # CR-01: reconstruct DIRECTLY against the authoritative live-equity anchor via
+    # the honest core, BYPASSING ``combine_realized_and_funding`` →
+    # ``trades_to_daily_returns_with_status`` and its CSV/ccxt dust→heuristic-capital
+    # fallback (``transforms.py`` ``_DUST_BALANCE_THRESHOLD``). That fallback DISCARDS
+    # any anchor ≤ $1000 and substitutes a fabricated ≥$10k base — correct for a
+    # balance-less CSV upload, but WRONG for MT5, which ALWAYS has an authoritative
+    # ``account_info().equity`` read. Routing MT5 through it let a sub-$1000 account
+    # (forex/CFD margin accounts are commonly in ($100, $1000]) be silently rescaled
+    # 5–10× off a fabricated base, inflated above the $1000 DUST_NAV_FLOOR so the
+    # DQ-01 dust guard never fired, and published as an ``api_verified`` factsheet.
+    # Calling the core directly (the way ``combine_native_ledger`` /
+    # ``combine_sfox_balance_history`` anchor to their real venue NAV) makes the
+    # heuristic base UNREACHABLE for MT5: a real sub-$1000 anchor is HONORED (scaled
+    # correctly), while a genuinely dust/degenerate account falls to the honest DQ-01
+    # dust guard (every day NaN → <2 usable → the job-worker material-equity floor
+    # rejects it PERMANENT) — never a silent rescale, never a false ``api_verified``.
+    # A ledger with NO trading deals yields no interpretable return series (mirrors
+    # the CSV combiner's empty-trades early return: a deposit-only account has no
+    # track record); return an empty series so the downstream <2-day / material-equity
+    # gates dispose it, never a fabricated flat series off pure flows.
+    if daily_pnl_series.empty:
+        return (
+            gap_fill_daily_returns(pd.Series(dtype="float64", name="returns")),
+            dict(_build_nav_meta({})),
+        )
+    returns, meta = reconstruct_nav_and_twr(
+        daily_pnl_series,
+        account_equity,
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
     )
+    returns = gap_fill_daily_returns(returns)
+    return returns, dict(meta)

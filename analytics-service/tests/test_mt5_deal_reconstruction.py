@@ -385,3 +385,136 @@ def test_returns_series_unambiguous_for_quantstats() -> None:
     vals = returns.to_numpy()
     assert (vals < 0).any()      # at least one strictly negative day
     assert (vals <= 1.0).all()   # no > 100% day → cannot be mistaken for prices
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (CR-01 regression) — a REAL sub-$1000 equity anchor is HONORED, never
+# swapped for a fabricated ≥$10k heuristic-capital base.
+#
+# Before the fix, combine_mt5_deal_ledger delegated to the CSV-oriented
+# trades_to_daily_returns_with_status, whose dust gate DISCARDS any anchor
+# <= $1000 and substitutes heuristic_base = max(mean_abs_pnl*100, |Σpnl|, 10_000).
+# For an MT5 account with equity in (100, 1000] this (a) rescaled the returns
+# 5–10×, (b) inflated the reconstructed prev_nav above the $1000 DUST_NAV_FLOOR so
+# the DQ-01 dust guard never fired and the account slipped past the material-equity
+# floor, and (c) published the wrong series stamped api_verified. MT5 ALWAYS has an
+# authoritative account_info().equity read, so the heuristic base must never be
+# reachable. These oracles pin the two honest outcomes: a small account whose prior
+# reconstructed NAV is still above the dust floor reconstructs CORRECTLY off the
+# real anchor; a genuinely-dust account fails the DQ-01 dust guard honestly (<2
+# usable days → the job-worker material-equity floor rejects it) — never a silent
+# rescale off a fabricated base.
+# ---------------------------------------------------------------------------
+
+
+def test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base() -> None:
+    """CR-01. Equity $900 (sub-$1000) after two losing days. The reconstruction
+    MUST anchor to the REAL $900 equity, not a fabricated ≥$10k base.
+
+    Hand arithmetic (equity 900, balance 900 ⇒ open_unrealized 0; two trading days
+    on consecutive UTC days, no flows):
+      day1 (06-02): SELL profit −600 → day PnL −600
+      day2 (06-03): SELL profit −500 → day PnL −500
+      Σpnl = −1100
+      terminal NAV = anchor equity = 900
+      backward roll (NAV_{t−1} = NAV_t − pnl_t):
+        NAV(06-03) = 900
+        NAV(06-02) = 900 − (−500) = 1_400
+        base (pre-history) = 1_400 − (−600) = 2_000
+      flow-in-numerator returns r_t = (NAV_t − NAV_{t−1})/NAV_{t−1}:
+        day1: (1_400 − 2_000)/2_000 = −600/2_000 = −0.30
+        day2: (900 − 1_400)/1_400   = −500/1_400 = −0.3571428571428571…
+      Both prior NAVs (2_000, 1_400) are ABOVE the $1000 dust floor, so both days
+      are interpretable — NO dust guard, 2 usable days.
+
+    The FABRICATED-base series the buggy code produced (heuristic_base =
+    max(550*100, 1100, 10_000) = 55_000, anchor 53_900) would instead be
+    ≈ −600/55_000 = −0.0109 and ≈ −500/54_400 = −0.0092 — a ~27× rescale — with
+    used_heuristic_capital=True. This test reddens against that.
+    """
+    deals = [
+        {"type": 1, "entry": 1, "profit": -600.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        {"type": 1, "entry": 1, "profit": -500.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
+    ]
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=900.0, account_balance=900.0
+    )
+    vals = returns.to_numpy()
+    assert len(returns) == 2                                    # 06-02, 06-03 dense
+    assert vals[0] == pytest.approx(-600 / 2_000, abs=1e-12)    # −0.30, REAL base
+    assert vals[1] == pytest.approx(-500 / 1_400, abs=1e-12)    # off real prior NAV
+    # The honest core reconstructs from the real anchor: NO heuristic base, NO dust
+    # guard (both prior NAVs are above the $1000 floor), 2 usable days.
+    assert not meta.get("used_heuristic_capital")
+    assert not meta.get("dust_nav_guard")
+    assert int(returns.notna().sum()) == 2
+    # The fabricated-base rescale the fix defeats (≈ −0.0109 off a $55k base):
+    assert vals[0] != pytest.approx(-600 / 55_000, abs=1e-6)
+
+
+def test_genuinely_dust_equity_fails_dust_guard_not_rescaled() -> None:
+    """CR-01 (the other honest outcome). Equity $500 whose entire reconstructed NAV
+    path stays below the $1000 dust floor. The honest core dust-guards EVERY day
+    (NaN) → <2 usable days → the job-worker material-equity floor rejects the
+    account PERMANENT. It is NEVER silently rescaled off a fabricated ≥$10k base.
+
+    Hand arithmetic (equity 500, balance 500 ⇒ open_unrealized 0; consecutive UTC
+    days, no flows):
+      day1 (06-02): BUY profit +40  → day PnL +40
+      day2 (06-03): SELL profit −20 → day PnL −20
+      Σpnl = +20
+      terminal NAV = 500
+      backward roll:
+        NAV(06-03) = 500
+        NAV(06-02) = 500 − (−20) = 520
+        base       = 520 − 40    = 480
+      prior NAVs are {480 (day1), 520 (day2)} — BOTH 0 < prev < $1000 ⇒
+      dust_nav_guard fires on both days ⇒ both returns NaN ⇒ 0 usable days.
+
+    The buggy heuristic path (base max(30*100, 20, 10_000)=10_000, anchor 10_020)
+    instead emitted +40/10_000=+0.0040 and ≈ −20/10_040 with NO dust guard and 2
+    usable days — an empty-but-green track record fabricated off $10k. This test
+    reddens against that.
+    """
+    deals = [
+        {"type": 0, "entry": 1, "profit": 40.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 2)},
+        {"type": 1, "entry": 1, "profit": -20.0, "swap": 0.0,
+         "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 3)},
+    ]
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=500.0, account_balance=500.0
+    )
+    # Honest DQ-01 dust rejection, NOT a fabricated base:
+    assert not meta.get("used_heuristic_capital")
+    assert meta.get("dust_nav_guard") is True
+    assert int(returns.notna().sum()) < 2   # <2 usable ⇒ material-equity floor rejects
+    assert meta.get("computation_status_hint") == "complete_with_warnings"
+
+
+# ---------------------------------------------------------------------------
+# WR-01 regression — the external-flow money fold must fail loud on a bool,
+# identically to the trading channel (deal_cash_effect → _coerce_money).
+# ---------------------------------------------------------------------------
+
+
+def test_flow_channel_rejects_bool_profit_like_trading_channel() -> None:
+    """WR-01. A BALANCE/CREDIT/BONUS deal whose ``profit`` arrived as a bool is
+    schema drift. The trading fold already rejects bool (via mt5_deals._coerce_money
+    inside deal_cash_effect); the flow fold must reject it identically instead of
+    silently coercing float(True)==1.0 into a $1 capital flow. A bool ``profit`` on
+    the day-4 BALANCE deposit therefore fails the WHOLE combine loud (nothing
+    partial), never a silent $1 flow.
+
+    Before the fix the flow fold used nav_twr._coerce_float, which accepts bool
+    (float(True) is finite) → the combine returned a corrupted-but-'complete'
+    series with no raise. This test reddens against that."""
+    deals = _canonical_deposit_deals()
+    # Turn the day-4 BALANCE deposit's profit into a bool (schema drift).
+    deals[1] = {**deals[1], "profit": True}
+    with pytest.raises(Mt5DealClassificationError):
+        combine_mt5_deal_ledger(
+            deals, account_equity=110_500.0, account_balance=110_500.0
+        )
