@@ -287,6 +287,24 @@ _MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
     os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
 )
 
+# WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
+# built from UTC ``now``, but MT5 deal ``time`` values are in the broker's SERVER
+# timezone (``mt5_deals.deal_utc_day`` is the ONE server-time→UTC correction seam).
+# A server AHEAD of UTC stamps a just-happened deal with an epoch LATER than UTC
+# ``now``, so without a margin that same-day deal would fall past the upper bound
+# and be silently CLIPPED from the ledger → under-counted terminal PnL → a wrong
+# (but plausible) series. The margin MUST cover the maximum plausible
+# server-ahead-of-UTC offset; real MT5 brokers sit within ±13h of UTC. The assert
+# ties the (deliberately generous, one full day) margin to that offset bound so a
+# future edit that tightens the window to "avoid fetching the future" can never
+# silently make it too tight to survive a same-day deal on an ahead-of-UTC server.
+_MT5_MAX_SERVER_UTC_OFFSET_S: Final[int] = 13 * 3600  # ±13h — the real-broker bound
+_MT5_DEAL_FETCH_MARGIN_S: Final[int] = 86_400  # one full day
+assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
+    "MT5 deal-fetch margin must cover the max server-UTC offset so a same-day "
+    "server-time deal is never clipped by the UTC-based upper bound (WR-02)"
+)
+
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
 
@@ -3306,7 +3324,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # None (error) is a typed raise inside the client; () → [] honest
                 # empty. NO fabricated flat account can enter here.
                 _deals = _mt5_session.client.history_deals_get(
-                    0, int(_mt5_now.timestamp()) + 86_400
+                    0, int(_mt5_now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
                 )
                 return _info, _deals
 

@@ -557,3 +557,29 @@ async def test_reconstruction_reconciles_to_equity(monkeypatch) -> None:
         rows, initial=initial + 2.0, flows_by_day=flows_by_day
     )
     assert abs(drifted - terminal_equity) > tol
+
+
+# ---------------------------------------------------------------------------
+# WR-02 regression — the MT5 deal-fetch upper-bound margin must cover the max
+# plausible server-ahead-of-UTC offset so a same-day server-time deal is never
+# clipped by the UTC-based bound. The invariant is enforced at module import by
+# an assert on the two named constants (replacing the former bare ``86_400``);
+# this test documents WHY and reddens if the margin is ever tightened below the
+# offset bound (or the constants removed).
+# ---------------------------------------------------------------------------
+
+
+def test_deal_fetch_margin_covers_server_utc_offset_bound() -> None:
+    """A broker whose server runs AHEAD of UTC stamps a just-happened deal with an
+    epoch LATER than UTC ``now``. The fetch upper bound is ``utc_now + margin``, so
+    a same-day deal on a server ``offset`` seconds ahead survives iff
+    ``margin >= offset``. The margin must therefore cover the maximum plausible
+    offset (real MT5 brokers are within ±13h). Encodes the invariant the module
+    assert guards — a future tightening of the window that could silently drop
+    same-day deals turns this RED."""
+    assert jw._MT5_DEAL_FETCH_MARGIN_S >= jw._MT5_MAX_SERVER_UTC_OFFSET_S
+    # A +13h-ahead server's same-day deal lands within the fetch window:
+    utc_now = 1_700_000_000
+    upper_bound = utc_now + jw._MT5_DEAL_FETCH_MARGIN_S
+    same_day_deal_on_ahead_server = utc_now + jw._MT5_MAX_SERVER_UTC_OFFSET_S
+    assert same_day_deal_on_ahead_server <= upper_bound
