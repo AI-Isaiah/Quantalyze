@@ -134,7 +134,7 @@ def _default_connect(*, host: str, port: int, timeout: float) -> Any:
     the whole analytics suite in CI today. `timeout` sets the rpyc
     `sync_request_timeout` (the constructor `timeout=` knob).
     """
-    from mt5linux import MetaTrader5  # noqa: PLC0415 — intentional lazy transport import
+    from mt5linux import MetaTrader5  # type: ignore[import-not-found]  # noqa: PLC0415 — intentional lazy transport import
 
     return MetaTrader5(host, port, timeout)
 
@@ -147,7 +147,7 @@ def _coerce(value: Any) -> Any:
     return str(value)
 
 
-def _materialize(obj: Any) -> dict:
+def _materialize(obj: Any) -> dict[str, Any]:
     """Materialize a netref namedtuple to a native dict. Fail loud on a degenerate
     (non-namedtuple) shape — never coerce it into an empty/partial dict."""
     asdict = getattr(obj, "_asdict", None)
@@ -270,14 +270,14 @@ class Mt5Client:
         if not ok:
             self._raise_last()
 
-    def account_info(self) -> dict:
+    def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
         info = self._guarded_read(self._mt5.account_info)
         if info is None:
             self._raise_last()
         return _materialize(info)
 
-    def history_deals_get(self, from_ts: Any, to_ts: Any) -> list[dict]:
+    def history_deals_get(self, from_ts: Any, to_ts: Any) -> list[dict[str, Any]]:
         """Deals in [from_ts, to_ts) as native dicts. `None` is an ERROR -> typed
         raise (NEVER a truthiness check on `deals` — that conflates the error with
         the honest empty `()`); `()` -> `[]`; a populated tuple -> materialized
@@ -289,7 +289,7 @@ class Mt5Client:
             self._raise_last()
         return [_materialize(d) for d in deals]
 
-    def order_check(self, request: dict) -> dict:
+    def order_check(self, request: dict[str, Any]) -> dict[str, Any]:
         """PROBE ONLY. Materialize an `order_check` result to a native dict; `None`
         (error) -> typed raise.
 

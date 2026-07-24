@@ -3207,9 +3207,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             try:
                 # FLIPRETRY-01: EACH crawl is wall-clock bounded. asyncio.wait_for
                 # cancels the inner crawl on timeout and raises asyncio.TimeoutError.
+                # venue=="sfox" ⇒ ctx.exchange is a SfoxClient; cast narrows the
+                # union (Mt5Session was added to it in Phase 136) — mypy --strict.
                 _bh_rows, _earliest_ms = await asyncio.wait_for(
                     crawl_sfox_balance_history(
-                        ctx.exchange,
+                        cast(SfoxClient, ctx.exchange),
                         start_date_ms=_SFOX_FAR_PAST_EPOCH_MS,
                         end_date_ms=_sfox_now_ms,
                     ),
@@ -3220,7 +3222,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # false-time-out a >30-page ledger into an infinite transient retry.
                 _txn_rows = await asyncio.wait_for(
                     crawl_sfox_transactions(
-                        ctx.exchange,
+                        cast(SfoxClient, ctx.exchange),
                         from_ms=_SFOX_FAR_PAST_EPOCH_MS,
                         to_ms=_sfox_now_ms,
                     ),
@@ -3408,7 +3410,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.mt5_validation import classify_mt5_login_error
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
 
-            _mt5_session = ctx.exchange  # Mt5Session (parsed creds + Mt5Client)
+            # venue=="mt5" ⇒ the preflight built an Mt5Session (cast narrows the
+            # ccxt.Exchange | SfoxClient | Mt5Session union for the .login/.client/
+            # .investor_password/.server accesses below — mypy --strict, no ignore).
+            _mt5_session = cast(Mt5Session, ctx.exchange)
             _mt5_now = datetime.now(timezone.utc)
             # (b) ONE synchronous read block off the event loop (Mt5Client is
             # blocking RPyC) wrapped in asyncio.wait_for — the FLIPRETRY-01 baseline

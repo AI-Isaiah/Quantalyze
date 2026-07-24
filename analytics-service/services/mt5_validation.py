@@ -115,7 +115,7 @@ def parse_mt5_credentials(
     return login, investor_pw, server
 
 
-def mt5_probe_request(symbol: str = "EURUSD") -> dict:
+def mt5_probe_request(symbol: str = "EURUSD") -> dict[str, Any]:
     """A minimal market-order-shaped request for ``order_check`` (PROBE ONLY —
     never submitted). ``order_check`` validates margin/funds and does NOT place an
     order. Mirrors ``scripts/mt5_spike.py:124`` ``_probe_request`` (the shape the
