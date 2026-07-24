@@ -559,6 +559,15 @@ describe("POST /api/strategies/composite/add-key — credential posture (T-88-13
  */
 describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)", () => {
   beforeEach(resetHappyMocks);
+  // Acceptance = the go-live state: MT5_ENABLED=true so the server gate (added to
+  // mirror validate-and-encrypt + the sfox precedent) lets the connect through.
+  // The fail-closed default is covered by the dedicated block below.
+  beforeEach(() => {
+    process.env.MT5_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
 
   const MT5_BODY = {
     exchange: "mt5",
@@ -606,6 +615,19 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
+  it("accepts a SHORT (<8) mt5 login on the multi-key path — a broker account number is often 5-7 digits (RED-TEAM)", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...MT5_BODY, api_key: "500123" }));
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalledWith(
+      "mt5",
+      "500123",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+    );
+  });
+
   it("STILL 400s an invalid exchange value (three-layer lockstep: bogus never admitted)", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...MT5_BODY, exchange: "notanexchange" }));
@@ -615,5 +637,60 @@ describe("POST /api/strategies/composite/add-key — mt5 acceptance (MT5SRC-03)"
     expect(json.code).toBe("KEY_INVALID_FORMAT");
     expect(json.error).toBe("Unsupported exchange");
     expect(validateKeyMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 135 (MT5SRC-03) — STRUCTURAL server gate (regression for the ship-review
+ * finding). Add-to-composite is a second connect path; with MT5_ENABLED unset it
+ * must FAIL CLOSED — a clean 400 "not yet available", no live probe, no minted
+ * composite key. Without the gate the request falls through to the Python
+ * MT5_DISABLED_DETAIL gate → UNKNOWN → 500. Reddens if the gate is removed.
+ * Mirrors the sfox server-gate block verbatim.
+ */
+describe("POST /api/strategies/composite/add-key — mt5 server gate (MT5_ENABLED off)", () => {
+  beforeEach(resetHappyMocks);
+  beforeEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  it.each(["mt5", "MT5", "Mt5"])(
+    "fails closed for %s (400 not-available, no live probe, no key minted)",
+    async (exchange) => {
+      const POST = await importPost();
+      const res = await POST(
+        makeReq({
+          exchange,
+          api_key: "500123456",
+          api_secret: "investor-password-123",
+          passphrase: "MetaQuotes-Demo",
+          label: "mt5 composite key",
+          wizard_session_id: WIZARD_SESSION_ID,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      const json = await res.json();
+      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.error).toBe("MT5 integration is not yet available.");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does NOT gate ccxt — binance runs normally with MT5_ENABLED unset", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalled();
   });
 });

@@ -530,10 +530,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // stamp 'traditional' for mt5 (forex/CFD) vs 'crypto' for a crypto venue. Owner
   // scope is already enforced (the apiKeyId came off the owner-scoped strategies
   // row above); this admin read only fetches the venue string. On a lookup fault
-  // apiKeyExchange stays null → isCryptoExchange(null) is false → 'traditional'
-  // (the conservative √252 default). This is non-destructive: the write is
-  // non-blocking and the worker re-derives asset_class from the venue anyway, so
-  // a transient blip can only under-state (never over-state) the crypto clock.
+  // apiKeyExchange stays null — and in that case the update below is SKIPPED
+  // (RED-TEAM): create-with-key already stamped a venue-aware asset_class on the
+  // draft, and the worker reads strategies.asset_class DIRECTLY as the
+  // annualization clock (it does NOT re-derive from venue — see job_worker
+  // periods_per_year_for_asset_class(strategies.asset_class)). Defaulting to
+  // 'traditional' on a blip would silently mis-annualize a crypto strategy (√252
+  // not √365 → inflated Sharpe), so we leave the correct draft stamp untouched.
   let apiKeyExchange: string | null = null;
   if (apiKeyId) {
     const { data: keyVenueRow, error: keyVenueErr } = await assetClassAdmin
@@ -554,34 +557,45 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       typeof keyVenueRow?.exchange === "string" ? keyVenueRow.exchange : null;
   }
   //
-  // Non-blocking on failure: the column default means a failed write leaves a
-  // CSV strategy on √252 (harmless for traditional; WRONG for crypto-CSV, so
-  // the failure is surfaced to Sentry below) and a broker/composite strategy is
-  // re-derived to crypto on the next finalize attempt.
-  // @audit-skip: non-security annualization metadata (√365 crypto / √252
-  // traditional) written as part of the already-audited strategy finalization;
-  // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
-  const { error: assetClassErr } = await supabase
-    .from("strategies")
-    .update({
-      asset_class: apiKeyId
-        ? isCryptoExchange(apiKeyExchange)
-          ? "crypto"
-          : "traditional"
-        : isCompositeForAssetClass
-          ? "crypto"
-          : fields.asset_class,
-    })
-    .eq("id", fields.strategy_id)
-    .eq("user_id", user.id);
-  if (assetClassErr) {
+  // RED-TEAM: for a single-key strategy whose venue we FAILED to resolve
+  // (apiKeyExchange null after a lookup fault), SKIP the write entirely. The
+  // draft already carries create-with-key's venue-aware stamp, and the worker
+  // treats strategies.asset_class as the authoritative annualization clock — an
+  // overwrite to 'traditional' here would silently mis-annualize a crypto
+  // strategy. Only write when we have a confident value (venue resolved, or a
+  // composite/CSV path where apiKeyId is absent).
+  const skipAssetClassWrite = Boolean(apiKeyId) && apiKeyExchange === null;
+  if (skipAssetClassWrite) {
     console.warn(
-      `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+      "[strategies/finalize-wizard] asset_class venue unresolved for a single-key " +
+        "strategy — leaving the draft's venue-aware stamp intact (no √252 overwrite)",
     );
-    captureToSentry(assetClassErr, {
-      tags: { op: "finalize-wizard.asset_class_persist" },
-      level: "warning",
-    });
+  } else {
+    // @audit-skip: non-security annualization metadata (√365 crypto / √252
+    // traditional) written as part of the already-audited strategy finalization;
+    // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
+    const { error: assetClassErr } = await supabase
+      .from("strategies")
+      .update({
+        asset_class: apiKeyId
+          ? isCryptoExchange(apiKeyExchange)
+            ? "crypto"
+            : "traditional"
+          : isCompositeForAssetClass
+            ? "crypto"
+            : fields.asset_class,
+      })
+      .eq("id", fields.strategy_id)
+      .eq("user_id", user.id);
+    if (assetClassErr) {
+      console.warn(
+        `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+      );
+      captureToSentry(assetClassErr, {
+        tags: { op: "finalize-wizard.asset_class_persist" },
+        level: "warning",
+      });
+    }
   }
 
   // Probe runs BEFORE both legacy and unified paths so the
