@@ -49,6 +49,16 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    both default OFF). Do: version + CHANGELOG bump → PR → merge. Live acceptance (Phoenix
    key) stays deferred. ⚠️ landing risk documented: a structural smoothed mark-hole fails
    the WHOLE job — that's why it ships dark.
+6. **v1.15 MT5 go-live (founder + soak).** Engineering shipped dark (v1.15). Gateway RPyC
+   bridge FIXED + verified 2026-07-25 (rpyc 6.x↔5.x + numpy 2.x↔1.x skew on the gmag11
+   gateway; live Vantage account 26547876 @ `VantageMarkets-Live 5` reads through the full
+   RPyC→Wine→MT5 chain, read-only). Worker RPyC deps + a critical `_default_connect` ctor
+   crash fixed (v0.49.1.0). REMAINING: set `MT5_SPIKE_*` on the worker → run the 5–10
+   business-day soak (`scripts.mt5_soak`, host `mt5-gateway.railway.internal:8001`) →
+   gate-check → flip `MT5_ENABLED` + `NEXT_PUBLIC_MT5_ENABLED` + `MT5_GATEWAY_HOST/PORT`
+   (redeploy worker & Vercel) → verify the `api_verified` MT5 factsheet renders end-to-end
+   (MT5 → dailies → unified backbone → factsheet). **Founder:** investor password (Railway),
+   soak run/window.
 
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
@@ -176,6 +186,13 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
 - Env sprawl (59 keys, no manifest/startup validation); README setup stale/prod-dangerous;
   no CONTRIBUTING/ops runbooks (deploy-rollback, Railway restart, migration-recovery, secrets
   rotation).
+- **`requirements.in` vs lock drift (analytics-service).** `.in` pins `pandas==2.2.3` but
+  the committed `requirements.txt` lock pins `pandas==3.0.3` — out of sync, so a naive
+  `make lock` would silently DOWNGRADE prod pandas 3.0.3→2.2.3 (a money-math dep). Also the
+  committed lock predates `--universal` markers / drops `[extra]` annotations vs local uv
+  0.11.6 output, so `make lock` isn't reproducible across uv versions. Fix: decide the
+  intended pandas, pin the uv version used for locking, regen once, commit. (Surfaced by the
+  v0.49.1.0 MT5-deps ship; the rpyc line was hand-added to avoid triggering this drift.)
 - **No `docs/architecture/` ADRs** — every decision is implicit in code; actively-inconsistent
   mechanisms to codify + consolidate: multiple auth wrappers, multiple cron mechanisms
   (vercel.json vs `pg_cron`+`pg_net`), multiple admin checks. (17 existing decisions to

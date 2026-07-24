@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.49.1.0] - 2026-07-25
+### v1.15 MT5 go-live prep — worker RPyC client deps + a critical connect fix
+Makes the MT5 gateway reachable from the worker and fixes a latent crash on the
+go-live path. Still DARK behind `MT5_ENABLED` (the `mt5linux` import stays lazy).
+
+- **Worker transport deps**: pin `rpyc==5.2.3` in `requirements.in`/lock and install
+  `mt5linux==0.1.9` `--no-deps` in the Dockerfile. rpyc MUST stay on the 5.x line
+  (`<6`) — 6.x is not wire-compatible with the gateway's Wine-side rpyc-5 server and
+  fails the handshake with `invalid message type: 18`. `mt5linux` goes in `--no-deps`
+  because its 0.1.9 wheel mis-declares its build toolchain (twine, `urllib3==1.26.7`,
+  `six`) as runtime deps, which would conflict with the service's own pins.
+- **Critical connect fix** (`services/mt5_client.py`): `_default_connect` called
+  `MetaTrader5(host, port, timeout)`, but mt5linux 0.1.9's constructor is
+  `(host, port)` only — a third positional raised `TypeError` on EVERY real connect,
+  which would have crashed the go-live soak gate and every mt5 job at the flip. It was
+  invisible because the contract tests inject a `_connect` double and mt5linux is
+  never installed in CI. Now constructs with `(host, port)` and sets the rpyc
+  `sync_request_timeout` on the private connection (0.1.9's only timeout knob; its
+  real default is 30s, not the 300s the old comment claimed). Regression test pins the
+  real 0.1.9 constructor arity so the double can never mask this class of bug again.
+- **Durable gateway constraint**: commit `deploy/mt5-gateway/mt5linux-constraint.txt`
+  (the 3-pin `PIP_CONSTRAINT` — `mt5linux==0.1.9` + `rpyc==5.0.1` + `numpy<2`) and
+  document the `PIP_CONSTRAINT` wiring + one-time Wine `numpy<2` step in
+  `railway-gateway.md`, so a from-scratch gateway rebuild reproduces a working bridge.
+
 ## [0.49.0.0] - 2026-07-24
 ### v1.15 — MetaTrader 5 live `api_verified` account sync, ships DARK behind flags
 Elevates MetaTrader 5 from the fabricatable legacy Expert-Advisor / CSV
