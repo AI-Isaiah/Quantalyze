@@ -37,6 +37,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import types
 
 import pytest
 
@@ -223,6 +224,53 @@ def test_connect_receives_request_timeout():
     connect, _fake, record = _make({})
     Mt5Client("host", 18812, _connect=connect, request_timeout_s=25.0)
     assert record["timeout"] == 25.0
+
+
+def test_default_connect_matches_real_mt5linux_0_1_9_ctor(monkeypatch):
+    """REGRESSION (red-team FABLE, 2026-07-25): the REAL `_default_connect` factory
+    (not the injected double) must call mt5linux 0.1.9's actual constructor —
+    ``MetaTrader5(host, port)``, which takes NO ``timeout`` param — and wire the
+    rpyc ``sync_request_timeout`` onto the private connection itself.
+
+    WHY THIS MATTERS: the shipped code called ``MetaTrader5(host, port, timeout)``.
+    The pinned 0.1.9 wheel's ctor is ``__init__(self, host, port)``, so a third
+    positional raises ``TypeError: takes from 1 to 3 positional arguments but 4
+    were given`` on EVERY real connect — the go-live soak gate (scripts.mt5_spike →
+    Mt5Client) could never pass and every mt5 job would crash at the flip. It was
+    invisible because ALL other contract tests inject a ``_connect`` double whose
+    signature happens to accept ``timeout``, and mt5linux is never installed in CI.
+    This test injects a fake ``mt5linux`` whose ctor is byte-for-byte 0.1.9's
+    signature, so the constructor-arity contract is pinned and this whole class of
+    "double masks the real wheel" bug fails loud. Fails (TypeError) pre-fix.
+    """
+    from services.mt5_client import _default_connect
+
+    captured: dict = {}
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self._config: dict = {}
+
+        def execute(self, *_a, **_k) -> None:  # 0.1.9 ctor calls conn.execute(...)
+            pass
+
+    class _FakeMetaTrader5:
+        # EXACTLY mt5linux 0.1.9's signature: (self, host, port) — NO timeout knob.
+        def __init__(self, host: str = "localhost", port: int = 18812) -> None:
+            captured["ctor_args"] = (host, port)
+            # name-mangled `self.__conn`, as the real 0.1.9 class stores it.
+            self._MetaTrader5__conn = _FakeConn()
+
+    fake_module = types.ModuleType("mt5linux")
+    fake_module.MetaTrader5 = _FakeMetaTrader5  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mt5linux", fake_module)
+
+    client = _default_connect(host="gw.internal", port=8001, timeout=42.0)
+
+    # 1. the ctor received ONLY (host, port) — the third positional is gone.
+    assert captured["ctor_args"] == ("gw.internal", 8001)
+    # 2. the rpyc per-request timeout was wired onto the private connection.
+    assert client._MetaTrader5__conn._config["sync_request_timeout"] == 42.0
 
 
 def test_inverting_request_timeout_is_rejected():
