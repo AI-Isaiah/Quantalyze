@@ -19,7 +19,12 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
 )
-from services.mt5_client import Mt5Client, Mt5ClientError, MT5_REQUEST_TIMEOUT_S
+from services.mt5_client import (
+    Mt5Client,
+    Mt5ClientError,
+    Mt5AccountMismatchError,
+    MT5_REQUEST_TIMEOUT_S,
+)
 from services.mt5_validation import (
     Mt5ValidationError,
     classify_mt5_login_error,
@@ -214,16 +219,49 @@ async def _validate_mt5_key(
         logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
         raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
 
-    client = Mt5Client(host, port)
+    # RED-TEAM: Mt5Client.__init__ opens the RPyC socket SYNCHRONOUSLY (a blocking
+    # connect). Run construction — and the close in the finally — OFF the event
+    # loop under a wait_for ceiling; a hung/unreachable gateway connect on the loop
+    # would wedge FastAPI / healthz (the v1.11 WEDGE-01 class), exactly what the
+    # probe body already guards. A connect failure is a server/bridge fault, never
+    # the user's key → 503 (mirrors the missing-config 503 above), never a 500.
+    try:
+        client = await asyncio.wait_for(
+            asyncio.to_thread(lambda: Mt5Client(host, port)),
+            timeout=_MT5_PROBE_TIMEOUT_S,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("validate_key: MT5 gateway connect timed out (bridge hung)")
+        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+    except Exception:  # noqa: BLE001 — connect failure is server/bridge, not the key
+        logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
+        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+
     try:
         # Mt5Client is SYNCHRONOUS blocking RPyC. Run the login+read+probe body off
         # the event loop and bound it with a wait_for ceiling so a hung terminal
-        # can never wedge the loop / healthz (WEDGE-01, T-135-12). The terminal-
-        # restart recovery machinery is Phase 137 — not built here.
+        # can never wedge the loop / healthz (WEDGE-01, T-135-12).
+        def _assert_expected_login(info: dict[str, Any]) -> None:
+            # RED-TEAM login bracket, cloned from the worker derive arm (MT5CONC-02):
+            # FastAPI serves validates CONCURRENTLY against the ONE shared terminal,
+            # so a second request's login(...) can switch the terminal onto another
+            # account mid-probe. Without this bracket is_trade_capable() could be
+            # judged against the WRONG account — a master password wrongly accepted
+            # as read-only (the EoP gate T-135-09 defeated), or an investor login
+            # wrongly rejected. STRICT equality on the parsed login; a missing "login"
+            # field FAILS LOUD, never default-matches. A mismatch → the transient
+            # fail-closed arm below (Mt5AccountMismatchError is NOT an Mt5ClientError,
+            # so the classify arm can never absorb it into a verdict).
+            _actual = info.get("login")
+            if _actual != login:
+                raise Mt5AccountMismatchError(login, _actual)
+
         def _probe() -> tuple[dict[str, Any], dict[str, Any]]:
             client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
             info = client.account_info()  # proves auth + read
+            _assert_expected_login(info)  # PRE-probe bracket
             probe = client.order_check(mt5_probe_request())  # PROBE ONLY
+            _assert_expected_login(client.account_info())  # POST-probe bracket
             return info, probe
 
         try:
@@ -235,6 +273,16 @@ async def _validate_mt5_key(
             # with the shared NETWORK detail (mirrors the sfox transient arm);
             # WARNING (not exception) so a blip does not spam Sentry.
             logger.warning("validate_key: MT5 probe timed out (upstream bridge hung)")
+            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+        except Mt5AccountMismatchError:
+            # RED-TEAM: a concurrent validate re-logged the shared terminal onto
+            # another account mid-probe — an INFRA/concurrency fault, never the
+            # user's key. Fail CLOSED transient (never valid, never auth-failed,
+            # never a wrong-account verdict). No account values in the log line.
+            logger.warning(
+                "validate_key: MT5 terminal account mismatch mid-probe "
+                "(concurrent validate) — failing closed transient"
+            )
             raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
         except Mt5ClientError as e:
             # Classify via the ONE mt5_validation seam. NEVER log the interpolated
@@ -265,10 +313,23 @@ async def _validate_mt5_key(
         # investor-vs-master probe above that sfox lacks.
         return {"valid": True, "read_only": True}
     finally:
-        # Idempotent close on EVERY path after construction (success,
-        # master-reject, auth/server fail, transient/timeout) so the terminal
-        # session never leaks.
-        client.close()
+        # RED-TEAM: bounded, off-loop close. client.close() is blocking RPyC (a hung
+        # Wine shutdown on the loop would wedge FastAPI); mirror aclose_exchange's
+        # mt5 arm. close() swallows its own teardown errors; the wait_for is the
+        # last-resort ceiling. Runs on EVERY path (success, master-reject, auth/
+        # server fail, mismatch, transient/timeout) so the session never leaks.
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "validate_key: MT5 client.close() timed out — abandoning session"
+            )
+        except Exception:  # noqa: BLE001 — close must never mask the probe verdict
+            logger.warning(
+                "validate_key: MT5 client.close() failed — abandoning session"
+            )
 
 
 @router.post("/validate-key")

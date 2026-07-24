@@ -421,6 +421,36 @@ async def test_upnl_wedge_flags(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b — NEGATIVE CONTROL: a flat equity==balance account (wedge 0) must NOT
+# stamp unrealized_pnl_in_anchor on the mt5 derive branch specifically. The
+# positive test above pins that the flag FIRES; without this, a wiring bug that
+# spuriously always-stamps the flag on the mt5 open_unrealized_usd = equity −
+# balance seam (broker_dailies.py) would pass every mt5 test. The non-mt5 "no
+# wedge → no flag" controls live in test_job_worker.py, so the mt5 wiring needs
+# its own. Reddens if the flag is always-on.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_no_wedge_does_not_flag(monkeypatch) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    # equity == balance == 100_000 → wedge 0 → 0/100_000 = 0.0 < 0.05 ratio.
+    # Same canonical 4-day ledger (>=2 usable days, floor not tripped) as the
+    # positive test, so the ONLY difference is the zeroed uPnL wedge.
+    transport = _FakeMt5Transport(
+        account={"equity": 100_000.0, "balance": 100_000.0, "login": 123456}, deals=_canonical_deals()
+    )
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE
+    flags = _dq_flags(capture)
+    assert flags.get("unrealized_pnl_in_anchor") is not True, (
+        f"a flat equity==balance account has NO uPnL wedge — the flag must not be "
+        f"stamped (guards against an always-on wiring bug); got flags={flags!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 4 — a mid-read error fails the WHOLE job; nothing partial persists.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
@@ -443,6 +473,54 @@ async def test_read_error_fails_whole_job(monkeypatch) -> None:
     # NO partial series row and NO terminal analytics stamp (no-invented-data).
     assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
     assert not any(u[0] == "strategy_analytics" for u in capture["upserts"])
+
+
+@pytest.mark.asyncio
+async def test_wrong_server_at_derive_is_transient_not_permanent(monkeypatch) -> None:
+    """RED-TEAM: at DERIVE the key ALREADY validated, so a connection/bridge error —
+    which classify_mt5_login_error folds into 'wrong_server' via its 'connect'/
+    'network'/'terminal' tokens — must be TRANSIENT (retry, NO user-blame stamp),
+    NOT a permanent 'bad credentials or wrong broker server' failure. A routine
+    gateway redeploy mid-derive must never permanently kill a valid strategy and
+    blame the user's creds. Reddens against the old `_kind in ('auth','wrong_server')
+    -> permanent` classification."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=[],
+        # str contains "connection" → the 'connect' wrong_server token.
+        read_exc=ConnectionResetError("Connection reset by peer during history read"),
+    )
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"  # NOT permanent — the key validated once
+    # A transient must NOT stamp a terminal user-blame analytics row.
+    assert not any(u[0] == "strategy_analytics" for u in capture["upserts"])
+
+
+@pytest.mark.asyncio
+async def test_balance_flow_with_none_profit_does_not_crash(monkeypatch) -> None:
+    """RED-TEAM: a BALANCE/CREDIT deal with an explicit profit=None PASSES the
+    combine (which None-coalesces to 0.0) — the worker's flow-EVIDENCE loop must
+    None-coalesce IDENTICALLY. A raw float(None) there would raise TypeError AFTER
+    the series was already computed, burning transient retries to failed_final with
+    no stamp. The job must COMPLETE. Reddens against the raw float(profit) fold."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    deals = _canonical_deals()
+    # The canonical BALANCE deposit (type=2) but with a missing profit field.
+    deals[1] = {**deals[1], "profit": None}
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=deals
+    )
+    ctx, capture = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    # No TypeError crash — the evidence fold tolerated what the money fold does.
+    assert result.outcome == DispatchOutcome.DONE
 
 
 # ---------------------------------------------------------------------------
@@ -522,12 +600,18 @@ def _ledger_supabase_mock() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_long_fetch_tail_wiring() -> None:
+async def test_long_fetch_tail_wiring(monkeypatch) -> None:
     """MT5RECON-01: an mt5 onboard routes the queued long-fetch through the
     ledger tail (derive_broker_dailies) and NEVER the fill pipeline — mt5's
     Mt5Adapter.fetch_raw/compute_metrics raise by design. Mirrors the deribit/
     sfox tail-wiring tests."""
     from services.ingestion.adapter import ValidationResult
+
+    # Go-live state: the RED-TEAM long_fetch kill-switch (mt5 + not
+    # mt5_enabled_server() → permanent skip before adapter.validate) requires the
+    # server flag ON for the tail to run. The disabled default is pinned separately
+    # in test_long_fetch_mt5_disabled_skips_probe below.
+    monkeypatch.setenv("MT5_ENABLED", "true")
 
     assert "mt5" in _LEDGER_BACKED_SOURCES  # the set membership that drives it
     job = {
@@ -586,6 +670,46 @@ async def test_long_fetch_tail_wiring() -> None:
         "a ledger-backed source must enqueue derive_broker_dailies, not sync_trades"
     )
     assert enqueue[0].args[1]["p_strategy_id"] == "s-mt5"
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_disabled_skips_probe(monkeypatch) -> None:
+    """RED-TEAM defense-in-depth kill-switch: an mt5 onboard/resync job that drains
+    AFTER an incident rollback (MT5_ENABLED off) must FAIL CLOSED permanent WITHOUT
+    firing a live probe — adapter.validate is never called. Mirrors the worker
+    derive arm + the TS/router gates. Reddens if the long_fetch gate is removed."""
+    monkeypatch.delenv("MT5_ENABLED", raising=False)
+
+    job = {
+        "id": "job-mt5-off",
+        "kind": "process_key_long",
+        "strategy_id": "s-mt5",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-mt5-off",
+            "source": "mt5",
+            "flow_type": "onboard",
+            "correlation_id": "cid-mt5-off",
+            "context": {
+                "strategy_id": "s-mt5", "api_key": "123456", "api_secret": "pw",
+                "passphrase": "Broker-Live",
+            },
+        },
+    }
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        side_effect=AssertionError("no live probe when MT5_ENABLED is off")
+    )
+    sb = _ledger_supabase_mock()
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert "not yet available" in (result.error_message or "").lower()
+    adapter.validate.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -137,7 +137,10 @@ async def _call(router, req):
     return await router.validate_key(MagicMock(name="request"), req)
 
 
-_INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0}
+# "login": 123456 matches the parsed login from _make_req's api_key="123456" so the
+# RED-TEAM login bracket (account_info().login == expected, pre+post the read) passes
+# on the happy path — the fake terminal IS on the connected account.
+_INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0, "login": 123456}
 # An investor order_check is rejected (retcode != TRADE_RETCODE_DONE 10009).
 _INVESTOR_ORDER_CHECK = {"retcode": 10027, "comment": "AutoTrading disabled"}
 
@@ -199,7 +202,9 @@ async def test_mt5_investor_returns_valid_readonly_and_never_ccxt(exchange_route
 
     assert result == {"valid": True, "read_only": True}
     client.login.assert_called_once()
-    client.account_info.assert_called_once()
+    # account_info is read TWICE — the RED-TEAM login bracket re-asserts the
+    # terminal account PRE (before order_check) and POST (after) the probe.
+    assert client.account_info.call_count == 2
     client.order_check.assert_called_once()
     client.close.assert_called_once()
     create_exchange_spy.assert_not_called()
@@ -216,7 +221,8 @@ async def test_mt5_master_via_trade_allowed_rejected(exchange_router):
     valid:true, so the TS caller never reaches /encrypt-key). close() still runs."""
     router = exchange_router
     client = _make_client(
-        account={"trade_allowed": True}, order_check=_INVESTOR_ORDER_CHECK
+        account={"trade_allowed": True, "login": 123456},
+        order_check=_INVESTOR_ORDER_CHECK,
     )
     _install_mt5_client(router, client)
 
@@ -234,7 +240,7 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
     positive signal alone still rejects the master login."""
     router = exchange_router
     client = _make_client(
-        account={"trade_allowed": False},
+        account={"trade_allowed": False, "login": 123456},
         order_check={"retcode": 10009, "comment": "Done"},
     )
     _install_mt5_client(router, client)
@@ -244,6 +250,33 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
 
     assert ei.value.status_code == 400
     assert ei.value.detail == MT5_MASTER_PASSWORD_DETAIL
+    client.close.assert_called_once()
+
+
+async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
+    """RED-TEAM login bracket: if the shared terminal is on the WRONG account
+    (account_info().login != the connected login — e.g. a concurrent validate
+    re-logged it mid-probe), the verdict must FAIL CLOSED transient
+    (NETWORK_ERROR_DETAIL), NEVER {valid:true}, and order_check must NOT even run
+    (the PRE bracket refuses before the probe). close() still runs. Without the
+    bracket, is_trade_capable() would be judged against the wrong account — a
+    master password could be wrongly accepted as read-only. Reddens if removed."""
+    router = exchange_router
+    # The connected login is 123456 (from _make_req) but the terminal reports 999999.
+    client = _make_client(
+        account={"trade_allowed": False, "login": 999999},
+        order_check=_INVESTOR_ORDER_CHECK,
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 400
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.status_code != 500
+    # PRE bracket fires right after the first account_info, before the probe.
+    client.order_check.assert_not_called()
     client.close.assert_called_once()
 
 
@@ -315,14 +348,23 @@ async def test_mt5_probe_timeout_maps_to_network_detail_and_closes(exchange_rout
     client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
     _install_mt5_client(router, client)
 
-    async def _immediate_timeout(aw, timeout=None):
-        # Close the underlying to_thread coroutine so it never runs (no thread, no
-        # "coroutine was never awaited" warning), then simulate the ceiling firing.
-        if hasattr(aw, "close"):
-            aw.close()
-        raise asyncio.TimeoutError
+    # There are now THREE wait_for sites (RED-TEAM): (1) the off-loop ctor, (2) the
+    # probe, (3) the off-loop close. Time out only the PROBE (call #2) so the client
+    # is still constructed (ctor passes) and the finally close still runs — the exact
+    # "hung probe, bounded, closes" scenario. Calls #1 and #3 run for real.
+    _wf_calls = {"n": 0}
 
-    monkeypatch.setattr(router.asyncio, "wait_for", _immediate_timeout)
+    async def _timeout_on_probe(aw, timeout=None):
+        _wf_calls["n"] += 1
+        if _wf_calls["n"] == 2:
+            # Close the underlying to_thread coroutine so it never runs (no thread,
+            # no "coroutine was never awaited" warning), then simulate the ceiling.
+            if hasattr(aw, "close"):
+                aw.close()
+            raise asyncio.TimeoutError
+        return await aw
+
+    monkeypatch.setattr(router.asyncio, "wait_for", _timeout_on_probe)
 
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())

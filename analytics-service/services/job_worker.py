@@ -3569,29 +3569,39 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         error_kind="transient",
                     )
                 except Mt5ClientError as exc:
-                    # Classify via the ONE mt5_validation seam: auth/wrong_server are
-                    # PERMANENT (a stored bad/wrong-server key never self-heals) +
-                    # terminal stamp; anything else degrades to TRANSIENT (a bridge/
-                    # terminal blip may succeed next attempt — no terminal stamp).
-                    # The message is already secret-scrubbed at construction.
+                    # Classify via the ONE mt5_validation seam. At DERIVE time the key
+                    # ALREADY validated (login+server were correct at connect), so the
+                    # permanence rule is NARROWER than at validate: only a genuine
+                    # "auth" signal is PERMANENT + user-blamed (a stored bad credential
+                    # never self-heals). "wrong_server" is NOT permanent here — the
+                    # [ASSUMED] token set folds network/bridge errors ("connect",
+                    # "network", "terminal") into "wrong_server", so a routine gateway
+                    # redeploy or connection reset mid-derive would otherwise
+                    # PERMANENTLY fail a valid strategy and falsely blame the user's
+                    # credentials with no retry (RED-TEAM). Treat wrong_server (and any
+                    # unrecognized error) as TRANSIENT: retry, no terminal user-blame
+                    # stamp. A truly stale server degrades to failed_final via the
+                    # retry cap, never a wrong-credential stamp. Msg secret-scrubbed at
+                    # construction.
                     _kind = classify_mt5_login_error(exc)
                     _scrubbed = str(scrub_freeform_string(str(exc)))
-                    if _kind in ("auth", "wrong_server"):
+                    if _kind == "auth":
                         await _stamp_strategy_analytics_failed(
-                            "MT5 login/read was rejected (bad credentials or wrong "
-                            "broker server). " + _scrubbed
+                            "MT5 login was rejected (bad credentials). " + _scrubbed
                         )
                         return DispatchResult(
                             outcome=DispatchOutcome.FAILED,
                             error_message=(
-                                "derive_broker_dailies: mt5 login/read rejected — "
+                                "derive_broker_dailies: mt5 login rejected — "
                                 + _scrubbed
                             ),
                             error_kind="permanent",
                         )
                     logger.warning(
-                        "derive_broker_dailies: mt5 read hit a transient client "
-                        "error (label=%s) — retrying (no terminal stamp)",
+                        "derive_broker_dailies: mt5 read hit a transient/wrong-server "
+                        "client error (kind=%s, label=%s) — retrying (no terminal "
+                        "stamp; key already validated)",
+                        _kind,
                         funding_label,
                     )
                     return DispatchResult(
@@ -3738,8 +3748,15 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         _deal.get("time"),
                         int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
                     )
-                    _mt5_flow_by_day[_fday] = _mt5_flow_by_day.get(_fday, 0.0) + float(
-                        _deal.get("profit", 0.0)
+                    # RED-TEAM: None-coalesce EXACTLY as combine_mt5_deal_ledger does
+                    # (`0.0 if raw is None else ...`). A BALANCE/CREDIT deal with an
+                    # explicit profit=None PASSES the combine but a raw float(None)
+                    # here would raise TypeError AFTER the series was already computed
+                    # — burning transient retries to failed_final with no analytics
+                    # stamp. The evidence fold must tolerate what the money fold does.
+                    _raw_profit = _deal.get("profit", 0.0)
+                    _mt5_flow_by_day[_fday] = _mt5_flow_by_day.get(_fday, 0.0) + (
+                        0.0 if _raw_profit is None else float(_raw_profit)
                     )
 
             # Set the shared downstream variables EXACTLY as the sfox branch does so

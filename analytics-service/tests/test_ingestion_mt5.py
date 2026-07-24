@@ -137,7 +137,9 @@ _METRICS_SENTINEL = MetricsSnapshot(
     win_rate=None,
 )
 
-_INVESTOR_ACCOUNT = _FakeNamedTuple(trade_allowed=False, balance=1000.0)
+# login=123456 matches the parsed login from _req's api_key="123456" so the RED-TEAM
+# login bracket (account_info().login == expected, pre+post) passes on the happy path.
+_INVESTOR_ACCOUNT = _FakeNamedTuple(trade_allowed=False, balance=1000.0, login=123456)
 # An investor order_check is rejected (retcode != TRADE_RETCODE_DONE 10009).
 _INVESTOR_ORDER_CHECK = _FakeNamedTuple(retcode=10027, comment="AutoTrading disabled")
 
@@ -188,7 +190,7 @@ def test_validate_master_via_trade_allowed_rejected(monkeypatch) -> None:
     fake = _install_client(
         monkeypatch,
         {
-            "account": _FakeNamedTuple(trade_allowed=True),
+            "account": _FakeNamedTuple(trade_allowed=True, login=123456),
             "order_check": _INVESTOR_ORDER_CHECK,
         },
     )
@@ -208,7 +210,7 @@ def test_validate_master_via_order_check_retcode_rejected(monkeypatch) -> None:
     fake = _install_client(
         monkeypatch,
         {
-            "account": _FakeNamedTuple(trade_allowed=False),
+            "account": _FakeNamedTuple(trade_allowed=False, login=123456),
             "order_check": _FakeNamedTuple(retcode=10009, comment="Done"),
         },
     )

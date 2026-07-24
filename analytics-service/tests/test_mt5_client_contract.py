@@ -45,6 +45,7 @@ from services.mt5_client import (
     MT5_REQUEST_TIMEOUT_S,
     Mt5Client,
     Mt5ClientError,
+    Mt5Session,
 )
 
 
@@ -74,6 +75,8 @@ class _FakeMt5:
       shutdown_raises  -> if truthy, shutdown() raises
       login_raises     -> if set, login() RAISES this exception (transport error)
       account_raises   -> if set, account_info() RAISES this exception
+      last_error_raises -> if set, last_error() RAISES this exception (transport
+                           died on the last_error() round-trip itself)
     """
 
     def __init__(self, scenario: dict) -> None:
@@ -101,6 +104,9 @@ class _FakeMt5:
         return self._scenario.get("order_check")
 
     def last_error(self):
+        exc = self._scenario.get("last_error_raises")
+        if exc is not None:
+            raise exc
         return self._scenario.get("last_error", (0, "unknown"))
 
     def shutdown(self):
@@ -272,6 +278,42 @@ def test_raise_last_malformed_shape_still_typed(malformed):
     client = Mt5Client("host", 18812, _connect=connect)
     with pytest.raises(Mt5ClientError):
         client.account_info()
+
+
+def test_raise_last_transport_raise_is_typed_and_scrubbed():
+    """RED-TEAM: last_error() is itself a raw transport call. If the connection
+    dies on THAT round-trip (right after the None-return that triggered
+    _raise_last), the exception must still be converted to a typed, scrubbed
+    Mt5ClientError — never a raw rpyc traceback escaping the single fail-loud choke
+    point (which would 500 the router / skip the worker classify arms and could
+    carry unscrubbed remote text). Reddens if the last_error() call is unwrapped."""
+    boom = RuntimeError("rpyc EOFError mid-last_error: password='hunter2'")
+    connect, _fake, _rec = _make({"account": None, "last_error_raises": boom})
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as ei:
+        client.account_info()
+    # Typed (not the raw RuntimeError) and scrubbed (no leaked credential text).
+    assert "hunter2" not in str(ei.value)
+
+
+def test_mt5_session_repr_does_not_leak_credentials():
+    """RED-TEAM: the Mt5Session dataclass auto-__repr__ must NOT emit the plaintext
+    investor password / login / broker server — any %r/f-string/structlog
+    serialization would otherwise leak them (the repr-leak class). repr(session)
+    must contain none of the three credential values. Reddens if the field(repr=
+    False) markers are removed."""
+    connect, _fake, _rec = _make({})
+    client = Mt5Client("host", 18812, _connect=connect)
+    session = Mt5Session(
+        client=client,
+        login=50123456,
+        investor_password="s3cr3t-investor-pw",
+        server="TopBroker-Live-7",
+    )
+    text = repr(session)
+    assert "s3cr3t-investor-pw" not in text
+    assert "50123456" not in text
+    assert "TopBroker-Live-7" not in text
 
 
 def test_account_info_materialized_to_native_dict():

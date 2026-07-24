@@ -55,6 +55,7 @@ from services.ingestion.adapter import (
 )
 from services.mt5_client import (
     MT5_REQUEST_TIMEOUT_S,
+    Mt5AccountMismatchError,
     Mt5Client,
     Mt5ClientError,
 )
@@ -145,15 +146,41 @@ class Mt5Adapter:
                 "are unset. This is a server misconfiguration, never a credential "
                 "failure."
             )
-        client = _build_client(host, int(port_raw))
+        # RED-TEAM: _build_client → Mt5Client.__init__ opens the RPyC socket
+        # SYNCHRONOUSLY (a blocking connect). Run construction OFF the event loop
+        # under a wait_for ceiling; a hung/unreachable gateway connect on the loop
+        # would wedge the SEQUENTIAL worker (the v1.11 WEDGE-01 class the probe body
+        # already guards). A connect timeout/failure PROPAGATES untouched (the
+        # adapter's transient disposition — never valid, never auth-failed); there is
+        # no client to close yet, so it sits OUTSIDE the close-finally below.
+        client = await asyncio.wait_for(
+            asyncio.to_thread(lambda: _build_client(host, int(port_raw))),
+            timeout=_MT5_PROBE_TIMEOUT_S,
+        )
         try:
             # Mt5Client is SYNCHRONOUS blocking RPyC — run the login+read+probe body
             # off the event loop (asyncio.to_thread). Blocking the loop on a hung
             # terminal reopens the v1.11 WEDGE-01 class.
+            def _assert_expected_login(info: dict[str, Any]) -> None:
+                # RED-TEAM login bracket, cloned from the worker derive arm
+                # (MT5CONC-02): a concurrent validate (the FastAPI router path, a
+                # different process) or another worker replica can re-log the ONE
+                # shared terminal onto another account mid-probe, so is_trade_capable()
+                # could be judged against the WRONG account (a master password wrongly
+                # accepted as read-only, or an investor login wrongly rejected). STRICT
+                # equality on the parsed login; a missing "login" field FAILS LOUD.
+                # Mismatch → Mt5AccountMismatchError (NOT an Mt5ClientError, so the
+                # classify arm can never absorb it) → propagated transient below.
+                _actual = info.get("login")
+                if _actual != login:
+                    raise Mt5AccountMismatchError(login, _actual)
+
             def _probe() -> tuple[dict[str, Any], dict[str, Any]]:
                 client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
                 info = client.account_info()  # proves auth + read
+                _assert_expected_login(info)  # PRE-probe bracket
                 probe = client.order_check(mt5_probe_request())  # PROBE ONLY
+                _assert_expected_login(client.account_info())  # POST-probe bracket
                 return info, probe
 
             try:
@@ -171,6 +198,12 @@ class Mt5Adapter:
                 # auth-failed, never valid, never wrong_server); the caller
                 # classifies it honestly (sFOX F4 posture). close() still runs in
                 # the finally below, so the terminal session never leaks.
+                raise
+            except Mt5AccountMismatchError:
+                # RED-TEAM: a concurrent actor re-logged the shared terminal onto
+                # another account mid-probe — an INFRA/concurrency fault, never the
+                # user's key. PROPAGATE untouched (transient disposition: never valid,
+                # never auth-failed, never a wrong-account verdict).
                 raise
             except Mt5ClientError as e:
                 kind = classify_mt5_login_error(e)
@@ -202,9 +235,19 @@ class Mt5Adapter:
                 debug_context=None,
             )
         finally:
-            # Idempotent close on EVERY path (success, master-reject, auth/server
-            # fail, propagating transient) so the terminal session never leaks.
-            client.close()
+            # RED-TEAM: bounded, off-loop close. client.close() is blocking RPyC (a
+            # hung Wine shutdown on the loop would wedge the sequential worker);
+            # mirror aclose_exchange's mt5 arm + the router's close. Mt5Client.close()
+            # swallows and logs its own teardown errors internally; the wait_for is
+            # the last-resort ceiling. Runs on EVERY path so the session never leaks;
+            # a timeout/failure abandons the session (bounded, client-logged) rather
+            # than masking the probe verdict.
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
+                )
+            except Exception:  # noqa: BLE001 — close must never mask the verdict
+                pass
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         # FAIL LOUD — no synchronous flow routes mt5 to a fill-based Trade list.

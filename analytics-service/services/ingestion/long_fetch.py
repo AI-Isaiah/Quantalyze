@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 
 import structlog
 
+from services.closed_sets import MT5_DISABLED_DETAIL, mt5_enabled_server
 from services.db import get_supabase
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source
@@ -274,6 +275,20 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # ledger-backed so it routes to the derive_broker_dailies tail, exactly like
     # deribit.
     is_ledger_backed = source in _LEDGER_BACKED_SOURCES
+
+    # RED-TEAM (defense-in-depth kill-switch): mirror the derive_broker_dailies
+    # mt5 gate. The DB CHECK admits 'mt5' unconditionally, so an onboard/resync
+    # job enqueued BEFORE an incident rollback (MT5_ENABLED flipped off) would
+    # otherwise still fire ONE live RPyC probe (adapter.validate → login) when the
+    # queue drains. Fail CLOSED — permanent, no live probe — BEFORE validate, the
+    # same posture the worker's derive arm and the TS/router key gates take.
+    if source == "mt5" and not mt5_enabled_server():
+        log.warning("process_key_long.mt5_disabled_skip")
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"process_key_long: {MT5_DISABLED_DETAIL}",
+            error_kind="permanent",
+        )
 
     # 1. validate
     val = await adapter.validate(request)

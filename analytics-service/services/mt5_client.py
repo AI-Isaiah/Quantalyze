@@ -64,7 +64,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, NoReturn
 
 from services.redact import scrub_freeform_string
@@ -201,7 +201,18 @@ class Mt5Client:
     def _raise_last(self) -> NoReturn:
         """Capture `last_error()` IMMEDIATELY (the next remote call overwrites it)
         and raise a typed, secret-scrubbed error."""
-        err = self._mt5.last_error()
+        # RED-TEAM: last_error() is itself a raw transport call. If the connection
+        # died right after the None-return that triggered _raise_last, this call
+        # can RAISE — and outside _guarded_read it would escape as a raw, untyped,
+        # unscrubbed rpyc traceback, bypassing the single typed fail-loud choke
+        # point (router 500 instead of clean 400; worker skips the mt5 classify
+        # arms). Convert it exactly as _guarded_read does.
+        try:
+            err = self._mt5.last_error()
+        except Mt5ClientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
+            raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
         if not err:
             raise Mt5ClientError(0, "unknown")
         # A truthy-but-malformed shape (wrong-length tuple, non-subscriptable
@@ -392,7 +403,13 @@ class Mt5Session:
     every job-worker close site becomes mt5-safe with zero per-site edits.
     """
 
+    # repr=False on the three credential-bearing fields (RED-TEAM hardening): the
+    # dataclass auto-__repr__ would otherwise emit the plaintext investor password
+    # (and the login/server, both treated as secrets by services.redact) into any
+    # `%r`/f-string/structlog serialization of a Mt5Session — the same repr-leak
+    # class schemas.py wraps in SecretStr for. This makes the "secrets never in
+    # logs/exceptions" invariant STRUCTURAL, not call-site discipline.
     client: Mt5Client
-    login: int
-    investor_password: str
-    server: str
+    login: int = field(repr=False)
+    investor_password: str = field(repr=False)
+    server: str = field(repr=False)
