@@ -71,9 +71,12 @@ from services.redact import scrub_freeform_string
 
 logger = logging.getLogger("quantalyze.analytics")
 
-# rpyc `sync_request_timeout` (seconds). Its mt5linux/rpyc default is 300s — a
-# hung terminal would wedge the SEQUENTIAL worker for 5 minutes, far past the
-# ~90s healthz budget (v1.11 WEDGE-01). 30s is comfortably above normal MT5 read
+# rpyc `sync_request_timeout` (seconds). rpyc 5.x's own DEFAULT_CONFIG default is
+# 30s (NOT 300s — that is mt5linux 0.1.10's hardcode, and we pin 0.1.9), so an
+# unset knob would already bound a hung terminal at 30s; we set it EXPLICITLY on
+# the connection (see `_default_connect`) so this env var, not the rpyc default,
+# governs the wire. A hung terminal must not wedge the SEQUENTIAL worker past the
+# ~90s healthz budget (v1.11 WEDGE-01); 30s is comfortably above normal MT5 read
 # latency yet well under the healthz budget, so a stalled bridge fails loud fast.
 MT5_REQUEST_TIMEOUT_S = float(os.getenv("MT5_REQUEST_TIMEOUT_S", "30"))
 
@@ -131,12 +134,27 @@ def _default_connect(*, host: str, port: int, timeout: float) -> Any:
     The `mt5linux` import is LAZY — inside this function body only — so importing
     `services.mt5_client` does not require the package. `mt5linux` is not installed
     until the plan 134-03 human-verify gate clears; a module-level import would red
-    the whole analytics suite in CI today. `timeout` sets the rpyc
-    `sync_request_timeout` (the constructor `timeout=` knob).
+    the whole analytics suite in CI today.
+
+    mt5linux 0.1.9's constructor is ``MetaTrader5(host, port)`` ONLY — it hardwires
+    ``rpyc.classic.connect(host, port)`` internally with NO ``timeout=`` knob (that
+    param exists only in >=0.1.10, which we deliberately pin OUT — the 0.1.10
+    ``shell=True`` server regression, see the go-live runbook / gateway constraint).
+    Passing ``timeout`` as a third positional raised ``TypeError`` on EVERY real
+    connect (masked in CI: the contract tests inject a ``_connect`` double and
+    mt5linux is never installed). So construct with ``(host, port)`` and set the
+    rpyc ``sync_request_timeout`` directly on the private connection — the only knob
+    0.1.9 exposes — so ``MT5_REQUEST_TIMEOUT_S`` actually governs the wire (its own
+    default is 30s, NOT 300s).
     """
     from mt5linux import MetaTrader5  # type: ignore[import-not-found]  # noqa: PLC0415 — intentional lazy transport import
 
-    return MetaTrader5(host, port, timeout)
+    mt5 = MetaTrader5(host, port)
+    # ponytail: name-mangled private attr (`__conn`) + rpyc-internal `_config`;
+    # stable because mt5linux is pinned ==0.1.9 and rpyc `_config` is stable across
+    # the 5.x line. This is the ONLY per-request timeout knob 0.1.9 exposes.
+    mt5._MetaTrader5__conn._config["sync_request_timeout"] = timeout
+    return mt5
 
 
 def _coerce(value: Any) -> Any:
