@@ -42,7 +42,21 @@ FlowType = Literal["teaser", "onboard", "internal_report", "csv", "resync"]
 # metrics (``SfoxAdapter.compute_metrics`` is intentionally fail-loud). The
 # key-save EXCHANGE boundary (VerifyStrategyRequest.exchange, debug_key_flow.
 # Broker, the four SQL CHECKs) already admitted 'sfox' in Phase 119.
-Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox"]
+#
+# Phase 135 (MT5SRC-01, 135-01) SHIPS the mt5 ingestion path: the ingestion
+# registry (``SUPPORTED_SOURCES`` / ``_FACTORIES`` in
+# services/ingestion/__init__.py) now admits 'mt5' and get_adapter("mt5")
+# resolves an ``Mt5Adapter``. 'mt5' joins this ``Source`` Literal + the registry
+# TOGETHER here (the pinned lockstep — test_source_literal_and_registry_agree);
+# because the factory (``Mt5Adapter``) lands in the SAME change there is no
+# Literal-ahead-of-registry split (the SFOX-01 pin precedent). This is the
+# ingestion CAPABILITY only (mirroring the deribit/sfox landings): MT5 returns
+# flow through the broker-dailies ONE backbone via the deal-ledger daily-NAV
+# reconstruction (combine_mt5_deal_ledger, Phase 136), never fill-based
+# process_key metrics (``Mt5Adapter.compute_metrics`` is intentionally
+# fail-loud). The read-only validate/encrypt branch is Phase 135 (MT5SRC-02); the
+# onboarding UI is Phase 138; go-live is Phase 139.
+Source = Literal["okx", "binance", "bybit", "csv", "deribit", "sfox", "mt5"]
 TrustTier = Literal["api_verified", "csv_uploaded", "self_reported"]
 Status = Literal[
     "draft",

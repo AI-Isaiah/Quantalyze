@@ -308,6 +308,12 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
     // the public offer flag flips) so the key card renders the mono tag, never
     // the "?" fallback. Mono, no emoji per DESIGN.md.
     sfox: "SFOX",
+    // 138-03 (MT5UI-02): same SFOX-09 provenance precedent — a founder-connected
+    // mt5 key exists before the go-live offer flag (NEXT_PUBLIC_MT5_ENABLED)
+    // flips, so its key card must render the real mono tag, never the "?"
+    // fallback. Provenance surface (the user's OWN key), not an offer surface.
+    // "MT5" — 3 chars, no emoji per DESIGN.md.
+    mt5: "MT5",
   };
 
   return (
@@ -360,7 +366,10 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
         <Card key={key.id}>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <span className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary">
+              <span
+                data-testid={`api-key-avatar-${key.exchange}`}
+                className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary"
+              >
                 {exchangeIcon[key.exchange] ?? "?"}
               </span>
               <div>

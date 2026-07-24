@@ -5,7 +5,11 @@ import { withAuth } from "@/lib/api/withAuth";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
-import { isSupportedExchange, isSfoxEnabledServer } from "@/lib/closed-sets";
+import {
+  isSupportedExchange,
+  isSfoxEnabledServer,
+  isMt5EnabledServer,
+} from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
@@ -71,13 +75,6 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (typeof api_key !== "string" || api_key.length < 8) {
-    return NextResponse.json(
-      { code: "KEY_INVALID_FORMAT", error: "api_key is required" },
-      { status: 400, headers: NO_STORE_HEADERS },
-    );
-  }
-
   // SECURITY-SENSITIVE carve-out (119-CONTEXT Q1, LOCKED): sFOX authenticates with a
   // SINGLE Bearer token and carries NO api_secret (118-RESEARCH confirmed). For sfox
   // ONLY, the token is stored as api_key and the absent secret is normalized to "".
@@ -89,6 +86,25 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Mirrors the create-with-key sibling and this file's `exchange.toLowerCase() ===
   // "okx"` convention.
   const isSfox = exchange.toLowerCase() === "sfox";
+  // Computed BEFORE the api_key/api_secret shape checks (RED-TEAM): mt5's slots are
+  // login/investor-password/broker-server, not ccxt-shaped.
+  const isMt5 = exchange.toLowerCase() === "mt5";
+
+  // ccxt API keys are long secrets; an MT5 login is a short broker ACCOUNT NUMBER
+  // (commonly 5-8 digits), so mt5 requires only a NON-BLANK login, mirroring the
+  // validate-and-encrypt + create-with-key mt5 shape. Without this carve-out a
+  // legitimate short MT5 login is wrongly rejected as KEY_INVALID_FORMAT — the
+  // three routes MUST NOT diverge (RED-TEAM). sfox + every ccxt venue keep the
+  // byte-identical <8 rejection.
+  if (
+    typeof api_key !== "string" ||
+    (isMt5 ? api_key.trim().length === 0 : api_key.length < 8)
+  ) {
+    return NextResponse.json(
+      { code: "KEY_INVALID_FORMAT", error: "api_key is required" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
 
   // F2 (Phase 122 — STRUCTURAL server gate): sFOX is founder-gated until go-live.
   // The client flag NEXT_PUBLIC_SFOX_ENABLED only hides the wizard card; this
@@ -104,7 +120,38 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     );
   }
 
-  if (!isSfox && (typeof api_secret !== "string" || api_secret.length < 8)) {
+  // Phase 135 (MT5SRC-03) — STRUCTURAL server gate, mirroring the sfox arm above
+  // and the create-with-key sibling. Add-to-composite is a second connect path;
+  // without the gate, an mt5 add in the client-on/server-off half-state falls
+  // through to the Python MT5_DISABLED_DETAIL gate → UNKNOWN → 500. The clean 400
+  // fails CLOSED before any live probe. isMt5EnabledServer() is strict
+  // `MT5_ENABLED === "true"`; ccxt/sfox paths are unaffected (isMt5 false).
+  if (isMt5 && !isMt5EnabledServer()) {
+    return NextResponse.json(
+      { code: "KEY_INVALID_FORMAT", error: "MT5 integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // MT5 three-credential defense-in-depth (RED-TEAM — mirror of validate-and-encrypt
+  // + create-with-key): mt5 requires ALL THREE non-blank slots (login/api_key,
+  // investor password/api_secret, broker server/passphrase). The generic <8 secret
+  // check below is ccxt-shaped and skipped for mt5 (an investor password is
+  // broker-set and can be short); this is the mt5 presence enforcement instead.
+  if (
+    isMt5 &&
+    (typeof api_secret !== "string" ||
+      api_secret.trim().length === 0 ||
+      typeof passphrase !== "string" ||
+      passphrase.trim().length === 0)
+  ) {
+    return NextResponse.json(
+      { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  if (!isSfox && !isMt5 && (typeof api_secret !== "string" || api_secret.length < 8)) {
     return NextResponse.json(
       { code: "KEY_INVALID_FORMAT", error: "api_secret is required" },
       { status: 400, headers: NO_STORE_HEADERS },

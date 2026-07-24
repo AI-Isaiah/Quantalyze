@@ -203,7 +203,12 @@ class VerifyStrategyRequest(BaseModel):
     # ``strategy_verifications.source``, also admits ``csv`` for ingestion, but
     # that is not a user-submitted verify exchange.) The Literal 422s the bad
     # value at the boundary.
-    exchange: Literal["binance", "okx", "bybit", "deribit", "sfox"]
+    # Phase 135 (MT5SRC-01): 'mt5' widened in lockstep with the TS
+    # SUPPORTED_EXCHANGES + the four SQL CHECKs. Credential-slot reuse (login →
+    # api_key, investor password → api_secret, broker server → passphrase) is
+    # documented at the encrypt chokepoint (plan 135-03); the SecretStr fields
+    # below are unchanged.
+    exchange: Literal["binance", "okx", "bybit", "deribit", "sfox", "mt5"]
     # Audit H-0535: wrap credentials in SecretStr so they never leak into
     # ``repr(req)``, FastAPI validation-error messages, Sentry breadcrumbs, or
     # tracebacks (a bare ``str`` prints verbatim). The consumers in

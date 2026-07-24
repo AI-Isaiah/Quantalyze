@@ -162,6 +162,7 @@ export {
   SUPPORTED_EXCHANGES,
   UI_EXCHANGE_CODES,
   SFOX_UI_ENABLED,
+  MT5_UI_ENABLED,
   FUNDING_EXCHANGES,
   type SupportedExchange,
 } from "./closed-sets";

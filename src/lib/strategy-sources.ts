@@ -11,7 +11,8 @@
  * Adding a value here requires a paired migration extending the CHECK
  * constraint on `strategies.source` (set-equality pinned by
  * src/__tests__/strategy-sources-migration-parity.test.ts). Phase 68 (DRB-02)
- * added `deribit` alongside its migration in the same plan.
+ * added `deribit` alongside its migration in the same plan; Phase 135
+ * (MT5SRC-03) added `mt5` alongside 20260723172032_mt5_exchange_boundary_checks.sql.
  */
 
 export const STRATEGY_SOURCES = [
@@ -25,6 +26,7 @@ export const STRATEGY_SOURCES = [
   "bybit",
   "deribit",
   "sfox",
+  "mt5",
 ] as const;
 
 export type StrategySource = (typeof STRATEGY_SOURCES)[number];

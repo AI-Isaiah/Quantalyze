@@ -463,3 +463,146 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
   });
 });
+
+/**
+ * Phase 135 (MT5SRC-03) — MT5 is the MIRROR-IMAGE of the sfox carve-out.
+ *
+ * (a) Server gate: with MT5_ENABLED unset (the default), an mt5 connect FAILS
+ *     CLOSED with an honest "not yet available" 400 and NO live probe — the
+ *     dark-until-go-live (Phase 139) posture the worker's mt5_enabled_server()
+ *     gate enforces behind it.
+ * (b) Three-credential defense: where sfox RELAXES api_secret, mt5 REQUIRES all
+ *     three non-blank slots (login/api_key, investor password/api_secret, broker
+ *     server/passphrase). A missing/blank slot is a 400 BEFORE any worker call.
+ * (c) Gate-on happy path: all three slots forward to validateKey then encryptKey.
+ */
+const MT5_BODY = {
+  exchange: "mt5",
+  api_key: "5001234",
+  api_secret: "investor-password-123",
+  passphrase: "MetaQuotes-Demo",
+};
+
+describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED off)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    delete process.env.MT5_ENABLED;
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({ api_key_encrypted: "ct-blob" });
+  });
+
+  it.each(["mt5", "MT5", "Mt5"])(
+    "fails closed for %s with no live probe when MT5_ENABLED is unset",
+    async (exchange) => {
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ ...MT5_BODY, exchange }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("MT5 integration is not yet available.");
+      // No live probe, no encryption of a key we refuse to admit while dark.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["1", "TRUE", "on", ""])(
+    "stays fail-closed for a non-exact MT5_ENABLED=%s (strict === 'true')",
+    async (flag) => {
+      process.env.MT5_ENABLED = flag;
+      const { POST } = await import("./route");
+      const res = await POST(makeReq(MT5_BODY));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("MT5 integration is not yet available.");
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      delete process.env.MT5_ENABLED;
+    },
+  );
+
+  it("does NOT gate ccxt exchanges — okx runs normally with MT5_ENABLED unset", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+  });
+});
+
+describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (MT5_ENABLED on)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    process.env.MT5_ENABLED = "true";
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
+    mockEncryptKey.mockResolvedValue({
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  it.each([
+    ["api_key missing", { api_secret: "investor-password-123", passphrase: "MetaQuotes-Demo" }],
+    ["api_secret missing", { api_key: "5001234", passphrase: "MetaQuotes-Demo" }],
+    ["passphrase (broker server) missing", { api_key: "5001234", api_secret: "investor-password-123" }],
+    ["passphrase blank/whitespace", { api_key: "5001234", api_secret: "investor-password-123", passphrase: "   " }],
+    ["api_secret blank/whitespace", { api_key: "5001234", api_secret: "  ", passphrase: "MetaQuotes-Demo" }],
+  ])(
+    "rejects mt5 with %s BEFORE any worker call (three-cred defense, mirror of sfox relaxation)",
+    async (_label, partial) => {
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ exchange: "mt5", ...partial }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Missing required fields");
+      // The mirror-image of sfox: mt5 flows the api_secret-REQUIRED path AND
+      // additionally requires the broker server — no sfox-style relaxation leaks.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it("forwards all THREE mt5 slots to validateKey then encryptKey on the happy path", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(MT5_BODY));
+
+    expect(res.status).toBe(200);
+    // Canonical lowercase 'mt5' + login/api_key, investor pw/api_secret, broker
+    // server/passphrase — the exact slot mapping the worker's is_mt5 branch reads.
+    expect(mockValidateKey).toHaveBeenCalledWith(
+      "mt5",
+      "5001234",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+    );
+    expect(mockEncryptKey).toHaveBeenCalledWith(
+      "mt5",
+      "5001234",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+    );
+  });
+
+  it("normalizes mixed-case MT5 to canonical lowercase 'mt5' downstream", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ ...MT5_BODY, exchange: "MT5" }));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledWith(
+      "mt5",
+      "5001234",
+      "investor-password-123",
+      "MetaQuotes-Demo",
+    );
+  });
+});

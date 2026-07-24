@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, cast, get_args
 
 import structlog
 
+from services.closed_sets import MT5_DISABLED_DETAIL, mt5_enabled_server
 from services.db import get_supabase
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source
@@ -48,7 +49,18 @@ log = structlog.get_logger("quantalyze.analytics.long_fetch")
 # compute_metrics BY DESIGN, so the fill steps must be skipped and the factsheet
 # produced by the derive_broker_dailies tail. deribit = txn-log ledger; sfox =
 # balance-history usd_value series (both feed the broker-dailies ONE-path).
-_LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox"})
+#
+# MT5RECON-01 (Phase 136): mt5 is ALSO ledger-backed — its returns come from the
+# history_deals_get deal ledger reconstructed against account_info().equity via
+# combine_mt5_deal_ledger (the THIRD combiner sibling), fed through the SAME
+# broker-dailies ONE-path. Mt5Adapter.fetch_raw + compute_metrics both raise
+# NotImplementedError BY DESIGN (there is no fill-based mt5 consumer — a fill path
+# would reopen the BYB-02 corruption class the sfox F1 incident exposed: sfox once
+# fell into the fill branch → fetch_raw NotImplementedError crashed EVERY onboard
+# in prod). Admitting mt5 here routes onboard/resync to run validate + encrypt +
+# the state machine and enqueue the derive_broker_dailies tail, never the fill
+# steps — exactly like deribit and sfox.
+_LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox", "mt5"})
 
 
 async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
@@ -263,6 +275,20 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # ledger-backed so it routes to the derive_broker_dailies tail, exactly like
     # deribit.
     is_ledger_backed = source in _LEDGER_BACKED_SOURCES
+
+    # RED-TEAM (defense-in-depth kill-switch): mirror the derive_broker_dailies
+    # mt5 gate. The DB CHECK admits 'mt5' unconditionally, so an onboard/resync
+    # job enqueued BEFORE an incident rollback (MT5_ENABLED flipped off) would
+    # otherwise still fire ONE live RPyC probe (adapter.validate → login) when the
+    # queue drains. Fail CLOSED — permanent, no live probe — BEFORE validate, the
+    # same posture the worker's derive arm and the TS/router key gates take.
+    if source == "mt5" and not mt5_enabled_server():
+        log.warning("process_key_long.mt5_disabled_skip")
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=f"process_key_long: {MT5_DISABLED_DETAIL}",
+            error_kind="permanent",
+        )
 
     # 1. validate
     val = await adapter.validate(request)

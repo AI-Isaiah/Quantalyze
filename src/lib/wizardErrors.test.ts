@@ -561,6 +561,18 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
   });
 });
 
+// Phase 135 (MT5SRC-02): the EXACT worker detail strings emitted by
+// analytics-service/services/closed_sets.py (MT5_MASTER_PASSWORD_DETAIL /
+// MT5_WRONG_SERVER_DETAIL, cited in 135-01/135-03). Pinned as byte-identical
+// literals here because that byte-identity IS the cross-language contract: if
+// a Python-side reword drops the "master password" / "broker server" substring
+// the TS classifier depends on, these tests MUST red rather than silently
+// collapsing the MT5 failure to a generic UNKNOWN 500.
+const MT5_MASTER_PASSWORD_DETAIL =
+  "MT5 master password detected — this login can place trades. Reconnect using your read-only investor password.";
+const MT5_WRONG_SERVER_DETAIL =
+  "Broker server not found — check the exact server name shown in your MT5 terminal login window.";
+
 describe("classifyKeyValidationError — shared key-entry error mapping", () => {
   // The single source of truth for BOTH create-with-key and composite/add-key.
   // Each case pins (message → code + status) so the "+ Add another key" path can
@@ -572,6 +584,12 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     // Deribit 13004 phrase. Both must land on the actionable 400, NOT UNKNOWN.
     ["Authentication failed. Check your API key and secret.", "KEY_AUTH_FAILED", 400],
     ['deribit {"error":{"code":13004,"message":"invalid_credentials"}}', "KEY_AUTH_FAILED", 400],
+    // Phase 135 (MT5SRC-02): the worker emits THREE distinguishable MT5 failure
+    // details. Byte-identical to services/closed_sets.py MT5_*_DETAIL — a
+    // Python-side reword MUST red these. "master password" / "broker server"
+    // are the collision-checked substrings; both are client faults → 400.
+    [MT5_MASTER_PASSWORD_DETAIL, "KEY_MT5_MASTER_PASSWORD", 400],
+    [MT5_WRONG_SERVER_DETAIL, "KEY_MT5_WRONG_SERVER", 400],
     ["Your IP is not on the allowlist", "KEY_IP_ALLOWLIST", 502],
     ["Rate limit exceeded", "KEY_RATE_LIMIT", 503],
     ["429 Too Many Requests", "KEY_RATE_LIMIT", 503],
@@ -601,5 +619,79 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     // user-facing bad-key copy.
     const { code } = classifyKeyValidationError("Invalid authentication credentials");
     expect(code).not.toBe("KEY_AUTH_FAILED");
+  });
+
+  // ===========================================================
+  // Phase 135 (MT5SRC-02) — three distinguishable MT5 failure paths.
+  // Resolved Q-B: a master (trade-capable) login and a wrong/unknown broker
+  // server are DISTINCT user mistakes from bad credentials and need targeted,
+  // actionable copy. Collapsing them into KEY_AUTH_FAILED would tell the user
+  // to fix the wrong thing.
+  // ===========================================================
+  it("classifies the worker's master-password detail as KEY_MT5_MASTER_PASSWORD (not bad-creds)", () => {
+    expect(classifyKeyValidationError(MT5_MASTER_PASSWORD_DETAIL)).toEqual({
+      code: "KEY_MT5_MASTER_PASSWORD",
+      status: 400,
+    });
+  });
+
+  it("classifies the worker's wrong-server detail as KEY_MT5_WRONG_SERVER (not bad-creds)", () => {
+    expect(classifyKeyValidationError(MT5_WRONG_SERVER_DETAIL)).toEqual({
+      code: "KEY_MT5_WRONG_SERVER",
+      status: 400,
+    });
+  });
+
+  it("keeps the three MT5 failure paths distinguishable (master ≠ wrong-server ≠ bad-creds)", () => {
+    const master = classifyKeyValidationError(MT5_MASTER_PASSWORD_DETAIL).code;
+    const server = classifyKeyValidationError(MT5_WRONG_SERVER_DETAIL).code;
+    const badCreds = classifyKeyValidationError(
+      "Authentication failed. Check your API key and secret.",
+    ).code;
+    expect(new Set([master, server, badCreds]).size).toBe(3);
+    expect(badCreds).toBe("KEY_AUTH_FAILED");
+  });
+
+  it("does NOT let the MT5 branches shadow existing classifications (placement pin)", () => {
+    // The MT5 branches sit AFTER KEY_AUTH_FAILED and BEFORE ip/allow. A
+    // signature mismatch, a rate-limit, a timeout and a probe failure must all
+    // keep their existing codes after the insertion.
+    expect(classifyKeyValidationError("Invalid signature").code).toBe(
+      "KEY_INVALID_SIGNATURE",
+    );
+    expect(classifyKeyValidationError("Rate limit exceeded").code).toBe(
+      "KEY_RATE_LIMIT",
+    );
+    expect(classifyKeyValidationError("connect ETIMEDOUT").code).toBe(
+      "KEY_NETWORK_TIMEOUT",
+    );
+    expect(
+      classifyKeyValidationError("Could not verify the key's permission scopes")
+        .code,
+    ).toBe("KEY_PROBE_FAILED");
+  });
+
+  it("renders real (non-UNKNOWN) copy for both new MT5 codes without placeholder leakage", () => {
+    for (const code of ["KEY_MT5_MASTER_PASSWORD", "KEY_MT5_WRONG_SERVER"] as const) {
+      expect(Object.keys(WIZARD_ERROR_COPY)).toContain(code);
+      const copy = formatKeyError(code);
+      expect(copy.title).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.title);
+      expect(copy.title.length).toBeGreaterThan(0);
+      expect(copy.cause.length).toBeGreaterThan(0);
+      expect(copy.fix.length).toBeGreaterThan(0);
+      // No un-interpolated placeholder tokens leaked into user-facing copy.
+      expect(copy.title).not.toMatch(/\{.*\}/);
+      expect(copy.cause).not.toMatch(/\{.*\}/);
+    }
+  });
+
+  it("master-password copy never falsely asserts a wrong password", () => {
+    // Honest-copy discipline: on the master path the password was CORRECT — it
+    // was refused because it can trade, not because it was wrong. The copy must
+    // not tell the user their password was wrong (that path is KEY_AUTH_FAILED).
+    const copy = formatKeyError("KEY_MT5_MASTER_PASSWORD");
+    const blob = (copy.title + " " + copy.cause + " " + copy.fix.join(" ")).toLowerCase();
+    expect(blob).toContain("investor");
+    expect(blob).not.toMatch(/password (was |is )?(wrong|incorrect|invalid)/);
   });
 });

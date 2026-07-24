@@ -12,7 +12,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
 import { getCorrelationId } from "@/lib/correlation-id";
-import { isSfoxEnabledServer } from "@/lib/closed-sets";
+import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
 
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
@@ -35,12 +35,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // carve-out these routes do, not fall through to a spurious "Missing required
   // fields" 400.
   const isSfox = typeof exchange === "string" && exchange.toLowerCase() === "sfox";
+  // MT5 is the MIRROR-IMAGE of the sfox carve-out (Phase 135 / MT5SRC-03):
+  // where sfox RELAXES api_secret presence, mt5 REQUIRES all three credential
+  // slots (login → api_key, investor password → api_secret, broker server →
+  // passphrase — the slot mapping the worker's is_mt5 branch reads back). Match
+  // case-INSENSITIVELY and forward the CANONICAL lowercase 'mt5' downstream: the
+  // api_keys DB CHECK admits only lowercase 'mt5' and the Python /validate-key
+  // intercept is an exact `== "mt5"` match, so a mixed-case value must
+  // NORMALIZE, not pass through raw. ccxt exchanges are forwarded verbatim.
+  const isMt5 = typeof exchange === "string" && exchange.toLowerCase() === "mt5";
   // Forward the CANONICAL lowercase 'sfox' downstream: the api_keys DB CHECK
   // admits only lowercase 'sfox' and the Python /validate-key intercept is an
   // exact `== "sfox"` match, so a mixed-case value must NORMALIZE, not pass
   // through raw. Normalization is keyed on sfox ONLY — every ccxt exchange is
   // forwarded verbatim, so ccxt behavior is byte-identical.
-  const exchangeNormalized = isSfox ? "sfox" : exchange;
+  const exchangeNormalized = isSfox ? "sfox" : isMt5 ? "mt5" : exchange;
   const api_secret_normalized =
     isSfox && typeof api_secret !== "string" ? "" : api_secret;
 
@@ -53,6 +62,44 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   if (isSfox && !isSfoxEnabledServer()) {
     return NextResponse.json(
       { error: "sFOX integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // Phase 135 (MT5SRC-03) — STRUCTURAL server gate, mirroring the sfox F2 arm
+  // above. isMt5EnabledServer() is strict `MT5_ENABLED === "true"` (closed-sets.ts,
+  // NOT NEXT_PUBLIC): until go-live (Phase 139) an mt5 CONNECT fails CLOSED with
+  // an honest 400 BEFORE the rate-limit and the live validate/encrypt round-trip —
+  // never a crash, never a false KEY_AUTH_FAILED, never a live probe. This is
+  // defense-in-depth: the worker's own mt5_enabled_server() gate + MT5_DISABLED_DETAIL
+  // sit behind it, but the TS gate fires first so no probe is even attempted.
+  // ccxt/sfox exchanges are unaffected (isMt5 is false).
+  if (isMt5 && !isMt5EnabledServer()) {
+    return NextResponse.json(
+      { error: "MT5 integration is not yet available." },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
+  }
+
+  // Phase 135 (MT5SRC-03) — three-credential defense-in-depth, the MIRROR-IMAGE
+  // of the sfox api_secret RELAXATION. MT5 requires ALL THREE non-blank slots
+  // (login/api_key, investor password/api_secret, broker server/passphrase);
+  // reject a manifestly-incomplete mt5 connect BEFORE any worker call so it
+  // never burns a live probe. The worker's is_mt5 branch is the AUTHORITATIVE
+  // enforcement (a login without a server fails) — this is a fail-fast, not a
+  // replacement for it. Placed before the generic presence check below so the
+  // passphrase requirement (which that check treats as OKX-optional) is pinned.
+  if (
+    isMt5 &&
+    (typeof api_key !== "string" ||
+      api_key.trim().length === 0 ||
+      typeof api_secret !== "string" ||
+      api_secret.trim().length === 0 ||
+      typeof passphrase !== "string" ||
+      passphrase.trim().length === 0)
+  ) {
+    return NextResponse.json(
+      { error: "Missing required fields" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }

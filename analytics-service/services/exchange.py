@@ -915,6 +915,31 @@ async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
         await exchange.aclose()
         return
 
+    # MT5RECON-01: an Mt5Session owns a SYNCHRONOUS Mt5Client (blocking RPyC).
+    # Route its idempotent client.close() OFF the event loop (asyncio.to_thread)
+    # and BOUND it — a hung Wine terminal shutdown must never wedge the SEQUENTIAL
+    # worker (the v1.11 WEDGE-01 class). Mt5Client.close() already swallows its own
+    # teardown errors, but the wait_for bound is the last-resort ceiling. Lazy
+    # import avoids an import cycle. Route + return BEFORE the ccxt close() below.
+    from services.mt5_client import Mt5Session
+
+    if isinstance(exchange, Mt5Session):
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(exchange.client.close), timeout=_ACLOSE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "aclose_exchange: mt5 client.close() exceeded %ss — abandoning",
+                _ACLOSE_TIMEOUT_S,
+            )
+        except Exception as exc:  # pragma: no cover - close swallows internally
+            logger.warning(
+                "aclose_exchange: mt5 client.close() failed (%s): %s",
+                type(exc).__name__, exc,
+            )
+        return
+
     task = asyncio.ensure_future(exchange.close())
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout=_ACLOSE_TIMEOUT_S)
