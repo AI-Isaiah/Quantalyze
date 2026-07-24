@@ -1,0 +1,52 @@
+# MT5 Gateway — Fly.io SECONDARY fallback template
+#
+# Fly is the SECONDARY fallback, documented for completeness — it offers NO advantage
+# over the VPS for this workload. Fly 6PN / .internal / Flycast only bridge apps INSIDE
+# Fly; the analytics worker is on Railway, so a Fly gateway needs the SAME
+# Tailscale/WireGuard tunnel a VPS needs, while adding a second PaaS. Prefer the Railway
+# co-locate PRIMARY (railway-gateway.md); if a tunnel is acceptable, the VPS
+# (docker-compose.yml) is cheaper and gives a cleaner single static IP.
+# Full decision matrix: docs/runbooks/mt5-go-live.md Step 0.
+#
+# ============================================================================
+# HARD CONSTRAINT - PRIVATE NETWORK ONLY. RPyC :8001 is an UNAUTHENTICATED
+# arbitrary-remote-code channel (Phase-134 T-134-03). This config declares NO public
+# port handlers and NO [http_service] section AT ALL -> the app gets no public IP.
+# Reaching a NON-Fly (Railway) worker requires a Tailscale/WireGuard sidecar; RPyC is
+# exposed ONLY on the tailnet interface. NEVER add a public port handler.
+# ============================================================================
+#
+# The MetaTrader terminal self-updates from the broker independently of this image and
+# CANNOT be frozen — only the image tag+digest is pinnable. The soak is the detector.
+
+app            = "quantalyze-mt5-gateway"
+primary_region = "ams"                    # geo-allowed, matches the worker region family
+
+[build]
+  # gmag11/metatrader5_vnc:2.3 = latest, linux/amd64 ONLY (~1.57 GB compressed).
+  # PIN the digest in the runbook: gmag11/metatrader5_vnc:2.3@sha256:<digest>.
+  image = "gmag11/metatrader5_vnc:2.3"
+
+[[vm]]
+  size     = "shared-cpu-2x"
+  memory   = "2gb"                        # ~4 GB image on disk; RAM for Wine + terminal
+  cpu_kind = "shared"
+
+[[mounts]]
+  source      = "mt5_config"              # `fly volumes create mt5_config --size 3`
+  destination = "/config"                 # persistent Wine prefix + saved investor login
+                                          # (one Machine per volume — single-writer, same as Railway/VPS)
+
+# NOTE: intentionally NO public port handlers and NO [http_service] block — this app
+# has no public IP (Fly private-only). RPyC reachability to the Railway worker REQUIRES a
+# Tailscale/WireGuard sidecar in this Machine: bind the tunnel and firewall :8001 to the
+# tailnet only; the Railway worker joins the tailnet and sets MT5_GATEWAY_HOST to the
+# gateway's tailnet address (MT5_GATEWAY_PORT=8001).
+#
+# Broker allowlisting (Pitfall 4): `fly ips allocate-v4` gives ONE dedicated egress IP
+# for the broker allowlist — the terminal (gateway) makes the broker connection, NOT the
+# worker. Most brokers do NOT IP-restrict investor logins [ASSUMED A1 — confirm].
+#
+# One-time VNC :3000 install: use `fly proxy 3000:3000` to your laptop for the one-time
+# terminal install + investor login, then stop the proxy. NEVER add a public :3000
+# handler.
