@@ -7,11 +7,20 @@ appends one sanitized record per run. The actual RUN is human_needed (plan 139-0
 what IS provable offline — and what these tests pin, driven through the injectable
 ``client_factory`` seam with a fake Mt5Client (no mt5linux, no network) — is:
 
-  * Test 1 (parity green): a ledger consistent with the live equity reconciles
-    within max($1, 1e-6·|equity|) → parity_ok True, observation "populated".
-  * Test 2 (negative control — TEETH): a $2 equity drift the realized deal ledger
-    does NOT explain reddens → parity_ok False AND main() exits non-zero. The gate
-    is not vacuous.
+  * Test 1 (parity green): a flat ledger reconstructs to BALANCE within
+    max($1, 1e-6·|balance|) with a zero wedge → parity_ok True, observation
+    "populated".
+  * Test 2 (WR-01 — the reconstruction/wedge split): fidelity is
+    reconstructed-vs-BALANCE, and the open-position uPnL wedge (equity − balance) is
+    gated SEPARATELY at the 136 UNREALIZED_MATERIALITY_RATIO. 2a — a small legitimate
+    wedge reconstructs perfectly and passes (pre-fix it false-FAILed vs equity). 2b —
+    a MATERIAL wedge reconstructs perfectly yet is NOT green (parity_ok False, exits
+    non-zero), reported distinctly from a fidelity FAIL. 2c — a genuine $2
+    reconstruction drift vs balance still reddens fidelity (the gate keeps its teeth).
+  * CR-01 (read-only premise — TEETH): a trade-ENABLED account with clean parity
+    yields an INCONCLUSIVE (not NO-GO) read-only leg; the gate requires the leg to
+    POSITIVELY pass (GO), so main() exits non-zero. Reds against the `!= "NO-GO"`
+    gate.
   * Test 3 (fail-loud read): an Mt5ClientError from history_deals_get is recorded
     typed (code preserved), NEVER coerced to an empty ledger (the None ≠ ()
     honesty); parity_ok is never True; main exits non-zero.
@@ -43,7 +52,13 @@ from pathlib import Path
 import pytest
 
 from scripts.deribit_ground_truth import assert_sanitized, sanitize_evidence
-from scripts.mt5_soak import main, reconcile_parity, run_soak
+from scripts.mt5_soak import (
+    _forward_terminal_nav,
+    _parity_tolerance,
+    main,
+    reconcile_parity,
+    run_soak,
+)
 from services.mt5_client import Mt5ClientError
 
 _DEAL_TYPE_BUY = 0
@@ -98,6 +113,7 @@ class _FakeMt5:
         login: int = 99887766,
         deals=None,
         deals_error: BaseException | None = None,
+        trade_allowed: bool = False,
     ) -> None:
         self._touched = touched
         self._equity = equity
@@ -105,6 +121,7 @@ class _FakeMt5:
         self._login = login
         self._deals = deals if deals is not None else []
         self._deals_error = deals_error
+        self._trade_allowed = trade_allowed
 
     def login(self, login, password, server) -> None:
         self._touched.add("login")
@@ -115,7 +132,7 @@ class _FakeMt5:
             "equity": self._equity,
             "balance": self._balance,
             "login": self._login,
-            "trade_allowed": False,
+            "trade_allowed": self._trade_allowed,
         }
 
     def history_deals_get(self, from_ts, to_ts):
@@ -165,34 +182,96 @@ def test_parity_reconciles_within_tolerance():
 
     assert parity["observation"] == "populated"
     assert parity["parity_ok"] is True
-    tol = max(1.0, 1e-6 * abs(110_500.0))
+    # Fidelity is reconstructed-vs-BALANCE (WR-01); the flat account has a zero wedge.
+    tol = max(1.0, 1e-6 * abs(110_500.0))  # == $1 at this scale
     assert abs(parity["reconstructed_terminal"] - 110_500.0) <= tol
-    assert parity["tolerance"] == tol
+    assert parity["recon_tolerance"] == tol
+    assert parity["recon_ok"] is True
+    assert abs(parity["recon_residual"]) <= tol
     assert parity["deal_count"] == 4
     assert parity["upnl_wedge"] == 0.0
+    assert parity["wedge_within_materiality"] is True
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — negative control: a $2 equity drift the ledger does NOT explain.
+# Test 2 (WR-01) — an open-position uPnL wedge is NOT a reconstruction breach.
+#
+# 2a: a SMALL legitimate wedge (equity $2 above balance) reconstructs to balance
+#     PERFECTLY and the wedge is within materiality → parity_ok True. Pre-WR-01 this
+#     compared reconstructed vs EQUITY under max($1,1e-6·equity)=$1, so the $2 wedge
+#     false-FAILed a correctly-reconstructed account. Reds against the pre-fix gate.
+# 2b: a MATERIAL wedge (equity 110_000, balance 100_000 → 9.09% > 5%) reconstructs to
+#     balance PERFECTLY (recon_ok True) yet is NOT a green run — parity_ok False and
+#     main() exits non-zero. The wedge is reported distinctly, never conflated with a
+#     fidelity FAIL. Mirrors the 136-03 derive-branch materiality fixture.
+# 2c: a GENUINE reconstruction error (reconstructed off balance by $2) still FAILs
+#     fidelity — the balance-anchored fidelity gate keeps its teeth (hand-derived).
 # ---------------------------------------------------------------------------
-def test_two_dollar_drift_reddens_parity():
-    # Balance (realized) unchanged at 110_500; equity reads $2 higher — an
-    # unexplained wedge beyond max($1, 1e-6·|equity|). The realized reconstruction
-    # anchors to balance, so this genuinely lands OUTSIDE tolerance.
+def test_small_wedge_within_materiality_passes():
+    # WR-01 regression: balance 110_500 (realized ledger reconstructs it exactly);
+    # equity reads $2 higher → a $2 open-position uPnL wedge. 2/110_502 ≈ 1.8e-5 well
+    # under the 5% materiality ratio, so this is a legitimate flat-ish account, NOT a
+    # reconstruction breach → parity_ok True. (Pre-fix: |reconstructed−equity|=$2 > $1
+    # tolerance → false FAIL.)
     factory = _make_factory(equity=110_502.0, balance=110_500.0, deals=_canonical_deals())
     parity = _reconcile(factory)
 
     assert parity["observation"] == "populated"
-    assert parity["parity_ok"] is False
-    assert abs(parity["reconstructed_terminal"] - 110_502.0) > parity["tolerance"]
+    assert parity["recon_ok"] is True
+    assert abs(parity["reconstructed_terminal"] - 110_500.0) <= parity["recon_tolerance"]
     assert parity["upnl_wedge"] == pytest.approx(2.0)
+    assert parity["wedge_within_materiality"] is True
+    assert parity["parity_ok"] is True
 
 
-def test_two_dollar_drift_exits_nonzero(tmp_path, monkeypatch):
+def test_small_wedge_exits_zero(tmp_path, monkeypatch):
+    # The corrected end-to-end verdict: a correctly-reconstructed account carrying a
+    # tiny legitimate open-position wedge PASSES the soak (read-only leg is GO on the
+    # trade_allowed=False fake). Reds against the pre-WR-01 gate (which exited 1).
     _set_env(monkeypatch, tmp_path)
     factory = _make_factory(equity=110_502.0, balance=110_500.0, deals=_canonical_deals())
     rc = main([], client_factory=factory, utc_now=_UTC_NOW)
+    assert rc == 0
+
+
+def test_material_wedge_reconstructs_but_is_not_green():
+    # Balance 100_000 (the realized ledger reconstructs it EXACTLY — perfect
+    # fidelity), equity 110_000 → wedge 10_000; 10_000/110_000 ≈ 0.0909 > 0.05. The
+    # reconstruction is correct, but a MATERIAL open-position wedge must NOT count as
+    # a green soak run — and it must be reported as a wedge, never a fidelity FAIL.
+    factory = _make_factory(equity=110_000.0, balance=100_000.0, deals=_canonical_deals())
+    parity = _reconcile(factory)
+
+    assert parity["observation"] == "populated"
+    assert parity["recon_ok"] is True  # fidelity vs BALANCE holds
+    assert abs(parity["reconstructed_terminal"] - 100_000.0) <= parity["recon_tolerance"]
+    assert parity["upnl_wedge"] == pytest.approx(10_000.0)
+    assert parity["wedge_within_materiality"] is False  # 9.09% > 5%
+    assert parity["parity_ok"] is False  # material wedge → not green
+
+
+def test_material_wedge_exits_nonzero(tmp_path, monkeypatch):
+    _set_env(monkeypatch, tmp_path)
+    factory = _make_factory(equity=110_000.0, balance=100_000.0, deals=_canonical_deals())
+    rc = main([], client_factory=factory, utc_now=_UTC_NOW)
     assert rc != 0
+
+
+def test_fidelity_gate_has_teeth_vs_balance():
+    # WR-01 negative control (hand-derived, mirrors test_mt5_derive_branch.py:638):
+    # the fidelity gate is reconstructed-vs-BALANCE under max($1, 1e-6·|balance|). If
+    # the reconstruction were off balance by $2 (a genuine roll/anchor bug), it lands
+    # OUTSIDE tolerance and reddens — the gate is not vacuous. balance 110_500 →
+    # tolerance max($1, 0.1105) = $1; a $2 drift exceeds it.
+    balance = 110_500.0
+    tol = _parity_tolerance(balance)  # == $1 at this scale
+    assert tol == pytest.approx(1.0)
+    # A correct reconstruction (initial rolls to balance) is within tolerance …
+    correct = _forward_terminal_nav({}, initial=balance, flows_by_day={})
+    assert abs(correct - balance) <= tol
+    # … but a $2 drift on the reconstructed terminal reddens fidelity.
+    drifted = _forward_terminal_nav({}, initial=balance + 2.0, flows_by_day={})
+    assert abs(drifted - balance) > tol
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +319,45 @@ def test_empty_ledger_exits_nonzero(tmp_path, monkeypatch):
     factory = _make_factory(equity=110_500.0, balance=110_500.0, deals=[])
     rc = main([], client_factory=factory, utc_now=_UTC_NOW)
     assert rc != 0
+
+
+# ---------------------------------------------------------------------------
+# CR-01 — a trade-ENABLED account is NEVER a green soak run, even with clean parity.
+#
+# The read-only investor-login premise is the entire security basis of this
+# integration. run_spike's read-only leg returns INCONCLUSIVE (NOT NO-GO) whenever
+# trade_allowed is not False (mt5_spike.py:245) — including a trade-ENABLED account.
+# The pre-fix gate (parity_ok True AND verdict != "NO-GO") green-lit that exact case.
+# The fixed gate additionally requires the read-only leg to POSITIVELY pass
+# (verdict == "GO"), so a trade-enabled account exits NON-ZERO. Reds against the
+# pre-fix `!= "NO-GO"` gate (which returned 0 here).
+# ---------------------------------------------------------------------------
+def test_trade_enabled_account_exits_nonzero(tmp_path, monkeypatch):
+    _set_env(monkeypatch, tmp_path)
+    # Clean parity (equity == balance, canonical ledger) so parity_ok is True and the
+    # ONLY thing withholding a green verdict is the unconfirmed read-only premise.
+    factory = _make_factory(
+        equity=110_500.0, balance=110_500.0, deals=_canonical_deals(),
+        trade_allowed=True,
+    )
+    rc = main([], client_factory=factory, utc_now=_UTC_NOW)
+    assert rc != 0
+
+
+def test_trade_enabled_readonly_leg_is_inconclusive_not_nogo():
+    # Prove the failure MODE the gate must catch: a trade-enabled account yields an
+    # INCONCLUSIVE read-only leg (never NO-GO) and clean parity — so the pre-fix
+    # `!= "NO-GO"` gate would have returned 0. The verdict split is what the CR-01
+    # gate keys on.
+    factory = _make_factory(
+        equity=110_500.0, balance=110_500.0, deals=_canonical_deals(),
+        trade_allowed=True,
+    )
+    report = run_soak(_VALID_ENV, client_factory=factory, utc_now=_UTC_NOW)
+
+    assert report["read_only_proof"]["verdict"] == "INCONCLUSIVE"
+    assert report["verdict"] != "NO-GO"  # the pre-fix gate would have passed this
+    assert report["parity"]["parity_ok"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +410,23 @@ def test_written_record_is_sanitized(tmp_path, monkeypatch):
     text = files[0].read_text(encoding="utf-8")
     assert _INVESTOR_PW not in text
     assert _SERVER not in text
+    assert _LOGIN not in text  # IN-01: the login is scrubbed too, never emitted
     # And the parsed record survives assert_sanitized.
     record = json.loads(text)
     assert_sanitized(record)
+
+
+def test_sanitize_masks_login_key():
+    """IN-01: a future record embedding ``account_info()`` (which carries the raw
+    ``login``) must have the login MASKED, not emitted verbatim. Exercises the
+    ``login`` entry added to sanitize's ``_MASK_KEYS`` directly, so a regression
+    that stores the account snapshot into the soak record is caught."""
+    record = {"account": {"login": _LOGIN, "equity": 110_500.0, "trade_allowed": False}}
+    clean = sanitize_evidence(record)
+    text = json.dumps(clean)
+    assert _LOGIN not in text  # masked via truncate_account_id (***<last4>)
+    assert clean["account"]["login"] != _LOGIN
+    assert_sanitized(clean)
 
 
 # ---------------------------------------------------------------------------

@@ -25,20 +25,31 @@ This runner writes almost no new logic. It COMPOSES:
 RECONCILIATION (the 136-03 gate on real data)
 ----------------------------------------------
 login → account_info() (equity + balance anchor) → history_deals_get(window) →
-combine_mt5_deal_ledger → forward-roll NAV_t = NAV_{t-1}·(1+r_t) + F_t → parity_ok
-iff ``|reconstructed − equity| <= max($1, 1e-6·|equity|)`` (the exact 136-03
-tolerance).
+combine_mt5_deal_ledger → forward-roll NAV_t = NAV_{t-1}·(1+r_t) + F_t → the verdict
+splits into TWO independent quantities (WR-01):
 
-The forward-roll ``initial`` is anchored to the account BALANCE
-(``balance − Σtrading_pnl − Σflows``), NOT equity. The shipped
-``reconstruct_nav_and_twr`` anchors the realized terminal to
-``anchor_nav − open_unrealized_usd`` == balance (nav_twr.py:800). Deriving
-``initial`` from equity would make ``|reconstructed − equity|`` a mathematical
-identity (always ~0) — a self-referential oracle with no teeth. Anchoring to
-balance keeps the check honest: the realized ledger reconstructs the balance, and
-parity to the live equity holds only when the uPnL wedge is within tolerance — so
-an unexplained equity drift genuinely reddens the run. The uPnL wedge
-(``equity − balance``) is recorded so the founder sees any open-position exposure.
+  * FIDELITY (reconstruction correctness): ``recon_ok`` iff
+    ``|reconstructed − balance| <= max($1, 1e-6·|balance|)``. The forward-roll
+    ``initial`` is anchored to the account BALANCE
+    (``balance − Σtrading_pnl − Σflows``), and the shipped
+    ``reconstruct_nav_and_twr`` terminates the realized series at
+    ``anchor_nav − open_unrealized_usd`` == balance (nav_twr.py:836). So the
+    realized ledger reconstructs the BALANCE; comparing reconstructed vs balance
+    is the honest reconstruction-correctness test (a real roll/flow bug reddens
+    it), never a vacuous self-referential identity.
+  * uPnL WEDGE (open-position exposure): ``wedge = equity − balance`` is the
+    LEGITIMATE floating PnL of open positions, NEVER a reconstruction error. It is
+    gated SEPARATELY at the SHIPPED 136 ``UNREALIZED_MATERIALITY_RATIO`` (5%,
+    ``|wedge|/equity`` on a non-dust anchor, exactly the ``unrealized_pnl_in_anchor``
+    rule of nav_twr.py:868).
+
+``parity_ok = recon_ok AND wedge-within-materiality``. Reconciling reconstructed
+directly against ``equity`` under one tight tolerance (the pre-WR-01 gate) made
+``parity_ok`` true only for a near-flat account — any open position >$1 false-FAILed
+a correctly-reconstructed live managed account. Splitting the two keeps a legitimate
+open-position wedge from masquerading as a reconstruction breach while still
+surfacing a MATERIAL wedge distinctly (a material wedge never exits 0 green). Both
+the fidelity residual and the wedge are recorded so the founder sees them apart.
 
 Honesty contract (fail-loud, never fabricate a flat account):
   * an ``Mt5ClientError`` read → observation="error", parity_ok=None, exit 1 —
@@ -47,7 +58,11 @@ Honesty contract (fail-loud, never fabricate a flat account):
     a zero-deal run can NEVER count as a green soak run;
   * an unclassifiable DEAL_TYPE → ``Mt5DealClassificationError`` propagates
     (never swallowed);
-  * exit 0 ONLY when parity_ok is True AND the spike verdict is not NO-GO.
+  * exit 0 ONLY when parity_ok is True AND the spike verdict is not NO-GO AND the
+    read-only proof leg POSITIVELY passes (verdict == "GO", i.e. trade_allowed is
+    False). A merely-INCONCLUSIVE read-only leg — including a trade-ENABLED account
+    — is NEVER green (CR-01): the read-only investor-login premise is the whole
+    security basis of this integration and must be affirmatively confirmed.
 
 SECURITY (hard constraint, carried forward from 134):
   * the ``mt5linux`` RPyC bridge is an UNAUTHENTICATED arbitrary-remote-code
@@ -80,10 +95,12 @@ day, EVERY run within tolerance; extend the window on any red run.
 
 EXIT CODES
 ----------
-  0  soak run PASS — parity within tolerance + spike verdict not NO-GO
+  0  soak run PASS — reconstruction fidelity holds vs balance, uPnL wedge within
+     materiality, spike verdict not NO-GO, AND the read-only proof leg == "GO"
   2  read-only premise violated (ScopeViolationError)
   3  missing required MT5_SPIKE_* env vars
-  1  any other outcome (parity breach / INCONCLUSIVE / error / scrubbed failure)
+  1  any other outcome (fidelity breach / material wedge / read-only not positively
+     proven / INCONCLUSIVE / error / scrubbed failure)
 """
 from __future__ import annotations
 
@@ -104,6 +121,11 @@ from scripts.deribit_ground_truth import (
 # COMPOSE — the SHIPPED 136 combiner (the reconstruction path, not a parallel calc).
 from services.broker_dailies import combine_mt5_deal_ledger
 
+# COMPOSE — the SHIPPED 136 uPnL-wedge materiality constants (reused verbatim, never
+# a re-invented magic number). DUST_NAV_FLOOR gates the ratio on a non-dust anchor
+# exactly as nav_twr's own ``unrealized_pnl_in_anchor`` flag does (nav_twr.py:868).
+from services.nav_twr import DUST_NAV_FLOOR, UNREALIZED_MATERIALITY_RATIO
+
 # COMPOSE — the ONE DEAL_TYPE allow-list + server-time→UTC seam (fail-loud).
 from services.mt5_deals import (
     Mt5DealClassificationError,
@@ -123,9 +145,11 @@ _REQUIRED_ENV = (
 )
 
 
-def _parity_tolerance(equity: float) -> float:
-    """The EXACT 136-03 gate tolerance: max($1, 1e-6·|equity|)."""
-    return max(1.0, 1e-6 * abs(equity))
+def _parity_tolerance(anchor: float) -> float:
+    """The EXACT 136-03 gate tolerance: max($1, 1e-6·|anchor|). Applied to the
+    BALANCE for the reconstruction-fidelity gate (WR-01) — balance is what the
+    realized ledger can actually reproduce."""
+    return max(1.0, 1e-6 * abs(anchor))
 
 
 def _forward_terminal_nav(
@@ -165,15 +189,22 @@ def reconcile_parity(
 
     login → account_info() (equity + balance anchor) → history_deals_get over the
     window → combine_mt5_deal_ledger → forward-roll from a BALANCE-anchored initial
-    → parity_ok iff ``|reconstructed − equity| <= max($1, 1e-6·|equity|)``.
+    → the verdict splits (WR-01): ``recon_ok`` iff
+    ``|reconstructed − balance| <= max($1, 1e-6·|balance|)`` (reconstruction
+    fidelity), and the uPnL wedge ``equity − balance`` gated separately at
+    ``UNREALIZED_MATERIALITY_RATIO``. ``parity_ok = recon_ok AND wedge-within-
+    materiality``.
 
     Returns a dict with ``observation`` ("populated"/"honest_empty"/"error"),
-    ``parity_ok`` (True/False/None), the equity/balance/upnl_wedge anchors, the
-    reconstructed terminal, the tolerance, the deal_count, and the combine meta
-    flags. An ``Mt5ClientError`` read → observation="error", parity_ok=None (NEVER
-    coerced to an empty ledger). An empty ledger → observation="honest_empty",
-    parity_ok=None (INCONCLUSIVE — never green). An unclassifiable DEAL_TYPE
-    propagates ``Mt5DealClassificationError`` (never swallowed).
+    ``parity_ok`` (True/False/None), ``recon_ok`` + ``recon_residual`` +
+    ``recon_tolerance`` (the fidelity gate reported distinctly),
+    ``wedge_within_materiality`` + ``upnl_wedge`` + ``wedge_materiality_ratio`` (the
+    open-position exposure reported distinctly), the equity/balance anchors, the
+    reconstructed terminal, the deal_count, and the combine meta flags. An
+    ``Mt5ClientError`` read → observation="error", parity_ok=None (NEVER coerced to
+    an empty ledger). An empty ledger → observation="honest_empty", parity_ok=None
+    (INCONCLUSIVE — never green). An unclassifiable DEAL_TYPE propagates
+    ``Mt5DealClassificationError`` (never swallowed).
     """
     if utc_now is None:
         utc_now = datetime.now(timezone.utc)
@@ -260,20 +291,49 @@ def reconcile_parity(
         reconstructed = _forward_terminal_nav(
             returns_by_day, initial=initial, flows_by_day=flows_by_day
         )
-        tolerance = _parity_tolerance(equity)
+
+        # WR-01: the realized ledger reconstructs the BALANCE (not equity — the
+        # terminal self-updates to ``anchor − open_unrealized_usd == balance``,
+        # nav_twr.py:836), so FIDELITY is reconstructed-vs-balance under the tight
+        # 136-03 tolerance. This is the reconstruction-correctness gate; a real
+        # roll/flow bug that lands reconstructed off balance reddens it.
+        recon_tolerance = _parity_tolerance(balance)
+        recon_residual = reconstructed - balance
+        recon_ok = abs(recon_residual) <= recon_tolerance
+
+        # The uPnL wedge (equity − balance) is the LEGITIMATE open-position exposure
+        # — NEVER a reconstruction error. Gate it SEPARATELY at the SHIPPED 136
+        # materiality ratio (|wedge|/anchor, anchor=equity, guarded on a non-dust
+        # anchor exactly like nav_twr's ``unrealized_pnl_in_anchor``, nav_twr.py:868)
+        # so an open-position account is no longer false-FAILed as a reconstruction
+        # breach, and a MATERIAL wedge is surfaced distinctly rather than folded into
+        # the fidelity residual.
+        wedge = equity - balance
+        wedge_material = (
+            abs(equity) > DUST_NAV_FLOOR
+            and abs(wedge) / abs(equity) > UNREALIZED_MATERIALITY_RATIO
+        )
+
+        # PASS iff BOTH: reconstruction fidelity holds AND the wedge is within
+        # materiality. A material wedge does not certify a green soak run (it must
+        # not exit-0 green) but is distinguished from a fidelity FAIL in the record.
+        parity_ok = recon_ok and not wedge_material
 
         return {
             "observation": "populated",
-            "parity_ok": abs(reconstructed - equity) <= tolerance,
+            "parity_ok": parity_ok,
+            "recon_ok": recon_ok,
+            "wedge_within_materiality": not wedge_material,
             "deal_count": deal_count,
             "equity": equity,
             "balance": balance,
-            "upnl_wedge": equity - balance,
+            "upnl_wedge": wedge,
+            "wedge_materiality_ratio": UNREALIZED_MATERIALITY_RATIO,
             "total_trading_pnl": total_trading_pnl,
             "total_flows": total_flows,
             "reconstructed_terminal": reconstructed,
-            "tolerance": tolerance,
-            "residual": reconstructed - equity,
+            "recon_tolerance": recon_tolerance,
+            "recon_residual": recon_residual,
             "meta": {
                 key: meta[key]
                 for key in ("nav_coverage_gap_days", "computation_status_hint")
@@ -398,8 +458,18 @@ def main(
 
     parity = report.get("parity", {})
     spike_verdict = report.get("verdict")
-    # Exit 0 ONLY when parity is within tolerance AND the spike is not a NO-GO.
-    if parity.get("parity_ok") is True and spike_verdict != "NO-GO":
+    read_only = report.get("read_only_proof", {}).get("verdict")
+    # CR-01: exit 0 ONLY on a genuine PASS — parity_ok (reconstruction fidelity vs
+    # balance AND uPnL wedge within materiality), the spike has NO NO-GO leg, AND the
+    # read-only investor-login premise is POSITIVELY proven (read_only == "GO", i.e.
+    # trade_allowed is False). An INCONCLUSIVE read-only leg — INCLUDING a
+    # trade-ENABLED account — is NEVER green: the whole security premise of this
+    # integration is a read-only login, so "not disproven" can never pass the gate.
+    if (
+        parity.get("parity_ok") is True
+        and spike_verdict != "NO-GO"
+        and read_only == "GO"
+    ):
         return 0
     return 1
 
