@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.49.0.0] - 2026-07-24
+### v1.15 — MetaTrader 5 live `api_verified` account sync, ships DARK behind flags
+Elevates MetaTrader 5 from the fabricatable legacy Expert-Advisor / CSV
+`self_reported` tier to a live, read-only `api_verified` institutional factsheet —
+the exact v1.12 sFOX "live read = ground truth" arc applied to MT5's forex/CFD
+world. An allocator connects a read-only MT5 **investor** login (login / investor
+password / broker server) and gets a factsheet reconstructed from real deal
+history, not numbers a manager can type.
+
+Architecture (phases 134–139, all reusing the sFOX/Deribit seam):
+- **Gateway + client**: the worker reads MT5 as a pure network client
+  (`Mt5Client`, a narrowing read-only RPyC facade — no `order_send`, no
+  `__getattr__`) against a self-hosted `gmag11/metatrader5_vnc` Linux/Wine gateway,
+  so the Windows-only `MetaTrader5` package never enters the worker process.
+- **Source**: `'mt5'` registered in lockstep (`Source` Literal / `SUPPORTED_SOURCES`
+  / `_FACTORIES`); a read-only validate branch proves investor-vs-master via
+  `order_check`; three key routes accept mt5; a widen-only CHECK migration admits
+  `'mt5'` across the four exchange constraints.
+- **Reconstruction**: `combine_mt5_deal_ledger` folds realized profit/swap/
+  commission/fee + `DEAL_TYPE_BALANCE` flows against the live equity anchor into
+  the ONE `derive_basis_series` backbone with the `api_verified` stamp. MT5 is a
+  TRADITIONAL asset class (√252, NOT crypto √365).
+- **Hardening**: per-terminal `asyncio.Lock`, `account_info().login == expected`
+  bracket pre+post read, and bounded restart-on-timeout keep a hung Wine terminal
+  off the event loop and make a wrong-account `api_verified` stamp impossible.
+- **UI**: flag-gated add-key card + investor-password setup guide + `api_verified`
+  badge (all roles), covered by a blocking e2e.
+
+Ships fully DARK behind `MT5_ENABLED` (server) / `NEXT_PUBLIC_MT5_ENABLED`
+(client), both strict `"true"`; OFF is byte-identical. The prod gateway stand-up,
+broker onboard, soak, and LIVE flag flip are a founder go-live session driven by
+`docs/runbooks/mt5-go-live.md` (the soak runner `scripts/mt5_soak.py` ships too).
+
+Ship-review hardening (specialist fan-out + red-team, all with regression tests):
+- MT5 server gate added to `create-with-key` + `composite/add-key` (the routes the
+  wizard submits to), so the client-on/server-off half-state returns a clean 400
+  instead of a 500 UNKNOWN.
+- MT5 login shape fixed: an MT5 login is a short broker account number (often
+  <8 digits), so the three key routes require a non-blank login (not the ccxt
+  `<8` rejection) — a legitimate short login is no longer wrongly rejected.
+- `finalize-wizard` no longer overwrites a resolved crypto `asset_class` with the
+  √252 `traditional` default on a venue-lookup fault (would have mis-annualized
+  crypto strategies — a non-MT5 regression); the write is skipped instead.
+- Off-loop, bounded MT5 client construction + close on the validate paths
+  (WEDGE-01 class); the validate probe gained the same login bracket as the derive
+  read; a network blip during derive is TRANSIENT (retry), not a permanent
+  user-blaming failure; `_raise_last` and the flow-evidence fold are fully
+  fail-loud/None-safe; `Mt5Session` credentials are `repr=False`; and the
+  long-fetch validate path gained the MT5 kill-switch gate.
+
 ## [0.48.0.1] - 2026-07-23
 ### fix(test): make equity_reconstruction OKX anchor tests time-independent
 Three `test_equity_reconstruction.py` tests (`test_v0_15_4_2_anchor_offsets_...`,
