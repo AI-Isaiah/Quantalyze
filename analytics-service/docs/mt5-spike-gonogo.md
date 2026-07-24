@@ -183,3 +183,90 @@ whenever a new broker server is onboarded.
 Overall verdict aggregation (harness-computed): NO-GO if any leg is NO-GO; else
 INCONCLUSIVE if any leg is INCONCLUSIVE; else GO. Leg 1 is the core gate — a NO-GO
 there elects the Windows VPS fallback (identical contract).
+
+---
+
+## Soak log (MT5GOLIVE-02)
+
+**Status: TEMPLATE — awaiting the live founder soak.** Every live-result cell below
+is pre-filled with the literal placeholder `human_needed`. An unfilled row can
+therefore never be misread as "passed": the soak gate is green ONLY once every
+row in the window carries an observed `parity_ok=true`.
+
+The soak proves the **Phase-136 reconciliation gate on REAL prod data over the soak
+window**: the daily-NAV terminal reconstructed from the deal ledger reconciles to
+the live `account_info().equity` within tolerance, run once per day until the flip.
+It COMPOSES the offline-proven pieces and reinvents nothing — the 134 spike legs
+(`run_spike`), the 136 combiner (`combine_mt5_deal_ledger`), and the deribit
+sanitize primitives — so the soak run itself writes no new trust-critical logic.
+The runner is proven offline (`tests/test_mt5_soak.py`); the RUN is the human part.
+
+### Invocation
+
+Reuse the 134 `MT5_SPIKE_*` env contract **verbatim** (same login / investor
+password / server / private host / RPyC port) plus the two soak-only knobs:
+
+| Var | Required | Meaning |
+|-----|----------|---------|
+| `MT5_SPIKE_LOGIN` … `MT5_SPIKE_PORT` | yes | the 134 contract, unchanged (§1 table) |
+| `MT5_SPIKE_HISTORY_DAYS` | no (default 90) | reconciliation deal-history window |
+| `MT5_SOAK_SERVER_OFFSET_MIN` | no (default 0) | broker server-time-vs-UTC offset in minutes — **[ASSUMED]** until founder-confirmed from Leg 4 / the VNC-displayed server clock (§7); converted to seconds for `combine_mt5_deal_ledger`'s one normalize seam |
+| `MT5_SOAK_LOG_DIR` | no (default `docs/evidence`) | per-run sanitized record dir |
+
+```bash
+cd analytics-service && python -m scripts.mt5_soak
+echo "exit=$?"
+```
+
+**Exit codes:** `0` PASS (parity within tolerance AND spike verdict not NO-GO) ·
+`2` read-only premise violated · `3` missing required `MT5_SPIKE_*` env ·
+`1` any other outcome (parity breach / INCONCLUSIVE / error). Each run writes one
+sanitized record to `MT5_SOAK_LOG_DIR/mt5-soak-<UTC-date>.json` (credentials never
+survive — `sanitize_evidence` + `assert_sanitized` gate every write).
+
+### Window rule
+
+- **5–10 business days [ASSUMED A5]**, **one run per day**, EVERY run within
+  tolerance `max($1, 1e-6·|equity|)` (the exact 136-03 gate).
+- **Extend the window on any red run.** The MT5 terminal self-updates independently
+  of the pinned image (§ Pitfall 2 — only the image tag/digest is pinnable, not the
+  terminal binary), so the soak window is the **parity-break detector**: a
+  terminal-update-induced reconciliation break reddens a run BEFORE the flip.
+
+### Per-day soak table (founder fills — one row per run)
+
+| Date (UTC) | Live equity | Reconstructed terminal | Tolerance | Parity verdict | `deal_count` | uPnL wedge | Evidence file |
+|------------|-------------|------------------------|-----------|----------------|--------------|------------|---------------|
+| `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` (true / false / INCONCLUSIVE) | `human_needed` | `human_needed` | `human_needed` |
+| `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` |
+| `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` |
+| `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` |
+| `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` | `human_needed` |
+
+> The reconstructed terminal is rolled from a **balance-anchored** initial, so the
+> uPnL wedge (`equity − balance`) is recorded per run: a material wedge means the
+> realized-basis reconstruction does not match live equity within tolerance and the
+> run reddens — soak a flat/near-flat account or account for open positions
+> explicitly.
+
+### Pass rule
+
+The soak gate is **green ONLY when every run in the window records
+`parity_ok=true`**. An `INCONCLUSIVE` run (empty / no-interpretable-return ledger,
+`parity_ok=null`) NEVER counts as green — a zero-deal ledger is not a passing soak,
+and an error read is recorded typed, never coerced to a flat account
+(the `None` ≠ `()` honesty). One red or inconclusive run fails the gate.
+
+### Live-deferred confirmations folded into this session (per 139-CONTEXT)
+
+The same founder soak session also confirms the two assumptions deferred to the
+live run:
+
+- **136-05 DEAL_TYPE ambiguous-middle:** CHARGE / CORRECTION / INTEREST / CANCELED /
+  DIVIDEND / TAX currently **fail loud** (allow-list, not block-list). If any appear
+  in the real ledger, the soak run raises `Mt5DealClassificationError` — record the
+  observed type(s) and lock their classification behind the 136-05 human-verify
+  checkpoint before proceeding.
+- **WR-03 master-rejection retcode:** confirm the investor-vs-master distinguishing
+  `order_check` retcode (Leg 2 `[ASSUMED]`) against the live account so the
+  validate-time master-password rejection encodes the real per-broker rule.
