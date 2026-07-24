@@ -77,7 +77,42 @@ Railway secret store, **never in git**.
 CUSTOM_USER     = <vnc user>
 PASSWORD        = <vnc password>      # gateway secret, NOT in git
 mt5server_port  = 8001
+PIP_CONSTRAINT  = /config/mt5linux-constraint.txt   # see below — MANDATORY
 ```
+
+## ⚠️ PIP_CONSTRAINT — the bridge does NOT work without it (Pitfall 5 — false-green)
+
+`start.sh` installs `mt5linux`/`rpyc`/`numpy` **unpinned** on both the Wine and Linux
+sides, and the resulting default versions leave the RPyC bridge **functionally dead
+while it still logs `[7/7] server started on :8001`** — a bare TCP-connect / `LISTEN`
+check passes, so this is a classic false-green. Three coordinated pins are required:
+
+1. Copy **`deploy/mt5-gateway/mt5linux-constraint.txt`** (in this repo) to the gateway
+   volume at **`/config/mt5linux-constraint.txt`**.
+2. Set the gateway env var **`PIP_CONSTRAINT=/config/mt5linux-constraint.txt`**.
+3. **One-time Wine numpy fix.** Because `start.sh` skips the Wine MetaTrader5/mt5linux
+   reinstall when they're already present, the constraint alone does NOT downgrade the
+   Wine-side numpy on an already-provisioned volume. Force it once:
+   ```bash
+   railway ssh --service <gateway> "s6-setuidgid abc bash -lc \
+     'export WINEPREFIX=/config/.wine WINEDEBUG=-all PIP_CONSTRAINT=/config/mt5linux-constraint.txt; \
+      wine python -m pip install --no-cache-dir \"numpy<2\"'"
+   ```
+   It persists on `/config` and survives boots (the MT5 reinstall stays skipped).
+
+The three failure modes each pin prevents are documented inline in the constraint file.
+**Verify the bridge is actually live** (not just listening) by attaching a client and
+reading the account — `initialize()` must return `True` and `account_info()` must return
+the real login, e.g. from inside the gateway container:
+```bash
+railway ssh --service <gateway> "python3 -c 'from mt5linux import MetaTrader5; \
+  m=MetaTrader5(host=\"localhost\",port=8001); print(m.initialize(), m.account_info())'"
+```
+
+The **worker** carries the matching client libs: `rpyc==5.2.3` (pinned in
+`analytics-service/requirements.in`, 5.x/<6) plus `mt5linux==0.1.9` installed `--no-deps`
+in `analytics-service/Dockerfile`. Keep the worker rpyc on the 5.x line to match the
+gateway's Wine-side rpyc-5 server.
 
 ## Environment variables (worker service — set AT FLIP, not at stand-up)
 
