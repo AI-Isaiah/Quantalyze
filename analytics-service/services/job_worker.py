@@ -75,15 +75,22 @@ if TYPE_CHECKING:
     # `-> "pd.Series"` return annotation needs the name resolvable under mypy.
     import pandas as pd
 
+    # MT5CONC-01: the bounded restart helper is typed against Mt5Client. The value
+    # is only ever a client already held by the live Mt5Session; a type-only import
+    # keeps the module-import-does-not-require-mt5linux contract intact.
+    from services.mt5_client import Mt5Client
+
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
 from services.geo_block import is_geo_blocked
 from services.closed_sets import (  # B8b: single-sourced closed sets, re-exported
     CRYPTO_VENUES,
+    MT5_DISABLED_DETAIL,
     SFOX_DISABLED_DETAIL,
     PositionDirection as PositionDirection,
     Side as Side,
     is_smoothed_mtm_enabled,
+    mt5_enabled_server,
     sfox_enabled_server,
 )
 from services.db import db_execute, get_supabase, one, rows
@@ -99,6 +106,10 @@ from services.exchange import (
 )
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
+from services.mt5_client import (  # mt5 holder + the rpyc bound the derive margins off
+    Mt5Session,
+    MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S,
+)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 
@@ -258,9 +269,145 @@ _SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
 # money-critical fix (SFOX-05): without it, combine_realized_and_funding runs on
 # empty streams and clobbers the reconstructed sfox TWR. deribit stays byte
 # -identical (it was, and remains, excluded).
-_NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox"})
+# MT5RECON-01 (Phase 136): mt5's daily-return series is produced NATIVELY inside
+# the venue dispatch (combine_mt5_deal_ledger, the deal-ledger reconstruction)
+# rather than by the ccxt USD-space combine_realized_and_funding pass below.
+# Excluding it here is money-critical (the sfox SFOX-05 lesson): without it, the
+# ccxt combine would run on empty realized/funding streams and CLOBBER the
+# reconstructed mt5 TWR with a flat series.
+_NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "mt5"})
+
+# MT5RECON-01 (Phase 136): the last-resort event-loop ceiling on the mt5 derive
+# read block (login → account_info → history_deals_get, run OFF the loop via
+# asyncio.to_thread). Each RPyC round-trip is already rpyc-bounded by
+# MT5_REQUEST_TIMEOUT_S inside Mt5Client; this outer wait_for is the FLIPRETRY-01
+# baseline so a hang OUTSIDE a bounded round-trip (netref materialization, a wedged
+# Wine terminal) becomes a CLASSIFIED TRANSIENT at the bound, never an unbounded
+# wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening is
+# delivered incrementally: restart-on-timeout landed in Phase 137 plan 01 (the
+# _MT5_RESTART_TIMEOUT_S / _mt5_bounded_restart pair below + the TimeoutError-branch
+# invocation), and the module-level per-terminal lock (_MT5_TERMINAL_LOCKS /
+# _mt5_terminal_lock_for) + the account_info().login bracket (pre+post read) landed
+# in plan 137-02 — both Phase-137 deltas now delivered. Derived
+# from MT5_REQUEST_TIMEOUT_S (+10s margin) so a retuned rpyc bound carries through
+# — mirrors ingestion/mt5.py:_MT5_PROBE_TIMEOUT_S so the derive and probe paths
+# never diverge (WR-02).
+_MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
+    os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
+)
+
+# MT5CONC-01 (Phase 137 plan 01): the wall-clock ceiling on an ACTIVE terminal
+# restart (bounded shutdown + re-connect) invoked on the derive read-timeout
+# branch. The 10s magnitude mirrors exchange.py:_ACLOSE_TIMEOUT_S — a bounded
+# teardown+rebuild is the same order as a bounded close. It MUST stay far under
+# TIMEOUT_PER_KIND["derive_broker_dailies"] (15 min) so a hung restart can never
+# itself push the job into the outer dispatch ceiling: the restart is best-effort
+# recovery, and a restart that wedged is abandoned at this bound exactly like the
+# hung read (never a nested wedge of the sequential worker).
+_MT5_RESTART_TIMEOUT_S: Final[float] = float(
+    os.getenv("MT5_RESTART_TIMEOUT_S", "10.0")
+)
+
+# WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
+# built from UTC ``now``, but MT5 deal ``time`` values are in the broker's SERVER
+# timezone (``mt5_deals.deal_utc_day`` is the ONE server-time→UTC correction seam).
+# A server AHEAD of UTC stamps a just-happened deal with an epoch LATER than UTC
+# ``now``, so without a margin that same-day deal would fall past the upper bound
+# and be silently CLIPPED from the ledger → under-counted terminal PnL → a wrong
+# (but plausible) series. The margin MUST cover the maximum plausible
+# server-ahead-of-UTC offset; real MT5 brokers sit within ±13h of UTC. The assert
+# ties the (deliberately generous, one full day) margin to that offset bound so a
+# future edit that tightens the window to "avoid fetching the future" can never
+# silently make it too tight to survive a same-day deal on an ahead-of-UTC server.
+_MT5_MAX_SERVER_UTC_OFFSET_S: Final[int] = 13 * 3600  # ±13h — the real-broker bound
+_MT5_DEAL_FETCH_MARGIN_S: Final[int] = 86_400  # one full day
+assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
+    "MT5 deal-fetch margin must cover the max server-UTC offset so a same-day "
+    "server-time deal is never clipped by the UTC-based upper bound (WR-02)"
+)
 
 logger = logging.getLogger("quantalyze.analytics.job_worker")
+
+
+async def _mt5_bounded_restart(client: "Mt5Client") -> None:
+    """MT5CONC-01 — ACTIVELY restart a wedged MT5 terminal, bounded so it can never
+    itself nest-wedge the SEQUENTIAL worker.
+
+    ``Mt5Client.restart()`` is blocking RPyC (like the read), so it runs OFF the
+    event loop via ``to_thread`` and is capped by ``_MT5_RESTART_TIMEOUT_S`` (~10s,
+    far under the 15-min dispatch ceiling). A hung restart is ABANDONED at the bound
+    exactly like a hung read — the thread is never joined. Best-effort recovery: any
+    failure (the ``wait_for`` firing, a transport raise) is logged and SWALLOWED so
+    the restart can never mask or replace the caller's transient classification.
+    Kept module-level (not nested in the branch) because plan 137-02 reuses it for
+    the login-mismatch branch.
+    """
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S
+        )
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — best-effort recovery
+        logger.warning(
+            "derive_broker_dailies: bounded mt5 terminal restart did not complete "
+            "within its wall-clock bound — abandoning it; the transient retry will "
+            "reconnect on the next attempt (MT5CONC-01)"
+        )
+
+
+# MT5CONC-02 (Phase 137 plan 02): module-level per-terminal asyncio.Lock registry,
+# keyed by the process-wide terminal identity (host:port via Mt5Client.terminal_key),
+# mirroring position_reconstruction.py:308-317. It MUST be module-level, NOT a
+# Mt5Session attribute: _make_mt5_session builds a FRESH Mt5Session + Mt5Client per
+# job, so a Session-attached lock would be a brand-new Lock object per job and
+# serialize NOTHING (the Pitfall-1 anti-pattern). Keyed by terminal_key so every job
+# hitting the ONE shared Wine terminal contends on the SAME Lock.
+#
+# The dict grows unboundedly BY DESIGN (same rationale as the reconstruct registry):
+# evicting a Lock with waiters parked on it would silently break serialization, and
+# terminal cardinality is bounded (v1 = ONE gateway terminal, O(1) keys).
+#
+# v1 SCOPE — a DOCUMENTED gap, not silently assumed: an asyncio.Lock is
+# SINGLE-EVENT-LOOP. It serializes the shared terminal only WITHIN one worker
+# process's event loop. The sequential main_worker.py:606 dispatch loop runs jobs
+# one-at-a-time in-process, so in-process interleave is structurally impossible;
+# ACROSS worker replicas / the separate FastAPI validate process it does NOT
+# serialize. Cross-process serialization of the ONE gateway is a DOCUMENTED v1 gap
+# (v1 = one serialized terminal, one worker replica); the plan-02 login bracket
+# (account_info().login == expected, asserted pre+post the read) is the cross-process
+# safety net. The dispatch-epilogue aclose_exchange close also sits OUTSIDE this lock
+# — safe under the sequential per-process loop (no terminal IPC contends with it).
+_MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
+    # setdefault is atomic across coroutine resumption — there is no await between
+    # the lookup and the insert, so within one event loop two simultaneous first-
+    # callers for the same terminal cannot end up with two different Lock objects.
+    # Single-event-loop safe (see the cross-process gap noted above).
+    return _MT5_TERMINAL_LOCKS.setdefault(terminal_key, asyncio.Lock())
+
+
+class _Mt5PostReadVerificationError(Exception):
+    """IN-01 — a transient transport blip on the ASSERTION-ONLY POST login bracket.
+
+    The POST bracket re-reads ``account_info()`` purely to re-assert the account
+    AFTER the correct account's deals were already fetched successfully. A genuine
+    network/terminal blip on that re-read surfaces as an ``Mt5ClientError``. Routing
+    it through the shared ``except Mt5ClientError`` classify/stamp arm risks a
+    PERMANENT user-attributed ``failed`` stamp (if ``classify_mt5_login_error``
+    reads it as ``auth``/``wrong_server``) even though the economic read of the
+    CORRECT account succeeded — a credential verdict for a mere verification gap.
+
+    Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass, so the
+    classify/stamp arm is structurally UNABLE to absorb it: it routes instead to a
+    dedicated TRANSIENT (re-queue), no-stamp branch. It carries only the already-
+    secret-scrubbed ``Mt5ClientError`` text.
+
+    It does NOT weaken the trust guarantee: a genuine wrong-account POST read raises
+    ``Mt5AccountMismatchError`` (a different type, raised by ``_assert_expected_login``
+    OUTSIDE the wrapped ``account_info()`` call), which still routes to the
+    mismatch arm — so ``api_verified`` can never be stamped on the wrong account.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -752,8 +899,43 @@ class _ExchangeContext:
     key_row: dict[str, Any]
     # SFOX-05: sfox is a non-ccxt venue read through the GET-only SfoxClient. The
     # preflights construct that instead of a ccxt.Exchange; aclose_exchange routes
-    # it to SfoxClient.aclose() at the single close chokepoint.
-    exchange: ccxt.Exchange | SfoxClient
+    # it to SfoxClient.aclose() at the single close chokepoint. MT5RECON-01: mt5 is
+    # likewise non-ccxt — read through the RPyC Mt5Client wrapped in an Mt5Session
+    # holder (the parsed login/investor-password/server + the client), routed to
+    # client.close() at the same chokepoint.
+    exchange: ccxt.Exchange | SfoxClient | Mt5Session
+
+
+def _make_mt5_session(
+    api_key: str, api_secret: str, passphrase: str | None
+) -> Mt5Session:
+    """MT5RECON-01 — build the mt5 exchange holder from the reused credential
+    slots + the gateway env, mirroring Mt5Adapter.validate's construction posture
+    (ingestion/mt5.py:133-144).
+
+    Credential-slot reuse (the one MT5 wrinkle, the 135 convention): login ->
+    api_key, investor password -> api_secret, broker server -> passphrase. The
+    parse is fail-CLOSED OFFLINE via the ONE mt5_validation seam (a structurally
+    invalid slot combo raises before any live RPyC probe). A missing
+    MT5_GATEWAY_HOST/PORT is a SERVER misconfig (never blames the user's creds),
+    propagated as a RuntimeError exactly like the adapter."""
+    from services.mt5_client import Mt5Client
+    from services.mt5_validation import parse_mt5_credentials
+
+    login, investor_pw, server = parse_mt5_credentials(api_key, api_secret, passphrase)
+    host = os.getenv("MT5_GATEWAY_HOST")
+    port_raw = os.getenv("MT5_GATEWAY_PORT")
+    if not host or not port_raw:
+        raise RuntimeError(
+            "MT5 gateway not configured: MT5_GATEWAY_HOST / MT5_GATEWAY_PORT are "
+            "unset. This is a server misconfiguration, never a credential failure."
+        )
+    return Mt5Session(
+        client=Mt5Client(host, int(port_raw)),
+        login=login,
+        investor_password=investor_pw,
+        server=server,
+    )
 
 
 def _make_exchange_client(
@@ -761,10 +943,10 @@ def _make_exchange_client(
     api_key: str,
     api_secret: str,
     passphrase: str | None,
-) -> ccxt.Exchange | SfoxClient:
+) -> ccxt.Exchange | SfoxClient | Mt5Session:
     """SFOX-05 — the SINGLE preflight construction chokepoint. Both
     _exchange_preflight and _allocator_key_preflight route through here, so the
-    sfox-vs-ccxt decision lives in exactly ONE place.
+    sfox-vs-mt5-vs-ccxt decision lives in exactly ONE place.
 
     sFOX is NOT a ccxt exchange: create_exchange RAISES ValueError for it
     (EXCHANGE_CLASSES holds only ccxt classes). Construct the GET-only
@@ -773,10 +955,16 @@ def _make_exchange_client(
     passed. The .strip() mirrors the validate/exchange-router credential
     chokepoint (a trailing-newline token must authenticate identically).
 
+    MT5RECON-01: mt5 is ALSO non-ccxt — build an Mt5Session (parsed creds + the
+    RPyC Mt5Client) via _make_mt5_session. Its login/investor-password/server come
+    from the reused api_key/api_secret/passphrase slots (the 135 convention).
+
     Every ccxt venue is BYTE-IDENTICAL to the prior inline create_exchange call.
     """
     if exchange_name == "sfox":
         return make_sfox_client(api_key.strip())
+    if exchange_name == "mt5":
+        return _make_mt5_session(api_key, api_secret, passphrase)
     return create_exchange(exchange_name, api_key, api_secret, passphrase)
 
 
@@ -3019,9 +3207,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             try:
                 # FLIPRETRY-01: EACH crawl is wall-clock bounded. asyncio.wait_for
                 # cancels the inner crawl on timeout and raises asyncio.TimeoutError.
+                # venue=="sfox" ⇒ ctx.exchange is a SfoxClient; cast narrows the
+                # union (Mt5Session was added to it in Phase 136) — mypy --strict.
                 _bh_rows, _earliest_ms = await asyncio.wait_for(
                     crawl_sfox_balance_history(
-                        ctx.exchange,
+                        cast(SfoxClient, ctx.exchange),
                         start_date_ms=_SFOX_FAR_PAST_EPOCH_MS,
                         end_date_ms=_sfox_now_ms,
                     ),
@@ -3032,7 +3222,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # false-time-out a >30-page ledger into an infinite transient retry.
                 _txn_rows = await asyncio.wait_for(
                     crawl_sfox_transactions(
-                        ctx.exchange,
+                        cast(SfoxClient, ctx.exchange),
                         from_ms=_SFOX_FAR_PAST_EPOCH_MS,
                         to_ms=_sfox_now_ms,
                     ),
@@ -3184,6 +3374,411 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # the SAME list[ExternalFlow] type (sfox_read.py:238), so the downstream
             # consumer accepts it identically. Shape parity CONFIRMED.
             external_flows = _flow_evidence
+        elif venue == "mt5":
+            # ── MT5RECON-01/03: the MT5 deal-ledger broker-dailies ONE-path ──
+            # MT5 is single-currency (broker deposit ccy, USD-family) with a LIVE
+            # account_info().equity anchor — structurally closest to sFOX (no
+            # per-currency coin reconstruction), but the return series comes from a
+            # deal LEDGER (history_deals_get), reconstructed against equity by
+            # combine_mt5_deal_ledger. Modeled line-for-line on the sfox branch:
+            # (a) kill-switch gate FIRST, (b) ONE bounded read block, (c) equity/
+            # balance extraction + the realized-vs-MTM uPnL wedge, (d) material-
+            # equity floor, (e) the combine + typed dispositions, feeding the
+            # UNCHANGED derive/persist below (excluded from the ccxt combine via
+            # _NATIVE_RETURNS_VENUES).
+            #
+            # (a) SFOX-06 parity kill-switch chokepoint: the QUEUE-executed path
+            # must honor the founder go-dark gate too. The DB CHECK admits 'mt5'
+            # unconditionally, so after MT5_ENABLED is turned off (an incident
+            # rollback) a stored mt5 key would keep firing live RPyC deal reads
+            # here every run. Gate BEFORE any decrypt/login/read. Permanent (the
+            # founder disabled it deliberately — retrying is wrong): fails cleanly
+            # and stops, never a live read while disabled.
+            if not mt5_enabled_server():
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=f"derive_broker_dailies: {MT5_DISABLED_DETAIL}",
+                    error_kind="permanent",
+                )
+            from services.broker_dailies import combine_mt5_deal_ledger
+            from services.mt5_client import Mt5AccountMismatchError, Mt5ClientError
+            from services.mt5_deals import (
+                Mt5DealClassificationError,
+                classify_deal,
+                deal_utc_day,
+            )
+            from services.mt5_validation import classify_mt5_login_error
+            from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
+
+            # venue=="mt5" ⇒ the preflight built an Mt5Session (cast narrows the
+            # ccxt.Exchange | SfoxClient | Mt5Session union for the .login/.client/
+            # .investor_password/.server accesses below — mypy --strict, no ignore).
+            _mt5_session = cast(Mt5Session, ctx.exchange)
+            _mt5_now = datetime.now(timezone.utc)
+            # (b) ONE synchronous read block off the event loop (Mt5Client is
+            # blocking RPyC) wrapped in asyncio.wait_for — the FLIPRETRY-01 baseline
+            # ceiling. login → account_info → history_deals_get over the FULL
+            # history (epoch 0 → now + one day margin so a same-day deal near the
+            # boundary is never clipped). Each round-trip is already rpyc-bounded
+            # inside Mt5Client; this bound catches a hang OUTSIDE a bounded call.
+            def _assert_expected_login(info: dict[str, Any]) -> None:
+                # MT5CONC-02 login bracket: the live terminal's account MUST be the
+                # connected key's account (mt5_session.login is the parsed api_key
+                # slot, mt5_validation.py:75). STRICT equality; a MISSING "login"
+                # field (info.get → None) must FAIL LOUD, never default-match
+                # (Pitfall 3). A mismatch is a mis-routed/stale-terminal INFRA fault
+                # → Mt5AccountMismatchError (NOT an Mt5ClientError, so the classify/
+                # stamp arm can never absorb it) → the dedicated no-stamp/no-persist
+                # transient+restart branch below.
+                _actual_login = info.get("login")
+                if _actual_login != _mt5_session.login:
+                    raise Mt5AccountMismatchError(_mt5_session.login, _actual_login)
+
+            def _mt5_read() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+                _mt5_session.client.login(
+                    _mt5_session.login,
+                    _mt5_session.investor_password,
+                    _mt5_session.server,
+                )
+                _info = _mt5_session.client.account_info()  # None→typed raise
+                # None (error) is a typed raise inside the client; () → [] honest
+                # empty. NO fabricated flat account can enter here.
+                # PRE-read login bracket (MT5CONC-02): refuse the read before the
+                # deal fetch if the terminal is on the wrong account.
+                _assert_expected_login(_info)
+                _deals = _mt5_session.client.history_deals_get(
+                    0, int(_mt5_now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
+                )
+                # POST-read login bracket (MT5CONC-02): re-read account_info and
+                # re-assert, catching a mid-read terminal re-login by another actor
+                # (the cross-process net for the module-level lock's documented
+                # cross-replica gap). The PRE _info stays the returned economic
+                # anchor (equity/balance byte-preserved from 136); this POST read is
+                # assertion-only and its dict is discarded.
+                # IN-01: the re-read is ASSERTION-ONLY — the correct account's deals
+                # were already fetched. A transient transport blip HERE
+                # (Mt5ClientError) is a retry-worthy verification gap, NOT a
+                # credential fault, so re-signal it as a distinct transient-only type
+                # rather than let it flow into the permanent-stamp classify arm. Only
+                # the account_info() CALL is wrapped; a real mismatch still raises
+                # Mt5AccountMismatchError from _assert_expected_login below, so the
+                # never-stamp-the-wrong-account guarantee is untouched.
+                try:
+                    _post_info = _mt5_session.client.account_info()
+                except Mt5ClientError as exc:
+                    raise _Mt5PostReadVerificationError(str(exc)) from exc
+                _assert_expected_login(_post_info)
+                return _info, _deals
+
+            # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
+            # AND every except branch's terminal touch — the 137-01 TimeoutError
+            # restart, the Mt5ClientError classify) against the ONE shared Wine
+            # terminal via the module-level per-terminal lock. A concurrent job can
+            # never log in mid-read OR mid-restart. Returns INSIDE the async-with are
+            # fine — the lock releases on exit. The post-read PURE computation (equity
+            # extraction, combine, persist below) stays OUTSIDE the lock: it does no
+            # terminal IPC, and holding the terminal through the combine would
+            # needlessly serialize CPU work that needs no terminal.
+            async with _mt5_terminal_lock_for(_mt5_session.client.terminal_key):
+                try:
+                    _mt5_info, _mt5_deals = await asyncio.wait_for(
+                        asyncio.to_thread(_mt5_read),
+                        timeout=_MT5_DERIVE_READ_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
+                    # NEVER an unbounded wedge, NO terminal stamp (FLIPRETRY-01). The
+                    # finally: aclose_exchange below still runs (bounded mt5 close).
+                    # MT5CONC-01: a blocked RPyC/Wine pipe will NOT self-unblock, so
+                    # ACTIVELY restart the terminal (itself bounded — never a nested
+                    # wedge) BEFORE the transient return, so the next DB-backoff retry
+                    # hits a FRESH terminal instead of inheriting the same wedge
+                    # across all attempts and burning to failed_final.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 read exceeded its wall-clock "
+                        "bound (label=%s) — classified transient, actively "
+                        "restarting the terminal and retrying (FLIPRETRY-01, "
+                        "MT5CONC-01)",
+                        funding_label,
+                    )
+                    await _mt5_bounded_restart(_mt5_session.client)
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 read exceeded the per-read "
+                            "wall-clock bound — retrying rather than wedging the "
+                            "worker (FLIPRETRY-01)"
+                        ),
+                        error_kind="transient",
+                    )
+                except Mt5AccountMismatchError as exc:
+                    # MT5CONC-02 — THE structural trust guarantee of the phase: the
+                    # live terminal presented a DIFFERENT account (or omitted the
+                    # login field) than the connected key. This is a mis-routed/
+                    # stale-terminal INFRA fault, NEVER user-blame, so:
+                    #   * NO _stamp_strategy_analytics_failed (contrast the auth arm
+                    #     below at classify): we never write a user-attributed
+                    #     'failed' analytics row for a server fault;
+                    #   * NO combine / NO persist of ANY kind reached — api_verified
+                    #     can NEVER be stamped on the wrong account's numbers;
+                    #   * classify TRANSIENT + bounded restart (a mis-routed terminal
+                    #     is exactly the stale pipe a restart heals). A genuinely
+                    #     persistent mis-map exhausts the DB backoff to failed_final
+                    #     WITHOUT ever stamping or persisting the wrong account's
+                    #     numbers. Because Mt5AccountMismatchError is NOT an
+                    #     Mt5ClientError, the classify/stamp arm below cannot absorb
+                    #     it. The message carries ONLY the two int logins.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 login bracket rejected a "
+                        "mismatched terminal account (%s) — classified transient, "
+                        "restarting the terminal; NOTHING persisted (MT5CONC-02)",
+                        str(exc),
+                    )
+                    await _mt5_bounded_restart(_mt5_session.client)
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 terminal account mismatch — "
+                            + str(exc)
+                        ),
+                        error_kind="transient",
+                    )
+                except _Mt5PostReadVerificationError as exc:
+                    # IN-01 — a transient transport blip on the ASSERTION-ONLY POST
+                    # re-read. The economic read of the CORRECT account already
+                    # succeeded (login + PRE bracket + deal fetch all passed), so a
+                    # failure to RE-CONFIRM the account is a retry-worthy verification
+                    # gap, NEVER a credential fault: classify TRANSIENT with NO
+                    # permanent stamp and NO terminal stamp (mirrors the generic
+                    # transient client-error arm below — no user-blame analytics row
+                    # for what is a bridge/terminal blip). Because
+                    # _Mt5PostReadVerificationError is NOT an Mt5ClientError, the
+                    # classify/stamp arm below can never absorb it; and a genuine
+                    # wrong-account POST read is Mt5AccountMismatchError (handled
+                    # above), never this — so the trust guarantee is intact. The
+                    # message is already secret-scrubbed (it wraps the Mt5ClientError
+                    # text).
+                    logger.warning(
+                        "derive_broker_dailies: mt5 POST-read account re-assertion "
+                        "hit a transient client error (label=%s) — the economic read "
+                        "already succeeded on the correct account; classified "
+                        "transient, retrying (no stamp) (IN-01)",
+                        funding_label,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 POST-read account "
+                            "re-assertion transient error — retrying"
+                        ),
+                        error_kind="transient",
+                    )
+                except Mt5ClientError as exc:
+                    # Classify via the ONE mt5_validation seam. At DERIVE time the key
+                    # ALREADY validated (login+server were correct at connect), so the
+                    # permanence rule is NARROWER than at validate: only a genuine
+                    # "auth" signal is PERMANENT + user-blamed (a stored bad credential
+                    # never self-heals). "wrong_server" is NOT permanent here — the
+                    # [ASSUMED] token set folds network/bridge errors ("connect",
+                    # "network", "terminal") into "wrong_server", so a routine gateway
+                    # redeploy or connection reset mid-derive would otherwise
+                    # PERMANENTLY fail a valid strategy and falsely blame the user's
+                    # credentials with no retry (RED-TEAM). Treat wrong_server (and any
+                    # unrecognized error) as TRANSIENT: retry, no terminal user-blame
+                    # stamp. A truly stale server degrades to failed_final via the
+                    # retry cap, never a wrong-credential stamp. Msg secret-scrubbed at
+                    # construction.
+                    _kind = classify_mt5_login_error(exc)
+                    _scrubbed = str(scrub_freeform_string(str(exc)))
+                    if _kind == "auth":
+                        await _stamp_strategy_analytics_failed(
+                            "MT5 login was rejected (bad credentials). " + _scrubbed
+                        )
+                        return DispatchResult(
+                            outcome=DispatchOutcome.FAILED,
+                            error_message=(
+                                "derive_broker_dailies: mt5 login rejected — "
+                                + _scrubbed
+                            ),
+                            error_kind="permanent",
+                        )
+                    logger.warning(
+                        "derive_broker_dailies: mt5 read hit a transient/wrong-server "
+                        "client error (kind=%s, label=%s) — retrying (no terminal "
+                        "stamp; key already validated)",
+                        _kind,
+                        funding_label,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 read transient error — "
+                            "retrying"
+                        ),
+                        error_kind="transient",
+                    )
+
+            # (c) Extract equity + balance, fail-loud on non-finite (a NaN/Inf
+            # anchor would sail past every downstream NAV-denominator guard as a
+            # silent-NaN 'complete' series). open_unrealized_usd = equity − balance
+            # is the directly-observable MT5 realized-vs-MTM wedge (v1.8 convention:
+            # account_info().equity = balance + floating uPnL of open positions).
+            try:
+                _mt5_equity = float(_mt5_info["equity"])
+                _mt5_balance = float(_mt5_info["balance"])
+            except (KeyError, TypeError, ValueError) as exc:
+                await _stamp_strategy_analytics_failed(
+                    "MT5 account snapshot was missing or carried a non-numeric "
+                    "equity/balance."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 account_info missing/non-numeric "
+                        "equity/balance — " + str(scrub_freeform_string(str(exc)))
+                    ),
+                    error_kind="permanent",
+                )
+            if not (math.isfinite(_mt5_equity) and math.isfinite(_mt5_balance)):
+                await _stamp_strategy_analytics_failed(
+                    "MT5 account snapshot carried a non-finite equity/balance "
+                    "(NaN/Inf); refusing a poisoned anchor."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 equity/balance non-finite — "
+                        "refusing a poisoned anchor"
+                    ),
+                    error_kind="permanent",
+                )
+
+            # (e) THE combine: the deal ledger → cashflow-neutral daily TWR via the
+            # EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard set)
+            # anchored to the LIVE equity. server_utc_offset_s is the [ASSUMED A2]
+            # env-threaded broker offset (confirmed at the 134/139 live spike; plan
+            # 136-05 checkpoint). An unclassifiable DEAL_TYPE (the deribit
+            # 'correction' lesson) raises Mt5DealClassificationError → PERMANENT +
+            # stamp (never retry an unknown type forever); a structural NAV/TWR
+            # refusal raises NavReconstructionError → the SHARED terminal
+            # disposition (sfox :3156 / ccxt :2934 parity).
+            try:
+                returns, meta = combine_mt5_deal_ledger(
+                    _mt5_deals,
+                    account_equity=_mt5_equity,
+                    account_balance=_mt5_balance,
+                    server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                )
+            except Mt5DealClassificationError as exc:
+                _scrubbed = str(scrub_freeform_string(str(exc)))
+                await _stamp_strategy_analytics_failed(
+                    "MT5 deal ledger contained a deal type that could not be "
+                    "classified (an ambiguous/unknown DEAL_TYPE, or a non-finite "
+                    "money/time field). " + _scrubbed
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 deal unclassifiable — "
+                        + _scrubbed
+                    ),
+                    error_kind="permanent",
+                )
+            except NavReconstructionError as exc:
+                return await _dispose_broker_nav_error(
+                    exc,
+                    stamp_detail=(
+                        "MT5 NAV/TWR reconstruction refused a structural input "
+                        "(an undatable deal or a non-finite NAV/flow amount). "
+                    ),
+                    result_detail=(
+                        "derive_broker_dailies: mt5 NAV/TWR reconstruction failed "
+                        "structurally — "
+                    ),
+                )
+
+            open_unrealized_usd = _mt5_equity - _mt5_balance
+
+            # (d) Material-equity floor (the deribit C2 / sfox :3116 analog,
+            # venue-agnostic): a materially-funded account that produced <2 usable
+            # daily-return days is a silently-empty (green) track record (broken
+            # key / wrong account), NOT genuine "insufficient history". Fail loud
+            # PERMANENT. A genuinely tiny/empty account (equity below the floor)
+            # instead flows to the honest downstream <2-day gate (:3680) — no
+            # invented rows. Judged AFTER the combine (the combine is pure and its
+            # gap-fill defines the usable-day count the downstream gate also uses).
+            _mt5_usable_days = int(returns.notna().sum())
+            if (
+                abs(_mt5_equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
+                and _mt5_usable_days < 2
+            ):
+                await _stamp_strategy_analytics_failed(
+                    "MT5 account holds material equity but produced no "
+                    "interpretable daily history."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=(
+                        "derive_broker_dailies: mt5 account holds material equity "
+                        f"(~{abs(_mt5_equity):.0f} USD) but produced <2 usable "
+                        "daily-return days — refusing an empty-but-green track record"
+                    ),
+                    error_kind="permanent",
+                )
+
+            # (f) Belt-and-braces uPnL-wedge flag: combine_mt5_deal_ledger already
+            # threads open_unrealized_usd through the honest core (which sets
+            # unrealized_pnl_in_anchor when the core judged the wedge material), but
+            # re-apply the deribit :2496-2503 condition here defensively so a
+            # material realized-vs-MTM wedge on a trustworthy anchor promotes to
+            # complete_with_warnings even if the core's own flag were ever missed.
+            # Never silently reconciled (the v1.8 realized-basis convention).
+            if (
+                _mt5_equity > DUST_NAV_FLOOR
+                and abs(open_unrealized_usd) / _mt5_equity
+                > UNREALIZED_MATERIALITY_RATIO
+            ):
+                meta["unrealized_pnl_in_anchor"] = True
+
+            # Build the ExternalFlow evidence list from the SAME classify pass the
+            # combine ran (all deals already classified cleanly — combine raised
+            # otherwise), so the downstream DQ-02 terminus / key-mode key_inputs
+            # contract sees honest evidence. The flow numerator was ALREADY applied
+            # INSIDE combine_mt5_deal_ledger; this list is evidence only (mt5 has no
+            # retention cap → the DQ-02 terminus is None, so it never re-segments).
+            _mt5_flow_by_day: dict[str, float] = {}
+            for _deal in _mt5_deals:
+                if classify_deal(_deal) == "external_flow":
+                    _fday = deal_utc_day(
+                        _deal.get("time"),
+                        int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                    )
+                    # RED-TEAM: None-coalesce EXACTLY as combine_mt5_deal_ledger does
+                    # (`0.0 if raw is None else ...`). A BALANCE/CREDIT deal with an
+                    # explicit profit=None PASSES the combine but a raw float(None)
+                    # here would raise TypeError AFTER the series was already computed
+                    # — burning transient retries to failed_final with no analytics
+                    # stamp. The evidence fold must tolerate what the money fold does.
+                    _raw_profit = _deal.get("profit", 0.0)
+                    _mt5_flow_by_day[_fday] = _mt5_flow_by_day.get(_fday, 0.0) + (
+                        0.0 if _raw_profit is None else float(_raw_profit)
+                    )
+
+            # Set the shared downstream variables EXACTLY as the sfox branch does so
+            # the post-dispatch code runs unchanged. balance_error is False (a live
+            # read that reached here succeeded); upnl_unreadable is False (the MT5
+            # wedge is DIRECTLY observable as equity − balance, never a missing
+            # field); funding/realized are empty (mt5 returns are NATIVE, already
+            # TWR from the ledger reconstruction — no ccxt realized/funding record).
+            equity = _mt5_equity
+            balance_error = False
+            upnl_unreadable = False
+            funding = []
+            realized = []
+            external_flows = [
+                ExternalFlow(utc_day_iso=_day, usd_signed=_amt)
+                for _day, _amt in sorted(_mt5_flow_by_day.items())
+            ]
         else:
             # Current total equity = the initial-capital anchor (anchor-to-today,
             # reconstruct backward). OKX is read via raw totalEq inside

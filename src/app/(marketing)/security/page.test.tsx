@@ -305,3 +305,123 @@ describe("Phase 122 — sFOX guide is founder-gated (F1, SFOX_ENABLED off)", () 
     expect(document.getElementById("egress-ips")).not.toBeNull();
   });
 });
+
+/**
+ * Phase 138 Plan 02 — MT5 investor-password setup guide (MT5UI-01).
+ *
+ * A new #mt5-readonly SubAnchor inside the readonly-key section documents how to
+ * connect with an MT5 investor (read-only) password and how to copy the exact
+ * broker server string. It is the deep-link target for the wizard's derived
+ * /security#mt5-readonly href (plan 138-01 pins the link side; this plan provides
+ * the target).
+ *
+ * Gating (threat T-138-05/07): founder-gated on the SERVER flag MT5_ENABLED
+ * (isMt5EnabledServer) — the same seam sfox uses — never the client
+ * NEXT_PUBLIC_MT5_ENABLED. Pre-launch there is no MT5 wizard card to point at, so
+ * the block must be ABSENT and the page byte-identical to its pre-mt5 baseline.
+ *
+ * Honesty (threat T-138-06): the copy is constrained to server-enforced facts —
+ * the investor login is read-only and a master password is refused at connect
+ * time with nothing stored (the 135 KEY_MT5_MASTER_PASSWORD contract). No IP /
+ * gateway / hosting claim (that surface is Phase 139 founder ops, not yet real) —
+ * the negative IP regexes pin its absence.
+ *
+ * Revert-proof: deleting the SubAnchor turns the first test red; dropping the
+ * investor/master steer or the refusal-honesty phrase turns the content tests
+ * red; leaking a literal IP turns the negative test red; gating on the client
+ * flag (which is undefined in this Server Component) would make the ON block fail.
+ */
+describe("Phase 138 — MT5 readonly setup guide (MT5UI-01)", () => {
+  beforeEach(() => {
+    process.env.MT5_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  it("renders a #mt5-readonly block titled MT5 inside the readonly-key section", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("mt5-readonly");
+    expect(block).not.toBeNull();
+    expect(within(block as HTMLElement).getByRole("heading")).toHaveTextContent(
+      "MT5",
+    );
+    // Nested under the readonly-key section (deribit/sfox precedent placement).
+    expect(document.getElementById("readonly-key")?.contains(block)).toBe(true);
+  });
+
+  it("steers to the INVESTOR password, never the MASTER password", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("mt5-readonly") as HTMLElement;
+    expect(block.textContent).toMatch(/investor/i);
+    expect(block.textContent).toMatch(/master password/i);
+  });
+
+  it("honestly states a master password is refused with nothing stored (135 contract)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("mt5-readonly") as HTMLElement;
+    // Agrees with KEY_MT5_MASTER_PASSWORD honesty: refused at connect, nothing stored.
+    expect(block.textContent).toMatch(/refuse/i);
+    expect(block.textContent).toMatch(/store nothing/i);
+  });
+
+  it("tells the user to copy the broker server string exactly (region / Demo-Live caveat)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("mt5-readonly") as HTMLElement;
+    expect(block.textContent).toMatch(/server name/i);
+    expect(block.textContent).toMatch(/exactly/i);
+    // Agrees with KEY_MT5_WRONG_SERVER fix copy — region / Demo/Live suffix caveat.
+    expect(block.textContent).toMatch(/Demo\/Live|region/i);
+  });
+
+  it("makes NO infrastructure claim — no literal IP baked in (T-138-06)", () => {
+    render(<SecurityPage />);
+    const block = document.getElementById("mt5-readonly") as HTMLElement;
+    // The gateway/egress/hosting story is Phase 139 founder ops; the guide must
+    // not assert infrastructure that does not exist yet.
+    expect(block.textContent).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/);
+    expect(block.textContent).not.toMatch(/\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){4,}\b/i);
+    expect(block.textContent).not.toMatch(/whitelist|egress|gateway/i);
+  });
+});
+
+/**
+ * Phase 138 (pre-launch leak removal): with MT5_ENABLED off (the default), the
+ * /security#mt5-readonly guide must be ABSENT. Pre-launch there is no MT5 wizard
+ * card to point at, so rendering the guide would advertise an unavailable
+ * capability (and coach users into a fail-closed connect). Absence keeps the
+ * public page byte-identical to its pre-mt5 baseline while the flag is off.
+ */
+describe("Phase 138 — MT5 guide is founder-gated (MT5_ENABLED off)", () => {
+  beforeEach(() => {
+    delete process.env.MT5_ENABLED;
+  });
+
+  it("does NOT render the #mt5-readonly block when the server flag is off", () => {
+    render(<SecurityPage />);
+    expect(document.getElementById("mt5-readonly")).toBeNull();
+  });
+
+  it.each(["1", "on", "", "false", "TRUE"])(
+    "stays absent for a non-exact MT5_ENABLED=%s (strict 'true' only)",
+    (flag) => {
+      process.env.MT5_ENABLED = flag;
+      render(<SecurityPage />);
+      expect(document.getElementById("mt5-readonly")).toBeNull();
+      delete process.env.MT5_ENABLED;
+    },
+  );
+
+  it("still renders the sibling #deribit-readonly (only mt5 is gated here)", () => {
+    render(<SecurityPage />);
+    expect(document.getElementById("deribit-readonly")).not.toBeNull();
+  });
+
+  it("keeps the sfox block gated by ITS own flag (SFOX_ENABLED unset → absent)", () => {
+    // The mt5 gate must not accidentally un-gate sfox; with SFOX_ENABLED unset
+    // the sfox block stays absent regardless of MT5_ENABLED state.
+    delete process.env.SFOX_ENABLED;
+    render(<SecurityPage />);
+    expect(document.getElementById("sfox-readonly")).toBeNull();
+  });
+});

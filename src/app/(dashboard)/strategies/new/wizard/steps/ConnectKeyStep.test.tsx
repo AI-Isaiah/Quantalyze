@@ -293,11 +293,15 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(body.passphrase).toBeNull();
   });
 
-  it("points the sFOX setup-guide link at /security#sfox-readonly", async () => {
+  // WR-01: sFOX's per-exchange #sfox-readonly SubAnchor is server-flag-gated
+  // (isSfoxEnabledServer), so it is dark in the card-visible / guide-dark
+  // half-state. The setup-guide link must target the UNCONDITIONAL #readonly-key
+  // Section anchor (always rendered) so it is never a dead link.
+  it("points the sFOX setup-guide link at the unconditional /security#readonly-key", async () => {
     await renderWithFlagOn();
     fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
     const link = screen.getByRole("link", { name: /sFOX setup guide/ });
-    expect(link).toHaveAttribute("href", "/security#sfox-readonly");
+    expect(link).toHaveAttribute("href", "/security#readonly-key");
   });
 
   it("renders the F3-honest read-only claim for sFOX — never a scope-verification claim", async () => {
@@ -393,5 +397,227 @@ describe("Phase 122 — sFOX wizard card (flag ON, SFOX-08)", () => {
     expect(onSuccess).toHaveBeenCalledWith(
       expect.objectContaining({ exchange: "deribit" }),
     );
+  });
+});
+
+/**
+ * Phase 138 / MT5UI-01+02 — flag-gated MT5 wizard card (3-credential variant).
+ *
+ * With NEXT_PUBLIC_MT5_ENABLED === "true" the picker offers an MT5 card. MT5
+ * collects THREE credentials that map onto the existing {api_key, api_secret,
+ * passphrase} slots (the 135 chokepoint): login → api_key, investor password →
+ * api_secret, broker server → passphrase. The third (passphrase) field carries
+ * a per-exchange LABEL override ("Broker server", NOT "OKX Passphrase") and is
+ * REQUIRED, gating submit. The "What we reject" trust atom swaps to the MT5
+ * master-password-honest body. Three failure codes (KEY_AUTH_FAILED /
+ * KEY_MT5_WRONG_SERVER / KEY_MT5_MASTER_PASSWORD) each render their OWN
+ * distinguishable envelope. All copy is pre-authored (Phase 135) — ZERO new
+ * envelope strings.
+ *
+ * MT5_UI_ENABLED is a module-scope const, so each flag-ON render stubs the env,
+ * resets the registry, and dynamic-imports the step fresh. vi.unstubAllEnvs +
+ * vi.restoreAllMocks in afterEach prevent the stub/spy leaking into a sibling
+ * test (the Node22 stub-leak lesson).
+ */
+const MT5_STEER =
+  "Use your investor (read-only) password — not your master password. A master password can place trades, so we refuse it and store nothing.";
+const MT5_SERVER_HELPER =
+  "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.";
+const MT5_REJECT_ATOM =
+  "MT5 master passwords can place trades, so we reject them at connect time and store nothing — only a read-only investor login is accepted.";
+
+describe("Phase 138 — MT5 wizard card (MT5UI-01+02)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  async function renderWithMt5On(fetchImpl?: Response | Error) {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    if (fetchImpl instanceof Error) {
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(fetchImpl);
+    } else if (fetchImpl) {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(fetchImpl);
+    }
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    return { onSuccess };
+  }
+
+  function fillMt5Fields() {
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+  }
+
+  it("does NOT render an MT5 card when the flag is OFF (default) — byte-identical offer", () => {
+    // Static import reads the default (OFF) flag: exactly the four base cards.
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    expect(screen.getByTestId("wizard-exchange-binance")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-okx")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-bybit")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-exchange-deribit")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-exchange-mt5")).toBeNull();
+  });
+
+  it("renders an MT5 card with the pinned name + caption when the flag is ON", async () => {
+    await renderWithMt5On();
+    const card = screen.getByTestId("wizard-exchange-mt5");
+    expect(card).toHaveTextContent("MT5");
+    expect(card).toHaveTextContent(
+      "Live investor (read-only) login. Forex & CFD.",
+    );
+  });
+
+  it("shows exactly three labeled MT5 credential fields (broker-server override, not OKX)", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.getByLabelText("MT5 login")).toBeInTheDocument();
+    expect(screen.getByLabelText("Investor password")).toBeInTheDocument();
+    // The third (passphrase-slot) field carries the label override.
+    expect(screen.getByLabelText("Broker server")).toBeInTheDocument();
+    expect(screen.queryByLabelText("OKX Passphrase")).toBeNull();
+    // Generic labels are gone for MT5.
+    expect(screen.queryByLabelText("API Secret")).toBeNull();
+  });
+
+  it("renders the muted investor-password steer and the broker-server find-it helper", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    const steer = screen.getByText(MT5_STEER);
+    expect(steer).toBeInTheDocument();
+    // Muted neutral, NEVER amber/red on the resting form (DESIGN.md gate).
+    expect(steer.className).toContain("text-text-muted");
+    expect(steer.className).not.toMatch(/amber|red|negative/);
+    expect(screen.getByText(MT5_SERVER_HELPER)).toBeInTheDocument();
+  });
+
+  it("keeps submit disabled until the broker server (third field) is filled", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    const submit = screen.getByTestId("wizard-connect-submit");
+    fireEvent.change(screen.getByLabelText("MT5 login"), {
+      target: { value: "5000123" },
+    });
+    fireEvent.change(screen.getByLabelText("Investor password"), {
+      target: { value: "investor-pw-xxx" },
+    });
+    // Login + investor pw filled, broker server empty → still disabled.
+    expect(submit).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Broker server"), {
+      target: { value: "MyBroker-Live" },
+    });
+    expect(submit).not.toBeDisabled();
+  });
+
+  it("POSTs the 135 slot mapping: login→api_key, investor pw→api_secret, server→passphrase", async () => {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          strategy_id: "99999999-9999-9999-9999-999999999999",
+          api_key_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        },
+        200,
+      ),
+    );
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const onSuccess = vi.fn();
+    render(<Fresh wizardSessionId={SESSION} onSuccess={onSuccess} />);
+    fillMt5Fields();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    await vi.waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    const body = JSON.parse(
+      (fetchSpy.mock.calls[0]![1] as RequestInit).body as string,
+    ) as Record<string, unknown>;
+    expect(body.exchange).toBe("mt5");
+    expect(body.api_key).toBe("5000123");
+    expect(body.api_secret).toBe("investor-pw-xxx");
+    expect(body.passphrase).toBe("MyBroker-Live");
+    expect(onSuccess).toHaveBeenCalledWith(
+      expect.objectContaining({ exchange: "mt5" }),
+    );
+  });
+
+  // WR-01: MT5's per-exchange #mt5-readonly SubAnchor is server-flag-gated
+  // (isMt5EnabledServer), so in the documented card-visible / guide-dark
+  // half-state (NEXT_PUBLIC_MT5_ENABLED set, MT5_ENABLED unset) it does not
+  // render and a deep link to it lands on /security top with no guide. The link
+  // must target the UNCONDITIONAL #readonly-key Section anchor (always rendered).
+  it("points the MT5 setup-guide link at the unconditional /security#readonly-key", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    const link = screen.getByRole("link", { name: /MT5 setup guide/ });
+    expect(link).toHaveAttribute("href", "/security#readonly-key");
+  });
+
+  it("swaps the 'What we reject' trust atom to the MT5-honest body (mt5 only)", async () => {
+    await renderWithMt5On();
+    fireEvent.click(screen.getByTestId("wizard-exchange-mt5"));
+    expect(screen.getByText(MT5_REJECT_ATOM)).toBeInTheDocument();
+    // The generic ccxt scope-rejection claim must NOT render for mt5.
+    expect(screen.queryByText(/rejected before we store it/i)).toBeNull();
+    // Contrast: switching to binance restores the generic atom.
+    fireEvent.click(screen.getByTestId("wizard-exchange-binance"));
+    expect(screen.queryByText(MT5_REJECT_ATOM)).toBeNull();
+    expect(
+      screen.getByText(/rejected before we store it/i),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves the sFOX trust-atom swap intact when both flags are ON", async () => {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-sfox"));
+    expect(screen.getByText(/read-only by our adapter/i)).toBeInTheDocument();
+    expect(screen.getByText(/no per-key scope endpoint/i)).toBeInTheDocument();
+    // The MT5 atom must NOT bleed into the sfox selection.
+    expect(screen.queryByText(MT5_REJECT_ATOM)).toBeNull();
+  });
+
+  it.each([
+    ["KEY_AUTH_FAILED", "The exchange rejected these credentials."],
+    ["KEY_MT5_WRONG_SERVER", "We could not find that broker server."],
+    ["KEY_MT5_MASTER_PASSWORD", "This MT5 login can place trades."],
+  ])(
+    "surfaces a distinguishable envelope for %s (own data-error-code + title)",
+    async (code, title) => {
+      const { onSuccess } = await renderWithMt5On(
+        jsonResponse({ code }, 422),
+      );
+      fillMt5Fields();
+      fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", code);
+      expect(envelope).toHaveTextContent(title);
+      expect(onSuccess).not.toHaveBeenCalled();
+    },
+  );
+
+  it("OKX regression: the passphrase field still labels 'OKX Passphrase' with today's helper", async () => {
+    // The label-override refactor must be byte-neutral for existing venues.
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("wizard-exchange-okx"));
+    expect(screen.getByLabelText("OKX Passphrase")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /OKX requires a passphrase in addition to key and secret/i,
+      ),
+    ).toBeInTheDocument();
   });
 });

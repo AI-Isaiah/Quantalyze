@@ -69,6 +69,47 @@ def sfox_enabled_server() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# MT5 server/worker go-dark gate + cross-plan error-detail contract (Phase 135
+# / MT5SRC — the Q-C go-dark decision; verbatim clone of the sfox seam above).
+#
+# These three detail strings are the SHARED cross-plan contract consumed by the
+# Phase-135 validate branch (plan 135-01 Mt5Adapter.validate) and the FastAPI
+# `is_mt5` router branch + Next.js key routes (plans 03/04). They are defined
+# HERE (the single closed-set source) so the copy cannot be silently re-worded
+# or hand-forked across the worker + router.
+#
+# STRING-SAFETY INVARIANT (D: Q-B resolved): the wizardErrors.ts
+# classifyKeyValidationError matcher is SUBSTRING-based. These three strings
+# were collision-checked against every substring branch in that matcher
+# ("signature", "invalid secret", "authentication failed", "invalid_credentials",
+# "ip"+"allow", "rate", "429", "timeout", "could not verify", "permission scope",
+# "probe", "trading", "withdraw") and collide with NONE. Any reword MUST re-run
+# that collision check before landing — a stray "rate"/"trading"/"timeout"
+# substring would silently mis-classify the MT5 failure.
+#
+# mt5_enabled_server() mirrors sfox_enabled_server byte-for-byte: fail-CLOSED
+# strict lower-cased "true" (unset / "" / "1" / "on" / "TRUE " all read OFF), read
+# per-call (never a module-load const) so a go-live env flip takes effect without
+# a reimport. The seam ships DARK (Q-C) until the founder sets MT5_ENABLED=true at
+# go-live (Phase 139), in lockstep with the Vercel server env of the same name.
+# ---------------------------------------------------------------------------
+MT5_DISABLED_DETAIL = "MT5 integration is not yet available."
+MT5_MASTER_PASSWORD_DETAIL = (
+    "MT5 master password detected — this login can place trades. Reconnect "
+    "using your read-only investor password."
+)
+MT5_WRONG_SERVER_DETAIL = (
+    "Broker server not found — check the exact server name shown in your MT5 "
+    "terminal login window."
+)
+
+
+def mt5_enabled_server() -> bool:
+    """True iff MT5_ENABLED is set to "true" (fail-closed; see module note)."""
+    return (os.getenv("MT5_ENABLED") or "").strip().lower() == "true"
+
+
+# ---------------------------------------------------------------------------
 # smoothed_mtm worker kill-switch (Phase 134 — SAFE ROLLOUT of the v1.14 basis).
 #
 # The worker computes a THIRD factsheet basis (`smoothed_mtm`) at derive time for

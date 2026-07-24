@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
-import { SUPPORTED_EXCHANGES } from "@/lib/closed-sets";
+import { SUPPORTED_EXCHANGES, CRYPTO_EXCHANGES } from "@/lib/closed-sets";
 
 /**
  * Tests for POST /api/keys/sync.
@@ -764,28 +764,47 @@ describe("POST /api/keys/sync", () => {
 
 // ── UAT tripwire: the composite asset_class='crypto' hardcode ────────────────
 // Both the preview kickoff (this route) and finalize-wizard HARDCODE
-// asset_class='crypto' for a composite, ahead of the worker's real venue-blend
-// annualization. That is correct ONLY while every SUPPORTED_EXCHANGES venue is
-// crypto (√365). Non-crypto venues are on the roadmap (e.g. MetaTrader5, a
-// traditional √252 venue). When one is added, an all-MT5 composite would blend
-// to √252 while these hardcodes assert √365 — the worker guard would fail-loud
-// (safe, but it BLOCKS the composite), and a mixed composite could mis-label.
-// This test reddens the instant the supported set changes, forcing whoever adds
-// the venue to replace the hardcodes with a per-member-venue derive
-// (isCryptoExchange over the members, mirroring "365 if ANY leg crypto else 252").
+// asset_class='crypto' for a COMPOSITE (api_key_id NULL, ≥1 member), ahead of the
+// worker's real venue-blend annualization. That is correct ONLY while every
+// composite member venue is crypto (√365).
+//
+// MT5RECON-02 (Phase 136 — CONSCIOUS REVIEW DONE): mt5 (traditional forex/CFD
+// √252) joined SUPPORTED_EXCHANGES in Phase 135. The SINGLE-KEY asset_class stamp
+// is now VENUE-AWARE in BOTH key routes (create-with-key + finalize-wizard,
+// `isCryptoExchange(exchange) ? 'crypto' : 'traditional'`), so a single-key mt5
+// strategy is correctly √252. The COMPOSITE 'crypto' hardcode (this route + the
+// finalize sibling) is DELIBERATELY RETAINED: an mt5 composite member fails LOUD
+// at the worker's stitch unknown-venue gate (job_worker.py) — honest, and out of
+// Phase-136 scope — so a composite can never silently ship an mt5 member
+// mis-annualized on √365. The worker's √365-vs-asset_class cross-check reads the
+// Python CRYPTO_VENUES registry (which also excludes mt5), so the two sides agree
+// by construction. This test still reddens on the NEXT venue addition, forcing the
+// same conscious review.
 describe("[UAT] composite asset_class hardcode tripwire", () => {
-  it("every SUPPORTED_EXCHANGES venue is crypto — else the 'crypto' hardcode must be revisited", () => {
-    // Sorted exact pin: adding ANY venue (crypto or not) reddens this and forces
-    // a conscious review of the keys/sync + finalize-wizard asset_class derive.
-    // sfox added v1.12 (SFOX-08): a crypto prime broker → isCryptoExchange
-    // (SUPPORTED_EXCHANGES membership) classifies it √365, so the composite
-    // asset_class='crypto' hardcode stays valid. Conscious review DONE.
+  it("SUPPORTED_EXCHANGES pins the 6-venue key-save set; mt5 is the sole non-crypto venue (MT5RECON-02)", () => {
+    // Sorted exact pin: adding ANY venue reddens this and forces a conscious
+    // review of the keys/sync + finalize-wizard asset_class derive. sfox (v1.12,
+    // SFOX-08) is a crypto prime broker → in CRYPTO_EXCHANGES → the composite
+    // hardcode stays valid. mt5 (Phase 135) is traditional → EXCLUDED from
+    // CRYPTO_EXCHANGES → single-key derive is venue-aware, composite fails loud at
+    // the worker. Both reviews DONE.
     expect([...SUPPORTED_EXCHANGES].sort()).toEqual([
+      "binance",
+      "bybit",
+      "deribit",
+      "mt5",
+      "okx",
+      "sfox",
+    ]);
+    // The crypto subset that drives the √365 clock (#597) — mt5 is deliberately
+    // absent, which is exactly what keeps a single-key mt5 strategy on √252.
+    expect([...CRYPTO_EXCHANGES].sort()).toEqual([
       "binance",
       "bybit",
       "deribit",
       "okx",
       "sfox",
     ]);
+    expect((CRYPTO_EXCHANGES as readonly string[]).includes("mt5")).toBe(false);
   });
 });

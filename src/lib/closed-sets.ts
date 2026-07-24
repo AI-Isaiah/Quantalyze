@@ -36,7 +36,7 @@ import { z } from "zod";
 // deribit key clears the allowlist; the FUNDING and USER-FACING UI surfaces are
 // DECOUPLED below (FUNDING_EXCHANGES / UI_EXCHANGE_CODES) and stay 3-exchange —
 // widening this base MUST NOT auto-widen those (OQ4 gate + Pitfall 2).
-export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit", "sfox"] as const;
+export const SUPPORTED_EXCHANGES = ["binance", "okx", "bybit", "deribit", "sfox", "mt5"] as const;
 export type SupportedExchange = (typeof SUPPORTED_EXCHANGES)[number];
 export const exchangeEnum = z.enum(SUPPORTED_EXCHANGES);
 
@@ -51,6 +51,7 @@ export const EXCHANGE_DISPLAY = {
   bybit: "Bybit",
   deribit: "Deribit",
   sfox: "sFOX",
+  mt5: "MT5",
 } as const satisfies Record<SupportedExchange, string>;
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
@@ -97,6 +98,32 @@ export const SMOOTHED_MTM_UI_ENABLED =
   process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED === "true";
 
 /**
+ * Feature flag for the public MT5 add-key offer (Phase 138 / MT5UI-01). A
+ * verbatim clone of SFOX_UI_ENABLED: strict equality against the EXACT string
+ * "true" — fail-closed ("1" / "TRUE" / "on" / "" / unset all read OFF). Next.js
+ * inlines the full static `process.env.NEXT_PUBLIC_MT5_ENABLED` member
+ * expression into the client bundle at build time, so this MUST stay a single
+ * static member access (never dynamic `process.env[...]` indexing) or the
+ * inlining breaks and the flag reads undefined in the browser.
+ *
+ * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates ONLY the
+ * MT5 venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array).
+ * Flag OFF ⇒ the wizard is BYTE-IDENTICAL to today (no MT5 pixel); a test pins
+ * this (ConnectKeyStep.test.tsx + closed-sets.mt5-flag.test.ts).
+ *
+ * DISTINCT from the server gate isMt5EnabledServer() below (env MT5_ENABLED,
+ * NOT NEXT_PUBLIC): that admits the CONNECT at the three key routes. Both flip
+ * in Phase 139; either alone is an intentional SAFE half-state (card hidden but
+ * gated, or card shown but connect fails closed 400).
+ *
+ * mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES /
+ * CRYPTO_EXCHANGES regardless of this flag — the manager-surface <Select> must
+ * not silently widen (UI-SPEC §MT5-Manager-Parity; the closed-sets.mt5-flag
+ * no-widening pin enforces it).
+ */
+export const MT5_UI_ENABLED = process.env.NEXT_PUBLIC_MT5_ENABLED === "true";
+
+/**
  * SERVER-SIDE sFOX go-live gate (Phase 122 / F2 — the STRUCTURAL gate).
  *
  * DISTINCT from SFOX_UI_ENABLED above: that is the NEXT_PUBLIC *client-build*
@@ -122,6 +149,34 @@ export const SMOOTHED_MTM_UI_ENABLED =
  */
 export function isSfoxEnabledServer(): boolean {
   return process.env.SFOX_ENABLED === "true";
+}
+
+/**
+ * SERVER-SIDE MT5 go-live gate (Phase 135 / MT5SRC-03 — the STRUCTURAL gate).
+ *
+ * A verbatim clone of isSfoxEnabledServer above (the sFOX seam shipped
+ * FLAG-OFF; the MT5 seam ships DARK the same way). Server/runtime-only
+ * (deliberately NOT NEXT_PUBLIC): gates whether an mt5 CONNECT is admitted at
+ * the three key routes (validate-and-encrypt, create-with-key,
+ * composite/add-key) — the Python worker enforces the mirror gate
+ * (services/closed_sets.py::mt5_enabled_server, landed in plan 135-01).
+ * Fail-CLOSED with strict equality against the EXACT string "true": unset /
+ * "1" / "TRUE" / "on" / "" all read OFF, so an mt5 connect FAILS CLOSED
+ * honestly ("not yet available", a clean 4xx — never a crash, never a false
+ * KEY_AUTH_FAILED, never a live probe) until the founder sets MT5_ENABLED=true
+ * at go-live (Phase 139).
+ *
+ * The UI-facing NEXT_PUBLIC_MT5_ENABLED offer flag landed in Phase 138 as the
+ * MT5_UI_ENABLED client const above — DISTINCT from this server gate. mt5 still
+ * stays OUT of UI_EXCHANGE_CODES / the offered set (the MT5 card rides
+ * MT5_UI_ENABLED in ConnectKeyStep's local array, not the manager <Select>).
+ *
+ * Read as a FUNCTION (never a module-load const) so it is evaluated per-request
+ * server-side and is never inlined into the client bundle; on the client
+ * `process.env.MT5_ENABLED` is undefined, so this reads false there.
+ */
+export function isMt5EnabledServer(): boolean {
+  return process.env.MT5_ENABLED === "true";
 }
 
 /**
@@ -207,16 +262,40 @@ export function isSupportedExchange(value: string): boolean {
 // √252 traditional).
 
 /**
- * Is this exchange a crypto venue? Today EVERY supported exchange
- * (binance / okx / bybit / deribit / sfox) is crypto, so membership in the
- * allowlist IS the crypto signal. Case-insensitive. When a non-crypto
- * (equities/FX) venue is ever added to SUPPORTED_EXCHANGES this must be
- * narrowed to an explicit crypto subset — until then, allowlist membership
- * is the honest single source of truth.
+ * The crypto-venue subset of SUPPORTED_EXCHANGES — the "annualize on the crypto
+ * (√365) clock" set (#597). The TS mirror of the single-sourced Python registry
+ * `analytics-service/services/closed_sets.py::CRYPTO_VENUES`, pinned value-for-value
+ * by the literal-mirror test in closed-sets.test.ts (and, on the Python side, by
+ * plan 136-01's registry test) so the two #597 registries cannot silently drift.
+ *
+ * MT5RECON-02: `mt5` is a SUPPORTED venue (it clears the key-save allowlist) but is
+ * forex/CFD = TRADITIONAL √252, so it is deliberately EXCLUDED here. This is the TS
+ * half of the "MT5 = √252" divergence and it closes the MT5 instance of the DEFERRED
+ * unknown→crypto latent bug: an MT5 series can no longer be mis-annualized on √365,
+ * which would inflate its Sharpe ~×1.20 vs crypto peers on the allocator-facing
+ * ranking (a trust-integrity defect). `satisfies readonly SupportedExchange[]` makes
+ * a typo or a non-supported member a COMPILE error and keeps CRYPTO_EXCHANGES a
+ * subset of SUPPORTED_EXCHANGES.
+ */
+export const CRYPTO_EXCHANGES = [
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+  "sfox",
+] as const satisfies readonly SupportedExchange[];
+
+/**
+ * Is this exchange a crypto venue (the √365 clock, #597)? Membership in the
+ * EXPLICIT CRYPTO_EXCHANGES subset — NOT the wider SUPPORTED_EXCHANGES allowlist,
+ * which now includes the traditional forex/CFD venue `mt5` (MT5RECON-02). The
+ * "when a non-crypto venue is ever added" future-note is NOW: mt5 is that venue, so
+ * this returns FALSE for mt5 (and any non-crypto venue) and, unchanged, for
+ * null/undefined/''. Case-insensitive.
  */
 export function isCryptoExchange(exchange: string | null | undefined): boolean {
   if (!exchange) return false;
-  return (SUPPORTED_EXCHANGES as readonly string[]).includes(
+  return (CRYPTO_EXCHANGES as readonly string[]).includes(
     exchange.toLowerCase(),
   );
 }

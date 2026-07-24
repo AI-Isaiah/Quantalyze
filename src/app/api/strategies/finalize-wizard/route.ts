@@ -5,7 +5,7 @@ import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
-import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
+import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -493,56 +493,109 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // (RLS + the belt-and-braces user_id filter enforce ownership) BEFORE the
   // finalize dispatch, covering both the legacy and unified paths.
   //
-  // API-keyed strategies FORCE-DERIVE 'crypto': every supported exchange
-  // (binance/okx/bybit/deribit) is a crypto venue, so the picker is only
-  // meaningful for CSV uploads. Trusting the submitted value here would let a
-  // resumed broker draft (whose DB row carries the NOT NULL DEFAULT
-  // 'traditional') silently annualize a crypto strategy on √252 — a regression
-  // vs the pre-#597 `api_key_id → √365` proxy. Mirrors the migration backfill
-  // rule (api_key_id IS NOT NULL → crypto).
+  // API-keyed strategies FORCE-DERIVE off the linked key's VENUE (MT5RECON-02):
+  // a crypto venue (binance/okx/bybit/deribit/sfox) → 'crypto' (√365), an mt5
+  // (forex/CFD) venue → 'traditional' (√252). The picker's submitted value is
+  // still ignored for api-keyed drafts — trusting it would let a resumed broker
+  // draft (whose DB row carries the NOT NULL DEFAULT 'traditional') silently
+  // annualize a crypto strategy on √252. Before MT5RECON-02 this arm was an
+  // unconditional 'crypto' (every supported venue WAS crypto); now that mt5 is a
+  // supported venue, `isCryptoExchange` (the explicit CRYPTO_EXCHANGES subset) is
+  // the single source of truth, so this seam no longer overwrites the
+  // create-with-key 'traditional' stamp back to crypto for an mt5 key.
   //
   // Phase 86 / F-1: a MULTI-KEY composite has api_key_id=NULL (members live in
-  // strategy_keys), so the `apiKeyId ? crypto` rule alone would leave it on the
-  // picker/default 'traditional'. But every composite member venue is a crypto
-  // exchange this phase, and run_stitch_composite_job annualizes the headline on
-  // the venue blend (Deribit → √365). If asset_class stayed 'traditional', every
-  // #597 surface (scenario blends, leg annualization, OG card, peer-rank) would
-  // recompute √252 from the SAME returns and disagree with the composite headline
-  // by ~√(365/252) ≈ 1.20×. Force 'crypto' when the strategy has ≥1 member. The
-  // count is best-effort (membership isn't sensitive → admin client); a count
-  // blip falling open here CANNOT silently ship a mislabeled composite because
-  // the worker fails LOUD on a √365-vs-asset_class mismatch (F-1b) and the
-  // dispatch guard fails closed on unknowable membership.
+  // strategy_keys), so the venue-aware apiKeyId arm doesn't apply — it force-
+  // derives 'crypto'. Every composite member venue is a crypto exchange this
+  // phase (an mt5 composite member fails LOUD at the stitch unknown-venue gate,
+  // job_worker.py — honest, out of 136 scope), and run_stitch_composite_job
+  // annualizes the headline on the venue blend (Deribit → √365). If asset_class
+  // stayed 'traditional', every #597 surface (scenario blends, leg annualization,
+  // OG card, peer-rank) would recompute √252 from the SAME returns and disagree
+  // with the composite headline by ~√(365/252) ≈ 1.20×. Force 'crypto' when the
+  // strategy has ≥1 member. The count is best-effort (membership isn't sensitive
+  // → admin client); a count blip falling open here CANNOT silently ship a
+  // mislabeled composite because the worker fails LOUD on a √365-vs-asset_class
+  // mismatch (F-1b) — and that cross-check reads the Python CRYPTO_VENUES registry
+  // which ALSO excludes mt5, so the TS and worker sides agree by construction —
+  // and the dispatch guard fails closed on unknowable membership.
   const assetClassAdmin = createAdminClient();
   const { count: assetClassMemberCount } = await assetClassAdmin
     .from("strategy_keys")
     .select("*", { count: "exact", head: true })
     .eq("strategy_id", fields.strategy_id);
   const isCompositeForAssetClass = (assetClassMemberCount ?? 0) > 0;
+
+  // MT5RECON-02 — resolve the single key's venue so the apiKeyId arm below can
+  // stamp 'traditional' for mt5 (forex/CFD) vs 'crypto' for a crypto venue. Owner
+  // scope is already enforced (the apiKeyId came off the owner-scoped strategies
+  // row above); this admin read only fetches the venue string. On a lookup fault
+  // apiKeyExchange stays null — and in that case the update below is SKIPPED
+  // (RED-TEAM): create-with-key already stamped a venue-aware asset_class on the
+  // draft, and the worker reads strategies.asset_class DIRECTLY as the
+  // annualization clock (it does NOT re-derive from venue — see job_worker
+  // periods_per_year_for_asset_class(strategies.asset_class)). Defaulting to
+  // 'traditional' on a blip would silently mis-annualize a crypto strategy (√252
+  // not √365 → inflated Sharpe), so we leave the correct draft stamp untouched.
+  let apiKeyExchange: string | null = null;
+  if (apiKeyId) {
+    const { data: keyVenueRow, error: keyVenueErr } = await assetClassAdmin
+      .from("api_keys")
+      .select("exchange")
+      .eq("id", apiKeyId)
+      .single();
+    if (keyVenueErr) {
+      console.warn(
+        `[strategies/finalize-wizard] asset_class venue resolve failed (non-blocking, defaults √252): ${scrubInternalToken(keyVenueErr.message)}`,
+      );
+      captureToSentry(keyVenueErr, {
+        tags: { op: "finalize-wizard.asset_class_venue_resolve" },
+        level: "warning",
+      });
+    }
+    apiKeyExchange =
+      typeof keyVenueRow?.exchange === "string" ? keyVenueRow.exchange : null;
+  }
   //
-  // Non-blocking on failure: the column default means a failed write leaves a
-  // CSV strategy on √252 (harmless for traditional; WRONG for crypto-CSV, so
-  // the failure is surfaced to Sentry below) and a broker/composite strategy is
-  // re-derived to crypto on the next finalize attempt.
-  // @audit-skip: non-security annualization metadata (√365 crypto / √252
-  // traditional) written as part of the already-audited strategy finalization;
-  // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
-  const { error: assetClassErr } = await supabase
-    .from("strategies")
-    .update({
-      asset_class:
-        apiKeyId || isCompositeForAssetClass ? "crypto" : fields.asset_class,
-    })
-    .eq("id", fields.strategy_id)
-    .eq("user_id", user.id);
-  if (assetClassErr) {
+  // RED-TEAM: for a single-key strategy whose venue we FAILED to resolve
+  // (apiKeyExchange null after a lookup fault), SKIP the write entirely. The
+  // draft already carries create-with-key's venue-aware stamp, and the worker
+  // treats strategies.asset_class as the authoritative annualization clock — an
+  // overwrite to 'traditional' here would silently mis-annualize a crypto
+  // strategy. Only write when we have a confident value (venue resolved, or a
+  // composite/CSV path where apiKeyId is absent).
+  const skipAssetClassWrite = Boolean(apiKeyId) && apiKeyExchange === null;
+  if (skipAssetClassWrite) {
     console.warn(
-      `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+      "[strategies/finalize-wizard] asset_class venue unresolved for a single-key " +
+        "strategy — leaving the draft's venue-aware stamp intact (no √252 overwrite)",
     );
-    captureToSentry(assetClassErr, {
-      tags: { op: "finalize-wizard.asset_class_persist" },
-      level: "warning",
-    });
+  } else {
+    // @audit-skip: non-security annualization metadata (√365 crypto / √252
+    // traditional) written as part of the already-audited strategy finalization;
+    // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
+    const { error: assetClassErr } = await supabase
+      .from("strategies")
+      .update({
+        asset_class: apiKeyId
+          ? isCryptoExchange(apiKeyExchange)
+            ? "crypto"
+            : "traditional"
+          : isCompositeForAssetClass
+            ? "crypto"
+            : fields.asset_class,
+      })
+      .eq("id", fields.strategy_id)
+      .eq("user_id", user.id);
+    if (assetClassErr) {
+      console.warn(
+        `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+      );
+      captureToSentry(assetClassErr, {
+        tags: { op: "finalize-wizard.asset_class_persist" },
+        level: "warning",
+      });
+    }
   }
 
   // Probe runs BEFORE both legacy and unified paths so the

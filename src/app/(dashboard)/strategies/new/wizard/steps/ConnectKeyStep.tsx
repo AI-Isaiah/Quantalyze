@@ -9,7 +9,7 @@ import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
-import { SFOX_UI_ENABLED } from "@/lib/utils";
+import { SFOX_UI_ENABLED, MT5_UI_ENABLED } from "@/lib/utils";
 import {
   getWizardCorrelationId,
   wizardFetch,
@@ -44,6 +44,20 @@ interface ExchangeOption {
   // the rendered label/placeholder text differs.
   credentialLabels?: { key: string; secret: string };
   credentialPlaceholders?: { key: string; secret: string };
+  // Per-exchange, presentation-only overrides for the third (passphrase-slot)
+  // field. Today the third field is hardcoded to OKX ("OKX Passphrase"); MT5
+  // reuses the SAME passphrase slot to collect the broker server, relabelled
+  // "Broker server". Like credentialLabels (D-03), these mirror the label-only
+  // precedent: the submit payload key (`passphrase`) and the storage column are
+  // UNCHANGED — only the rendered label/placeholder/helper text differs.
+  // Absent → today's OKX strings (byte-neutral for existing venues).
+  passphraseLabel?: string;
+  passphrasePlaceholder?: string;
+  passphraseHelper?: string;
+  // Optional muted helper rendered directly under the secret input. Absent →
+  // nothing renders (byte-neutral). MT5 uses it for the up-front
+  // investor-vs-master-password steer.
+  secretHelper?: string;
 }
 
 // Phase 122 / SFOX-08: the sfox card is APPENDED only when SFOX_UI_ENABLED is on
@@ -95,6 +109,34 @@ const EXCHANGES: ExchangeOption[] = [
         },
       ]
     : []),
+  // Phase 138 / MT5UI-01: the MT5 card is APPENDED only when MT5_UI_ENABLED is
+  // on (the founder-gated NEXT_PUBLIC_MT5_ENABLED flag). Flag OFF (default)
+  // leaves this array literal byte-identical (empty spread). MT5 collects three
+  // credentials into the existing {api_key, api_secret, passphrase} slots (the
+  // 135 chokepoint): login → api_key, investor password → api_secret, broker
+  // server → passphrase. requiresPassphrase:true renders the third field, gates
+  // submit on it (:435), and flows the broker server into payload.passphrase.
+  ...(MT5_UI_ENABLED
+    ? [
+        {
+          id: "mt5" as const,
+          name: "MT5",
+          caption: "Live investor (read-only) login. Forex & CFD.",
+          requiresPassphrase: true,
+          credentialLabels: { key: "MT5 login", secret: "Investor password" },
+          credentialPlaceholders: {
+            key: "Your MT5 account number",
+            secret: "Your read-only investor password",
+          },
+          passphraseLabel: "Broker server",
+          passphrasePlaceholder: "Exactly as shown in your MT5 terminal",
+          passphraseHelper:
+            "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.",
+          secretHelper:
+            "Use your investor (read-only) password — not your master password. A master password can place trades, so we refuse it and store nothing.",
+        },
+      ]
+    : []),
 ];
 
 // F3 (Phase 122): the sfox honest "what we reject" atom. sFOX exposes no per-key
@@ -102,6 +144,14 @@ const EXCHANGES: ExchangeOption[] = [
 // implies — say the structural facts instead, never a false verified-scope claim.
 const SFOX_REJECT_ATOM_BODY =
   "sFOX keys are used read-only by our adapter — no order or withdraw path exists. sFOX exposes no per-key scope endpoint, so mint a READ-ONLY token.";
+
+// Phase 138 / MT5UI-01 (UI-SPEC Delta 2): the mt5 honest "what we reject" atom.
+// MT5 accounts carry a master password (can trade) and a separate investor
+// (read-only) password. We refuse the master at connect time — state that
+// structural fact up front rather than the ccxt scope-rejection claim, which
+// does not describe MT5's mechanism.
+const MT5_REJECT_ATOM_BODY =
+  "MT5 master passwords can place trades, so we reject them at connect time and store nothing — only a read-only investor login is accepted.";
 
 const TRUST_ATOMS: { title: string; body: string }[] = [
   {
@@ -184,17 +234,35 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   }, [onDraftChange, exchange, nickname, apiKey, apiSecret, passphrase]);
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
+  // WR-01: the per-exchange "setup guide" SubAnchors for the flag-gated venues
+  // (sfox #sfox-readonly, mt5 #mt5-readonly) are gated on their SERVER go-live
+  // flags (isSfoxEnabledServer / isMt5EnabledServer), while this wizard card is
+  // gated on the CLIENT flag. In the documented card-visible / guide-dark
+  // half-state those per-exchange anchors do not render, so a deep link to them
+  // lands on /security top with no guide. Point those venues at the
+  // UNCONDITIONAL #readonly-key section anchor (the parent "Creating a read-only
+  // API key" Section, always rendered) — matching the error-envelope link — so
+  // the link is never dead. Other venues keep their per-exchange anchor.
+  const guideAnchor =
+    exchange === "sfox" || exchange === "mt5"
+      ? "readonly-key"
+      : `${exchange}-readonly`;
   const requiresPassphrase = activeExchange?.requiresPassphrase ?? false;
   // Absent requiresSecret → true (every ccxt exchange). sFOX is token-only.
   const requiresSecret = activeExchange?.requiresSecret ?? true;
-  // F3: swap the "What we reject" atom body to the honest structural claim for
-  // sfox (no order/withdraw path; no per-key scope endpoint). Every other
-  // exchange renders today's scope-rejection copy byte-identically.
-  const trustAtoms = TRUST_ATOMS.map((atom) =>
-    atom.title === "What we reject" && !requiresSecret
-      ? { ...atom, body: SFOX_REJECT_ATOM_BODY }
-      : atom,
-  );
+  // Swap the "What we reject" atom body to the honest structural claim per
+  // venue. MT5 is keyed on the venue id (it REQUIRES a secret, so the sfox
+  // `!requiresSecret` branch can never fire for it — check mt5 FIRST). F3: sfox
+  // keys on `!requiresSecret` (no order/withdraw path; no per-key scope
+  // endpoint). Every other exchange renders today's scope-rejection copy
+  // byte-identically.
+  const trustAtoms = TRUST_ATOMS.map((atom) => {
+    if (atom.title !== "What we reject") return atom;
+    if (activeExchange?.id === "mt5")
+      return { ...atom, body: MT5_REJECT_ATOM_BODY };
+    if (!requiresSecret) return { ...atom, body: SFOX_REJECT_ATOM_BODY };
+    return atom;
+  });
   // Presentation-only credential labels/placeholders. Default to the generic
   // "API Key"/"API Secret" wording; Deribit overrides to "Client ID"/"Client
   // Secret" (D-03). Storage columns + payload keys are unchanged.
@@ -204,6 +272,17 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     activeExchange?.credentialPlaceholders?.key ?? "Paste the read-only key";
   const secretPlaceholder =
     activeExchange?.credentialPlaceholders?.secret ?? "Paste the secret";
+  // Third (passphrase-slot) field overrides. Default to today's OKX strings so
+  // existing venues render byte-identically; MT5 relabels it "Broker server".
+  const passphraseLabel = activeExchange?.passphraseLabel ?? "OKX Passphrase";
+  const passphrasePlaceholder =
+    activeExchange?.passphrasePlaceholder ?? "Paste the OKX passphrase";
+  const passphraseHelper =
+    activeExchange?.passphraseHelper ??
+    "OKX requires a passphrase in addition to key and secret. You set this when you created the API key on OKX.";
+  // Optional muted helper under the secret input (MT5's investor-vs-master
+  // steer). Absent → render nothing.
+  const secretHelper = activeExchange?.secretHelper;
 
   const onSelectExchange = useCallback((next: ExchangeId) => {
     setExchange(next);
@@ -332,7 +411,7 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           <p className="mt-2 text-micro text-text-muted">
             Need help creating a read-only key?{" "}
             <Link
-              href={`/security#${exchange}-readonly`}
+              href={`/security#${guideAnchor}`}
               className="underline-offset-4 hover:underline"
               target="_blank"
               rel="noopener"
@@ -382,24 +461,27 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
               required
               className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
             />
+            {/* Muted (never amber/red) steer under the secret input — DESIGN.md
+                semantic-color gate: tone is earned by an actual rejection, not a
+                preemptive warning. MT5 uses it for the investor-vs-master steer. */}
+            {secretHelper && (
+              <p className="mt-1 text-micro text-text-muted">{secretHelper}</p>
+            )}
           </div>
         )}
 
         {requiresPassphrase && (
           <div>
             <Input
-              label="OKX Passphrase"
+              label={passphraseLabel}
               type={showSecret ? "text" : "password"}
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
-              placeholder="Paste the OKX passphrase"
+              placeholder={passphrasePlaceholder}
               autoComplete="off"
               required
             />
-            <p className="mt-1 text-micro text-text-muted">
-              OKX requires a passphrase in addition to key and secret. You set
-              this when you created the API key on OKX.
-            </p>
+            <p className="mt-1 text-micro text-text-muted">{passphraseHelper}</p>
           </div>
         )}
 

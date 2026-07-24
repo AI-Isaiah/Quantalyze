@@ -49,6 +49,7 @@ from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, T
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
+from services.closed_sets import mt5_enabled_server
 from services.metrics import periods_per_year_for_asset_class
 from services.rate_limit import limiter
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
@@ -139,6 +140,12 @@ class _ProcessKeyBody(BaseModel):
     # branch, NOT fills), so the synchronous teaser/internal_report/csv preview
     # cannot serve it. Admitting it here kills the phase-119 F2 422-on-source; the
     # async flows route sfox through run_process_key_long_job → derive_broker_dailies.
+    #
+    # MT5RECON-01 — `mt5` is admitted to `onboard`/`resync` ONLY, for the SAME
+    # reason (Mt5Adapter.compute_metrics/fetch_raw fail loud by design; returns
+    # come from the history_deals_get deal ledger via the mt5 broker-dailies
+    # branch, NOT fills). It rides the SAME long-fetch tail and stays fully
+    # founder-gated behind mt5_enabled_server until go-live.
     @field_validator("source")
     @classmethod
     def _validate_source_per_flow(cls, source: Source, info: ValidationInfo) -> Source:
@@ -158,11 +165,23 @@ class _ProcessKeyBody(BaseModel):
                 "SFOX-F2: sFOX integration is not yet available "
                 "(SFOX_ENABLED is off)."
             )
+        # MT5RECON-01 (Phase 136 — the go-dark gate, verbatim mirror of the sfox
+        # F2 seam above): mt5 is founder-gated until go-live (Phase 139). Fail
+        # CLOSED at the wire boundary — an mt5 onboard/resync body is REJECTED
+        # (422) BEFORE any compute_job is enqueued or any live RPyC deal read runs,
+        # until MT5_ENABLED=true is set on the worker (lockstep with the Vercel
+        # server env — the 135/139 runbook). Never a live probe, never a
+        # false-verified draft. ccxt/deribit/sfox sources are unaffected.
+        if source == "mt5" and not mt5_enabled_server():
+            raise ValueError(
+                "MT5-F2: MT5 integration is not yet available "
+                "(MT5_ENABLED is off)."
+            )
         valid: dict[str, set[str]] = {
             "teaser": {"okx", "binance", "bybit"},
-            "onboard": {"okx", "binance", "bybit", "deribit", "sfox"},
+            "onboard": {"okx", "binance", "bybit", "deribit", "sfox", "mt5"},
             "internal_report": {"okx", "binance", "bybit"},
-            "resync": {"okx", "binance", "bybit", "deribit", "sfox"},
+            "resync": {"okx", "binance", "bybit", "deribit", "sfox", "mt5"},
             "csv": {"csv"},
         }
         allowed = valid.get(flow_type, set())

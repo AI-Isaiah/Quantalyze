@@ -58,7 +58,13 @@ def _verify_internal_token(token: str | None) -> None:
         raise HTTPException(status_code=401, detail="Invalid internal token")
 
 
-Broker = Literal["okx", "binance", "bybit", "deribit", "sfox"]
+# Phase 135 (MT5SRC-01): 'mt5' widened for key-save boundary type-consistency,
+# mirroring how 'sfox' was admitted here. This is a pure Literal-membership edit;
+# like sfox, mt5 is non-ccxt and has no create_exchange path — this debug harness
+# is testnet-only and its endpoints route brokers through create_exchange, so a
+# real mt5 exercise here would 503 on absent DEBUG_KEY_FLOW_MT5_* creds. No
+# downstream ccxt guard exists for sfox, so none is added for mt5.
+Broker = Literal["okx", "binance", "bybit", "deribit", "sfox", "mt5"]
 
 
 def _maybe_enable_sandbox(exchange: ccxt.Exchange) -> None:

@@ -679,6 +679,67 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     fetchSpy.mockRestore();
   });
 
+  // MT5RECON-02 — the venue-aware single-key derive. An API-keyed draft whose
+  // linked api_keys.exchange is 'mt5' must persist 'traditional' (forex/CFD √252),
+  // NOT 'crypto'. This is the finalize seam that would otherwise overwrite the
+  // create-with-key 'traditional' stamp back to crypto. WIRING test: neutering the
+  // derive (reverting the apiKeyId arm to the unconditional 'crypto' literal)
+  // persists 'crypto' → this reddens.
+  it("MT5RECON-02: persists 'traditional' for an API-keyed draft on an mt5 venue", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID }; // single api-keyed draft
+    STATE.adminApiKeysExchange = "mt5"; // linked key is an MT5 (forex/CFD) venue
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "traditional" });
+    // The crypto default must NOT have leaked in for an mt5 venue.
+    expect(STATE.assetClassUpdates).not.toContainEqual({ asset_class: "crypto" });
+    fetchSpy.mockRestore();
+  });
+
+  // Regression: a crypto single-key venue stays byte-identical to today ('crypto')
+  // even when 'traditional' is submitted — the force-derive still applies, keyed
+  // off the venue rather than an unconditional literal.
+  it("MT5RECON-02: still FORCE-DERIVES 'crypto' for a crypto (bybit) single-key venue", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "bybit"; // crypto venue
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  // RED-TEAM regression: when the single-key venue lookup FAULTS (transient DB
+  // blip), the route must NOT overwrite the draft's stamp with the √252
+  // 'traditional' default — the worker reads strategies.asset_class DIRECTLY as
+  // the annualization clock (it does NOT re-derive from venue), so a blind
+  // 'traditional' write would silently mis-annualize a crypto strategy (inflated
+  // Sharpe). The write must be SKIPPED, leaving create-with-key's venue-aware
+  // draft stamp intact. Reddens against the old unconditional 'traditional' fault
+  // default.
+  it("does NOT overwrite asset_class to 'traditional' when the single-key venue lookup faults", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID }; // single api-keyed draft
+    STATE.adminApiKeysExchange = "bybit"; // the key IS a crypto venue…
+    STATE.adminApiKeysSelectError = { message: "transient PG blip" }; // …but the lookup fails
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    // The fault path must SKIP the write — no 'traditional' overwrite of the
+    // draft's correct venue-aware stamp.
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
+    expect(STATE.assetClassUpdates).toHaveLength(0);
+    fetchSpy.mockRestore();
+  });
+
   it("persists 'crypto' for a CSV draft when the body sends asset_class: 'crypto'", async () => {
     const fetchSpy = okProbe();
     STATE.strategyRow = { api_key_id: null }; // CSV branch (probe skipped)

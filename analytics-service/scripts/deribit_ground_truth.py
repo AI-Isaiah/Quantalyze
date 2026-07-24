@@ -340,7 +340,7 @@ _DENY_KEY_SUBSTRINGS: tuple[str, ...] = (
 )
 # Keys whose string value is masked via truncate_account_id (***<last4>).
 _MASK_KEYS: frozenset[str] = frozenset(
-    {"username", "user_id", "email", "system_name", "id"}
+    {"username", "user_id", "email", "system_name", "id", "login"}
 )
 # Email + long-opaque-token shapes flagged by assert_sanitized as unmasked leaks.
 _EMAIL_RE: re.Pattern[str] = re.compile(

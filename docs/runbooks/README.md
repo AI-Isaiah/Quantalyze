@@ -25,6 +25,7 @@ For deploy semantics and the CI/prod invariants, see the repo
 | [metrics-nan-policy.md](./metrics-nan-policy.md) | Metrics NaN handling policy |
 | [posthog-wizard-funnel.md](./posthog-wizard-funnel.md) | PostHog wizard funnel dashboard |
 | [vercel-cron-upgrade.md](./vercel-cron-upgrade.md) | Vercel cron scheduler |
+| [mt5-go-live.md](./mt5-go-live.md) | MT5 prod gateway stand-up + real-broker soak + flag flip (private-net-only RPyC, GATE-CHECK, rollback) |
 
 ## Security & compliance
 

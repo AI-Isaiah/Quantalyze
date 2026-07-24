@@ -134,6 +134,13 @@ const EXCHANGE_TAGS: Record<
   // from every entry above. Ships UNCONDITIONALLY, independent of the SFOX-08
   // offer flag: a founder-connected sfox key must render before the flag flips.
   sfox: { label: "SFOX", bg: "#F1F5F9", fg: "#0F172A" },
+  // 138-03 (MT5UI-02): mt5 has no bright brand colour — REUSE the sfox neutral
+  // slate pairing verbatim (slate-100 bg / near-black navy fg, well past WCAG AA;
+  // NO new hex this phase per UI-SPEC constraint 3). Same SFOX-09 rationale:
+  // ships UNCONDITIONALLY, independent of the go-live offer flag, so a
+  // founder-connected mt5 key renders the real mono tag before the flag flips.
+  // This is a provenance surface (the user's OWN key), not an offer surface.
+  mt5: { label: "MT5", bg: "#F1F5F9", fg: "#0F172A" },
 };
 
 function formatRelative(iso: string | null): string {

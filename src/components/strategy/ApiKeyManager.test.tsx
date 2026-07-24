@@ -361,6 +361,45 @@ describe("ApiKeyManager — M-0456 projection allowlist columns reach the UI", (
     // … and the degraded "?" fallback does NOT.
     expect(screen.queryByText("?")).not.toBeInTheDocument();
   });
+
+  // 138-03 / MT5UI-02 — mt5 ships its provenance mono tag UNCONDITIONALLY (the
+  // SFOX-09 precedent): a founder-connected mt5 key exists before the go-live
+  // offer flag (NEXT_PUBLIC_MT5_ENABLED) flips, so the key card must render the
+  // real "MT5" tag, never the "?" unknown-exchange fallback. Pins the mono tag:
+  // an mt5 row must show "MT5", never "?". FAILS without the exchangeIcon entry.
+  it("renders the MT5 badge (not '?') for an mt5 key row (138-03)", async () => {
+    selectResultMock.mockReturnValue({
+      data: [
+        {
+          id: "key-mt5",
+          user_id: "user-a",
+          exchange: "mt5",
+          label: "My MT5",
+          is_active: true,
+          sync_status: "complete",
+          last_sync_at: "2026-04-19T11:58:00Z",
+          account_balance_usdt: 1000,
+          created_at: "2026-01-01T00:00:00Z",
+          sync_error: null,
+          last_429_at: null,
+          disconnected_at: null,
+        },
+      ],
+      error: null,
+    });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("My MT5")).toBeInTheDocument();
+    });
+    // Canonical mono tag renders …
+    expect(screen.getByText("MT5")).toBeInTheDocument();
+    // … and the degraded "?" fallback does NOT.
+    expect(screen.queryByText("?")).not.toBeInTheDocument();
+  });
 });
 
 // mig 20260707120000 — a warned sync (complete_with_warnings) is a terminal
