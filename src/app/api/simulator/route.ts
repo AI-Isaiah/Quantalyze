@@ -7,6 +7,7 @@ import {
   AnalyticsUpstreamError,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
+import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
   simulatorLimiter,
@@ -41,6 +42,30 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * the expensive simulateAddCandidate Python round-trip is exactly what the
  * universal-approval gate exists to deny to pending-approval users.
  */
+
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
+ * route's `SEAM_ROUTE_BUDGETS` row in `src/lib/resilient-fetch.ts`.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot RAISE this
+ * route's worst-case lambda hold (threat T-140-29). It exists so the SC-4b
+ * headroom invariant has an in-repo source of truth instead of a
+ * dashboard-changeable assumption: this route spends one `simulator` budget
+ * (15s), i.e. 20× headroom.
+ */
+export const maxDuration = 300;
+
+/**
+ * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
+ * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
+ * seam routes, so a breaker trip reads the same to a user whichever seam they
+ * hit, and it names no infrastructure (threat T-140-17).
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
+
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
@@ -146,6 +171,37 @@ export async function POST(req: NextRequest) {
     );
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
+    // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
+    //
+    // An open circuit means no request was issued: 503 + a cooldown, not the
+    // generic 500 this used to fall through to (which invites an immediate
+    // retry against a service already known to be down).
+    //
+    // ⚠️ Placement: INSIDE the handler, after the 401 + approval gates above
+    // (threat T-140-20) — a breaker-aware branch hoisted above them would turn
+    // "is Railway degraded right now?" into an unauthenticated oracle.
+    //
+    // ⚠️ `CircuitOpenError` comes from the dependency-free leaf
+    // `@/lib/seam-errors`, never through `@/lib/analytics-client`: this route's
+    // test mocks that module wholesale, and a class read through a mocked
+    // module is `undefined` — `err instanceof undefined` throws a TypeError
+    // from inside this very catch block (threat T-140-30).
+    if (err instanceof CircuitOpenError) {
+      console.error(
+        `[simulator] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+      );
+      return NextResponse.json(
+        { error: CIRCUIT_OPEN_COPY },
+        {
+          status: 503,
+          headers: {
+            ...NO_STORE_HEADERS,
+            // Same pairing as this route's own 429/503 limiter arms above.
+            "Retry-After": String(err.retryAfterS),
+          },
+        },
+      );
+    }
     // Forward 4xx semantics from the Python service (e.g. 400 "already in
     // portfolio", 404 "portfolio not found") instead of flattening every
     // upstream error to 500. AnalyticsUpstreamError.message carries the Python
