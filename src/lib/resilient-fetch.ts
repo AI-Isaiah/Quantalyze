@@ -467,3 +467,107 @@ export async function recordSeamFailure(): Promise<void> {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// SEAM-01 — the engine
+// ---------------------------------------------------------------------------
+
+/**
+ * Base URL of the Railway analytics service.
+ *
+ * This module is the ONLY legal home for it after Phase 140: both clients read
+ * their own copy today, and the third seam plus the dormant handler each hard-
+ * coded a fourth and fifth. Centralising it here is what the Wave-4
+ * `no-raw-analytics-fetch` ESLint rule keys on — a raw `fetch()` against this
+ * env var outside the core is how a sixth seam appears with no timeout and no
+ * breaker, exactly as the third one did.
+ */
+const ANALYTICS_URL =
+  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
+
+/** `RequestInit` minus `signal` (the core owns the deadline), plus an escape hatch. */
+export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
+  /**
+   * Override the table's budget for this ONE call. Intended for tests and for
+   * a caller that legitimately knows better; routine tuning belongs in
+   * `SEAM_BUDGETS`, not at the call site — scattered budgets are the drift
+   * SEAM-02 exists to end.
+   */
+  timeoutMsOverride?: number;
+};
+
+/**
+ * The ONE way to call the Railway analytics service.
+ *
+ * Sequence: breaker check → budgeted fetch → classified failure recording.
+ *
+ * ⚠️ CALL ORDER RELATIVE TO AUTH. This must be invoked from INSIDE a route
+ * handler body, AFTER that handler's `withAuth` / `isAdminUser` / `CRON_SECRET`
+ * gate. Hoisting the breaker check above the auth gate — or into middleware —
+ * would turn breaker state into an unauthenticated oracle. Middleware also runs
+ * before routing and cannot know the call site's budget, which is the second
+ * reason the check lives here and is per-call.
+ *
+ * Errors: throws `CircuitOpenError` when the circuit is open; otherwise
+ * rethrows whatever `fetch` threw, UNWRAPPED. Non-2xx responses are RETURNED,
+ * not thrown — status interpretation is the caller's contract, and only the
+ * caller knows whether a 404 is an error or an expected empty result.
+ */
+export async function resilientFetch(
+  budgetKey: SeamBudgetKey,
+  path: string,
+  init: ResilientFetchInit = {},
+): Promise<Response> {
+  const { timeoutMsOverride, ...requestInit } = init;
+  const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
+
+  const breaker = await isBreakerOpen();
+  if (breaker.open) {
+    throw new CircuitOpenError(breaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S);
+  }
+
+  let res: Response;
+  try {
+    // Headers, body, and cache pass through byte-for-byte. A dropped
+    // `X-User-Id` re-opens the CT-4 cross-tenant rate-limit-bucket defect, and
+    // a dropped `Authorization` turns a working call into a 401 the breaker
+    // would then count as degradation.
+    res = await fetch(`${ANALYTICS_URL}${path}`, {
+      ...requestInit,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    // Both failure classes count toward the breaker: the deadline fired, or the
+    // connection never completed. The name test is deliberately the BROADER of
+    // the two shapes in the repo — analytics-client's `err instanceof
+    // DOMException && name === "TimeoutError"` misses a plain `AbortError`,
+    // which would then be misreported as "service not reachable". Only the log
+    // line differs; the budget key is logged, never the path, body, or headers
+    // (the seam carries raw exchange credentials and INTERNAL_API_TOKEN).
+    const deadlineExceeded =
+      err instanceof Error &&
+      (err.name === "AbortError" || err.name === "TimeoutError");
+    console.error(
+      deadlineExceeded
+        ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
+        : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`,
+    );
+    await recordSeamFailure();
+    // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
+    // typed errors (AnalyticsTimeoutError / UPSTREAM_TIMEOUT); wrapping here
+    // would silently reclassify every timeout in the codebase.
+    throw err;
+  }
+
+  if (res.status >= 500) {
+    await recordSeamFailure();
+  }
+  // 4xx NEVER records. A user's bad API key returning 400 is Railway working
+  // CORRECTLY — `create-with-key` and `composite/add-key` deliberately map that
+  // to a client fault. Counting 4xx would let a handful of users fat-fingering
+  // credentials trip the breaker and take key-connect down for everyone: a user
+  // error must never become an outage. The accepted cost (A4, operator
+  // decision) is that if Railway 4xxes during genuine degradation the breaker
+  // under-trips.
+  return res;
+}

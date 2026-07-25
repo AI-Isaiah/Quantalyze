@@ -1,8 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
-// Imported from the LEAF, never from the core — this is the import shape every
-// caller must use, and the one that survives a wholesale vi.mock of the clients.
-import { CircuitOpenError } from "@/lib/seam-errors";
 import {
   FAKE_BREAKER_KEY,
   seedBreakerOpen,
@@ -17,45 +14,73 @@ import {
  * included), SC-3c (failure classification) and SC-4c (the budget table
  * actually reaches AbortSignal.timeout).
  *
- * ⚠️ THE STORE MUST BE HOISTED. `vi.mock` factories RE-RUN after
- * `vi.resetModules()`. A factory-local store would hand every module context a
- * fresh empty map, so an in-memory (per-instance) breaker would PASS the
- * cross-context test — the exact false green SC-2 exists to prevent
- * (research §10.2 / Pitfall 6). The `negative control` test deliberately flips
- * to a per-factory store to prove the passing test depends on shared state.
+ * ⚠️ TWO MECHANICS OF `vi.resetModules()`, MEASURED ON vitest 4.1.10 — BOTH
+ * MATTER AND THE SECOND CONTRADICTS 140-RESEARCH.md §10.2:
+ *
+ *  1. Non-mocked modules DO re-execute. That is what makes this file a real
+ *     SC-2 proof: `resilient-fetch`'s module body runs again, recreating every
+ *     module-scope binding, so a `let breakerState` breaker could not survive.
+ *     Only state outside the module — the fake Upstash store — can.
+ *
+ *  2. `vi.mock` FACTORIES DO **NOT** RE-RUN. Measured directly: a factory
+ *     incrementing a hoisted counter reports 1 execution before and after
+ *     `vi.resetModules()`. Research §10.2 asserts the opposite and builds the
+ *     negative control on it — that shape silently produces a FALSE green
+ *     (context B keeps the cached store, short-circuits, and the control never
+ *     fires). The per-context hook that DOES exist is `Redis.fromEnv()`, which
+ *     the core calls once per module body execution; `beginContext()` below
+ *     hangs off it. Hoisting the store remains correct and is what survives the
+ *     reset in shared mode.
+ *
+ * ⚠️ CLASS IDENTITY. After `vi.resetModules()`, a statically imported
+ * `CircuitOpenError` is a DIFFERENT class object from the one the freshly
+ * imported core throws, so `instanceof` against the static import fails. Assert
+ * against the module namespace from the SAME registry (`b.CircuitOpenError`).
+ * This is a test-harness artifact only — production has one registry, and the
+ * `re-exports the leaf's class identity` test below pins the property that
+ * actually ships.
  *
  * ⚠️ Leaked `vi.stubGlobal("fetch")` is this repo's known CI-only (Node 22)
  * failure cause. Every test path unstubs in `afterEach`.
  */
 
-const shared = vi.hoisted(() => ({
+const shared = vi.hoisted(() => {
   /** The "shared Upstash database" — survives vi.resetModules(). */
-  store: new Map<string, { value: string; expiresAt: number }>(),
-  mode: {
-    /** false → each vi.mock factory execution builds its OWN store (negative control). */
+  const store = new Map<string, { value: string; expiresAt: number }>();
+  const mode = {
+    /** false → every module context gets its OWN store (negative control). */
     sharedStore: true,
     /** true → redis.get rejects, exercising the fail-OPEN catch arm. */
     throwOnGet: false,
     /** true → the failure counter rejects, exercising the swallow-and-log arm. */
     throwOnLimit: false,
-  },
-}));
+  };
+  /** The store the CURRENT module context is bound to. */
+  const ctx = { store };
+  return {
+    store,
+    mode,
+    ctx,
+    /**
+     * Called once per module context, from the mocked `Redis.fromEnv()` —
+     * the core constructs its redis singleton before its limiter, so both
+     * doubles land on the same store for that context.
+     */
+    beginContext() {
+      ctx.store = mode.sharedStore
+        ? store
+        : new Map<string, { value: string; expiresAt: number }>();
+      return ctx.store;
+    },
+  };
+});
 
 vi.mock("@upstash/redis", async () => {
-  const { fakeRedisFor, createFakeUpstashStore } = await import(
-    "@/test/helpers/upstash-breaker"
-  );
-  // This line runs once PER FACTORY EXECUTION, and the factory re-runs after
-  // vi.resetModules(). In shared mode it resolves to the hoisted store (real
-  // cross-instance semantics); in negative-control mode it mints a fresh store
-  // per module context, which is what an in-memory breaker effectively has.
-  const store = shared.mode.sharedStore
-    ? shared.store
-    : createFakeUpstashStore();
+  const { fakeRedisFor } = await import("@/test/helpers/upstash-breaker");
   return {
     Redis: {
       fromEnv: () => {
-        const base = fakeRedisFor(store);
+        const base = fakeRedisFor(shared.beginContext());
         return {
           ...base,
           get: async (key: string) => {
@@ -71,12 +96,7 @@ vi.mock("@upstash/redis", async () => {
 });
 
 vi.mock("@upstash/ratelimit", async () => {
-  const { fakeRatelimitFor, createFakeUpstashStore } = await import(
-    "@/test/helpers/upstash-breaker"
-  );
-  const store = shared.mode.sharedStore
-    ? shared.store
-    : createFakeUpstashStore();
+  const { fakeRatelimitFor } = await import("@/test/helpers/upstash-breaker");
   return {
     Ratelimit: class {
       static slidingWindow(tokens: number, window: string) {
@@ -84,7 +104,8 @@ vi.mock("@upstash/ratelimit", async () => {
       }
       private readonly fake: { limit: (id: string) => Promise<unknown> };
       constructor(opts: { limiter: { tokens: number } }) {
-        this.fake = fakeRatelimitFor(store, opts.limiter.tokens);
+        // Binds to whatever store beginContext() just selected.
+        this.fake = fakeRatelimitFor(shared.ctx.store, opts.limiter.tokens);
       }
       limit(identifier: string) {
         if (shared.mode.throwOnLimit) {
@@ -118,8 +139,13 @@ function configureUpstash(): void {
 beforeEach(() => {
   vi.resetModules();
   shared.store.clear();
+  shared.ctx.store = shared.store;
   shared.mode.sharedStore = true;
   shared.mode.throwOnGet = false;
+  // Every flag resets. A leaked `throwOnLimit` silently disables the failure
+  // counter for every later test, which makes "the breaker did not trip"
+  // assertions pass for entirely the wrong reason.
+  shared.mode.throwOnLimit = false;
   configureUpstash();
 });
 
@@ -135,6 +161,22 @@ describe("resilient-fetch breaker key", () => {
     // The helper duplicates the literal (it cannot import the core from inside
     // a vi.mock factory). This assertion is the anti-drift fence.
     expect(mod.BREAKER_KEY).toBe(FAKE_BREAKER_KEY);
+  });
+
+  it("re-exports the leaf's CircuitOpenError class identity", async () => {
+    // The production invariant behind the dependency-free leaf: the core's
+    // re-export is an ALIAS, not a second class. If it ever became a distinct
+    // definition, `err instanceof CircuitOpenError` in wizardErrors (which
+    // imports the leaf) would be false for errors thrown by the core, and the
+    // wizard would fall through to UNKNOWN/500.
+    const mod = await import("./resilient-fetch");
+    const leaf = await import("./seam-errors");
+    expect(mod.CircuitOpenError).toBe(leaf.CircuitOpenError);
+
+    const err = new mod.CircuitOpenError(30);
+    expect(err).toBeInstanceOf(leaf.CircuitOpenError);
+    expect(err.message).toBe("Analytics service circuit is open");
+    expect(err.name).toBe("CircuitOpenError");
   });
 });
 
@@ -296,7 +338,8 @@ describe("resilientFetch breaker short-circuit", () => {
 
     await expect(
       b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
-    ).rejects.toBeInstanceOf(CircuitOpenError);
+    // Same-registry class object — see the CLASS IDENTITY note in the header.
+    ).rejects.toBeInstanceOf(b.CircuitOpenError);
     // THE assertion that proves "without touching Railway".
     expect(fetchB).not.toHaveBeenCalled();
     expect(fetchA).toHaveBeenCalledTimes(a.BREAKER_FAILURE_THRESHOLD);
