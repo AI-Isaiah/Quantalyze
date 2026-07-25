@@ -62,7 +62,16 @@ const FINALIZE_MAY_EMIT: Record<WizardErrorCode, boolean> = {
   // WR-01 — the breaker tripped (or the seam transport failed) during submit.
   // THE code this phase exists to surface; it reached the wizard as the
   // non-union string "CIRCUIT_OPEN" and rendered UNKNOWN.
-  SERVICE_UNAVAILABLE_RETRY: true,
+  //
+  // ⚠️ C2 — the POST-SAVE variant, and that distinction is the fix. Submit runs
+  // only after `create-with-key` has minted the `api_keys` row and the draft
+  // `strategies` row, so the connect-step copy's "Your key has not been saved
+  // and nothing was submitted" is FALSE here. Every seam-unavailable wire code
+  // is aliased onto this one below, including the literal
+  // "SERVICE_UNAVAILABLE_RETRY" that finalize-wizard emits — the WIRE
+  // vocabulary is deliberately unchanged (five routes and their tests depend on
+  // it); only what the wizard RENDERS moves.
+  SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED: true,
 
   // ── Not emitted by finalize ──────────────────────────────────────────────
   KEY_HAS_TRADING_PERMS: false,
@@ -77,6 +86,9 @@ const FINALIZE_MAY_EMIT: Record<WizardErrorCode, boolean> = {
   KEY_IP_ALLOWLIST: false,
   KEY_RATE_LIMIT: false,
   DRAFT_ALREADY_EXISTS: false,
+  // C2 — the CONNECT-STEP copy ("your key has not been saved"). Never rendered
+  // here: by submit, the key and the draft both exist. Aliased away below.
+  SERVICE_UNAVAILABLE_RETRY: false,
   SYNC_TIMEOUT: false,
   SYNC_FAILED: false,
   GATE_INSUFFICIENT_TRADES: false,
@@ -125,7 +137,18 @@ const FINALIZE_MAY_EMIT: Record<WizardErrorCode, boolean> = {
  * between the probe and the enqueue.
  */
 const LEGACY_WIRE_CODE_ALIASES: Readonly<Record<string, WizardErrorCode>> = {
-  CIRCUIT_OPEN: "SERVICE_UNAVAILABLE_RETRY",
+  CIRCUIT_OPEN: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+  // C2 — the wire code finalize-wizard emits directly (route.ts:409, :449) and
+  // the one the permissions probe mints. Aliased rather than renamed: the wire
+  // vocabulary is a stable contract across five routes and their tests, while
+  // SUBMIT is a post-save surface where the connect-step copy's "your key has
+  // not been saved" is simply untrue. Mapping happens before the
+  // FINALIZE_MAY_EMIT lookup, so the connect-step code can be marked `false`
+  // there and still render correctly here.
+  SERVICE_UNAVAILABLE_RETRY: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+  // C3 — process-key-client's token-misconfiguration 503, which used to carry
+  // no code at all.
+  UPSTREAM_NOT_CONFIGURED: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
   // Phase 140 review / F-3 — THE COMMON CASE, which CIRCUIT_OPEN is not.
   //
   // The breaker needs 5 failures inside 30s to open, which is unreachable at
@@ -145,8 +168,8 @@ const LEGACY_WIRE_CODE_ALIASES: Readonly<Record<string, WizardErrorCode>> = {
   // precisely the correct action. Identical user meaning to a breaker trip:
   // we could not reach our own service, nothing was submitted, the draft is
   // intact. Same copy.
-  UPSTREAM_TIMEOUT: "SERVICE_UNAVAILABLE_RETRY",
-  UPSTREAM_NETWORK_ERROR: "SERVICE_UNAVAILABLE_RETRY",
+  UPSTREAM_TIMEOUT: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+  UPSTREAM_NETWORK_ERROR: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
 };
 
 /**

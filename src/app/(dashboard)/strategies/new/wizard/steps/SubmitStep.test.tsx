@@ -294,7 +294,7 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
    * DOGFOOD-3 failure the new code exists to kill. The fix landed on 2 of 8
    * emitting paths; these pin the rest.
    */
-  it("maps SERVICE_UNAVAILABLE_RETRY (503 breaker trip on the probe) to its outage copy, not the dead end", async () => {
+  it("maps the SERVICE_UNAVAILABLE_RETRY wire code to the POST-SAVE outage copy, not the dead end and not the connect-step claim", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
         {
@@ -309,11 +309,19 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
-    expect(findWizardError()!.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(findWizardError()!.code).toBe(
+      "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    );
     expect(
-      screen.getByText("Our service is temporarily unavailable."),
+      screen.getByText("We could not reach our service just now."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    // C2 — SUBMIT is a POST-SAVE surface: `create-with-key` has already minted
+    // the api_keys row and the draft strategies row, so the connect-step copy's
+    // "Your key has not been saved and nothing was submitted" is FALSE here.
+    // The wire code is deliberately unchanged (five routes emit it); what the
+    // wizard RENDERS is what moves.
+    expect(screen.queryByText(/has not been saved/i)).not.toBeInTheDocument();
     // Recoverable by definition — a Retry control must render.
     expect(
       await screen.findByRole("button", { name: "Retry" }),
@@ -344,9 +352,11 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
     // Funnel-truth: reported under the UNION member, so the wizard_error
     // dimension has ONE value for one condition rather than two spellings.
-    expect(findWizardError()!.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(findWizardError()!.code).toBe(
+      "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    );
     expect(
-      screen.getByText("Our service is temporarily unavailable."),
+      screen.getByText("We could not reach our service just now."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   });
@@ -394,9 +404,11 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
 
       await vi.waitFor(() => expect(findWizardError()).toBeDefined());
       // Funnel-truth: ONE value for one condition, matching the breaker trip.
-      expect(findWizardError()!.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+      expect(findWizardError()!.code).toBe(
+      "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    );
       expect(
-        screen.getByText("Our service is temporarily unavailable."),
+        screen.getByText("We could not reach our service just now."),
       ).toBeInTheDocument();
       expect(
         screen.queryByText("Something went wrong."),

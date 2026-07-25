@@ -140,6 +140,23 @@ export type WizardErrorCode =
   // ("something went wrong, our team has been notified"), which is both untrue
   // and un-actionable during an infra outage.
   | "SERVICE_UNAVAILABLE_RETRY"
+  // Phase 140 round-3 / C2 — THE POST-SAVE TWIN OF SERVICE_UNAVAILABLE_RETRY.
+  //
+  // SERVICE_UNAVAILABLE_RETRY asserts "Your key has not been saved and nothing
+  // was submitted", which is TRUE at the connect step it was written for and
+  // FALSE everywhere later: the sync-preview step and the submit step only run
+  // after `create-with-key` has already minted the `api_keys` row and the draft
+  // `strategies` row, and a composite may have several members by then. Batch-B
+  // fixes (SubmitStep's wire-code aliases, SyncPreviewStep's kickoff
+  // classifier) routed those later surfaces into the connect-step copy, so the
+  // wizard began telling users their keys were not saved when they were.
+  //
+  // A SEPARATE CODE rather than a context flag ON PURPOSE: `FINALIZE_MAY_EMIT`
+  // in SubmitStep is an exhaustive `Record<WizardErrorCode, boolean>`, so a new
+  // member is a COMPILE ERROR until every surface decides which of the two it
+  // means. A boolean defaulting to "nothing was saved" would silently repeat
+  // exactly the mistake this code exists to fix.
+  | "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED"
   // Phase 140 review / CR-01 — the composite scope-broadening re-probe fans out
   // one cache-bypassing seam round trip PER member key, sequentially. Past
   // MAX_COMPOSITE_MEMBERS_PROBED that fan-out can outrun the finalize route's
@@ -780,10 +797,21 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // ⚠️ CONNECT-STEP ONLY. This copy asserts "Your key has not been saved", which
+  // is a claim about the user's data and must never render on a surface where
+  // the key IS saved. Every post-save surface uses
+  // SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED below.
   SERVICE_UNAVAILABLE_RETRY: {
     title: "Our service is temporarily unavailable.",
     cause:
-      "We paused outbound requests after repeated failures so the service can recover. Your key has not been saved and nothing was submitted — this is on our side, not your key.",
+      // C3 — no longer asserts the BREAKER as the mechanism. This code is
+      // emitted for a breaker trip AND for a plain transport timeout /
+      // unreachable service (`classifyKeyValidationError`'s WR-01 type branch),
+      // and "we paused outbound requests after repeated failures" is false for
+      // the latter two — which are also the COMMON case, since 5 failures in
+      // 30s is unreachable at human retry cadence. The honest statement covers
+      // all three.
+      "A request to our own service did not get through. Your key has not been saved and nothing was submitted — this is on our side, not your key.",
     fix: [
       "Wait a moment, then try connecting the key again.",
       "If it is still failing after a few minutes, contact security@quantalyze.com.",
@@ -791,6 +819,23 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     docsHref: "/security#sync-timing",
     // Recoverable by definition — the whole point of the code is that a Retry
     // control renders instead of the dead-end UNKNOWN envelope.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED: {
+    title: "We could not reach our service just now.",
+    cause:
+      // Surface-neutral AND mechanism-neutral, because both vary: this renders
+      // at the sync-preview kickoff and at submit, for a breaker trip, a seam
+      // timeout, a refused connection, a misconfigured token, an enqueue RPC
+      // failure and a platform 5xx. The two things that are true in EVERY one
+      // of those cases are the two things it states.
+      "The request did not get through to our own service. Your draft and every key you have connected are saved, and nothing was submitted — this is on our side, not your keys.",
+    fix: [
+      "Wait a moment, then try again — your draft and your connected keys are saved.",
+      "If it is still failing after a few minutes, contact security@quantalyze.com with your draft ID.",
+    ],
+    docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
   },
 
@@ -911,7 +956,11 @@ export function formatKeyError(
   // silently falls back to the generic copy rather than rendering "in NaN
   // seconds".
   if (
-    code === "SERVICE_UNAVAILABLE_RETRY" &&
+    // C2 — BOTH unavailable codes get the real wait. Naming only the
+    // connect-step one would have left the post-save surfaces (where the hint
+    // is just as actionable) on the vague "wait a moment".
+    (code === "SERVICE_UNAVAILABLE_RETRY" ||
+      code === "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED") &&
     typeof context?.retryAfterS === "number" &&
     Number.isFinite(context.retryAfterS) &&
     context.retryAfterS > 0

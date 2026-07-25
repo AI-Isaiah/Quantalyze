@@ -922,3 +922,83 @@ describe("classifyKeyValidationError — Phase 140 CircuitOpenError type branch 
     expect(blob).not.toMatch(/circuit|breaker|upstash|redis|railway|http|localhost/i);
   });
 });
+
+// ===========================================================================
+// Phase 140 round-3 / C2 — THE TWO UNAVAILABLE CODES MUST STAY TRUTHFUL.
+//
+// `SERVICE_UNAVAILABLE_RETRY` asserts "Your key has not been saved and nothing
+// was submitted". That is TRUE at the connect step it was written for, where
+// `create-with-key` has not run yet. Batch-B fixes (SubmitStep's wire-code
+// aliases, SyncPreviewStep's kickoff classifier) routed LATER steps into the
+// same copy — steps that only run AFTER the `api_keys` row and the draft
+// `strategies` row exist, and after a composite may have several members.
+//
+// These pin the contract as a PROPERTY of the copy rather than as a
+// spot-check of one sentence, so a future reword cannot quietly re-break it.
+// ===========================================================================
+describe("[C2] the unavailable codes make opposite, surface-correct claims", () => {
+  const connectStep = formatKeyError("SERVICE_UNAVAILABLE_RETRY");
+  const postSave = formatKeyError("SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED");
+
+  it("the CONNECT-step copy says nothing was saved", () => {
+    expect(connectStep.cause).toMatch(/has not been saved/i);
+    expect(connectStep.cause).toMatch(/nothing was submitted/i);
+  });
+
+  it("the POST-SAVE copy says the draft and the keys ARE saved, and never the opposite", () => {
+    // THE assertion. Rendering "has not been saved" on a surface where the key
+    // IS saved is a false statement about the user's data — and it sat directly
+    // above the control that deletes the draft.
+    expect(postSave.cause).not.toMatch(/has not been saved/i);
+    expect(postSave.cause).toMatch(/are saved/i);
+    expect(postSave.cause).toMatch(/nothing was submitted/i);
+  });
+
+  it("neither asserts the BREAKER as the mechanism (C3)", () => {
+    // Both codes are emitted for a plain transport timeout / unreachable
+    // service with the circuit CLOSED — which is the common case, since five
+    // failures in 30s is unreachable at human retry cadence — and the post-save
+    // one is additionally emitted for two Supabase failures in `keys/sync`.
+    // "We paused outbound requests after repeated failures" is a specific,
+    // checkable claim about our own infrastructure that is false in all of
+    // those.
+    for (const copy of [connectStep, postSave]) {
+      expect(copy.cause).not.toMatch(/paused outbound requests/i);
+    }
+  });
+
+  it("the POST-SAVE fix steps never tell the user to reconnect the key", () => {
+    // The connect-step remedy ("try connecting the key again") is wrong after
+    // the key is stored: it points at re-doing work that already succeeded,
+    // which is what steered users onto the destructive control.
+    expect(connectStep.fix[0]).toMatch(/connecting the key again/i);
+    for (const step of postSave.fix) {
+      expect(step).not.toMatch(/connecting the key again/i);
+    }
+  });
+
+  it("both are RECOVERABLE, so a Retry control renders instead of a dead end", () => {
+    for (const copy of [connectStep, postSave]) {
+      expect(copy.actions).toContain("clear_and_retry");
+    }
+  });
+
+  it("both name the real wait when the seam published a Retry-After (F-4 parity)", () => {
+    // The post-save surfaces are exactly where the hint is most actionable;
+    // extending the interpolation to only one code would have left them on the
+    // vague "wait a moment", which in practice means retrying instantly into
+    // the same wall.
+    for (const code of [
+      "SERVICE_UNAVAILABLE_RETRY",
+      "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    ] as const) {
+      expect(formatKeyError(code, { retryAfterS: 27 }).fix[0]).toMatch(
+        /Wait about 27 seconds/i,
+      );
+      // Malformed hints degrade to the generic copy, never "NaN".
+      expect(formatKeyError(code, { retryAfterS: Number.NaN }).fix[0]).not.toMatch(
+        /NaN/,
+      );
+    }
+  });
+});
