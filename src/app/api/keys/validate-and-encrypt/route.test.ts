@@ -66,23 +66,24 @@ vi.mock("@/lib/ratelimit", () => ({
   checkLimit: async () => rateLimitResult,
 }));
 
-vi.mock("@/lib/analytics-client", () => {
-  // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
-  // narrowing resolves against the same constructor identity (F5b R8).
-  class AnalyticsUpstreamError extends Error {
-    readonly status: number;
-    constructor(message: string, status: number) {
-      super(message);
-      this.name = "AnalyticsUpstreamError";
-      this.status = status;
-    }
-  }
-  class AnalyticsTimeoutError extends Error {
-    constructor(path: string, timeoutMs: number) {
-      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
-      this.name = "AnalyticsTimeoutError";
-    }
-  }
+vi.mock("@/lib/analytics-client", async () => {
+  // C9/E5 — RE-EXPORT THE SHIPPING CLASSES, never hand-rolled look-alikes.
+  //
+  // This factory used to DEFINE its own `AnalyticsUpstreamError` /
+  // `AnalyticsTimeoutError`, and the route imported those names from this same
+  // (mocked) module — so route and test agreed only because BOTH resolved to the
+  // shim. Every `instanceof` case below proved nothing about the class that
+  // ships, and the shim silently dropped the real `AnalyticsUpstreamError`'s
+  // H-1144 100–599 status fence (it would happily construct status 0 or 999,
+  // which the shipping class refuses).
+  //
+  // Sourcing them from the never-mocked `@/lib/seam-errors` leaf — where the
+  // route imports them from now — makes the identity under test the identity in
+  // production. The bindings stay present, so the `undefined`-instanceof hazard
+  // (T-140-30) stays closed.
+  const { AnalyticsUpstreamError, AnalyticsTimeoutError } = await import(
+    "@/lib/seam-errors"
+  );
   return {
     validateKey: mockValidateKey,
     encryptKey: mockEncryptKey,
@@ -129,6 +130,57 @@ describe("POST /api/keys/validate-and-encrypt", () => {
       nonce: "nonce-b64",
       kek_version: 3,
     });
+  });
+
+  /**
+   * C9/E5 — ANTI-DRIFT FENCE for the seam error class identity.
+   *
+   * Every `instanceof` case in this file is only meaningful if the class it
+   * throws is the class the route narrows against. Before this fix that was
+   * accidentally true for the wrong reason (both sides resolved to a hand-rolled
+   * look-alike in the mock factory), so the cases could not have detected a
+   * divergence — and the look-alike dropped `AnalyticsUpstreamError`'s H-1144
+   * 100–599 fence, so the test suite modelled a class the app does not ship.
+   *
+   * Asserted DIRECTLY: the classes reachable through the mocked
+   * `@/lib/analytics-client` are, by identity, the ones the never-mocked leaf
+   * ships — and the real fence is in force.
+   */
+  it("C9/E5: the mocked analytics-client exposes the SHIPPING seam error classes", async () => {
+    const mocked = await import("@/lib/analytics-client");
+    const leaf = await import("@/lib/seam-errors");
+
+    expect(mocked.AnalyticsUpstreamError).toBe(leaf.AnalyticsUpstreamError);
+    expect(mocked.AnalyticsTimeoutError).toBe(leaf.AnalyticsTimeoutError);
+
+    // The H-1144 fence a look-alike silently dropped.
+    expect(() => new leaf.AnalyticsUpstreamError("x", 0)).toThrow(RangeError);
+    expect(() => new leaf.AnalyticsUpstreamError("x", 999)).toThrow(RangeError);
+
+    // And the route narrows against that same identity end to end: an error
+    // minted from the LEAF takes the 4xx-forwarding arm, not the generic 500.
+    mockValidateKey.mockRejectedValue(
+      new leaf.AnalyticsUpstreamError("Invalid API credentials", 400),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+  });
+
+  /**
+   * C9/E5 — the same fence on the TIMEOUT class, which owns a different arm
+   * (504) than the upstream class. `AnalyticsTimeoutError` minted from the leaf
+   * must reach the route's 504 branch; a shim identity would fall through to the
+   * generic 500.
+   */
+  it("C9/E5: a leaf-minted AnalyticsTimeoutError reaches the route's 504 arm", async () => {
+    const leaf = await import("@/lib/seam-errors");
+    mockValidateKey.mockRejectedValue(
+      new leaf.AnalyticsTimeoutError("/api/validate-key", 30000),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(504);
   });
 
   // ── (1) Rate limit → 429 + Retry-After ──────────────────────────────

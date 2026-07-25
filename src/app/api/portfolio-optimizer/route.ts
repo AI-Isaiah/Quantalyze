@@ -3,11 +3,19 @@ import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { assertProfileApproved } from "@/lib/api/approval-gate";
 import { assertPortfolioOwnership } from "@/lib/queries";
-import {
-  runPortfolioOptimizer,
-  AnalyticsTimeoutError,
-} from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { runPortfolioOptimizer } from "@/lib/analytics-client";
+// C9/E5 — BOTH seam error classes come from the never-mocked leaf, not one from
+// the leaf and one from the wholesale-mocked module above. The T-140-30
+// reasoning that put `CircuitOpenError` here applies verbatim to
+// `AnalyticsTimeoutError`: reaching a class through a module a test file
+// replaces with a bare factory yields `undefined`, and `err instanceof
+// undefined` throws a TypeError from inside a catch block. `analytics-client`
+// re-exports it, so production behaviour is identical either way — but the
+// re-export is also what let `route.test.ts` mock the module with a hand-rolled
+// `FakeAnalyticsTimeoutError` and still pass: route and test agreed only because
+// BOTH resolved to the shim, so the 504 case proved nothing about the shipping
+// class.
+import { AnalyticsTimeoutError, CircuitOpenError } from "@/lib/seam-errors";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 

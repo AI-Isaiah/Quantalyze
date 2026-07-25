@@ -1,11 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
+import { validateKey, encryptKey } from "@/lib/analytics-client";
+// C9/E5 — ALL THREE seam error classes come from the never-mocked leaf, not one
+// from the leaf and two from the wholesale-mocked module above. The T-140-30
+// reasoning that put `CircuitOpenError` here applies verbatim to the other two:
+// reaching a class through a module a test file replaces with a bare factory
+// yields `undefined`, and `err instanceof undefined` throws a TypeError from
+// inside a catch block. `analytics-client` re-exports them, so production
+// behaviour is identical either way — but the re-export is also what let
+// `route.test.ts` mock the module with hand-rolled look-alikes and still pass:
+// route and test agreed only because BOTH resolved to the shim, so every
+// `instanceof` case proved nothing about the shipping class, and the shim
+// silently dropped `AnalyticsUpstreamError`'s H-1144 100–599 status fence.
 import {
-  validateKey,
-  encryptKey,
-  AnalyticsUpstreamError,
   AnalyticsTimeoutError,
-} from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+  AnalyticsUpstreamError,
+  CircuitOpenError,
+} from "@/lib/seam-errors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { withAuth } from "@/lib/api/withAuth";

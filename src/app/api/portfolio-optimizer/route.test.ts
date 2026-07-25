@@ -28,16 +28,6 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 
 vi.mock("server-only", () => ({}));
 
-const { FakeAnalyticsTimeoutError } = vi.hoisted(() => {
-  class FakeAnalyticsTimeoutError extends Error {
-    constructor() {
-      super("timeout");
-      this.name = "AnalyticsTimeoutError";
-    }
-  }
-  return { FakeAnalyticsTimeoutError };
-});
-
 const STATE = vi.hoisted(() => ({
   authUser: { id: "00000000-0000-0000-0000-000000000001" } as
     | { id: string }
@@ -94,15 +84,34 @@ vi.mock("@/lib/queries", () => ({
   },
 }));
 
-vi.mock("@/lib/analytics-client", () => ({
-  runPortfolioOptimizer: (id: string, actorId: string, ms?: number) => {
-    STATE.optimizerCalls.push({ id, actorId, ms });
-    return STATE.optimizerImpl(id, actorId, ms);
-  },
-  AnalyticsTimeoutError: FakeAnalyticsTimeoutError,
-}));
+vi.mock("@/lib/analytics-client", async () => {
+  // C9/E5 — RE-EXPORT THE SHIPPING CLASS, never a hand-rolled look-alike.
+  //
+  // This factory used to expose a `FakeAnalyticsTimeoutError`, and the route
+  // imported `AnalyticsTimeoutError` from this same (mocked) module — so route
+  // and test agreed only because BOTH resolved to the shim. The 504 case below
+  // proved nothing about the class that ships and would have stayed green
+  // through a real divergence.
+  //
+  // Sourcing it from the never-mocked `@/lib/seam-errors` leaf — where the route
+  // imports it from now — makes the identity under test the identity in
+  // production, and keeps the binding present so the `undefined`-instanceof
+  // hazard (T-140-30) stays closed.
+  const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
+  return {
+    runPortfolioOptimizer: (id: string, actorId: string, ms?: number) => {
+      STATE.optimizerCalls.push({ id, actorId, ms });
+      return STATE.optimizerImpl(id, actorId, ms);
+    },
+    AnalyticsTimeoutError,
+  };
+});
 
 import { POST } from "./route";
+// C9/E5 — the SHIPPING class, statically imported from the never-mocked leaf.
+// Nothing mocks `@/lib/seam-errors`, so this binding is the exact constructor
+// the route narrows against in production.
+import { AnalyticsTimeoutError } from "@/lib/seam-errors";
 
 function buildRequest(body: unknown): NextRequest {
   return new NextRequest("https://example.com/api/portfolio-optimizer", {
@@ -177,7 +186,7 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
 
   it("C-0106 #4: returns 504 on AnalyticsTimeoutError", async () => {
     STATE.optimizerImpl = async () => {
-      throw new FakeAnalyticsTimeoutError();
+      throw new AnalyticsTimeoutError("/api/portfolio-optimizer", 15000);
     };
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(504);
@@ -247,7 +256,7 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
 
   it("red-team R-0002: 504 timeout refunds the 5/min token (analytics-side failure)", async () => {
     STATE.optimizerImpl = async () => {
-      throw new FakeAnalyticsTimeoutError();
+      throw new AnalyticsTimeoutError("/api/portfolio-optimizer", 15000);
     };
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(504);

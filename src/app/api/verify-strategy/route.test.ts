@@ -21,7 +21,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 
-const verifyStrategyMock = vi.fn();
+// C9/E5 — the route's ACTUAL seam delegate. The old `verifyStrategyMock` named a
+// function this route never calls, so its negative assertions were vacuous.
+const postProcessKeyMock = vi.fn();
 // Daily-cap count returned by the admin verification_requests head/count
 // select. Mutated per test to drive the 429 branch.
 let verificationCount = 0;
@@ -38,29 +40,25 @@ vi.mock("@/lib/ratelimit", () => ({
   getClientIp: () => "127.0.0.1",
 }));
 
-vi.mock("@/lib/analytics-client", () => {
-  // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
-  // narrowing resolves against the same constructor identity (F5b R8).
-  class AnalyticsUpstreamError extends Error {
-    readonly status: number;
-    constructor(message: string, status: number) {
-      super(message);
-      this.name = "AnalyticsUpstreamError";
-      this.status = status;
-    }
-  }
-  class AnalyticsTimeoutError extends Error {
-    constructor(path: string, timeoutMs: number) {
-      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
-      this.name = "AnalyticsTimeoutError";
-    }
-  }
-  return {
-    verifyStrategy: verifyStrategyMock,
-    AnalyticsUpstreamError,
-    AnalyticsTimeoutError,
-  };
-});
+// C9/E5 — the dead `vi.mock("@/lib/analytics-client")` factory that used to sit
+// here is GONE. It defined hand-rolled `AnalyticsUpstreamError` /
+// `AnalyticsTimeoutError` look-alikes "so the route's instanceof narrowing
+// resolves against the same constructor identity" — but this route does not
+// import `@/lib/analytics-client` at all (it reaches the seam through
+// `postProcessKey`), so the factory replaced a module nothing under test loaded
+// and the look-alikes narrowed nothing. It also exported `verifyStrategy`, a
+// function this route has never called, which made every
+// `expect(verifyStrategyMock).not.toHaveBeenCalled()` below vacuously true: a
+// guard that could not fail no matter how the route was rewritten.
+//
+// The short-circuit guards now name the REAL delegate. Later cases in this file
+// `vi.doMock` this same path with their own bodies (and the G6 case
+// `vi.doUnmock`s it to drive the real client) — those registrations take
+// precedence over this one, so this default only governs the validation cases
+// that must never reach the seam at all.
+vi.mock("@/lib/process-key-client", () => ({
+  postProcessKey: postProcessKeyMock,
+}));
 
 // F5b (R8): spy on captureToSentry so the 5xx-redaction test can pin that the
 // internal detail still reaches Sentry now that err.message is no longer echoed.
@@ -116,8 +114,10 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     verificationCount = 0;
-    verifyStrategyMock.mockResolvedValue({
-      verification_id: "22222222-2222-2222-2222-222222222222",
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      response: null,
+      body: { verification_id: "22222222-2222-2222-2222-222222222222" },
     });
   });
 
@@ -130,7 +130,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     const res = await POST(postReq("{not json", true));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Invalid JSON body");
-    expect(verifyStrategyMock).not.toHaveBeenCalled();
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
   });
 
   it("returns 400 'Missing required fields' when api_secret is missing", async () => {
@@ -142,7 +142,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     const body = await res.json();
     expect(body.error).toContain("Missing required fields");
     // The delegate must never run on a malformed payload.
-    expect(verifyStrategyMock).not.toHaveBeenCalled();
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
   });
 
   it("returns 400 'Invalid email address' when the email fails the regex", async () => {
@@ -150,7 +150,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     const res = await POST(postReq({ ...VALID_BODY, email: "not-an-email" }));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Invalid email address");
-    expect(verifyStrategyMock).not.toHaveBeenCalled();
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
   });
 
   it("returns 400 'Unsupported exchange' when the exchange is not in UI_EXCHANGE_CODES", async () => {
@@ -159,7 +159,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toContain("Unsupported exchange");
-    expect(verifyStrategyMock).not.toHaveBeenCalled();
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
   });
 
   // F3 (Phase 122): sfox is in the widened key-save allowlist SUPPORTED_EXCHANGES
@@ -177,7 +177,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
       // The disclosed "Supported: …" enum must NOT name sfox pre-launch.
       expect(body.error.toLowerCase()).not.toContain("sfox");
       // Never forwarded to the teaser pipeline (no half-accept).
-      expect(verifyStrategyMock).not.toHaveBeenCalled();
+      expect(postProcessKeyMock).not.toHaveBeenCalled();
     },
   );
 
@@ -205,7 +205,7 @@ describe("POST /api/verify-strategy — input validation (H-0335)", () => {
       const body = await res.json();
       expect(body.error).toContain("not yet available");
       // Never forwarded to the teaser pipeline despite passing the offer gate.
-      expect(verifyStrategyMock).not.toHaveBeenCalled();
+      expect(postProcessKeyMock).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock("@/lib/utils");
       vi.doUnmock("@/lib/closed-sets");
