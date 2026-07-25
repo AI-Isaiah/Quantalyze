@@ -52,15 +52,26 @@ const shared = vi.hoisted(() => {
     sharedStore: true,
     /** true → redis.get rejects, exercising the fail-OPEN catch arm. */
     throwOnGet: false,
+    /**
+     * true → redis.get NEVER SETTLES. This is the CR-02 shape: a stalled
+     * Upstash REST call is not a rejection, so the fail-OPEN catch arm does
+     * nothing for it and only a deadline can.
+     */
+    hangOnGet: false,
+    /** true → the failure counter never settles (the write half of CR-02). */
+    hangOnLimit: false,
     /** true → the failure counter rejects, exercising the swallow-and-log arm. */
     throwOnLimit: false,
   };
+  /** Config object the core passed to `Redis.fromEnv()`, captured per context. */
+  const captured = { redisConfig: undefined as Record<string, unknown> | undefined };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
   return {
     store,
     mode,
     ctx,
+    captured,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -79,13 +90,21 @@ vi.mock("@upstash/redis", async () => {
   const { fakeRedisFor } = await import("@/test/helpers/upstash-breaker");
   return {
     Redis: {
-      fromEnv: () => {
+      fromEnv: (config?: Record<string, unknown>) => {
+        // CR-02 — the core must now construct its client with retry disabled
+        // and a per-request abort-signal FACTORY. Capture the config so a test
+        // can assert the wiring rather than trusting the SDK defaults.
+        shared.captured.redisConfig = config;
         const base = fakeRedisFor(shared.beginContext());
         return {
           ...base,
           get: async (key: string) => {
             if (shared.mode.throwOnGet) {
               throw new Error("upstash: connection reset");
+            }
+            if (shared.mode.hangOnGet) {
+              // Never settles — a stalled REST call, not a rejection.
+              return new Promise<never>(() => {});
             }
             return base.get(key);
           },
@@ -110,6 +129,9 @@ vi.mock("@upstash/ratelimit", async () => {
       limit(identifier: string) {
         if (shared.mode.throwOnLimit) {
           return Promise.reject(new Error("upstash: limiter unavailable"));
+        }
+        if (shared.mode.hangOnLimit) {
+          return new Promise<never>(() => {});
         }
         return this.fake.limit(identifier);
       }
@@ -142,6 +164,11 @@ beforeEach(() => {
   shared.ctx.store = shared.store;
   shared.mode.sharedStore = true;
   shared.mode.throwOnGet = false;
+  // A leaked hang flag would stall every later test at the store deadline
+  // instead of failing loudly, so both reset here alongside throwOnLimit.
+  shared.mode.hangOnGet = false;
+  shared.mode.hangOnLimit = false;
+  shared.captured.redisConfig = undefined;
   // Every flag resets. A leaked `throwOnLimit` silently disables the failure
   // counter for every later test, which makes "the breaker did not trip"
   // assertions pass for entirely the wrong reason.
@@ -250,6 +277,97 @@ describe("isBreakerOpen", () => {
       mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
     ).resolves.toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * CR-02 — the breaker's own store must be a HINT, never a dependency.
+ *
+ * `isBreakerOpen()` runs BEFORE the seam's `AbortSignal.timeout` is
+ * constructed, and the `@upstash/redis` defaults are 5 retries with
+ * exponential backoff and NO signal at all. A regional Upstash incident that
+ * STALLS rather than rejects would therefore hold every seam route until
+ * `maxDuration = 300` — a feature added to stop Railway holding lambda slots
+ * would have handed that power to a second, unrelated service. The pre-existing
+ * fail-OPEN tests do nothing here: they all cover REJECTIONS, and a hang is not
+ * a rejection.
+ *
+ * Teeth: with the deadline removed these tests do not fail on an assertion,
+ * they never return — the suite times out. That is the production symptom
+ * reproduced exactly.
+ */
+describe("breaker store is bounded (CR-02)", () => {
+  it("constructs the client with retries disabled and a per-request abort factory", async () => {
+    await import("./resilient-fetch");
+    const mod = await import("./resilient-fetch");
+    const config = shared.captured.redisConfig as
+      | { retry?: { retries?: number }; signal?: () => AbortSignal }
+      | undefined;
+
+    expect(
+      config,
+      "Redis.fromEnv() was called with NO config — the SDK defaults (5 retries, " +
+        "~4.3s of backoff sleeps, no signal) are back in front of every seam call.",
+    ).toBeDefined();
+    expect(config!.retry?.retries).toBeLessThanOrEqual(1);
+    // A FACTORY, not a shared signal: the SDK calls it per request, so a single
+    // module-lifetime signal would abort every command after the first 250ms.
+    expect(typeof config!.signal).toBe("function");
+
+    const signal = config!.signal!();
+    expect(signal).toBeInstanceOf(AbortSignal);
+    expect(signal.aborted).toBe(false);
+    // And it is genuinely wired to the store budget rather than being some
+    // arbitrary never-firing signal.
+    await new Promise((r) => setTimeout(r, mod.BREAKER_STORE_TIMEOUT_MS + 100));
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("a HANGING breaker read does not delay the seam call", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.hangOnGet = true;
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    const started = Date.now();
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).resolves.toBeDefined();
+    const elapsed = Date.now() - started;
+
+    // Fail OPEN: the real request still went out.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Bounded, with slack for CI scheduling — the point is 250ms-ish, not 300s.
+    expect(elapsed).toBeLessThan(mod.BREAKER_STORE_TIMEOUT_MS * 8);
+    // Never silent: the request proceeded UNPROTECTED and that is an
+    // operational fact.
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("a HANGING breaker read still resolves isBreakerOpen to closed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // Even with the breaker genuinely tripped in the store: an unreadable store
+    // must never DENY traffic, or the breaker has become the outage.
+    seedBreakerOpen(shared.store);
+    shared.mode.hangOnGet = true;
+    const mod = await import("./resilient-fetch");
+
+    await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
+  });
+
+  it("a HANGING failure WRITE does not extend an already-failing request", async () => {
+    // recordSeamFailure runs inside the caller's catch arm — exactly when
+    // Railway is already sick, which is when a shared regional Upstash is most
+    // likely to be struggling too (correlated failure).
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.hangOnLimit = true;
+    const mod = await import("./resilient-fetch");
+
+    const started = Date.now();
+    await expect(mod.recordSeamFailure()).resolves.toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(
+      mod.BREAKER_STORE_TIMEOUT_MS * 8,
+    );
   });
 });
 

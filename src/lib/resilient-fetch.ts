@@ -40,8 +40,13 @@ import { CircuitOpenError } from "./seam-errors";
  *    failure re-increments the counter and can re-trip. "Missing half-open" is
  *    not a defect here — it is the design.
  * 4. FAIL OPEN, ALWAYS. Every failure mode of the breaker's own store (client
- *    unconfigured, `get` throwing, malformed value) resolves to "closed,
- *    proceed" in ALL environments, production included. This is a deliberate
+ *    unconfigured, `get` throwing, a malformed value, and — since CR-02 — a
+ *    store that merely HANGS rather than rejecting) resolves to "closed,
+ *    proceed" in ALL environments, production included. The latency half is
+ *    load-bearing and was originally missing: the enumeration covered
+ *    rejections only, while a stalled REST call is the likeliest Upstash
+ *    degradation mode and the one that can hold a lambda. See
+ *    `BREAKER_STORE_TIMEOUT_MS`. This is a deliberate
  *    inversion of `src/lib/ratelimit.ts`, which fails CLOSED on a production
  *    misconfiguration. The reasoning differs because the mechanisms differ: a
  *    silently-disabled rate limiter removes a regulatory cap, whereas a
@@ -112,6 +117,29 @@ export const BREAKER_COOLDOWN_S = 30;
  * Matches `BREAKER_COOLDOWN_S` so a client never sees a wildly wrong hint.
  */
 export const DEFAULT_RETRY_AFTER_S = 30;
+
+/**
+ * The breaker's own store I/O budget. THE BREAKER IS A HINT, NEVER A
+ * DEPENDENCY (CR-02).
+ *
+ * `isBreakerOpen()` runs BEFORE `AbortSignal.timeout` is constructed for the
+ * real request, so anything slow here is pure, unbudgeted addition to every
+ * seam call. The `@upstash/redis` defaults are hostile to that position: 5
+ * retries with `Math.exp(i) * 50` backoff (~4.3s of sleeps) and — because
+ * nothing was passed — NO abort signal at all, so each of the 6 attempts would
+ * wait indefinitely on a stalled connection. A regional Upstash incident that
+ * STALLS rather than rejects would then hold every seam route (bridge,
+ * simulator, key-connect, the public teaser) until `maxDuration = 300`: a
+ * feature added to stop Railway holding lambda slots would have handed that
+ * power to a second, unrelated service.
+ *
+ * The fail-OPEN guarantee in locked decision 4 enumerated REJECTIONS. Latency
+ * is not a rejection, so it was not covered. 250ms is well above a healthy
+ * Upstash round trip from the same region and far below anything a caller
+ * would notice; a breaker read that needs longer is already too stale to be
+ * worth waiting for.
+ */
+export const BREAKER_STORE_TIMEOUT_MS = 250;
 
 /**
  * Retries performed by the core. ZERO in this phase, by design.
@@ -395,8 +423,59 @@ export const SEAM_EXCLUSIONS: Record<string, string> = {
  */
 const redis =
   process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
-    ? Redis.fromEnv()
+    ? Redis.fromEnv({
+        // CR-02 — the SDK defaults (5 retries, exponential backoff, no signal)
+        // turn one slow store into ~4.3s of sleeps plus unbounded waiting, in
+        // front of every seam deadline. A breaker read that needs a retry is
+        // already too slow to be useful: take the single attempt and fail OPEN.
+        retry: { retries: 0, backoff: () => 0 },
+        // A FACTORY, not a shared signal: the SDK calls it per request
+        // (`isSignalFunction ? signal() : signal`), so a module-lifetime signal
+        // would abort every later command once the first 250ms elapsed.
+        signal: () => AbortSignal.timeout(BREAKER_STORE_TIMEOUT_MS),
+      })
     : null;
+
+/** Sentinel distinguishing "the store did not answer in time" from a real value. */
+const STORE_TIMED_OUT = Symbol("breaker-store-timeout");
+
+/**
+ * Run one breaker store operation under `BREAKER_STORE_TIMEOUT_MS`.
+ *
+ * BELT AND BRACES, deliberately duplicating the client-level `signal` above.
+ * The signal depends on the SDK honouring it on every code path and on a future
+ * SDK default not quietly re-opening the hole; this race depends on nothing but
+ * the event loop. Neither alone is sufficient evidence for a claim as strong as
+ * "the breaker can never cost more than 250ms", which is what the module
+ * docblock now promises.
+ *
+ * The loser of the race still has a handler attached by `Promise.race`, so a
+ * late rejection from a hung store cannot surface as an unhandled rejection.
+ */
+async function withStoreDeadline<T>(
+  op: Promise<T>,
+  label: string,
+): Promise<T | typeof STORE_TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<typeof STORE_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => resolve(STORE_TIMED_OUT), BREAKER_STORE_TIMEOUT_MS);
+  });
+  try {
+    const result = await Promise.race([op, deadline]);
+    if (result === STORE_TIMED_OUT) {
+      // Never silent: a store slow enough to be abandoned is an operational
+      // fact, and the request proceeds unprotected because of it.
+      console.error(
+        `[resilient-fetch] breaker store ${label} exceeded ${BREAKER_STORE_TIMEOUT_MS}ms — failing OPEN`,
+      );
+    }
+    return result;
+  } finally {
+    // Never leave a pending timer holding the function alive after the answer
+    // is known.
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 if (!redis) {
   // Unconfigured notice — ONE unconditional warning at module load, never per
@@ -451,10 +530,24 @@ export async function isBreakerOpen(): Promise<{
 }> {
   if (!redis) return { open: false };
   try {
-    const state = await redis.get<string>(BREAKER_KEY);
-    if (state !== "open") return { open: false };
-    const ttl = await redis.ttl(BREAKER_KEY);
-    return { open: true, retryAfterS: ttl > 0 ? ttl : DEFAULT_RETRY_AFTER_S };
+    // ONE deadline over the whole check, not one per command: the pair is what
+    // sits in front of the seam, and two independently-bounded reads would let
+    // the check cost 2x the advertised ceiling.
+    const state = await withStoreDeadline(
+      (async () => {
+        const value = await redis.get<string>(BREAKER_KEY);
+        if (value !== "open") return { open: false as const };
+        const ttl = await redis.ttl(BREAKER_KEY);
+        return {
+          open: true as const,
+          retryAfterS: ttl > 0 ? ttl : DEFAULT_RETRY_AFTER_S,
+        };
+      })(),
+      "read",
+    );
+    // Timed out → the breaker is UNKNOWN, and unknown means proceed.
+    if (state === STORE_TIMED_OUT) return { open: false };
+    return state;
   } catch (err) {
     console.error(
       "[resilient-fetch] breaker check failed — failing OPEN:",
@@ -479,21 +572,32 @@ export async function isBreakerOpen(): Promise<{
 export async function recordSeamFailure(): Promise<void> {
   if (!redis || !breakerLimiter) return;
   try {
-    const { success, remaining } = await breakerLimiter.limit(
-      `${BREAKER_KEY}:failures`,
+    // CR-02 — bounded like the read, and for a sharper reason: this runs inside
+    // the caller's catch arm, i.e. exactly when Railway is already failing,
+    // which is precisely when a shared regional Upstash is most likely to be
+    // under load too (correlated failure). Bookkeeping must never extend a
+    // request whose outcome is already decided.
+    await withStoreDeadline(
+      (async () => {
+        const { success, remaining } = await breakerLimiter.limit(
+          `${BREAKER_KEY}:failures`,
+        );
+        // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`)
+        // and denies the (N+1)th. The breaker must open ON the threshold-th
+        // failure, not one failure later, so exhaustion counts as a trip signal
+        // alongside outright denial.
+        if (success && remaining > 0) return;
+        // `nx: true` makes concurrent trips idempotent: the first writer's TTL
+        // stands, so a second instance tripping 200ms later cannot ratchet the
+        // cooldown window open. Benign race, deliberately not serialised with
+        // Lua.
+        await redis.set(BREAKER_KEY, "open", {
+          ex: BREAKER_COOLDOWN_S,
+          nx: true,
+        });
+      })(),
+      "write",
     );
-    // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`) and
-    // denies the (N+1)th. The breaker must open ON the threshold-th failure,
-    // not one failure later, so exhaustion counts as a trip signal alongside
-    // outright denial.
-    if (success && remaining > 0) return;
-    // `nx: true` makes concurrent trips idempotent: the first writer's TTL
-    // stands, so a second instance tripping 200ms later cannot ratchet the
-    // cooldown window open. Benign race, deliberately not serialised with Lua.
-    await redis.set(BREAKER_KEY, "open", {
-      ex: BREAKER_COOLDOWN_S,
-      nx: true,
-    });
   } catch (err) {
     console.error(
       "[resilient-fetch] failed to record seam failure — breaker state may be stale:",
