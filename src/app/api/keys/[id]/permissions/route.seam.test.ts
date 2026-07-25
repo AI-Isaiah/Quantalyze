@@ -3,20 +3,25 @@ import { NextRequest } from "next/server";
 import { seedBreakerOpen } from "@/test/helpers/upstash-breaker";
 
 /**
- * `next/dist/server/app-render/async-local-storage.js` reads
- * `globalThis.AsyncLocalStorage` ONCE, at module evaluation, and falls back to a
- * stub whose every method throws. jsdom does not expose it. The install must
- * therefore happen before ANY `next/*` import in this file is evaluated —
- * `vi.hoisted` is the only hook that runs that early (a `beforeEach` is far too
- * late: `next/server` below would already have captured `undefined`, and the
- * route's `unstable_cache` call would throw an invariant that the handler's
- * catch would faithfully report as a generic 502, hiding every case here).
+ * HOST GLOBAL: `globalThis.AsyncLocalStorage` is installed by `src/test-setup.ts`.
+ *
+ * `next/dist/server/app-render/async-local-storage.js` reads it ONCE, at module
+ * evaluation, and otherwise substitutes a stub whose `run()` throws the E504
+ * invariant. jsdom does not expose it, and `unstable_cache` (exercised for real
+ * below) is built on that storage — so the global must exist before the first
+ * `next/*` module in the worker is evaluated.
+ *
+ * This file originally installed it here, from an ASYNC `vi.hoisted` block. That
+ * is a RACE rather than a fix: the block is hoisted above the imports, but its
+ * `await import("node:async_hooks")` resolves on a later microtask, so under
+ * full-suite worker contention this file's own imports could evaluate first and
+ * capture `undefined`. It failed roughly one full-suite run in three, and it
+ * failed SILENTLY — the invariant surfaced as a generic upstream 502 that the
+ * route's catch classified plausibly, so all three cases here reported a wrong
+ * status rather than an obvious harness error. Setup files are fully awaited
+ * before any test module loads, which makes the install deterministic; see the
+ * comment on the static import in `src/test-setup.ts`.
  */
-vi.hoisted(async () => {
-  const { AsyncLocalStorage } = await import("node:async_hooks");
-  (globalThis as unknown as { AsyncLocalStorage: unknown }).AsyncLocalStorage =
-    AsyncLocalStorage;
-});
 
 /**
  * Phase 140 / SEAM-01 + T-140-32 — route-level SEAM proof for
