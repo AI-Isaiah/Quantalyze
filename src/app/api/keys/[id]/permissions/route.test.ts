@@ -16,6 +16,12 @@ import { NextRequest } from "next/server";
  * real — the next/cache mock either runs the body (MISS, drives a stubbed
  * upstream fetch) or replays a memoized value WITHOUT running it (HIT) — rather
  * than injecting a synthetic timestamp.
+ *
+ * Phase 140 / SEAM-01 + T-140-32 addendum: the upstream call now goes through
+ * the shared resilience core, INSIDE the cached callback. The three cases in the
+ * final describe block pin the breaker's behaviour across that cache boundary
+ * against the mocked cache here; the REAL `next/cache` boundary (which this file
+ * necessarily replaces) is proved separately in `route.seam.test.ts`.
  */
 
 vi.mock("server-only", () => ({}));
@@ -41,7 +47,52 @@ const STATE = vi.hoisted(() => ({
   upstreamPayload: {} as Record<string, unknown>,
   upstreamStatus: 200 as number,
   upstreamThrow: false as boolean,
+  // Phase 140 / T-140-32: a FAITHFUL memoizing cache. When true the mock stores
+  // the RESOLVED value under the keyParts and replays it on the next call —
+  // and, exactly as the fork does, writes NOTHING when the body throws. This is
+  // what makes "a breaker error must not be cached for 60s" a falsifiable
+  // assertion rather than a tautology of the passthrough mock.
+  memoize: false as boolean,
+  memoStore: new Map<string, unknown>(),
 }));
+
+/**
+ * Phase 140 / SEAM-01 — control surface over the shared resilience core.
+ *
+ * Partial mock (the 140-03 spread-`importOriginal` pattern): every export stays
+ * REAL — including `resilientFetch`'s base URL, budget and `AbortSignal` — and
+ * only the breaker decision is driven from the test. A full factory would
+ * re-implement the transport and could not detect a regression in it.
+ */
+const RF = vi.hoisted(() => ({
+  breakerOpen: false as boolean,
+  retryAfterS: 30 as number,
+  calls: 0 as number,
+  lastCall: null as
+    | { budgetKey: string; path: string; init: Record<string, unknown> }
+    | null,
+}));
+
+vi.mock("@/lib/resilient-fetch", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/resilient-fetch")>();
+  // The leaf is never mocked, so this is the SAME class identity the route's
+  // `instanceof` branch tests against.
+  const { CircuitOpenError } = await import("@/lib/seam-errors");
+  return {
+    ...actual,
+    resilientFetch: async (
+      budgetKey: Parameters<typeof actual.resilientFetch>[0],
+      path: string,
+      init: Parameters<typeof actual.resilientFetch>[2] = {},
+    ) => {
+      RF.calls += 1;
+      RF.lastCall = { budgetKey, path, init: init as Record<string, unknown> };
+      if (RF.breakerOpen) throw new CircuitOpenError(RF.retryAfterS);
+      return actual.resilientFetch(budgetKey, path, init);
+    },
+  };
+});
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
@@ -77,7 +128,7 @@ vi.mock("@/lib/ratelimit", () => ({
 // body (so the route's didDecrypt closure flag stays false); a MISS runs the
 // body (which flips didDecrypt and calls the stubbed upstream fetch).
 vi.mock("next/cache", () => ({
-  unstable_cache: (fn: () => Promise<unknown>) => {
+  unstable_cache: (fn: () => Promise<unknown>, keyParts?: string[]) => {
     return async () => {
       if (STATE.simulateCacheHit) return STATE.cachedHitPayload;
       if (STATE.simulateStaleRevalidate) {
@@ -86,6 +137,20 @@ vi.mock("next/cache", () => ({
         // return the prior STALE value immediately, as Next does.
         void fn().catch(() => {});
         return STATE.stalePayload;
+      }
+      if (STATE.memoize) {
+        const memoKey = (keyParts ?? []).join(",");
+        if (STATE.memoStore.has(memoKey)) return STATE.memoStore.get(memoKey);
+        // FIDELITY, and the whole point of this branch: the fork `await`s the
+        // callback and writes the entry only AFTER it RESOLVES
+        // (next/dist/server/web/spec-extension/unstable-cache.js — the
+        // `cacheNewResult(result, ...)` call sits after `const result = await
+        // ...cb(...)`). A rejection therefore leaves NO entry. Storing the
+        // value before/despite a throw here would make the "not cached"
+        // assertion below unfalsifiable.
+        const value = await fn();
+        STATE.memoStore.set(memoKey, value);
+        return value;
       }
       return fn();
     };
@@ -131,6 +196,12 @@ beforeEach(() => {
   };
   STATE.upstreamStatus = 200;
   STATE.upstreamThrow = false;
+  STATE.memoize = false;
+  STATE.memoStore.clear();
+  RF.breakerOpen = false;
+  RF.retryAfterS = 30;
+  RF.calls = 0;
+  RF.lastCall = null;
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
   // Stub the upstream Python call the cache-miss body makes.
   vi.stubGlobal(
@@ -359,5 +430,108 @@ describe("GET /api/keys/[id]/permissions — decrypt-audit cache honesty (M-0325
     expect(audit).toBeDefined();
     // A real decrypt happened in the background → correctly NOT a cache hit.
     expect(audit!.args.p_metadata).toMatchObject({ cache_hit: false });
+  });
+});
+
+/**
+ * Phase 140 / SEAM-01 + SEAM-03 — the third Railway seam, and the breaker's
+ * behaviour ACROSS the cache boundary it sits behind.
+ *
+ * The upstream call is now `resilientFetch("keys-permissions", ...)`, issued
+ * from inside the cached callback. Two consequences are load-bearing and are
+ * pinned here:
+ *
+ *   1. T-140-32 — a breaker trip must NOT become a 60s cache entry. The Next
+ *      layer's window (60s) is DOUBLE the breaker cooldown (30s), so a cached
+ *      error would keep answering 503 for half a minute after Railway had
+ *      already recovered: the mitigation would have become the outage. The
+ *      route therefore THROWS out of the callback (never returns the error as a
+ *      value), which leaves no entry — asserted by re-attempting after the
+ *      breaker clears.
+ *   2. A cache HIT must not consult the breaker at all. The short-circuit is
+ *      for calls that would otherwise cross the seam; a hit crosses nothing.
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+describe("GET /api/keys/[id]/permissions — breaker across the unstable_cache boundary", () => {
+  it("cache MISS + breaker open → 503 CIRCUIT_OPEN + Retry-After, and the error is NOT cached", async () => {
+    STATE.memoize = true;
+    RF.breakerOpen = true;
+    // Deliberately NOT 30: 30 is simultaneously BREAKER_COOLDOWN_S and
+    // DEFAULT_RETRY_AFTER_S, so a hardcoded "30" would pass a 30-valued
+    // assertion while forwarding nothing.
+    RF.retryAfterS = 17;
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("17");
+    const raw = await res.text();
+    const body = JSON.parse(raw);
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    expect(body.error).toBe(CIRCUIT_OPEN_COPY);
+    // Static copy: no infra vocabulary reaches an authed client.
+    expect(raw).not.toMatch(/breaker|upstash|railway|analytics service circuit/i);
+    // The seam was NOT crossed.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // No decrypt happened, so no decrypt audit row may claim one.
+    await drainAuditMicrotasks();
+    expect(
+      STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
+    ).toHaveLength(0);
+
+    // ── T-140-32: the failure left NO cache entry ──────────────────────────
+    expect(STATE.memoStore.size).toBe(0);
+    RF.breakerOpen = false;
+    const res2 = await GET(makeRequest(KEY_ID));
+    expect(res2.status).toBe(200);
+    expect((await res2.json()).read).toBe(true);
+    // The second call genuinely re-attempted the seam rather than replaying a
+    // memoized failure — this is the assertion a cached-error regression fails.
+    expect(RF.calls).toBe(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    consoleErr.mockRestore();
+  });
+
+  it("cache HIT → the breaker is never consulted and the seam is never touched", async () => {
+    STATE.simulateCacheHit = true;
+    // The breaker is OPEN, and it must make no difference whatsoever: the
+    // cached callback does not run, so nothing reads Redis and nothing fetches.
+    RF.breakerOpen = true;
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).read).toBe(true);
+    expect(RF.calls).toBe(0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(res.headers.get("Retry-After")).toBeNull();
+  });
+
+  it("routes the probe through the core byte-for-byte (path, query-free, headers, budget key)", async () => {
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+
+    expect(RF.lastCall).not.toBeNull();
+    expect(RF.lastCall!.budgetKey).toBe("keys-permissions");
+    // Same path the raw fetch used, id still percent-encoded.
+    expect(RF.lastCall!.path).toBe(
+      `/internal/keys/${encodeURIComponent(KEY_ID)}/permissions`,
+    );
+    expect(RF.lastCall!.init.method).toBe("POST");
+    expect(RF.lastCall!.init.headers).toMatchObject({
+      "Content-Type": "application/json",
+      "X-Internal-Token": "test-internal-token",
+    });
+    // The core owns the deadline — the caller must not pass its own.
+    expect(RF.lastCall!.init.signal).toBeUndefined();
   });
 });
