@@ -494,6 +494,28 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
    * SEAM-02 exists to end.
    */
   timeoutMsOverride?: number;
+  /**
+   * May a failure on THIS call increment the shared breaker counter?
+   *
+   * DEFAULTS TO TRUE, so every authenticated call site is unchanged. Set it
+   * FALSE on any call whose payload an ANONYMOUS caller controls (today: the
+   * public landing-page teaser, `verify-strategy` → `postProcessKey({flow_type:
+   * "teaser"})`, which has no `withAuth` and no session read at all).
+   *
+   * WHY (CR-04). There is exactly ONE breaker key shared by every tenant and
+   * every budget key. An input-dependent unhandled exception on the FastAPI
+   * side is a 500 and is fully attributable to one caller's payload, so five
+   * such requests inside `BREAKER_WINDOW` — trivially reachable from a public
+   * route across a handful of IPs — would deny key-connect, sync, the optimizer
+   * and admin match to EVERY tenant for `BREAKER_COOLDOWN_S`, repeatable
+   * indefinitely at near-zero cost.
+   *
+   * READ-ONLY, NOT EXEMPT. This flag governs WRITES only. An opted-out call
+   * still consults `isBreakerOpen()` and still fails fast while the circuit is
+   * open — sparing a dying Railway is the whole point, and the public teaser is
+   * the loudest single source of seam traffic.
+   */
+  recordFailures?: boolean;
 };
 
 /**
@@ -518,7 +540,7 @@ export async function resilientFetch(
   path: string,
   init: ResilientFetchInit = {},
 ): Promise<Response> {
-  const { timeoutMsOverride, ...requestInit } = init;
+  const { timeoutMsOverride, recordFailures = true, ...requestInit } = init;
   const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
 
   const breaker = await isBreakerOpen();
@@ -552,14 +574,19 @@ export async function resilientFetch(
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
         : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`,
     );
-    await recordSeamFailure();
+    // `recordFailures: false` (the anonymous surface) still fails fast on an
+    // OPEN breaker above; it just may not DRIVE the shared counter. See the
+    // flag's docblock on ResilientFetchInit for the CR-04 reasoning.
+    if (recordFailures) {
+      await recordSeamFailure();
+    }
     // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
     // typed errors (AnalyticsTimeoutError / UPSTREAM_TIMEOUT); wrapping here
     // would silently reclassify every timeout in the codebase.
     throw err;
   }
 
-  if (res.status >= 500) {
+  if (res.status >= 500 && recordFailures) {
     await recordSeamFailure();
   }
   // 4xx NEVER records. A user's bad API key returning 400 is Railway working

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
+  DEFAULT_RETRY_AFTER_S,
   resilientFetch,
   SEAM_BUDGETS,
   type SeamBudgetKey,
@@ -105,6 +106,30 @@ export interface PostProcessKeyArgs {
    * validate-only / teaser / resync flows, which never hit a user-auth RPC.
    */
   userAccessToken?: string;
+  /**
+   * TRUE when this call originates from a PUBLIC, unauthenticated surface —
+   * today exactly one caller: the landing-page teaser (`/api/verify-strategy`,
+   * which has no `withAuth` and reads no session; only same-origin + a per-IP
+   * limiter stand in front of it). DEFAULTS TO FALSE so every authenticated
+   * call site is byte-unchanged.
+   *
+   * Two things change, and both are about not letting an anonymous caller
+   * DRIVE or READ shared infrastructure state:
+   *
+   *  1. CR-04 — failures on this call do NOT increment the single global
+   *     breaker counter (`recordFailures: false` on the core). An anonymous
+   *     payload that trips an unhandled FastAPI exception is a 500 attributable
+   *     to ONE caller; five of them would otherwise open `breaker:railway` and
+   *     deny the whole seam to every tenant for the cooldown. The call is still
+   *     BLOCKED by an already-open breaker — read, never write.
+   *
+   *  2. CR-05 — the breaker 503 advertises the STATIC `DEFAULT_RETRY_AFTER_S`
+   *     instead of the live `redis.ttl`. The real TTL tells an anonymous poller
+   *     exactly how many seconds of degradation remain, which is a free,
+   *     timestamped readout of production health from a public surface (and,
+   *     combined with (1) pre-fix, both the lever and the readout).
+   */
+  unauthenticated?: boolean;
 }
 
 export type PostProcessKeyResult =
@@ -170,6 +195,9 @@ export async function postProcessKey(
         context: args.context,
       }),
       cache: "no-store",
+      // CR-04 — an anonymous caller may READ breaker state but must never
+      // WRITE it. See PostProcessKeyArgs.unauthenticated.
+      recordFailures: !args.unauthenticated,
     });
   } catch (err) {
     const tag = args.routeTag ?? "process-key-client";
@@ -182,6 +210,14 @@ export async function postProcessKey(
         `[${tag}] /process-key short-circuited — the analytics circuit is open`,
         { correlation_id: correlationId, retry_after_s: err.retryAfterS },
       );
+      // CR-05 — the live TTL is a precise readout of how degraded production is
+      // right now. Authenticated callers get it (it is genuinely actionable and
+      // is the same class of hint `rateLimitDenyJson` already publishes); the
+      // anonymous surface gets the STATIC cooldown constant instead. The server
+      // log above keeps the real value either way.
+      const advertisedRetryAfterS = args.unauthenticated
+        ? DEFAULT_RETRY_AFTER_S
+        : err.retryAfterS;
       return {
         ok: false,
         response: NextResponse.json(
@@ -194,7 +230,7 @@ export async function postProcessKey(
           },
           {
             status: 503,
-            headers: { "Retry-After": String(err.retryAfterS) },
+            headers: { "Retry-After": String(advertisedRetryAfterS) },
           },
         ),
       };

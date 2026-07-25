@@ -459,6 +459,115 @@ describe("resilientFetch failure classification", () => {
   });
 });
 
+/**
+ * CR-04 — `recordFailures: false`, the anonymous-surface opt-out.
+ *
+ * ONE breaker key is shared by every tenant and every budget key, and the
+ * public teaser (`verify-strategy` → `postProcessKey({flow_type:"teaser"})`)
+ * reaches it with no auth gate whatsoever. Five input-triggered upstream 500s
+ * inside the window would therefore deny the WHOLE seam — key connect, sync,
+ * optimizer, admin match — to every tenant, from an anonymous caller, for the
+ * cooldown, repeatably.
+ *
+ * The opt-out governs WRITES only: an opted-out call must still be BLOCKED by
+ * an already-open breaker. Both halves are pinned below, because a fix that
+ * skipped the read as well would silently hand the public route an exemption
+ * from the very protection the breaker exists to provide.
+ */
+describe("resilientFetch — recordFailures opt-out (CR-04)", () => {
+  async function drive5xx(
+    mod: typeof import("./resilient-fetch"),
+    n: number,
+    init: Record<string, unknown>,
+  ): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await mod.resilientFetch("process-key-sync", "/process-key", {
+        method: "POST",
+        ...init,
+      });
+    }
+  }
+
+  it("recordFailures:false — upstream 5xx does NOT increment the breaker counter", async () => {
+    okFetch(500);
+    const mod = await import("./resilient-fetch");
+
+    // Twice the threshold, so an off-by-one in the counter cannot mask it.
+    await drive5xx(mod, mod.BREAKER_FAILURE_THRESHOLD * 2, {
+      recordFailures: false,
+    });
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    // And nothing was written to the counter either — not merely "the lock was
+    // not set". A counter loaded to threshold-minus-one would let ONE later
+    // authenticated failure trip the seam, which is the same DoS one request
+    // further out.
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("POSITIVE CONTROL: the identical drive WITH the default does trip", async () => {
+    // Without this, the test above cannot be distinguished from "the 5xx arm
+    // stopped recording for everyone".
+    okFetch(500);
+    const mod = await import("./resilient-fetch");
+
+    await drive5xx(mod, mod.BREAKER_FAILURE_THRESHOLD, {});
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("recordFailures:false — a network/deadline THROW does not increment it either", async () => {
+    // The 5xx arm is not the only writer: the catch arm records too, and an
+    // anonymous payload can drive a slow upstream to the deadline just as
+    // easily as it can drive a 500.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(new DOMException("aborted", "TimeoutError"));
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD * 2; i++) {
+      await expect(
+        mod.resilientFetch("process-key-sync", "/process-key", {
+          method: "POST",
+          recordFailures: false,
+        }),
+      ).rejects.toBeDefined();
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("READ, NOT EXEMPT: an opted-out call is still blocked by an open breaker", async () => {
+    // The opt-out must not become a bypass. Sparing a dying Railway is the
+    // whole point, and the public teaser is the loudest single seam caller.
+    seedBreakerOpen(shared.store, 21);
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("process-key-sync", "/process-key", {
+        method: "POST",
+        recordFailures: false,
+      }),
+    ).rejects.toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("never leaks recordFailures into the RequestInit", async () => {
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("process-key-sync", "/process-key", {
+      method: "POST",
+      recordFailures: false,
+    });
+
+    const init = fetchMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(init).not.toHaveProperty("recordFailures");
+  });
+});
+
 describe("resilientFetch budget wiring", () => {
   it("budget reaches AbortSignal.timeout", async () => {
     // SC-4c. Asserted against the exported table, not a literal — the point is

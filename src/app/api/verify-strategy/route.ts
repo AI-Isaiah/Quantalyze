@@ -190,6 +190,16 @@ async function unifiedVerifyStrategyHandler(
     // so the upstream rate limiter buckets all anonymous landing-page
     // traffic to a shared key, isolated from authenticated tenants.
     userId: "public",
+    // CR-04 / CR-05 (Phase 140 review) — THE public surface. This route has no
+    // withAuth and no session read, yet it crosses the same seam and shares the
+    // single `breaker:railway` key with every authenticated tenant. The flag
+    // stops an anonymous payload from DRIVING that shared breaker (five
+    // input-triggered upstream 500s would otherwise deny key-connect, sync, the
+    // optimizer and admin match to everyone for the cooldown) and collapses the
+    // 503's `Retry-After` to the static constant so the exact remaining
+    // degradation is not readable from the open internet. An already-open
+    // breaker still short-circuits this route — read, never write.
+    unauthenticated: true,
   });
   if (!result.ok) return result.response;
 

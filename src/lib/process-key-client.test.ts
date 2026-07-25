@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { DEFAULT_RETRY_AFTER_S } from "@/lib/resilient-fetch";
 import type { NextResponse } from "next/server";
 
 // process-key-client pulls in next/server (NextResponse) + correlation-id.
@@ -176,16 +177,89 @@ describe("postProcessKey — Phase 140 / SEAM-04 CIRCUIT_OPEN envelope", () => {
     );
   });
 
-  it("advertises the breaker's own cooldown, not a hardcoded constant", async () => {
+  it("an AUTHENTICATED caller gets the breaker's own cooldown, not a hardcoded constant", async () => {
+    coreSpy.mockRejectedValue(new CircuitOpenError(7));
+    const result = await postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: {},
+      userId: "u1",
+      correlationId: "c2",
+    });
+    expect(failureResponse(result).headers.get("Retry-After")).toBe("7");
+  });
+
+  /**
+   * CR-04 / CR-05 — the anonymous surface.
+   *
+   * `verify-strategy` is the landing-page teaser: no `withAuth`, no session
+   * read, and it crosses the SAME seam under the SAME single breaker key as
+   * every authenticated tenant. `unauthenticated: true` is what stops an
+   * anonymous payload from driving that shared breaker, and what stops the 503
+   * from publishing the exact remaining cooldown to the open internet.
+   */
+  it("PUBLIC caller: Retry-After is the STATIC constant, never the live breaker TTL", async () => {
+    // 7 is deliberately far from DEFAULT_RETRY_AFTER_S so "the TTL leaked"
+    // cannot be mistaken for "the constant happened to match".
     coreSpy.mockRejectedValue(new CircuitOpenError(7));
     const result = await postProcessKey({
       flow_type: "teaser",
       source: "landing",
       context: {},
       userId: "public",
-      correlationId: "c2",
+      correlationId: "c-public",
+      unauthenticated: true,
     });
-    expect(failureResponse(result).headers.get("Retry-After")).toBe("7");
+    const response = failureResponse(result);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe(
+      String(DEFAULT_RETRY_AFTER_S),
+    );
+    expect(response.headers.get("Retry-After")).not.toBe("7");
+  });
+
+  it("PUBLIC caller: the seam call opts OUT of writing the shared breaker counter", async () => {
+    // The wiring, not just the flag: the value must reach the CORE. A client
+    // that accepted `unauthenticated` and then forgot to thread it would leave
+    // the whole DoS open while looking fixed at the call site.
+    coreSpy.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await postProcessKey({
+      flow_type: "teaser",
+      source: "landing",
+      context: {},
+      userId: "public",
+      correlationId: "c-public-2",
+      unauthenticated: true,
+    });
+
+    const init = coreSpy.mock.calls[0][2] as { recordFailures?: boolean };
+    expect(init.recordFailures).toBe(false);
+  });
+
+  it("AUTHENTICATED caller: the seam call still records failures (default unchanged)", async () => {
+    coreSpy.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: {},
+      userId: "u1",
+      correlationId: "c-authed",
+    });
+
+    const init = coreSpy.mock.calls[0][2] as { recordFailures?: boolean };
+    expect(init.recordFailures).toBe(true);
   });
 
   it("does NOT flatten CIRCUIT_OPEN into the 504 UPSTREAM_TIMEOUT arm", async () => {

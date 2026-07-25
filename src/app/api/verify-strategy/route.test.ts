@@ -341,3 +341,65 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
     expect(body).toHaveProperty("expires_at");
   });
 });
+
+/**
+ * CR-04 / CR-05 (Phase 140 review) — the anonymous breaker surface.
+ *
+ * This route is the ONLY fully-unauthenticated caller of the Vercel→Railway
+ * seam: no `withAuth`, no session read, only same-origin + a per-IP limiter.
+ * It shares ONE `breaker:railway` key with every authenticated tenant, so
+ * before this fix five input-triggered upstream 500s from anonymous callers
+ * denied key-connect, sync, the optimizer and admin match to EVERYONE for the
+ * cooldown — and the 503's `Retry-After` told the caller exactly how many
+ * seconds of degradation remained, making the same endpoint both the lever and
+ * the readout.
+ *
+ * This pins the WIRING, not the flag: `postProcessKey` owns both behaviours,
+ * but only if this route actually asks for them.
+ */
+describe("CR-04/CR-05 — the public teaser opts out of DRIVING the shared breaker", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("passes unauthenticated:true to postProcessKey", async () => {
+    const postProcessKeySpy = vi.fn().mockResolvedValue({
+      ok: true,
+      response: null,
+      body: {
+        verification_id: "55555555-5555-5555-5555-555555555555",
+        status: "published",
+      },
+    });
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: postProcessKeySpy,
+    }));
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: () => ({ eq: async () => ({ error: null }) }) };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    expect(postProcessKeySpy).toHaveBeenCalledTimes(1);
+    const args = postProcessKeySpy.mock.calls[0]![0] as Record<string, unknown>;
+    expect(args.unauthenticated).toBe(true);
+    // The CT-4 public bucket is unrelated and must not have been disturbed.
+    expect(args.userId).toBe("public");
+    expect(args.flow_type).toBe("teaser");
+  });
+});
