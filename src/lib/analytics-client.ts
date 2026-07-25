@@ -11,6 +11,7 @@ import {
 } from "./analytics-schemas";
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
 import {
+  collectRequestSecrets,
   describeTransportError,
   resilientFetch,
   SEAM_BUDGETS,
@@ -112,19 +113,27 @@ async function analyticsRequest(
   // FastAPI side has a stable join key.
   const correlationId = options.correlationId ?? crypto.randomUUID();
 
-  let res: Response;
-  try {
+  // D2a — HOISTED so the catch arm below can harvest the very credentials this
+  // request is putting on the wire. Built inline previously, which left the
+  // error log at the bottom of this function structurally unable to scrub them:
+  // it had no reference to the body it had just sent.
+  const requestInit = {
     // Headers are built HERE and passed through the core byte-for-byte. A
     // dropped X-Service-Key silently unauthenticates every analytics call.
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Api-Version": ANALYTICS_API_VERSION,
+      "X-Correlation-Id": correlationId,
+      ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
+    },
+    ...(body !== null && { body: JSON.stringify(body) }),
+  };
+
+  let res: Response;
+  try {
     res = await resilientFetch(options.budgetKey, path, {
-      method,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Api-Version": ANALYTICS_API_VERSION,
-        "X-Correlation-Id": correlationId,
-        ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
-      },
-      ...(body !== null && { body: JSON.stringify(body) }),
+      ...requestInit,
       ...(options.timeoutMs !== undefined && {
         timeoutMsOverride: options.timeoutMs,
       }),
@@ -175,9 +184,17 @@ async function analyticsRequest(
     //    killed, which the core does not know.
     //    REDACTED (H-0328): undici can embed the outgoing headers, and this
     //    client sends X-Service-Key. See describeTransportError.
+    //
+    //    D2a — WITH THE PER-REQUEST SECRETS. This call used to pass NO
+    //    `extraSecrets`, so it scrubbed the two DEPLOYMENT secrets and nothing
+    //    else — on the one client that puts the user's RAW exchange
+    //    `api_key`/`api_secret`/`passphrase` in the body (validateKey /
+    //    encryptKey below). That is precisely the population C4 exists for, and
+    //    this log line is the one that published it: measured live, one frame
+    //    after the core's correctly-redacted line, into the same Vercel sink.
     console.error(
       `[analytics-client] ${path} could not reach the analytics service:`,
-      describeTransportError(err),
+      describeTransportError(err, collectRequestSecrets(requestInit)),
     );
     throw new AnalyticsUnreachableError(err);
   }

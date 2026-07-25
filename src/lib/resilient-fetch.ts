@@ -1055,11 +1055,89 @@ const SEAM_SECRET_FIELD_RE =
   /(secret|token|password|passphrase|api[_-]?key|apikey|authorization)/i;
 
 /**
- * Shortest value worth redacting. Guards against blanking out a low-entropy
- * value that happens to sit under a matching name (`"token": "none"`,
- * `"api_key": ""`) and blowing a hole through unrelated log text.
+ * Shortest value worth redacting.
+ *
+ * ⚠️ WAS 8, WHICH LEAKED (D2b). An OKX `passphrase` is USER-CHOSEN and is
+ * deliberately NOT trimmed or length-normalised at the entry point
+ * (`analytics-client.ts` `trimCredential`'s docblock says so explicitly), so a
+ * five-character passphrase sailed straight through this floor and reached the
+ * log verbatim. The floor exists to stop a low-entropy PLACEHOLDER blowing a
+ * hole through unrelated log text, and that job is done far more precisely by
+ * `NON_SECRET_PLACEHOLDERS` below than by a length cut-off that also happens to
+ * exempt real credentials.
  */
-const MIN_REDACTABLE_SECRET_LENGTH = 8;
+const MIN_REDACTABLE_SECRET_LENGTH = 3;
+
+/**
+ * Values that sit under a secret-ish NAME but are not credentials.
+ *
+ * This is the precise version of what the old length floor was approximating:
+ * `{"token": "none"}` must not turn every "none" in the line into
+ * `<redacted>`, but `{"passphrase": "hunt2"}` absolutely must be scrubbed.
+ * Compared case-insensitively.
+ */
+const NON_SECRET_PLACEHOLDERS: ReadonlySet<string> = new Set([
+  "none",
+  "null",
+  "nil",
+  "true",
+  "false",
+  "undefined",
+  "n/a",
+  "na",
+  "-",
+  "0",
+  "1",
+  "bearer",
+  "basic",
+]);
+
+/**
+ * How many LEADING characters of a secret must appear before we treat the
+ * match as an occurrence worth redacting.
+ *
+ * ⚠️ THIS IS WHAT CLOSES THE TRUNCATION LEAK (D2b). The old scrub was an exact
+ * `split(secret).join("<redacted>")`, so a log line carrying a SHORTENED form —
+ * the shape every truncating logger, every `…` ellipsis and every
+ * `substring(0, n)` produces — matched nothing and published the prefix intact.
+ * A prefix IS the credential's high-entropy head; publishing it is a real leak,
+ * not a cosmetic one.
+ *
+ * 8 is the balance point: long enough that a base64/hex head is not going to
+ * collide with prose, short enough to catch every realistic truncation. Secrets
+ * SHORTER than this must match in full (see `redactOccurrences`), so the
+ * newly-admitted short passphrases cannot over-redact on a 3-character prefix.
+ */
+const TRUNCATED_SECRET_PROBE_LENGTH = 8;
+
+/**
+ * Replace every occurrence of `secret` — FULL or TRUNCATED — in `haystack`.
+ *
+ * Scans for the secret's leading probe, then extends the match greedily along
+ * the secret, so one pass consumes a whole occurrence whichever length it
+ * happens to have. Over-redaction is the safe direction: the module's own
+ * docblock says so, and losing some log detail is strictly cheaper than
+ * publishing a usable credential.
+ */
+function redactOccurrences(haystack: string, secret: string): string {
+  const probeLength = Math.min(secret.length, TRUNCATED_SECRET_PROBE_LENGTH);
+  const probe = secret.slice(0, probeLength);
+  let out = "";
+  let cursor = 0;
+  for (;;) {
+    const hit = haystack.indexOf(probe, cursor);
+    if (hit === -1) return out + haystack.slice(cursor);
+    let matched = probeLength;
+    while (
+      matched < secret.length &&
+      haystack[hit + matched] === secret[matched]
+    ) {
+      matched++;
+    }
+    out += haystack.slice(cursor, hit) + "<redacted>";
+    cursor = hit + matched;
+  }
+}
 
 /**
  * Harvest the per-request credentials THIS call is putting on the wire, so they
@@ -1071,19 +1149,35 @@ const MIN_REDACTABLE_SECRET_LENGTH = 8;
  * under a secret-ish name (plus the token half of a `Bearer …` value, since
  * undici may embed either form), and string leaves under a secret-ish key
  * anywhere in a JSON body.
+ *
+ * ⚠️ EXPORTED (D2a). It used to be module-private, which meant the OTHER two
+ * sites that log a seam transport error for the very same request —
+ * `analytics-client.ts` (the client that puts raw `api_key`/`api_secret`/
+ * `passphrase` on the wire) and `process-key-client.ts` (which carries
+ * `Authorization: Bearer ${INTERNAL_API_TOKEN}` and the user's live Supabase
+ * JWT in `X-User-Access-Token`) — STRUCTURALLY could not scrub the per-request
+ * population, however much they wanted to. Proven live: one frame after
+ * `[resilient-fetch] … api_secret=<redacted>` the same Vercel sink received
+ * `[analytics-client] … api_secret=CLIENTSECRET_abcdefghij`. A scrub that
+ * covers one of three log sites for one error is not a scrub.
  */
-function collectRequestSecrets(init: Omit<RequestInit, "signal">): string[] {
+export function collectRequestSecrets(
+  init: Omit<RequestInit, "signal">,
+): string[] {
   const found: string[] = [];
+  const push = (value: string): void => {
+    if (value.length < MIN_REDACTABLE_SECRET_LENGTH) return;
+    if (NON_SECRET_PLACEHOLDERS.has(value.toLowerCase())) return;
+    found.push(value);
+  };
   const take = (name: string, value: unknown): void => {
     if (typeof value !== "string") return;
     if (!SEAM_SECRET_FIELD_RE.test(name)) return;
-    if (value.length >= MIN_REDACTABLE_SECRET_LENGTH) found.push(value);
+    push(value);
     // `Authorization: Bearer <jwt>` — the credential is the tail, and an error
     // string may carry the tail alone.
     const bearer = /^Bearer\s+(.+)$/i.exec(value);
-    if (bearer && bearer[1].length >= MIN_REDACTABLE_SECRET_LENGTH) {
-      found.push(bearer[1]);
-    }
+    if (bearer) push(bearer[1]);
   };
 
   const headers = init.headers;
@@ -1106,8 +1200,23 @@ function collectRequestSecrets(init: Omit<RequestInit, "signal">): string[] {
         }
         if (typeof node !== "object" || node === null) return;
         for (const [k, v] of Object.entries(node)) {
-          if (typeof v === "string") take(k, v);
-          else walk(v);
+          if (typeof v === "string") {
+            take(k, v);
+          } else if (Array.isArray(v)) {
+            // D2b — STRING LEAVES INSIDE AN ARRAY UNDER A SECRET-ISH KEY.
+            // `walk(v)` alone descends into the array and then loses the key,
+            // so `{"api_keys": ["live-secret-a", "live-secret-b"]}` harvested
+            // NOTHING: the elements have no key of their own, and the only
+            // secret-ish name in the structure was the one we just discarded.
+            // Carry the parent key down one level, then keep walking for
+            // nested objects.
+            for (const item of v) {
+              if (typeof item === "string") take(k, item);
+              else walk(item);
+            }
+          } else {
+            walk(v);
+          }
         }
       };
       walk(JSON.parse(init.body) as unknown);
@@ -1155,12 +1264,29 @@ function redactSeamSecrets(
   extraSecrets: readonly string[] = [],
 ): string {
   let out = value;
-  for (const secret of [
+  // LONGEST FIRST. A short secret that happens to be a substring of a longer
+  // one would otherwise fragment the longer one's occurrence into pieces that
+  // no longer match it.
+  const secrets = [
     process.env.INTERNAL_API_TOKEN,
     process.env.ANALYTICS_SERVICE_KEY,
     ...extraSecrets,
-  ]) {
-    if (secret && secret.length > 0) out = out.split(secret).join("<redacted>");
+  ]
+    .filter(
+      (s): s is string => !!s && s.length >= MIN_REDACTABLE_SECRET_LENGTH,
+    )
+    .sort((a, b) => b.length - a.length);
+
+  for (const secret of secrets) {
+    // Full AND truncated forms (D2b) — see `redactOccurrences`.
+    out = redactOccurrences(out, secret);
+    // D2b — PERCENT-ENCODED FORM. A secret that travelled through a URL, a
+    // query string or a form body reaches the error message escaped
+    // (`+` → `%2B`, `/` → `%2F`), and a scrub that only knows the raw form
+    // publishes it. Skipped when encoding is a no-op so a plain alphanumeric
+    // token is not scanned twice.
+    const encoded = encodeURIComponent(secret);
+    if (encoded !== secret) out = redactOccurrences(out, encoded);
   }
   return out;
 }

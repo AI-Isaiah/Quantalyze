@@ -455,3 +455,66 @@ describe("postProcessKey — D-5 unparseable upstream bodies are logged", () => 
     ).toHaveLength(0);
   });
 });
+
+/**
+ * Batch-D / D2a — the log site with NO redaction at all.
+ *
+ * `console.error(..., err.message)` on a request whose headers carry
+ * `Authorization: Bearer ${INTERNAL_API_TOKEN}` and `X-User-Access-Token` — the
+ * END USER's live Supabase session JWT, which is the headline example in C4's
+ * own commit message. The core redacted its copy of the same error; this frame
+ * printed it raw one line later into the same sink.
+ */
+describe("[D2a] postProcessKey transport log scrubs the request's own secrets", () => {
+  const realFetch = global.fetch;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-live-token-abcdefghij";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("never publishes INTERNAL_API_TOKEN or the user's access token", async () => {
+    const USER_JWT = "eyJhbGciOi.supabase-live-session.signature";
+    // undici echoing the outgoing headers back in the MESSAGE — the exact
+    // H-0328 shape, and the one the bare `err.message` log published whole.
+    // The syscall detail hangs off `.cause`, as it really does.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(
+        new TypeError(
+          `fetch failed [authorization=Bearer internal-live-token-abcdefghij] ` +
+            `[x-user-access-token=${USER_JWT}]`,
+          { cause: new Error("connect ECONNREFUSED 10.0.0.1:8002") },
+        ),
+      ),
+    );
+
+    const result = await postProcessKey({
+      flow_type: "csv_finalize",
+      source: "csv",
+      context: {},
+      userId: "u1",
+      userAccessToken: USER_JWT,
+      correlationId: "corr-secret",
+    });
+    expect(result.ok).toBe(false);
+
+    const logged = errorSpy.mock.calls.flat().map(String).join("\n");
+    expect(logged).not.toContain("internal-live-token-abcdefghij");
+    expect(logged).not.toContain(USER_JWT);
+    // POSITIVE CONTROL: the diagnosis survives — and `describeTransportError`
+    // recovers the `.cause` syscall code the bare `err.message` threw away, so
+    // this cannot pass merely because the log line was deleted.
+    expect(logged).toContain("<redacted>");
+    expect(logged).toContain("fetch failed");
+    expect(logged).toContain("ECONNREFUSED");
+  });
+});

@@ -1592,3 +1592,118 @@ describe("resilientFetch budget wiring", () => {
     );
   });
 });
+
+/**
+ * Batch-D / D2b — THE SCRUB'S PROVEN BYPASSES.
+ *
+ * C4 made the redaction STRUCTURAL (name-matched rather than an enumeration of
+ * two env vars), which was the right move and is not re-litigated here. What it
+ * left open are four ways a live credential still reached the log intact, each
+ * reproduced below against the real `describeTransportError` /
+ * `collectRequestSecrets` pair:
+ *
+ *   1. under the 8-char length floor — an OKX `passphrase` is USER-CHOSEN and
+ *      deliberately untrimmed at the entry point, so a 5-char one qualified;
+ *   2. TRUNCATED forms — the scrub was an exact `split/join`, so any shortened
+ *      rendering published the credential's high-entropy head verbatim;
+ *   3. PERCENT-ENCODED forms;
+ *   4. strings inside an ARRAY under a secret-ish key — the harvester's `walk`
+ *      only took string values of OBJECT entries, and an array element has no
+ *      key of its own.
+ */
+describe("[D2b] seam secret redaction — the bypasses", () => {
+  it("redacts a SHORT credential (the untrimmed OKX passphrase case)", async () => {
+    const mod = await import("./resilient-fetch");
+    const secrets = mod.collectRequestSecrets({
+      method: "POST",
+      body: JSON.stringify({ exchange: "okx", passphrase: "hunt2" }),
+    });
+
+    // Harvested at all — the 8-char floor rejected it outright.
+    expect(secrets).toContain("hunt2");
+    const rendered = mod.describeTransportError(
+      new Error("fetch failed: passphrase=hunt2"),
+      secrets,
+    );
+    expect(rendered).not.toContain("hunt2");
+    expect(rendered).toContain("<redacted>");
+  });
+
+  it("does NOT redact a low-entropy placeholder under a secret-ish name", async () => {
+    // POSITIVE CONTROL for the floor's real job: `{"token": "none"}` must not
+    // turn every "none" in the line into <redacted>. Lowering the floor without
+    // this guard would blow holes through unrelated log text.
+    const mod = await import("./resilient-fetch");
+    expect(
+      mod.collectRequestSecrets({ body: JSON.stringify({ token: "none" }) }),
+    ).toEqual([]);
+  });
+
+  it("redacts a TRUNCATED occurrence, not just an exact one", async () => {
+    const mod = await import("./resilient-fetch");
+    const secret = "CLIENTSECRET_abcdefghijklmnop";
+    const secrets = mod.collectRequestSecrets({
+      body: JSON.stringify({ api_secret: secret }),
+    });
+
+    // The shape every truncating logger produces. Exact split/join matched
+    // nothing here and published the head.
+    const rendered = mod.describeTransportError(
+      new Error(`fetch failed sending api_secret=${secret.slice(0, 16)}…`),
+      secrets,
+    );
+    expect(rendered).not.toContain(secret.slice(0, 16));
+    expect(rendered).not.toContain("CLIENTSECRET_abc");
+  });
+
+  it("redacts a PERCENT-ENCODED occurrence", async () => {
+    const mod = await import("./resilient-fetch");
+    const secret = "ab+cd/ef=ghijklmn";
+    const secrets = mod.collectRequestSecrets({
+      body: JSON.stringify({ api_secret: secret }),
+    });
+
+    const rendered = mod.describeTransportError(
+      new Error(`fetch failed url=?k=${encodeURIComponent(secret)}`),
+      secrets,
+    );
+    expect(rendered).not.toContain(encodeURIComponent(secret));
+    expect(rendered).not.toContain(secret);
+  });
+
+  it("harvests string leaves inside an ARRAY under a secret-ish key", async () => {
+    const mod = await import("./resilient-fetch");
+    const secrets = mod.collectRequestSecrets({
+      body: JSON.stringify({
+        context: { api_keys: ["live-secret-alpha", "live-secret-beta"] },
+      }),
+    });
+
+    expect(secrets).toEqual(
+      expect.arrayContaining(["live-secret-alpha", "live-secret-beta"]),
+    );
+    const rendered = mod.describeTransportError(
+      new Error("fetch failed: live-secret-alpha live-secret-beta"),
+      secrets,
+    );
+    expect(rendered).not.toContain("live-secret-alpha");
+    expect(rendered).not.toContain("live-secret-beta");
+  });
+
+  it("still harvests headers and the Bearer tail (C4 regression guard)", async () => {
+    // The C4 behaviour these hardenings must not break.
+    const mod = await import("./resilient-fetch");
+    const secrets = mod.collectRequestSecrets({
+      headers: {
+        Authorization: "Bearer jwt-header.jwt-payload.jwt-signature",
+        "X-User-Access-Token": "supabase-live-session-jwt",
+        "X-User-Id": "user-123",
+      },
+    });
+
+    expect(secrets).toContain("jwt-header.jwt-payload.jwt-signature");
+    expect(secrets).toContain("supabase-live-session-jwt");
+    // A tenant id is not a credential and must not be redacted out of logs.
+    expect(secrets).not.toContain("user-123");
+  });
+});

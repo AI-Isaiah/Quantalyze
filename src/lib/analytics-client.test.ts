@@ -679,3 +679,62 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
     ).toBe(true);
   });
 });
+
+/**
+ * Batch-D / D2a — C4's SCRUB COVERED ONE OF THREE LOG SITES FOR THE SAME ERROR.
+ *
+ * `resilient-fetch` redacted the per-request credentials correctly. THIS client
+ * called `describeTransportError(err)` with NO `extraSecrets` — and the
+ * harvester was not even exported, so the call site structurally could not pass
+ * them. On the one client that puts the user's RAW exchange
+ * `api_key`/`api_secret`/`passphrase` on the wire, that meant a proven live
+ * pair of adjacent lines in the same Vercel sink:
+ *
+ *   [resilient-fetch]  … api_secret=<redacted>
+ *   [analytics-client] … api_secret=CLIENTSECRET_abcdefghij
+ */
+describe("[D2a] analytics-client transport log scrubs the request's own secrets", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("never publishes the exchange credentials it just sent", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const API_KEY = "CLIENTID_abcdefghij";
+    const API_SECRET = "CLIENTSECRET_abcdefghij";
+    const PASSPHRASE = "hunt2";
+
+    // The real undici shape H-0328 was filed for: the outgoing request is
+    // echoed back inside the error message.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(
+        new TypeError("fetch failed", {
+          cause: new Error(
+            `sending {"api_key":"${API_KEY}","api_secret":"${API_SECRET}","passphrase":"${PASSPHRASE}"}`,
+          ),
+        }),
+      ),
+    );
+
+    const mod = await import("./analytics-client");
+    await expect(
+      mod.validateKey("okx", API_KEY, API_SECRET, PASSPHRASE),
+    ).rejects.toBeInstanceOf(Error);
+
+    const logged = errorSpy.mock.calls.flat().map(String).join("\n");
+    // THE assertions. Each of these strings is a usable live credential.
+    expect(logged).not.toContain(API_SECRET);
+    expect(logged).not.toContain(API_KEY);
+    expect(logged).not.toContain(PASSPHRASE);
+    // POSITIVE CONTROL: the D-1 diagnosis still reaches the operator, so this
+    // cannot pass merely because logging stopped happening.
+    expect(logged).toContain("<redacted>");
+    expect(logged).toContain("fetch failed");
+  });
+});

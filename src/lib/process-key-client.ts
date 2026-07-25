@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
+  collectRequestSecrets,
   DEFAULT_RETRY_AFTER_S,
+  describeTransportError,
   resilientFetch,
   SEAM_BUDGETS,
   type SeamBudgetKey,
@@ -180,32 +182,42 @@ export async function postProcessKey(
   const budgetKey = budgetKeyFor(args.flow_type);
   const timeoutMs = SEAM_BUDGETS[budgetKey].timeoutMs;
 
-  let res: Response;
-  try {
+  // D2a — HOISTED so the catch arm can harvest the credentials this request is
+  // putting on the wire. Every header below is a live secret or a tenant id:
+  // `Authorization` carries INTERNAL_API_TOKEN and `X-User-Access-Token` the
+  // END USER's Supabase session JWT — the headline example in C4's own commit
+  // message, and the one log site in the repo that was still printing a raw
+  // transport error message with no redaction whatsoever.
+  const requestInit = {
     // Headers and body pass through the core byte-for-byte. A dropped
     // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${internalToken}`,
+      "X-Correlation-Id": correlationId,
+      // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
+      // isolation. See PostProcessKeyArgs.userId for the contract.
+      "X-User-Id": args.userId,
+      // Phase 19.1 — forward the end user's access token so the unified
+      // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
+      // as the user. Only present for the CSV finalize step.
+      ...(args.userAccessToken
+        ? { "X-User-Access-Token": args.userAccessToken }
+        : {}),
+    },
+    body: JSON.stringify({
+      flow_type: args.flow_type,
+      source: args.source,
+      context: args.context,
+    }),
+    cache: "no-store" as const,
+  };
+
+  let res: Response;
+  try {
     res = await resilientFetch(budgetKey, "/process-key", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${internalToken}`,
-        "X-Correlation-Id": correlationId,
-        // CT-4 (army2) — forward tenant id for cross-tenant rate-limit
-        // isolation. See PostProcessKeyArgs.userId for the contract.
-        "X-User-Id": args.userId,
-        // Phase 19.1 — forward the end user's access token so the unified
-        // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
-        // as the user. Only present for the CSV finalize step.
-        ...(args.userAccessToken
-          ? { "X-User-Access-Token": args.userAccessToken }
-          : {}),
-      },
-      body: JSON.stringify({
-        flow_type: args.flow_type,
-        source: args.source,
-        context: args.context,
-      }),
-      cache: "no-store",
+      ...requestInit,
       // CR-04 — an anonymous caller may READ breaker state but must never
       // WRITE it. See PostProcessKeyArgs.unauthenticated.
       recordFailures: !args.unauthenticated,
@@ -272,8 +284,18 @@ export async function postProcessKey(
     }
     // Non-timeout network errors surface as 502 so the caller can
     // distinguish "we never reached upstream" from "upstream rejected us".
-    const message = err instanceof Error ? err.message : "Network error";
-    console.error(`[${tag}] /process-key upstream fetch threw:`, message);
+    //
+    // D2a — REDACTED, and via the shared renderer. This logged `err.message`
+    // RAW, on a request whose headers carry INTERNAL_API_TOKEN and the user's
+    // live Supabase JWT — the exact population the C4 scrub was written for,
+    // on the exact seam whose own module docblock says undici can embed the
+    // outgoing headers in the message. `describeTransportError` also recovers
+    // the `.cause` syscall code (ECONNREFUSED / ENOTFOUND / TLS) that the bare
+    // `.message` threw away.
+    console.error(
+      `[${tag}] /process-key upstream fetch threw:`,
+      describeTransportError(err, collectRequestSecrets(requestInit)),
+    );
     return {
       ok: false,
       response: NextResponse.json(
