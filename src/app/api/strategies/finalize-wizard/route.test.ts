@@ -623,6 +623,53 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     },
   );
 
+  /**
+   * E10 — F-7's ATTRIBUTION RULE, APPLIED TO THE ARM F-7 LEFT.
+   *
+   * `fetchLivePermissions` throws when `INTERNAL_API_TOKEN` is absent, and the
+   * catch classifies by elimination: `isSeamTransportFailure` accepts only
+   * AbortError/TimeoutError and the two typed seam errors, so a bare Error fell
+   * through to the "genuine upstream fault" arm and answered
+   * `502 KEY_NETWORK_TIMEOUT` — "We could not reach the exchange … usually a
+   * temporary exchange issue" — about a request that was never issued, to any
+   * exchange, because OUR deployment secret is missing. A manager reading that
+   * goes and audits a healthy key.
+   */
+  it("E10: a missing INTERNAL_API_TOKEN blames US, not the user's exchange", async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    // Proof the probe never issued a request: nothing to reject, nothing to
+    // resolve. If fetch is reached the test fails loudly rather than passing on
+    // a coincidence.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(() => {
+      throw new Error("the probe must not reach fetch with no token");
+    });
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // 503 (our service is not usable) rather than 502 (the upstream answered).
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    // The wire code `process-key-client:164` already mints for this exact
+    // condition, and which every wizard surface aliases onto the draft-saved
+    // copy. NOT the exchange-blaming one.
+    expect(body.code).toBe("UPSTREAM_NOT_CONFIGURED");
+    expect(body.code).not.toBe("KEY_NETWORK_TIMEOUT");
+    // No Retry-After: a missing env var does not clear itself after a cooldown,
+    // and quoting one would promise a retry that cannot work (E9's rule).
+    expect(res.headers.get("Retry-After")).toBeNull();
+    // The env-var name must not leak to the client.
+    expect(JSON.stringify(body)).not.toContain("INTERNAL_API_TOKEN");
+    // STILL FAILS CLOSED.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
   it("F-7 POSITIVE CONTROL: a non-2xx FROM the analytics service stays KEY_NETWORK_TIMEOUT", async () => {
     // The probe REACHED the service and it answered non-2xx, so
     // fetchLivePermissions throws with the status. That is a genuine upstream

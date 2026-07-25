@@ -102,6 +102,31 @@ const CIRCUIT_OPEN_COPY =
  * upstream field must not flow untyped onward either. `probe_error` stays
  * optional — it is genuinely absent on some Python arms.
  */
+/**
+ * E10 — the deployment misconfiguration, typed.
+ *
+ * `fetchLivePermissions` threw a bare `Error("INTERNAL_API_TOKEN is not
+ * configured")`, and `runScopeBroadeningProbe`'s catch classifies by
+ * elimination: `isSeamTransportFailure` accepts only AbortError/TimeoutError
+ * and the two typed seam errors, so this fell straight through to the "a
+ * genuine upstream fault — the probe REACHED the analytics service" arm and
+ * answered `502 KEY_NETWORK_TIMEOUT`. That copy reads "We could not reach the
+ * exchange … usually means a temporary exchange issue" about a request that was
+ * never issued, to any exchange, because OUR env var was absent. It is the same
+ * false attribution F-7 fixed for the transport case, on the one arm F-7 left.
+ *
+ * A type rather than a message match, for the reason `wizardErrors.ts` gives at
+ * its own type-check-first branch — and because the safe-logging helper
+ * deliberately SCRUBS the literal token name out of error strings, so a
+ * substring branch here would be fighting a redaction the route wants.
+ */
+class InternalTokenMissingError extends Error {
+  constructor() {
+    super("INTERNAL_API_TOKEN is not configured");
+    this.name = "InternalTokenMissingError";
+  }
+}
+
 const LivePermissionsSchema = z
   .object({
     read: z.boolean(),
@@ -140,7 +165,16 @@ async function fetchLivePermissions(
 ): Promise<LivePermissions> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
-    throw new Error("INTERNAL_API_TOKEN is not configured");
+    // E10 — TYPED, because the caller's catch classified this by elimination.
+    // `isSeamTransportFailure` accepts only AbortError/TimeoutError and the two
+    // typed seam errors, so a bare Error here fell past it to the "genuine
+    // upstream fault" arm and answered `502 KEY_NETWORK_TIMEOUT` — "We could not
+    // reach the exchange … usually a temporary exchange issue." A missing
+    // deployment secret on OUR side sent a manager to audit a perfectly healthy
+    // key, which is precisely the F-7 attribution failure that arm exists to
+    // prevent. `process-key-client:164` already mints the right wire code for
+    // exactly this condition; the type lets us reuse it.
+    throw new InternalTokenMissingError();
   }
   const res = await resilientFetch(
     "keys-permissions",
@@ -486,6 +520,31 @@ async function runScopeBroadeningProbe(
     //
     // Fails CLOSED either way — a key whose live scopes could not be re-checked
     // is never promoted. Only the attribution and the remedy change.
+    //
+    // E10 — AND THE MISCONFIGURATION CASE, which F-7 left on the exchange-blaming
+    // arm. A missing `INTERNAL_API_TOKEN` means no request was issued, to any
+    // exchange, because a deployment secret is absent on OUR side. Same user
+    // meaning as the transport failures: it did not get through, nothing was
+    // submitted, the draft is intact. `process-key-client:164` already mints
+    // `UPSTREAM_NOT_CONFIGURED` for exactly this condition and every wizard
+    // surface already aliases that code onto the draft-saved copy, so this is
+    // the existing wire vocabulary rather than a new one.
+    //
+    // No `Retry-After`: unlike a transport blip there is no cooldown after which
+    // this clears by itself, and quoting one would repeat the E9 mistake of
+    // promising a retry that cannot work.
+    if (probeErr instanceof InternalTokenMissingError) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            error: "Could not verify key scopes",
+            code: "UPSTREAM_NOT_CONFIGURED",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
+        ),
+      };
+    }
     if (isSeamTransportFailure(probeErr)) {
       return {
         ok: false,
