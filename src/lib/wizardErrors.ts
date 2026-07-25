@@ -6,6 +6,24 @@
  */
 
 import type { GateFailureCode } from "./strategyGate";
+// ⚠️ LOAD-BEARING IMPORT PATH (Phase 140 / SEAM-04, blocker B-1). `seam-errors`
+// is the dependency-free LEAF: zero imports, zero env reads, zero module-load
+// side effects. This module is VALUE-imported by ten `"use client"` components
+// (MetadataStep, CsvPreviewStep, MultiKeyConnectStep, SyncPreviewStep,
+// CsvSubmitStep, ConnectKeyStep, SubmitStep, CsvUploadStep,
+// CsvValidationEnvelope, StrategyGrid), so whatever it imports ships to the
+// BROWSER. Do NOT "simplify" this to `@/lib/analytics-client` or
+// `@/lib/resilient-fetch` — either re-export drags `@upstash/redis`,
+// `@upstash/ratelimit` and a top-level `Redis.fromEnv()` singleton into the
+// wizard bundle for every user. (The mirror-image convention is the
+// `import "server-only"` guard at `src/lib/analytics.ts:1`.)
+//
+// The leaf path is also the only one that survives the test suite: sixteen
+// route test files `vi.mock("@/lib/analytics-client")` with BARE factories, so
+// a class reached through that re-export would be `undefined` at runtime and
+// the `instanceof` below would throw from inside a catch block. Nothing mocks
+// the leaf.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -108,6 +126,16 @@ export type WizardErrorCode =
   // membership is definitionally empty and "composite" wording would confuse
   // them. Recoverable: the draft is intact, Retry re-runs the load.
   | "WIZARD_KEYS_LOAD_FAILED"
+  // Phase 140 / SEAM-04 — the Vercel→Railway circuit breaker is OPEN, so the
+  // key-connect request was short-circuited BEFORE any call was issued. Nothing
+  // reached the exchange and nothing was stored. Distinct from KEY_PROBE_FAILED
+  // (the probe RAN and fail-closed) and from KEY_NETWORK_TIMEOUT (a request WAS
+  // issued and timed out): here we deliberately declined to try, and the
+  // honest, actionable thing to tell the user is "we are recovering — retry in
+  // a moment". Before this code existed the trip fell through to UNKNOWN/500
+  // ("something went wrong, our team has been notified"), which is both untrue
+  // and un-actionable during an infra outage.
+  | "SERVICE_UNAVAILABLE_RETRY"
   // Fallback
   | "UNKNOWN";
 
@@ -740,6 +768,20 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  SERVICE_UNAVAILABLE_RETRY: {
+    title: "Our service is temporarily unavailable.",
+    cause:
+      "We paused outbound requests after repeated failures so the service can recover. Your key has not been saved and nothing was submitted — this is on our side, not your key.",
+    fix: [
+      "Wait a moment, then try connecting the key again.",
+      "If it is still failing after a few minutes, contact security@quantalyze.com.",
+    ],
+    docsHref: "/security#sync-timing",
+    // Recoverable by definition — the whole point of the code is that a Retry
+    // control renders instead of the dead-end UNKNOWN envelope.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -875,22 +917,54 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
 }
 
 /**
- * Classify a caught key-validation exception message into a stable wizard error
- * code + HTTP status. SINGLE source of truth for the wizard's key-entry routes
+ * Classify a caught key-validation exception into a stable wizard error code +
+ * HTTP status. SINGLE source of truth for the wizard's key-entry routes
  * (`create-with-key` and `composite/add-key`, which fed byte-identical inline
  * copies before this was extracted) so the exchange-rejection → user-copy
  * mapping is defined ONCE and can never drift between the single-key and
  * multi-key ("+ Add another key") paths.
  *
+ * Accepts the caught value itself (`unknown`), not its message: Phase 140 needs
+ * to branch on the error TYPE (see below), which a pre-stringified message
+ * destroys. A bare `string` is still accepted and behaves exactly as before.
+ *
  * The HTTP status distinguishes client faults (400) from upstream faults
  * (502/503) so dashboards/SLO consumers can tell 'bad key' from
- * 'analytics-service unavailable' (H-0310). The raw `message` is NEVER returned
+ * 'analytics-service unavailable' (H-0310). The raw message is NEVER returned
  * to the client — callers forward ONLY the returned `code` (H-0305).
  */
-export function classifyKeyValidationError(message: string): {
+export function classifyKeyValidationError(error: unknown): {
   code: WizardErrorCode;
   status: number;
 } {
+  // ⚠️ Phase 140 / SEAM-04 — TYPE CHECK FIRST, BY DESIGN. This branch MUST stay
+  // above the substring cascade below, and it MUST stay a type check.
+  //
+  // Everything after this point matches on `err.message` text, and the cascade
+  // terminates in `{code:"UNKNOWN", status:500}` — the "something went wrong,
+  // our team has been notified" dead end. A breaker trip reaching that terminal
+  // branch is the DOGFOOD-3-class failure this code exists to kill: during a
+  // Railway outage the founder saw an unexplained 500 with no retry affordance.
+  //
+  // Never replace this with a substring match on the word c-i-r-c-u-i-t
+  // (research Pitfall 2 names that as the warning sign; it is spelled out here
+  // so the acceptance grep that forbids such a branch cannot be tripped by this
+  // very comment). The breaker's message is our own static
+  // string today, so a substring branch looks equivalent — but it is
+  // simultaneously too narrow (any reword silently re-opens the cascade) and
+  // too broad (an unrelated upstream string containing the word would be
+  // mislabelled as an outage). It would also lose to whichever earlier branch
+  // the message happened to collide with, since ordering, not specificity,
+  // decides the substring cascade.
+  if (error instanceof CircuitOpenError) {
+    return { code: "SERVICE_UNAVAILABLE_RETRY", status: 503 };
+  }
+
+  // `String(error)` keeps the classifier TOTAL: `throw {…}` / `throw undefined`
+  // are legal JS, and a second throw from inside a catch block would surface as
+  // an unhandled 500 rather than a classified response. Both fall through to
+  // UNKNOWN, which is the correct answer for an unrecognised throw.
+  const message = error instanceof Error ? error.message : String(error);
   const lower = message.toLowerCase();
   if (lower.includes("signature") || lower.includes("invalid secret")) {
     // Client supplied a wrong secret — their fault, 400.
