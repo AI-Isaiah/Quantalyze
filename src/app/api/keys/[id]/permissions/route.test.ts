@@ -413,9 +413,14 @@ describe("GET /api/keys/[id]/permissions — D-6 upstream contract validation", 
     errorSpy.mockRestore();
   });
 
-  it("still accepts an UNKNOWN EXTRA field — additive drift must not break the badge", async () => {
-    // The fix must not become its own outage: the Python service adding a new
-    // field is routine and must keep working.
+  it("accepts an UNKNOWN EXTRA field but STRIPS it from the response", async () => {
+    // Two requirements pulling opposite ways, both pinned here. The fix must
+    // not become its own outage — the Python service adding a field is routine
+    // and must keep working (so NOT `.strict()`) — but an unknown upstream
+    // field must not flow untyped into the body handed to the browser, which
+    // is the NEW-C40-01 boundary-leak class the repo's
+    // `quantalyze/no-passthrough-on-ipc` rule exists to stop (so NOT
+    // `.passthrough()`). Zod's default strip satisfies both.
     STATE.upstreamPayload = {
       read: true,
       trade: false,
@@ -428,7 +433,9 @@ describe("GET /api/keys/[id]/permissions — D-6 upstream contract validation", 
 
     const res = await GET(makeRequest(KEY_ID));
     expect(res.status).toBe(200);
-    expect((await res.json()).read).toBe(true);
+    const body = await res.json();
+    expect(body.read).toBe(true);
+    expect(body.newly_added_field).toBeUndefined();
   });
 
   it("still accepts a payload with probe_error absent (a real Python arm)", async () => {

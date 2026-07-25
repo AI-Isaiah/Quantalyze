@@ -80,9 +80,18 @@ const CIRCUIT_OPEN_COPY =
  * as an unknown state — instead of a confident false claim.
  *
  * `probe_error` stays OPTIONAL: it is genuinely absent on some Python arms and
- * defaults to false downstream. `.passthrough()` is deliberate too — the
- * service adding a NEW field must not break a working badge, which is the
- * failure mode this fix exists to prevent, not create.
+ * defaults to false downstream.
+ *
+ * STRIP, NOT STRICT AND NOT PASSTHROUGH. The two requirements pull in opposite
+ * directions and Zod's DEFAULT satisfies both:
+ *   * the service adding a NEW field must not break a working badge — that is
+ *     the failure mode this fix exists to prevent, not create — so `.strict()`
+ *     is wrong;
+ *   * but an unknown upstream field must not flow untyped into the response
+ *     this route hands the browser (the NEW-C40-01 boundary-leak class the
+ *     `quantalyze/no-passthrough-on-ipc` rule exists to stop), so
+ *     `.passthrough()` is wrong too.
+ * Stripping accepts the additive drift and drops the unknown field.
  */
 const PermissionPayloadSchema = z
   .object({
@@ -102,7 +111,7 @@ const PermissionPayloadSchema = z
      */
     probe_error: z.boolean().optional(),
   })
-  .passthrough();
+  .strip();
 
 type PermissionPayload = z.infer<typeof PermissionPayloadSchema>;
 
