@@ -27,6 +27,11 @@ import type { WizardErrorCode } from "@/lib/wizardErrors";
 
 vi.mock("server-only", () => ({}));
 
+// E9 — the route now REPORTS its own permanent faults. Spy on the capture so
+// "reaches Sentry" is an assertion rather than a hope.
+const captureSpy = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureSpy }));
+
 const USER = { id: "00000000-0000-0000-0000-000000000001" };
 const KEY_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -204,6 +209,7 @@ beforeEach(() => {
   RF.calls = 0;
   RF.lastCall = null;
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
+  captureSpy.mockClear();
   // Stub the upstream Python call the cache-miss body makes.
   vi.stubGlobal(
     "fetch",
@@ -449,6 +455,137 @@ describe("GET /api/keys/[id]/permissions — D-6 upstream contract validation", 
         String(c[0]).includes("contract violation"),
       ),
     ).toBe(true);
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * E9 — A PERMANENT ENGINEERING FAULT MUST NOT RENDER AS A RETRYABLE ONE.
+   *
+   * D-6 made contract drift fail loudly, but the throw then fell through the
+   * catch's message-sniffing cascade to its terminal `PROBE_FAILED` arm —
+   * "Could not check key scopes. Try again." Retrying a schema violation
+   * produces the identical failure until an engineer ships something, so the
+   * copy promised a manager something that cannot happen on the surface that
+   * tells them whether their money-bearing key still has the scopes they think
+   * it has. And it never reached Sentry, because the cascade made it
+   * indistinguishable from an exchange blip.
+   */
+  it("E9: contract drift is its OWN code, says retrying will not help, and reaches Sentry", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.upstreamPayload = { can_read: true } as never;
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+
+    // NOT the generic exchange-blip arm.
+    expect(body.code).toBe("PROBE_CONTRACT_VIOLATION");
+    expect(body.code).not.toBe("PROBE_FAILED");
+    // The copy must not promise a retry that cannot work.
+    expect(body.error).toMatch(/retrying will not clear it/i);
+    expect(body.error).not.toMatch(/try again/i);
+
+    // Recorded, not silently swallowed.
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const [captured, ctx] = captureSpy.mock.calls[0] as [
+      unknown,
+      { tags: Record<string, string> },
+    ];
+    expect((captured as Error).name).toBe("PermissionContractError");
+    expect(ctx.tags.reason).toBe("upstream_contract_violation");
+    // The live permission triple must never reach the error tracker.
+    expect(JSON.stringify(ctx)).not.toContain("can_read");
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * E9 — the same rule for the OTHER our-side permanent fault in this catch: a
+   * missing `INTERNAL_API_TOKEN` is a deployment misconfiguration, and
+   * "Could not reach the permissions service. Try again shortly." framed it as a
+   * transient outage while sending nothing to Sentry.
+   */
+  it("E9: a missing INTERNAL_API_TOKEN is its own code, is honest, and reaches Sentry", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    delete process.env.INTERNAL_API_TOKEN;
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("PROBE_MISCONFIGURED");
+    expect(body.error).toMatch(/retrying will not clear it/i);
+    // The raw env-var name must still never reach the client (the pre-existing
+    // infra-leak closure this route already owned).
+    expect(JSON.stringify(body)).not.toContain("INTERNAL_API_TOKEN");
+
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    expect(
+      (captureSpy.mock.calls[0]![1] as { tags: Record<string, string> }).tags
+        .reason,
+    ).toBe("internal_api_token_missing");
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * E9b — the ECONNREFUSED text match was DEAD, and its replacement is a type
+   * check.
+   *
+   * undici surfaces a refused connection as `TypeError("fetch failed")` and
+   * hides the syscall code on `.cause`, so `rawMessage.includes("ECONNREFUSED")`
+   * could never fire — a genuinely refused connection fell to the terminal
+   * `PROBE_FAILED` arm and told the user we had "checked" their key scopes and
+   * failed, when we never reached our own service at all.
+   */
+  it("E9b: undici's TypeError('fetch failed') classifies as PROBE_BACKEND_UNAVAILABLE, not PROBE_FAILED", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        // The EXACT shape undici produces for ECONNREFUSED / DNS / TLS.
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8002"), {
+            code: "ECONNREFUSED",
+          }),
+        });
+      }),
+    );
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("PROBE_BACKEND_UNAVAILABLE");
+    expect(body.code).not.toBe("PROBE_FAILED");
+    errorSpy.mockRestore();
+  });
+
+  /**
+   * E9b — the deadline arm, pinned on the TYPE rather than on a word.
+   *
+   * The message deliberately contains neither "aborted" nor "timeout", the two
+   * substrings the old cascade matched on, so this case cannot pass by
+   * coincidence: with the type check removed it falls to PROBE_FAILED. That
+   * matters because `resilientFetch`'s deadline surfaces as a DOMException whose
+   * wording is the platform's, not ours, and the old cascade already had a live
+   * blind spot of exactly this kind ("timed out" does not contain "timeout" —
+   * the WR-01 bug in `wizardErrors.ts`).
+   */
+  it("E9b: a fired deadline classifies as PROBE_TIMEOUT on the TYPE, not on a keyword", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const abort = new Error("signal deadline exceeded");
+        abort.name = "TimeoutError";
+        throw abort;
+      }),
+    );
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("PROBE_TIMEOUT");
     errorSpy.mockRestore();
   });
 

@@ -7,7 +7,13 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
-import { CircuitOpenError, formatUpstreamDetail } from "@/lib/seam-errors";
+import {
+  AnalyticsTimeoutError,
+  CircuitOpenError,
+  formatUpstreamDetail,
+  isSeamTransportFailure,
+} from "@/lib/seam-errors";
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { WizardErrorCode } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
 
@@ -55,6 +61,38 @@ export const maxDuration = 300;
  */
 const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+/**
+ * E9 — OUR-SIDE, PERMANENT faults, typed so the handler can answer honestly.
+ *
+ * Both used to be bare `new Error(...)` and both fell through the catch's
+ * message-sniffing cascade. `PermissionContractError` landed on its terminal
+ * `PROBE_FAILED` arm ("Could not check key scopes. Try again.") and
+ * `InternalTokenMissingError` on `PROBE_BACKEND_UNAVAILABLE` ("Try again
+ * shortly.") — both PROMISING A RETRY that cannot possibly work, on the surface
+ * that tells a manager whether their money-bearing key still has the scopes they
+ * think it has. Neither reached Sentry, because the cascade rendered them
+ * indistinguishable from an exchange blip.
+ *
+ * Typed rather than message-matched for the reason `wizardErrors.ts` states at
+ * its own type-check-first branch: a substring branch is simultaneously too
+ * narrow (any reword silently re-opens the cascade) and too broad (an unrelated
+ * upstream string containing the token is mislabelled), and ordering rather than
+ * specificity decides which arm wins.
+ */
+class PermissionContractError extends Error {
+  constructor() {
+    super("Permission payload failed contract validation");
+    this.name = "PermissionContractError";
+  }
+}
+
+class InternalTokenMissingError extends Error {
+  constructor() {
+    super("INTERNAL_API_TOKEN is not configured on the Next layer.");
+    this.name = "InternalTokenMissingError";
+  }
+}
 
 /**
  * Runtime contract for the `/internal/keys/{id}/permissions` payload.
@@ -146,9 +184,8 @@ function makeCachedFetcher(keyId: string): {
       didDecrypt = true; // runs only on a cache MISS
       const internalToken = process.env.INTERNAL_API_TOKEN;
       if (!internalToken) {
-        throw new Error(
-          "INTERNAL_API_TOKEN is not configured on the Next layer.",
-        );
+        // E9 — typed. Message preserved verbatim so server logs are unchanged.
+        throw new InternalTokenMissingError();
       }
 
       // Phase 140 / SEAM-01 + SEAM-03. Two properties of running the seam call
@@ -214,7 +251,8 @@ function makeCachedFetcher(keyId: string): {
           `[keys/${keyId}/permissions] upstream contract violation — refusing to cache`,
           parsed.error.issues,
         );
-        throw new Error("Permission payload failed contract validation");
+        // E9 — typed. Message preserved verbatim so server logs are unchanged.
+        throw new PermissionContractError();
       }
       return parsed.data;
     },
@@ -318,18 +356,105 @@ export const GET = withAuth(
         );
       }
 
+      // ⚠️ E9 — OUR OWN ENGINEERING FAULTS ARE TYPED AND BRANCH FIRST.
+      //
+      // Everything below this point is the message-sniffing cascade, whose
+      // terminal arm is `PROBE_FAILED` / "Could not check key scopes. Try
+      // again." — copy that promises the user a retry will help. That promise is
+      // TRUE for an exchange blip and FALSE for a permanent, deterministic fault
+      // on our side: retrying a schema violation or a missing deployment secret
+      // produces the identical failure until an engineer ships something. On a
+      // money-bearing surface that turns a five-minute page into a manager
+      // clicking "Re-check" forever while nothing is recorded anywhere — these
+      // arms never reached Sentry either, because the cascade collapsed them
+      // into the same generic 502 an exchange timeout produces.
+      //
+      // Both are typed (not message-matched) for the reason `wizardErrors.ts`
+      // spells out at its own type-check-first branch: a reword silently
+      // re-opens the cascade, and ordering rather than specificity decides which
+      // substring arm wins.
+      if (err instanceof PermissionContractError) {
+        // Contract drift on the live permission triple. `parsed.error.issues`
+        // is already logged (never the body — it carries someone's live scopes).
+        captureToSentry(err, {
+          tags: {
+            route: "/api/keys/[id]/permissions",
+            reason: "upstream_contract_violation",
+          },
+          extra: { key_id: keyId },
+        });
+        return NextResponse.json(
+          {
+            error:
+              "We can't read the permission data for this key right now. This is a fault on our side — we have been notified, and retrying will not clear it.",
+            code: "PROBE_CONTRACT_VIOLATION",
+          },
+          { status: 502, headers: NO_STORE_HEADERS },
+        );
+      }
+      if (err instanceof InternalTokenMissingError) {
+        // A DEPLOYMENT misconfiguration: the env var is absent from this
+        // environment. Same honesty rule — no "try again shortly".
+        captureToSentry(err, {
+          tags: {
+            route: "/api/keys/[id]/permissions",
+            reason: "internal_api_token_missing",
+          },
+          extra: { key_id: keyId },
+        });
+        return NextResponse.json(
+          {
+            error:
+              "The permissions service is not configured on this deployment. This is a fault on our side — we have been notified, and retrying will not clear it.",
+            code: "PROBE_MISCONFIGURED",
+          },
+          { status: 502, headers: NO_STORE_HEADERS },
+        );
+      }
+
+      // E9b — TRANSPORT FAILURES ARE A TYPE CHECK, and the old text match was
+      // DEAD. `rawMessage.includes("ECONNREFUSED")` never fired: undici surfaces
+      // a refused connection as `TypeError("fetch failed")` and hides the syscall
+      // code on `.cause` (documented at `resilient-fetch.ts:1347`, verified on
+      // Node 22 and 25 for ECONNREFUSED, DNS and TLS). `isSeamTransportFailure`
+      // was written for exactly this shape and had been applied only in
+      // `finalize-wizard`.
+      //
+      // The deadline / unreachable split below is for COPY ONLY — both mean "we
+      // could not reach our own service", both are genuinely transient, and both
+      // keep the retry promise the terminal arm makes falsely.
+      if (isSeamTransportFailure(err)) {
+        const isDeadline =
+          err instanceof AnalyticsTimeoutError ||
+          ((err instanceof Error || err instanceof DOMException) &&
+            (err.name === "AbortError" || err.name === "TimeoutError"));
+        console.error(
+          `[keys/permissions] seam transport failure for ${keyId}:`,
+          err,
+        );
+        return NextResponse.json(
+          {
+            error: isDeadline
+              ? "Permissions probe timed out. Try again."
+              : "Could not reach the permissions service. Try again shortly.",
+            code: isDeadline ? "PROBE_TIMEOUT" : "PROBE_BACKEND_UNAVAILABLE",
+          },
+          { status: 502, headers: NO_STORE_HEADERS },
+        );
+      }
+
       // The raw Error.message used to bubble straight into the response
       // body (e.g. "INTERNAL_API_TOKEN is not configured on the Next
       // layer."). That leaks infra detail to any authenticated client
       // and confuses the wizard alert with internal jargon. Classify
       // into a stable code + generic copy here; keep the raw message
       // server-side for debugging only.
+      //
+      // What still reaches this cascade is the UPSTREAM's own error text (the
+      // `formatUpstreamDetail`-rendered `detail` from a non-2xx), which is the
+      // only input it was ever able to classify.
       const rawMessage = err instanceof Error ? err.message : String(err);
-      const isConfigError =
-        rawMessage.includes("INTERNAL_API_TOKEN") ||
-        rawMessage.startsWith("Upstream 5") ||
-        rawMessage.includes("ECONNREFUSED") ||
-        rawMessage.includes("not configured");
+      const isConfigError = rawMessage.startsWith("Upstream 5");
       const isTimeout =
         rawMessage.includes("aborted") ||
         rawMessage.toLowerCase().includes("timeout");
