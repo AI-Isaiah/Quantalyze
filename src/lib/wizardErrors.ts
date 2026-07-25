@@ -165,6 +165,19 @@ export type WizardErrorCode =
   // instead, BEFORE the first probe, so the failure is deterministic and the
   // draft is untouched.
   | "COMPOSITE_TOO_MANY_MEMBERS"
+  // Batch-D / D1a — OUR OWN RATE LIMITER DENIED THE KICKOFF.
+  //
+  // `/api/keys/sync` is capped at 5 per 60s per (user, strategy). The wizard's
+  // seam-retry button re-POSTs that exact route, so four clicks after the
+  // mount's own POST exhaust the bucket and the fifth is denied. The denial
+  // used to be a CODELESS 429, which fell through every classifier arm into
+  // SYNC_FAILED — whose gate affordance is the DRAFT-DELETING one. A user
+  // following our own "Try again" copy was routed into the delete button.
+  //
+  // Distinct from KEY_RATE_LIMIT, which blames the EXCHANGE. This one is ours,
+  // it is short, and `Retry-After` says exactly how short — so the copy names
+  // the real wait rather than sending the user round the same loop.
+  | "SYNC_RATE_LIMITED"
   // Fallback
   | "UNKNOWN";
 
@@ -853,6 +866,24 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  SYNC_RATE_LIMITED: {
+    title: "You have tried this a few times in quick succession.",
+    cause:
+      // Ours, not the exchange's, and it says so — KEY_RATE_LIMIT's copy
+      // ("The exchange asked us to slow down") would send a manager to audit a
+      // venue that was never involved. And it states the two facts that are
+      // true on EVERY path here: nothing was lost, and the wait is short.
+      "We cap how often a single strategy can start a sync, and this draft has just hit that cap. Your draft and every key you have connected are saved, and nothing was submitted.",
+    fix: [
+      "Wait a moment, then try again.",
+      "If it keeps happening, contact security@quantalyze.com with your draft ID.",
+    ],
+    docsHref: "/security#sync-timing",
+    // Recoverable by construction — the whole content of this error is "not
+    // yet", so the Retry affordance must render.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -959,8 +990,14 @@ export function formatKeyError(
     // C2 — BOTH unavailable codes get the real wait. Naming only the
     // connect-step one would have left the post-save surfaces (where the hint
     // is just as actionable) on the vague "wait a moment".
+    //
+    // D1a — and SYNC_RATE_LIMITED above all, because there the hint is not an
+    // estimate: `Retry-After` is the limiter's own bucket reset, so "wait about
+    // N seconds" is exactly right and "wait a moment" means retrying straight
+    // back into the same denial.
     (code === "SERVICE_UNAVAILABLE_RETRY" ||
-      code === "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED") &&
+      code === "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED" ||
+      code === "SYNC_RATE_LIMITED") &&
     typeof context?.retryAfterS === "number" &&
     Number.isFinite(context.retryAfterS) &&
     context.retryAfterS > 0

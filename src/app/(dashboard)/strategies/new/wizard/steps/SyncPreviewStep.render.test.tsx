@@ -100,15 +100,53 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
     errSpy.mockRestore();
   });
 
-  it("transitions to gate_failed with a network-timeout when the sync POST throws", async () => {
+  /**
+   * Batch-D / D1b + D1c — ⚠️ THIS TEST ASSERTED THE BUG.
+   *
+   * It required `wizard-try-another-key` — the control wired to
+   * `onTryAnotherKey` -> WizardClient's `handleDeleteDraft()`, which cascades
+   * away the draft and every `strategy_keys` member — to be present on the
+   * THROW path, and it was the only assertion the throw path had.
+   *
+   * The throw arm set `errorCode` and `phase` and never touched `seamFailure`,
+   * so the destructive-only branch rendered. `isComposite` is false here too
+   * (it is only ever set from a SUCCESSFUL kickoff body), so the composite
+   * branch never applied either: a user who had just connected three keys and
+   * lost their network was shown ONE button, and it deleted everything.
+   *
+   * Inverted. A thrown kickoff is our-side transport (D1c), so the copy is the
+   * draft-saved outage envelope and the controls are non-destructive.
+   */
+  it("D1b: a THROWN kickoff is non-destructive and never offers the delete-draft control", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onTryAnotherKey = vi.fn();
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
 
-    render(<SyncPreviewStep {...baseProps} />);
-
-    await waitFor(() =>
-      expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument(),
+    render(
+      <SyncPreviewStep
+        {...baseProps}
+        onTryAnotherKey={onTryAnotherKey}
+        onReviewKeys={vi.fn()}
+      />,
     );
+
+    // THE assertion, and it is the inversion of what this case used to require.
+    await waitFor(() =>
+      expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+    ).not.toBeInTheDocument();
+    expect(onTryAnotherKey).not.toHaveBeenCalled();
+
+    // D1c — and the copy does not blame the user's exchange for a request that
+    // never reached OUR OWN route.
+    expect(
+      screen.getByText("We could not reach our service just now."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/could not reach the exchange/i),
+    ).not.toBeInTheDocument();
     errSpy.mockRestore();
   });
 });
@@ -344,8 +382,14 @@ describe("[C2] SyncPreviewStep — a seam kickoff failure is never destructive",
    * "the destructive control was removed entirely" — which would itself be a
    * regression, since a genuine gate failure is exactly when "try another key"
    * is the right offer.
+   *
+   * Batch-D / D1a — the SECOND assertion here was relaxed on purpose. It used
+   * to require the retry to be ABSENT on an unclassified kickoff failure, which
+   * is precisely the shape that made every classifier blind spot a data-loss
+   * path: the draft-deleting control alone on the screen. The offer stands; it
+   * is no longer alone. See `kickoffFailed`.
    */
-  it("POSITIVE CONTROL: a genuine gate failure still offers the try-another-key control", async () => {
+  it("POSITIVE CONTROL: an unclassified kickoff failure still offers try-another-key — beside a retry", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
@@ -356,7 +400,8 @@ describe("[C2] SyncPreviewStep — a seam kickoff failure is never destructive",
     expect(
       await screen.findByTestId("wizard-try-another-key"),
     ).toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-seam-retry")).not.toBeInTheDocument();
+    // D1a — never the SOLE control on a kickoff failure.
+    expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument();
     errSpy.mockRestore();
   });
 });
@@ -1506,5 +1551,236 @@ describe("[94-03/WIZ-05] SyncPreviewStep — cached snapshot + durability skip",
       String(c[0]).includes("/api/keys/sync"),
     );
     expect(syncPosts).toHaveLength(1);
+  });
+});
+
+/**
+ * Batch-D / D1a — THE RETRY BUTTON ROUTED BACK TO THE DELETE BUTTON.
+ *
+ * `handleSeamRetry` re-POSTs `/api/keys/sync`, which is capped at 5 per 60s per
+ * (user, strategy) (`ratelimit.ts` `userActionLimiter`). Mount spends token 1;
+ * four clicks spend 2-5; the fifth is DENIED with a 429. That 429 was CODELESS,
+ * 429 is not in `CODELESS_SEAM_KICKOFF_STATUSES`, so `classifySeamKickoffFailure`
+ * returned `null` -> `SYNC_FAILED` + `setSeamFailure(false)` -> the render swapped
+ * to `wizard-try-another-key` -> `handleDeleteDraft()` -> every `strategy_keys`
+ * member cascaded away.
+ *
+ * A user following our own "Try again" copy, at our own advertised cadence,
+ * destroyed their composite draft. `handleSeamRetry`'s failure path had NO test
+ * coverage at all.
+ */
+describe("[D1a] SyncPreviewStep — the retry path can never route into the delete control", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function seamOutage(): Response {
+    return new Response(JSON.stringify({ ok: false, code: "CIRCUIT_OPEN" }), {
+      status: 503,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  /** What `/api/keys/sync` now answers when ITS OWN limiter denies the kickoff. */
+  function rateLimited(retryAfter = "42"): Response {
+    return new Response(
+      JSON.stringify({ error: "Too many requests", code: "SYNC_RATE_LIMITED" }),
+      {
+        status: 429,
+        headers: { "content-type": "application/json", "Retry-After": retryAfter },
+      },
+    );
+  }
+
+  it("a 429 on RETRY stays non-destructive and names the real wait", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(seamOutage())
+      .mockResolvedValue(rateLimited("42"));
+
+    render(
+      <SyncPreviewStep
+        {...baseProps}
+        onTryAnotherKey={onTryAnotherKey}
+        onReviewKeys={vi.fn()}
+      />,
+    );
+
+    const retry = await screen.findByTestId("wizard-seam-retry");
+    await act(async () => {
+      retry.click();
+    });
+
+    // THE assertion. Pre-fix this render swapped to the draft-deleting control.
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("wizard-try-another-key"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument();
+    expect(onTryAnotherKey).not.toHaveBeenCalled();
+
+    // Honest copy: ours, not the exchange's, and it never claims we fetched
+    // trades (the sync was never started).
+    expect(
+      screen.getByText("You have tried this a few times in quick succession."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/We fetched your trades/i)).not.toBeInTheDocument();
+    // `Retry-After` is the limiter's own bucket reset — an exact number, not a
+    // guess. "Wait a moment" meant retrying straight back into the same denial.
+    expect(await screen.findByText(/Wait about 42 seconds/i)).toBeInTheDocument();
+
+    errSpy.mockRestore();
+  });
+
+  it("FOUR retry clicks — the real cadence — never reach the destructive control", async () => {
+    // The lived sequence: mount 503, then the user does exactly what the screen
+    // tells them to. The 5th POST in the 60s window is the limiter's.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(seamOutage()) // mount — token 1
+      .mockResolvedValueOnce(seamOutage()) // click 1 — token 2
+      .mockResolvedValueOnce(seamOutage()) // click 2 — token 3
+      .mockResolvedValueOnce(seamOutage()) // click 3 — token 4
+      .mockResolvedValue(rateLimited()); //  click 4 — DENIED
+
+    render(
+      <SyncPreviewStep
+        {...baseProps}
+        onTryAnotherKey={onTryAnotherKey}
+        onReviewKeys={vi.fn()}
+      />,
+    );
+
+    for (let i = 0; i < 4; i++) {
+      const retry = await screen.findByTestId("wizard-seam-retry");
+      await act(async () => {
+        retry.click();
+      });
+    }
+
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+    ).not.toBeInTheDocument();
+    expect(onTryAnotherKey).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("DEFENCE IN DEPTH: even a CODELESS 429 is never solely destructive", async () => {
+    // The class fix, not the instance fix. `kickoffFailed` is set on EVERY
+    // kickoff-failure arm including the SYNC_FAILED fallback, so a future arm
+    // that forgets to name itself on the wire — which is exactly how this bug
+    // arrived — degrades to "honest copy plus a useless retry", never to "one
+    // button and it deletes your composite".
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(seamOutage())
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "Too many requests" }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+    render(
+      <SyncPreviewStep
+        {...baseProps}
+        onTryAnotherKey={onTryAnotherKey}
+        onReviewKeys={vi.fn()}
+      />,
+    );
+
+    const retry = await screen.findByTestId("wizard-seam-retry");
+    await act(async () => {
+      retry.click();
+    });
+
+    // The retry survives the reclassification, so the destructive control is
+    // never the only thing on the screen.
+    await waitFor(() =>
+      expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument(),
+    );
+    expect(onTryAnotherKey).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("an UNCLASSIFIED failure on RETRY offers the gate control but never alone", async () => {
+    // The retry got through and the kickoff failed for a reason we do not
+    // recognise. "Try another key" is a legitimate OFFER — it is not the only
+    // one, because we still never started the sync.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(seamOutage())
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "compute failed" }), {
+          status: 500,
+        }),
+      );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    const retry = await screen.findByTestId("wizard-seam-retry");
+    await act(async () => {
+      retry.click();
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("a THROWN retry re-states our-side transport and stays non-destructive", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(seamOutage())
+      .mockRejectedValue(new Error("offline"));
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    const retry = await screen.findByTestId("wizard-seam-retry");
+    await act(async () => {
+      retry.click();
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("wizard-try-another-key"),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/could not reach the exchange/i),
+    ).not.toBeInTheDocument();
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("a 404 draft-gone classifies as GATE_DRAFT_GONE, not a failed analytics run", async () => {
+    // `keys/sync`'s 404 was codeless too. SYNC_FAILED's "we fetched your trades
+    // but the analytics computation did not complete" is a false claim about
+    // the user's money data when the draft simply is not there.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: "Strategy not found", code: "GATE_DRAFT_GONE" }),
+        { status: 404, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    expect(
+      await screen.findByText("This draft is no longer available."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/We fetched your trades/i)).not.toBeInTheDocument();
+    // Not transient, so the gate control is offered — but still not alone.
+    expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument();
+    errSpy.mockRestore();
   });
 });

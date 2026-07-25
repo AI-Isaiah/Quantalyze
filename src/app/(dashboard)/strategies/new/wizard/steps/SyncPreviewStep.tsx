@@ -356,8 +356,15 @@ function capitalizeExchange(exchange: string): string {
  * the CODE, never the raw HTTP status"). Two fixes in the same batch chose
  * opposite rules; this is the convergence.
  *
- * Every arm that can produce one of these responses now names itself on the
- * wire, so the table is exhaustive over our own routes:
+ * ⚠️ D1a — THE "EXHAUSTIVE" CLAIM USED TO BE FALSE, and the gap was a
+ * data-loss path. `keys/sync` still answered CODELESS on both 429s
+ * (`:88`, `:99`), both 400s (`:63`, `:72`) and the 404 (`:125`). None of those
+ * statuses is in `CODELESS_SEAM_KICKOFF_STATUSES`, so they classified to
+ * `null` -> SYNC_FAILED -> the DRAFT-DELETING control. The 429 is the one that
+ * bit: the seam-retry button re-POSTs this very route, which is capped at
+ * 5/60s per (user, strategy), so four clicks after the mount's own POST routed
+ * the user from "Try again" straight into "Try another key". Every arm now
+ * names itself, and the claim below holds:
  *
  *   CIRCUIT_OPEN            breaker open (process-key-client)
  *   UPSTREAM_TIMEOUT        504, the seam deadline fired
@@ -366,19 +373,30 @@ function capitalizeExchange(exchange: string): string {
  *   SYNC_ENQUEUE_FAILED     503, the enqueue RPC failed (keys/sync:221)
  *   COMPOSITE_MEMBERSHIP_UNKNOWN
  *                           503, membership unknowable (keys/sync:159)
+ *   SYNC_RATE_LIMITED       429, OUR limiter denied the kickoff
+ *   GATE_DRAFT_GONE         404, the draft is not there any more
+ *   SYNC_BAD_REQUEST        400, WE built a malformed request
  *
- * All but the last mean "we could not start the sync"; the last has its own
- * accurate copy and keeps it.
+ * `transient` says whether re-POSTing the SAME kickoff is a sensible remedy.
+ * It is what gates the non-destructive-only render: a transient failure is not
+ * attributable to the key, so nothing on screen may discard it. The last two
+ * rows are NOT transient — a vanished draft and our own malformed request are
+ * not fixed by waiting — but they are still KICKOFF failures, and the destructive
+ * control is never the SOLE offer on any of them (see `kickoffFailed`).
  */
-const KICKOFF_WIRE_CODE_TO_ENVELOPE: Readonly<Record<string, WizardErrorCode>> =
-  {
-    CIRCUIT_OPEN: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
-    UPSTREAM_TIMEOUT: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
-    UPSTREAM_NETWORK_ERROR: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
-    UPSTREAM_NOT_CONFIGURED: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
-    SYNC_ENQUEUE_FAILED: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
-    COMPOSITE_MEMBERSHIP_UNKNOWN: "COMPOSITE_MEMBERSHIP_UNKNOWN",
-  };
+const KICKOFF_WIRE_CODE_TO_ENVELOPE: Readonly<
+  Record<string, { code: WizardErrorCode; transient: boolean }>
+> = {
+  CIRCUIT_OPEN: { code: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED", transient: true },
+  UPSTREAM_TIMEOUT: { code: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED", transient: true },
+  UPSTREAM_NETWORK_ERROR: { code: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED", transient: true },
+  UPSTREAM_NOT_CONFIGURED: { code: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED", transient: true },
+  SYNC_ENQUEUE_FAILED: { code: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED", transient: true },
+  COMPOSITE_MEMBERSHIP_UNKNOWN: { code: "COMPOSITE_MEMBERSHIP_UNKNOWN", transient: true },
+  SYNC_RATE_LIMITED: { code: "SYNC_RATE_LIMITED", transient: true },
+  GATE_DRAFT_GONE: { code: "GATE_DRAFT_GONE", transient: false },
+  SYNC_BAD_REQUEST: { code: "UNKNOWN", transient: false },
+};
 
 /**
  * Statuses that are a seam/platform failure even with NO code in the body.
@@ -408,19 +426,26 @@ const CODELESS_SEAM_KICKOFF_STATUSES = new Set([502, 503, 504]);
 function classifySeamKickoffFailure(
   res: Response,
   body: { code?: unknown } | null,
-): { code: WizardErrorCode; retryAfterS: number | undefined } | null {
+): {
+  code: WizardErrorCode;
+  retryAfterS: number | undefined;
+  transient: boolean;
+} | null {
   const wireCode = typeof body?.code === "string" ? body.code : null;
   const mapped = wireCode ? KICKOFF_WIRE_CODE_TO_ENVELOPE[wireCode] : undefined;
 
   let code: WizardErrorCode;
+  let transient: boolean;
   if (mapped) {
-    code = mapped;
+    code = mapped.code;
+    transient = mapped.transient;
   } else if (wireCode) {
     // A code we do not recognise is NOT a seam failure by default — that is the
     // whole discipline. Let the caller fall through to SYNC_FAILED.
     return null;
   } else if (CODELESS_SEAM_KICKOFF_STATUSES.has(res.status)) {
     code = "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED";
+    transient = true;
   } else {
     return null;
   }
@@ -432,6 +457,7 @@ function classifySeamKickoffFailure(
   return {
     code,
     retryAfterS: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined,
+    transient,
   };
 }
 
@@ -477,6 +503,26 @@ export function SyncPreviewStep({
    * attributable to the key, so nothing should discard it.
    */
   const [seamFailure, setSeamFailure] = useState(false);
+  /**
+   * TRUE when `gate_failed` was reached because the KICKOFF failed, for ANY
+   * reason at all — thrown, codeless, rate-limited, unrecognised, or a genuine
+   * 500 from the enqueue.
+   *
+   * ⚠️ D1a/D1b — THIS IS THE CLASS FIX, and `seamFailure` above is the special
+   * case of it. `seamFailure` only ever covered the failures the classifier
+   * RECOGNISED, so every hole in that classifier — and there were five, all of
+   * them codeless `keys/sync` arms — silently re-armed the destructive control
+   * as the SOLE offer on the screen. The throw arm had the same shape: it set
+   * `errorCode` and `phase` and never touched `seamFailure` at all.
+   *
+   * The invariant this state exists to hold is narrow and absolute: NOTHING
+   * about a failed kickoff is attributable to the user's key, because the
+   * kickoff is the request that starts the sync. So on any kickoff failure the
+   * draft-deleting `onTryAnotherKey` may never be the only thing a user can
+   * click. It may still be OFFERED (a genuine analytics failure is exactly when
+   * "try another key" is right) — just never alone.
+   */
+  const [kickoffFailed, setKickoffFailed] = useState(false);
   const [gateResult, setGateResult] = useState<StrategyGateResult | null>(null);
   const [snapshot, setSnapshot] = useState<SyncPreviewSnapshot | null>(null);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
@@ -664,10 +710,15 @@ export function SyncPreviewStep({
               // C2 — this failure happened AFTER create-with-key persisted the
               // key and the draft, so the recovery control must be
               // non-destructive. See `seamFailure`.
-              setSeamFailure(true);
+              setSeamFailure(seam.transient);
             } else {
               setErrorCode("SYNC_FAILED");
             }
+            // D1a — UNCONDITIONAL, on every arm including the SYNC_FAILED
+            // fallback. This is the flag the render actually keys the data-loss
+            // guard off; leaving it to the classifier is what made each of the
+            // classifier's five blind spots a route back to the delete button.
+            setKickoffFailed(true);
             setPhase("gate_failed");
           }
           return;
@@ -679,7 +730,24 @@ export function SyncPreviewStep({
       } catch (err) {
         console.error("[wizard:SyncPreviewStep] kickoff threw:", err);
         if (mountedRef.current) {
-          setErrorCode("KEY_NETWORK_TIMEOUT");
+          // D1c — NOT `KEY_NETWORK_TIMEOUT`. A thrown `fetch` on this POST means
+          // the request never reached OUR OWN service; the exchange was never
+          // involved, and could not have been — this is the wizard talking to
+          // `/api/keys/sync`, not to a venue. "We could not reach the exchange
+          // … usually means a temporary exchange issue" therefore sends a
+          // manager to audit a key that was never the problem, and hides our
+          // outage from the `wizard_error` funnel. F-7 fixed exactly this
+          // attribution on the SERVER (finalize-wizard) and left the three
+          // client throw arms saying the untrue thing.
+          setErrorCode("SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED");
+          // D1b — AND THE GUARD. This arm set `errorCode` and `phase` and never
+          // touched `seamFailure`, so the destructive-only branch rendered:
+          // `isComposite` is false here too (it is only ever set from a
+          // SUCCESSFUL kickoff body), so a user who had just connected three
+          // keys and lost the network was offered "Try another key" as the ONE
+          // control, beneath copy blaming their exchange.
+          setSeamFailure(true);
+          setKickoffFailed(true);
           setPhase("gate_failed");
         }
       }
@@ -1340,21 +1408,28 @@ export function SyncPreviewStep({
         if (seam) {
           setSeamRetryAfterS(seam.retryAfterS);
           setErrorCode(seam.code);
-          setSeamFailure(true);
+          setSeamFailure(seam.transient);
         } else {
           // The kickoff got through this time and failed for a REAL reason.
           // Hand over to the honest terminal copy — and drop the
-          // non-destructive guard with it, since the gate affordance is now
-          // the correct one.
+          // TRANSIENT guard with it, since the gate affordance is now a
+          // reasonable OFFER. It is still not the only one: `kickoffFailed`
+          // stays true, so the retry sits beside it (D1a).
           setSeamRetryAfterS(undefined);
           setErrorCode("SYNC_FAILED");
           setSeamFailure(false);
         }
+        // Still a kickoff failure however it classified.
+        setKickoffFailed(true);
         return;
       }
       if (kickoff?.composite === true) setIsComposite(true);
       setErrorCode(null);
       setSeamFailure(false);
+      // The kickoff SUCCEEDED, so a later `gate_failed` from the POLL is a
+      // genuine gate verdict about this key and must get the gate's own
+      // (single, destructive) affordance back.
+      setKickoffFailed(false);
       setSeamRetryAfterS(undefined);
       // A fresh wait genuinely starts now, so both patience clocks reset —
       // same reasoning as the F-2b reset in handleRetrySync.
@@ -1366,6 +1441,16 @@ export function SyncPreviewStep({
         "[wizard:SyncPreviewStep] seam retry POST failed:",
         seamErr,
       );
+      // D1c — same reasoning as the mount arm: a thrown `fetch` on a POST to
+      // OUR OWN route is our-side transport, never the exchange. Leaving the
+      // PREVIOUS envelope in place would also have been a lie whenever the
+      // retry failed for a different reason than the original.
+      if (mountedRef.current) {
+        setSeamRetryAfterS(undefined);
+        setErrorCode("SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED");
+        setSeamFailure(true);
+        setKickoffFailed(true);
+      }
     } finally {
       if (mountedRef.current) setRetrying(false);
     }
@@ -1435,15 +1520,41 @@ export function SyncPreviewStep({
               )}
             </>
           ) : (
-            <Button
-              type="button"
-              onClick={
-                isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey
-              }
-              data-testid="wizard-try-another-key"
-            >
-              {isComposite ? "Review your keys" : "Try another key"}
-            </Button>
+            <>
+              {/*
+               * D1a — THE DESTRUCTIVE CONTROL IS NEVER THE SOLE OFFER ON A
+               * KICKOFF FAILURE.
+               *
+               * C2 removed it for the failures the classifier RECOGNISED, which
+               * left every blind spot in that classifier as a live route back to
+               * `handleDeleteDraft()`. `kickoffFailed` is true for ALL of them —
+               * including the SYNC_FAILED fallback and an unrecognised wire code
+               * — so the idempotent retry always sits beside it. "Try another
+               * key" remains offered here because a genuine analytics failure is
+               * exactly when it is the right remedy; it just stops being the
+               * only thing on the screen when we never even started the sync.
+               */}
+              {kickoffFailed && (
+                <Button
+                  type="button"
+                  onClick={handleSeamRetry}
+                  disabled={retrying}
+                  data-testid="wizard-seam-retry"
+                >
+                  {retrying ? "Retrying…" : "Try again"}
+                </Button>
+              )}
+              <Button
+                type="button"
+                variant={kickoffFailed ? "ghost" : "primary"}
+                onClick={
+                  isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey
+                }
+                data-testid="wizard-try-another-key"
+              >
+                {isComposite ? "Review your keys" : "Try another key"}
+              </Button>
+            </>
           )}
         </div>
       </section>

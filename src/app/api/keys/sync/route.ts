@@ -59,8 +59,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
   const { strategy_id } = body;
 
+  // D1a — EVERY ARM NAMES ITSELF ON THE WIRE. The wizard classifies kickoff
+  // failures off the CODE (C3's rule), and it can only do that if the route
+  // actually sends one. These 400s, the two 429s and the 404 below all answered
+  // CODELESS, so C3's docblock claim that the table was "exhaustive over our
+  // own routes" was false — and the fallback for an unclassifiable failure is
+  // SYNC_FAILED, whose recovery control DELETES THE DRAFT.
   if (!strategy_id || typeof strategy_id !== "string") {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Missing strategy_id", code: "SYNC_BAD_REQUEST" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (code-review): reject a malformed strategy_id BEFORE it becomes the
@@ -69,7 +78,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // fresh allowance + an ownership SELECT) from arbitrary strings. A
   // valid-but-unowned id still gets the uniform 404 below (P458, no existence leak).
   if (!isUuid(strategy_id)) {
-    return NextResponse.json({ error: "Invalid strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Invalid strategy_id", code: "SYNC_BAD_REQUEST" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (M-0327/H-0279): two-tier rate limit.
@@ -84,10 +96,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // A per-user-ONLY bucket (the pre-F6 `keys-sync:${user.id}`) had the
   // starvation + cross-strategy-burn problem; a per-strategy-ONLY bucket
   // removed the per-user ceiling. Both together close both holes.
+  //
+  // D1a — BOTH 429s CARRY `SYNC_RATE_LIMITED`. The per-(user, strategy) bucket
+  // below is `userActionLimiter` = 5 per 60s, and the wizard's own seam-retry
+  // button re-POSTs THIS route: mount spends token 1, four clicks spend 2-5,
+  // the fifth is denied. A codeless 429 matched no classifier arm in
+  // SyncPreviewStep, fell through to SYNC_FAILED, and SYNC_FAILED's single
+  // recovery control is `onTryAnotherKey` -> `handleDeleteDraft()`, which
+  // cascades away every `strategy_keys` member. Our own "Try again" copy led
+  // to our own delete button. The code is what lets the client tell a
+  // short, self-inflicted "not yet" apart from a real analytics failure;
+  // `Retry-After` (already sent) then names the exact wait.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "SYNC_RATE_LIMITED" satisfies WizardErrorCode },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
     );
   }
@@ -97,7 +120,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   );
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "SYNC_RATE_LIMITED" satisfies WizardErrorCode },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
@@ -122,8 +145,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 403-unowned from 404-not-found. Now there is no asymmetry: an
     // attacker probing a foreign strategy_id and an attacker probing a
     // random uuid both see the same response shape.
+    // D1a — `GATE_DRAFT_GONE` already exists and describes this EXACTLY ("the
+    // draft is no longer there"). Emitting it costs nothing, preserves the
+    // P458 uniformity above (both cases still answer the same 404 + the same
+    // code, so there is still no existence oracle), and stops the wizard
+    // classifying a missing draft as a failed analytics run.
     return NextResponse.json(
-      { error: "Strategy not found" },
+      { error: "Strategy not found", code: "GATE_DRAFT_GONE" satisfies WizardErrorCode },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }

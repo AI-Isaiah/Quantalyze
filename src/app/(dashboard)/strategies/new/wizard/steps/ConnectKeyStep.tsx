@@ -337,11 +337,18 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         exchange,
       });
     } catch (err) {
-      setErrorCode("KEY_NETWORK_TIMEOUT");
+      // D1c — our-side transport, not the user's exchange. This POST goes to
+      // `/api/keys/create-with-key`; a throw here means we never reached our own
+      // route, so nothing was validated against a venue and nothing could have
+      // been. SERVICE_UNAVAILABLE_RETRY (not the DRAFT_SAVED twin) because this
+      // IS the connect step: its "your key has not been saved and nothing was
+      // submitted" is the accurate half of the pair here, and stays accurate —
+      // the draft is only minted by a SUCCESSFUL response to this very call.
+      setErrorCode("SERVICE_UNAVAILABLE_RETRY");
       trackForQuantsEventClient("wizard_error", {
         wizard_session_id: wizardSessionId,
         step: "connect_key",
-        code: "KEY_NETWORK_TIMEOUT",
+        code: "SERVICE_UNAVAILABLE_RETRY",
       });
       console.error("[wizard:ConnectKeyStep] submit threw:", err);
       setSubmitting(false);

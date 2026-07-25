@@ -86,7 +86,25 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
     expect(payload.code).toBe("UNKNOWN");
   });
 
-  it("maps a thrown fetch (network failure) to KEY_NETWORK_TIMEOUT", async () => {
+  /**
+   * Batch-D / D1c — WE DO NOT BLAME THE USER'S EXCHANGE FOR OUR OWN OUTAGE.
+   *
+   * ⚠️ THIS ASSERTION WAS INVERTED. It used to require `KEY_NETWORK_TIMEOUT`,
+   * whose copy is "We could not reach the exchange … usually means a temporary
+   * exchange issue". This POST goes to `/api/keys/create-with-key` — OUR route.
+   * A thrown `fetch` means we never reached OUR OWN service, so no exchange was
+   * contacted and none could have been: the copy is untrue by construction, it
+   * sends a manager to audit a key that was never the problem, and it buries our
+   * outage in the `wizard_error` funnel under an exchange-shaped code.
+   *
+   * F-7 established exactly this rule on the SERVER (finalize-wizard's probe
+   * arm) and left all three CLIENT throw arms saying the untrue thing.
+   * SERVICE_UNAVAILABLE_RETRY (not the DRAFT_SAVED twin) because this is the
+   * connect step: "your key has not been saved and nothing was submitted" is
+   * the accurate half here — the draft is only minted by a SUCCESSFUL response
+   * to this very call.
+   */
+  it("D1c: maps a thrown fetch to SERVICE_UNAVAILABLE_RETRY, never an exchange blame", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
@@ -98,8 +116,16 @@ describe("[H-0189] ConnectKeyStep — server code → wizard_error mapping", () 
       (c) => (c as unknown[])[0] === "wizard_error",
     ) as unknown[] | undefined;
     const payload = call![1] as { code: string; step: string };
-    expect(payload.code).toBe("KEY_NETWORK_TIMEOUT");
+    expect(payload.code).toBe("SERVICE_UNAVAILABLE_RETRY");
     expect(payload.step).toBe("connect_key");
+
+    // And the rendered copy makes no claim about the exchange.
+    expect(
+      await screen.findByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/could not reach the exchange/i),
+    ).not.toBeInTheDocument();
     errSpy.mockRestore();
   });
 

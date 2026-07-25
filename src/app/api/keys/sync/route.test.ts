@@ -851,3 +851,75 @@ describe("[UAT] composite asset_class hardcode tripwire", () => {
     expect((CRYPTO_EXCHANGES as readonly string[]).includes("mt5")).toBe(false);
   });
 });
+
+/**
+ * Batch-D / D1a — EVERY ARM OF THIS ROUTE NAMES ITSELF ON THE WIRE.
+ *
+ * `SyncPreviewStep`'s kickoff classifier maps off the CODE (C3's rule) and
+ * falls through to SYNC_FAILED for anything it cannot classify — and
+ * SYNC_FAILED's recovery control is `onTryAnotherKey` -> `handleDeleteDraft()`,
+ * which cascades away the draft and every `strategy_keys` member.
+ *
+ * These five responses were CODELESS, so C3's own docblock claim that the table
+ * was "exhaustive over our own routes" was false. The 429 is the one that bit in
+ * practice: the wizard's "Try again" button re-POSTs this route, which is capped
+ * at 5/60s per (user, strategy), so following our own copy at our own cadence
+ * routed the user into the delete button.
+ */
+describe("[D1a] POST /api/keys/sync — no codeless failure arms", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER.id };
+    authState.user = { id: TEST_USER.id };
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
+    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockUpsert.mockReturnValue({ error: null });
+  });
+
+  it("429 carries SYNC_RATE_LIMITED alongside Retry-After", async () => {
+    rateLimitResult.success = false;
+    rateLimitResult.retryAfter = 42;
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    expect(res.status).toBe(429);
+    // THE assertion: a code the wizard can classify, so the denial cannot fall
+    // through to the draft-deleting control.
+    expect((await res.json()).code).toBe("SYNC_RATE_LIMITED");
+    // The exact wait is already on the wire and the copy now quotes it.
+    expect(res.headers.get("Retry-After")).toBe("42");
+  });
+
+  it("404 carries GATE_DRAFT_GONE without re-opening the P458 existence oracle", async () => {
+    ownershipResult.data = null;
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.code).toBe("GATE_DRAFT_GONE");
+    // P458 — the code is the SAME for "no such strategy" and "exists but
+    // unowned" (both reach this one arm), so it adds no asymmetry to probe.
+    expect(body.error).toBe("Strategy not found");
+    expect(body.error).not.toMatch(/owned/i);
+  });
+
+  it.each([
+    { label: "missing strategy_id", body: {} },
+    { label: "non-uuid strategy_id", body: { strategy_id: "not-a-uuid" } },
+  ])("400 ($label) carries SYNC_BAD_REQUEST", async ({ body }) => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(body));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("SYNC_BAD_REQUEST");
+  });
+});

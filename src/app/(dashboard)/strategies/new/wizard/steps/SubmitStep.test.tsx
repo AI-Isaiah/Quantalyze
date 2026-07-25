@@ -130,16 +130,39 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(onSubmitted).not.toHaveBeenCalled();
   });
 
-  it("maps a thrown fetch to KEY_NETWORK_TIMEOUT", async () => {
+  /**
+   * Batch-D / D1c — F-7 WAS APPLIED SERVER-SIDE ONLY.
+   *
+   * ⚠️ THIS ASSERTION WAS INVERTED. It required `KEY_NETWORK_TIMEOUT`, whose
+   * copy is "We could not reach the exchange … usually means a temporary
+   * exchange issue". This POST goes to `/api/strategies/finalize-wizard` — OUR
+   * route. A thrown `fetch` means we never reached OUR OWN service, so no
+   * exchange was contacted and none could have been.
+   *
+   * F-7 established exactly this rule inside finalize-wizard's probe arm and
+   * left the client's own catch block blaming the venue for our outage — which
+   * also mis-buckets the incident in the `wizard_error` funnel.
+   */
+  it("D1c: a thrown fetch reports OUR outage, never the user's exchange", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     renderStep();
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
     // No wizard_error telemetry on the catch path (only setErrorCode), so
-    // assert the rendered envelope instead. KEY_NETWORK_TIMEOUT is a
-    // recoverable code, so the envelope renders the Retry affordance
-    // (aria-label="Retry") wired to onRetry.
+    // assert the rendered envelope. The draft-saved outage copy is recoverable,
+    // so the Retry affordance still renders.
+    expect(
+      await screen.findByText("We could not reach our service just now."),
+    ).toBeInTheDocument();
+    // THE assertion: no claim about the exchange, on a request that never left
+    // our own perimeter.
+    expect(
+      screen.queryByText(/could not reach the exchange/i),
+    ).not.toBeInTheDocument();
+    // And it must not tell a user whose draft IS saved that it is not — the
+    // C2 distinction between the two unavailable codes.
+    expect(screen.queryByText(/has not been saved/i)).not.toBeInTheDocument();
     await screen.findByRole("button", { name: "Retry" });
     expect(findWizardError()).toBeUndefined();
     errSpy.mockRestore();

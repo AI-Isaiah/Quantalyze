@@ -119,6 +119,12 @@ const FINALIZE_MAY_EMIT: Record<WizardErrorCode, boolean> = {
   WIZARD_DUPLICATE: false,
   MULTI_KEY_WINDOWS_INVALID: false,
   WIZARD_KEYS_LOAD_FAILED: false,
+  // D1a — a `/api/keys/sync` code, emitted at the SYNC-PREVIEW step. Finalize
+  // has its own limiter but does not speak this code, and admitting it here
+  // would let a finalize response render sync-flavoured copy ("we cap how often
+  // a single strategy can start a sync") on the submit screen. This `false` is
+  // the deliberate decision the exhaustive Record forced, not an oversight.
+  SYNC_RATE_LIMITED: false,
   // The fallback itself — mapping it here would be circular.
   UNKNOWN: false,
 };
@@ -304,7 +310,15 @@ export function SubmitStep({
       onSubmitted(data.strategy_id ?? strategyId);
     } catch (err) {
       console.error("[wizard:SubmitStep] threw:", err);
-      setErrorCode("KEY_NETWORK_TIMEOUT");
+      // D1c — F-7 WAS APPLIED SERVER-SIDE ONLY. A thrown `fetch` on the POST to
+      // `/api/strategies/finalize-wizard` means the request never reached OUR
+      // OWN service; no exchange was contacted and none could have been.
+      // `KEY_NETWORK_TIMEOUT`'s copy ("We could not reach the exchange … usually
+      // means a temporary exchange issue") is therefore untrue by construction,
+      // and it points the manager at their venue instead of at "retry shortly".
+      // The draft-saved twin states the two things that ARE true here: it did
+      // not get through, and nothing was lost.
+      setErrorCode("SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED");
       setSubmitting(false);
     }
   }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
