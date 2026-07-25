@@ -57,7 +57,10 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
         __INTERNAL_analyticsRequest: (
           path: string,
           body: Record<string, unknown> | null,
-          options?: {
+          // Phase 140 / SEAM-01: `budgetKey` is REQUIRED — it names the call
+          // site's row in SEAM_BUDGETS, which now owns every deadline.
+          options: {
+            budgetKey: string;
             timeoutMs?: number;
             method?: string;
             correlationId?: string;
@@ -65,11 +68,10 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
         ) => Promise<unknown>;
       };
       const internal = mod as unknown as Internal;
-      return internal.__INTERNAL_analyticsRequest(
-        "/test",
-        { ping: 1 },
-        options,
-      );
+      return internal.__INTERNAL_analyticsRequest("/test", { ping: 1 }, {
+        budgetKey: "validate-key",
+        ...options,
+      });
     }
 
     it("forwards an explicit correlationId verbatim on the wire (Test 1)", async () => {
@@ -231,11 +233,13 @@ describe("AnalyticsUpstreamError", () => {
       __INTERNAL_analyticsRequest: (
         path: string,
         body: Record<string, unknown> | null,
+        options: { budgetKey: string },
       ) => Promise<unknown>;
     };
     return (mod as unknown as Internal).__INTERNAL_analyticsRequest(
       "/test",
       { ping: 1 },
+      { budgetKey: "validate-key" },
     );
   }
 
