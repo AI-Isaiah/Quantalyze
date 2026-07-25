@@ -767,6 +767,30 @@ describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () =
     expect([...shared.store.keys()]).toEqual([]);
   });
 
+  it("D-1: the transport log carries the error OBJECT, not just a sentence", async () => {
+    // Four different incidents (ECONNREFUSED, TLS expiry, DNS EAI_AGAIN, a
+    // header TypeError) produced four byte-identical log lines because `err`
+    // was dropped. undici puts the diagnosis on `.cause`; a static sentence
+    // discards it.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const transport = new TypeError("fetch failed", {
+      cause: Object.assign(new Error("getaddrinfo EAI_AGAIN"), {
+        code: "EAI_AGAIN",
+      }),
+    });
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(transport);
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toBe(transport);
+
+    expect(errorSpy.mock.calls.some((call) => call.includes(transport))).toBe(
+      true,
+    );
+  });
+
   it("the response body is left INTACT for the caller after the peek", async () => {
     // The classifier clones. If it ever read the original instead, every
     // caller's `res.json()` would throw "body already consumed" — turning the

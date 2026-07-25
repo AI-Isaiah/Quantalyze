@@ -177,7 +177,18 @@ async function analyticsRequest(
     //    the breaker NOT tripped, which is the ordinary shape at human retry
     //    cadence) used to match no branch and render the UNKNOWN/500 dead end.
     //    Message preserved verbatim.
-    throw new AnalyticsUnreachableError();
+    //
+    //    D-1 — `cause` and a log line. This arm previously minted a fresh Error
+    //    and dropped `err` on the floor, so the ONE piece of information that
+    //    distinguishes a refused connection from an expired TLS certificate
+    //    from a DNS failure never reached an operator. The core logs the same
+    //    error at the transport layer; this line records which CALL SITE it
+    //    killed, which the core does not know.
+    console.error(
+      `[analytics-client] ${path} could not reach the analytics service:`,
+      err,
+    );
+    throw new AnalyticsUnreachableError(err);
   }
 
   // Warn on API version mismatch (don't fail — just surface contract drift).

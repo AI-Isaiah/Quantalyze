@@ -611,4 +611,71 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
     expect(caught).not.toBeInstanceOf(mod.AnalyticsTimeoutError);
     expect((caught as Error).message).toMatch(/not reachable/i);
   });
+
+  /**
+   * Phase 140 review / D-1 — the transport diagnosis must survive.
+   *
+   * `ECONNREFUSED`, an expired TLS certificate and a DNS `EAI_AGAIN` are three
+   * different incidents with three different responders, and undici
+   * distinguishes them ONLY on `.cause`. This arm minted a fresh Error and
+   * dropped the original, so all three produced one static sentence and an
+   * operator had nothing to go on.
+   */
+  it("D-1: preserves the original transport error as `cause`", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    // The real undici shape: a "fetch failed" TypeError whose `.cause` carries
+    // the actual syscall error.
+    const root = Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:8002"), {
+      code: "ECONNREFUSED",
+    });
+    const transport = new TypeError("fetch failed", { cause: root });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(transport));
+    const mod = await import("./analytics-client");
+
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key" },
+      );
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUnreachableError);
+    // The whole point: the chain reaches the syscall, so an operator can tell
+    // "nothing is listening" from "the certificate expired".
+    expect((caught as Error).cause).toBe(transport);
+    expect(((caught as Error).cause as Error).cause).toBe(root);
+  });
+
+  it("D-1: logs the error OBJECT, not just a static sentence", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const transport = new TypeError("fetch failed", {
+      cause: new Error("certificate has expired"),
+    });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(transport));
+    const mod = await import("./analytics-client");
+
+    await expect(
+      (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key" },
+      ),
+    ).rejects.toBeInstanceOf(mod.AnalyticsUnreachableError);
+
+    // Some call passed the ERROR through, not a pre-stringified summary — a
+    // static-string-only log cannot satisfy this.
+    expect(
+      errorSpy.mock.calls.some((call) => call.includes(transport)),
+    ).toBe(true);
+    // And it names the call site, which the core's own log does not know.
+    expect(
+      errorSpy.mock.calls.some((call) =>
+        call.some((a) => typeof a === "string" && a.includes("/test")),
+      ),
+    ).toBe(true);
+  });
 });

@@ -95,8 +95,23 @@ export class AnalyticsTimeoutError extends Error {
  * nothing that reads it changes; the TYPE is what the classifier now uses.
  */
 export class AnalyticsUnreachableError extends Error {
-  constructor() {
-    super("Analytics service is not reachable. Please ensure it is running.");
+  /**
+   * D-1 — the ORIGINAL transport error, threaded through as `cause`.
+   *
+   * This class is minted in `analytics-client`'s catch arm from a `fetch`
+   * rejection that carries the only diagnosis anyone will ever get:
+   * `ECONNREFUSED` vs an expired TLS certificate vs a DNS `EAI_AGAIN` are four
+   * completely different incidents with four different responders, and undici
+   * distinguishes them ONLY on `.cause`. Minting a fresh Error and discarding
+   * the original collapsed all of them into one static sentence, so the
+   * server log said "not reachable" and nothing else.
+   *
+   * Optional so the zero-arg construction in existing tests still compiles.
+   */
+  constructor(cause?: unknown) {
+    super("Analytics service is not reachable. Please ensure it is running.", {
+      ...(cause !== undefined && { cause }),
+    });
     this.name = "AnalyticsUnreachableError";
   }
 }

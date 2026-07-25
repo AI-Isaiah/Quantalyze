@@ -896,6 +896,15 @@ export async function resilientFetch(
         : transportFailed
           ? `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`
           : `[resilient-fetch] ${budgetKey}: request could not be constructed (caller fault — NOT counted against the breaker)`,
+      // D-1 — LOG THE ERROR OBJECT. Dropping it made ECONNREFUSED, TLS
+      // certificate expiry, DNS EAI_AGAIN and a header TypeError produce four
+      // byte-identical log lines, which is the entire diagnostic value of this
+      // arm: undici puts the real reason on `.cause`, and the static sentence
+      // threw it away. `isBreakerOpen` already logs this way — this arm was the
+      // outlier. Safe: the value logged is the ERROR, never the request body,
+      // headers or path (the seam carries raw exchange credentials and
+      // INTERNAL_API_TOKEN, and undici's message never embeds them).
+      err,
     );
     // `recordFailures: false` (the anonymous surface) still fails fast on an
     // OPEN breaker above; it just may not DRIVE the shared counter. See the
