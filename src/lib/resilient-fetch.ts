@@ -1,3 +1,5 @@
+import { Ratelimit } from "@upstash/ratelimit";
+import { Redis } from "@upstash/redis";
 import { CircuitOpenError } from "./seam-errors";
 
 /**
@@ -344,3 +346,124 @@ export const SEAM_EXCLUSIONS: Record<string, string> = {
   "src/lib/warmup-analytics.ts":
     "Same reasoning as cron/warm-analytics: a 10s fire-and-forget /health warmer. Counting its failures would trip the breaker during routine warmup.",
 };
+
+// ---------------------------------------------------------------------------
+// SEAM-03 — breaker state
+// ---------------------------------------------------------------------------
+
+/**
+ * Dedicated client for the breaker. Same physical Upstash database as
+ * `ratelimit.ts` (the locked "do not provision a second store" constraint is
+ * about the DATABASE, not the client object), but constructed here rather than
+ * imported: `ratelimit.ts` does not export its singleton, and importing it
+ * would drag `next/server` plus fifteen limiter constructions into every module
+ * that touches the seam (research §7.4).
+ */
+const redis =
+  process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
+    ? Redis.fromEnv()
+    : null;
+
+if (!redis) {
+  // Unconfigured notice — ONE unconditional warning at module load, never per
+  // request, and never escalated to an error.
+  //
+  // This is a DOUBLE inversion of the limiter's policy and both halves are
+  // intentional. The limiter defers its notice inside a production-only branch
+  // and then fails CLOSED in production; the breaker warns once unconditionally
+  // and fails OPEN in ALL environments, production included. A limiter whose
+  // store is missing silently removes a regulatory cap, so it should be loud
+  // and refuse traffic. A breaker whose store is missing is simply absent — and
+  // a breaker that refuses traffic because of its own misconfiguration is
+  // strictly worse than having no breaker at all (SEAM-03). There is therefore
+  // no environment branch here, and none anywhere else in this module.
+  console.warn(
+    "[resilient-fetch] Upstash not configured — the Railway circuit breaker is disabled (all seam calls pass through).",
+  );
+}
+
+/**
+ * Failure counter, used inversely: `.limit()` is called ONLY on a failure, so
+ * exhausting the allowance means "too many failures in the window" rather than
+ * "too many requests".
+ *
+ * `analytics: false` sidesteps the dangling `pending` promise the Upstash
+ * typings warn about on Vercel (the existing `checkLimit` never awaits it) and
+ * keeps breaker counters out of the rate-limit analytics dashboard.
+ * `prefix: "breaker"` is distinct from the limiter's "quantalyze" so the two
+ * keyspaces can never collide.
+ */
+const breakerLimiter = redis
+  ? new Ratelimit({
+      redis,
+      limiter: Ratelimit.slidingWindow(BREAKER_FAILURE_THRESHOLD, BREAKER_WINDOW),
+      analytics: false,
+      prefix: "breaker",
+    })
+  : null;
+
+/**
+ * Is the Railway circuit currently open?
+ *
+ * EVERY exit path returns a value and nothing throws — that is the SEAM-03
+ * contract, not an implementation detail. Unconfigured store, a `get` that
+ * rejects, a malformed value: all resolve to `{ open: false }` so the caller
+ * proceeds to the real request. The breaker can only ever REMOVE protection
+ * when it is unhealthy; it can never itself deny traffic for that reason.
+ */
+export async function isBreakerOpen(): Promise<{
+  open: boolean;
+  retryAfterS?: number;
+}> {
+  if (!redis) return { open: false };
+  try {
+    const state = await redis.get<string>(BREAKER_KEY);
+    if (state !== "open") return { open: false };
+    const ttl = await redis.ttl(BREAKER_KEY);
+    return { open: true, retryAfterS: ttl > 0 ? ttl : DEFAULT_RETRY_AFTER_S };
+  } catch (err) {
+    console.error(
+      "[resilient-fetch] breaker check failed — failing OPEN:",
+      err,
+    );
+    return { open: false };
+  }
+}
+
+/**
+ * Record ONE infrastructure failure and trip the circuit if the allowance for
+ * `BREAKER_WINDOW` is now exhausted.
+ *
+ * Called only from the engine's classified failure arms (timeout, network
+ * throw, 5xx) — never for a 4xx. See `resilientFetch` for that rationale.
+ *
+ * The whole body is swallowed on error: this runs INSIDE the caller's catch
+ * arm, so a throw here would replace the real upstream error with a breaker
+ * bookkeeping error. Never log request bodies or header values from this
+ * module — the seam carries raw exchange API secrets and INTERNAL_API_TOKEN.
+ */
+export async function recordSeamFailure(): Promise<void> {
+  if (!redis || !breakerLimiter) return;
+  try {
+    const { success, remaining } = await breakerLimiter.limit(
+      `${BREAKER_KEY}:failures`,
+    );
+    // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`) and
+    // denies the (N+1)th. The breaker must open ON the threshold-th failure,
+    // not one failure later, so exhaustion counts as a trip signal alongside
+    // outright denial.
+    if (success && remaining > 0) return;
+    // `nx: true` makes concurrent trips idempotent: the first writer's TTL
+    // stands, so a second instance tripping 200ms later cannot ratchet the
+    // cooldown window open. Benign race, deliberately not serialised with Lua.
+    await redis.set(BREAKER_KEY, "open", {
+      ex: BREAKER_COOLDOWN_S,
+      nx: true,
+    });
+  } catch (err) {
+    console.error(
+      "[resilient-fetch] failed to record seam failure — breaker state may be stale:",
+      err,
+    );
+  }
+}
