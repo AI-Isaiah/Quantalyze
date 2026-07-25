@@ -460,3 +460,151 @@ describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whites
     expect(body.passphrase).toBe(" pass phrase ");
   });
 });
+
+/**
+ * Phase 140 / SEAM-01 — analyticsRequest now delegates to the ONE resilience
+ * core (`resilient-fetch.ts`). Three properties of the retrofit are pinned
+ * here because each one is a silent-regression risk rather than a loud one:
+ *
+ *  1. BROADENED ABORT CHECK. The pre-140 catch tested `err instanceof
+ *     DOMException && name === "TimeoutError"` only. A plain `Error` named
+ *     "AbortError" — the shape a client-side abort and several Node/undici
+ *     paths produce — fell through to the generic "not reachable" arm and was
+ *     reported to the user as a dead service rather than a slow one. The
+ *     pre-existing DOMException test at :385 pins the OLD half; this pins the
+ *     NEW half. Both must hold.
+ *  2. CIRCUIT-OPEN PASSTHROUGH. `CircuitOpenError` must reach the route
+ *     handler UNWRAPPED. If the generic arm swallowed it, every breaker trip
+ *     would surface as "Analytics service is not reachable" and the whole
+ *     SEAM-04 envelope (503 + Retry-After) would be unreachable. Asserted by
+ *     object IDENTITY (`toBe`), which is stronger than `instanceof` and immune
+ *     to the post-`vi.resetModules()` class-duplication artifact documented in
+ *     `resilient-fetch.test.ts`'s header.
+ *  3. BUDGET RESOLUTION. With no explicit `timeoutMs`, the deadline reported in
+ *     the `AnalyticsTimeoutError` message must come from `SEAM_BUDGETS[budgetKey]`
+ *     — proof the call site's budget key is actually consulted rather than a
+ *     resurrected local default.
+ */
+describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience core", () => {
+  type Internal = {
+    __INTERNAL_analyticsRequest: (
+      path: string,
+      body: Record<string, unknown> | null,
+      options: {
+        budgetKey: string;
+        timeoutMs?: number;
+        method?: string;
+        correlationId?: string;
+      },
+    ) => Promise<unknown>;
+  };
+
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("./resilient-fetch");
+    vi.restoreAllMocks();
+    // CI runs Node 22 while local runs Node 25; a leaked fetch stub is this
+    // repo's known CI-only failure mode.
+    vi.unstubAllGlobals();
+  });
+
+  it("maps a plain Error named AbortError to AnalyticsTimeoutError (broadened check)", async () => {
+    const abortErr = Object.assign(new Error("The operation was aborted."), {
+      name: "AbortError",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortErr));
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "bridge" },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect((caught as Error).message).not.toMatch(/not reachable/i);
+  });
+
+  it("reports the SEAM_BUDGETS deadline for the call site's budgetKey", async () => {
+    const abortErr = Object.assign(new Error("aborted"), {
+      name: "TimeoutError",
+    });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(abortErr));
+    const mod = await import("./analytics-client");
+    const core = await import("./resilient-fetch");
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "bridge" },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect((caught as Error).message).toContain(
+      String(core.SEAM_BUDGETS["bridge"].timeoutMs),
+    );
+  });
+
+  it("lets CircuitOpenError from the core propagate UNWRAPPED", async () => {
+    const { CircuitOpenError } = await import("./seam-errors");
+    const tripped = new CircuitOpenError(30);
+    // Deterministic failure if the module mock ever stops intercepting: no
+    // real socket is opened, so this test can never depend on whatever is (or
+    // isn't) listening on the default analytics port.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("fetch must not be reached")),
+    );
+    vi.doMock("./resilient-fetch", async () => {
+      const actual =
+        await vi.importActual<typeof import("./resilient-fetch")>(
+          "./resilient-fetch",
+        );
+      return { ...actual, resilientFetch: vi.fn().mockRejectedValue(tripped) };
+    });
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key" },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    // Identity, not instanceof: the error must arrive UNTOUCHED, and identity
+    // cannot be satisfied by a re-wrapped look-alike.
+    expect(caught).toBe(tripped);
+  });
+
+  it("still maps a generic network throw to the 'not reachable' Error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("network down")),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key" },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect((caught as Error).message).toMatch(/not reachable/i);
+  });
+});
