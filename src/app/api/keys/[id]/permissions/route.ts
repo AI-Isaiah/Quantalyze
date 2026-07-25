@@ -5,6 +5,8 @@ import { createClient } from "@/lib/supabase/server";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { resilientFetch } from "@/lib/resilient-fetch";
+import { CircuitOpenError } from "@/lib/seam-errors";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -26,9 +28,31 @@ import type { User } from "@supabase/supabase-js";
  *
  * Ownership: a SELECT against api_keys verifies the key belongs to the caller
  * BEFORE we proxy to Python. Returns 403 on mismatch / 404 on unknown key.
+ *
+ * Phase 140 / SEAM-01: the upstream call is the THIRD Railway seam. It used to
+ * be a raw fetch with its own base URL and its own duplicated 15s deadline —
+ * one of two verbatim copies, the other in finalize-wizard's force-refresh
+ * probe. Both now route through the shared resilience core, which owns the base
+ * URL, the `keys-permissions` budget and the `breaker:railway` circuit.
  */
 
-const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
+/**
+ * Vercel function ceiling for this route. Declared rather than inherited so the
+ * SC-4 headroom invariant has an in-repo source of truth: the seam-budget
+ * invariant test reads this export from disk and fails if it drifts from
+ * `SEAM_ROUTE_BUDGETS`. The value matches the platform default verified against
+ * the live project settings in 140-01, so pinning it raises nothing.
+ */
+export const maxDuration = 300;
+
+/**
+ * User-facing copy for the breaker's 503. STATIC by design (threat T-140-05):
+ * a trip is an infrastructure fact, so the body carries no upstream URL, no
+ * status and no error detail. Byte-identical to the other seam routes' copy —
+ * a breaker trip should read the same wherever a user meets it.
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 interface PermissionPayload {
   read: boolean;
@@ -84,16 +108,35 @@ function makeCachedFetcher(keyId: string): {
         );
       }
 
-      const res = await fetch(
-        `${ANALYTICS_URL}/internal/keys/${encodeURIComponent(keyId)}/permissions`,
+      // Phase 140 / SEAM-01 + SEAM-03. Two properties of running the seam call
+      // from HERE — inside the cached callback — are deliberate:
+      //
+      //  1. A cache HIT never consults the breaker. The short-circuit exists to
+      //     spare a dying Railway; a hit crosses nothing, so reading breaker
+      //     state on it would be pure latency (and one more Redis round-trip
+      //     per render pass on the wizard's busiest badge).
+      //  2. On a MISS the core's CircuitOpenError is THROWN out of this
+      //     callback, never returned as a value. The fork awaits the callback
+      //     and writes the cache entry only after it RESOLVES, so a throw
+      //     leaves no entry (verified against the real boundary in
+      //     route.seam.test.ts, not assumed). That is load-bearing: this layer
+      //     caches for 60s while the breaker's cooldown is 30s, so an error
+      //     returned as a VALUE would keep answering 503 for half a minute
+      //     after Railway had already recovered — the mitigation would have
+      //     become the outage (T-140-32). The thrown error reaches the
+      //     handler's catch below with its prototype intact, which is what
+      //     makes the `instanceof` branch there work.
+      const res = await resilientFetch(
+        "keys-permissions",
+        `/internal/keys/${encodeURIComponent(keyId)}/permissions`,
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-Internal-Token": internalToken,
           },
-          // No body needed — key_id is in the path.
-          signal: AbortSignal.timeout(15_000),
+          // No body needed — key_id is in the path. No signal either: the core
+          // owns the deadline (SEAM_BUDGETS["keys-permissions"]).
         },
       );
 
@@ -180,6 +223,28 @@ export const GET = withAuth(
 
       return NextResponse.json(payload, { headers: NO_STORE_HEADERS });
     } catch (err) {
+      // ORDER IS LOAD-BEARING: CircuitOpenError FIRST. The message-sniffing
+      // classifier below matches none of its (static) text, so a breaker trip
+      // would otherwise be reported as a generic PROBE_FAILED 502 — and the
+      // caller would never see the Retry-After hint that makes it actionable.
+      // The class comes from the never-mocked `@/lib/seam-errors` leaf, so this
+      // `instanceof` holds under every mock shape in the suite.
+      if (err instanceof CircuitOpenError) {
+        console.error(
+          `[keys/permissions] short-circuited for ${keyId} — the analytics circuit is open (retry_after_s=${err.retryAfterS})`,
+        );
+        return NextResponse.json(
+          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          {
+            status: 503,
+            headers: {
+              ...NO_STORE_HEADERS,
+              "Retry-After": String(err.retryAfterS),
+            },
+          },
+        );
+      }
+
       // The raw Error.message used to bubble straight into the response
       // body (e.g. "INTERNAL_API_TOKEN is not configured on the Next
       // layer."). That leaks infra detail to any authenticated client
