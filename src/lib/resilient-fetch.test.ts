@@ -1091,6 +1091,32 @@ describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () =
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
   });
 
+  it("C7: a 404 EDGE HTML page DOES trip — sub-500 records on text/html, 4xx included", async () => {
+    // Pins what the code does against what its comment used to claim. The
+    // comment said "4xx never records" while the line beneath it returned
+    // `contentType.includes("text/html")` — which records a Railway
+    // "Application not found" 404, i.e. a deployment that is gone or a domain
+    // that is unrouted. That IS the proposition the breaker exists to detect,
+    // so the behaviour is right and the comment was wrong.
+    edgeFetch(404);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("C7: the A4 carve-out's load-bearing half — an APPLICATION 4xx does NOT trip", async () => {
+    // The other side of the same line, and the half that actually protects
+    // tenants: a user's bad API key returning `400 {"detail": …}` is Railway
+    // working CORRECTLY. This holds because a FastAPI 4xx is JSON, never HTML.
+    bodyFetch(400, JSON.stringify({ detail: "Invalid API key" }), "application/json");
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD * 2);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
   it("a 204 No Content (no content-type) does NOT trip", async () => {
     // The guard on scoping the 2xx arm to text/html rather than "not JSON".
     const mock = installFetchMock();

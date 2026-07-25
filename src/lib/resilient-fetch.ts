@@ -955,7 +955,24 @@ async function shouldRecordResponseFailure(res: Response): Promise<boolean> {
   // the analytics service has NO non-JSON 2xx endpoints (verified: zero
   // PlainTextResponse/HTMLResponse/StreamingResponse in the service).
   if (res.status < 500) {
-    // 4xx never records — the A4 carve-out, unchanged.
+    // ⚠️ C7 — READ THIS AS WRITTEN: sub-500 responses record ON `text/html`,
+    // AND THAT INCLUDES 4xx. The comment here used to say "4xx never records",
+    // which the very next line contradicts. The behaviour is deliberate and the
+    // claim was simply wrong.
+    //
+    // A 4xx carrying an HTML page is a Railway/Vercel EDGE page — the classic
+    // being a 404 "Application not found" served when the deployment is gone or
+    // the domain is unrouted. The container never saw that request, which is
+    // precisely the proposition the breaker exists to detect, and it is
+    // indistinguishable from the 5xx HTML case in everything except the number.
+    //
+    // What the A4 carve-out actually guarantees, and what IS unchanged, is
+    // narrower and is the load-bearing half: a 4xx the APPLICATION authored
+    // never records. A user's bad API key returning `400 {"detail": …}` is
+    // Railway working CORRECTLY, and counting those would let a handful of
+    // people fat-fingering credentials trip the breaker for everyone. That
+    // holds because a FastAPI 4xx is `application/json`, never `text/html` —
+    // the service emits zero HTMLResponse/PlainTextResponse endpoints.
     return contentType.includes("text/html");
   }
 
