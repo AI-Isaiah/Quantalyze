@@ -186,6 +186,14 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
 - Env sprawl (59 keys, no manifest/startup validation); README setup stale/prod-dangerous;
   no CONTRIBUTING/ops runbooks (deploy-rollback, Railway restart, migration-recovery, secrets
   rotation).
+- **MT5 transport doubles are stateless about IPC-attach (test robustness).** The
+  `_FakeMt5`/`_FakeMt5Transport` doubles return True from `initialize()` unconditionally;
+  reads don't depend on it. The bug class ("IPC state exists only on the live terminal,
+  doubles never modeled it" — the `-10004` connect crash) stays partially unmodeled. Give
+  the doubles an `initialized` flag (reads → -10004 unless `initialize()` ran, `shutdown()`
+  clears it) so the restart→re-attach path is proven, not just asserted by call-order.
+  Deferred from v0.49.2.0 (conflicts with the isolated-read tests that don't login first;
+  needs those restructured). Red-team FABLE 2026-07-25.
 - **`requirements.in` vs lock drift (analytics-service).** `.in` pins `pandas==2.2.3` but
   the committed `requirements.txt` lock pins `pandas==3.0.3` — out of sync, so a naive
   `make lock` would silently DOWNGRADE prod pandas 3.0.3→2.2.3 (a money-math dep). Also the

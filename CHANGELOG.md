@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.49.2.0] - 2026-07-25
+### v1.15 MT5 go-live connect-path fixes (surfaced by running the live soak)
+Running the go-live soak against the prod gateway on the real Vantage account
+exposed two production-path bugs the offline doubles masked, plus a related UX bug.
+Still DARK behind `MT5_ENABLED`.
+
+- **`Mt5Client.login()` never attached the terminal IPC** (`services/mt5_client.py`):
+  it called `login()` directly, but the MT5 Python API needs `initialize()` first —
+  the real terminal returns `-10004 'No IPC connection'` on every call before it. So
+  the soak (and every mt5 job at the flip) crashed at connect. Now calls
+  `initialize()` (idempotent no-op when already attached) before `login()`; verified
+  live reading the real account. Regression tests pin the initialize→login order and
+  the failed-initialize → typed-raise / login-not-attempted contract; the three
+  transport doubles gained an `initialize()`.
+- **Soak parity gate false-failed a funded-inside-window account**
+  (`scripts/mt5_soak.py`): `_forward_terminal_nav` rolled over only return-days, so a
+  deposit made before the account's first computable return (day-0 return NaN-breaks
+  on zero prior NAV) was subtracted from the anchor but never re-added → reconstructed
+  ≈0 → false fidelity FAIL. Now rolls over the union of return-days and flow-days. The
+  shipped reconstruction was already correct; only the soak's cross-check was wrong.
+- **`-10004` misclassified as a permanent wrong-server** (`services/mt5_validation.py`):
+  its "ipc" text matched the wrong-server tokens, so a gateway outage during key
+  onboarding would permanently reject a valid key. Code-gated `-10004` → transient
+  (bridge down = infra fault, never user-blame) — more relevant now that `initialize()`
+  makes it the canonical first-touch bridge error.
+
 ## [0.49.1.0] - 2026-07-25
 ### v1.15 MT5 go-live prep — worker RPyC client deps + a critical connect fix
 Makes the MT5 gateway reachable from the worker and fixes a latent crash on the
