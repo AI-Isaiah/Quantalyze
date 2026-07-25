@@ -78,11 +78,14 @@ const shared = vi.hoisted(() => {
   };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
+  /** Identifiers passed to `Ratelimit.resetUsedTokens` (C5). */
+  const resetUsedTokensCalls: string[] = [];
   return {
     store,
     mode,
     ctx,
     captured,
+    resetUsedTokensCalls,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -138,7 +141,10 @@ vi.mock("@upstash/ratelimit", async () => {
       static slidingWindow(tokens: number, window: string) {
         return { tokens, window };
       }
-      private readonly fake: { limit: (id: string) => Promise<unknown> };
+      private readonly fake: {
+        limit: (id: string) => Promise<unknown>;
+        resetUsedTokens: (id: string) => Promise<void>;
+      };
       /** Captured so a test can assert the core's limiter construction. */
       static lastConfig: Record<string, unknown> | undefined;
       constructor(opts: { limiter: { tokens: number } } & Record<string, unknown>) {
@@ -159,6 +165,15 @@ vi.mock("@upstash/ratelimit", async () => {
           return new Promise<never>(() => {});
         }
         return this.fake.limit(identifier);
+      }
+      /**
+       * C5 — the breaker clears the failure counter the instant it writes the
+       * open-lock, via the library's own public reset. Forwarded to the fake so
+       * a test can observe the counter key actually disappearing.
+       */
+      resetUsedTokens(identifier: string) {
+        shared.resetUsedTokensCalls.push(identifier);
+        return this.fake.resetUsedTokens(identifier);
       }
     },
   };
@@ -231,6 +246,7 @@ beforeEach(() => {
   // counter for every later test, which makes "the breaker did not trip"
   // assertions pass for entirely the wrong reason.
   shared.mode.throwOnLimit = false;
+  shared.resetUsedTokensCalls.length = 0;
   configureUpstash();
 });
 
@@ -631,6 +647,67 @@ describe("recordSeamFailure", () => {
     await expect(mod.recordSeamFailure()).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalled();
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+  });
+
+  /**
+   * C5 — ONE BURST, ONE DENIAL WINDOW.
+   *
+   * The counter and the open-lock are independent keys and nothing used to
+   * clear the counter when the lock was written. Against the real
+   * `slidingWindow` Lua: five failures at t≈0 trip (lock 30s); at t≈31s the
+   * window has rolled and the previous one is counted pro-rata —
+   * `ceil(5 × (1 − 1/30)) = 5` — so the FIRST failure after the cooldown
+   * already read as exhausted and re-tripped instantly. Documented recovery
+   * latency 30s, delivered ~60s.
+   *
+   * The fake limiter is a FIXED window (see the helper's own warning), so it
+   * cannot reproduce the weighted carry-over directly. What it CAN pin — and
+   * what the fix actually is — is the invariant that removes the carry-over
+   * entirely: after a trip the counter key is GONE, so the next window starts
+   * from zero whatever its alignment.
+   */
+  it("C5: the trip CLEARS the failure counter, so one burst = one denial window", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+
+    // The library's own public reset was invoked for the breaker's identifier —
+    // not a re-derivation of its internal key layout.
+    expect(shared.resetUsedTokensCalls).toEqual([`${mod.BREAKER_KEY}:failures`]);
+
+    // The ONLY surviving key is the open-lock. Every failure-counter bucket is
+    // gone, which is what makes the next window start from zero.
+    expect([...shared.store.keys()]).toEqual([mod.BREAKER_KEY]);
+  });
+
+  it("C5: after the cooldown expires, ONE failure does not re-trip", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+
+    // Simulate the lock's TTL elapsing without touching any other key — exactly
+    // what Redis does at t = BREAKER_COOLDOWN_S. The counter's fate is the
+    // whole question.
+    shared.store.delete(mod.BREAKER_KEY);
+
+    await mod.recordSeamFailure("bridge");
+    // Pre-C5 the carried-over count made this single failure re-trip
+    // immediately, doubling the outage the user experiences from one burst.
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+
+    // And the breaker still works: it re-trips on a genuine fresh burst.
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD - 1; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
   });
 });
 

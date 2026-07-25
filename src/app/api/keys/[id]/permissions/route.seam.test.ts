@@ -128,6 +128,12 @@ vi.mock("@upstash/ratelimit", async () => {
       limit(identifier: string) {
         return this.fake.limit(identifier);
       }
+      // C5 — the breaker clears its failure counter at the trip via the
+      // library's public reset. A mock missing it turns a real call into a
+      // TypeError that recordSeamFailure swallows, i.e. a silent false green.
+      resetUsedTokens(identifier: string) {
+        return this.fake.resetUsedTokens(identifier);
+      }
     },
   };
 });

@@ -155,6 +155,17 @@ export interface FakeRatelimitResponse {
 
 export interface FakeRatelimit {
   limit(identifier: string): Promise<FakeRatelimitResponse>;
+  /**
+   * The library's public counter reset (`Ratelimit.resetUsedTokens`), which the
+   * breaker calls the instant it writes the open-lock so ONE burst produces ONE
+   * denial window (C5).
+   *
+   * The real implementation SCAN+DELs `${prefix}:${identifier}:*` — every
+   * window bucket for that identifier. This fake keeps exactly one bucket per
+   * identifier, so deleting it is the faithful equivalent for what the breaker
+   * observes.
+   */
+  resetUsedTokens(identifier: string): Promise<void>;
 }
 
 /**
@@ -232,6 +243,9 @@ export function fakeRatelimitFor(
         remaining: Math.max(0, threshold - count),
         reset: expiresAt,
       };
+    },
+    async resetUsedTokens(identifier: string): Promise<void> {
+      store.delete(`${COUNTER_PREFIX}${identifier}`);
     },
   };
 }

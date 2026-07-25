@@ -106,8 +106,24 @@ export const BREAKER_WINDOW = "30 s" as const;
  * How long the circuit stays open. Also the `Retry-After` the 503 envelope
  * advertises. 30s is long enough for a Railway pod to finish restarting and
  * short enough that a recovered service is picked back up within one user
- * retry — and because TTL expiry IS the half-open transition, this value is
- * the entire recovery latency of the system.
+ * retry.
+ *
+ * ⚠️ THIS IS THE DENIAL WINDOW, NOT "the entire recovery latency of the
+ * system" (C5). The docblock used to claim the latter, which was wrong in both
+ * directions:
+ *
+ *  - A RECOVERED service is picked up as soon as the lock expires, so recovery
+ *    latency is at most this value — never more, since `recordSeamFailure` now
+ *    clears the failure counter at the moment it writes the lock.
+ *  - Before that reset existed the counter and the lock were independent keys
+ *    and nothing cleared the former, so the real `slidingWindow` carried
+ *    `ceil(5 × (1 − 1/30)) = 5` into the next window and the FIRST failure
+ *    after the cooldown re-tripped instantly — a ~60s effective denial from one
+ *    burst, alignment-dependent and therefore intermittent.
+ *
+ * A still-broken service is re-detected after `BREAKER_FAILURE_THRESHOLD`
+ * further failures, by design: TTL expiry IS the half-open transition (locked
+ * decision 3), and those requests are the probe.
  */
 export const BREAKER_COOLDOWN_S = 30;
 
@@ -697,6 +713,41 @@ export async function recordSeamFailure(
               `refused for ${BREAKER_COOLDOWN_S}s` +
               (budgetKey ? ` (last failing call site: ${budgetKey})` : ""),
           );
+          // C5 — ONE BURST MUST PRODUCE ONE DENIAL WINDOW, so the counter is
+          // cleared at the moment the lock is written.
+          //
+          // The counter and the open-lock are INDEPENDENT keys, and nothing used
+          // to reset the former when the latter was written. Worked against the
+          // real `slidingWindow` Lua: five failures at t≈0 trip and the lock
+          // expires at t=30. At t≈31s the window has rolled, and the library
+          // counts the previous window pro-rata —
+          // `ceil(5 × (1 − 1/30)) = 5` carried forward — so the FIRST failure
+          // after the cooldown already reads as exhausted and re-trips
+          // immediately for another 30s. The documented recovery latency was
+          // 30s; the delivered one was ~60s, and alignment-dependent (a failure
+          // landing later in the new window carries less, so the doubling comes
+          // and goes).
+          //
+          // `resetUsedTokens` is the library's own public API (it SCAN+DELs
+          // `${prefix}:${identifier}:*`, covering both the current and previous
+          // window keys) rather than us re-deriving its key layout, which is
+          // exactly the kind of internal coupling that breaks silently on a
+          // minor bump.
+          //
+          // COST, honestly: that SCAN walks the shared Upstash keyspace. It is
+          // gated on `wrote`, so it runs AT MOST once per cooldown per trip
+          // (never per failure), and it is inside the same 250ms
+          // `withStoreDeadline` as everything else here — a scan we cannot
+          // finish in budget simply leaves the counter alone, which is the
+          // pre-C5 behaviour. Never worse than before.
+          //
+          // BEHAVIOUR THIS CHANGES, deliberately: during a SUSTAINED outage the
+          // seam now lets `BREAKER_FAILURE_THRESHOLD` requests through per
+          // cooldown cycle instead of re-tripping on the first one. That is
+          // locked decision 3 working as written — TTL expiry IS the half-open
+          // transition, and re-proving the seam is down is what the probe budget
+          // is for.
+          await breakerLimiter.resetUsedTokens(`${BREAKER_KEY}:failures`);
         }
       })(),
       "breaker store write",
