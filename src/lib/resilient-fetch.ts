@@ -1034,25 +1034,131 @@ async function shouldRecordResponseFailure(res: Response): Promise<boolean> {
 }
 
 /**
+ * Field/header names whose VALUE is a credential, matched case-insensitively.
+ *
+ * STRUCTURAL, NOT AN ENUMERATION (C4). The previous scrub listed two env
+ * variables by name, which silently excluded every secret that is per-REQUEST
+ * rather than per-deployment — and the seam carries several:
+ *
+ *   `X-User-Access-Token`  the END USER's live Supabase JWT
+ *                          (`process-key-client.ts:188-190`)
+ *   `api_key` / `api_secret` / `passphrase`
+ *                          the RAW exchange credentials, in the BODY of
+ *                          `/api/validate-key` and `/api/encrypt-key`
+ *
+ * A name-matched rule keeps working when a new secret header or field is added,
+ * which an enumeration cannot. It is deliberately broad in the safe direction:
+ * over-redaction costs a log line some detail, under-redaction publishes a
+ * usable credential to Vercel logs.
+ */
+const SEAM_SECRET_FIELD_RE =
+  /(secret|token|password|passphrase|api[_-]?key|apikey|authorization)/i;
+
+/**
+ * Shortest value worth redacting. Guards against blanking out a low-entropy
+ * value that happens to sit under a matching name (`"token": "none"`,
+ * `"api_key": ""`) and blowing a hole through unrelated log text.
+ */
+const MIN_REDACTABLE_SECRET_LENGTH = 8;
+
+/**
+ * Harvest the per-request credentials THIS call is putting on the wire, so they
+ * can be scrubbed from its own transport-error log line (C4).
+ *
+ * Runs ONLY on the error path — never on a healthy request.
+ *
+ * Both carriers are walked because both are real on this seam: header values
+ * under a secret-ish name (plus the token half of a `Bearer …` value, since
+ * undici may embed either form), and string leaves under a secret-ish key
+ * anywhere in a JSON body.
+ */
+function collectRequestSecrets(init: Omit<RequestInit, "signal">): string[] {
+  const found: string[] = [];
+  const take = (name: string, value: unknown): void => {
+    if (typeof value !== "string") return;
+    if (!SEAM_SECRET_FIELD_RE.test(name)) return;
+    if (value.length >= MIN_REDACTABLE_SECRET_LENGTH) found.push(value);
+    // `Authorization: Bearer <jwt>` — the credential is the tail, and an error
+    // string may carry the tail alone.
+    const bearer = /^Bearer\s+(.+)$/i.exec(value);
+    if (bearer && bearer[1].length >= MIN_REDACTABLE_SECRET_LENGTH) {
+      found.push(bearer[1]);
+    }
+  };
+
+  const headers = init.headers;
+  if (headers instanceof Headers) {
+    headers.forEach((v, k) => take(k, v));
+  } else if (Array.isArray(headers)) {
+    for (const [k, v] of headers) take(k, v);
+  } else if (headers && typeof headers === "object") {
+    for (const [k, v] of Object.entries(headers)) take(k, v);
+  }
+
+  // Bodies on this seam are always `JSON.stringify(...)` strings. A non-string
+  // body (stream, FormData) carries nothing we can inspect and is left alone.
+  if (typeof init.body === "string") {
+    try {
+      const walk = (node: unknown): void => {
+        if (Array.isArray(node)) {
+          for (const item of node) walk(item);
+          return;
+        }
+        if (typeof node !== "object" || node === null) return;
+        for (const [k, v] of Object.entries(node)) {
+          if (typeof v === "string") take(k, v);
+          else walk(v);
+        }
+      };
+      walk(JSON.parse(init.body) as unknown);
+    } catch {
+      // Not JSON — nothing structured to harvest. The env-sourced secrets below
+      // are still scrubbed.
+    }
+  }
+  return found;
+}
+
+/**
  * Strip any literal seam secret out of a string bound for a log.
  *
  * ⚠️ LOAD-BEARING, NOT DEFENSIVE DECORATION (H-0328). Some fetch / undici /
  * retry-wrapper errors embed the OUTGOING REQUEST HEADERS in the error message
- * — and, in the shape H-0328 was filed for, even in the error NAME. The seam's
- * headers carry `INTERNAL_API_TOKEN` and `ANALYTICS_SERVICE_KEY`, so logging a
- * transport error verbatim can publish a live credential to the log sink. This
- * mirrors `scrubInternalToken` in `strategies/finalize-wizard/route.ts`, which
- * exists for exactly this reason at the route's own log site; the core needs
- * its own copy because it logs FIRST, before any route sees the error.
+ * — and, in the shape H-0328 was filed for, even in the error NAME. Logging a
+ * transport error verbatim can therefore publish a live credential to the log
+ * sink. This mirrors `scrubInternalToken` in
+ * `strategies/finalize-wizard/route.ts`, which exists for exactly this reason at
+ * the route's own log site; the core needs its own copy because it logs FIRST,
+ * before any route sees the error.
  *
- * Read from `process.env` at call time, never captured at module load, so a
- * rotated token is scrubbed too.
+ * TWO POPULATIONS, and only the first used to be covered (C4):
+ *
+ *  1. DEPLOYMENT secrets — `INTERNAL_API_TOKEN`, `ANALYTICS_SERVICE_KEY`. Read
+ *     from `process.env` at call time, never captured at module load, so a
+ *     rotated token is scrubbed too.
+ *  2. PER-REQUEST secrets — the caller's `X-User-Access-Token` (a live Supabase
+ *     session JWT) and the raw exchange `api_key` / `api_secret` in the body.
+ *     These are strictly MORE sensitive than the deployment token (they are the
+ *     user's own credentials) and were being logged unredacted under this
+ *     module's own stated premise. Harvested by `collectRequestSecrets` and
+ *     passed in per call.
+ *
+ * ON THE PREMISE ITSELF: it is the module's, not this fix's. H-0328 is a filed,
+ * in-repo incident and `finalize-wizard`'s `scrubInternalToken` is a second
+ * independent implementation of the same defence. Whether or not the current
+ * undici build embeds headers, the code claims it can — so the two populations
+ * must be treated the same way or the comments and the code disagree. Making
+ * the scrub structural is the cheap way to make them agree.
  */
-function redactSeamSecrets(value: string): string {
+function redactSeamSecrets(
+  value: string,
+  extraSecrets: readonly string[] = [],
+): string {
   let out = value;
   for (const secret of [
     process.env.INTERNAL_API_TOKEN,
     process.env.ANALYTICS_SERVICE_KEY,
+    ...extraSecrets,
   ]) {
     if (secret && secret.length > 0) out = out.split(secret).join("<redacted>");
   }
@@ -1069,9 +1175,18 @@ function redactSeamSecrets(value: string): string {
  * syscall `code`, which is where ECONNREFUSED / ENOTFOUND / TLS actually live)
  * keeps every bit of the diagnostic value D-1 was about while passing the whole
  * string through redaction.
+ *
+ * @param extraSecrets - per-request credentials this call put on the wire (C4).
+ *   Optional so existing callers are unchanged; `resilientFetch` always passes
+ *   them.
  */
-export function describeTransportError(err: unknown): string {
-  if (!(err instanceof Error)) return redactSeamSecrets(String(err));
+export function describeTransportError(
+  err: unknown,
+  extraSecrets: readonly string[] = [],
+): string {
+  if (!(err instanceof Error)) {
+    return redactSeamSecrets(String(err), extraSecrets);
+  }
   const parts = [`${err.name}: ${err.message}`];
   const cause: unknown = (err as { cause?: unknown }).cause;
   if (cause instanceof Error) {
@@ -1083,7 +1198,7 @@ export function describeTransportError(err: unknown): string {
   } else if (cause !== undefined) {
     parts.push(`caused by ${String(cause)}`);
   }
-  return redactSeamSecrets(parts.join(" | "));
+  return redactSeamSecrets(parts.join(" | "), extraSecrets);
 }
 
 /**
@@ -1211,9 +1326,12 @@ export async function resilientFetch(
       //
       // REDACTED, not raw (H-0328): undici can embed the outgoing headers — and
       // in the filed shape, even the error NAME — which on this seam means a
-      // live INTERNAL_API_TOKEN / ANALYTICS_SERVICE_KEY. `describeTransportError`
-      // keeps name + message + cause + syscall code and scrubs the secrets.
-      describeTransportError(err),
+      // live INTERNAL_API_TOKEN / ANALYTICS_SERVICE_KEY and, per C4, the
+      // caller's own `X-User-Access-Token` and the raw exchange
+      // `api_key`/`api_secret` in the body. `describeTransportError` keeps
+      // name + message + cause + syscall code and scrubs BOTH populations —
+      // the per-request half is harvested from this very request.
+      describeTransportError(err, collectRequestSecrets(requestInit)),
     );
     // `recordFailures: false` (the anonymous surface) still fails fast on an
     // OPEN breaker above; it just may not DRIVE the shared counter. See the

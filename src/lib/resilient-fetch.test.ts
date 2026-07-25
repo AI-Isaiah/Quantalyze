@@ -1285,6 +1285,73 @@ describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () =
     expect(logged).toContain("<redacted>");
   });
 
+  /**
+   * C4 — the SAME premise, applied to the secrets the scrub did not cover.
+   *
+   * `redactSeamSecrets` enumerated exactly two ENV values. But this seam also
+   * carries per-REQUEST credentials that are strictly more sensitive than the
+   * deployment token, because they are the user's own:
+   *
+   *   `X-User-Access-Token`  the end user's live Supabase JWT
+   *                          (process-key-client.ts:188-190)
+   *   `api_key`/`api_secret` raw exchange credentials in the BODY of
+   *                          /api/validate-key and /api/encrypt-key
+   *
+   * Under this module's own stated premise — undici can embed the outgoing
+   * request in the error, even in its NAME — a transport error on those calls
+   * wrote a usable session token or exchange credential to Vercel logs.
+   */
+  it("C4: never logs the caller's per-request secrets (header + body)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Deliberately NOT set: this test must pass on the per-request path alone,
+    // so a stray env match cannot make it green for the wrong reason.
+    delete process.env.INTERNAL_API_TOKEN;
+    delete process.env.ANALYTICS_SERVICE_KEY;
+
+    const userJwt = "eyJhbGciOiJIUzI1NiJ9.live-supabase-session-jwt.sig";
+    const exchangeKey = "AK-live-exchange-api-key-0001";
+    const exchangeSecret = "SK-live-exchange-api-secret-0001";
+    const bearerToken = "internal-bearer-token-value";
+
+    const leaky = new Error(
+      `fetch failed sending Authorization: Bearer ${bearerToken}, ` +
+        `X-Correlation-Id: corr-1234-abcd, ` +
+        `X-User-Access-Token: ${userJwt} with body ` +
+        `{"api_key":"${exchangeKey}","api_secret":"${exchangeSecret}"}`,
+    );
+    leaky.name = `LeakyWrapper(${userJwt})`;
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(leaky);
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("validate-key", "/api/validate-key", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${bearerToken}`,
+          "X-User-Access-Token": userJwt,
+          // A NON-secret header must survive — the log has to stay useful.
+          "X-Correlation-Id": "corr-1234-abcd",
+        },
+        body: JSON.stringify({
+          exchange: "binance",
+          credentials: { api_key: exchangeKey, api_secret: exchangeSecret },
+        }),
+      }),
+    ).rejects.toBe(leaky);
+
+    const logged = errorSpy.mock.calls.flat().map(String).join("\n");
+    expect(logged).not.toContain(userJwt);
+    expect(logged).not.toContain(exchangeKey);
+    expect(logged).not.toContain(exchangeSecret);
+    expect(logged).not.toContain(bearerToken);
+    // Redacted, not dropped — and the non-secret correlation id survives, which
+    // is what keeps this a redaction rather than a blanket suppression.
+    expect(logged).toContain("<redacted>");
+    expect(logged).toContain("corr-1234-abcd");
+  });
+
   it("the response body is left INTACT for the caller after the peek", async () => {
     // The classifier clones. If it ever read the original instead, every
     // caller's `res.json()` would throw "body already consumed" — turning the
