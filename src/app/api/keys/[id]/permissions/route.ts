@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import { unstable_cache } from "next/cache";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
@@ -55,23 +56,55 @@ export const maxDuration = 300;
 const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
-interface PermissionPayload {
-  read: boolean;
-  trade: boolean;
-  withdraw: boolean;
-  detected_at: string;
-  /**
-   * True when the Python service caught an exchange-side exception and
-   * returned the fail-CLOSED default ({read,trade,withdraw}=true). The
-   * field used to be silently stripped here because the interface did
-   * not include it, which made the frontend `KeyPermissionBadge` render
-   * the "No read permission detected — the key may have been revoked"
-   * warning whenever the exchange API was just temporarily down.
-   * Forwarding the flag lets the badge distinguish "exchange down" from
-   * "key actually revoked".
-   */
-  probe_error?: boolean;
-}
+/**
+ * Runtime contract for the `/internal/keys/{id}/permissions` payload.
+ *
+ * VALIDATED, NOT CAST (Phase 140 review / D-6). This body used to be taken as
+ * `(await res.json()) as PermissionPayload` — a compile-time assertion with no
+ * runtime force whatsoever — and then CACHED FOR 60 SECONDS. The failure mode
+ * is specific and bad: if the Python side renames or drops a field (say
+ * `read` → `can_read`), every property reads `undefined`, the badge's
+ * `read === true` test is false, and `KeyPermissionBadge` tells the user
+ *
+ *     "No read permission detected — the key may have been revoked"
+ *
+ * about a PERFECTLY HEALTHY money-bearing key. Because the bad value is
+ * cached, the "Re-check" button repeats the same libel for the next minute.
+ * A manager's rational response is to go revoke and re-issue a key that was
+ * never broken.
+ *
+ * `analytics-client` already validates every response it parses with Zod
+ * (`parseResponse`) and throws loudly on drift; this third seam was the one
+ * that did not. Failing loudly here surfaces as the route's existing 502
+ * "Failed to fetch permissions" — an honest, uncached error the badge renders
+ * as an unknown state — instead of a confident false claim.
+ *
+ * `probe_error` stays OPTIONAL: it is genuinely absent on some Python arms and
+ * defaults to false downstream. `.passthrough()` is deliberate too — the
+ * service adding a NEW field must not break a working badge, which is the
+ * failure mode this fix exists to prevent, not create.
+ */
+const PermissionPayloadSchema = z
+  .object({
+    read: z.boolean(),
+    trade: z.boolean(),
+    withdraw: z.boolean(),
+    detected_at: z.string(),
+    /**
+     * True when the Python service caught an exchange-side exception and
+     * returned the fail-CLOSED default ({read,trade,withdraw}=true). The
+     * field used to be silently stripped here because the interface did
+     * not include it, which made the frontend `KeyPermissionBadge` render
+     * the "No read permission detected — the key may have been revoked"
+     * warning whenever the exchange API was just temporarily down.
+     * Forwarding the flag lets the badge distinguish "exchange down" from
+     * "key actually revoked".
+     */
+    probe_error: z.boolean().optional(),
+  })
+  .passthrough();
+
+type PermissionPayload = z.infer<typeof PermissionPayloadSchema>;
 
 /**
  * Fetch the live permission triple from the Python service. Wrapped in
@@ -150,7 +183,23 @@ function makeCachedFetcher(keyId: string): {
         throw new Error(`Upstream ${res.status}`);
       }
 
-      return (await res.json()) as PermissionPayload;
+      // D-6 — VALIDATE BEFORE CACHING. Inside the cached callback on purpose:
+      // a throw here leaves NO cache entry (same property the CircuitOpenError
+      // note above depends on), so a drift-induced failure is retried on the
+      // next request instead of being pinned for 60s. Validating after the
+      // cache write would have cached the bad value and defeated the fix.
+      const parsed = PermissionPayloadSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        // Loud: contract drift on a money-bearing surface is an engineering
+        // event, not a user error. Issues only — never the body, which carries
+        // the live permission triple for someone's exchange key.
+        console.error(
+          `[keys/${keyId}/permissions] upstream contract violation — refusing to cache`,
+          parsed.error.issues,
+        );
+        throw new Error("Permission payload failed contract validation");
+      }
+      return parsed.data;
     },
     [`key-permissions:${keyId}`],
     { revalidate: 60, tags: [`key-permissions:${keyId}`] },

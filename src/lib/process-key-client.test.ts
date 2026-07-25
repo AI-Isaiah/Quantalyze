@@ -384,7 +384,7 @@ describe("postProcessKey — D-5 unparseable upstream bodies are logged", () => 
       expect(result.ok).toBe(ok);
 
       const logged = errorSpy.mock.calls
-        .map((c) => c.map((a) => JSON.stringify(a)).join(" "))
+        .map((c: unknown[]) => c.map((a) => JSON.stringify(a)).join(" "))
         .join("\n");
       expect(logged).toContain("unparseable JSON body");
       // The correlation id is what joins this line to the Python side.
@@ -413,7 +413,7 @@ describe("postProcessKey — D-5 unparseable upstream bodies are logged", () => 
     });
 
     expect(
-      errorSpy.mock.calls.filter((c) =>
+      errorSpy.mock.calls.filter((c: unknown[]) =>
         String(c[0]).includes("unparseable JSON body"),
       ),
     ).toHaveLength(0);

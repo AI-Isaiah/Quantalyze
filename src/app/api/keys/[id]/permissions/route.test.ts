@@ -349,6 +349,103 @@ describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
   });
 });
 
+/**
+ * Phase 140 review / D-6 — NEVER CACHE AN UNVALIDATED PAYLOAD.
+ *
+ * The body was taken as `(await res.json()) as PermissionPayload` — a
+ * compile-time assertion with no runtime force — and then cached for 60s. On
+ * field drift every property reads `undefined`, the badge's `read === true`
+ * test is false, and `KeyPermissionBadge` tells the user "No read permission
+ * detected — the key may have been revoked" about a perfectly healthy
+ * money-bearing key. Cached, so "Re-check" repeats the libel for a minute, and
+ * the manager's rational response is to revoke a key that was never broken.
+ *
+ * `analytics-client` has validated every response with Zod since it was
+ * written; this third seam was the one that did not.
+ */
+describe("GET /api/keys/[id]/permissions — D-6 upstream contract validation", () => {
+  it.each([
+    {
+      label: "a renamed field (read -> can_read)",
+      payload: {
+        can_read: true,
+        trade: false,
+        withdraw: false,
+        detected_at: "2026-04-16T00:00:00Z",
+      },
+    },
+    {
+      label: "a dropped field",
+      payload: { read: true, trade: false, detected_at: "2026-04-16T00:00:00Z" },
+    },
+    {
+      label: "a retyped field (boolean -> string)",
+      payload: {
+        read: "true",
+        trade: false,
+        withdraw: false,
+        detected_at: "2026-04-16T00:00:00Z",
+      },
+    },
+    {
+      label: "a null body",
+      payload: null,
+    },
+  ])("fails loudly on $label rather than defaming the key", async ({ payload }) => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.upstreamPayload = payload as never;
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+
+    // An honest error the badge renders as an unknown state — NOT a confident
+    // 200 asserting the key lost its read scope.
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.read).toBeUndefined();
+
+    // Loud: contract drift on a money-bearing surface is an engineering event.
+    expect(
+      errorSpy.mock.calls.some((c: unknown[]) =>
+        String(c[0]).includes("contract violation"),
+      ),
+    ).toBe(true);
+    errorSpy.mockRestore();
+  });
+
+  it("still accepts an UNKNOWN EXTRA field — additive drift must not break the badge", async () => {
+    // The fix must not become its own outage: the Python service adding a new
+    // field is routine and must keep working.
+    STATE.upstreamPayload = {
+      read: true,
+      trade: false,
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-04-16T00:00:00Z",
+      newly_added_field: "ignore me",
+    } as never;
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+    expect((await res.json()).read).toBe(true);
+  });
+
+  it("still accepts a payload with probe_error absent (a real Python arm)", async () => {
+    STATE.upstreamPayload = {
+      read: true,
+      trade: false,
+      withdraw: false,
+      detected_at: "2026-04-16T00:00:00Z",
+    } as never;
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+    expect((await res.json()).read).toBe(true);
+  });
+});
+
 describe("GET /api/keys/[id]/permissions — decrypt-audit cache honesty (M-0325)", () => {
   // The audit row used to assert an unconditional decrypt on every GET, but a
   // 60s Next-layer cache hit replays the prior probe and decrypts NOTHING. The
