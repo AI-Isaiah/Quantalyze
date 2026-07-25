@@ -498,7 +498,7 @@ describe("[D2a] postProcessKey transport log scrubs the request's own secrets", 
     );
 
     const result = await postProcessKey({
-      flow_type: "csv_finalize",
+      flow_type: "csv",
       source: "csv",
       context: {},
       userId: "u1",

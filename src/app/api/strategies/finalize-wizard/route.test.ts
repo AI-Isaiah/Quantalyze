@@ -2118,3 +2118,99 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     ).toBeUndefined();
   });
 });
+
+/**
+ * Batch-D / D2c — THE PUBLISH GATE MUST NOT FAIL OPEN ON CONTRACT DRIFT.
+ *
+ * D-6 replaced `(await res.json()) as PermissionPayload` with a Zod schema on
+ * the SIBLING badge route and left this route's identical cast in place. The
+ * two fail in opposite directions under the same drift, and this is the one
+ * that matters:
+ *
+ *   badge route     → fails loud, uncached: the user sees "we could not check".
+ *   finalize route  → `probe_error`, `trade` and `withdraw` all read
+ *                     `undefined`. `if (livePerms.probe_error)` is falsy and
+ *                     `trade === true || withdraw === true` is false, so BOTH
+ *                     gates fall through and a key that has been broadened to
+ *                     TRADE OR WITHDRAW on the exchange is promoted to
+ *                     `pending_review`.
+ *
+ * Silently, on money-bearing authorization.
+ */
+describe("[D2c] finalize-wizard — the live-permissions probe is validated, not cast", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("REFUSES to publish when the payload drifts (read → can_read) on a TRADE-broadened key", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    // The exact drift D-6 models, on a key that HAS been broadened. Every field
+    // the gate reads is now absent under the name the gate knows.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          can_read: true,
+          can_trade: true,
+          can_withdraw: true,
+          detected_at: "2026-05-05T00:00:00Z",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    routeThroughLegacyFinalize();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Fails CLOSED, exactly as an unreadable body already does — drift IS an
+    // unreadable body.
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+    // THE assertion: the draft is NOT promoted. Pre-fix this reached 200 and
+    // published a trade-capable key.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    // Loud, not silent — contract drift here is an engineering event.
+    expect(
+      consoleErr.mock.calls.some((c) =>
+        String(c[0]).includes("contract violation"),
+      ),
+    ).toBe(true);
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("POSITIVE CONTROL: an ADDITIVE unknown field still publishes", async () => {
+    // `.strip()`, not `.strict()`. The service adding a new field must not
+    // break a working submit — that is the failure mode this fix prevents, not
+    // one it may create. Without this control the test above is
+    // indistinguishable from "the probe now rejects everything".
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          read: true,
+          trade: false,
+          withdraw: false,
+          probe_error: false,
+          detected_at: "2026-05-05T00:00:00Z",
+          brand_new_upstream_field: "ignored",
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    routeThroughLegacyFinalize();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeDefined();
+
+    fetchSpy.mockRestore();
+  });
+});

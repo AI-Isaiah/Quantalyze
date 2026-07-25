@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
@@ -73,12 +74,44 @@ export const maxDuration = 300;
 const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
-interface LivePermissions {
-  read: boolean;
-  trade: boolean;
-  withdraw: boolean;
-  probe_error?: boolean;
-}
+/**
+ * Runtime contract for the `/internal/keys/{id}/permissions` payload.
+ *
+ * VALIDATED, NOT CAST (Batch-D / D2c). D-6 replaced exactly this cast with a
+ * Zod schema on the SIBLING route (`/api/keys/[id]/permissions`) and left this
+ * copy behind — and this is the copy that matters more, because the two routes
+ * fail in OPPOSITE directions under the same drift:
+ *
+ *   * the badge route fails LOUD and UNCACHED — the user sees "we could not
+ *     check", which is honest;
+ *   * this route is the PUBLISH GATE. Under the exact drift D-6 models
+ *     (`read` -> `can_read`), `livePerms.probe_error`, `livePerms.trade` and
+ *     `livePerms.withdraw` ALL read `undefined`. `probe_error` is falsy, and
+ *     `trade === true || withdraw === true` is false. Both gates fall through
+ *     and a key that has been BROADENED TO TRADE OR WITHDRAW on the exchange is
+ *     promoted to `pending_review`. Measured: the pre-fix cast answers 200 and
+ *     calls `finalize_wizard_strategy` on that key.
+ *
+ * A silent fail-OPEN on money-bearing authorization is the one outcome this
+ * probe exists to prevent. A parse failure throws, which the caller's catch arm
+ * already turns into a fail-CLOSED 502 — the same disposition as an unreadable
+ * body, which is what drift actually is.
+ *
+ * STRIP, NOT STRICT AND NOT PASSTHROUGH, for the sibling's reasons: an
+ * ADDITIVE upstream field must not break a working submit, but an unknown
+ * upstream field must not flow untyped onward either. `probe_error` stays
+ * optional — it is genuinely absent on some Python arms.
+ */
+const LivePermissionsSchema = z
+  .object({
+    read: z.boolean(),
+    trade: z.boolean(),
+    withdraw: z.boolean(),
+    probe_error: z.boolean().optional(),
+  })
+  .strip();
+
+type LivePermissions = z.infer<typeof LivePermissionsSchema>;
 
 /**
  * Force-refresh the live `{read, trade, withdraw}` triple for an
@@ -128,7 +161,20 @@ async function fetchLivePermissions(
   if (!res.ok) {
     throw new Error(`permissions probe failed: ${res.status}`);
   }
-  return (await res.json()) as LivePermissions;
+  // D2c — VALIDATE. See LivePermissionsSchema: the cast here was the last
+  // fail-OPEN on this seam, and it sits in front of the publish gate.
+  const parsed = LivePermissionsSchema.safeParse(await res.json());
+  if (!parsed.success) {
+    // Loud: contract drift on a money-bearing authorization surface is an
+    // engineering event. Issues only — never the body, which carries the live
+    // permission triple for someone's exchange key.
+    console.error(
+      `[strategies/finalize-wizard] live permissions contract violation for key ${keyId}:`,
+      parsed.error.issues,
+    );
+    throw new Error("permissions probe failed contract validation");
+  }
+  return parsed.data;
 }
 
 function validateStringArray(value: unknown): string[] {
