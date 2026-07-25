@@ -127,6 +127,11 @@ class _FakeMt5Transport:
         self._account_info_calls = 0
         self.calls: list[str] = []
 
+    def initialize(self):
+        # Real login() attaches the terminal IPC via initialize() before login().
+        self.calls.append("initialize")
+        return True
+
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
         self.calls.append("login")
         return self._login_ok
@@ -372,6 +377,7 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
     # login bracket) → history_deals_get → account_info (POST login bracket,
     # MT5CONC-02). Silent deletion of the POST bracket reds this healthy-path test.
     assert transport.calls == [
+        "initialize",
         "login",
         "account_info",
         "history_deals_get",
@@ -1065,7 +1071,8 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
     # — the first four terminal calls are the full read sequence (a trailing
     # "shutdown" from the bounded restart follows).
-    assert transport.calls[:4] == [
+    assert transport.calls[:5] == [
+        "initialize",
         "login",
         "account_info",
         "history_deals_get",
@@ -1145,6 +1152,7 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
     # The blip fired on the POST re-read: the full 4-call read sequence ran (login →
     # PRE account_info → deal fetch → POST account_info which raised).
     assert transport.calls == [
+        "initialize",
         "login",
         "account_info",
         "history_deals_get",
@@ -1179,3 +1187,16 @@ def test_deal_fetch_margin_covers_server_utc_offset_bound() -> None:
     upper_bound = utc_now + jw._MT5_DEAL_FETCH_MARGIN_S
     same_day_deal_on_ahead_server = utc_now + jw._MT5_MAX_SERVER_UTC_OFFSET_S
     assert same_day_deal_on_ahead_server <= upper_bound
+
+
+def test_classify_no_ipc_connection_is_transient_not_wrong_server():
+    """Regression (red-team FABLE, 2026-07-25): -10004 'No IPC connection' means the
+    terminal bridge isn't attached (gateway down / mid-redeploy) — a TRANSIENT infra
+    fault, NOT a wrong broker server. Its 'ipc' text matches _WRONG_SERVER_TOKENS, so
+    without the code-gate it classified as 'wrong_server' → a PERMANENT user-blame
+    rejection of a VALID key during a gateway outage (more likely now that login()
+    calls initialize() first, making -10004 the canonical first-touch bridge error)."""
+    from services.mt5_validation import classify_mt5_login_error
+
+    err = Mt5ClientError(-10004, "No IPC connection")
+    assert classify_mt5_login_error(err) == "transient"  # pre-fix returned "wrong_server"

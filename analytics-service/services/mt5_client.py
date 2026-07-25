@@ -272,7 +272,27 @@ class Mt5Client:
         they are ALSO redacted by value (login/server, not just `password=`
         shapes) on top of the shape-based `scrub_freeform_string`. The MT5 IPC
         login timeout is passed explicitly and stays below the rpyc request
-        timeout (Pitfall 3)."""
+        timeout (Pitfall 3).
+
+        initialize() FIRST (T-139 go-live): the MT5 Python API requires
+        ``initialize()`` to attach the terminal's IPC pipe before ANY call —
+        without it ``login()`` (and every subsequent read) returns
+        ``-10004 'No IPC connection'`` against a real terminal (verified live on
+        the prod gateway; the offline doubles never exercised it). The gateway
+        terminal is already running and investor-auto-logged-in, so a bare
+        ``initialize()`` attaches to the running instance (it is idempotent — a
+        no-op True when already attached), and the explicit ``login()`` below then
+        (re)authenticates the EXPECTED investor account under our controlled
+        timeout + read-only semantics. initialize() carries no credentials, but its
+        transport text is scrubbed on the same fail-loud path for safety."""
+        try:
+            inited = self._mt5.initialize()
+        except Mt5ClientError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — never let raw transport text escape
+            raise Mt5ClientError(0, scrub_freeform_string(str(exc))) from None
+        if not inited:
+            self._raise_last()
         try:
             ok = self._mt5.login(
                 login, password=password, server=server, timeout=MT5_LOGIN_TIMEOUT_MS

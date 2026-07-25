@@ -84,9 +84,21 @@ class _FakeMt5:
         self._scenario = scenario
         self.login_calls: list[tuple] = []
         self.shutdown_calls = 0
+        self.initialize_calls = 0
+        self.call_order: list[str] = []
+
+    def initialize(self):
+        # The real terminal needs initialize() before any call (attaches IPC).
+        self.initialize_calls += 1
+        self.call_order.append("initialize")
+        exc = self._scenario.get("initialize_raises")
+        if exc is not None:
+            raise exc
+        return self._scenario.get("initialize", True)
 
     def login(self, login, **kwargs):
         self.login_calls.append((login, kwargs))
+        self.call_order.append("login")
         exc = self._scenario.get("login_raises")
         if exc is not None:
             raise exc
@@ -203,6 +215,46 @@ def test_read_transport_raise_is_scrubbed_and_typed():
     with pytest.raises(Mt5ClientError) as exc_info:
         client.account_info()
     assert "SUPERSECRET" not in str(exc_info.value)
+
+
+def test_login_calls_initialize_before_login():
+    """REGRESSION (soak, 2026-07-25): login() MUST call initialize() FIRST — the real
+    MT5 terminal returns -10004 'No IPC connection' on any call before initialize()
+    attaches the IPC pipe. Invisible offline because the double answered login()
+    without needing an IPC; only running the soak against the live gateway exposed it.
+    Verified live: initialize()->login()->account_info() reads the real account."""
+    connect, fake, _rec = _make({"login": True})
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.login(123, password="pw", server="Broker-Demo")
+    assert fake.initialize_calls == 1
+    # initialize STRICTLY before login (order pinned, not just presence)
+    assert fake.call_order[:2] == ["initialize", "login"]
+
+
+def test_login_raises_when_initialize_fails_and_skips_login():
+    """A falsy initialize() (terminal down / no IPC) -> typed raise via last_error,
+    and login() is NEVER attempted — no credential round-trip against a dead
+    terminal. Fails against a login() that skips the initialize() guard."""
+    connect, fake, _rec = _make(
+        {"initialize": False, "last_error": (-10004, "No IPC connection")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError) as exc_info:
+        client.login(123, password="pw", server="Broker-Demo")
+    assert exc_info.value.code == -10004
+    assert fake.login_calls == []  # login not attempted after a failed initialize
+
+
+def test_login_initialize_transport_raise_is_typed():
+    """A transport-RAISED exception from initialize() (dead rpyc bridge) surfaces as a
+    typed, scrubbed Mt5ClientError, never a raw transport exception — same fail-loud
+    discipline as the login() call itself."""
+    connect, _fake, _rec = _make(
+        {"initialize_raises": RuntimeError("rpyc remote error: bridge down")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    with pytest.raises(Mt5ClientError):
+        client.login(123, password="pw", server="Broker-Demo")
 
 
 def test_login_passes_ipc_timeout_below_rpyc_timeout():

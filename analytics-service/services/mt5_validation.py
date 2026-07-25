@@ -159,6 +159,13 @@ def classify_mt5_login_error(
     CLEAR auth token then yields ``"auth"``; anything unrecognized degrades to
     ``"transient"`` (which the caller PROPAGATES untouched — never auth-failed,
     never valid). The token tables are [ASSUMED] pending the live spike."""
+    # -10004 "No IPC connection": the terminal bridge isn't attached (gateway down /
+    # mid-redeploy), NOT a wrong broker server. Code-gate it BEFORE the text tokens —
+    # its "ipc" text would otherwise classify as wrong_server and PERMANENTLY reject a
+    # valid key during a transient gateway outage. It is an infra fault → transient
+    # (the caller propagates untouched, never a user-blame stamp).
+    if err.code == -10004:
+        return "transient"
     text = str(err).lower()
     if any(tok in text for tok in _WRONG_SERVER_TOKENS):
         return "wrong_server"
