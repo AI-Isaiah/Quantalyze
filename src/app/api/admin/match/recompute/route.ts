@@ -3,7 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { AnalyticsTimeoutError, recomputeMatch } from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { AnalyticsUpstreamError, CircuitOpenError } from "@/lib/seam-errors";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
@@ -125,6 +125,29 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json(
         { error: TIMEOUT_COPY },
         { status: 504, headers: NO_STORE_HEADERS },
+      );
+    }
+    // Phase 140 review / D-12 — FORWARD 4xx, KEEP 5xx GENERIC.
+    //
+    // Flattening every AnalyticsUpstreamError to 500 left an admin unable to
+    // tell "I passed a bad parameter" from "Railway is broken" — the two have
+    // completely different responses (fix the request vs page the on-call) and
+    // the route erased the distinction the error class exists to preserve
+    // ("Preserves the upstream status so route handlers can forward 4xx
+    // semantics").
+    //
+    // 4xx is a CLIENT fault whose detail is a validation message the admin
+    // needs, and this route is already behind isAdminUser. 5xx stays generic on
+    // purpose: that detail can carry a Python traceback, and the leak closure
+    // must stay shut.
+    if (err instanceof AnalyticsUpstreamError && err.status < 500) {
+      console.error(
+        `[api/admin/match/recompute] upstream rejected the request (${err.status}):`,
+        err.message,
+      );
+      return NextResponse.json(
+        { error: err.message },
+        { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
     console.error("[api/admin/match/recompute] error:", err);

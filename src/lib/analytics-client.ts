@@ -19,6 +19,7 @@ import {
 import {
   AnalyticsTimeoutError,
   AnalyticsUnreachableError,
+  AnalyticsUpstreamError,
   CircuitOpenError,
 } from "./seam-errors";
 
@@ -58,31 +59,18 @@ export {
 } from "./seam-errors";
 
 /**
- * Thrown when the analytics service returns a non-2xx HTTP response.
- * Preserves the upstream status so route handlers can forward 4xx semantics
- * (e.g. 400 "already in portfolio", 404 "not found") instead of flattening
- * every upstream error to 500.
+ * Phase 140 review / D-12 — back-compat convenience re-export.
+ *
+ * `AnalyticsUpstreamError` is DEFINED in the dependency-free leaf
+ * `@/lib/seam-errors`, for the same reason `AnalyticsTimeoutError` and
+ * `AnalyticsUnreachableError` were moved there by WR-01: route handlers must be
+ * able to branch on it with `instanceof`, and the route test files that mock
+ * THIS module with a bare factory would otherwise see `undefined` — where
+ * `err instanceof undefined` throws a `TypeError` from inside the catch block
+ * (threat T-140-30), converting a clean error response into a crash. The class
+ * identity is the leaf's, singular.
  */
-export class AnalyticsUpstreamError extends Error {
-  readonly status: number;
-  constructor(message: string, status: number) {
-    super(message);
-    this.name = "AnalyticsUpstreamError";
-    // H-1144: the documented contract is "preserve the UPSTREAM status so route
-    // handlers can forward it as the HTTP response code". Guard the invariant at
-    // construction so a malformed status (NaN, non-integer, or out of the
-    // 100–599 HTTP range) fails loud here rather than surfacing downstream as an
-    // invalid `NextResponse` status. All current callers pass `res.status`
-    // (already a valid integer), so this never fires in practice — it's a
-    // fail-loud fence against a future caller passing an unchecked number.
-    if (!Number.isInteger(status) || status < 100 || status > 599) {
-      throw new RangeError(
-        `AnalyticsUpstreamError: invalid HTTP status ${status} (expected an integer 100–599)`,
-      );
-    }
-    this.status = status;
-  }
-}
+export { AnalyticsUpstreamError } from "./seam-errors";
 
 /**
  * Core fetch wrapper for the Python analytics service.

@@ -117,6 +117,33 @@ export class AnalyticsUnreachableError extends Error {
 }
 
 /**
+ * Thrown when the analytics service returns a non-2xx HTTP response.
+ * Preserves the upstream status so route handlers can forward 4xx semantics
+ * (e.g. 400 "already in portfolio", 404 "not found") instead of flattening
+ * every upstream error to 500.
+ */
+export class AnalyticsUpstreamError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "AnalyticsUpstreamError";
+    // H-1144: the documented contract is "preserve the UPSTREAM status so route
+    // handlers can forward it as the HTTP response code". Guard the invariant at
+    // construction so a malformed status (NaN, non-integer, or out of the
+    // 100–599 HTTP range) fails loud here rather than surfacing downstream as an
+    // invalid `NextResponse` status. All current callers pass `res.status`
+    // (already a valid integer), so this never fires in practice — it's a
+    // fail-loud fence against a future caller passing an unchecked number.
+    if (!Number.isInteger(status) || status < 100 || status > 599) {
+      throw new RangeError(
+        `AnalyticsUpstreamError: invalid HTTP status ${status} (expected an integer 100–599)`,
+      );
+    }
+    this.status = status;
+  }
+}
+
+/**
  * Did this thrown value mean "WE could not reach OUR OWN analytics service"?
  *
  * Phase 140 review / F-7. Callers that catch around a seam call need to tell

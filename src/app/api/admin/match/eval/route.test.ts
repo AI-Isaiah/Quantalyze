@@ -254,6 +254,61 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     expect(raw).not.toContain("/api/match/eval");
   });
 
+  /**
+   * Phase 140 review / D-12 — an admin must be able to tell "I passed a bad
+   * parameter" from "Railway is broken".
+   *
+   * Flattening every AnalyticsUpstreamError to 500 erased exactly the
+   * distinction that class exists to preserve, and the two failures need
+   * opposite responses: fix the request, or page the on-call.
+   */
+  it.each([
+    { status: 400, detail: "lookback_days must be a positive integer" },
+    { status: 404, detail: "partner_tag not found" },
+    { status: 422, detail: "lookback_days exceeds the 365-day maximum" },
+  ])(
+    "D-12: forwards an upstream $status with its detail",
+    async ({ status, detail }) => {
+      userState.current = { id: "admin-1" };
+      adminFlag.isAdmin = true;
+      // From the LEAF, not through the mocked `@/lib/analytics-client`. The mock
+    // factory does not re-run on vi.resetModules(), so a class reached through
+    // it is registry #1's while the freshly-imported route holds registry #N's
+    // — `instanceof` is then false and the arm silently falls through to 500.
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
+      evalState.throwValue = new AnalyticsUpstreamError(detail, status);
+      const { GET } = await import("./route");
+
+      const res = await GET(makeReq());
+      expect(res.status).toBe(status);
+      expect(JSON.parse(await res.text()).error).toBe(detail);
+    },
+  );
+
+  it("D-12: an upstream 5xx STAYS generic — the leak closure must not reopen", async () => {
+    // The 4xx forwarding must not become a blanket passthrough. A 5xx detail
+    // can carry a Python traceback (T-140-11), so it keeps the static copy.
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    // From the LEAF, not through the mocked `@/lib/analytics-client`. The mock
+    // factory does not re-run on vi.resetModules(), so a class reached through
+    // it is registry #1's while the freshly-imported route holds registry #N's
+    // — `instanceof` is then false and the arm silently falls through to 500.
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "Traceback: psycopg2 at http://localhost:8002 secret detail",
+      500,
+    );
+    const { GET } = await import("./route");
+
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+    expect(raw).not.toContain("Traceback");
+    expect(raw).not.toContain("localhost");
+  });
+
   it("keeps the breaker arm BEHIND the admin gate — unauthenticated + CircuitOpenError never yields 503 (T-140-12)", async () => {
     // The error arms live inside the handler, after auth, so an unauthenticated
     // caller cannot use the status code as a breaker-state oracle. evalMatch is

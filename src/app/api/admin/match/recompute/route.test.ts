@@ -255,6 +255,48 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(raw).not.toContain("/api/match/recompute");
   });
 
+  /**
+   * Phase 140 review / D-12 — an admin must be able to tell "I passed a bad
+   * parameter" from "Railway is broken". Flattening every
+   * AnalyticsUpstreamError to 500 erased exactly the distinction that class
+   * exists to preserve, and the two failures need opposite responses.
+   */
+  it.each([
+    { status: 400, detail: "allocator_id is not a valid uuid" },
+    { status: 404, detail: "allocator not found" },
+    { status: 409, detail: "a recompute is already running for this allocator" },
+  ])("D-12: forwards an upstream $status with its detail", async ({ status, detail }) => {
+    // From the LEAF, not through the mocked `@/lib/analytics-client`. The mock
+    // factory does not re-run on vi.resetModules(), so a class reached through
+    // it is registry #1's while the freshly-imported route holds registry #N's
+    // — `instanceof` is then false and the arm silently falls through to 500.
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new AnalyticsUpstreamError(detail, status);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(status);
+    expect(JSON.parse(await res.text()).error).toBe(detail);
+  });
+
+  it("D-12: an upstream 5xx STAYS generic — the leak closure must not reopen", async () => {
+    // The 4xx forwarding must not become a blanket passthrough. A 5xx detail
+    // can carry a Python traceback (T-140-11), so it keeps the static copy.
+    // From the LEAF, not through the mocked `@/lib/analytics-client`. The mock
+    // factory does not re-run on vi.resetModules(), so a class reached through
+    // it is registry #1's while the freshly-imported route holds registry #N's
+    // — `instanceof` is then false and the arm silently falls through to 500.
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Traceback: psycopg2 at http://localhost:8002 secret detail",
+      503,
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+    expect(raw).not.toContain("Traceback");
+    expect(raw).not.toContain("localhost");
+  });
+
   it("returns 500 with STATIC copy and NEVER echoes the upstream Error message (T-140-11)", async () => {
     // Deliberately shaped like the two things this arm used to leak: a raw
     // upstream detail string and the analytics service's base URL.
