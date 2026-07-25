@@ -102,6 +102,33 @@ export interface FakeRedis {
     opts?: { ex?: number; nx?: boolean },
   ): Promise<"OK" | null>;
   ttl(key: string): Promise<number>;
+  /**
+   * The breaker's atomic trip script (Batch-D / D3a-D3c).
+   *
+   * ⚠️ THIS FAKE INTERPRETS THE SCRIPT'S SEMANTICS, NOT ITS LUA. There is
+   * exactly one script in the module — `BREAKER_TRIP_SCRIPT` — and its contract
+   * is a single integer return, so re-implementing that contract here is far
+   * cheaper and far more readable than embedding a Lua interpreter. The same
+   * trade-off (and the same warning) as `fakeRatelimitFor` below: a test author
+   * who assumes byte-fidelity with Redis will draw wrong conclusions.
+   *
+   * What IS faithful, because it is what every breaker test depends on:
+   *   * INCR-then-PEXPIRE-on-first, so a burst's window starts at its first
+   *     failure and later failures cannot extend it;
+   *   * the threshold comparison;
+   *   * `SET … NX`, so a second tripper cannot ratchet the cooldown open;
+   *   * the counter DELETE happening in the same indivisible step as the trip,
+   *     which is the whole point of the fix.
+   *
+   * JavaScript's run-to-completion semantics give this function the same
+   * atomicity Redis gives the script, so a CONCURRENT test driven through
+   * `Promise.all` exercises the real interleaving question.
+   */
+  eval<T = number>(
+    script: string,
+    keys: string[],
+    args: string[],
+  ): Promise<T>;
 }
 
 /**
@@ -136,6 +163,39 @@ export function fakeRedisFor(store: FakeUpstashStore): FakeRedis {
       if (!entry) return -2;
       if (entry.expiresAt === Number.POSITIVE_INFINITY) return -1;
       return Math.ceil((entry.expiresAt - Date.now()) / 1000);
+    },
+    async eval<T = number>(
+      _script: string,
+      keys: string[],
+      args: string[],
+    ): Promise<T> {
+      const [counterKey, lockKey] = keys;
+      const [thresholdArg, windowMsArg, cooldownSArg] = args;
+      const threshold = Number(thresholdArg);
+
+      const existing = readLive(store, counterKey);
+      const count = (existing ? Number(existing.value) : 0) + 1;
+      store.set(counterKey, {
+        value: String(count),
+        // PEXPIRE on the FIRST increment only — a later failure in the same
+        // burst must not extend the window.
+        expiresAt: existing
+          ? existing.expiresAt
+          : Date.now() + Number(windowMsArg),
+      });
+      if (count < threshold) return 0 as unknown as T;
+
+      // SET … NX: the first writer's TTL stands.
+      const lockHeld = readLive(store, lockKey) !== undefined;
+      if (!lockHeld) {
+        store.set(lockKey, {
+          value: "open",
+          expiresAt: Date.now() + Number(cooldownSArg) * 1000,
+        });
+      }
+      // DEL the counter either way, in the same indivisible step as the trip.
+      store.delete(counterKey);
+      return (lockHeld ? -count : count) as unknown as T;
     },
   };
 }

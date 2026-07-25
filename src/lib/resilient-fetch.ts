@@ -1,4 +1,3 @@
-import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { CircuitOpenError } from "./seam-errors";
 
@@ -53,9 +52,11 @@ import { CircuitOpenError } from "./seam-errors";
  *    breaker that blocks traffic because its store is misconfigured has itself
  *    become the outage it exists to prevent. There is no environment branch
  *    anywhere in this module.
- * 5. ZERO NEW DEPENDENCIES. `@upstash/redis` and `@upstash/ratelimit` are
- *    already installed and already carry production traffic behind
- *    `ratelimit.ts`. `cockatiel`/`opossum` are explicitly out of scope.
+ * 5. ZERO NEW DEPENDENCIES. `@upstash/redis` is already installed and already
+ *    carries production traffic behind `ratelimit.ts`. `cockatiel`/`opossum`
+ *    are explicitly out of scope. (D3c removed this module's use of
+ *    `@upstash/ratelimit` — still a dependency, still used by `ratelimit.ts`,
+ *    but the breaker now owns its counter outright; see `BREAKER_FAILURE_KEY`.)
  *
  * Retry is NOT implemented here — see `SEAM_RETRIES`.
  */
@@ -96,11 +97,23 @@ export const BREAKER_KEY = "breaker:railway";
 export const BREAKER_FAILURE_THRESHOLD = 5;
 
 /**
- * Sliding window over which failures are counted (Upstash `Duration` string).
+ * Window over which failures are counted, in milliseconds.
+ *
  * 30s pairs with the threshold: five failures inside half a minute is a
  * degradation signal, five spread across an hour is background noise.
+ *
+ * D3c — MILLISECONDS ARE NOW THE SOURCE OF TRUTH, and `BREAKER_WINDOW` below
+ * is derived from it. The counter is no longer `@upstash/ratelimit`'s sliding
+ * window (which needed a `Duration` string) but a plain key we own, expired
+ * with `PEXPIRE`. FIXED, not sliding, and that is an improvement rather than a
+ * concession: a fixed window that is DELETED at the trip is exactly the "one
+ * burst, one denial window" property C5 wanted, with no weighted carry-over to
+ * reason about at all.
  */
-export const BREAKER_WINDOW = "30 s" as const;
+export const BREAKER_WINDOW_MS = 30_000;
+
+/** Human-readable form of `BREAKER_WINDOW_MS`, for log copy. Derived, never drifts. */
+export const BREAKER_WINDOW = `${BREAKER_WINDOW_MS / 1000} s` as const;
 
 /**
  * How long the circuit stays open. Also the `Retry-After` the 503 envelope
@@ -113,13 +126,18 @@ export const BREAKER_WINDOW = "30 s" as const;
  * directions:
  *
  *  - A RECOVERED service is picked up as soon as the lock expires, so recovery
- *    latency is at most this value — never more, since `recordSeamFailure` now
- *    clears the failure counter at the moment it writes the lock.
+ *    latency is at most this value — never more, since `recordSeamFailure`
+ *    clears the failure counter IN THE SAME ATOMIC STEP that writes the lock.
  *  - Before that reset existed the counter and the lock were independent keys
- *    and nothing cleared the former, so the real `slidingWindow` carried
- *    `ceil(5 × (1 − 1/30)) = 5` into the next window and the FIRST failure
+ *    and nothing cleared the former, so the real `slidingWindow` carried the
+ *    previous window's count pro-rata into the next one and the FIRST failure
  *    after the cooldown re-tripped instantly — a ~60s effective denial from one
  *    burst, alignment-dependent and therefore intermittent.
+ *    (⚠️ D3d — this docblock used to quote that carry-over as
+ *    `ceil(5 × (1 − 1/30)) = 5`. The library's Lua uses `math.floor`, so the
+ *    real figure was 4. The conclusion held either way — 4 carried into a
+ *    threshold of 5 still re-trips on the first post-cooldown failure — but a
+ *    number an operator can check has to be right.)
  *
  * A still-broken service is re-detected after `BREAKER_FAILURE_THRESHOLD`
  * further failures, by design: TTL expiry IS the half-open transition (locked
@@ -456,9 +474,20 @@ const redis =
         // front of every seam deadline. A breaker read that needs a retry is
         // already too slow to be useful: take the single attempt and fail OPEN.
         retry: { retries: 0, backoff: () => 0 },
-        // A FACTORY, not a shared signal: the SDK calls it per request
-        // (`isSignalFunction ? signal() : signal`), so a module-lifetime signal
-        // would abort every later command once the first 250ms elapsed.
+        // ⚠️ A FACTORY, NOT A SHARED SIGNAL, AND IT MUST STAY ONE. The SDK
+        // calls it per request (`isSignalFunction ? signal() : signal`), so a
+        // module-lifetime `AbortSignal` would abort every later command once
+        // the first 250ms elapsed.
+        //
+        // D3d — and the failure is SILENT AND INVERTED, which is why this
+        // warning is here rather than left to the reader. On an aborted
+        // command the Upstash client fabricates `200 {result: "Aborted"}`
+        // rather than throwing, so the trip script's return value reads as a
+        // successful answer: `wrote` becomes truthy and the module logs
+        // "BREAKER OPEN — tripped" for a trip THAT NEVER HAPPENED. An operator
+        // then believes the seam is protected while every request sails
+        // through. Changing this one line to `AbortSignal.timeout(...)` is
+        // enough to produce that.
         signal: () => AbortSignal.timeout(BREAKER_STORE_TIMEOUT_MS),
       })
     : null;
@@ -479,13 +508,26 @@ const STORE_TIMED_OUT = Symbol("breaker-store-timeout");
  * bypassed at the very moment it was being driven toward tripping, which is the
  * opposite diagnosis and the opposite remedy.
  */
-type DeadlineDirection = "fail-open" | "record-failure";
+type DeadlineDirection = "fail-open" | "record-failure" | "trip-write";
 
 const DEADLINE_DIRECTION_COPY: Record<DeadlineDirection, string> = {
   "fail-open":
     "failing OPEN (the breaker is bypassed for this call, which proceeds unprotected)",
   "record-failure":
     "treating it as NO readable envelope — this response WILL be counted against the breaker",
+  // D3a/D3d — THE WRITE PATH NEEDED ITS OWN COPY, and inheriting "fail-open"
+  // made the log false in every particular. Nothing was bypassed: this runs
+  // AFTER the seam call already failed, so no request's protection changed. And
+  // an operator reading "the breaker is bypassed" immediately below a
+  // "BREAKER OPEN … tripped" line (C6's exact bug, reintroduced by C5) draws
+  // the opposite diagnosis and the opposite remedy.
+  //
+  // What is actually true: we stopped WAITING. The trip is ONE atomic Redis
+  // command that has already been dispatched, so it may well have landed — we
+  // just do not know, and the only cost of not knowing is that this line cannot
+  // tell you whether the circuit is now open.
+  "trip-write":
+    "abandoning the WAIT, not the work — the trip is a single atomic command that was already dispatched and may still have landed. Nothing was bypassed: the call this bookkeeping belongs to had already failed",
 };
 
 /**
@@ -553,39 +595,84 @@ if (!redis) {
 }
 
 /**
- * Failure counter, used inversely: `.limit()` is called ONLY on a failure, so
- * exhausting the allowance means "too many failures in the window" rather than
- * "too many requests".
+ * The failure counter's key. A PLAIN KEY WE OWN (D3b/D3c).
  *
- * `analytics: false` sidesteps the dangling `pending` promise the Upstash
- * typings warn about on Vercel (the existing `checkLimit` never awaits it) and
- * keeps breaker counters out of the rate-limit analytics dashboard.
- * `prefix: "breaker"` is distinct from the limiter's "quantalyze" so the two
- * keyspaces can never collide.
+ * ⚠️ WAS `@upstash/ratelimit`'s `slidingWindow`, and three separate findings
+ * traced back to that choice:
+ *
+ *  * D3c — clearing it meant `resetUsedTokens`, which is a Lua
+ *    `repeat SCAN … MATCH … until cursor == "0"` with NO `COUNT`
+ *    (`@upstash/ratelimit/dist/index.mjs`). That is O(entire keyspace),
+ *    executed ATOMICALLY, so Redis's single thread is blocked for the whole
+ *    walk — on the database shared with this app's fifteen production
+ *    limiters, which fail CLOSED in production. Measured live: `DBSIZE = 146`,
+ *    almost all `quantalyze:events:*` analytics hashes with `TTL = -1`, one
+ *    bucket per active hour since 2026-04 and never pruned. The cost grows
+ *    monotonically, forever. (What was DISPROVED and is not a concern: the
+ *    SCAN pattern is `breaker:breaker:railway:failures:*`, so it can never
+ *    MATCH another limiter's keys — it merely walks past them.)
+ *  * D3b — the reset was gated on the `nx` result, so it fired exactly once at
+ *    the trip while the counter kept being written afterwards by concurrent
+ *    trippers (`resilientFetch` checks the breaker at the top and records at
+ *    the bottom, with no re-check between) and by in-flight long-budget calls
+ *    (60s budgets against a 30s cooldown). At TTL expiry the stale count
+ *    carried and the first post-cooldown failure re-tripped: the ~60s
+ *    double-denial C5 claimed to have removed.
+ *  * D3a — `limit()` then `set(nx)` then `resetUsedTokens()` is THREE
+ *    round trips inside one 250ms budget. On expiry the async IIFE was
+ *    orphaned, the route returned, and Fluid Compute froze the instance with
+ *    no `waitUntil` — so the fifth failure's `set(BREAKER_KEY, "open")` never
+ *    landed, precisely when Railway is down and Upstash is slow, which is the
+ *    correlated failure this module documents elsewhere. The breaker did not
+ *    open for the whole incident.
+ *
+ * One key, one command, no scan, no growth curve. See `BREAKER_TRIP_SCRIPT`.
  */
-const breakerLimiter = redis
-  ? new Ratelimit({
-      redis,
-      limiter: Ratelimit.slidingWindow(BREAKER_FAILURE_THRESHOLD, BREAKER_WINDOW),
-      analytics: false,
-      prefix: "breaker",
-      // F-5 — DISABLE the library's own timeout race. `@upstash/ratelimit`
-      // v2.0.8 defaults to `timeout: 5000` and, on expiry, RESOLVES a fail-open
-      // sentinel `{success:true, limit:0, remaining:0, reason:"timeout"}`
-      // (dist/index.mjs `applyTimeout`). That sentinel is indistinguishable
-      // from real counter exhaustion under a `remaining > 0` test, so the
-      // library's fail-OPEN would have become this breaker's fail-CLOSED —
-      // a direct contradiction of locked decision 4.
-      //
-      // `withStoreDeadline` already owns this deadline at 250ms, an order of
-      // magnitude tighter, so the library's race is pure redundancy with a
-      // hostile failure mode. `0` disables it (`if (this.timeout > 0)`), giving
-      // the store deadline exactly ONE owner. The sentinel is still handled
-      // defensively in `recordSeamFailure` in case a future version reinstates
-      // it by another route.
-      timeout: 0,
-    })
-  : null;
+export const BREAKER_FAILURE_KEY = `${BREAKER_KEY}:failures`;
+
+/**
+ * Count one failure and, if that reaches the threshold, trip — ATOMICALLY.
+ *
+ * This is the whole of D3a/D3b/D3c's fix. Redis runs a script to completion
+ * with nothing interleaved, so "increment, decide, trip, clear the counter" is
+ * ONE indivisible step. Three properties follow that the previous three-round-
+ * trip sequence could not have:
+ *
+ *  1. THE TRIP CANNOT BE HALF-DONE. Either the lock is written and the counter
+ *     cleared, or neither. There is no window in which a request can observe a
+ *     counter that has passed the threshold but a circuit that is still closed.
+ *  2. CONCURRENCY IS CLOSED, not merely narrowed. A second instance racing the
+ *     trip runs the script AFTER the first has completed, so it increments a
+ *     counter that has already been deleted: it reads 1, not 6, and cannot
+ *     re-trip. `SET NX` still guards the TTL, so a late arrival can never
+ *     ratchet the cooldown window open.
+ *  3. ONE ROUND TRIP fits the 250ms budget with room to spare, so the deadline
+ *     stops being a coin-flip on whether the trip lands.
+ *
+ * Return value, deliberately a single integer so no shape parsing is needed:
+ *     0    counted, below threshold — nothing else happened
+ *    >0    THIS caller tripped the breaker; the value is the failure count
+ *    <0    threshold reached but the lock was already held (another instance
+ *          got there first); the counter was still cleared
+ *
+ * `PEXPIRE` only on the first increment, so a burst's window is measured from
+ * its FIRST failure and cannot be extended indefinitely by later ones.
+ */
+const BREAKER_TRIP_SCRIPT = `
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then
+  redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+if count < tonumber(ARGV[1]) then
+  return 0
+end
+local wrote = redis.call("SET", KEYS[2], "open", "EX", ARGV[3], "NX")
+redis.call("DEL", KEYS[1])
+if wrote then
+  return count
+end
+return -count
+`;
 
 /**
  * Is the Railway circuit currently open?
@@ -641,6 +728,16 @@ export async function isBreakerOpen(): Promise<{
  * bookkeeping error. Never log request bodies or header values from this
  * module — the seam carries raw exchange API secrets and INTERNAL_API_TOKEN.
  *
+ * ⚠️ A STORE THAT IS DOWN MUST NEVER TRIP THE BREAKER. That is locked decision
+ * 4 read in the write direction, and it used to need a special case: the old
+ * `@upstash/ratelimit` counter answered its own internal timeout by RESOLVING
+ * `{success:true, limit:0, remaining:0, reason:"timeout"}`, a fail-OPEN value
+ * that read as exhaustion under a `remaining > 0` test and so became this
+ * breaker's fail-CLOSED (F-5). With the counter owned here there is no such
+ * sentinel to misread: an unreachable store either rejects (caught below) or
+ * misses the deadline (returns `STORE_TIMED_OUT`), and NEITHER writes the lock.
+ * The inversion is now structurally impossible rather than defended against.
+ *
  * @param budgetKey - the call site whose failure this is. Logged at the TRIP
  *   only (D-3), so an operator reading the line knows which seam was the last
  *   straw. Optional because the breaker is keyed globally, not per budget.
@@ -648,110 +745,59 @@ export async function isBreakerOpen(): Promise<{
 export async function recordSeamFailure(
   budgetKey?: SeamBudgetKey,
 ): Promise<void> {
-  if (!redis || !breakerLimiter) return;
+  if (!redis) return;
   try {
     // CR-02 — bounded like the read, and for a sharper reason: this runs inside
     // the caller's catch arm, i.e. exactly when Railway is already failing,
     // which is precisely when a shared regional Upstash is most likely to be
     // under load too (correlated failure). Bookkeeping must never extend a
     // request whose outcome is already decided.
-    await withStoreDeadline(
-      (async () => {
-        const { success, limit, remaining, reason } = await breakerLimiter.limit(
-          `${BREAKER_KEY}:failures`,
-        );
-        // F-5 — THE LIBRARY'S FAIL-OPEN MUST NOT BECOME OUR FAIL-CLOSED.
-        //
-        // `@upstash/ratelimit` answers its own internal timeout by RESOLVING
-        // `{success:true, limit:0, remaining:0, reason:"timeout"}` rather than
-        // rejecting — a deliberate fail-open meaning "I could not reach the
-        // store, let the caller through". Under the `remaining > 0` test below
-        // that sentinel reads as "the allowance is exhausted", so a degraded
-        // Upstash would TRIP the breaker and deny the entire seam to every
-        // tenant, which is precisely the inversion locked decision 4 forbids:
-        // the breaker becoming the outage it exists to prevent.
-        //
-        // Checked on BOTH fields. `reason` is the library's explicit marker;
-        // `limit === 0` is the structural backstop, because a configured
-        // `slidingWindow(BREAKER_FAILURE_THRESHOLD, …)` can never report a zero
-        // limit on a real answer, so a future version that drops `reason` still
-        // cannot silently re-open this hole.
-        if (reason === "timeout" || limit === 0) {
-          console.error(
-            "[resilient-fetch] breaker counter unavailable (limiter fail-open) — NOT tripping",
-          );
-          return;
-        }
-        // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`)
-        // and denies the (N+1)th. The breaker must open ON the threshold-th
-        // failure, not one failure later, so exhaustion counts as a trip signal
-        // alongside outright denial.
-        if (success && remaining > 0) return;
-        // `nx: true` makes concurrent trips idempotent: the first writer's TTL
-        // stands, so a second instance tripping 200ms later cannot ratchet the
-        // cooldown window open. Benign race, deliberately not serialised with
-        // Lua.
-        const wrote = await redis.set(BREAKER_KEY, "open", {
-          ex: BREAKER_COOLDOWN_S,
-          nx: true,
-        });
-        // D-3 — THE BREAKER OPENING IS THE MOST IMPORTANT OPERATIONAL EVENT
-        // THIS MODULE PRODUCES, and it used to be completely silent: every
-        // individual failure logged, but the moment they added up to "the seam
-        // is now refused for everyone" logged nothing at all. An operator
-        // watching a support ticket saw a burst of transport errors and then
-        // a sudden, unexplained absence of them — the breaker doing its job is
-        // indistinguishable in the logs from the incident spontaneously
-        // resolving.
-        //
-        // Gated on `wrote` (the `nx` result), so this is emitted ONCE per
-        // actual trip rather than by every instance that loses the race.
-        if (wrote) {
-          console.error(
-            `[resilient-fetch] BREAKER OPEN — ${BREAKER_KEY} tripped after ` +
-              `${limit - remaining} failures in ${BREAKER_WINDOW}; the seam is ` +
-              `refused for ${BREAKER_COOLDOWN_S}s` +
-              (budgetKey ? ` (last failing call site: ${budgetKey})` : ""),
-          );
-          // C5 — ONE BURST MUST PRODUCE ONE DENIAL WINDOW, so the counter is
-          // cleared at the moment the lock is written.
-          //
-          // The counter and the open-lock are INDEPENDENT keys, and nothing used
-          // to reset the former when the latter was written. Worked against the
-          // real `slidingWindow` Lua: five failures at t≈0 trip and the lock
-          // expires at t=30. At t≈31s the window has rolled, and the library
-          // counts the previous window pro-rata —
-          // `ceil(5 × (1 − 1/30)) = 5` carried forward — so the FIRST failure
-          // after the cooldown already reads as exhausted and re-trips
-          // immediately for another 30s. The documented recovery latency was
-          // 30s; the delivered one was ~60s, and alignment-dependent (a failure
-          // landing later in the new window carries less, so the doubling comes
-          // and goes).
-          //
-          // `resetUsedTokens` is the library's own public API (it SCAN+DELs
-          // `${prefix}:${identifier}:*`, covering both the current and previous
-          // window keys) rather than us re-deriving its key layout, which is
-          // exactly the kind of internal coupling that breaks silently on a
-          // minor bump.
-          //
-          // COST, honestly: that SCAN walks the shared Upstash keyspace. It is
-          // gated on `wrote`, so it runs AT MOST once per cooldown per trip
-          // (never per failure), and it is inside the same 250ms
-          // `withStoreDeadline` as everything else here — a scan we cannot
-          // finish in budget simply leaves the counter alone, which is the
-          // pre-C5 behaviour. Never worse than before.
-          //
-          // BEHAVIOUR THIS CHANGES, deliberately: during a SUSTAINED outage the
-          // seam now lets `BREAKER_FAILURE_THRESHOLD` requests through per
-          // cooldown cycle instead of re-tripping on the first one. That is
-          // locked decision 3 working as written — TTL expiry IS the half-open
-          // transition, and re-proving the seam is down is what the probe budget
-          // is for.
-          await breakerLimiter.resetUsedTokens(`${BREAKER_KEY}:failures`);
-        }
-      })(),
-      "breaker store write",
+    //
+    // D3a — ITS OWN `direction`, so the log tells the truth on this path. It
+    // inherited the default `"fail-open"` and printed "the breaker is bypassed
+    // for this call, which proceeds unprotected", which is false in every
+    // particular here: nothing was bypassed, and the call in question had
+    // already failed before this function was entered.
+    const outcome = await withStoreDeadline(
+      redis.eval<string[], number>(
+        BREAKER_TRIP_SCRIPT,
+        [BREAKER_FAILURE_KEY, BREAKER_KEY],
+        [
+          String(BREAKER_FAILURE_THRESHOLD),
+          String(BREAKER_WINDOW_MS),
+          String(BREAKER_COOLDOWN_S),
+        ],
+      ),
+      "breaker trip write",
+      BREAKER_STORE_TIMEOUT_MS,
+      "trip-write",
     );
+
+    // Timed out. `withStoreDeadline` has already said so, truthfully, and there
+    // is nothing further to report: whether the trip landed is exactly what we
+    // do not know. Deliberately NOT logged as a trip either way — D3d's bug was
+    // a "BREAKER OPEN … tripped" line for a trip we could not confirm.
+    if (outcome === STORE_TIMED_OUT) return;
+
+    // D-3 — THE BREAKER OPENING IS THE MOST IMPORTANT OPERATIONAL EVENT THIS
+    // MODULE PRODUCES, and it used to be completely silent: every individual
+    // failure logged, but the moment they added up to "the seam is now refused
+    // for everyone" logged nothing at all. An operator watching a support
+    // ticket saw a burst of transport errors and then a sudden, unexplained
+    // absence of them — the breaker doing its job is indistinguishable in the
+    // logs from the incident spontaneously resolving.
+    //
+    // Emitted ONCE per actual trip: the script returns a positive count only to
+    // the caller whose `SET NX` actually wrote, so instances that lose the race
+    // stay quiet instead of spamming a duplicate per failure.
+    if (typeof outcome === "number" && outcome > 0) {
+      console.error(
+        `[resilient-fetch] BREAKER OPEN — ${BREAKER_KEY} tripped after ` +
+          `${outcome} failures in ${BREAKER_WINDOW}; the seam is ` +
+          `refused for ${BREAKER_COOLDOWN_S}s` +
+          (budgetKey ? ` (last failing call site: ${budgetKey})` : ""),
+      );
+    }
   } catch (err) {
     console.error(
       "[resilient-fetch] failed to record seam failure — breaker state may be stale:",

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
 import {
   FAKE_BREAKER_KEY,
@@ -58,34 +60,29 @@ const shared = vi.hoisted(() => {
      * nothing for it and only a deadline can.
      */
     hangOnGet: false,
-    /** true → the failure counter never settles (the write half of CR-02). */
-    hangOnLimit: false,
-    /** true → the failure counter rejects, exercising the swallow-and-log arm. */
-    throwOnLimit: false,
     /**
-     * true → the failure counter resolves @upstash/ratelimit's FAIL-OPEN
-     * timeout sentinel ({success:true, limit:0, remaining:0, reason:"timeout"})
-     * instead of counting. F-5: this must NOT be read as exhaustion.
+     * true → the atomic trip write never settles (the write half of CR-02).
+     *
+     * Batch-D / D3a: this now hangs `redis.eval`, the ONE command the breaker's
+     * write path issues, rather than `@upstash/ratelimit`'s `limit()`.
      */
-    limiterTimeoutSentinel: false,
+    hangOnTripWrite: false,
+    /** true → the trip write rejects, exercising the swallow-and-log arm. */
+    throwOnTripWrite: false,
     /** true → redis.ttl rejects. Only reachable once the lock reads "open". */
     throwOnTtl: false,
   };
   /** Config object the core passed to `Redis.fromEnv()`, captured per context. */
   const captured = {
     redisConfig: undefined as Record<string, unknown> | undefined,
-    limiterConfig: undefined as Record<string, unknown> | undefined,
   };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
-  /** Identifiers passed to `Ratelimit.resetUsedTokens` (C5). */
-  const resetUsedTokensCalls: string[] = [];
   return {
     store,
     mode,
     ctx,
     captured,
-    resetUsedTokensCalls,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -128,56 +125,33 @@ vi.mock("@upstash/redis", async () => {
             }
             return base.ttl(key);
           },
+          // Batch-D / D3a — the breaker's write path is now ONE atomic
+          // `eval`. The hang/throw modes hang off it so CR-02's "a sick store
+          // must never extend an already-failed request" pins keep their teeth.
+          eval: async (script: string, keys: string[], args: string[]) => {
+            if (shared.mode.throwOnTripWrite) {
+              throw new Error("upstash: trip write unavailable");
+            }
+            if (shared.mode.hangOnTripWrite) {
+              return new Promise<never>(() => {});
+            }
+            return base.eval(script, keys, args);
+          },
         };
       },
     },
   };
 });
 
-vi.mock("@upstash/ratelimit", async () => {
-  const { fakeRatelimitFor } = await import("@/test/helpers/upstash-breaker");
-  return {
-    Ratelimit: class {
-      static slidingWindow(tokens: number, window: string) {
-        return { tokens, window };
-      }
-      private readonly fake: {
-        limit: (id: string) => Promise<unknown>;
-        resetUsedTokens: (id: string) => Promise<void>;
-      };
-      /** Captured so a test can assert the core's limiter construction. */
-      static lastConfig: Record<string, unknown> | undefined;
-      constructor(opts: { limiter: { tokens: number } } & Record<string, unknown>) {
-        (this.constructor as { lastConfig?: unknown }).lastConfig = opts;
-        shared.captured.limiterConfig = opts;
-        // Binds to whatever store beginContext() just selected.
-        this.fake = fakeRatelimitFor(
-          shared.ctx.store,
-          opts.limiter.tokens,
-          shared.mode.limiterTimeoutSentinel,
-        );
-      }
-      limit(identifier: string) {
-        if (shared.mode.throwOnLimit) {
-          return Promise.reject(new Error("upstash: limiter unavailable"));
-        }
-        if (shared.mode.hangOnLimit) {
-          return new Promise<never>(() => {});
-        }
-        return this.fake.limit(identifier);
-      }
-      /**
-       * C5 — the breaker clears the failure counter the instant it writes the
-       * open-lock, via the library's own public reset. Forwarded to the fake so
-       * a test can observe the counter key actually disappearing.
-       */
-      resetUsedTokens(identifier: string) {
-        shared.resetUsedTokensCalls.push(identifier);
-        return this.fake.resetUsedTokens(identifier);
-      }
-    },
-  };
-});
+/**
+ * Batch-D / D3c — `@upstash/ratelimit` IS NO LONGER MOCKED HERE, because
+ * `resilient-fetch` no longer imports it. Its `slidingWindow` counter was the
+ * root of D3a (three round trips in one 250ms budget, so the trip could be
+ * abandoned), D3b (the reset fired once and the counter kept being written) and
+ * D3c (`resetUsedTokens` is a `COUNT`-less full-keyspace Lua SCAN, executed
+ * atomically, on the database shared with fifteen production limiters). The
+ * breaker owns a plain key and one atomic script instead.
+ */
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -235,18 +209,15 @@ beforeEach(() => {
   shared.mode.sharedStore = true;
   shared.mode.throwOnGet = false;
   // A leaked hang flag would stall every later test at the store deadline
-  // instead of failing loudly, so both reset here alongside throwOnLimit.
+  // instead of failing loudly, so both reset here alongside throwOnTripWrite.
   shared.mode.hangOnGet = false;
-  shared.mode.hangOnLimit = false;
+  shared.mode.hangOnTripWrite = false;
   shared.captured.redisConfig = undefined;
-  shared.captured.limiterConfig = undefined;
-  shared.mode.limiterTimeoutSentinel = false;
   shared.mode.throwOnTtl = false;
-  // Every flag resets. A leaked `throwOnLimit` silently disables the failure
-  // counter for every later test, which makes "the breaker did not trip"
-  // assertions pass for entirely the wrong reason.
-  shared.mode.throwOnLimit = false;
-  shared.resetUsedTokensCalls.length = 0;
+  // Every flag resets. A leaked `throwOnTripWrite` silently disables the
+  // failure counter for every later test, which makes "the breaker did not
+  // trip" assertions pass for entirely the wrong reason.
+  shared.mode.throwOnTripWrite = false;
   configureUpstash();
 });
 
@@ -465,7 +436,7 @@ describe("breaker store is bounded (CR-02)", () => {
     // Railway is already sick, which is when a shared regional Upstash is most
     // likely to be struggling too (correlated failure).
     vi.spyOn(console, "error").mockImplementation(() => {});
-    shared.mode.hangOnLimit = true;
+    shared.mode.hangOnTripWrite = true;
     const mod = await import("./resilient-fetch");
 
     const started = Date.now();
@@ -572,24 +543,40 @@ describe("recordSeamFailure", () => {
   });
 
   /**
-   * Phase 140 review / F-5 — the limiter's FAIL-OPEN must not become the
-   * breaker's FAIL-CLOSED.
+   * Phase 140 review / F-5, carried forward structurally (Batch-D / D3c).
    *
-   * `@upstash/ratelimit` v2.0.8 answers its own internal timeout by RESOLVING
-   * `{success:true, limit:0, remaining:0, reason:"timeout"}` (dist/index.mjs
-   * `applyTimeout`, default 5000ms) — meaning "I could not reach the store, let
-   * the caller through". Read under `!(success && remaining > 0)` that value is
-   * indistinguishable from real exhaustion, so a degraded Upstash would TRIP
-   * the breaker and deny the whole seam to every tenant: exactly the inversion
-   * locked decision 4 forbids.
+   * The ORIGINAL hazard: `@upstash/ratelimit` answered its own internal timeout
+   * by RESOLVING `{success:true, limit:0, remaining:0, reason:"timeout"}` —
+   * "I could not reach the store, let the caller through". Read under
+   * `!(success && remaining > 0)` that fail-OPEN value was indistinguishable
+   * from real exhaustion, so a degraded Upstash TRIPPED the breaker and denied
+   * the whole seam to every tenant: the inversion locked decision 4 forbids.
+   *
+   * That sentinel no longer exists to misread — the breaker owns its counter
+   * and issues one atomic `eval`. The INVARIANT it protected is what these pin,
+   * and it is now structural: an unreachable store either rejects or misses the
+   * deadline, and NEITHER path can write the lock, because the lock is only
+   * ever written by the script itself.
    */
-  it("F-5: the limiter's timeout sentinel does NOT trip the breaker", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    shared.mode.limiterTimeoutSentinel = true;
+  it("F-5: a store that TIMES OUT never trips the breaker", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.hangOnTripWrite = true;
     const mod = await import("./resilient-fetch");
 
-    // Well past the threshold: if the sentinel counted, this would be open many
-    // times over.
+    // Well past the threshold: if an unanswered write counted, this would be
+    // open many times over.
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD * 3; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+  });
+
+  it("F-5: a store that REJECTS never trips the breaker", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.throwOnTripWrite = true;
+    const mod = await import("./resilient-fetch");
+
     for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD * 3; i++) {
       await mod.recordSeamFailure("bridge");
     }
@@ -597,16 +584,12 @@ describe("recordSeamFailure", () => {
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
     // Loud, not silent: a breaker running without a counter is an operational
     // fact, and it is why the seam is currently unprotected.
-    expect(
-      errorSpy.mock.calls.some((c) =>
-        String(c[0]).includes("limiter fail-open"),
-      ),
-    ).toBe(true);
+    expect(errorSpy).toHaveBeenCalled();
   });
 
-  it("F-5: POSITIVE CONTROL — the same drive without the sentinel DOES trip", async () => {
-    // Without this, the test above cannot be distinguished from "recordSeamFailure
-    // stopped tripping at all".
+  it("F-5: POSITIVE CONTROL — the same drive against a HEALTHY store DOES trip", async () => {
+    // Without this, the two tests above cannot be distinguished from
+    // "recordSeamFailure stopped tripping at all".
     vi.spyOn(console, "error").mockImplementation(() => {});
     const mod = await import("./resilient-fetch");
 
@@ -615,14 +598,6 @@ describe("recordSeamFailure", () => {
     }
 
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
-  });
-
-  it("F-5: constructs the limiter with its redundant internal timeout disabled", async () => {
-    // `withStoreDeadline` owns this deadline at 250ms — an order of magnitude
-    // tighter than the library's 5000ms default. Leaving both in place keeps a
-    // second, hostile failure mode alive for no benefit.
-    await import("./resilient-fetch");
-    expect(shared.captured.limiterConfig).toMatchObject({ timeout: 0 });
   });
 
   it("is a no-op when Upstash is unconfigured", async () => {
@@ -641,7 +616,7 @@ describe("recordSeamFailure", () => {
     // caller has to handle — recordSeamFailure is called from inside the
     // engine's catch arms, where a throw would replace the real upstream error.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    shared.mode.throwOnLimit = true;
+    shared.mode.throwOnTripWrite = true;
     const mod = await import("./resilient-fetch");
 
     await expect(mod.recordSeamFailure()).resolves.toBeUndefined();
@@ -655,16 +630,14 @@ describe("recordSeamFailure", () => {
    * The counter and the open-lock are independent keys and nothing used to
    * clear the counter when the lock was written. Against the real
    * `slidingWindow` Lua: five failures at t≈0 trip (lock 30s); at t≈31s the
-   * window has rolled and the previous one is counted pro-rata —
-   * `ceil(5 × (1 − 1/30)) = 5` — so the FIRST failure after the cooldown
-   * already read as exhausted and re-tripped instantly. Documented recovery
-   * latency 30s, delivered ~60s.
+   * window has rolled and the previous one is counted pro-rata — `floor`, not
+   * `ceil`, so 4 rather than the 5 the old docblock claimed (D3d) — and the
+   * FIRST failure after the cooldown re-tripped instantly regardless.
+   * Documented recovery latency 30s, delivered ~60s.
    *
-   * The fake limiter is a FIXED window (see the helper's own warning), so it
-   * cannot reproduce the weighted carry-over directly. What it CAN pin — and
-   * what the fix actually is — is the invariant that removes the carry-over
-   * entirely: after a trip the counter key is GONE, so the next window starts
-   * from zero whatever its alignment.
+   * The fix removes the carry-over entirely: the counter is a key we own,
+   * DELETED in the same atomic step as the trip, so the next window starts from
+   * zero whatever its alignment.
    */
   it("C5: the trip CLEARS the failure counter, so one burst = one denial window", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
@@ -675,9 +648,10 @@ describe("recordSeamFailure", () => {
     }
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
 
-    // The library's own public reset was invoked for the breaker's identifier —
-    // not a re-derivation of its internal key layout.
-    expect(shared.resetUsedTokensCalls).toEqual([`${mod.BREAKER_KEY}:failures`]);
+    // D3b — the counter is cleared IN THE SAME ATOMIC STEP as the lock write,
+    // so there is no interval in which a concurrent tripper can observe a
+    // past-threshold counter beside a closed circuit.
+    expect(shared.store.get(mod.BREAKER_FAILURE_KEY)).toBeUndefined();
 
     // The ONLY surviving key is the open-lock. Every failure-counter bucket is
     // gone, which is what makes the next window start from zero.
@@ -708,6 +682,180 @@ describe("recordSeamFailure", () => {
       await mod.recordSeamFailure("bridge");
     }
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+});
+
+/**
+ * Batch-D / D3a-D3d — THE BREAKER UNDER CONCURRENCY.
+ *
+ * ⚠️ EVERY PRE-EXISTING BREAKER TEST IN THIS FILE IS STRICTLY SERIAL — an
+ * `await` per failure, one in flight at a time. That is not the shape
+ * production has: Fluid Compute runs many instances, `resilientFetch` checks
+ * the breaker at the top and records at the bottom with NO re-check between,
+ * and a 60s `process-key-sync` budget outlives a 30s cooldown. C5's reset was
+ * gated on the `nx` result, so it fired exactly once at the trip while the
+ * counter kept being written afterwards; at TTL expiry the stale count carried
+ * and the first post-cooldown failure re-tripped — the ~60s double denial C5
+ * claimed to have removed (D3b, REPRODUCED).
+ */
+describe("[D3b] breaker under CONCURRENCY", () => {
+  it("a concurrent burst well past the threshold trips exactly ONCE", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    // Four times the threshold, all in flight together — the shape a real
+    // Railway outage produces across instances, and the shape no existing test
+    // covered.
+    await Promise.all(
+      Array.from({ length: mod.BREAKER_FAILURE_THRESHOLD * 4 }, () =>
+        mod.recordSeamFailure("bridge"),
+      ),
+    );
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+    // ONE trip line. The script returns a positive count only to the caller
+    // whose SET NX actually wrote, so the losers stay quiet.
+    expect(
+      errorSpy.mock.calls
+        .map((c) => String(c[0]))
+        .filter((m) => m.includes("BREAKER OPEN")),
+    ).toHaveLength(1);
+  });
+
+  it("stragglers arriving AFTER the trip cannot ratchet the cooldown open", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    await Promise.all(
+      Array.from({ length: mod.BREAKER_FAILURE_THRESHOLD }, () =>
+        mod.recordSeamFailure(),
+      ),
+    );
+    const firstExpiry = shared.store.get(mod.BREAKER_KEY)?.expiresAt;
+    expect(firstExpiry).toBeDefined();
+
+    // In-flight long-budget calls landing during the cooldown: a 60s
+    // `process-key-sync` budget genuinely outlives a 30s lock.
+    await Promise.all(
+      Array.from({ length: mod.BREAKER_FAILURE_THRESHOLD * 2 }, () =>
+        mod.recordSeamFailure(),
+      ),
+    );
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.expiresAt).toBe(firstExpiry);
+  });
+
+  it("D3b: a CONCURRENT burst leaves NO carried-over count for the next window", async () => {
+    // THE regression. Serially this already held (C5 cleared the counter at the
+    // trip); concurrently it did not, because the reset fired once and every
+    // later failure in the burst wrote the counter straight back. At TTL expiry
+    // that residue meant the first post-cooldown failure re-tripped instantly,
+    // doubling the outage one burst costs a user.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    await Promise.all(
+      Array.from({ length: mod.BREAKER_FAILURE_THRESHOLD * 3 }, () =>
+        mod.recordSeamFailure("bridge"),
+      ),
+    );
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+
+    // Exactly what Redis does at t = BREAKER_COOLDOWN_S: the lock expires and
+    // nothing else is touched. The counter's residue is the whole question.
+    shared.store.delete(mod.BREAKER_KEY);
+
+    await mod.recordSeamFailure("bridge");
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+
+    // And the breaker still works — it re-trips on a genuine fresh burst.
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD - 1; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  /**
+   * ⚠️ THE FAKE CANNOT EXECUTE LUA. `fakeRedisFor.eval` re-implements the
+   * script's SEMANTICS (it is documented as such), so the behavioural tests
+   * above prove the INVARIANT but cannot prove the deployed script implements
+   * it. This case closes that gap the only way available without a live Redis:
+   * by pinning the shape of the script text itself, at the two places where a
+   * plausible edit would silently reintroduce D3b or D3a.
+   */
+  it("D3b: the script DELETES the counter unconditionally, not only when it wrote the lock", async () => {
+    const src = await readFile(
+      join(process.cwd(), "src/lib/resilient-fetch.ts"),
+      "utf-8",
+    );
+    const script = /const BREAKER_TRIP_SCRIPT = `([\s\S]*?)`;/.exec(src)?.[1];
+    expect(script).toBeDefined();
+
+    const setNx = script!.indexOf('redis.call("SET", KEYS[2]');
+    const del = script!.indexOf('redis.call("DEL", KEYS[1])');
+    const ifWrote = script!.indexOf("if wrote then");
+    expect(setNx).toBeGreaterThan(-1);
+    // The DEL runs AFTER the SET and BEFORE the `if wrote` branch — i.e.
+    // outside it. Gating the DEL on `wrote` is exactly the C5 shape that
+    // survived serially and failed under concurrency (D3b).
+    expect(del).toBeGreaterThan(setNx);
+    expect(del).toBeLessThan(ifWrote);
+
+    // And the whole trip is ONE script: no SCAN anywhere near this module's
+    // write path (D3c), and the counter window is set with PEXPIRE on the
+    // first increment only.
+    expect(script).not.toMatch(/SCAN/i);
+    expect(script).toContain('redis.call("PEXPIRE"');
+    expect(script).toContain("if count == 1 then");
+  });
+
+  it("D3c: the trip issues ONE store command and never a SCAN", async () => {
+    // `resetUsedTokens` was a `COUNT`-less `repeat SCAN … until cursor == "0"`
+    // over the shared keyspace, executed atomically — Redis's single thread
+    // blocked for the whole walk, on the database carrying fifteen production
+    // limiters that fail CLOSED. It is gone, and the whole write path is now a
+    // single round trip that fits the 250ms budget with room to spare.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+
+    // The breaker's entire footprint in the shared keyspace is ONE key.
+    expect([...shared.store.keys()]).toEqual([mod.BREAKER_KEY]);
+    expect(mod.BREAKER_FAILURE_KEY).toBe(`${mod.BREAKER_KEY}:failures`);
+  });
+
+  /**
+   * D3a/D3d — THE LOG MUST NOT CONTRADICT ITSELF, OR LIE.
+   *
+   * The write path inherited `withStoreDeadline`'s default `"fail-open"`
+   * direction and printed "failing OPEN — the breaker is bypassed for this
+   * call, which proceeds unprotected". False in every particular: nothing was
+   * bypassed, and the call this bookkeeping belongs to had already failed. C5
+   * then reintroduced C6's exact bug — an operator could see "BREAKER OPEN …
+   * tripped" followed immediately by "the breaker is bypassed".
+   */
+  it("D3a: a timed-out trip write never claims the breaker was bypassed", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.hangOnTripWrite = true;
+    const mod = await import("./resilient-fetch");
+
+    await mod.recordSeamFailure("bridge");
+
+    const lines = errorSpy.mock.calls.map((c) => String(c[0]));
+    const deadlineLine = lines.find((m) => m.includes("breaker trip write"));
+    expect(deadlineLine).toBeDefined();
+    // THE assertions: no false claim, and no self-contradiction. Matched on
+    // the exact sentence that was wrong — the copy DOES say "Nothing was
+    // bypassed", which is the opposite claim and is the point.
+    expect(deadlineLine).not.toContain("the breaker is bypassed");
+    expect(deadlineLine).not.toContain("failing OPEN");
+    expect(deadlineLine).toContain("Nothing was bypassed");
+    // Truthful about what WAS abandoned — the wait, not the work.
+    expect(deadlineLine).toContain("abandoning the WAIT");
+    expect(lines.some((m) => m.includes("BREAKER OPEN"))).toBe(false);
   });
 });
 
