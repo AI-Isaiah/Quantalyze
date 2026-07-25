@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 
 /**
  * Tests for GET /api/keys/[id]/permissions — the Task 7.1a `api_key.decrypt`
@@ -455,7 +456,10 @@ const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 describe("GET /api/keys/[id]/permissions — breaker across the unstable_cache boundary", () => {
-  it("cache MISS + breaker open → 503 CIRCUIT_OPEN + Retry-After, and the error is NOT cached", async () => {
+  // Phase 140 review (WR-01): the wire code is SERVICE_UNAVAILABLE_RETRY, a
+  // real WizardErrorCode. It was "CIRCUIT_OPEN", which no wizard surface can
+  // render, so every consumer fell through to the UNKNOWN dead end.
+  it("cache MISS + breaker open → 503 SERVICE_UNAVAILABLE_RETRY + Retry-After, and the error is NOT cached", async () => {
     STATE.memoize = true;
     RF.breakerOpen = true;
     // Deliberately NOT 30: 30 is simultaneously BREAKER_COOLDOWN_S and
@@ -472,7 +476,8 @@ describe("GET /api/keys/[id]/permissions — breaker across the unstable_cache b
     expect(res.headers.get("Retry-After")).toBe("17");
     const raw = await res.text();
     const body = JSON.parse(raw);
-    expect(body.code).toBe("CIRCUIT_OPEN");
+    const expectedCode: WizardErrorCode = "SERVICE_UNAVAILABLE_RETRY";
+    expect(body.code).toBe(expectedCode);
     expect(body.error).toBe(CIRCUIT_OPEN_COPY);
     // Static copy: no infra vocabulary reaches an authed client.
     expect(raw).not.toMatch(/breaker|upstash|railway|analytics service circuit/i);

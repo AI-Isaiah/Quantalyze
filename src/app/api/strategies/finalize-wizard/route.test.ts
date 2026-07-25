@@ -31,6 +31,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 import { MAX_COMPOSITE_MEMBERS_PROBED } from "@/lib/resilient-fetch";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 
 vi.mock("server-only", () => ({}));
 
@@ -688,14 +689,22 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * Its fail-CLOSED contract is the security property under test (T-140-22): a
  * probe that cannot run must BLOCK finalize, never wave it through. A breaker
  * trip is one more way the probe cannot run, so it must land on the blocking
- * side of that branch — with its own 503/CIRCUIT_OPEN code rather than the
- * generic 502, because "retry in 30s" is actionable and "probe failed" is not.
+ * side of that branch — with its own 503 + SERVICE_UNAVAILABLE_RETRY code
+ * rather than the generic 502, because "retry in 30s" is actionable and "probe
+ * failed" is not.
+ *
+ * Phase 140 review (WR-01): the wire code was "CIRCUIT_OPEN", which is NOT a
+ * member of the WizardErrorCode union, so SubmitStep's closed set rejected it
+ * and rendered UNKNOWN — "our team has been notified" — i.e. the headline user
+ * benefit of this whole phase was unreachable on the wizard's most important
+ * path. The assertion below is now typed against the union so the wire code
+ * cannot drift back out of the wizard's vocabulary.
  */
 describe("POST /api/strategies/finalize-wizard — breaker open (SEAM-04 fail-closed)", () => {
   const CIRCUIT_OPEN_COPY =
     "The analytics service is temporarily unavailable. Please try again in a moment.";
 
-  it("blocks finalize with 503 CIRCUIT_OPEN + Retry-After when the breaker is open", async () => {
+  it("blocks finalize with 503 SERVICE_UNAVAILABLE_RETRY + Retry-After when the breaker is open", async () => {
     RF.breakerOpen = true;
     // Not 30: 30 is both BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S, so a
     // hardcoded value would satisfy a 30-valued assertion while forwarding
@@ -711,7 +720,10 @@ describe("POST /api/strategies/finalize-wizard — breaker open (SEAM-04 fail-cl
     expect(res.headers.get("Retry-After")).toBe("23");
     const raw = await res.text();
     const body = JSON.parse(raw);
-    expect(body.code).toBe("CIRCUIT_OPEN");
+    // Typed: a wire code the wizard cannot render is the defect, so the
+    // expectation is written as a WizardErrorCode, not a bare string.
+    const expectedCode: WizardErrorCode = "SERVICE_UNAVAILABLE_RETRY";
+    expect(body.code).toBe(expectedCode);
     expect(body.error).toBe(CIRCUIT_OPEN_COPY);
     expect(raw).not.toMatch(/breaker|upstash|railway|analytics service circuit/i);
 

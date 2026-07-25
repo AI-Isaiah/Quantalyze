@@ -19,7 +19,26 @@ import type { GateFailureCode } from "./strategyGate";
 // `instanceof` holds by class identity. Never route this through
 // `@/lib/analytics-client` (whose re-export is wholesale-mocked by 16 route
 // test files) nor `@/lib/resilient-fetch`.
-import { CircuitOpenError } from "@/lib/seam-errors";
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUnreachableError,
+  CircuitOpenError,
+} from "@/lib/seam-errors";
+// A NAMESPACE import, deliberately: this file already binds
+// `AnalyticsTimeoutError` from the leaf, so importing the same NAME again under
+// an alias would shadow confusingly. Used to prove the client's re-export is an
+// ALIAS of the leaf's class and never a second definition (see the "ONE class
+// identity" test — if it were a second definition, every type branch in
+// wizardErrors would be false in production while these tests stayed green),
+// and for AnalyticsUpstreamError, which has no reason to live in the leaf: it
+// carries an upstream HTTP status and no client-bundle code branches on it.
+//
+// ⚠️ The client must re-export these with `export { X } from "./seam-errors"`,
+// NOT `import { X } … ; export { X }`. The latter form resolves to `undefined`
+// through vitest's SSR transform, which would turn every route that does
+// `err instanceof AnalyticsTimeoutError` into a TypeError thrown from inside a
+// catch block. This test is what catches that.
+import * as analyticsClient from "@/lib/analytics-client";
 
 describe("wizardErrors", () => {
   describe("WIZARD_ERROR_COPY table shape", () => {
@@ -598,7 +617,14 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     ["Your IP is not on the allowlist", "KEY_IP_ALLOWLIST", 502],
     ["Rate limit exceeded", "KEY_RATE_LIMIT", 503],
     ["429 Too Many Requests", "KEY_RATE_LIMIT", 503],
-    ["connect ETIMEDOUT 10.0.0.1:443", "KEY_NETWORK_TIMEOUT", 502],
+    // Phase 140 review (WR-01): the old case here was the raw undici string
+    // "connect ETIMEDOUT 10.0.0.1:443", which CANNOT reach this classifier —
+    // analytics-client converts every transport failure into
+    // AnalyticsTimeoutError / AnalyticsUnreachableError first, and both are now
+    // typed above. The reachable input for this branch is an upstream `detail`
+    // forwarded from Python describing an EXCHANGE-side timeout, which is what
+    // KEY_NETWORK_TIMEOUT's "We could not reach the exchange" copy describes.
+    ["Exchange request timed out after 10s", "KEY_NETWORK_TIMEOUT", 502],
     ["Could not verify the key's permission scopes", "KEY_PROBE_FAILED", 503],
     ["This key has trading permissions", "KEY_HAS_TRADING_PERMS", 400],
     ["some totally unclassified upstream string", "UNKNOWN", 500],
@@ -667,7 +693,7 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     expect(classifyKeyValidationError("Rate limit exceeded").code).toBe(
       "KEY_RATE_LIMIT",
     );
-    expect(classifyKeyValidationError("connect ETIMEDOUT").code).toBe(
+    expect(classifyKeyValidationError("Exchange request timed out").code).toBe(
       "KEY_NETWORK_TIMEOUT",
     );
     expect(
@@ -778,7 +804,7 @@ describe("classifyKeyValidationError — Phase 140 CircuitOpenError type branch 
       classifyKeyValidationError("Rate limit exceeded"),
     );
     expect(
-      classifyKeyValidationError(new Error("connect ETIMEDOUT 10.0.0.1:443")).code,
+      classifyKeyValidationError(new Error("Exchange request timed out")).code,
     ).toBe("KEY_NETWORK_TIMEOUT");
   });
 
@@ -793,6 +819,81 @@ describe("classifyKeyValidationError — Phase 140 CircuitOpenError type branch 
       code: "UNKNOWN",
       status: 500,
     });
+  });
+
+  /**
+   * WR-01 — the breaker trip is the RARE case; the plain outage is the common
+   * one, and it was still hitting the dead end.
+   *
+   * The circuit only opens after 5 failures inside 30s, which is unreachable at
+   * human retry cadence — so during an ordinary Railway outage the wizard's
+   * key-connect routes catch one of analytics-client's two TRANSPORT errors
+   * with the circuit still CLOSED. Neither matched any branch of the substring
+   * cascade:
+   *
+   *   AnalyticsTimeoutError says "timed OUT" (with a space) while the cascade
+   *   tested `includes("timeout")` — so the branch was dead for its own
+   *   headline input; and "…is not reachable…" matched nothing at all.
+   *
+   * Both therefore rendered UNKNOWN/500 — "our team has been notified" — which
+   * `wizardErrors.ts` itself names as the DOGFOOD-3 failure these codes exist
+   * to kill. These pin the TYPE branch, using inputs production actually
+   * produces rather than raw undici strings that can never reach the
+   * classifier.
+   */
+  it("classifies AnalyticsTimeoutError as SERVICE_UNAVAILABLE_RETRY, not the dead end", () => {
+    // Constructed exactly as analytics-client constructs it.
+    const err = new AnalyticsTimeoutError("/api/validate-key", 30_000);
+    // Guard the premise: this really is the message the cascade could not see.
+    expect(err.message).toContain("timed out");
+    expect(err.message.toLowerCase()).not.toContain("timeout");
+
+    expect(classifyKeyValidationError(err)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("classifies AnalyticsUnreachableError as SERVICE_UNAVAILABLE_RETRY, not the dead end", () => {
+    const err = new AnalyticsUnreachableError();
+    // Premise guard: the message matches NO substring branch, so only a type
+    // check can classify it. If a future reword made it matchable, this test
+    // would be measuring the cascade instead of the type branch.
+    expect(classifyKeyValidationError(err.message)).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+
+    expect(classifyKeyValidationError(err)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("keeps KEY_NETWORK_TIMEOUT for a genuine EXCHANGE-side timeout forwarded from Python", () => {
+    // The distinction is a copy-honesty one, not a cosmetic one: telling a
+    // manager "we could not reach the exchange" when it was OUR service that
+    // was unreachable is a false claim about their key.
+    const upstream = new analyticsClient.AnalyticsUpstreamError(
+      "Exchange request timed out after 10s",
+      504,
+    );
+    expect(classifyKeyValidationError(upstream)).toEqual({
+      code: "KEY_NETWORK_TIMEOUT",
+      status: 502,
+    });
+  });
+
+  it("uses ONE class identity: the leaf's types are what analytics-client throws", () => {
+    // wizardErrors imports from the never-mocked `@/lib/seam-errors` leaf so
+    // the instanceof survives the sixteen files that mock analytics-client
+    // wholesale. If analytics-client ever re-DEFINED these instead of
+    // re-exporting them, every branch above would be false in production while
+    // these tests stayed green.
+    expect(analyticsClient.AnalyticsTimeoutError).toBe(AnalyticsTimeoutError);
+    expect(analyticsClient.AnalyticsUnreachableError).toBe(
+      AnalyticsUnreachableError,
+    );
   });
 
   it("renders real, non-UNKNOWN copy for SERVICE_UNAVAILABLE_RETRY with a retry affordance", () => {

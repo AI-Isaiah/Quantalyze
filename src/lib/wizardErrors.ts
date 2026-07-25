@@ -23,7 +23,11 @@ import type { GateFailureCode } from "./strategyGate";
 // a class reached through that re-export would be `undefined` at runtime and
 // the `instanceof` below would throw from inside a catch block. Nothing mocks
 // the leaf.
-import { CircuitOpenError } from "@/lib/seam-errors";
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUnreachableError,
+  CircuitOpenError,
+} from "@/lib/seam-errors";
 
 export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
@@ -982,6 +986,37 @@ export function classifyKeyValidationError(error: unknown): {
     return { code: "SERVICE_UNAVAILABLE_RETRY", status: 503 };
   }
 
+  // ⚠️ Phase 140 review (WR-01) — TRANSPORT FAILURES ARE ALSO A TYPE CHECK.
+  //
+  // The breaker only trips on 5 failures inside 30s, which is unreachable at
+  // human retry cadence — so the OVERWHELMINGLY common Railway outage arrives
+  // here as one of these two, with the circuit still closed. Both used to match
+  // NOTHING in the cascade below and land on the terminal UNKNOWN/500:
+  //
+  //   AnalyticsTimeoutError  "Analytics service timed out after 15000ms on …"
+  //                          — the cascade tests includes("timeout"), no space,
+  //                            so this never matched. The branch was DEAD for
+  //                            its own headline input.
+  //   AnalyticsUnreachableError
+  //                          "Analytics service is not reachable. …"
+  //                          — matched no branch at all.
+  //
+  // Both mean the same thing to the user: we could not reach our own service,
+  // nothing was stored, and retrying shortly is the correct action — which is
+  // exactly SERVICE_UNAVAILABLE_RETRY's copy. Text is the wrong join key
+  // between two modules; the classes are homed in the never-mocked
+  // `@/lib/seam-errors` leaf precisely so this can be a type check.
+  //
+  // KEY_NETWORK_TIMEOUT is NOT dead as a result — it still owns a genuine
+  // EXCHANGE-side timeout, which reaches us as an AnalyticsUpstreamError
+  // carrying the Python `detail` and is matched by the substring branch below.
+  if (
+    error instanceof AnalyticsTimeoutError ||
+    error instanceof AnalyticsUnreachableError
+  ) {
+    return { code: "SERVICE_UNAVAILABLE_RETRY", status: 503 };
+  }
+
   // `String(error)` keeps the classifier TOTAL: `throw {…}` / `throw undefined`
   // are legal JS, and a second throw from inside a catch block would surface as
   // an unhandled 500 rather than a classified response. Both fall through to
@@ -1034,8 +1069,20 @@ export function classifyKeyValidationError(error: unknown): {
     // Exchange or Railway rate-limit — upstream throttle, 503.
     return { code: "KEY_RATE_LIMIT", status: 503 };
   }
-  if (lower.includes("timeout") || lower.includes("etimedout")) {
-    // Network timeout reaching analytics-service — upstream unavailable, 502.
+  if (
+    // Phase 140 review (WR-01): "timed out" is added because the no-space form
+    // was the reason this branch was dead for our OWN timeout error, and it is
+    // the phrasing most upstream details use too ("Exchange request timed
+    // out…"). The reachable input here is an AnalyticsUpstreamError carrying
+    // the Python `detail` — i.e. a genuine EXCHANGE-side timeout, which is what
+    // KEY_NETWORK_TIMEOUT's copy ("We could not reach the exchange") actually
+    // describes. Our own transport failures are typed above and deliberately do
+    // NOT land here: telling a user we could not reach THEIR exchange when it
+    // was our service that was down is a false claim.
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("etimedout")
+  ) {
     return { code: "KEY_NETWORK_TIMEOUT", status: 502 };
   }
   if (

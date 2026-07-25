@@ -7,6 +7,7 @@ import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -234,7 +235,13 @@ export const GET = withAuth(
           `[keys/permissions] short-circuited for ${keyId} — the analytics circuit is open (retry_after_s=${err.retryAfterS})`,
         );
         return NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          {
+            error: CIRCUIT_OPEN_COPY,
+            // Phase 140 review (WR-01) — ONE VOCABULARY ON THE WIRE.
+            // "CIRCUIT_OPEN" is not a WizardErrorCode, so every wizard surface
+            // reading this response fell through to the UNKNOWN dead end.
+            code: "SERVICE_UNAVAILABLE_RETRY" satisfies WizardErrorCode,
+          },
           {
             status: 503,
             headers: {

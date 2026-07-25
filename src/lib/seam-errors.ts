@@ -55,3 +55,48 @@ export class CircuitOpenError extends Error {
     this.retryAfterS = retryAfterS;
   }
 }
+
+/**
+ * Thrown when the analytics service does not respond within its `SEAM_BUDGETS`
+ * deadline. A request WAS issued and the deadline fired.
+ *
+ * HOMED HERE, NOT IN `analytics-client` (Phase 140 review / WR-01). It lives in
+ * the leaf for the same two reasons `CircuitOpenError` does — the wizard
+ * classifier must be able to branch on it without dragging `@upstash/*` into
+ * ten `"use client"` bundles, and `instanceof` must survive the sixteen route
+ * test files that mock `@/lib/analytics-client` wholesale. `analytics-client`
+ * re-exports it, so every existing importer is unchanged and there is still
+ * exactly ONE class identity in the process.
+ *
+ * WHY THE CLASSIFIER NEEDS THE TYPE: the message reads "Analytics service timed
+ * out after 15000ms on /api/validate-key". The wizard's substring cascade tests
+ * `includes("timeout")` — with no space — so this message matched NOTHING and a
+ * plain Railway slowdown fell through to `UNKNOWN`/500, the "our team has been
+ * notified" dead end. Text is the wrong join key between two modules.
+ */
+export class AnalyticsTimeoutError extends Error {
+  constructor(path: string, timeoutMs: number) {
+    super(`Analytics service timed out after ${timeoutMs}ms on ${path}`);
+    this.name = "AnalyticsTimeoutError";
+  }
+}
+
+/**
+ * Thrown when the connection to the analytics service never completed at all —
+ * DNS failure, connection refused, TLS error, socket reset. Distinct from
+ * `AnalyticsTimeoutError` (a request was issued and ran out of time) and from
+ * `CircuitOpenError` (we deliberately declined to issue one).
+ *
+ * Phase 140 review / WR-01: this used to be a bare `new Error(...)` whose
+ * message matched no branch of the wizard's substring cascade, so a plain
+ * Railway outage — the ordinary case, since 5 failures in 30s is unreachable at
+ * human retry cadence and the breaker therefore does NOT trip — rendered as
+ * `UNKNOWN`/500 with no retry affordance. The message is preserved verbatim so
+ * nothing that reads it changes; the TYPE is what the classifier now uses.
+ */
+export class AnalyticsUnreachableError extends Error {
+  constructor() {
+    super("Analytics service is not reachable. Please ensure it is running.");
+    this.name = "AnalyticsUnreachableError";
+  }
+}

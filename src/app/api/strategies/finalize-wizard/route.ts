@@ -15,6 +15,7 @@ import {
 } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 import { logAuditEventAsUser } from "@/lib/audit";
 import type { User } from "@supabase/supabase-js";
 
@@ -395,7 +396,17 @@ async function runScopeBroadeningProbe(
       return {
         ok: false,
         response: NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          {
+            error: CIRCUIT_OPEN_COPY,
+            // Phase 140 review (WR-01) — ONE VOCABULARY ON THE WIRE. This used
+            // to emit "CIRCUIT_OPEN", which is not a WizardErrorCode and is not
+            // in SubmitStep's KNOWN_FINALIZE_CODES, so the phase's headline
+            // user benefit rendered as UNKNOWN — "something went wrong, our
+            // team has been notified" — on the single most important path.
+            // SERVICE_UNAVAILABLE_RETRY is the union member with the matching
+            // copy and a Retry affordance.
+            code: "SERVICE_UNAVAILABLE_RETRY" satisfies WizardErrorCode,
+          },
           {
             status: 503,
             headers: {

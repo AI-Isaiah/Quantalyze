@@ -27,6 +27,124 @@ import {
  * Success redirect is handled by WizardClient's `handleSubmitSuccess`.
  */
 
+/**
+ * Which wizard error codes `finalize-wizard` may surface, as an EXHAUSTIVE map
+ * over `WizardErrorCode` rather than a hand-maintained Set.
+ *
+ * WHY A TOTAL RECORD (Phase 140 review / WR-01, type-design). The old Set was a
+ * closed list of five strings, and anything else — including a code a seam
+ * route had just started emitting — collapsed to `UNKNOWN`, i.e. "Something
+ * went wrong… our team has been notified": untrue and un-actionable during an
+ * infrastructure outage, and the exact DOGFOOD-3 failure `wizardErrors.ts` says
+ * the newer codes exist to kill. A Set cannot tell you it is missing an entry.
+ * This `Record` can: adding a member to `WizardErrorCode` without deciding here
+ * whether finalize can emit it is a COMPILE ERROR, so the next code cannot
+ * silently inherit the dead end.
+ *
+ * `false` means "finalize never emits this" (it belongs to the connect step,
+ * the CSV branch, the metadata step, …), NOT "suppress it".
+ */
+const FINALIZE_MAY_EMIT: Record<WizardErrorCode, boolean> = {
+  // ── Emitted by POST /api/strategies/finalize-wizard ──────────────────────
+  // H-0192: 404 draft-gone, 403 RLS/ownership, and the live key-scope /
+  // network-probe arms.
+  KEY_SCOPE_BROADENED: true,
+  KEY_NETWORK_TIMEOUT: true,
+  GATE_DRAFT_GONE: true,
+  GUARD_BLOCKED: true,
+  // Phase 88 / W-4 — composite membership probe fail-closed (503). Recoverable
+  // copy renders the Retry affordance rather than the generic UNKNOWN envelope.
+  COMPOSITE_MEMBERSHIP_UNKNOWN: true,
+  // CR-01 — the composite is larger than the finalize route's probe cap, so it
+  // refused BEFORE spending any of the fan-out. "Remove some keys" is
+  // actionable; UNKNOWN's "our team has been notified" is not.
+  COMPOSITE_TOO_MANY_MEMBERS: true,
+  // WR-01 — the breaker tripped (or the seam transport failed) during submit.
+  // THE code this phase exists to surface; it reached the wizard as the
+  // non-union string "CIRCUIT_OPEN" and rendered UNKNOWN.
+  SERVICE_UNAVAILABLE_RETRY: true,
+
+  // ── Not emitted by finalize ──────────────────────────────────────────────
+  KEY_HAS_TRADING_PERMS: false,
+  KEY_HAS_WITHDRAW_PERMS: false,
+  KEY_NOT_READ_ONLY: false,
+  KEY_PROBE_FAILED: false,
+  KEY_INVALID_SIGNATURE: false,
+  KEY_AUTH_FAILED: false,
+  KEY_MT5_MASTER_PASSWORD: false,
+  KEY_MT5_WRONG_SERVER: false,
+  KEY_INVALID_FORMAT: false,
+  KEY_IP_ALLOWLIST: false,
+  KEY_RATE_LIMIT: false,
+  DRAFT_ALREADY_EXISTS: false,
+  SYNC_TIMEOUT: false,
+  SYNC_FAILED: false,
+  GATE_INSUFFICIENT_TRADES: false,
+  GATE_INSUFFICIENT_DAYS: false,
+  GATE_ANALYTICS_FAILED: false,
+  GATE_NO_DATA_SOURCE: false,
+  METADATA_DESCRIPTION_REQUIRED: false,
+  SESSION_EXPIRED: false,
+  SUBMIT_NOTIFY_FAILED: false,
+  CSV_PARSE_FAILED: false,
+  CSV_SCHEMA_VIOLATION: false,
+  CSV_FILE_TOO_LARGE: false,
+  CSV_INVALID_EXTENSION: false,
+  CSV_NON_MONOTONIC_DATES: false,
+  CSV_NAV_ZERO: false,
+  CSV_RETURN_OUT_OF_RANGE: false,
+  CSV_SHARPE_SUSPICIOUS: false,
+  CSV_CURRENCY_INVALID: false,
+  CSV_QTY_PRICE_INVALID: false,
+  CSV_STRATEGY_NAME_REQUIRED: false,
+  CSV_STRATEGY_NAME_TOO_LONG: false,
+  CSV_VALIDATION_FAILED: false,
+  CSV_UPSTREAM_FAIL: false,
+  CSV_NETWORK_TIMEOUT: false,
+  CSV_SUBMIT_FAILED: false,
+  CSV_SUBMIT_NO_STRATEGY_ID: false,
+  // Handled by its own 200-OK branch below, not by the !res.ok mapping.
+  WIZARD_DUPLICATE: false,
+  MULTI_KEY_WINDOWS_INVALID: false,
+  WIZARD_KEYS_LOAD_FAILED: false,
+  // The fallback itself — mapping it here would be circular.
+  UNKNOWN: false,
+};
+
+/**
+ * Legacy wire codes that predate the `WizardErrorCode` vocabulary, mapped to
+ * their union equivalent.
+ *
+ * `process-key-client` owns ONE shared 503 envelope for five routes (keys/sync,
+ * the public teaser, finalize-wizard's enqueue arm, csv-validate, csv-finalize)
+ * and publishes `code: "CIRCUIT_OPEN"` alongside `human_message`. That envelope
+ * is a stable contract for callers that are not the wizard, so it is aliased
+ * here rather than renamed across five routes — but the WIZARD must not show
+ * the "our team has been notified" dead end for a breaker trip on ANY finalize
+ * path, including the enqueue arm that is reachable when the circuit opens
+ * between the probe and the enqueue.
+ */
+const LEGACY_WIRE_CODE_ALIASES: Readonly<Record<string, WizardErrorCode>> = {
+  CIRCUIT_OPEN: "SERVICE_UNAVAILABLE_RETRY",
+};
+
+/**
+ * Map a server-supplied `code` onto the wizard vocabulary.
+ *
+ * Trust the code only if finalize can genuinely emit it, so a garbled or
+ * mislabelled response cannot poison the envelope copy — and map off the CODE,
+ * never the raw HTTP status: status-based mapping used to label pre-handler
+ * 403s (CSRF, the approval gate) as draft-finalize failures and conflated them
+ * in the `wizard_error` funnel.
+ */
+function surfacedFinalizeCode(code: string | undefined): WizardErrorCode {
+  if (!code) return "UNKNOWN";
+  const aliased = LEGACY_WIRE_CODE_ALIASES[code] ?? code;
+  return FINALIZE_MAY_EMIT[aliased as WizardErrorCode]
+    ? (aliased as WizardErrorCode)
+    : "UNKNOWN";
+}
+
 export interface SubmitStepProps {
   strategyId: string;
   wizardSessionId: string;
@@ -105,43 +223,13 @@ export function SubmitStep({
         // 2xx but that callback failed, the strategy is still saved.
         // Here we only surface actual finalize failures.
         //
-        // The server tags actionable failures with a stable WizardErrorCode
-        // (e.g. KEY_SCOPE_BROADENED when the live exchange-key scope
-        // re-check at finalize finds the key broadened to trade/withdraw
-        // since Connect, or KEY_NETWORK_TIMEOUT when that probe itself
-        // fails). Trust the code only if it's a known wizard code so a
-        // garbled response can't poison the envelope copy.
-        // H-0192: the finalize route tags each actionable failure with its
-        // own WizardErrorCode — the 404 "Draft not found" -> GATE_DRAFT_GONE,
-        // the 403 RLS/ownership denial -> GUARD_BLOCKED, and the live
-        // key-scope / network-probe paths -> KEY_SCOPE_BROADENED /
-        // KEY_NETWORK_TIMEOUT. Map off that code only, NOT raw HTTP status:
-        // status-based mapping mislabeled pre-handler 403s (CSRF, approval-gate)
-        // as draft-finalize failures and conflated them in the wizard_error
-        // funnel. Anything without a known code (a 409 stale-state, a 500, a
-        // pre-handler error) -> UNKNOWN, whose copy is recoverable so the retry
-        // affordance the old mapping provided is preserved.
-        const KNOWN_FINALIZE_CODES: ReadonlySet<WizardErrorCode> = new Set<WizardErrorCode>(
-          [
-            "KEY_SCOPE_BROADENED",
-            "KEY_NETWORK_TIMEOUT",
-            "GATE_DRAFT_GONE",
-            "GUARD_BLOCKED",
-            // Phase 88 / W-4 — composite membership probe fail-closed (503).
-            // Recoverable copy renders the Retry affordance rather than
-            // degrading to the generic UNKNOWN envelope.
-            "COMPOSITE_MEMBERSHIP_UNKNOWN",
-            // CR-01 — the composite is larger than the finalize route's probe
-            // cap, so it refused BEFORE spending any of the fan-out. The copy
-            // tells the user to remove keys, which is actionable; UNKNOWN's
-            // "our team has been notified" is not.
-            "COMPOSITE_TOO_MANY_MEMBERS",
-          ],
-        );
-        const surfaced: WizardErrorCode =
-          data.code && KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
-            ? (data.code as WizardErrorCode)
-            : "UNKNOWN";
+        // H-0192: the server tags each actionable failure with its own stable
+        // code (404 draft-gone -> GATE_DRAFT_GONE, 403 RLS/ownership ->
+        // GUARD_BLOCKED, the live key-scope / probe arms -> KEY_SCOPE_BROADENED
+        // / KEY_NETWORK_TIMEOUT). Anything unrecognised -> UNKNOWN, whose copy
+        // is still recoverable so a Retry affordance renders. See
+        // FINALIZE_MAY_EMIT for why that mapping is now exhaustive by type.
+        const surfaced = surfacedFinalizeCode(data.code);
         setErrorCode(surfaced);
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,

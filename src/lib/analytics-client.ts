@@ -15,7 +15,11 @@ import {
   SEAM_BUDGETS,
   type SeamBudgetKey,
 } from "./resilient-fetch";
-import { CircuitOpenError } from "./seam-errors";
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUnreachableError,
+  CircuitOpenError,
+} from "./seam-errors";
 
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
@@ -36,13 +40,21 @@ export const ANALYTICS_API_VERSION = "1";
  */
 export { CircuitOpenError };
 
-/** Thrown when the analytics service does not respond within the timeout. */
-export class AnalyticsTimeoutError extends Error {
-  constructor(path: string, timeoutMs: number) {
-    super(`Analytics service timed out after ${timeoutMs}ms on ${path}`);
-    this.name = "AnalyticsTimeoutError";
-  }
-}
+/**
+ * Phase 140 review (WR-01) — back-compat convenience re-exports.
+ *
+ * `AnalyticsTimeoutError` and `AnalyticsUnreachableError` are DEFINED in the
+ * dependency-free leaf `@/lib/seam-errors`, alongside `CircuitOpenError` and
+ * for the same two reasons: `wizardErrors.ts` must branch on them by TYPE
+ * without pulling `@upstash/*` into ten `"use client"` bundles, and the
+ * `instanceof` must survive the sixteen route test files that mock THIS module
+ * wholesale. Server-side importers may keep reaching them through here — the
+ * class identity is the leaf's, singular.
+ */
+export {
+  AnalyticsTimeoutError,
+  AnalyticsUnreachableError,
+} from "./seam-errors";
 
 /**
  * Thrown when the analytics service returns a non-2xx HTTP response.
@@ -159,8 +171,13 @@ async function analyticsRequest(
     ) {
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
-    // 3. Everything else: the connection never completed.
-    throw new Error("Analytics service is not reachable. Please ensure it is running.");
+    // 3. Everything else: the connection never completed. TYPED (Phase 140
+    //    review / WR-01) rather than a bare Error — the wizard classifier
+    //    branches on the type, and this exact case (a plain Railway outage with
+    //    the breaker NOT tripped, which is the ordinary shape at human retry
+    //    cadence) used to match no branch and render the UNKNOWN/500 dead end.
+    //    Message preserved verbatim.
+    throw new AnalyticsUnreachableError();
   }
 
   // Warn on API version mismatch (don't fail — just surface contract drift).

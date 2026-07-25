@@ -244,7 +244,7 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
     process.env = { ...ORIGINAL_ENV };
   });
 
-  it("cache MISS + breaker open → 503 CIRCUIT_OPEN through the real boundary, and NOTHING is cached", async () => {
+  it("cache MISS + breaker open → 503 SERVICE_UNAVAILABLE_RETRY through the real boundary, and NOTHING is cached", async () => {
     seedBreakerOpen(shared.store, 19);
     const { GET } = await import("./route");
 
@@ -256,7 +256,9 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("19");
     const raw = await res.text();
-    expect(JSON.parse(raw).code).toBe("CIRCUIT_OPEN");
+    // WR-01 — a WizardErrorCode on the wire, not the un-renderable
+    // "CIRCUIT_OPEN" string.
+    expect(JSON.parse(raw).code).toBe("SERVICE_UNAVAILABLE_RETRY");
     expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
     expect(raw).not.toMatch(/breaker|upstash|railway|analytics service circuit/i);
 

@@ -283,6 +283,96 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     ).toBeInTheDocument();
   });
 
+  /**
+   * Phase 140 review (WR-01) — the breaker's whole user-facing benefit,
+   * on the path that matters most.
+   *
+   * finalize-wizard's probe arm emitted `code: "CIRCUIT_OPEN"`, which is not a
+   * WizardErrorCode and was not in the known-code set, so a breaker trip during
+   * submit rendered UNKNOWN: "Something went wrong… our team has been notified"
+   * — untrue (we know exactly what happened), un-actionable, and the precise
+   * DOGFOOD-3 failure the new code exists to kill. The fix landed on 2 of 8
+   * emitting paths; these pin the rest.
+   */
+  it("maps SERVICE_UNAVAILABLE_RETRY (503 breaker trip on the probe) to its outage copy, not the dead end", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          error:
+            "The analytics service is temporarily unavailable. Please try again in a moment.",
+          code: "SERVICE_UNAVAILABLE_RETRY",
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(
+      screen.getByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    // Recoverable by definition — a Retry control must render.
+    expect(
+      await screen.findByRole("button", { name: "Retry" }),
+    ).toBeInTheDocument();
+  });
+
+  it("aliases the shared seam envelope's legacy CIRCUIT_OPEN wire code onto the same copy", async () => {
+    // finalize-wizard's ENQUEUE arm returns process-key-client's shared 503
+    // envelope, which five routes consume and which still publishes
+    // `CIRCUIT_OPEN`. That arm is reachable whenever the circuit opens between
+    // the scope probe and the enqueue, so the wizard must not fall into the
+    // dead end there either.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CIRCUIT_OPEN",
+          human_message:
+            "The analytics service is temporarily unavailable. Please try again in a moment.",
+          recoverable: true,
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    // Funnel-truth: reported under the UNION member, so the wizard_error
+    // dimension has ONE value for one condition rather than two spellings.
+    expect(findWizardError()!.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(
+      screen.getByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+  });
+
+  it("maps COMPOSITE_TOO_MANY_MEMBERS (400 probe-cap refusal) to its remove-keys copy", async () => {
+    // CR-01's deterministic degradation is only useful if the user can read it.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          error: "This strategy has too many keys to finalize in one request.",
+          code: "COMPOSITE_TOO_MANY_MEMBERS",
+        },
+        400,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    expect(
+      screen.getByText("This strategy has too many keys to submit at once."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+  });
+
   // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
   // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
   // keeps its Retry button (RED-TEAM R1 regression guard).
