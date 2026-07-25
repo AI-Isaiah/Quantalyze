@@ -73,6 +73,13 @@ export {
  */
 export { AnalyticsUpstreamError } from "./seam-errors";
 
+// E7b — the shared `detail` renderer. Homed in the leaf beside the class whose
+// message it builds, so the second caller of the same shape
+// (`keys/[id]/permissions`'s upstream arm) uses one implementation rather than
+// a second copy that drifts.
+import { formatUpstreamDetail } from "./seam-errors";
+export { formatUpstreamDetail } from "./seam-errors";
+
 /**
  * Core fetch wrapper for the Python analytics service.
  *
@@ -211,8 +218,15 @@ async function analyticsRequest(
     const contentType = res.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
       const error = await res.json().catch(() => ({ detail: res.statusText }));
+      // E7b — `detail` is NOT always a string. FastAPI's RequestValidationError
+      // (every 422 this service can emit) returns a LIST OF DICTS, which
+      // `Error`'s constructor stringifies to "[object Object]" — so D-12's
+      // 4xx forwarding published `{"error":"[object Object]"}` for exactly the
+      // status class where the upstream names the offending field. See
+      // `formatUpstreamDetail` for why `input`/`ctx` are dropped (credential
+      // echo on the validate-and-encrypt path).
       throw new AnalyticsUpstreamError(
-        error.detail ?? "Analytics service error",
+        formatUpstreamDetail(error?.detail, "Analytics service error"),
         res.status,
       );
     }

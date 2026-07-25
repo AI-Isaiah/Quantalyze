@@ -287,6 +287,85 @@ describe("AnalyticsUpstreamError", () => {
     expect(err.message).toBe("already in portfolio");
   });
 
+  /**
+   * E7b — THE 422 SHAPE FASTAPI ACTUALLY PRODUCES.
+   *
+   * Every 422 the analytics service can emit comes from
+   * `RequestValidationError`, whose `detail` is a LIST OF DICTS, not a string.
+   * The pre-fix coercion handed that array to `Error`'s constructor, so
+   * `err.message` was the literal `"[object Object]"` — and D-12's admin
+   * forwarding published `{"error":"[object Object]"}` for exactly the status
+   * class where the upstream names the offending field.
+   *
+   * The suite modelled a 422 with a plain-string detail, a shape FastAPI never
+   * produces, so nothing went red.
+   */
+  it("E7b: a FastAPI RequestValidationError detail (list of dicts) renders as loc: msg, never [object Object]", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: [
+            {
+              type: "missing",
+              loc: ["body", "strategy_id"],
+              msg: "Field required",
+              // NEVER surfaced: `input` echoes the failing REQUEST VALUE, and
+              // one forwarder of this message (validate-and-encrypt's 4xx arm)
+              // sits on the path carrying raw exchange credentials.
+              input: { api_secret: "SUPER-SECRET-VALUE" },
+              url: "https://errors.pydantic.dev/2.5/v/missing",
+            },
+            {
+              type: "greater_than",
+              loc: ["body", "lookback_days"],
+              msg: "Input should be greater than 0",
+              input: -1,
+            },
+          ],
+        }),
+        { status: 422, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.status).toBe(422);
+    expect(err.message).toBe(
+      "body.strategy_id: Field required; body.lookback_days: Input should be greater than 0",
+    );
+    // The whole point: the pre-fix output.
+    expect(err.message).not.toContain("[object Object]");
+    // The security property — no credential echo, no pydantic docs URL.
+    expect(err.message).not.toContain("SUPER-SECRET-VALUE");
+    expect(err.message).not.toContain("api_secret");
+    expect(err.message).not.toContain("errors.pydantic.dev");
+  });
+
+  it("E7b: an unrenderable detail degrades to the generic fallback, not [object Object]", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ detail: { unexpected: "shape" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await callInternal(fetchMock);
+    } catch (e) {
+      caught = e;
+    }
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.message).toBe("Analytics service error");
+    expect(err.message).not.toContain("[object Object]");
+  });
+
   it("forwards 404 JSON body as AnalyticsUpstreamError(status=404)", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ detail: "portfolio not found" }), {

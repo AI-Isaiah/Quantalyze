@@ -127,7 +127,21 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // needs, and this route is already behind isAdminUser. 5xx stays generic on
     // purpose: that detail can carry a Python traceback, and the leak closure
     // must stay shut.
-    if (err instanceof AnalyticsUpstreamError && err.status < 500) {
+    //
+    // E7 — LOWER-BOUNDED, matching the three pre-existing instances of this
+    // forward (`bridge:198`, `simulator:213`, `validate-and-encrypt:368`).
+    // `AnalyticsUpstreamError` only fences 100–599 (H-1144), so a bare
+    // `< 500` also admits 1xx and 3xx. A 304 in particular is fatal here:
+    // `NextResponse.json(body, {status: 304})` throws
+    // `RangeError: Failed to construct 'Response': Response with null body
+    // status cannot have body` — from INSIDE this catch block, so the admin
+    // gets an unhandled 500 with no envelope at all, which is exactly the
+    // outcome D-12 exists to prevent.
+    if (
+      err instanceof AnalyticsUpstreamError &&
+      err.status >= 400 &&
+      err.status < 500
+    ) {
       console.error(
         `[api/admin/match/eval] upstream rejected the request (${err.status}):`,
         err.message,

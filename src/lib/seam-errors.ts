@@ -144,6 +144,66 @@ export class AnalyticsUpstreamError extends Error {
 }
 
 /**
+ * Render a FastAPI error body's `detail` field as a human-readable string.
+ *
+ * Phase 140 / E7b — `detail` IS NOT ALWAYS A STRING, and assuming it was
+ * defeated D-12. FastAPI's `HTTPException(detail="…")` produces a string, but
+ * its `RequestValidationError` — every 422 the service can emit — produces a
+ * LIST OF DICTS:
+ *
+ *   [{"type":"missing","loc":["body","strategy_id"],"msg":"Field required",
+ *     "input":{…}, "url":"…"}]
+ *
+ * Passing that array straight into `new AnalyticsUpstreamError(detail, 422)`
+ * hands `Error`'s constructor a non-string, which stringifies to
+ * `"[object Object]"`. The admin routes then forward `{"error":"[object
+ * Object]"}` as their 4xx body — so D-12's whole purpose ("tell 'I passed a bad
+ * parameter' apart from 'Railway is broken', and say WHICH parameter") was
+ * erased for the one status class where the upstream actually names the field.
+ *
+ * ⚠️ `input` AND `ctx` ARE DELIBERATELY DROPPED, and that is a security
+ * property, not tidiness. `input` echoes the REQUEST VALUE that failed
+ * validation, and one forwarder of this message
+ * (`keys/validate-and-encrypt`'s 4xx arm) is on the path that carries a user's
+ * raw exchange `api_key` / `api_secret` / `passphrase`. Only `loc` (which field)
+ * and `msg` (what is wrong with it) are surfaced — the two things the caller
+ * needs and neither of which can contain a credential.
+ *
+ * Falls back to `fallback` for any shape it cannot render, so an unrecognised
+ * body degrades to a generic message rather than to `"[object Object]"` or to
+ * a raw JSON dump of the upstream payload.
+ */
+export function formatUpstreamDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail.trim() || fallback;
+
+  const renderIssue = (issue: unknown): string | null => {
+    if (typeof issue === "string") return issue.trim() || null;
+    if (issue === null || typeof issue !== "object") return null;
+    const rec = issue as Record<string, unknown>;
+    const msg = typeof rec.msg === "string" ? rec.msg.trim() : "";
+    if (!msg) return null;
+    const loc = Array.isArray(rec.loc)
+      ? rec.loc
+          .filter((p): p is string | number =>
+            typeof p === "string" || typeof p === "number",
+          )
+          .join(".")
+      : "";
+    return loc ? `${loc}: ${msg}` : msg;
+  };
+
+  if (Array.isArray(detail)) {
+    const rendered = detail
+      .map(renderIssue)
+      .filter((s): s is string => s !== null);
+    return rendered.length > 0 ? rendered.join("; ") : fallback;
+  }
+
+  const single = renderIssue(detail);
+  return single ?? fallback;
+}
+
+/**
  * Did this thrown value mean "WE could not reach OUR OWN analytics service"?
  *
  * Phase 140 review / F-7. Callers that catch around a seam call need to tell

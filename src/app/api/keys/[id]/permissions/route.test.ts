@@ -329,6 +329,45 @@ describe("GET /api/keys/[id]/permissions — probe_error pass-through", () => {
     expect(body.withdraw).toBe(true);
   });
 
+  /**
+   * E7b — an upstream error `detail` is NOT always a string.
+   *
+   * FastAPI's `RequestValidationError` returns a LIST OF DICTS, and this route
+   * fed that array straight to `new Error(...)`, which stringifies it to
+   * `"[object Object]"`. That string is then MESSAGE-SNIFFED by the classifier
+   * below it, so an unrenderable detail did not just produce useless log output
+   * — it destroyed the PROBE_TIMEOUT / PROBE_BACKEND_UNAVAILABLE / PROBE_FAILED
+   * discrimination the caller branches on, collapsing every one of them to the
+   * generic PROBE_FAILED.
+   *
+   * Pinned through the OBSERVABLE code, not the log line: a list-shaped detail
+   * that names a timeout must classify as PROBE_TIMEOUT.
+   */
+  it("E7b: a list-shaped upstream detail still classifies — PROBE_TIMEOUT, not the [object Object] fallback", async () => {
+    STATE.upstreamStatus = 400;
+    STATE.upstreamPayload = {
+      detail: [
+        {
+          type: "value_error",
+          loc: ["body", "exchange"],
+          msg: "Exchange request hit the probe timeout",
+          input: { api_secret: "SUPER-SECRET-VALUE" },
+        },
+      ],
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    // Pre-fix: "[object Object]" matched no branch → PROBE_FAILED.
+    expect(body.code).toBe("PROBE_TIMEOUT");
+    // The user-facing copy stays generic and never echoes the upstream detail,
+    // least of all the `input` echo of the submitted credential.
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain("SUPER-SECRET-VALUE");
+    expect(raw).not.toContain("[object Object]");
+  });
+
   it("forwards probe_error=false on a clean probe", async () => {
     STATE.upstreamPayload = {
       read: true,

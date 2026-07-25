@@ -280,6 +280,32 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(JSON.parse(await res.text()).error).toBe(detail);
   });
 
+  /**
+   * E7 — D-12's forward is LOWER-BOUNDED, matching its three pre-existing
+   * siblings (`bridge:198`, `simulator:213`, `validate-and-encrypt:368`).
+   *
+   * `AnalyticsUpstreamError` only fences 100–599, so a bare `err.status < 500`
+   * also admits 1xx and 3xx. A 304 is the fatal one: `NextResponse.json(body,
+   * {status: 304})` throws (a 304 is a null-body status and cannot carry one) —
+   * from INSIDE the catch block, so the admin gets an unhandled crash with no
+   * envelope, which is the exact outcome D-12 exists to prevent.
+   */
+  it.each([304, 100])(
+    "E7: an upstream %i is NOT forwarded — it falls to the generic 500, never a null-body throw",
+    async (status) => {
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
+      recomputeState.throwValue = new AnalyticsUpstreamError(
+        "not modified",
+        status,
+      );
+      // Pre-fix this REJECTED rather than resolving: the forward built a
+      // NextResponse with a body at a null-body status.
+      const res = await postAsAdmin();
+      expect(res.status).toBe(500);
+      expect(JSON.parse(await res.text()).error).toBe(GENERIC_COPY);
+    },
+  );
+
   it("D-12: an upstream 5xx STAYS generic — the leak closure must not reopen", async () => {
     // The 4xx forwarding must not become a blanket passthrough. A 5xx detail
     // can carry a Python traceback (T-140-11), so it keeps the static copy.

@@ -7,7 +7,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, formatUpstreamDetail } from "@/lib/seam-errors";
 import type { WizardErrorCode } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
 
@@ -187,7 +187,15 @@ function makeCachedFetcher(keyId: string): {
         const contentType = res.headers.get("content-type") ?? "";
         if (contentType.includes("application/json")) {
           const err = await res.json().catch(() => ({ detail: res.statusText }));
-          throw new Error(err.detail ?? `Upstream ${res.status}`);
+          // E7b — the SAME `detail`-is-not-a-string hole `analytics-client` had.
+          // FastAPI's RequestValidationError returns a list of dicts, which
+          // `new Error(...)` stringifies to "[object Object]" — and here that
+          // string is then message-sniffed by the classifier below, so an
+          // unrenderable detail also destroys the PROBE_TIMEOUT /
+          // PROBE_BACKEND_UNAVAILABLE discrimination. One shared renderer.
+          throw new Error(
+            formatUpstreamDetail(err?.detail, `Upstream ${res.status}`),
+          );
         }
         throw new Error(`Upstream ${res.status}`);
       }
