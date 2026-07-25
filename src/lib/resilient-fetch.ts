@@ -451,6 +451,28 @@ const redis =
 const STORE_TIMED_OUT = Symbol("breaker-store-timeout");
 
 /**
+ * What the CALLER does when its bounded operation runs out of time. Purely a
+ * log-accuracy concern — the caller still owns the actual behaviour.
+ *
+ * Phase 140 round-3 review / C6. This used to be hardcoded as "failing OPEN",
+ * which is correct for the two STORE calls (an unreadable breaker state means
+ * "proceed, unprotected") and EXACTLY BACKWARDS for the classifier's body peek,
+ * whose timeout arm returns `false` = "no readable envelope" = RECORD — see
+ * `BREAKER_BODY_PEEK_TIMEOUT_MS`, which spells that out. An operator reading
+ * "failing OPEN" during a stalled-proxy incident concludes the breaker was
+ * bypassed at the very moment it was being driven toward tripping, which is the
+ * opposite diagnosis and the opposite remedy.
+ */
+type DeadlineDirection = "fail-open" | "record-failure";
+
+const DEADLINE_DIRECTION_COPY: Record<DeadlineDirection, string> = {
+  "fail-open":
+    "failing OPEN (the breaker is bypassed for this call, which proceeds unprotected)",
+  "record-failure":
+    "treating it as NO readable envelope — this response WILL be counted against the breaker",
+};
+
+/**
  * Run one bounded breaker-owned side operation (a store read/write, or the
  * classifier's body peek) under an explicit deadline.
  *
@@ -463,11 +485,16 @@ const STORE_TIMED_OUT = Symbol("breaker-store-timeout");
  *
  * The loser of the race still has a handler attached by `Promise.race`, so a
  * late rejection from a hung store cannot surface as an unhandled rejection.
+ *
+ * @param direction - which way the CALLER fails on timeout, so the log line
+ *   tells the truth for each of the two callers (C6). Defaults to `fail-open`,
+ *   the store-call behaviour.
  */
 async function withStoreDeadline<T>(
   op: Promise<T>,
   label: string,
   timeoutMs: number = BREAKER_STORE_TIMEOUT_MS,
+  direction: DeadlineDirection = "fail-open",
 ): Promise<T | typeof STORE_TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<typeof STORE_TIMED_OUT>((resolve) => {
@@ -477,9 +504,10 @@ async function withStoreDeadline<T>(
     const result = await Promise.race([op, deadline]);
     if (result === STORE_TIMED_OUT) {
       // Never silent: an operation slow enough to be abandoned is an
-      // operational fact, and the request proceeds unprotected because of it.
+      // operational fact, and the request's protection changes because of it.
       console.error(
-        `[resilient-fetch] ${label} exceeded ${timeoutMs}ms — failing OPEN`,
+        `[resilient-fetch] ${label} exceeded ${timeoutMs}ms — ` +
+          DEADLINE_DIRECTION_COPY[direction],
       );
     }
     return result;
@@ -796,6 +824,10 @@ async function hasJsonErrorEnvelope(res: Response): Promise<boolean> {
       res.clone().text(),
       "response envelope peek",
       BREAKER_BODY_PEEK_TIMEOUT_MS,
+      // C6 — this caller fails toward RECORDING, not toward bypassing the
+      // breaker. Saying "failing OPEN" here told the operator the exact
+      // opposite of what happened.
+      "record-failure",
     );
     if (peeked === STORE_TIMED_OUT) return false;
     const parsed: unknown = JSON.parse(peeked);

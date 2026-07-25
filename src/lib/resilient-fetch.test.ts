@@ -1111,6 +1111,42 @@ describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () =
       detail: "Failed to decrypt credentials",
     });
   });
+
+  it("C6: a STALLED body peek logs that it RECORDS, never 'failing OPEN'", async () => {
+    // A proxy that flushes headers and then stalls the body. The peek's timeout
+    // arm returns `false` = no readable envelope = RECORD (see
+    // BREAKER_BODY_PEEK_TIMEOUT_MS). The shared deadline helper used to
+    // hardcode "failing OPEN", which is the two STORE callers' direction and
+    // the exact OPPOSITE of this one: an operator reading that line during a
+    // stalled-proxy incident concludes the breaker was bypassed at the very
+    // moment it was being driven toward tripping.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mock = installFetchMock();
+    mock.mockImplementation(
+      async () =>
+        new Response(
+          // Never enqueues, never closes — `.text()` never settles.
+          new ReadableStream({ start() {} }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        ),
+    );
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    // BEHAVIOUR: the stall drove the breaker OPEN (the peek fails toward
+    // recording). This is what makes the log-direction claim checkable.
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+
+    const peekLines = errorSpy.mock.calls
+      .flat()
+      .map(String)
+      .filter((line) => line.includes("response envelope peek"));
+    expect(peekLines.length).toBeGreaterThan(0);
+    for (const line of peekLines) {
+      expect(line).not.toContain("failing OPEN");
+      expect(line).toContain("counted against the breaker");
+    }
+  });
 });
 
 /**
