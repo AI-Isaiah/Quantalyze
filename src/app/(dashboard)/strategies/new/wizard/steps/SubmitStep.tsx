@@ -126,6 +126,27 @@ const FINALIZE_MAY_EMIT: Record<WizardErrorCode, boolean> = {
  */
 const LEGACY_WIRE_CODE_ALIASES: Readonly<Record<string, WizardErrorCode>> = {
   CIRCUIT_OPEN: "SERVICE_UNAVAILABLE_RETRY",
+  // Phase 140 review / F-3 — THE COMMON CASE, which CIRCUIT_OPEN is not.
+  //
+  // The breaker needs 5 failures inside 30s to open, which is unreachable at
+  // human retry cadence — so the OVERWHELMINGLY likely shape of a Railway
+  // outage at submit is the circuit still CLOSED and `postProcessKey`'s own
+  // transport arms firing instead:
+  //
+  //   UPSTREAM_TIMEOUT       504 — the deadline fired (process-key-client.ts,
+  //                                the `isAbort` arm)
+  //   UPSTREAM_NETWORK_ERROR 502 — the connection never completed
+  //
+  // finalize-wizard's enqueue arm returns `result.response` VERBATIM
+  // (route.ts, `if (!result.ok) return result.response`), so both codes reach
+  // this mapper unaliased, fail the FINALIZE_MAY_EMIT lookup, and render
+  // UNKNOWN — the "something went wrong, our team has been notified" dead end
+  // with no retry affordance, during an outage where retrying shortly is
+  // precisely the correct action. Identical user meaning to a breaker trip:
+  // we could not reach our own service, nothing was submitted, the draft is
+  // intact. Same copy.
+  UPSTREAM_TIMEOUT: "SERVICE_UNAVAILABLE_RETRY",
+  UPSTREAM_NETWORK_ERROR: "SERVICE_UNAVAILABLE_RETRY",
 };
 
 /**

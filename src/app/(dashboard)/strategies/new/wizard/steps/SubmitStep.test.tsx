@@ -351,6 +351,63 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
   });
 
+  /**
+   * Phase 140 review / F-3 — THE COMMON CASE, which CIRCUIT_OPEN is not.
+   *
+   * The breaker needs 5 failures inside 30s, unreachable at human retry
+   * cadence, so a Railway outage at submit overwhelmingly arrives with the
+   * circuit still CLOSED and `postProcessKey`'s own transport arms firing.
+   * finalize-wizard's enqueue arm returns those envelopes VERBATIM
+   * (`if (!result.ok) return result.response`), so before this fix the two
+   * codes production actually emits during an outage both rendered the
+   * "our team has been notified" dead end — with no Retry affordance, during
+   * an outage where retrying shortly is exactly the right action.
+   *
+   * Driven with the EXACT envelopes process-key-client constructs, not a
+   * paraphrase: the wire contract is the thing under test.
+   */
+  it.each([
+    {
+      label: "UPSTREAM_TIMEOUT (504, the deadline fired)",
+      code: "UPSTREAM_TIMEOUT",
+      human_message:
+        "The ingestion service did not respond in time. Please try again.",
+      status: 504,
+    },
+    {
+      label: "UPSTREAM_NETWORK_ERROR (502, never reached upstream)",
+      code: "UPSTREAM_NETWORK_ERROR",
+      human_message: "Could not reach the ingestion service.",
+      status: 502,
+    },
+  ])(
+    "aliases $label onto the outage copy, not the dead end",
+    async ({ code, human_message, status }) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(
+          { ok: false, code, human_message, recoverable: true },
+          status,
+        ),
+      );
+      renderStep();
+      fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+      await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+      // Funnel-truth: ONE value for one condition, matching the breaker trip.
+      expect(findWizardError()!.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+      expect(
+        screen.getByText("Our service is temporarily unavailable."),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("Something went wrong."),
+      ).not.toBeInTheDocument();
+      // The affordance that makes the outage recoverable for the user.
+      expect(
+        await screen.findByRole("button", { name: "Retry" }),
+      ).toBeInTheDocument();
+    },
+  );
+
   it("maps COMPOSITE_TOO_MANY_MEMBERS (400 probe-cap refusal) to its remove-keys copy", async () => {
     // CR-01's deterministic degradation is only useful if the user can read it.
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
