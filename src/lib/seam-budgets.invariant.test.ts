@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  MAX_COMPOSITE_MEMBERS_PROBED,
   SEAM_BUDGETS,
   SEAM_ROUTE_BUDGETS,
   SEAM_EXCLUSIONS,
@@ -148,6 +149,96 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         ).toBeLessThan(ceilingMs);
       },
     );
+  });
+
+  /**
+   * CR-01 — the `calls` column must not be decorative.
+   *
+   * `finalize-wizard` is the one route whose seam call sits inside a loop: the
+   * composite branch re-probes every member key, sequentially and
+   * cache-bypassing. Its row declared `calls: 1`, and SC-4b derives the worst
+   * case from that same number — so the assertion read `30 000 < 300 000` and
+   * was green for any membership count, including one that kills the lambda.
+   * That is the "compares the table to itself" anti-pattern this file's header
+   * says it exists to avoid, applied to the `calls` side rather than the
+   * ceiling side.
+   *
+   * These three assertions give the column teeth: the declared fan-out must BE
+   * the constant the route enforces, and the constant must sit strictly under
+   * the value at which the headroom actually breaks — so raising it far enough
+   * to be dangerous reddens CI here rather than in production.
+   */
+  describe("SC-4d — the finalize-wizard composite fan-out is bounded and modelled", () => {
+    const FINALIZE_ROUTE =
+      "src/app/api/strategies/finalize-wizard/route.ts";
+
+    it("declares keys-permissions x MAX_COMPOSITE_MEMBERS_PROBED, not x1", () => {
+      const entry = SEAM_ROUTE_BUDGETS[FINALIZE_ROUTE];
+      const probeBudget = entry.budgets.find((b) => b.key === "keys-permissions");
+      expect(
+        probeBudget?.calls,
+        `"${FINALIZE_ROUTE}" loops runScopeBroadeningProbe over every composite ` +
+          `member, so its keys-permissions fan-out is the ENFORCED cap, not 1. ` +
+          `Declaring 1 makes SC-4b assert the table against itself.`,
+      ).toBe(MAX_COMPOSITE_MEMBERS_PROBED);
+    });
+
+    it("enforces the same cap in the route file it declares it for", () => {
+      // The declaration is only worth anything if the route refuses to exceed
+      // it. Read the route from DISK — same discipline as the maxDuration pin.
+      const src = readFileSync(join(REPO, FINALIZE_ROUTE), "utf8");
+      // Strip comments first: this phase was bitten twice by prose satisfying a
+      // grep gate, and the enforcement block is heavily commented.
+      const code = src
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/^\s*\/\/.*$/gm, "");
+      expect(
+        code,
+        `"${FINALIZE_ROUTE}" must REFUSE a composite larger than ` +
+          `MAX_COMPOSITE_MEMBERS_PROBED before issuing any probe. A declared-but-` +
+          `unenforced cap is a hope, and the budget table would be lying again.`,
+      ).toMatch(/>\s*MAX_COMPOSITE_MEMBERS_PROBED/);
+      expect(code).toContain("COMPOSITE_TOO_MANY_MEMBERS");
+    });
+
+    it("FAILS the headroom invariant if the bound is raised beyond the ceiling", () => {
+      // The mutation this test exists to catch, computed rather than asserted
+      // by hand so it tracks any future budget change automatically.
+      const ceilingMs = readMaxDurationFromDisk(FINALIZE_ROUTE) * 1000;
+      const entry = SEAM_ROUTE_BUDGETS[FINALIZE_ROUTE];
+      const probeMs = SEAM_BUDGETS["keys-permissions"].timeoutMs;
+      const fixedMs = entry.budgets
+        .filter((b) => b.key !== "keys-permissions")
+        .reduce(
+          (acc, b) =>
+            acc + SEAM_BUDGETS[b.key].timeoutMs * b.calls * (1 + SEAM_RETRIES),
+          0,
+        );
+
+      /** Worst case in ms if the cap were `n`. Mirrors SC-4b's arithmetic. */
+      const worstCaseFor = (n: number) =>
+        fixedMs + probeMs * n * (1 + SEAM_RETRIES);
+
+      // Smallest cap that BREACHES the on-disk ceiling.
+      let breachingBound = 1;
+      while (worstCaseFor(breachingBound) < ceilingMs) breachingBound += 1;
+
+      // 1. The breach is real, not hypothetical: at that bound the invariant
+      //    genuinely fails. Without this the test below could pass vacuously
+      //    because no bound breaches at all.
+      expect(worstCaseFor(breachingBound)).toBeGreaterThanOrEqual(ceilingMs);
+
+      // 2. The shipped bound is strictly under it, with room for the DB work
+      //    SC-4b does not model.
+      expect(
+        MAX_COMPOSITE_MEMBERS_PROBED,
+        `MAX_COMPOSITE_MEMBERS_PROBED = ${MAX_COMPOSITE_MEMBERS_PROBED} would let ` +
+          `"${FINALIZE_ROUTE}" spend ${worstCaseFor(MAX_COMPOSITE_MEMBERS_PROBED)}ms ` +
+          `of seam budget against a ${ceilingMs}ms ceiling. At ${breachingBound} ` +
+          `probes the lambda is killed mid-request with no typed envelope. Lower ` +
+          `the cap, or lower the keys-permissions budget — never widen this test.`,
+      ).toBeLessThan(breachingBound);
+    });
   });
 
   describe("structural completeness", () => {

@@ -9,7 +9,10 @@ import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
-import { resilientFetch } from "@/lib/resilient-fetch";
+import {
+  MAX_COMPOSITE_MEMBERS_PROBED,
+  resilientFetch,
+} from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { logAuditEventAsUser } from "@/lib/audit";
@@ -750,7 +753,39 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
-      for (const member of members ?? []) {
+      // CR-01 — BOUND THE FAN-OUT BEFORE SPENDING ANY OF IT.
+      //
+      // Each iteration below is a full, cache-bypassing seam round trip under
+      // the 15s `keys-permissions` budget, awaited sequentially. Nothing caps
+      // `strategy_keys` membership, so an unbounded loop can exceed this
+      // route's 300s lambda ceiling: the function is then killed mid-request
+      // and the user gets a PLATFORM 504 with no typed envelope, no code and no
+      // Retry-After — precisely the outcome SEAM-02 exists to prevent. Worse,
+      // the probes that already ran did real credential decrypts on the Python
+      // side, so the request is partially executed with no record of where it
+      // stopped.
+      //
+      // Degrade DETERMINISTICALLY instead: refuse up front, before the first
+      // probe, with an actionable 4xx. This is the enforcement half of
+      // MAX_COMPOSITE_MEMBERS_PROBED — the SEAM_ROUTE_BUDGETS `calls` column
+      // for this route declares the same number, and the SC-4b invariant reads
+      // it, so the budget table is a CHECKED fact rather than a hope.
+      const memberRows = members ?? [];
+      if (memberRows.length > MAX_COMPOSITE_MEMBERS_PROBED) {
+        console.error(
+          `[strategies/finalize-wizard] composite has ${memberRows.length} members, ` +
+            `over the ${MAX_COMPOSITE_MEMBERS_PROBED}-probe finalize cap`,
+        );
+        return NextResponse.json(
+          {
+            error:
+              "This strategy has too many keys to finalize in one request.",
+            code: "COMPOSITE_TOO_MANY_MEMBERS",
+          },
+          { status: 400, headers: NO_STORE_HEADERS },
+        );
+      }
+      for (const member of memberRows) {
         const memberKeyId =
           typeof member.api_key_id === "string" ? member.api_key_id : null;
         if (!memberKeyId) continue;

@@ -136,6 +136,14 @@ export type WizardErrorCode =
   // ("something went wrong, our team has been notified"), which is both untrue
   // and un-actionable during an infra outage.
   | "SERVICE_UNAVAILABLE_RETRY"
+  // Phase 140 review / CR-01 — the composite scope-broadening re-probe fans out
+  // one cache-bypassing seam round trip PER member key, sequentially. Past
+  // MAX_COMPOSITE_MEMBERS_PROBED that fan-out can outrun the finalize route's
+  // Vercel function ceiling, which kills the lambda mid-request and returns a
+  // PLATFORM 504 with no envelope at all. finalize-wizard refuses up front
+  // instead, BEFORE the first probe, so the failure is deterministic and the
+  // draft is untouched.
+  | "COMPOSITE_TOO_MANY_MEMBERS"
   // Fallback
   | "UNKNOWN";
 
@@ -779,6 +787,20 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     docsHref: "/security#sync-timing",
     // Recoverable by definition — the whole point of the code is that a Retry
     // control renders instead of the dead-end UNKNOWN envelope.
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  COMPOSITE_TOO_MANY_MEMBERS: {
+    title: "This strategy has too many keys to submit at once.",
+    cause:
+      "We re-check every connected key's live permissions against its exchange before publishing, one key at a time. Beyond a handful of keys that re-check cannot finish inside a single request, so we stop before starting rather than time out halfway through. Your draft is saved and nothing was submitted.",
+    fix: [
+      "Remove some keys from this strategy, then submit again.",
+      "If every key genuinely belongs on one listing, use Request a Call — we can finalize it for you.",
+    ],
+    docsHref: "/security#sync-timing",
+    // Actionable by the user (remove keys), and the draft survives — so the
+    // retry affordance renders rather than the dead-end UNKNOWN envelope.
     actions: ["clear_and_retry", "request_call"],
   },
 

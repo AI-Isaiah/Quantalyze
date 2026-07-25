@@ -131,6 +131,11 @@ export function SubmitStep({
             // Recoverable copy renders the Retry affordance rather than
             // degrading to the generic UNKNOWN envelope.
             "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            // CR-01 — the composite is larger than the finalize route's probe
+            // cap, so it refused BEFORE spending any of the fan-out. The copy
+            // tells the user to remove keys, which is actionable; UNKNOWN's
+            // "our team has been notified" is not.
+            "COMPOSITE_TOO_MANY_MEMBERS",
           ],
         );
         const surfaced: WizardErrorCode =

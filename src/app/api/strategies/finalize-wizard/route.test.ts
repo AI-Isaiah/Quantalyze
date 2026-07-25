@@ -30,6 +30,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import { MAX_COMPOSITE_MEMBERS_PROBED } from "@/lib/resilient-fetch";
 
 vi.mock("server-only", () => ({}));
 
@@ -1785,6 +1786,72 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     );
     expect(sentry).toBeDefined();
     consoleErr.mockRestore();
+  });
+
+  /**
+   * CR-01 — the composite probe fan-out is BOUNDED and the bound is enforced.
+   *
+   * Each O-1 iteration is a full cache-bypassing seam round trip under the 15s
+   * keys-permissions budget, awaited sequentially, and nothing caps
+   * strategy_keys membership. An unbounded loop can outrun this route's 300s
+   * Vercel ceiling, in which case the lambda is KILLED mid-request: the user
+   * gets a platform 504 with no code, no Retry-After and no envelope, while the
+   * probes that already ran did real credential decrypts on the Python side.
+   *
+   * The refusal must therefore happen BEFORE the first probe — a cap checked
+   * inside the loop would still spend N-1 round trips and still decrypt.
+   */
+  function members(n: number): Array<{ api_key_id: string }> {
+    return Array.from({ length: n }, (_, i) => ({
+      api_key_id: `${String(i + 1).padStart(8, "0")}-1111-4111-8111-111111111111`,
+    }));
+  }
+
+  it("CR-01: refuses a composite over the probe cap with 400 COMPOSITE_TOO_MANY_MEMBERS — before ANY probe", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const over = MAX_COMPOSITE_MEMBERS_PROBED + 1;
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = over;
+    STATE.strategyKeysList = members(over);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    // THE assertion: not one probe left Vercel. A cap enforced inside the loop
+    // would read as "bounded" while still burning the budget and decrypting.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // Nothing was finalized or enqueued — the draft is untouched.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    expect(
+      STATE.adminRpcCalls.find((c) => c.name === "enqueue_compute_job"),
+    ).toBeUndefined();
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("CR-01: a composite exactly AT the cap still finalizes (the bound is off-by-one correct)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = MAX_COMPOSITE_MEMBERS_PROBED;
+    STATE.strategyKeysList = members(MAX_COMPOSITE_MEMBERS_PROBED);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    // Every member was re-probed — the cap did not silently skip the O-1
+    // scope-broadening defense for the last member.
+    expect(fetchSpy).toHaveBeenCalledTimes(MAX_COMPOSITE_MEMBERS_PROBED);
+    fetchSpy.mockRestore();
   });
 
   // Neutrality guards — the single-key path is byte-unchanged (green before AND

@@ -225,6 +225,36 @@ export const SEAM_BUDGETS: Record<
 };
 
 /**
+ * HARD CAP on the number of `keys-permissions` probes a single
+ * `finalize-wizard` request may issue (CR-01).
+ *
+ * `finalize-wizard` is the ONLY route whose seam call is inside a loop: the
+ * composite branch re-probes EVERY member key for scope-broadening, awaiting
+ * each one SEQUENTIALLY and bypassing both cache layers (`?force_refresh=true`,
+ * not wrapped in `unstable_cache`), so an N-member composite costs N full round
+ * trips on every submit. Nothing in `closed-sets.ts` or the add-key route caps
+ * `strategy_keys` membership, so before this constant the route's worst case
+ * was UNBOUNDED while its budget row declared `calls: 1` — and the SC-4b
+ * headroom invariant, which derives the worst case from that same number,
+ * asserted `30 000 < 300 000` and could never fail.
+ *
+ * THIS VALUE IS ENFORCED, NOT DECLARED. `finalize-wizard` rejects a composite
+ * with more members than this BEFORE issuing any probe (400
+ * `COMPOSITE_TOO_MANY_MEMBERS`), so the `calls` column below is a checked fact
+ * rather than a hope. Raising it here without raising the enforcement — or vice
+ * versa — reddens the invariant test.
+ *
+ * WHY 10. The arithmetic ceiling is 15 (`15 × 15 000 + 60 000 = 285 000` fits
+ * under the 300 000 ms lambda ceiling; 16 breaches it). 10 is deliberately
+ * BELOW that: SC-4b models only the seam spend, while the real request also
+ * pays for the members SELECT, the finalize RPC and the legacy side-effect
+ * fan-out, and Phase 141's retries multiply the seam half. 10 leaves 90 000 ms
+ * for all of it and still exceeds every composite in production (the largest
+ * live book is 3 keys). Measure before raising.
+ */
+export const MAX_COMPOSITE_MEMBERS_PROBED = 10;
+
+/**
  * Per-route declaration of the Vercel function ceiling each seam route runs
  * under, plus which budgets it spends.
  *
@@ -308,7 +338,11 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/strategies/finalize-wizard/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "keys-permissions", calls: 1 },
+      // COMPOSITE FAN-OUT (CR-01): one probe PER member, sequential and
+      // cache-bypassing (route.ts, the `for (const member of members ?? [])`
+      // loop). This is NOT 1. The number must match the cap the route enforces
+      // — see MAX_COMPOSITE_MEMBERS_PROBED.
+      { key: "keys-permissions", calls: MAX_COMPOSITE_MEMBERS_PROBED },
       { key: "process-key-enqueue", calls: 1 },
     ],
   },
