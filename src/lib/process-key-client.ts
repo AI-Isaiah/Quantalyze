@@ -278,14 +278,56 @@ export async function postProcessKey(
     };
   }
 
+  const tag = args.routeTag ?? "process-key-client";
+
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    const err = await parseUpstreamJson(res, tag, correlationId);
     return {
       ok: false,
       response: NextResponse.json(err, { status: res.status }),
     };
   }
 
-  const body = await res.json().catch(() => ({}));
+  const body = await parseUpstreamJson(res, tag, correlationId);
   return { ok: true, status: res.status, body };
+}
+
+/**
+ * Read the upstream JSON body, degrading to `{}` — but never SILENTLY.
+ *
+ * Phase 140 review / D-5. Both call sites were `res.json().catch(() => ({}))`,
+ * which discards the parse error entirely. The `ok` arm is the damaging one:
+ * `/api/keys/sync` forwards this body, so an upstream that answered 200 with an
+ * unparseable payload produced a clean `200 {}` to the client. The wizard then
+ * read `kickoff.composite === undefined`, took the single-key branch, and
+ * waited for a sync that was never described — a silent wrong answer rather
+ * than a visible failure, with NOTHING anywhere to explain it.
+ *
+ * The fallback itself is kept: both callers already treat `{}` as "no usable
+ * fields" and the status is preserved, so degrading is the right behaviour. It
+ * is the SILENCE that was wrong.
+ *
+ * Never logs the body — the seam carries raw exchange credentials. Only the
+ * status, the parse error's message, and the correlation id, which is what
+ * joins this line to the Python side.
+ */
+async function parseUpstreamJson(
+  res: Response,
+  tag: string,
+  correlationId: string,
+): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch (parseErr) {
+    console.error(
+      `[${tag}] /process-key returned ${res.status} with an unparseable JSON body — degrading to {}`,
+      {
+        correlation_id: correlationId,
+        content_type: res.headers.get("content-type"),
+        parse_error:
+          parseErr instanceof Error ? parseErr.message : String(parseErr),
+      },
+    );
+    return {};
+  }
 }

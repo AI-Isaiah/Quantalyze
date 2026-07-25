@@ -328,3 +328,94 @@ describe("postProcessKey — enqueue vs sync budget selection", () => {
     },
   );
 });
+
+/**
+ * Phase 140 review / D-5 — degrade, but never SILENTLY.
+ *
+ * Both body reads were `res.json().catch(() => ({}))`, which discards the parse
+ * error entirely. The `ok` arm is the damaging one: `/api/keys/sync` forwards
+ * this body, so an upstream answering 200 with an unparseable payload produced
+ * a clean `200 {}` to the client. The wizard then read
+ * `kickoff.composite === undefined`, took the single-key branch, and waited for
+ * a sync nothing had described — a silent WRONG ANSWER rather than a visible
+ * failure, with nothing anywhere to explain it.
+ *
+ * The `{}` fallback is deliberately kept (both callers already treat it as "no
+ * usable fields" and the status is preserved). It is the silence that was wrong.
+ */
+describe("postProcessKey — D-5 unparseable upstream bodies are logged", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    { label: "2xx (the silent-wrong-answer path)", status: 200, ok: true },
+    { label: "non-2xx", status: 500, ok: false },
+  ])(
+    "logs when a $label body cannot be parsed, and still degrades to {}",
+    async ({ status, ok }) => {
+      coreSpy.mockImplementation(
+        async () =>
+          // Truncated mid-flight behind a JSON content-type: a real proxy
+          // failure shape, not a synthetic one.
+          new Response('{"composite": tr', {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+
+      const result = await postProcessKey({
+        flow_type: "resync",
+        source: "test",
+        context: {},
+        userId: "u1",
+        correlationId: "corr-d5",
+      });
+
+      // Behaviour preserved: still degrades, still preserves the status.
+      expect(result.ok).toBe(ok);
+
+      const logged = errorSpy.mock.calls
+        .map((c) => c.map((a) => JSON.stringify(a)).join(" "))
+        .join("\n");
+      expect(logged).toContain("unparseable JSON body");
+      // The correlation id is what joins this line to the Python side.
+      expect(logged).toContain("corr-d5");
+      // The body is NEVER logged — the seam carries raw exchange credentials.
+      expect(logged).not.toContain("composite");
+    },
+  );
+
+  it("stays silent when the body parses cleanly", async () => {
+    // A log per successful call would drown the one that matters.
+    coreSpy.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ composite: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+
+    await postProcessKey({
+      flow_type: "resync",
+      source: "test",
+      context: {},
+      userId: "u1",
+      correlationId: "corr-ok",
+    });
+
+    expect(
+      errorSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("unparseable JSON body"),
+      ),
+    ).toHaveLength(0);
+  });
+});

@@ -255,7 +255,22 @@ async function _unifiedValidateAndEncryptHandler(args: {
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    // Phase 140 review / D-5 — degrade, but never SILENTLY. Discarding the
+    // parse error left an unparseable upstream body indistinguishable from an
+    // empty one, with nothing anywhere to explain the resulting `{}`. Body is
+    // never logged (the seam carries raw exchange credentials); only the
+    // status, the content-type and the parse error's message.
+    const err = await res.json().catch((parseErr: unknown) => {
+      console.error(
+        `[keys/validate-and-encrypt] /process-key returned ${res.status} with an unparseable JSON body — degrading to {}`,
+        {
+          content_type: res.headers.get("content-type"),
+          parse_error:
+            parseErr instanceof Error ? parseErr.message : String(parseErr),
+        },
+      );
+      return {};
+    });
     return NextResponse.json(err, { status: res.status, headers: NO_STORE_HEADERS });
   }
   return NextResponse.json(await res.json(), { headers: NO_STORE_HEADERS });
