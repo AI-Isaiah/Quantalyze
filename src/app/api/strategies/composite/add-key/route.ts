@@ -12,6 +12,10 @@ import {
 } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
+// The dependency-free leaf. `analytics-client` re-exports the class, but this
+// route must not depend on that re-export: it is wholesale-mocked by the route
+// test files, where `instanceof` against an undefined binding throws.
+import { CircuitOpenError } from "@/lib/seam-errors";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -42,6 +46,17 @@ import type { User } from "@supabase/supabase-js";
  * enforcement, encryptKey reuse, uniform { code } error classification, and the
  * H-0305 no-raw-upstream-strings posture — mirrors the analog verbatim.
  */
+
+/**
+ * Phase 140 / SEAM-04. The Vercel default (and the project's dashboard setting
+ * on 2026-07-25) already exceeds this, so declaring it cannot RAISE this route's
+ * worst-case lambda hold — it exists so the headroom invariant has an in-repo
+ * source of truth instead of a dashboard-changeable assumption. This route
+ * spends at most two seam budgets back to back (`validate-key` then
+ * `encrypt-key`), so the function deadline must comfortably exceed their sum;
+ * 300s matches the create-with-key mirror.
+ */
+export const maxDuration = 300;
 
 function pickPlaceholderCodename(): string {
   // The codename is overwritten at finalize time, so collisions during
@@ -403,7 +418,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // create-with-key uses — so the "+ Add another key" multi-key path and the
     // single-key path can never drift, and its HTTP status distinguishes client
     // faults (400) from upstream faults (502/503) for SLO consumers (H-0310).
-    const { code, status } = classifyKeyValidationError(message);
-    return NextResponse.json({ code }, { status, headers: NO_STORE_HEADERS });
+    //
+    // Phase 140 / SEAM-04: pass the caught VALUE, not `message` — the classifier
+    // branches on `err instanceof CircuitOpenError` before its substring
+    // cascade, and pre-stringifying here would send a breaker trip to the
+    // terminal UNKNOWN/500 instead of the retryable 503. DIVERGENCE-FREE: this
+    // is byte-identical to the create-with-key catch by design.
+    const { code, status } = classifyKeyValidationError(err);
+
+    // Mirror the `Retry-After` the resilience core already publishes on its own
+    // 503 envelope. `retryAfterS` is the breaker cooldown TTL — the only dynamic
+    // value CircuitOpenError exposes.
+    const headers =
+      err instanceof CircuitOpenError
+        ? { ...NO_STORE_HEADERS, "Retry-After": String(err.retryAfterS) }
+        : NO_STORE_HEADERS;
+    return NextResponse.json({ code }, { status, headers });
   }
 });
