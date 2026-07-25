@@ -192,27 +192,67 @@ async function _unifiedValidateAndEncryptHandler(args: {
   // unbounded hang that holds a Vercel concurrency slot until the function
   // ceiling. Headers and body are preserved verbatim; only the transport
   // changed.
-  const res = await resilientFetch("process-key-unified-dormant", "/process-key", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${internalToken}`,
-      "X-Correlation-Id": correlationId,
-    },
-    body: JSON.stringify({
-      flow_type: "onboard",
-      source: args.exchange,
-      context: {
-        exchange: args.exchange,
-        api_key: args.api_key,
-        api_secret: args.api_secret,
-        passphrase: args.passphrase,
-        user_id: args.userId,
-        step: "validate",
+  let res: Response;
+  try {
+    res = await resilientFetch("process-key-unified-dormant", "/process-key", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${internalToken}`,
+        "X-Correlation-Id": correlationId,
+        // WR-02 (Phase 140 review) — CT-4. The Python limiter keys on
+        // `(token_hash, X-User-Id)` HEADER
+        // (process_key.py:_process_key_rate_limit_key); `context.user_id` in
+        // the BODY below does not reach it. Without this header every user
+        // shares one `process_key:<token_hash>:anon` window, so one tenant's
+        // burst starves all others — the exact cross-tenant defect the core's
+        // own comment warns about, and the only place in the repo that still
+        // had it. Latent today (this handler is dormant); whoever revives it
+        // would have inherited a budget and a breaker AND a shared bucket.
+        "X-User-Id": args.userId,
       },
-    }),
-    cache: "no-store",
-  });
+      body: JSON.stringify({
+        flow_type: "onboard",
+        source: args.exchange,
+        context: {
+          exchange: args.exchange,
+          api_key: args.api_key,
+          api_secret: args.api_secret,
+          passphrase: args.passphrase,
+          user_id: args.userId,
+          step: "validate",
+        },
+      }),
+      cache: "no-store",
+    });
+  } catch (err) {
+    // WR-02 — this handler inherited the BREAKER from the core but not the
+    // ENVELOPE. `withAuth` has no catch, so a trip escaped as an untyped
+    // framework 500: the one outcome SEAM-04 exists to abolish, and on a
+    // key-connect path it reads to the user as "your key is broken" during an
+    // outage in which no request ever left Vercel. Byte-identical arm to the
+    // legacy handler's below, including the Retry-After pairing.
+    if (err instanceof CircuitOpenError) {
+      console.error(
+        `[keys/validate-and-encrypt] unified: circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+      );
+      return NextResponse.json(
+        { error: CIRCUIT_OPEN_COPY },
+        {
+          status: 503,
+          headers: {
+            ...NO_STORE_HEADERS,
+            "Retry-After": String(err.retryAfterS),
+          },
+        },
+      );
+    }
+    // Everything else is unchanged: this handler has never classified
+    // transport failures, and inventing that behaviour for dormant code is
+    // scope this fix does not take. A revival should route through
+    // postProcessKey, which already owns the whole contract.
+    throw err;
+  }
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { NextRequest } from "next/server";
 // Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
 // leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
@@ -644,5 +646,97 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       "investor-password-123",
       "MetaQuotes-Demo",
     );
+  });
+});
+
+/**
+ * WR-02 (Phase 140 review) — the DORMANT unified handler.
+ *
+ * `_unifiedValidateAndEncryptHandler` has zero callers today, which is exactly
+ * why Phase 140 routed it through the resilience core: whoever revives it
+ * inherits a budget and the breaker instead of re-introducing an unbounded
+ * hang. It inherited two defects with them:
+ *
+ *   1. CT-4. It forwarded `user_id` in the BODY only. The Python limiter keys
+ *      on the `X-User-Id` HEADER
+ *      (process_key.py:_process_key_rate_limit_key), so every user would share
+ *      one `process_key:<token_hash>:anon` window and one tenant's burst would
+ *      starve all others. This was the ONLY place in the repo still dropping
+ *      that header — the very defect `resilient-fetch.ts:531-534` and
+ *      `process-key-client.ts:149-150` both warn about in comments.
+ *   2. It inherited the BREAKER but not the ENVELOPE. `withAuth` has no catch,
+ *      so a `CircuitOpenError` escaped as an untyped framework 500.
+ *
+ * WHY A SOURCE SCAN. The handler is unreachable by construction (no caller)
+ * and cannot be exported for a behavioural test: Next 16 type-checks route
+ * modules against a closed set of allowed exports, so adding one fails
+ * `next build`. Deleting the handler is an explicit operator NO. A source scan
+ * is therefore the strongest guard available, and it is the in-repo precedent
+ * (`critical-regressions.test.ts`).
+ *
+ * COMMENTS ARE STRIPPED FIRST. This phase was bitten twice by prose satisfying
+ * a grep gate (140-03 dev. 1, 140-05 dev. 2) — and the fix's own explanatory
+ * comments mention both `X-User-Id` and `CircuitOpenError`, so an unstripped
+ * scan would pass on the comments alone.
+ */
+describe("WR-02 — the dormant unified handler's seam contract", () => {
+  /** The handler's SOURCE, comments removed, sliced from the whole file. */
+  function dormantHandlerCode(): string {
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"),
+      "utf8",
+    );
+    const stripped = src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+    const start = stripped.indexOf(
+      "async function _unifiedValidateAndEncryptHandler",
+    );
+    expect(
+      start,
+      "_unifiedValidateAndEncryptHandler is gone. It is dormant BY DECISION, " +
+        "not by accident — if it was deliberately deleted, delete this guard in " +
+        "the same commit.",
+    ).toBeGreaterThan(-1);
+    // Up to the next top-level declaration.
+    const rest = stripped.slice(start + 1);
+    const end = rest.search(/\nasync function |\nfunction |\nexport /);
+    return end === -1 ? rest : rest.slice(0, end);
+  }
+
+  it("forwards X-User-Id as a HEADER, not only as context.user_id in the body", () => {
+    const code = dormantHandlerCode();
+    // The header, bound to the caller's id — not a literal, not the body field.
+    expect(
+      code,
+      "CT-4: the Python limiter buckets on the X-User-Id HEADER. Without it " +
+        "every tenant shares one anon rate-limit window.",
+    ).toMatch(/"X-User-Id":\s*args\.userId/);
+    // Belt and braces: the header must sit in the headers block that the seam
+    // call actually sends, i.e. before the body.
+    const headerAt = code.search(/"X-User-Id"/);
+    const bodyAt = code.search(/body:\s*JSON\.stringify/);
+    expect(headerAt).toBeGreaterThan(-1);
+    expect(bodyAt).toBeGreaterThan(-1);
+    expect(headerAt).toBeLessThan(bodyAt);
+  });
+
+  it("has a CircuitOpenError arm returning a typed 503 with Retry-After", () => {
+    const code = dormantHandlerCode();
+    expect(
+      code,
+      "A breaker trip here escapes withAuth (which has no catch) as an untyped " +
+        "500 — on a key-connect path that reads to the user as 'your key is " +
+        "broken' during an outage in which no request was ever issued.",
+    ).toMatch(/instanceof\s+CircuitOpenError/);
+    expect(code).toMatch(/status:\s*503/);
+    expect(code).toMatch(/"Retry-After":\s*String\(err\.retryAfterS\)/);
+  });
+
+  it("still carries the credentials it always did (the fix is additive)", () => {
+    const code = dormantHandlerCode();
+    expect(code).toMatch(/Authorization:\s*`Bearer \$\{internalToken\}`/);
+    expect(code).toMatch(/"X-Correlation-Id":\s*correlationId/);
+    expect(code).toContain('flow_type: "onboard"');
   });
 });
