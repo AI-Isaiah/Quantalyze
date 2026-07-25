@@ -564,6 +564,15 @@ describe("POST /api/keys/sync", () => {
       const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
       expect(res.status).toBe(503);
+      // C3 — the arm must NAME ITSELF on the wire. A codeless 503 forced every
+      // client to classify off the bare status, which is how a SUPABASE failure
+      // came to render our circuit breaker's copy ("We paused outbound requests
+      // after repeated failures") and how the pre-existing
+      // COMPOSITE_MEMBERSHIP_UNKNOWN copy — which describes this exactly — got
+      // erased.
+      expect(await res.clone().json()).toMatchObject({
+        code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+      });
       expect(mockUpsert).toHaveBeenCalledTimes(1);
       const stamp = mockUpsert.mock.calls[0][0] as Record<string, unknown>;
       expect(stamp).toMatchObject({
@@ -609,6 +618,40 @@ describe("POST /api/keys/sync", () => {
         data_quality_flags: { csv_source: true, membership_unknown: true },
       });
       expect(mockRpc).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+
+    /**
+     * Phase 140 round-3 / C3 — the enqueue arm must name itself too, and with a
+     * DISTINCT code from the membership arm.
+     *
+     * Both were codeless 503s, so the wizard's status-shaped classifier
+     * collapsed them into one another AND into a genuine breaker trip, then
+     * rendered "We paused outbound requests after repeated failures" for a
+     * Supabase incident. Distinct codes make the two separable in logs and in
+     * the wizard_error funnel, and let the client render copy that is true.
+     */
+    it("C3: an enqueue_compute_job failure answers 503 with SYNC_ENQUEUE_FAILED, distinct from the membership code", async () => {
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      mockRpc.mockResolvedValue({
+        data: null,
+        error: { message: "deadlock detected" },
+      });
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { code?: string };
+      expect(body.code).toBe("SYNC_ENQUEUE_FAILED");
+      // Distinctness is the point — collapsing the two is the defect.
+      expect(body.code).not.toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
       consoleSpy.mockRestore();
     });
 

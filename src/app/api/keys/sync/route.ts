@@ -10,6 +10,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -157,7 +158,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         err,
       );
       return NextResponse.json(
-        { error: "Could not start sync. Try again in a moment." },
+        {
+          error: "Could not start sync. Try again in a moment.",
+          // C3 — CLASSIFY OFF THE CODE, NEVER THE BARE STATUS. This arm and the
+          // enqueue arm below both answered a codeless 503, so the wizard —
+          // which was matching on `status ∈ {502,503,504}` — labelled a
+          // SUPABASE incident with our breaker's copy ("We paused outbound
+          // requests after repeated failures"), a specific and checkably FALSE
+          // claim. It also erased the pre-existing COMPOSITE_MEMBERSHIP_UNKNOWN
+          // distinction, whose copy describes exactly this failure and already
+          // exists. Emitting the code restores it.
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN" satisfies WizardErrorCode,
+        },
         { status: 503, headers: NO_STORE_HEADERS },
       );
     }
@@ -219,7 +231,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           rpcError,
         );
         return NextResponse.json(
-          { error: "Could not start sync. Try again in a moment." },
+          {
+            error: "Could not start sync. Try again in a moment.",
+            // C3 — a DISTINCT code from the membership arm above, so the two
+            // Supabase failures are separable in logs and in the wizard_error
+            // funnel instead of collapsing into "503". Neither is a breaker
+            // trip and neither must render breaker copy. `SYNC_ENQUEUE_FAILED`
+            // is a WIRE code, aliased by the wizard onto its post-save
+            // "we could not start it, your draft is safe" envelope — the same
+            // treatment `CIRCUIT_OPEN` already gets, and for the same reason:
+            // the envelope vocabulary is the client's, not the route's.
+            code: "SYNC_ENQUEUE_FAILED",
+          },
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }

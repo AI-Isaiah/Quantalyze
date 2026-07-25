@@ -146,6 +146,42 @@ describe("postProcessKey — Phase 140 / SEAM-04 CIRCUIT_OPEN envelope", () => {
     vi.unstubAllGlobals();
   });
 
+  /**
+   * Phase 140 round-3 / C3 — the FOURTH seam-unavailable 503 this module can
+   * mint, and the only one that used to carry no `code`.
+   *
+   * A codeless 503 forces every client to classify off the bare HTTP status,
+   * which is precisely the rule this finding exists to end: `/api/keys/sync`
+   * ALSO answers 503 for two Supabase failures, so a status-shaped classifier
+   * described a database incident as our circuit breaker pausing traffic.
+   */
+  it("C3: a missing INTERNAL_API_TOKEN answers 503 with a NAMED code", async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: { key_id: "k1" },
+      userId: "u1",
+      correlationId: "c1",
+      routeTag: "keys/sync",
+    });
+
+    expect(result.ok).toBe(false);
+    const response = failureResponse(result);
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.code).toBe("UPSTREAM_NOT_CONFIGURED");
+    // Recoverable, and carrying the same static outage copy as the other three
+    // arms — the user meaning is identical (the request never left).
+    expect(body.recoverable).toBe(true);
+    expect(typeof body.human_message).toBe("string");
+    // The transport must never have been attempted.
+    expect(coreSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
   it("SC-5d: returns 503 CIRCUIT_OPEN with all five envelope fields and Retry-After", async () => {
     coreSpy.mockRejectedValue(new CircuitOpenError(30));
 

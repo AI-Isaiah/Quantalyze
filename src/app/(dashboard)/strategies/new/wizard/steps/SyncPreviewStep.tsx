@@ -338,41 +338,100 @@ function capitalizeExchange(exchange: string): string {
 }
 
 /**
- * Statuses on which `/api/keys/sync` means "we never reached the ingestion
- * service", as opposed to "we reached it and the work failed".
+ * WIRE CODE → envelope code for a failed `/api/keys/sync` kickoff.
  *
- * Phase 140 review / F-4. All three are minted by `process-key-client`'s own
- * arms and pass through `keys/sync` unchanged:
+ * ⚠️ C3 — CLASSIFY OFF THE CODE, NEVER THE BARE HTTP STATUS. The previous
+ * version matched `status ∈ {502, 503, 504}`, which is wrong because `keys/sync`
+ * mints 503 for things that are not seam failures at all:
  *
- *   503 — CIRCUIT_OPEN (breaker) or the INTERNAL_API_TOKEN misconfiguration
- *   504 — UPSTREAM_TIMEOUT, the seam deadline fired
- *   502 — UPSTREAM_NETWORK_ERROR, the connection never completed
+ *   route.ts:159 — the composite membership probe failed (a SUPABASE error)
+ *   route.ts:221 — the `enqueue_compute_job` RPC failed (also SUPABASE)
  *
- * ⚠️ 503 IS DELIBERATELY INCLUDED EVEN THOUGH `keys/sync` ALSO RETURNS 503 FOR
- * AN UNKNOWABLE COMPOSITE MEMBERSHIP. That arm fails closed for a reason the
- * user also cannot act on beyond retrying, and SERVICE_UNAVAILABLE_RETRY's copy
- * ("this is on our side, not your key… try again in a moment") is TRUE for it.
- * SYNC_FAILED's copy is not: it claims we fetched their trades. Preferring the
- * honest-for-both message over a false-for-one is the whole point of the fix.
+ * Both were rendering "We paused outbound requests after repeated failures" —
+ * a specific, checkable and FALSE statement about our circuit breaker during a
+ * DATABASE incident — and the first one silently erased the pre-existing
+ * `COMPOSITE_MEMBERSHIP_UNKNOWN` copy, which describes it exactly.
+ *
+ * `SubmitStep.tsx` had already adopted this rule for the same problem ("map off
+ * the CODE, never the raw HTTP status"). Two fixes in the same batch chose
+ * opposite rules; this is the convergence.
+ *
+ * Every arm that can produce one of these responses now names itself on the
+ * wire, so the table is exhaustive over our own routes:
+ *
+ *   CIRCUIT_OPEN            breaker open (process-key-client)
+ *   UPSTREAM_TIMEOUT        504, the seam deadline fired
+ *   UPSTREAM_NETWORK_ERROR  502, the connection never completed
+ *   UPSTREAM_NOT_CONFIGURED 503, INTERNAL_API_TOKEN missing
+ *   SYNC_ENQUEUE_FAILED     503, the enqueue RPC failed (keys/sync:221)
+ *   COMPOSITE_MEMBERSHIP_UNKNOWN
+ *                           503, membership unknowable (keys/sync:159)
+ *
+ * All but the last mean "we could not start the sync"; the last has its own
+ * accurate copy and keeps it.
  */
-const SEAM_KICKOFF_STATUSES = new Set([502, 503, 504]);
+const KICKOFF_WIRE_CODE_TO_ENVELOPE: Readonly<Record<string, WizardErrorCode>> =
+  {
+    CIRCUIT_OPEN: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    UPSTREAM_TIMEOUT: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    UPSTREAM_NETWORK_ERROR: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    UPSTREAM_NOT_CONFIGURED: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    SYNC_ENQUEUE_FAILED: "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED",
+    COMPOSITE_MEMBERSHIP_UNKNOWN: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+  };
 
 /**
- * Classify a failed `/api/keys/sync` kickoff, returning the seam's recovery
- * hint when this was a seam failure, or `null` when it was a genuine
- * sync/analytics failure.
+ * Statuses that are a seam/platform failure even with NO code in the body.
+ *
+ * Every arm OUR code owns now carries a code, so a codeless response at one of
+ * these statuses did not come from a handler at all — it is the platform (a
+ * Vercel function kill, an edge 502) or an upstream FastAPI body passed through
+ * verbatim. Either way the sync never started, so SYNC_FAILED's "we fetched
+ * your trades but the analytics computation did not complete" would still be a
+ * false claim about the user's money data — which is the F-4 finding this
+ * fallback deliberately preserves.
+ *
+ * 503 is included for the same reason it was before, but the reasoning is now
+ * sound rather than accidental: the two `keys/sync` 503s that made it unsound
+ * are matched by CODE above and never reach here.
+ */
+const CODELESS_SEAM_KICKOFF_STATUSES = new Set([502, 503, 504]);
+
+/**
+ * Classify a failed `/api/keys/sync` kickoff into an envelope code plus the
+ * seam's recovery hint, or `null` when it was a genuine sync/analytics failure
+ * the SYNC_FAILED copy honestly describes.
+ *
+ * @param body - the already-parsed response body (the caller reads it once;
+ *   a Response body may only be consumed once). `null` when unparseable.
  */
 function classifySeamKickoffFailure(
   res: Response,
-): { retryAfterS: number | undefined } | null {
-  if (!SEAM_KICKOFF_STATUSES.has(res.status)) return null;
+  body: { code?: unknown } | null,
+): { code: WizardErrorCode; retryAfterS: number | undefined } | null {
+  const wireCode = typeof body?.code === "string" ? body.code : null;
+  const mapped = wireCode ? KICKOFF_WIRE_CODE_TO_ENVELOPE[wireCode] : undefined;
+
+  let code: WizardErrorCode;
+  if (mapped) {
+    code = mapped;
+  } else if (wireCode) {
+    // A code we do not recognise is NOT a seam failure by default — that is the
+    // whole discipline. Let the caller fall through to SYNC_FAILED.
+    return null;
+  } else if (CODELESS_SEAM_KICKOFF_STATUSES.has(res.status)) {
+    code = "SERVICE_UNAVAILABLE_RETRY_DRAFT_SAVED";
+  } else {
+    return null;
+  }
+
   // `Retry-After` is seconds here (the seam never sends the HTTP-date form).
   // Anything unparseable degrades to the generic copy rather than "NaN".
   const raw = res.headers.get("Retry-After");
   const parsed = raw === null ? Number.NaN : Number(raw);
   return {
-    retryAfterS:
-      Number.isFinite(parsed) && parsed > 0 ? parsed : undefined,
+    code,
+    retryAfterS: Number.isFinite(parsed) && parsed > 0 ? parsed : undefined,
   };
 }
 
@@ -396,6 +455,28 @@ export function SyncPreviewStep({
   const [seamRetryAfterS, setSeamRetryAfterS] = useState<number | undefined>(
     undefined,
   );
+  /**
+   * TRUE when the `gate_failed` state was reached because the KICKOFF failed —
+   * i.e. we never started the sync — as opposed to the sync running and the
+   * gate/analytics rejecting the result.
+   *
+   * ⚠️ C2 — THIS GUARDS A DATA-LOSS PATH, it is not cosmetic.
+   *
+   * The `gate_failed` render offers exactly ONE button, wired to
+   * `onTryAnotherKey` → WizardClient's `handleDeleteDraft()`, which cascades
+   * away the draft AND every `strategy_keys` member. That is the right control
+   * for a gate failure ("this key does not qualify, try a different one"). It
+   * is catastrophic for a transient seam failure: `isComposite` is false on this
+   * path (it is only ever set from a SUCCESSFUL kickoff body), so a user who
+   * just connected three keys and hit a 30-second outage was told their key was
+   * not saved, given one control, and destroyed the whole composite draft with
+   * it.
+   *
+   * When this is true the render offers a retry and the NON-destructive
+   * `onReviewKeys` transition instead. Nothing on a kickoff failure is
+   * attributable to the key, so nothing should discard it.
+   */
+  const [seamFailure, setSeamFailure] = useState(false);
   const [gateResult, setGateResult] = useState<StrategyGateResult | null>(null);
   const [snapshot, setSnapshot] = useState<SyncPreviewSnapshot | null>(null);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
@@ -549,6 +630,20 @@ export function SyncPreviewStep({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
         });
+        // ONE body read, used by both arms (C3): a Response body may only be
+        // consumed once, and the failure classifier now needs the `code` the
+        // success arm never looked at.
+        //
+        // AUTHORITATIVE composite discriminator from server truth. The route
+        // returns `composite: true` ONLY on the stitch_composite branch and
+        // fails CLOSED (503, handled below) on an unknowable membership, so a
+        // 2xx always carries a definite boolean. A parse failure can only be a
+        // legacy/empty body (never a real composite, which always emits
+        // `composite: true`), so it safely defaults to the single-key arm.
+        const kickoff = (await res.json().catch(() => null)) as {
+          composite?: boolean;
+          code?: unknown;
+        } | null;
         if (!res.ok) {
           // A non-2xx kickoff fails CLOSED — never silently assume single-key.
           //
@@ -562,10 +657,14 @@ export function SyncPreviewStep({
           // costs trust, and it also pointed them at the wrong remedy (contact
           // support with a draft ID, rather than retry in a moment).
           if (mountedRef.current) {
-            const seam = classifySeamKickoffFailure(res);
+            const seam = classifySeamKickoffFailure(res, kickoff);
             if (seam) {
               setSeamRetryAfterS(seam.retryAfterS);
-              setErrorCode("SERVICE_UNAVAILABLE_RETRY");
+              setErrorCode(seam.code);
+              // C2 — this failure happened AFTER create-with-key persisted the
+              // key and the draft, so the recovery control must be
+              // non-destructive. See `seamFailure`.
+              setSeamFailure(true);
             } else {
               setErrorCode("SYNC_FAILED");
             }
@@ -573,15 +672,6 @@ export function SyncPreviewStep({
           }
           return;
         }
-        // AUTHORITATIVE composite discriminator from server truth. The route
-        // returns `composite: true` ONLY on the stitch_composite branch and
-        // fails CLOSED (503, handled above) on an unknowable membership, so a
-        // 2xx always carries a definite boolean. A parse failure can only be a
-        // legacy/empty body (never a real composite, which always emits
-        // `composite: true`), so it safely defaults to the single-key arm.
-        const kickoff = (await res.json().catch(() => null)) as {
-          composite?: boolean;
-        } | null;
         if (mountedRef.current) {
           if (kickoff?.composite === true) setIsComposite(true);
           setPhase("waiting_for_complete");
@@ -1220,6 +1310,67 @@ export function SyncPreviewStep({
     }
   }, [retrying, strategyId]);
 
+  /**
+   * C2 — the NON-DESTRUCTIVE recovery for a failed kickoff.
+   *
+   * Re-POSTs the same idempotent kickoff (the `compute_jobs` partial-unique
+   * index makes an in-flight job a no-op) and, on success, leaves the error
+   * state and resumes polling. On failure it re-classifies so the envelope
+   * reflects the CURRENT reason rather than a stale one.
+   *
+   * Deliberately separate from `handleRetrySync`, which retries a STALLED but
+   * live sync and must not clear a terminal phase.
+   */
+  const handleSeamRetry = useCallback(async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      const res = await wizardFetch("/api/keys/sync", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strategy_id: strategyId }),
+      });
+      const kickoff = (await res.json().catch(() => null)) as {
+        composite?: boolean;
+        code?: unknown;
+      } | null;
+      if (!mountedRef.current) return;
+      if (!res.ok) {
+        const seam = classifySeamKickoffFailure(res, kickoff);
+        if (seam) {
+          setSeamRetryAfterS(seam.retryAfterS);
+          setErrorCode(seam.code);
+          setSeamFailure(true);
+        } else {
+          // The kickoff got through this time and failed for a REAL reason.
+          // Hand over to the honest terminal copy — and drop the
+          // non-destructive guard with it, since the gate affordance is now
+          // the correct one.
+          setSeamRetryAfterS(undefined);
+          setErrorCode("SYNC_FAILED");
+          setSeamFailure(false);
+        }
+        return;
+      }
+      if (kickoff?.composite === true) setIsComposite(true);
+      setErrorCode(null);
+      setSeamFailure(false);
+      setSeamRetryAfterS(undefined);
+      // A fresh wait genuinely starts now, so both patience clocks reset —
+      // same reasoning as the F-2b reset in handleRetrySync.
+      startedAtRef.current = Date.now();
+      setElapsedMs(0);
+      setPhase("waiting_for_complete");
+    } catch (seamErr) {
+      console.warn(
+        "[wizard:SyncPreviewStep] seam retry POST failed:",
+        seamErr,
+      );
+    } finally {
+      if (mountedRef.current) setRetrying(false);
+    }
+  }, [retrying, strategyId]);
+
   const errorEnvelope = errorCode
     ? buildEnvelope(errorCode, correlationId, {
         trades: gateResult?.detail?.trades as number | undefined,
@@ -1252,13 +1403,48 @@ export function SyncPreviewStep({
           <WizardErrorEnvelope envelope={errorEnvelope} />
         </div>
         <div className="mt-6 flex gap-3">
-          <Button
-            type="button"
-            onClick={isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey}
-            data-testid="wizard-try-another-key"
-          >
-            {isComposite ? "Review your keys" : "Try another key"}
-          </Button>
+          {seamFailure ? (
+            /*
+             * C2 — NON-DESTRUCTIVE ONLY. The kickoff never reached the
+             * ingestion service, so nothing here is attributable to the key and
+             * NOTHING may discard it. `onTryAnotherKey` (→ handleDeleteDraft,
+             * which cascades away every strategy_keys member) is deliberately
+             * NOT reachable from this branch — a user who just connected three
+             * keys and hit a transient 503 was previously offered it as the ONE
+             * control on the screen, beneath copy telling them their key had
+             * not been saved.
+             */
+            <>
+              <Button
+                type="button"
+                onClick={handleSeamRetry}
+                disabled={retrying}
+                data-testid="wizard-seam-retry"
+              >
+                {retrying ? "Retrying…" : "Try again"}
+              </Button>
+              {onReviewKeys && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={onReviewKeys}
+                  data-testid="wizard-review-keys"
+                >
+                  Review your keys
+                </Button>
+              )}
+            </>
+          ) : (
+            <Button
+              type="button"
+              onClick={
+                isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey
+              }
+              data-testid="wizard-try-another-key"
+            >
+              {isComposite ? "Review your keys" : "Try another key"}
+            </Button>
+          )}
         </div>
       </section>
     );

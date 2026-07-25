@@ -153,7 +153,18 @@ export async function postProcessKey(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Service unavailable" },
+        {
+          error: "Service unavailable",
+          // C3 — the FOURTH seam-unavailable 503 this module can mint, and the
+          // only one that carried no `code`. A client classifying off the wire
+          // code (rather than off the bare status, which is what this finding
+          // exists to end) needs every arm to name itself. Same user meaning as
+          // CIRCUIT_OPEN / UPSTREAM_TIMEOUT / UPSTREAM_NETWORK_ERROR: the
+          // request never reached the service, nothing was stored.
+          code: "UPSTREAM_NOT_CONFIGURED",
+          human_message: CIRCUIT_OPEN_HUMAN_MESSAGE,
+          recoverable: true,
+        },
         { status: 503 },
       ),
     };

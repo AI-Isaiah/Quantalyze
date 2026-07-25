@@ -133,6 +133,18 @@ describe("[F-4] SyncPreviewStep — seam failures are not reported as sync failu
   /** The exact false sentence SYNC_FAILED renders. */
   const FALSE_CLAIM = /We fetched your trades/i;
 
+  /**
+   * C2 — the second false claim, introduced BY the F-4 fix these cases pin.
+   *
+   * F-4 routed the sync-preview kickoff onto SERVICE_UNAVAILABLE_RETRY, whose
+   * copy was written for the CONNECT step and asserts "Your key has not been
+   * saved and nothing was submitted". By this step `create-with-key` has
+   * already minted the `api_keys` row and the draft `strategies` row, so the
+   * sentence is false — and it sat directly above the button that deletes them.
+   * The post-save twin says the opposite, truthfully.
+   */
+  const FALSE_NOT_SAVED_CLAIM = /has not been saved/i;
+
   it.each([
     { label: "503 breaker trip / seam unavailable", status: 503 },
     { label: "504 seam deadline exceeded", status: 504 },
@@ -151,11 +163,17 @@ describe("[F-4] SyncPreviewStep — seam failures are not reported as sync failu
       render(<SyncPreviewStep {...baseProps} />);
 
       expect(
-        await screen.findByText("Our service is temporarily unavailable."),
+        await screen.findByText("We could not reach our service just now."),
       ).toBeInTheDocument();
       // THE assertion. A regression here is a false statement about the
       // user's money data, not a copy nit.
       expect(screen.queryByText(FALSE_CLAIM)).not.toBeInTheDocument();
+      // C2 — and the same standard applied to the copy F-4 introduced: by this
+      // step the key and the draft are persisted, so claiming otherwise is
+      // equally a false statement about the user's data.
+      expect(
+        screen.queryByText(FALSE_NOT_SAVED_CLAIM),
+      ).not.toBeInTheDocument();
       errSpy.mockRestore();
     },
   );
@@ -191,7 +209,7 @@ describe("[F-4] SyncPreviewStep — seam failures are not reported as sync failu
     render(<SyncPreviewStep {...baseProps} />);
 
     expect(
-      await screen.findByText("Our service is temporarily unavailable."),
+      await screen.findByText("We could not reach our service just now."),
     ).toBeInTheDocument();
     // Never "Wait about NaN seconds".
     expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
@@ -211,8 +229,237 @@ describe("[F-4] SyncPreviewStep — seam failures are not reported as sync failu
 
     expect(await screen.findByText(FALSE_CLAIM)).toBeInTheDocument();
     expect(
-      screen.queryByText("Our service is temporarily unavailable."),
+      screen.queryByText("We could not reach our service just now."),
     ).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 140 round-3 / C2 — A TRANSIENT OUTAGE MUST NOT DESTROY A COMPOSITE
+ * DRAFT.
+ *
+ * On `phase === "gate_failed"` this step rendered exactly ONE button, wired to
+ * `onTryAnotherKey` → WizardClient's `handleDeleteDraft()`, which cascades away
+ * the draft and every `strategy_keys` member. That is correct for a GATE
+ * failure. F-4 routed SEAM failures into the same terminal state, and
+ * `isComposite` is false there (it is only ever set from a SUCCESSFUL kickoff
+ * body), so the composite branch never even applied:
+ *
+ *   a user connects three keys → the kickoff hits a 30-second outage → the
+ *   wizard tells them their key was not saved → they press the only control on
+ *   the screen → the whole composite draft is gone.
+ *
+ * Copy and control are ONE finding: the copy told them there was nothing to
+ * lose, and the control took it.
+ */
+describe("[C2] SyncPreviewStep — a seam kickoff failure is never destructive", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The exact envelope `/api/keys/sync` forwards from a breaker trip. */
+  function seamOutageResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        code: "CIRCUIT_OPEN",
+        human_message:
+          "The analytics service is temporarily unavailable. Please try again in a moment.",
+        recoverable: true,
+      }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  it("a composite kickoff 503 offers a NON-destructive control, never the delete-draft path", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onTryAnotherKey = vi.fn();
+    const onReviewKeys = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(seamOutageResponse());
+
+    render(
+      <SyncPreviewStep
+        {...baseProps}
+        onTryAnotherKey={onTryAnotherKey}
+        onReviewKeys={onReviewKeys}
+      />,
+    );
+
+    // The envelope renders...
+    expect(
+      await screen.findByText("We could not reach our service just now."),
+    ).toBeInTheDocument();
+
+    // ...and THE assertion: the draft-deleting control is not on the screen.
+    // `wizard-try-another-key` is the testid bound to `onTryAnotherKey`, which
+    // is WizardClient's `handleDeleteDraft()` seam.
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+    ).not.toBeInTheDocument();
+
+    // What IS offered is non-destructive: retry the same idempotent kickoff,
+    // or go back and look at the keys (a pure step transition — WIZ-03).
+    expect(screen.getByTestId("wizard-seam-retry")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-review-keys")).toBeInTheDocument();
+
+    // Belt and braces: nothing rendered can reach the destructive handler.
+    expect(onTryAnotherKey).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("the retry control re-runs the kickoff and resumes on success", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(seamOutageResponse())
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ ok: true, accepted: true, composite: true }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    const retry = await screen.findByTestId("wizard-seam-retry");
+    const before = fetchMock.mock.calls.length;
+    await act(async () => {
+      retry.click();
+    });
+
+    // It really re-POSTs (idempotent server-side), and the terminal error state
+    // is cleared rather than stranding the user on a dead envelope.
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+    await waitFor(() =>
+      expect(
+        screen.queryByText("We could not reach our service just now."),
+      ).not.toBeInTheDocument(),
+    );
+    errSpy.mockRestore();
+  });
+
+  /**
+   * POSITIVE CONTROL. Without it, the first case cannot be distinguished from
+   * "the destructive control was removed entirely" — which would itself be a
+   * regression, since a genuine gate failure is exactly when "try another key"
+   * is the right offer.
+   */
+  it("POSITIVE CONTROL: a genuine gate failure still offers the try-another-key control", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    expect(
+      await screen.findByTestId("wizard-try-another-key"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-seam-retry")).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 140 round-3 / C3 — CLASSIFY OFF THE CODE, NOT THE BARE STATUS.
+ *
+ * `/api/keys/sync` returns 503 for two SUPABASE failures that are not seam
+ * failures at all (the composite membership probe, route.ts:159; the
+ * `enqueue_compute_job` RPC, route.ts:221). A status-shaped classifier
+ * rendered our breaker's copy — "We paused outbound requests after repeated
+ * failures" — during a DATABASE incident, a specific and checkably false
+ * statement, and erased the pre-existing COMPOSITE_MEMBERSHIP_UNKNOWN
+ * distinction that describes the first one exactly.
+ */
+describe("[C3] SyncPreviewStep — kickoff failures classify off the wire code", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function kickoffFailure(code: string | null, status: number): Response {
+    return new Response(
+      JSON.stringify(
+        code === null
+          ? { error: "Could not start sync. Try again in a moment." }
+          : { error: "Could not start sync. Try again in a moment.", code },
+      ),
+      { status, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  it("a 503 with COMPOSITE_MEMBERSHIP_UNKNOWN keeps its own copy, not the breaker's", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      kickoffFailure("COMPOSITE_MEMBERSHIP_UNKNOWN", 503),
+    );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    expect(
+      await screen.findByText(
+        "We couldn't confirm this strategy's key membership.",
+      ),
+    ).toBeInTheDocument();
+    // The membership distinction is RESTORED: this must not be collapsed into
+    // the generic unavailable copy.
+    expect(
+      screen.queryByText("We could not reach our service just now."),
+    ).not.toBeInTheDocument();
+    // Still non-destructive — the draft and its members are intact.
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+    ).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("a 503 from the enqueue RPC never claims the breaker paused anything", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      kickoffFailure("SYNC_ENQUEUE_FAILED", 503),
+    );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    expect(
+      await screen.findByText("We could not reach our service just now."),
+    ).toBeInTheDocument();
+    // THE assertion: a Supabase incident must not be described as our circuit
+    // breaker doing something it did not do.
+    expect(screen.queryByText(/paused outbound requests/i)).not.toBeInTheDocument();
+    // Nor may it claim the user's keys were not saved — they were.
+    expect(screen.queryByText(/has not been saved/i)).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("an UNRECOGNISED code at a seam-ish status falls through to SYNC_FAILED", async () => {
+    // The discipline in one case: the CODE decides. A 503 the wizard cannot
+    // interpret is not assumed to be a seam failure just because of its number.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      kickoffFailure("SOME_FUTURE_ROUTE_CODE", 503),
+    );
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    expect(await screen.findByText(/We fetched your trades/i)).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("a CODELESS 502/504 is still treated as a seam failure (F-4 preserved)", async () => {
+    // Every arm we own now names itself, so a codeless response at these
+    // statuses is the platform (a Vercel function kill, an edge 502). The sync
+    // never started, so SYNC_FAILED's "we fetched your trades" would still be
+    // false — which is exactly what F-4 fixed and this must not undo.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(kickoffFailure(null, 504));
+
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={vi.fn()} />);
+
+    expect(
+      await screen.findByText("We could not reach our service just now."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/We fetched your trades/i)).not.toBeInTheDocument();
     errSpy.mockRestore();
   });
 });
