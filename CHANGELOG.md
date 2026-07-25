@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.49.4.0] - 2026-07-25
+### Backlog triage — nightly npm-audit gate, MT5 server-time offset, dropped items
+- **Nightly `npm audit` gate: cleared the shipped highs, then scoped to the production tree**
+  (`npm audit --omit=dev --audit-level=high`; was a chronically-red full-tree `--audit-level=high`).
+  The 6 highs breaking the nightly were fixed at the root, not masked: **`next` 16.2.10→16.2.11**
+  (a lockfile bump inside the existing `^` caret) clears the 9 App-Router SSRF/proxy-bypass/
+  cache-confusion advisories — there IS a stable patched release — and `package.json` `overrides`
+  clear `sharp ^0.35.3` (prod libvips CVEs, since `next` still declares `sharp ^0.34.5`),
+  `fast-uri ^3.1.4`, and `postcss ^8.5.23`, plus `tmp ^0.2.7`. The one residual high is
+  build-only: the `brace-expansion` OOM advisory (GHSA-mh99-v99m-4gvg) is fixed only in 5.0.8,
+  which drops the CJS function export and breaks `minimatch@3` (`TypeError: expand is not a
+  function`) → eslint; unfixable without replacing the lint toolchain, and it never ships.
+  `--omit=dev` keeps full HIGH teeth on everything we deploy (a real prod RCE/SSRF still
+  hard-fails) while not being red on unfixable dev tooling; Dependabot tracks the dev surface.
+  (Supersedes Dependabot PR #638, which bumped `next` to 16.2.11.)
+- **MT5 server-time offset set + spike estimator hardened.** The live derive path read
+  `MT5_SERVER_UTC_OFFSET_S` defaulting to `0` (raw server-time day-bucketing); set to `10800`
+  (EEST/UTC+3) on the worker to match the validated soak, so MT5 deals bucket to true UTC days.
+  The spike's misleading `−810` offset estimate was root-caused — it assumed the latest deal
+  happened ~now, so a stale last deal makes the age term dominate the server↔UTC skew — and now
+  emits no candidate beyond the plausible ±13h band (`scripts/mt5_spike.py` + regression test).
+  The DST edge (EET↔EEST auto-switch) stays a founder VNC/live-tick confirm; it affects
+  day-bucketing only, not the balance-anchored parity.
+- **Backlog pruned (founder calls 2026-07-25):** portfolio email *alerts* taken out of the
+  pipeline (TODO removed; the dormant `alert-digest` route + cron left untouched on main since
+  removal cascades through two invariant tests); custodian (Matrixport/LiquidityTech) statement
+  reconciliation dropped — the Deribit API reconstruction stands as ground truth.
+
 ## [0.49.3.0] - 2026-07-25
 ### v1.15 MT5 — two more mt5linux 0.1.9 arg-form bugs (soak leg 2 + reconstruction)
 The soak's login now connects (v0.49.2.0), which surfaced two more mt5linux 0.1.9
