@@ -86,6 +86,8 @@ class _FakeMt5:
         self.shutdown_calls = 0
         self.initialize_calls = 0
         self.call_order: list[str] = []
+        self.deals_window: tuple | None = None
+        self.order_check_kwargs: dict | None = None
 
     def initialize(self):
         # The real terminal needs initialize() before any call (attaches IPC).
@@ -111,9 +113,12 @@ class _FakeMt5:
         return self._scenario.get("account")
 
     def history_deals_get(self, from_ts, to_ts):
+        self.deals_window = (from_ts, to_ts)  # record the (coerced) bounds
         return self._scenario.get("deals")
 
-    def order_check(self, request):
+    def order_check(self, **request):
+        # mt5linux evals order_check(*args, **kwargs); the client passes KEYWORDS.
+        self.order_check_kwargs = dict(request)
         return self._scenario.get("order_check")
 
     def last_error(self):
@@ -255,6 +260,37 @@ def test_login_initialize_transport_raise_is_typed():
     client = Mt5Client("host", 18812, _connect=connect)
     with pytest.raises(Mt5ClientError):
         client.login(123, password="pw", server="Broker-Demo")
+
+
+def test_order_check_passed_as_keywords_not_positional_dict():
+    """REGRESSION (soak, 2026-07-25): order_check MUST be called with KEYWORDS, not a
+    positional dict. mt5linux 0.1.9 evals ``mt5.order_check(*args, **kwargs)`` and MT5
+    rejects a positional dict with retcode -2 'Unnamed arguments not allowed' (verified
+    live on the prod gateway); ``**request`` -> ``order_check(action=…, symbol=…)`` which
+    MT5 accepts. Fails against a positional ``order_check(request)`` call."""
+    connect, fake, _rec = _make(
+        {"order_check": _FakeNamedTuple(retcode=0, comment="Done")}
+    )
+    client = Mt5Client("host", 18812, _connect=connect)
+    client.order_check({"action": 1, "symbol": "EURUSD", "volume": 0.01})
+    assert fake.order_check_kwargs == {"action": 1, "symbol": "EURUSD", "volume": 0.01}
+
+
+def test_history_deals_get_coerces_datetime_bounds_to_int_epoch():
+    """REGRESSION (soak, 2026-07-25): mt5linux 0.1.9's remote eval has NO ``datetime``
+    import, so a datetime window bound f-string-interpolates as ``datetime.datetime(…)``
+    and remote-NameErrors (the soak passes tz-aware datetimes; the worker passes ints).
+    The client coerces datetime -> int epoch seconds so BOTH callers work. Fails against
+    a passthrough that forwards the datetime verbatim."""
+    from datetime import datetime, timezone
+
+    connect, fake, _rec = _make({"deals": ()})
+    client = Mt5Client("host", 18812, _connect=connect)
+    dt_from = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    dt_to = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    client.history_deals_get(dt_from, dt_to)
+    assert fake.deals_window == (int(dt_from.timestamp()), int(dt_to.timestamp()))
+    assert all(isinstance(b, int) for b in fake.deals_window)
 
 
 def test_login_passes_ipc_timeout_below_rpyc_timeout():
