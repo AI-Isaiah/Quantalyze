@@ -840,6 +840,59 @@ async function shouldRecordResponseFailure(res: Response): Promise<boolean> {
 }
 
 /**
+ * Strip any literal seam secret out of a string bound for a log.
+ *
+ * ⚠️ LOAD-BEARING, NOT DEFENSIVE DECORATION (H-0328). Some fetch / undici /
+ * retry-wrapper errors embed the OUTGOING REQUEST HEADERS in the error message
+ * — and, in the shape H-0328 was filed for, even in the error NAME. The seam's
+ * headers carry `INTERNAL_API_TOKEN` and `ANALYTICS_SERVICE_KEY`, so logging a
+ * transport error verbatim can publish a live credential to the log sink. This
+ * mirrors `scrubInternalToken` in `strategies/finalize-wizard/route.ts`, which
+ * exists for exactly this reason at the route's own log site; the core needs
+ * its own copy because it logs FIRST, before any route sees the error.
+ *
+ * Read from `process.env` at call time, never captured at module load, so a
+ * rotated token is scrubbed too.
+ */
+function redactSeamSecrets(value: string): string {
+  let out = value;
+  for (const secret of [
+    process.env.INTERNAL_API_TOKEN,
+    process.env.ANALYTICS_SERVICE_KEY,
+  ]) {
+    if (secret && secret.length > 0) out = out.split(secret).join("<redacted>");
+  }
+  return out;
+}
+
+/**
+ * Render a transport error for the log: everything diagnostically useful,
+ * nothing secret.
+ *
+ * This is the SAFE form of D-1. Passing the raw error object preserved the
+ * diagnosis but also handed the log whatever undici had put in the message —
+ * see `redactSeamSecrets`. Projecting name + message + `cause` (with its
+ * syscall `code`, which is where ECONNREFUSED / ENOTFOUND / TLS actually live)
+ * keeps every bit of the diagnostic value D-1 was about while passing the whole
+ * string through redaction.
+ */
+export function describeTransportError(err: unknown): string {
+  if (!(err instanceof Error)) return redactSeamSecrets(String(err));
+  const parts = [`${err.name}: ${err.message}`];
+  const cause: unknown = (err as { cause?: unknown }).cause;
+  if (cause instanceof Error) {
+    const code = (cause as { code?: unknown }).code;
+    parts.push(
+      `caused by ${cause.name}: ${cause.message}` +
+        (code === undefined ? "" : ` (${String(code)})`),
+    );
+  } else if (cause !== undefined) {
+    parts.push(`caused by ${String(cause)}`);
+  }
+  return redactSeamSecrets(parts.join(" | "));
+}
+
+/**
  * Is this thrown value evidence that the TRANSPORT failed, as opposed to
  * evidence that WE built a bad request?
  *
@@ -958,15 +1011,15 @@ export async function resilientFetch(
         : transportFailed
           ? `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`
           : `[resilient-fetch] ${budgetKey}: request could not be constructed (caller fault — NOT counted against the breaker)`,
-      // D-1 — LOG THE ERROR OBJECT. Dropping it made ECONNREFUSED, TLS
+      // D-1 — LOG THE DIAGNOSIS. Dropping the error made ECONNREFUSED, TLS
       // certificate expiry, DNS EAI_AGAIN and a header TypeError produce four
-      // byte-identical log lines, which is the entire diagnostic value of this
-      // arm: undici puts the real reason on `.cause`, and the static sentence
-      // threw it away. `isBreakerOpen` already logs this way — this arm was the
-      // outlier. Safe: the value logged is the ERROR, never the request body,
-      // headers or path (the seam carries raw exchange credentials and
-      // INTERNAL_API_TOKEN, and undici's message never embeds them).
-      err,
+      // byte-identical log lines, when undici puts the real reason on `.cause`.
+      //
+      // REDACTED, not raw (H-0328): undici can embed the outgoing headers — and
+      // in the filed shape, even the error NAME — which on this seam means a
+      // live INTERNAL_API_TOKEN / ANALYTICS_SERVICE_KEY. `describeTransportError`
+      // keeps name + message + cause + syscall code and scrubs the secrets.
+      describeTransportError(err),
     );
     // `recordFailures: false` (the anonymous surface) still fails fast on an
     // OPEN breaker above; it just may not DRIVE the shared counter. See the

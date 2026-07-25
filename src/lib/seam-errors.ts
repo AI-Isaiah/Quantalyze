@@ -115,3 +115,48 @@ export class AnalyticsUnreachableError extends Error {
     this.name = "AnalyticsUnreachableError";
   }
 }
+
+/**
+ * Did this thrown value mean "WE could not reach OUR OWN analytics service"?
+ *
+ * Phase 140 review / F-7. Callers that catch around a seam call need to tell
+ * OUR outage apart from a genuine upstream/exchange fault, because the two get
+ * opposite user copy: `SERVICE_UNAVAILABLE_RETRY` ("this is on our side, not
+ * your key") versus `KEY_NETWORK_TIMEOUT` ("we could not reach the exchange").
+ * Blaming a manager's exchange for a Railway outage sends them to audit a key
+ * that was never the problem.
+ *
+ * Recognises the three shapes a seam transport failure can arrive in:
+ *
+ *  - the TYPED errors `analytics-client` mints (`AnalyticsTimeoutError`,
+ *    `AnalyticsUnreachableError`);
+ *  - a RAW deadline rejection, for callers like `finalize-wizard`'s probe that
+ *    use the core directly and therefore receive whatever `fetch` threw,
+ *    unwrapped. Both `Error` and `DOMException` are accepted because jsdom's
+ *    `DOMException` does not extend `Error` while Node's does — an
+ *    `instanceof Error`-only guard looks right in production and silently
+ *    misclassifies every timeout under vitest;
+ *  - undici's network failure, which is ALWAYS `TypeError("fetch failed")`
+ *    (verified on Node 22 and Node 25 for ECONNREFUSED, DNS and TLS). A
+ *    `TypeError` with any other message is a request WE built wrong — a caller
+ *    fault that says nothing about anyone's availability — and is deliberately
+ *    excluded, matching the core's own D-9 classification.
+ *
+ * `CircuitOpenError` is NOT included: it means we declined to issue a request
+ * at all, carries its own `retryAfterS`, and every call site branches on it
+ * first to publish a `Retry-After`. Folding it in here would silently discard
+ * that hint.
+ */
+export function isSeamTransportFailure(err: unknown): boolean {
+  if (
+    err instanceof AnalyticsTimeoutError ||
+    err instanceof AnalyticsUnreachableError
+  ) {
+    return true;
+  }
+  if (err instanceof TypeError) return err.message === "fetch failed";
+  if (err instanceof Error || err instanceof DOMException) {
+    return err.name === "AbortError" || err.name === "TimeoutError";
+  }
+  return false;
+}

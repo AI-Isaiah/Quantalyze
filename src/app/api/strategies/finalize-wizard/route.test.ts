@@ -564,6 +564,89 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     fetchSpy.mockRestore();
   });
 
+  /**
+   * Phase 140 review / F-7 — DO NOT BLAME THE USER'S EXCHANGE FOR OUR OUTAGE.
+   *
+   * The probe's catch arm answered KEY_NETWORK_TIMEOUT for everything, and that
+   * code's copy reads "We could not reach the exchange… usually means a
+   * temporary exchange issue". The most likely thing to land there is OUR seam
+   * failing: a Railway deadline or a refused connection with the circuit still
+   * CLOSED (5 failures in 30s is unreachable at human retry cadence, so the
+   * CircuitOpenError branch is the RARE path). Telling a manager their exchange
+   * is unreachable during a Railway outage sends them to audit a key that was
+   * never the problem, and hides the outage from the wizard_error funnel.
+   *
+   * Both arms still FAIL CLOSED — only the attribution and remedy change.
+   */
+  it.each([
+    {
+      label: "seam deadline (TimeoutError)",
+      err: () => new DOMException("aborted", "TimeoutError"),
+    },
+    {
+      label: "seam deadline (AbortError)",
+      err: () => new DOMException("aborted", "AbortError"),
+    },
+    {
+      label: "undici network failure (TypeError: fetch failed)",
+      err: () =>
+        new TypeError("fetch failed", {
+          cause: Object.assign(new Error("connect ECONNREFUSED"), {
+            code: "ECONNREFUSED",
+          }),
+        }),
+    },
+  ])(
+    "F-7: $label returns 503 SERVICE_UNAVAILABLE_RETRY, not an exchange blame",
+    async ({ err }) => {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(err());
+      const consoleErr = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+      // Actionable recovery hint, which the generic 502 never carried.
+      expect(res.headers.get("Retry-After")).toBe("30");
+      // STILL FAILS CLOSED — a key whose live scopes could not be re-checked is
+      // never promoted, regardless of who was at fault.
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      ).toBeUndefined();
+
+      consoleErr.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("F-7 POSITIVE CONTROL: a non-2xx FROM the analytics service stays KEY_NETWORK_TIMEOUT", async () => {
+    // The probe REACHED the service and it answered non-2xx, so
+    // fetchLivePermissions throws with the status. That is a genuine upstream
+    // fault and the exchange-flavoured copy is honest. Without this control the
+    // tests above cannot be told apart from "KEY_NETWORK_TIMEOUT became
+    // unreachable".
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Exchange permission probe failed" }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
   it("returns 502 KEY_NETWORK_TIMEOUT when the probe returns probe_error=true", async () => {
     // probe_error=true is the Python fail-CLOSED default that fires
     // when the live exchange call itself raised. We must NOT treat

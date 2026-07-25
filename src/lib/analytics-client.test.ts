@@ -666,11 +666,11 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
       ),
     ).rejects.toBeInstanceOf(mod.AnalyticsUnreachableError);
 
-    // Some call passed the ERROR through, not a pre-stringified summary — a
-    // static-string-only log cannot satisfy this.
-    expect(
-      errorSpy.mock.calls.some((call) => call.includes(transport)),
-    ).toBe(true);
+    // The DIAGNOSIS reaches the log — a static-string-only log cannot satisfy
+    // this. Rendered via describeTransportError rather than the raw object, so
+    // an undici message embedding X-Service-Key cannot leak (H-0328).
+    const logged = errorSpy.mock.calls.flat().map(String).join("\n");
+    expect(logged).toContain("certificate has expired");
     // And it names the call site, which the core's own log does not know.
     expect(
       errorSpy.mock.calls.some((call) =>

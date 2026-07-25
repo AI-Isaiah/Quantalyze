@@ -11,6 +11,7 @@ import {
 } from "./analytics-schemas";
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
 import {
+  describeTransportError,
   resilientFetch,
   SEAM_BUDGETS,
   type SeamBudgetKey,
@@ -184,9 +185,11 @@ async function analyticsRequest(
     //    from a DNS failure never reached an operator. The core logs the same
     //    error at the transport layer; this line records which CALL SITE it
     //    killed, which the core does not know.
+    //    REDACTED (H-0328): undici can embed the outgoing headers, and this
+    //    client sends X-Service-Key. See describeTransportError.
     console.error(
       `[analytics-client] ${path} could not reach the analytics service:`,
-      err,
+      describeTransportError(err),
     );
     throw new AnalyticsUnreachableError(err);
   }

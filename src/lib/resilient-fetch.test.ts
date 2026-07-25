@@ -1010,9 +1010,46 @@ describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () =
       mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
     ).rejects.toBe(transport);
 
-    expect(errorSpy.mock.calls.some((call) => call.includes(transport))).toBe(
-      true,
+    // The DIAGNOSIS must survive — name, message and the syscall code undici
+    // hides on `.cause` — even though the value logged is a redacted string
+    // rather than the raw object (see the H-0328 test below).
+    const logged = errorSpy.mock.calls.flat().map(String).join("\n");
+    expect(logged).toContain("EAI_AGAIN");
+    expect(logged).toContain("fetch failed");
+  });
+
+  /**
+   * H-0328 regression, re-armed for D-1.
+   *
+   * Logging the raw error object is the OBVIOUS way to satisfy D-1 and it is
+   * unsafe here: some undici / fetch / retry-wrapper errors embed the OUTGOING
+   * REQUEST HEADERS in the message, and in the shape H-0328 was filed for, in
+   * the error NAME too. On this seam those headers carry a live
+   * INTERNAL_API_TOKEN and ANALYTICS_SERVICE_KEY. The core logs BEFORE any
+   * route sees the error, so the route-level scrubber cannot cover it.
+   */
+  it("D-1/H-0328: never logs a live seam secret from the transport error", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.INTERNAL_API_TOKEN = "super-secret-internal-token";
+    process.env.ANALYTICS_SERVICE_KEY = "super-secret-service-key";
+
+    const leaky = new Error(
+      "fetch failed sending X-Internal-Token: super-secret-internal-token, X-Service-Key: super-secret-service-key",
     );
+    leaky.name = "LeakyWrapper(super-secret-internal-token)";
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(leaky);
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toBe(leaky);
+
+    const logged = errorSpy.mock.calls.flat().map(String).join("\n");
+    expect(logged).not.toContain("super-secret-internal-token");
+    expect(logged).not.toContain("super-secret-service-key");
+    // Redacted, not dropped: the line is still diagnostically useful.
+    expect(logged).toContain("<redacted>");
   });
 
   it("the response body is left INTACT for the caller after the peek", async () => {

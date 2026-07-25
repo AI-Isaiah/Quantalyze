@@ -10,10 +10,11 @@ import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
 import {
+  DEFAULT_RETRY_AFTER_S,
   MAX_COMPOSITE_MEMBERS_PROBED,
   resilientFetch,
 } from "@/lib/resilient-fetch";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, isSeamTransportFailure } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { WizardErrorCode } from "@/lib/wizardErrors";
 import { logAuditEventAsUser } from "@/lib/audit";
@@ -425,6 +426,45 @@ async function runScopeBroadeningProbe(
     console.error(
       `[strategies/finalize-wizard] live permissions probe failed: ${safeErrorString(probeErr)}`,
     );
+    // Phase 140 review / F-7 — DO NOT BLAME THE USER'S EXCHANGE FOR OUR OUTAGE.
+    //
+    // This arm caught everything and answered KEY_NETWORK_TIMEOUT, whose copy
+    // is "We could not reach the exchange … usually means a temporary exchange
+    // issue". But the most likely thing to land here is OUR seam failing: a
+    // Railway deadline or a refused connection, with the circuit still closed
+    // (5 failures in 30s is unreachable at human retry cadence, so the
+    // CircuitOpenError branch above is the RARE path, not the common one).
+    // Telling a manager their exchange is unreachable during a Railway outage
+    // sends them to audit a key that was never the problem, and hides the
+    // outage from us in the `wizard_error` funnel.
+    //
+    // Fails CLOSED either way — a key whose live scopes could not be re-checked
+    // is never promoted. Only the attribution and the remedy change.
+    if (isSeamTransportFailure(probeErr)) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            error: "Could not verify key scopes",
+            code: "SERVICE_UNAVAILABLE_RETRY" satisfies WizardErrorCode,
+          },
+          {
+            status: 503,
+            headers: {
+              ...NO_STORE_HEADERS,
+              // No live TTL to quote (the breaker never opened), so advertise
+              // the static cooldown — the same value the opted-out public
+              // surface receives.
+              "Retry-After": String(DEFAULT_RETRY_AFTER_S),
+            },
+          },
+        ),
+      };
+    }
+    // A genuine upstream fault: the probe REACHED the analytics service and it
+    // answered non-2xx (fetchLivePermissions throws with the status), or the
+    // body was unreadable. KEY_NETWORK_TIMEOUT's exchange-flavoured copy is
+    // honest here.
     return {
       ok: false,
       response: NextResponse.json(
