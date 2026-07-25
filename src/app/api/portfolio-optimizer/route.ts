@@ -7,11 +7,43 @@ import {
   runPortfolioOptimizer,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
+import { CircuitOpenError } from "@/lib/seam-errors";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
-/** Optimizer can take 3-8s on large portfolios; 15s is generous. */
-const OPTIMIZER_TIMEOUT_MS = 15_000;
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
+ * route's `SEAM_ROUTE_BUDGETS` row in `src/lib/resilient-fetch.ts`.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot RAISE this
+ * route's worst-case lambda hold (threat T-140-29). It exists so the SC-4b
+ * headroom invariant has an in-repo source of truth instead of a
+ * dashboard-changeable assumption: this route spends one `portfolio-optimizer`
+ * budget (15s), i.e. 20× headroom.
+ *
+ * NOTE the division of labour: `maxDuration` is the FUNCTION's ceiling, the
+ * budget table owns the SEAM's deadline. This route used to declare the latter
+ * itself, in a route-local 15s timeout constant removed in this phase — which
+ * is precisely the scattered-budget ownership SEAM-02 exists to end. The
+ * deadline now comes from `SEAM_BUDGETS["portfolio-optimizer"]` via the
+ * wrapper's budgetKey, so there is exactly one place to change it.
+ *
+ * (The old constant's NAME is deliberately not written out here: the same grep
+ * that proves it is gone would otherwise match this comment — the trap 140-04
+ * hit, where a guard was defeated by prose quoting the token it forbids.)
+ */
+export const maxDuration = 300;
+
+/**
+ * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
+ * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
+ * seam routes, so a breaker trip reads the same to a user whichever seam they
+ * hit, and it names no infrastructure (M-0333 / threat T-140-17).
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
@@ -117,11 +149,11 @@ export async function POST(req: NextRequest) {
     // the second ownership gate `portfolios.user_id = req.user_id` (the
     // first gate is `assertPortfolioOwnership` above, which is the TS-side
     // RLS-bypassing check). Both gates close C-PR5-01 in defence-in-depth.
-    const data = await runPortfolioOptimizer(
-      portfolioId,
-      user.id,
-      OPTIMIZER_TIMEOUT_MS,
-    );
+    // Phase 140 / SEAM-02: no timeout argument — the deadline is owned by
+    // SEAM_BUDGETS["portfolio-optimizer"] and reached through the wrapper's
+    // budgetKey. Passing one here would re-create the route-local budget this
+    // phase removed, and a route-local value silently WINS over the table.
+    const data = await runPortfolioOptimizer(portfolioId, user.id);
 
     return NextResponse.json(
       {
@@ -131,6 +163,44 @@ export async function POST(req: NextRequest) {
       { headers: NO_STORE_HEADERS },
     );
   } catch (err) {
+    // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
+    //
+    // Distinct from the generic 503 below in two ways that matter to a client:
+    // it carries a Retry-After cooldown (the request was never issued, so the
+    // breaker knows exactly when to come back) and its own static copy.
+    //
+    // The refund is red-team R-0002 consistency, not a new policy: this route
+    // already refunds on both upstream-failure arms because the failure is
+    // upstream of the caller. A breaker trip is the purest case of that — the
+    // request never left Vercel — so charging for it would burn a legitimate
+    // user's whole 5/min budget during a Railway outage.
+    //
+    // ⚠️ Placement: INSIDE the handler, after the 401 + approval + ownership
+    // gates (threat T-140-20) — a breaker-aware branch above them would turn
+    // "is Railway degraded right now?" into an unauthenticated oracle.
+    //
+    // ⚠️ `CircuitOpenError` comes from the dependency-free leaf
+    // `@/lib/seam-errors`, never through `@/lib/analytics-client`: this route's
+    // test mocks that module wholesale, and a class read through a mocked
+    // module is `undefined` — `err instanceof undefined` throws a TypeError
+    // from inside this very catch block (threat T-140-30).
+    if (err instanceof CircuitOpenError) {
+      console.error(
+        `[api/portfolio-optimizer] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+      );
+      await refundRateLimitToken("circuit_open");
+      return NextResponse.json(
+        { status: "failed", suggestions: null, error: CIRCUIT_OPEN_COPY },
+        {
+          status: 503,
+          headers: {
+            ...NO_STORE_HEADERS,
+            // Same pairing as this route's own 429 arm above.
+            "Retry-After": String(err.retryAfterS),
+          },
+        },
+      );
+    }
     if (err instanceof AnalyticsTimeoutError) {
       // Audit-2026-05-07 red-team R-0002: refund the 5/min token on
       // analytics-side timeout (the failure is upstream of the caller).

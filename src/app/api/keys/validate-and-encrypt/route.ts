@@ -5,6 +5,8 @@ import {
   AnalyticsUpstreamError,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
+import { CircuitOpenError } from "@/lib/seam-errors";
+import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
@@ -14,8 +16,32 @@ import type { User } from "@supabase/supabase-js";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
 
-const ANALYTICS_URL =
-  process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
+ * route's `SEAM_ROUTE_BUDGETS` row in `src/lib/resilient-fetch.ts`.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot RAISE this
+ * route's worst-case lambda hold (threat T-140-29). It exists so the SC-4b
+ * headroom invariant has an in-repo source of truth instead of a
+ * dashboard-changeable assumption. This route is the widest of the five: the
+ * live path spends `validate-key` then `encrypt-key` BACK TO BACK (30s + 30s,
+ * they sum per request), and the dormant unified handler below nominally adds
+ * a third — still 5× headroom.
+ */
+export const maxDuration = 300;
+
+/**
+ * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
+ * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
+ * seam routes, so a breaker trip reads the same to a user whichever seam they
+ * hit. It names no infrastructure (threat T-140-17) and — critically on THIS
+ * route — does not blame the user's key for an outage in which no request was
+ * ever issued.
+ */
+const CIRCUIT_OPEN_COPY =
+  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
@@ -155,7 +181,18 @@ async function _unifiedValidateAndEncryptHandler(args: {
   }
 
   const correlationId = await getCorrelationId();
-  const res = await fetch(`${ANALYTICS_URL}/process-key`, {
+  // Phase 140 / SEAM-01 (threat T-140-19). This call used to be a RAW fetch
+  // against a route-local analytics base-URL constant, with NO timeout at all —
+  // the last unbounded Vercel→Railway call. (That constant's name is
+  // deliberately not spelled out: the greps and the Wave-4 ESLint rule that
+  // prove it is gone would otherwise match this very comment.) It is dormant
+  // today — this handler has zero callers — which is exactly why it was routed
+  // through the core rather than left alone: whoever revives it inherits a
+  // budget and the breaker automatically, instead of re-introducing an
+  // unbounded hang that holds a Vercel concurrency slot until the function
+  // ceiling. Headers and body are preserved verbatim; only the transport
+  // changed.
+  const res = await resilientFetch("process-key-unified-dormant", "/process-key", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -219,6 +256,43 @@ async function legacyValidateAndEncryptHandler(args: {
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase);
     return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
   } catch (err) {
+    // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
+    //
+    // On THIS route the cascade was not merely the wrong status: a breaker trip
+    // used to surface as "Key validation failed. Please try again.", telling
+    // the user their credentials are at fault when no request ever left Vercel.
+    // 503 + a cooldown is both honest and actionable.
+    //
+    // ⚠️ Placement: INSIDE the handler chain, downstream of `withAuth` and the
+    // rate limiter (threat T-140-20) — a breaker-aware branch above the auth
+    // gate would turn "is Railway degraded right now?" into an unauthenticated
+    // oracle.
+    //
+    // ⚠️ `CircuitOpenError` comes from the dependency-free leaf
+    // `@/lib/seam-errors`, never through `@/lib/analytics-client`: this route's
+    // test mocks that module wholesale, and a class read through a mocked
+    // module is `undefined` — `err instanceof undefined` throws a TypeError
+    // from inside this very catch block (threat T-140-30).
+    //
+    // No `captureToSentry`: a breaker trip is a shared infrastructure state,
+    // so capturing would emit one event per request for the whole cooldown
+    // window. Same stance as the 4xx-forward and 504 arms below.
+    if (err instanceof CircuitOpenError) {
+      console.error(
+        `[keys/validate-and-encrypt] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+      );
+      return NextResponse.json(
+        { error: CIRCUIT_OPEN_COPY },
+        {
+          status: 503,
+          headers: {
+            ...NO_STORE_HEADERS,
+            // Same pairing as this route's own 429 arm.
+            "Retry-After": String(err.retryAfterS),
+          },
+        },
+      );
+    }
     // F5b (R8): forward the CURATED 4xx detail from the Python validator
     // (e.g. "Invalid API credentials", "Key has IP restrictions") so the
     // user can fix their key — but never echo a raw 5xx traceback, crypto

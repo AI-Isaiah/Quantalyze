@@ -85,9 +85,10 @@ export class AnalyticsUpstreamError extends Error {
  * @param body    - JSON body to POST
  * @param options - `budgetKey` is REQUIRED: it names this call site's row in
  *                  `SEAM_BUDGETS`, which is the single owner of its deadline.
- *                  `timeoutMs` overrides the table for one call (tests, and
- *                  the optimizer route's legacy constant). `method` defaults
- *                  to "POST".
+ *                  `timeoutMs` overrides the table for one call — TESTS ONLY
+ *                  since 140-05 removed the last production override (the
+ *                  optimizer route's legacy constant). `method` defaults to
+ *                  "POST".
  */
 async function analyticsRequest(
   path: string,
@@ -314,19 +315,16 @@ export async function computePortfolioAnalytics(
   return parseResponse(PortfolioAnalyticsResponseSchema, data, "/api/portfolio-analytics");
 }
 
-export async function runPortfolioOptimizer(
-  portfolioId: string,
-  actorId: string,
-  timeoutMs?: number,
-) {
+export async function runPortfolioOptimizer(portfolioId: string, actorId: string) {
   const data = await analyticsRequest(
     "/api/portfolio-optimizer",
     { portfolio_id: portfolioId, user_id: actorId },
-    // `timeoutMs` stays honoured as a one-call override for back-compat: the
-    // route still passes its legacy OPTIMIZER_TIMEOUT_MS, which happens to
-    // equal the table's value. Plan 140-05 deletes the route-side constant and
-    // this parameter becomes dead weight rather than a divergence.
-    { budgetKey: "portfolio-optimizer", ...(timeoutMs ? { timeoutMs } : {}) },
+    // Phase 140 / SEAM-02: no timeout override. This wrapper carried an
+    // optional `timeoutMs` third parameter purely so the route could keep
+    // passing its legacy `OPTIMIZER_TIMEOUT_MS = 15_000`; 140-05 deleted that
+    // route-local constant (the only caller), so the parameter went with it.
+    // The deadline now has exactly ONE owner: the row below.
+    { budgetKey: "portfolio-optimizer" },
   );
   return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");
 }
