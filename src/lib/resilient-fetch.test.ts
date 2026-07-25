@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
+// Imported from the LEAF, never from the core — this is the import shape every
+// caller must use, and the one that survives a wholesale vi.mock of the clients.
+import { CircuitOpenError } from "@/lib/seam-errors";
 import {
   FAKE_BREAKER_KEY,
   seedBreakerOpen,
@@ -94,6 +98,17 @@ vi.mock("@upstash/ratelimit", async () => {
 
 const ORIGINAL_ENV = { ...process.env };
 
+/**
+ * Install a fetch mock resolving a Response-shaped stub with `status`.
+ * A bare object rather than `new Response()` so a 204/304 status is
+ * expressible and nothing depends on jsdom's Response implementation.
+ */
+function okFetch(status = 200): FetchMock {
+  const mock = installFetchMock();
+  mock.mockResolvedValue({ ok: status < 400, status } as Response);
+  return mock;
+}
+
 /** Configure Upstash as PRESENT (the default for most tests). */
 function configureUpstash(): void {
   process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
@@ -152,13 +167,22 @@ describe("isBreakerOpen", () => {
 
   it("fails OPEN when Redis errors", async () => {
     // SC-3a. A store outage must never become the outage: every exit path out
-    // of the check resolves, none throws.
+    // of the check resolves, none throws, and the seam call still goes out.
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     shared.mode.throwOnGet = true;
+    const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
 
     await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
     expect(errorSpy).toHaveBeenCalled();
+
+    // Even with the breaker ALREADY tripped in the store, an unreadable store
+    // must not deny traffic — the real request is still attempted.
+    seedBreakerOpen(shared.store);
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("fails OPEN when Upstash is unconfigured", async () => {
@@ -172,11 +196,18 @@ describe("isBreakerOpen", () => {
     vi.resetModules();
 
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
 
     await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
     // Exactly one unconfigured notice, at module load — not per request.
     expect(warnSpy).toHaveBeenCalledTimes(1);
+
+    // Production is asserted above; the seam call still reaches Railway.
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -232,5 +263,233 @@ describe("recordSeamFailure", () => {
     await expect(mod.recordSeamFailure()).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalled();
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+  });
+});
+
+describe("resilientFetch breaker short-circuit", () => {
+  /** Drive `n` 5xx responses through the engine to load the failure counter. */
+  async function driveFailures(
+    mod: typeof import("./resilient-fetch"),
+    n: number,
+  ): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+    }
+  }
+
+  it("cross-context: a second module context short-circuits without touching Railway", async () => {
+    // SC-2. vi.resetModules() re-executes the module body, which is exactly
+    // what recreates any module-scope `let breakerState`. An in-memory breaker
+    // therefore CANNOT pass this test; only state in the shared store can.
+    const fetchA = okFetch(503);
+    const a = await import("./resilient-fetch");
+    await driveFailures(a, a.BREAKER_FAILURE_THRESHOLD);
+    expect(shared.store.get(a.BREAKER_KEY)?.value).toBe("open");
+
+    // A different Fluid Compute instance: fresh module registry, same Upstash.
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    const fetchB = okFetch();
+    const b = await import("./resilient-fetch");
+
+    await expect(
+      b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toBeInstanceOf(CircuitOpenError);
+    // THE assertion that proves "without touching Railway".
+    expect(fetchB).not.toHaveBeenCalled();
+    expect(fetchA).toHaveBeenCalledTimes(a.BREAKER_FAILURE_THRESHOLD);
+  });
+
+  it("cross-context: the CircuitOpenError carries the lock TTL as retryAfterS", async () => {
+    seedBreakerOpen(shared.store, 12);
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toMatchObject({
+      name: "CircuitOpenError",
+      retryAfterS: 12,
+      // Static message — no URL, no header, no upstream detail (T-140-05).
+      message: "Analytics service circuit is open",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("negative control: with a per-context store the second context does NOT short-circuit", async () => {
+    // SC-2-neg. Without this, the passing cross-context test cannot be
+    // distinguished from "the test never really created a second context".
+    // Flipping the store to per-factory is the ONLY change; if the assertions
+    // below hold, the green above genuinely depends on shared state.
+    shared.mode.sharedStore = false;
+    vi.resetModules();
+
+    const fetchA = okFetch(503);
+    const a = await import("./resilient-fetch");
+    await driveFailures(a, a.BREAKER_FAILURE_THRESHOLD);
+    expect(fetchA).toHaveBeenCalledTimes(a.BREAKER_FAILURE_THRESHOLD);
+
+    vi.resetModules();
+    vi.unstubAllGlobals();
+    const fetchB = okFetch();
+    const b = await import("./resilient-fetch");
+
+    await expect(
+      b.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).resolves.toBeDefined();
+    expect(fetchB).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("resilientFetch failure classification", () => {
+  async function drive(
+    mod: typeof import("./resilient-fetch"),
+    n: number,
+    expectThrow: boolean,
+  ): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      const call = mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+      if (expectThrow) await expect(call).rejects.toBeDefined();
+      else await call;
+    }
+  }
+
+  it("does not trip on HTTP 4xx, and the next call still reaches Railway", async () => {
+    // A4 / Pitfall 3 regression. A handful of users fat-fingering an API key
+    // must never become an outage for everyone.
+    const fetchMock = okFetch(400);
+    const mod = await import("./resilient-fetch");
+    await drive(mod, mod.BREAKER_FAILURE_THRESHOLD + 1, false);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+
+    const before = fetchMock.mock.calls.length;
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(fetchMock.mock.calls.length).toBe(before + 1);
+  });
+
+  it("trips on HTTP 5xx", async () => {
+    okFetch(503);
+    const mod = await import("./resilient-fetch");
+    await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, false);
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("trips on deadline (TimeoutError) rejections", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = installFetchMock();
+    // The established in-repo simulation (analytics-client.test.ts:385) —
+    // never vi.useFakeTimers().
+    fetchMock.mockRejectedValue(new DOMException("aborted", "TimeoutError"));
+    const mod = await import("./resilient-fetch");
+    await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, true);
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("trips on network TypeError throws", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+    const mod = await import("./resilient-fetch");
+    await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, true);
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("rethrows the ORIGINAL error unwrapped", async () => {
+    // Wave 2 depends on this: both clients map err.name to their own typed
+    // errors. Wrapping here would silently reclassify every timeout.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const original = new DOMException("aborted", "TimeoutError");
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(original);
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toBe(original);
+  });
+});
+
+describe("resilientFetch budget wiring", () => {
+  it("budget reaches AbortSignal.timeout", async () => {
+    // SC-4c. Asserted against the exported table, not a literal — the point is
+    // that the TABLE is what reaches the platform primitive.
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(timeoutSpy).toHaveBeenCalledWith(mod.SEAM_BUDGETS.bridge.timeoutMs);
+  });
+
+  it("budget reaches AbortSignal.timeout for a different call site", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("process-key-sync", "/process-key", {
+      method: "POST",
+    });
+    expect(timeoutSpy).toHaveBeenCalledWith(
+      mod.SEAM_BUDGETS["process-key-sync"].timeoutMs,
+    );
+  });
+
+  it("honours timeoutMsOverride and never leaks it into the RequestInit", async () => {
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+      timeoutMsOverride: 7_000,
+    });
+
+    expect(timeoutSpy).toHaveBeenCalledWith(7_000);
+    const init = fetchMock.mock.calls[0][1] as Record<string, unknown>;
+    expect(init).not.toHaveProperty("timeoutMsOverride");
+  });
+
+  it("forwards headers byte-for-byte", async () => {
+    // A dropped X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket
+    // defect: every tenant would share one upstream limiter window.
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+    const headers = {
+      Authorization: "Bearer internal-token",
+      "X-User-Id": "user-123",
+      "X-Correlation-Id": "corr-abc",
+    };
+
+    await mod.resilientFetch("process-key-enqueue", "/process-key", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ flow_type: "resync" }),
+      cache: "no-store",
+    });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.headers).toEqual(headers);
+    expect(init.cache).toBe("no-store");
+    expect(init.body).toBe(JSON.stringify({ flow_type: "resync" }));
+  });
+
+  it("targets the analytics base URL", async () => {
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      "http://localhost:8002/api/portfolio-bridge",
+    );
   });
 });
