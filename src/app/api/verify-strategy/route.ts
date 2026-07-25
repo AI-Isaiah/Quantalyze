@@ -7,6 +7,20 @@ import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
 
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; asserted against
+ * SEAM_ROUTE_BUDGETS by seam-budgets.invariant.test.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot raise this
+ * route's worst-case lambda hold. It exists so the SC-4b headroom invariant
+ * has an in-repo source of truth instead of a dashboard-changeable
+ * assumption: this route spends one `process-key-sync` budget (60s — the
+ * teaser runs the full pipeline INLINE), 5× headroom.
+ */
+export const maxDuration = 300;
+
 function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
