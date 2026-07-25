@@ -727,7 +727,8 @@ const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 
 // ---------------------------------------------------------------------------
-// WHAT COUNTS AS A BREAKER FAILURE (Phase 140 review / F-1, F-2, D-9, D-10)
+// WHAT COUNTS AS A BREAKER FAILURE (Phase 140 review / F-1, F-2, D-9, D-10,
+// round-3 / C1)
 //
 // The breaker exists to answer exactly ONE question: is the Railway analytics
 // deployment unreachable or not responding? Every recording decision below is
@@ -758,19 +759,50 @@ const ANALYTICS_URL =
 //      not cache failures, so a page showing five key cards produced five
 //      counter increments from a single bad row.
 //
-// THE RULE, therefore, is that the BODY is the evidence, not the status code.
-// FastAPI answers `HTTPException` with a well-formed `application/json`
-// envelope; a Railway/Vercel edge fault answers with an HTML or otherwise
-// unparseable error page, because the container never handled the request at
+//   3. UNHANDLED PYTHON EXCEPTIONS ARRIVE AS `text/plain` 500 (C1). A *raised*
+//      `HTTPException` is JSON, but an unhandled exception never reaches
+//      `ExceptionMiddleware` — Starlette's `ServerErrorMiddleware` answers
+//      `PlainTextResponse("Internal Server Error", 500)` with
+//      `text/plain; charset=utf-8` (verified on the installed starlette 0.52.1;
+//      `analytics-service/main.py:224` and `src/lib/analytics-client.ts:202`
+//      both state it). This is FACET 2 REOPENED, not a new class:
+//      `routers/internal.py:183` runs its `api_keys` SELECT OUTSIDE any try, so
+//      a 30s Supabase blip while a page renders five `KeyPermissionBadge`s
+//      (fetch-on-mount, failures uncached) yields five `text/plain` 500s in 30s
+//      — from a container that answered every one of them — and a JSON-only
+//      gate denied the seam to EVERY tenant for the cooldown.
+//
+// THE RULE, therefore, is that the BODY is the evidence, not the status code,
+// and "the app authored this" is the property being tested — not "this is
+// JSON". FastAPI answers `HTTPException` with a well-formed `application/json`
+// envelope and an unhandled exception with Starlette's one exact plain-text
+// sentence; a Railway/Vercel edge fault answers with an HTML or otherwise
+// unrecognisable error page, because the container never handled the request at
 // all. So:
 //
 //   RECORD    — network-level throws (`TypeError: fetch failed`: ECONNREFUSED,
 //               DNS, TLS), deadline exceeded (Abort/Timeout), HTTP 504, and
-//               ANY response whose body is not a readable JSON envelope
-//               (HTML interstitial on a 5xx *or* on a 200 — D-10).
+//               ANY response whose body the application plainly did not write
+//               (HTML interstitial on a 5xx *or* on a 200 — D-10; an empty,
+//               truncated or proxy-authored plain-text 5xx — C1).
 //   DO NOT    — any 4xx (the pre-existing A4 carve-out, unchanged), any
-//               5xx that carries a well-formed JSON error envelope, and
-//               caller-fault `TypeError`s (D-9).
+//               5xx that carries a well-formed JSON error envelope, a 500
+//               carrying EXACTLY Starlette's `text/plain` unhandled-exception
+//               body (C1), and caller-fault `TypeError`s (D-9).
+//
+// ⚠️ THE C1 CARVE-OUT IS DELIBERATELY BYTE-EXACT, and that is what keeps it
+// from swallowing real infrastructure evidence. Only `status === 500` +
+// `text/plain` + a trimmed body EQUAL to "Internal Server Error" is excused.
+// An empty body, a truncated body, "502 Bad Gateway", a proxy's own plain-text
+// diagnostic, and a debug traceback all fail the equality and still record —
+// as does the same sentence at any status other than 500. See
+// `hasApplicationAuthoredErrorBody`.
+//
+// ⚠️ It also means an ANONYMOUS caller can no longer drive the shared breaker
+// by finding an input that crashes a FastAPI handler — which is the SAME
+// property `recordFailures: false` (CR-04) exists to guarantee for the public
+// teaser, now held structurally for every surface. An unhandled exception is
+// attributable to the request, not to Railway's health.
 //
 // ⚠️ DELIBERATE DEVIATION FROM THE REVIEW'S LITERAL WORDING. The review asked
 // for "502/504 always records". 504 does (see `isEdgeOnlyStatus`), but a blanket
@@ -802,8 +834,56 @@ function isEdgeOnlyStatus(status: number): boolean {
 }
 
 /**
- * Does this response carry a well-formed JSON error envelope, i.e. did the
- * FastAPI application itself answer?
+ * The EXACT body Starlette's `ServerErrorMiddleware` writes for an UNHANDLED
+ * Python exception when `debug` is off — `PlainTextResponse("Internal Server
+ * Error", status_code=500)`, verified against the installed starlette 0.52.1
+ * (`starlette/middleware/errors.py`, `error_response`).
+ *
+ * Compared BYTE-FOR-BYTE, not by substring or prefix. That precision is the
+ * whole carve-out: it is the ONE plain-text 5xx we can attribute to the
+ * application with certainty, so widening the match is how a genuine
+ * infrastructure body ("502 Bad Gateway", an empty body, a proxy's own plain
+ * text) would start being excused.
+ */
+const STARLETTE_UNHANDLED_EXCEPTION_BODY = "Internal Server Error";
+
+/**
+ * Did the analytics APPLICATION author this error response, as opposed to the
+ * edge/proxy in front of it?
+ *
+ * TWO SHAPES COUNT AS "the container answered". Both are verified against the
+ * deployed stack rather than assumed:
+ *
+ *  1. `application/json` + a JSON OBJECT body. Every FastAPI `HTTPException`
+ *     lands here (`{"detail": …}`), which is how the F-1/F-2 sub-dependency
+ *     503s and per-key 500s stay off the breaker.
+ *
+ *  2. `text/plain` + status 500 + the body EXACTLY
+ *     `"Internal Server Error"` — Starlette's unhandled-exception response
+ *     (C6/C1). A *raised* HTTPException is JSON, but an UNHANDLED Python
+ *     exception never reaches `ExceptionMiddleware`: `ServerErrorMiddleware`
+ *     answers `PlainTextResponse("Internal Server Error", 500)` with
+ *     `text/plain; charset=utf-8`. `analytics-service/main.py:224` states this
+ *     in prose ("A raise escapes to ServerErrorMiddleware, which renders a 500
+ *     AND re-raises") and `analytics-client.ts:202` states it again.
+ *
+ *     THIS IS THE F-1/F-2 HAZARD REOPENED, NOT A NEW EXEMPTION.
+ *     `routers/internal.py:183` runs `supabase.table("api_keys")…execute()`
+ *     OUTSIDE any try, so a 30s Supabase blip while a page renders five
+ *     `KeyPermissionBadge`s (fetch-on-mount, failures uncached) produces five
+ *     `text/plain` 500s in 30s from a container that answered every one of them
+ *     — and under the JSON-only gate that denied the seam to EVERY tenant. The
+ *     evidence "Railway answered" is present either way; the content-type is
+ *     not what makes it evidence.
+ *
+ * HOW THE TWO PLAIN-TEXT POPULATIONS ARE TOLD APART, precisely:
+ *   - status must be exactly 500 (Starlette emits this at 500 and nowhere else;
+ *     a `text/plain` 502/503 is an edge and still RECORDS);
+ *   - the trimmed body must EQUAL the literal above (a truncated body, an empty
+ *     body, "502 Bad Gateway", a proxy's diagnostic text, or a debug traceback
+ *     all fail the equality and still RECORD);
+ *   - HTML error pages never reach this branch at all — `text/html` is not
+ *     `text/plain`, and the 2xx/4xx HTML arm above already records them.
  *
  * `res.clone()` so the caller's own `res.json()` / `res.text()` is untouched —
  * the core RETURNS the response and status interpretation belongs to the
@@ -811,15 +891,21 @@ function isEdgeOnlyStatus(status: number): boolean {
  * that flushes headers and then stalls the body is a genuine degradation shape,
  * and it must not extend a request whose outcome is already decided.
  *
- * Fails toward "no envelope" (i.e. toward RECORDING) on any doubt: a body we
- * cannot read or parse is exactly the infrastructure-fault evidence we are
- * looking for.
+ * Fails toward "not application-authored" (i.e. toward RECORDING) on any doubt:
+ * a body we cannot read or parse is exactly the infrastructure-fault evidence
+ * we are looking for.
  */
-async function hasJsonErrorEnvelope(res: Response): Promise<boolean> {
+async function hasApplicationAuthoredErrorBody(
+  res: Response,
+): Promise<boolean> {
   const contentType = res.headers.get("content-type") ?? "";
   // Same `.includes` shape analytics-client.ts already uses for this decision.
-  if (!contentType.includes("application/json")) return false;
+  const isJson = contentType.includes("application/json");
+  const isPlainText = contentType.includes("text/plain");
+  if (!isJson && !isPlainText) return false;
   try {
+    // ONE peek serves both shapes — a second clone+read would double the
+    // classifier's worst-case body budget on every 5xx.
     const peeked = await withStoreDeadline(
       res.clone().text(),
       "response envelope peek",
@@ -830,14 +916,20 @@ async function hasJsonErrorEnvelope(res: Response): Promise<boolean> {
       "record-failure",
     );
     if (peeked === STORE_TIMED_OUT) return false;
-    const parsed: unknown = JSON.parse(peeked);
-    // A JSON scalar (`null`, `"oops"`, `0`) is not an error envelope. FastAPI
-    // always emits an object — `{"detail": ...}` — and so does every handler in
-    // the service. Requiring an object keeps a proxy that returns bare `null`
-    // with a JSON content-type on the RECORD side.
-    return typeof parsed === "object" && parsed !== null;
+    if (isJson) {
+      const parsed: unknown = JSON.parse(peeked);
+      // A JSON scalar (`null`, `"oops"`, `0`) is not an error envelope. FastAPI
+      // always emits an object — `{"detail": ...}` — and so does every handler
+      // in the service. Requiring an object keeps a proxy that returns bare
+      // `null` with a JSON content-type on the RECORD side.
+      return typeof parsed === "object" && parsed !== null;
+    }
+    // text/plain: the Starlette unhandled-exception signature and nothing else.
+    return (
+      res.status === 500 && peeked.trim() === STARLETTE_UNHANDLED_EXCEPTION_BODY
+    );
   } catch {
-    // Unreadable or unparseable body behind a JSON content-type: the proxy, not
+    // Unreadable or unparseable body behind an app content-type: the proxy, not
     // the app, wrote this. Record.
     return false;
   }
@@ -867,8 +959,10 @@ async function shouldRecordResponseFailure(res: Response): Promise<boolean> {
     return contentType.includes("text/html");
   }
 
-  // 5xx: the app answers with a JSON envelope, the edge does not.
-  return !(await hasJsonErrorEnvelope(res));
+  // 5xx: the app answers with a JSON envelope — or, on an UNHANDLED Python
+  // exception, with Starlette's exact `text/plain` "Internal Server Error"
+  // (C1). The edge does neither.
+  return !(await hasApplicationAuthoredErrorBody(res));
 }
 
 /**

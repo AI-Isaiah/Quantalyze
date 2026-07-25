@@ -994,6 +994,93 @@ describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () =
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
   });
 
+  /**
+   * C1 — the `text/plain` population. There were ZERO of these tests before
+   * this block (`grep -n "text/plain" src/lib/resilient-fetch.test.ts` → no
+   * hits), which is exactly why the shape slipped through: the trip predicate
+   * gated on `application/json` and every fixture obliged.
+   *
+   * A *raised* HTTPException is JSON. An UNHANDLED Python exception never
+   * reaches ExceptionMiddleware — Starlette's ServerErrorMiddleware answers
+   * `PlainTextResponse("Internal Server Error", 500)` with
+   * `text/plain; charset=utf-8` (starlette 0.52.1). That is a container that
+   * ANSWERED, so it must not deny the seam to every tenant.
+   */
+  const STARLETTE_500_BODY = "Internal Server Error";
+  const STARLETTE_500_CONTENT_TYPE = "text/plain; charset=utf-8";
+
+  it("C1: Starlette's UNHANDLED-exception text/plain 500 does NOT trip", async () => {
+    // The live reproduction: internal.py:183 runs its api_keys SELECT OUTSIDE
+    // any try, so a Supabase blip while a page renders five KeyPermissionBadges
+    // (fetch-on-mount, failures uncached) is five of these inside 30s. Under
+    // the JSON-only gate that was a cross-tenant outage from one dependency
+    // wobble — F-1/F-2 reopened one content-type over.
+    bodyFetch(500, STARLETTE_500_BODY, STARLETTE_500_CONTENT_TYPE);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD * 2);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    // Not merely "the lock is unset" — the COUNTER must be untouched too, or a
+    // later genuine failure trips one increment early.
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("C1: a text/plain 500 with a DIFFERENT body DOES trip (the carve-out is byte-exact)", async () => {
+    // A proxy's own plain-text diagnostic. Same status, same content-type,
+    // opposite verdict — because the body is not the signature Starlette
+    // writes, so nothing here is evidence that the container answered.
+    bodyFetch(500, "upstream connect error or disconnect/reset before headers", STARLETTE_500_CONTENT_TYPE);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("C1: an EMPTY text/plain 5xx DOES trip", async () => {
+    // The edge answering with nothing at all is the loudest "the container did
+    // not handle this" signal in the plain-text population.
+    bodyFetch(502, "", STARLETTE_500_CONTENT_TYPE);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("C1: Starlette's exact body at a status OTHER than 500 DOES trip", async () => {
+    // Starlette emits that sentence at 500 and nowhere else, so a 503 carrying
+    // it is a proxy imitating an app response. Pinning the status keeps the
+    // carve-out from widening into "any plain-text 5xx saying the magic words".
+    bodyFetch(503, STARLETTE_500_BODY, STARLETTE_500_CONTENT_TYPE);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("C1: an HTML 500 still trips — text/html is not text/plain", async () => {
+    // The carve-out must not leak into the HTML population, which is the
+    // original infrastructure-fault evidence the whole predicate is built on.
+    edgeFetch(500);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("C1: the text/plain body is left INTACT for the caller after the peek", async () => {
+    // Same clone discipline as the JSON path: reading the original would turn
+    // every caller's `res.text()` into "body already consumed".
+    bodyFetch(500, STARLETTE_500_BODY, STARLETTE_500_CONTENT_TYPE);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch(
+      "keys-permissions",
+      "/internal/keys/x/permissions",
+      { method: "GET" },
+    );
+    await expect(res.text()).resolves.toBe(STARLETTE_500_BODY);
+  });
+
   it("D-10: a 200 carrying an HTML interstitial DOES trip", async () => {
     // A genuine outage the old predicate could not see at all: a "success" no
     // caller can parse. Scoped to text/html so a 204 can never be misread.
