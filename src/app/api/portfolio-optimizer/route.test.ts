@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
+// Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
+// leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
+// mocks that module wholesale (a bare factory), so the class read through it
+// would be `undefined` and `err instanceof undefined` throws a TypeError from
+// inside the route's own catch block (threat T-140-30). Nothing mocks the leaf,
+// and this file never calls vi.resetModules(), so a static import here is the
+// same class object the route narrows against.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 /**
  * Tests for POST /api/portfolio-optimizer — audit-2026-05-07 cluster A.
@@ -263,6 +271,63 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(200);
     expect(STATE.refundCalls).toHaveLength(0);
+  });
+
+  // Phase 140 / SEAM-04 (SC-5c). Status alone does NOT discriminate here: the
+  // pre-existing generic arm ALSO returns 503. What separates a breaker trip
+  // from "analytics unreachable" is the Retry-After cooldown and the distinct
+  // static copy — so both are asserted, not just the status.
+  it("SEAM-04: CircuitOpenError → 503 + Retry-After with the breaker's own TTL, distinct from the generic 503", async () => {
+    // 9, deliberately NOT the 30s breaker default (which is simultaneously
+    // BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S): a hardcoded "30" in the
+    // route would pass a 30-second fixture but fails this one.
+    STATE.optimizerImpl = async () => {
+      throw new CircuitOpenError(9);
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("9");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    // The route's own envelope shape is preserved on the new arm.
+    expect(body.status).toBe("failed");
+    expect(body.suggestions).toBeNull();
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    // M-0333 / T-140-17: the copy names no infrastructure.
+    expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
+  });
+
+  // red-team R-0002 consistency: this route already refunds the 5/min token on
+  // both upstream-failure arms (504 timeout, 503 unreachable) because the
+  // failure is upstream of the caller. A breaker trip is the PUREST case of
+  // that — the request was never even issued — so it must refund too. Without
+  // this, a Railway outage silently burns a legitimate user's whole budget on
+  // requests that never left Vercel.
+  it("red-team R-0002: the CIRCUIT_OPEN arm refunds the 5/min token", async () => {
+    STATE.optimizerImpl = async () => {
+      throw new CircuitOpenError(9);
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(503);
+    expect(STATE.refundCalls).toContain(
+      "optimizer:00000000-0000-0000-0000-000000000001",
+    );
+  });
+
+  // Phase 140 / SEAM-02: the route's deadline is owned by the ONE budget table
+  // (SEAM_BUDGETS["portfolio-optimizer"]), reached via the wrapper's budgetKey.
+  // The route must NOT pass a per-call timeout override — a local constant is
+  // exactly the scattered-budget drift the table exists to end, and it silently
+  // wins over the table whenever the two disagree.
+  it("SEAM-02: the route passes NO timeout override — the budget comes from the table", async () => {
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(res.status).toBe(200);
+    expect(STATE.optimizerCalls).toHaveLength(1);
+    expect(STATE.optimizerCalls[0].ms).toBeUndefined();
   });
 
   it("F5b: every response carries Cache-Control: private, no-store", async () => {
