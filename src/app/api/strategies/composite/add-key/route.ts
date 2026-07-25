@@ -12,11 +12,13 @@ import {
 } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
+import { MAX_COMPOSITE_MEMBERS_PROBED } from "@/lib/resilient-fetch";
 // The dependency-free leaf. `analytics-client` re-exports the class, but this
 // route must not depend on that re-export: it is wholesale-mocked by the route
 // test files, where `instanceof` against an undefined binding throws.
 import { CircuitOpenError } from "@/lib/seam-errors";
-import type { User } from "@supabase/supabase-js";
+import type { SupabaseClient, User } from "@supabase/supabase-js";
 
 /**
  * POST /api/strategies/composite/add-key — the multi-key wizard's per-key
@@ -240,6 +242,68 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // RPC's 'wizcomposite:' advisory-lock + select-existing fence supplies the
   // DRAFT dedup (double-click safety) without blocking the per-key add.
   const supabase = await createClient();
+
+  // ── F-8 — SURFACE THE COMPOSITE CAP AT ADD TIME, NOT AT SUBMIT ────────────
+  //
+  // `MAX_COMPOSITE_MEMBERS_PROBED` was enforced ONLY by finalize-wizard, so an
+  // 11-key composite was fully constructible: the user connected every key —
+  // each one a live exchange validate + encrypt round trip across the seam,
+  // each one minting a real encrypted api_keys row — and was refused only at
+  // the very end, after all of that cost was spent and with no hint that key 11
+  // was the problem. Refusing HERE means the limit is discovered at the key
+  // that crosses it, before its credentials are validated, encrypted or stored.
+  //
+  // ⚠️ THIS IS A UX PRE-CHECK, NOT THE ENFORCEMENT POINT. finalize-wizard's
+  // refusal remains the authority (it is what makes the `calls` column in
+  // SEAM_ROUTE_BUDGETS a checked fact). Two consequences follow deliberately:
+  //   * a READ FAILURE FAILS OPEN. A transient count error must not block a
+  //     legitimate second key; submit still refuses an over-cap composite, so
+  //     the invariant cannot be defeated by degrading this read.
+  //   * a race between two concurrent adds can land one key over the cap. Also
+  //     fine, for the same reason — the authority is downstream.
+  //
+  // The draft predicate is the RPC's own, verbatim (`add_wizard_composite_key`,
+  // migration 20260710180000): the (user, session) strategies row with a NULL
+  // api_key_id. Matching it exactly is what makes this count the same
+  // membership finalize will later probe.
+  const { data: existingDraft, error: draftErr } = await supabase
+    .from("strategies")
+    .select("id")
+    .eq("user_id", user.id)
+    .eq("wizard_session_id", wizard_session_id)
+    .is("api_key_id", null)
+    .maybeSingle();
+
+  if (draftErr) {
+    console.warn(
+      "[strategies/composite/add-key] member pre-count draft lookup failed; allowing the add (submit still enforces the cap):",
+      draftErr.message,
+    );
+  } else if (existingDraft?.id) {
+    const { count, error: countErr } = await (
+      supabase as unknown as SupabaseClient
+    )
+      .from("strategy_keys")
+      // `head: true` — we want the COUNT, never the rows: this table joins to
+      // encrypted credentials and there is no reason to pull any of it here.
+      .select("api_key_id", { count: "exact", head: true })
+      .eq("strategy_id", existingDraft.id);
+
+    if (countErr) {
+      console.warn(
+        "[strategies/composite/add-key] member pre-count failed; allowing the add (submit still enforces the cap):",
+        countErr.message,
+      );
+    } else if ((count ?? 0) >= MAX_COMPOSITE_MEMBERS_PROBED) {
+      return NextResponse.json(
+        {
+          code: "COMPOSITE_TOO_MANY_MEMBERS" satisfies WizardErrorCode,
+          error: "This strategy already has the maximum number of keys.",
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      );
+    }
+  }
 
   const exchangeNormalized = exchange.toLowerCase();
   const passphraseOrNull =

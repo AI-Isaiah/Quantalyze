@@ -19,6 +19,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
+import { MAX_COMPOSITE_MEMBERS_PROBED } from "@/lib/resilient-fetch";
 
 vi.mock("server-only", () => ({}));
 
@@ -51,11 +52,69 @@ vi.mock("@/lib/analytics-client", () => ({
 }));
 
 const rpcMock = vi.fn();
+/**
+ * Phase 140 review / F-8 — the route now runs a member PRE-COUNT before the
+ * seam calls, so the mock grows two reads:
+ *
+ *   from("strategies")   -> the composite draft (RPC predicate, verbatim)
+ *   from("strategy_keys") -> a head/count of that draft's members
+ *
+ * `memberState` drives them. Defaults are "no draft yet", which is the shape
+ * every pre-existing case in this file assumed and which keeps them byte-
+ * unchanged (the pre-count is skipped entirely when there is no draft).
+ */
+const memberState = vi.hoisted(() => ({
+  /** null → no composite draft exists for this session yet. */
+  draftId: null as string | null,
+  /** Current strategy_keys count for that draft. */
+  memberCount: 0,
+  /** When set, the draft lookup errors (must FAIL OPEN). */
+  draftError: null as { message: string } | null,
+  /** When set, the count read errors (must FAIL OPEN). */
+  countError: null as { message: string } | null,
+}));
+
 vi.mock("@/lib/supabase/server", () => ({
-  // The composite add-key route calls ONLY supabase.rpc — no app-layer
-  // draft SELECT (no F6 short-circuit) and no asset_class force-derive UPDATE.
+  // Besides supabase.rpc, the route runs the F-8 member pre-count: a
+  // `strategies` draft lookup and a `strategy_keys` head-count.
   createClient: async () => ({
     rpc: (...args: unknown[]) => rpcMock(...args),
+    from: (table: string) => {
+      if (table === "strategies") {
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          is: () => chain,
+          maybeSingle: async () => ({
+            data: memberState.draftId ? { id: memberState.draftId } : null,
+            error: memberState.draftError,
+          }),
+        };
+        return chain;
+      }
+      if (table === "strategy_keys") {
+        // PostgREST's builder is THENABLE: with `head: true` there is no
+        // maybeSingle(), the awaited builder itself resolves to
+        // { count, error }. Model that faithfully — an early-resolving
+        // `select()` would not survive the route's `.eq()` chain.
+        const chain = {
+          select: () => chain,
+          eq: () => chain,
+          then: (
+            resolve: (v: {
+              count: number;
+              error: { message: string } | null;
+            }) => unknown,
+          ) =>
+            resolve({
+              count: memberState.memberCount,
+              error: memberState.countError,
+            }),
+        };
+        return chain;
+      }
+      throw new Error(`unexpected table read: ${table}`);
+    },
   }),
 }));
 
@@ -93,6 +152,12 @@ function makeReq(body: unknown): NextRequest {
 }
 
 function resetHappyMocks() {
+  // F-8 pre-count defaults: no composite draft yet, so the pre-count is
+  // skipped entirely and every pre-existing case behaves as before.
+  memberState.draftId = null;
+  memberState.memberCount = 0;
+  memberState.draftError = null;
+  memberState.countError = null;
   validateKeyMock.mockReset();
   encryptKeyMock.mockReset();
   rpcMock.mockReset();
@@ -765,5 +830,81 @@ describe("POST /api/strategies/composite/add-key — circuit-breaker trip (SEAM-
     // Retry-After is breaker-specific — it must NOT appear on other 5xx paths.
     expect(res.headers.get("Retry-After")).toBeNull();
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * Phase 140 review / F-8 — the composite cap must be discoverable at the key
+ * that crosses it, not after every key has already been paid for.
+ *
+ * MAX_COMPOSITE_MEMBERS_PROBED was enforced ONLY by finalize-wizard, so an
+ * 11-key composite was fully constructible: the user connected every key — each
+ * a live exchange validate + encrypt round trip across the seam, each minting a
+ * real encrypted api_keys row — and was refused only at submit, after all that
+ * cost, with no hint that key 11 was the problem.
+ */
+describe("POST /api/strategies/composite/add-key — F-8 member cap at add time", () => {
+  beforeEach(resetHappyMocks);
+
+  it("refuses the over-cap add BEFORE spending either seam call", async () => {
+    memberState.draftId = STRATEGY_ID;
+    memberState.memberCount = MAX_COMPOSITE_MEMBERS_PROBED;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    // THE point of moving the check: no live exchange probe, no encrypt, and no
+    // api_keys row minted for a key that can never be submitted.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("allows the add that reaches exactly the cap", async () => {
+    // Off-by-one fence: at cap-1 members this add is the LAST legal one.
+    memberState.draftId = STRATEGY_ID;
+    memberState.memberCount = MAX_COMPOSITE_MEMBERS_PROBED - 1;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).toHaveBeenCalledTimes(1);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { label: "the draft lookup", set: () => (memberState.draftError = { message: "pg blip" }) },
+    { label: "the count read", set: () => (memberState.countError = { message: "pg blip" }) },
+  ])("FAILS OPEN when $label errors — submit remains the authority", async ({ set }) => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    memberState.draftId = STRATEGY_ID;
+    memberState.memberCount = MAX_COMPOSITE_MEMBERS_PROBED;
+    set();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // A transient read failure must NOT block a legitimate second key. The
+    // invariant cannot be defeated by this, because finalize-wizard still
+    // refuses an over-cap composite.
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    // Never silent — a degraded pre-check is an operational fact.
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("skips the pre-count entirely for the FIRST key of a session", async () => {
+    // No draft exists yet, so there is nothing to count and nothing to refuse.
+    memberState.draftId = null;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
   });
 });
