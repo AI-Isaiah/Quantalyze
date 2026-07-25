@@ -53,8 +53,14 @@ import { seedBreakerOpen } from "@/test/helpers/upstash-breaker";
  *
  * Two host details the fork requires, and why they are set up rather than
  * mocked away:
- *   - `globalThis.AsyncLocalStorage` — installed in the `vi.hoisted` block
- *     below; see its comment for the ordering hazard.
+ *   - `globalThis.AsyncLocalStorage` — installed statically by
+ *     `src/test-setup.ts` (see the HOST GLOBAL note at the top of this file).
+ *     It was originally installed from an ASYNC `vi.hoisted` block here, which
+ *     raced this file's own imports: `await import("node:async_hooks")` resolves
+ *     on a later microtask than Next's one-shot module-eval read, so ~1 full-suite
+ *     run in 3 reported a plausible-but-wrong status instead of an obvious
+ *     harness error. Setup files are fully awaited before any test module loads,
+ *     which is why the install belongs there and NOT in a hoisted block.
  *   - `globalThis.__incrementalCache` — outside a render, `unstable_cache`
  *     throws an invariant without one. The fake is a Map with the exact
  *     `generateSimpleCacheKey` / `get` / `set` surface the fork calls.

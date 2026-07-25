@@ -11,9 +11,19 @@
  * supplies its own wiring:
  *
  * ```ts
- * // The store MUST be hoisted. vi.mock factories RE-RUN on vi.resetModules(),
- * // so a factory-local store silently turns a shared-state breaker into an
- * // in-memory one and the cross-context test passes for the wrong reason.
+ * // The store MUST be hoisted, so that it lives OUTSIDE any module registry
+ * // that vi.resetModules() tears down — that is what lets one context observe
+ * // state another context wrote, which is the whole point of the SC-2 proof.
+ * //
+ * // ⚠️ Do NOT justify this with "vi.mock factories re-run on resetModules()".
+ * // That is FALSE on vitest 4.1.10 — measured directly in Phase 140: a factory
+ * // incrementing a hoisted counter reports 1 execution both before and after
+ * // resetModules(). Factories are cached; only NON-mocked module bodies re-run.
+ * // Building a negative control on the false premise yields a silent FALSE
+ * // GREEN (context B keeps the cached, already-tripped store and short-circuits,
+ * // so the control never fires). The per-context hook that DOES exist is
+ * // Redis.fromEnv(), called once per module-body execution — hang per-context
+ * // setup off that. See the header of src/lib/resilient-fetch.test.ts.
  * const shared = vi.hoisted(() => ({
  *   store: new Map<string, { value: string; expiresAt: number }>(),
  * }));
