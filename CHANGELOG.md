@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.49.3.0] - 2026-07-25
+### v1.15 MT5 — two more mt5linux 0.1.9 arg-form bugs (soak leg 2 + reconstruction)
+The soak's login now connects (v0.49.2.0), which surfaced two more mt5linux 0.1.9
+remote-eval arg quirks — it f-string-interpolates args into a Wine-side `eval`. Both
+fixed in `services/mt5_client.py`, verified live against the prod gateway. Still DARK.
+
+- **`order_check` rejected a positional dict** with retcode `-2 'Unnamed arguments not
+  allowed'` — breaking the read-only investor proof and the validate probe. mt5linux
+  evals `mt5.order_check(*args, **kwargs)`, and MT5 wants named fields, so the client
+  now passes `order_check(**request)` → `order_check(action=…, symbol=…)` (live: retcode
+  0 'Done').
+- **`history_deals_get` NameError'd on `datetime` bounds** — a `datetime` interpolates
+  as `datetime.datetime(...)`, but 0.1.9's remote namespace has no `datetime` import
+  (0.1.10 added it; we pin 0.1.9). The client now coerces window bounds to int epoch
+  seconds, so the soak (tz-aware datetimes) and the worker (ints) both work.
+
 ## [0.49.2.0] - 2026-07-25
 ### v1.15 MT5 go-live connect-path fixes (surfaced by running the live soak)
 Running the go-live soak against the prod gateway on the real Vantage account
