@@ -157,10 +157,20 @@ def _forward_terminal_nav(
 ) -> float:
     """Roll the equity curve FORWARD from ``initial`` using the flow-in-numerator
     identity NAV_t = NAV_{t-1}·(1+r_t) + F_t — the SAME roll the 136-03 oracle uses
-    (test_mt5_derive_branch.py:594). Independent of the SUT's own NAV levels."""
+    (test_mt5_derive_branch.py:594). Independent of the SUT's own NAV levels.
+
+    Rolls over the UNION of return-days and flow-days (WR-01 fix): an account funded
+    INSIDE the window (first deposit before its first computable return, e.g. the
+    03-17 deposit vs a 03-20 return start — day-0's return NaN-breaks because prior
+    NAV is 0) has flow days that are NOT return days. Iterating only ``returns_by_day``
+    dropped those deposits from the roll while ``initial`` still subtracted them,
+    reconstructing ≈0 and FALSE-failing the fidelity gate. A flow-only day carries a
+    0.0 return (``returns_by_day.get(day, 0.0)``) so the deposit lands at the right
+    point (0·1 + D); a NaN-broken day's pnl lands additively-uncompounded, immaterial
+    for the deposit-only lead-in this guards."""
     nav = initial
-    for day in sorted(returns_by_day):
-        nav = nav * (1.0 + returns_by_day[day]) + flows_by_day.get(day, 0.0)
+    for day in sorted(set(returns_by_day) | set(flows_by_day)):
+        nav = nav * (1.0 + returns_by_day.get(day, 0.0)) + flows_by_day.get(day, 0.0)
     return nav
 
 

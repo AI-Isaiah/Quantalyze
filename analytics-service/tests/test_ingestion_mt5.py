@@ -76,6 +76,13 @@ class _FakeMt5:
         self._scenario = scenario
         self.shutdown_calls = 0
 
+    def initialize(self):
+        # Real login() attaches the terminal IPC via initialize() before login().
+        exc = self._scenario.get("initialize_raises")
+        if exc is not None:
+            raise exc
+        return self._scenario.get("initialize", True)
+
     def login(self, login, **kwargs):
         exc = self._scenario.get("login_raises")
         if exc is not None:

@@ -488,3 +488,18 @@ def test_source_composes_not_reimplements():
     assert "combine_mt5_deal_ledger" in text
     assert "sanitize_evidence" in text
     assert "order_send(" not in text
+
+
+def test_forward_terminal_nav_includes_flow_only_days():
+    """WR-01 regression (red-team FABLE, 2026-07-25): a deposit on a day with NO
+    computable return — an account funded INSIDE the window, whose day-0 return
+    NaN-breaks because prior NAV is 0 — must still be included in the forward roll.
+    Iterating only ``returns_by_day`` dropped that deposit while ``initial`` still
+    subtracted it, reconstructing ~0 and FALSE-failing the fidelity gate for exactly
+    the real prod account (first $10k deposit 03-17, first return 03-20). Rolling over
+    the UNION of return-days and flow-days lands the deposit at the right point."""
+    returns_by_day = {"2026-03-20": 0.10}  # returns start day 3; funding day has none
+    flows_by_day = {"2026-03-17": 100_000.0, "2026-03-20": 0.0}
+    # initial = 0 (funded-inside-window). day1 deposit: 0*(1+0)+100000; day3: 100000*1.10.
+    nav = _forward_terminal_nav(returns_by_day, initial=0.0, flows_by_day=flows_by_day)
+    assert nav == pytest.approx(110_000.0)  # pre-fix (return-days only) reconstructs 0.0
