@@ -733,6 +733,49 @@ describe("resilientFetch breaker short-circuit", () => {
     expect(lock!.expiresAt).toBeGreaterThan(Date.now());
   });
 
+  /**
+   * Phase 140 review / G5 — ONE BREAKER KEY, ACROSS CALL SITES.
+   *
+   * Locked decision 2 is that both clients hit the same physical Railway
+   * deployment, so a single `breaker:railway` key is shared by every budget —
+   * two breakers could disagree about whether the service is up. Every existing
+   * short-circuit test drove `bridge` on BOTH sides, which passes just as well
+   * if the key were secretly per-budget. That is the shape of a false green:
+   * the property under test (sharing) is the one the test cannot observe.
+   *
+   * Driven as a table across genuinely different call sites — different
+   * clients, different budgets, different Vercel routes — so a
+   * `${BREAKER_KEY}:${budgetKey}` regression (which is exactly the T-140-01
+   * sharding hazard the key's docblock warns about) reddens here.
+   */
+  it.each([
+    { tripWith: "bridge", assertOn: "process-key-sync", path: "/process-key" },
+    { tripWith: "process-key-sync", assertOn: "bridge", path: "/api/portfolio-bridge" },
+    { tripWith: "keys-permissions", assertOn: "validate-key", path: "/api/validate-key" },
+    { tripWith: "match-eval", assertOn: "simulator", path: "/api/simulator" },
+  ] as const)(
+    "G5: a trip driven by '$tripWith' short-circuits '$assertOn'",
+    async ({ tripWith, assertOn, path }) => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const fetchA = edgeFetch(502);
+      const mod = await import("./resilient-fetch");
+
+      for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+        await mod.resilientFetch(tripWith, "/whatever", { method: "POST" });
+      }
+      expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+      expect(fetchA).toHaveBeenCalledTimes(mod.BREAKER_FAILURE_THRESHOLD);
+
+      // A DIFFERENT call site must now be refused without touching Railway.
+      vi.unstubAllGlobals();
+      const fetchB = okFetch();
+      await expect(
+        mod.resilientFetch(assertOn, path, { method: "POST" }),
+      ).rejects.toBeInstanceOf(mod.CircuitOpenError);
+      expect(fetchB).not.toHaveBeenCalled();
+    },
+  );
+
   it("negative control: with a per-context store the second context does NOT short-circuit", async () => {
     // SC-2-neg. Without this, the passing cross-context test cannot be
     // distinguished from "the test never really created a second context".

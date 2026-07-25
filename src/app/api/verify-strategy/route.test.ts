@@ -403,3 +403,78 @@ describe("CR-04/CR-05 — the public teaser opts out of DRIVING the shared break
     expect(args.flow_type).toBe("teaser");
   });
 });
+
+/**
+ * Phase 140 review / G6 — the PUBLIC teaser inherits the breaker envelope
+ * structurally, and nothing pinned it.
+ *
+ * verify-strategy, csv-validate and csv-finalize all reach the seam through
+ * `postProcessKey` and forward `result.response` verbatim, so they get the
+ * SEAM-04 503 for free. "For free" is exactly the problem: a refactor that
+ * stopped forwarding the response, or that swallowed the envelope into a
+ * generic 500, would break the phase's headline behaviour on the most-trafficked
+ * seam route in the product with no test going red anywhere.
+ *
+ * Driven through the REAL `process-key-client` with only the resilience core
+ * faked, so this proves the envelope is genuinely CONSTRUCTED and FORWARDED —
+ * a `vi.mock` of postProcessKey would only prove the route returns whatever it
+ * is handed.
+ */
+describe("POST /api/verify-strategy — G6 breaker envelope pass-through", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards the 503 CIRCUIT_OPEN envelope when the circuit is open", async () => {
+    vi.doMock("@/lib/resilient-fetch", async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import("@/lib/resilient-fetch")>();
+      const { CircuitOpenError } = await import("@/lib/seam-errors");
+      return {
+        ...actual,
+        resilientFetch: vi.fn(async () => {
+          // The live TTL — deliberately NOT 30 — so the CR-05 assertion below
+          // cannot pass by coincidence.
+          throw new CircuitOpenError(17);
+        }),
+      };
+    });
+    // Earlier cases in this file `vi.doMock` process-key-client, and those
+    // registrations persist for the whole file. Undo it explicitly: this test
+    // is only meaningful against the REAL client, which is what actually
+    // constructs the envelope.
+    vi.doUnmock("@/lib/process-key-client");
+    // The real client resolves a correlation id via next/headers, which needs a
+    // request scope this harness does not provide. Stub the id only — the
+    // envelope construction under test is untouched by it.
+    vi.doMock("@/lib/correlation-id", () => ({
+      getCorrelationId: async () => "corr-g6",
+      CORRELATION_HEADER: "x-correlation-id",
+    }));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.INTERNAL_API_TOKEN = "test-internal-token";
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    expect(body.recoverable).toBe(true);
+    // STATIC copy (T-140-08): this body renders directly on an unauthenticated
+    // landing page, so it carries no upstream URL, status or error detail.
+    expect(body.human_message).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    expect(JSON.stringify(body)).not.toContain("localhost:8002");
+
+    // CR-05 — the PUBLIC surface gets the STATIC cooldown, never the live TTL.
+    // The real TTL is a free, timestamped readout of production health from an
+    // anonymous surface; 17 above must NOT appear.
+    const { DEFAULT_RETRY_AFTER_S } = await import("@/lib/resilient-fetch");
+    expect(res.headers.get("Retry-After")).toBe(String(DEFAULT_RETRY_AFTER_S));
+    expect(res.headers.get("Retry-After")).not.toBe("17");
+  });
+});

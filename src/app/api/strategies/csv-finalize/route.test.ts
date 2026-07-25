@@ -107,7 +107,7 @@ vi.mock("next/server", async () => {
   return { ...actual, after: afterMock };
 });
 
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { POST } from "@/app/api/strategies/csv-finalize/route";
 import { captureToSentry } from "@/lib/sentry-capture";
 
@@ -262,5 +262,55 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     expect(String(body.human_message)).toContain("entry_context");
     expect(rpcCall("finalize_csv_strategy")).toBeUndefined();
     expect(postProcessKeyMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 140 review / G6 — the breaker envelope pass-through.
+ *
+ * csv-finalize reaches the seam through `postProcessKey` and forwards
+ * `result.response` verbatim, so it inherits the SEAM-04 503 for free. "For
+ * free" is the problem: a refactor that stopped forwarding the response, or
+ * that folded it into a generic 500/`ok:true`, would silently break the phase's
+ * headline behaviour on this route with no test going red.
+ *
+ * The envelope's CONSTRUCTION is proven against the real client in
+ * process-key-client.test.ts and verify-strategy/route.test.ts; what is pinned
+ * here is that this route hands it to the caller UNCHANGED — status, code and
+ * Retry-After all intact.
+ */
+describe("POST /api/strategies/csv-finalize — G6 breaker envelope pass-through", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+  });
+
+  it("forwards the 503 CIRCUIT_OPEN envelope verbatim", async () => {
+    postProcessKeyMock.mockResolvedValue({
+      ok: false,
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "CIRCUIT_OPEN",
+          human_message:
+            "The analytics service is temporarily unavailable. Please try again in a moment.",
+          correlation_id: "corr-g6",
+          recoverable: true,
+        },
+        { status: 503, headers: { "Retry-After": "23" } },
+      ),
+    } as never);
+
+    const res = await POST(makeRequest(validBody()));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    expect(body.recoverable).toBe(true);
+    // The hint is what makes the failure actionable; dropping it on the way
+    // through would be invisible without this assertion.
+    expect(res.headers.get("Retry-After")).toBe("23");
+    // Fails CLOSED — nothing was written when the seam never ran.
+    expect(rpcCall("finalize_csv_strategy")).toBeUndefined();
   });
 });
