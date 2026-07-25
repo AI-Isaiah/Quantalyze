@@ -142,13 +142,43 @@ vi.mock("@upstash/ratelimit", async () => {
 const ORIGINAL_ENV = { ...process.env };
 
 /**
- * Install a fetch mock resolving a Response-shaped stub with `status`.
- * A bare object rather than `new Response()` so a 204/304 status is
- * expressible and nothing depends on jsdom's Response implementation.
+ * Install a fetch mock resolving what the PYTHON SERVICE really sends: a
+ * FastAPI `HTTPException` JSON envelope (`{"detail": …}`) under an
+ * `application/json` content-type, at `status`.
+ *
+ * REAL `Response` objects, not bare `{ok, status}` stubs (Phase 140 review /
+ * F-1). The classifier's whole job is now to read the content-type and peek at
+ * the body, so a stub without those cannot exercise it — and, worse, a stub
+ * that lacks them would let a broken classifier pass. A fresh Response PER
+ * CALL because a body may only be consumed once.
  */
 function okFetch(status = 200): FetchMock {
   const mock = installFetchMock();
-  mock.mockResolvedValue({ ok: status < 400, status } as Response);
+  mock.mockImplementation(
+    async () =>
+      new Response(JSON.stringify({ detail: "handled by the application" }), {
+        status,
+        headers: { "content-type": "application/json" },
+      }),
+  );
+  return mock;
+}
+
+/**
+ * Install a fetch mock resolving what the RAILWAY EDGE sends when the
+ * container is down or unresponsive: an HTML error page, not a FastAPI
+ * envelope. This is the shape of a genuine "the analytics service is not
+ * answering" 5xx on the wire, and the one that must drive the breaker.
+ */
+function edgeFetch(status = 502): FetchMock {
+  const mock = installFetchMock();
+  mock.mockImplementation(
+    async () =>
+      new Response(
+        "<!DOCTYPE html><html><body><h1>Application failed to respond</h1></body></html>",
+        { status, headers: { "content-type": "text/html; charset=utf-8" } },
+      ),
+  );
   return mock;
 }
 
@@ -427,7 +457,7 @@ describe("recordSeamFailure", () => {
 });
 
 describe("resilientFetch breaker short-circuit", () => {
-  /** Drive `n` 5xx responses through the engine to load the failure counter. */
+  /** Drive `n` EDGE-shaped 5xx responses through the engine to load the counter. */
   async function driveFailures(
     mod: typeof import("./resilient-fetch"),
     n: number,
@@ -443,7 +473,7 @@ describe("resilientFetch breaker short-circuit", () => {
     // SC-2. vi.resetModules() re-executes the module body, which is exactly
     // what recreates any module-scope `let breakerState`. An in-memory breaker
     // therefore CANNOT pass this test; only state in the shared store can.
-    const fetchA = okFetch(503);
+    const fetchA = edgeFetch(503);
     const a = await import("./resilient-fetch");
     await driveFailures(a, a.BREAKER_FAILURE_THRESHOLD);
     expect(shared.store.get(a.BREAKER_KEY)?.value).toBe("open");
@@ -487,7 +517,7 @@ describe("resilientFetch breaker short-circuit", () => {
     shared.mode.sharedStore = false;
     vi.resetModules();
 
-    const fetchA = okFetch(503);
+    const fetchA = edgeFetch(503);
     const a = await import("./resilient-fetch");
     await driveFailures(a, a.BREAKER_FAILURE_THRESHOLD);
     expect(fetchA).toHaveBeenCalledTimes(a.BREAKER_FAILURE_THRESHOLD);
@@ -535,13 +565,6 @@ describe("resilientFetch failure classification", () => {
     expect(fetchMock.mock.calls.length).toBe(before + 1);
   });
 
-  it("trips on HTTP 5xx", async () => {
-    okFetch(503);
-    const mod = await import("./resilient-fetch");
-    await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, false);
-    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
-  });
-
   it("trips on deadline (TimeoutError) rejections", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const fetchMock = installFetchMock();
@@ -556,6 +579,8 @@ describe("resilientFetch failure classification", () => {
   it("trips on network TypeError throws", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const fetchMock = installFetchMock();
+    // undici's ONE network-failure shape, verified on Node 22 and Node 25 for
+    // ECONNREFUSED, DNS ENOTFOUND and TLS expiry alike.
     fetchMock.mockRejectedValue(new TypeError("fetch failed"));
     const mod = await import("./resilient-fetch");
     await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, true);
@@ -574,6 +599,189 @@ describe("resilientFetch failure classification", () => {
     await expect(
       mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
     ).rejects.toBe(original);
+  });
+});
+
+/**
+ * Phase 140 review / F-1, F-2, D-9, D-10 — "5xx means Railway is degraded" is
+ * FALSE for this service, and the breaker was built on it.
+ *
+ * Each test below pins one arm of the replacement rule against the response the
+ * PYTHON SOURCE actually emits at the cited line. The arms are the reason the
+ * predicate is body-shaped rather than status-shaped; a regression in any one
+ * of them is a cross-tenant outage driven by a single unhealthy sub-dependency
+ * or a single corrupt key row.
+ */
+describe("breaker records only INFRASTRUCTURE failures (F-1/F-2/D-9/D-10)", () => {
+  /** Install a fetch mock with an explicit body + content-type at `status`. */
+  function bodyFetch(
+    status: number,
+    body: string,
+    contentType: string | null,
+  ): FetchMock {
+    const mock = installFetchMock();
+    mock.mockImplementation(
+      async () =>
+        new Response(body, {
+          status,
+          ...(contentType ? { headers: { "content-type": contentType } } : {}),
+        }),
+    );
+    return mock;
+  }
+
+  /** Drive `n` responses; assert the breaker's final state. */
+  async function driveN(
+    mod: typeof import("./resilient-fetch"),
+    n: number,
+  ): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await mod.resilientFetch("keys-permissions", "/internal/keys/x/permissions", {
+        method: "GET",
+      });
+    }
+  }
+
+  it("MT5-gateway 503 does NOT trip (exchange.py:215/220/235/238)", async () => {
+    // The MT5 gateway is a SEPARATE Railway service that restarts on every
+    // deploy. `_validate_mt5_key` answers 503 + NETWORK_ERROR_DETAIL while it
+    // is down — from a perfectly healthy analytics service. Counting these
+    // denied key-connect, sync, the optimizer and admin match to every tenant
+    // for the cooldown, on every unrelated gateway rollout.
+    bodyFetch(
+      503,
+      JSON.stringify({
+        detail: "Could not reach the exchange. Please try again in a moment.",
+      }),
+      "application/json",
+    );
+    const mod = await import("./resilient-fetch");
+    // Twice the threshold: an off-by-one cannot mask a regression.
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD * 2);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    // Not merely "the lock is unset" — the COUNTER must be untouched too, or a
+    // later genuine failure trips one increment early.
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("per-key decrypt 500 does NOT trip (internal.py:214)", async () => {
+    // ONE corrupt key row answers 500 deterministically, forever. The badge
+    // fetches on mount and the route does not cache failures, so five key
+    // cards on one page were five increments.
+    bodyFetch(
+      500,
+      JSON.stringify({ detail: "Failed to decrypt credentials" }),
+      "application/json",
+    );
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD * 2);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("application-level 502 does NOT trip (internal.py:326/339)", async () => {
+    // "Exchange permission probe failed" is the USER'S exchange being down.
+    // This is why the rule is not "502 always records": that would have
+    // reproduced F-2 one status code over.
+    bodyFetch(
+      502,
+      JSON.stringify({ detail: "Exchange permission probe failed" }),
+      "application/json",
+    );
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD * 2);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+  });
+
+  it("EDGE 502 (HTML body) DOES trip", async () => {
+    // The counterpart to the test above, and the reason the discriminator is
+    // the BODY: same status, opposite verdict, because the container never
+    // handled this one.
+    edgeFetch(502);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("504 DOES trip even with a JSON body (the service never emits 504)", async () => {
+    // Verified by exhaustive grep of analytics-service: zero `status_code=504`.
+    // Its only possible origin is the platform reporting no answer.
+    bodyFetch(504, JSON.stringify({ detail: "upstream timeout" }), "application/json");
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("5xx with an UNPARSEABLE body behind a JSON content-type DOES trip", async () => {
+    // A proxy that truncates the response mid-flight. The content-type lies;
+    // the body is the evidence.
+    bodyFetch(500, '{"detail": "trunca', "application/json");
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("D-10: a 200 carrying an HTML interstitial DOES trip", async () => {
+    // A genuine outage the old predicate could not see at all: a "success" no
+    // caller can parse. Scoped to text/html so a 204 can never be misread.
+    edgeFetch(200);
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD);
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("a 204 No Content (no content-type) does NOT trip", async () => {
+    // The guard on scoping the 2xx arm to text/html rather than "not JSON".
+    const mock = installFetchMock();
+    mock.mockImplementation(async () => new Response(null, { status: 204 }));
+    const mod = await import("./resilient-fetch");
+    await driveN(mod, mod.BREAKER_FAILURE_THRESHOLD * 2);
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+  });
+
+  it("D-9: a caller-fault TypeError does NOT trip", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = installFetchMock();
+    // A header we built wrong. Verified real undici message shape; it carries
+    // NO information about Railway's health, and under the old classification
+    // it drove the shared breaker on every single request.
+    fetchMock.mockRejectedValue(
+      new TypeError('Headers.append: "a\nb" is an invalid header value.'),
+    );
+    const mod = await import("./resilient-fetch");
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD * 2; i++) {
+      await expect(
+        mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("the response body is left INTACT for the caller after the peek", async () => {
+    // The classifier clones. If it ever read the original instead, every
+    // caller's `res.json()` would throw "body already consumed" — turning the
+    // fix into a far worse outage than the bug.
+    bodyFetch(500, JSON.stringify({ detail: "Failed to decrypt credentials" }), "application/json");
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch(
+      "keys-permissions",
+      "/internal/keys/x/permissions",
+      { method: "GET" },
+    );
+    await expect(res.json()).resolves.toEqual({
+      detail: "Failed to decrypt credentials",
+    });
   });
 });
 
@@ -607,7 +815,7 @@ describe("resilientFetch — recordFailures opt-out (CR-04)", () => {
   }
 
   it("recordFailures:false — upstream 5xx does NOT increment the breaker counter", async () => {
-    okFetch(500);
+    edgeFetch(500);
     const mod = await import("./resilient-fetch");
 
     // Twice the threshold, so an off-by-one in the counter cannot mask it.
@@ -626,7 +834,7 @@ describe("resilientFetch — recordFailures opt-out (CR-04)", () => {
   it("POSITIVE CONTROL: the identical drive WITH the default does trip", async () => {
     // Without this, the test above cannot be distinguished from "the 5xx arm
     // stopped recording for everyone".
-    okFetch(500);
+    edgeFetch(500);
     const mod = await import("./resilient-fetch");
 
     await drive5xx(mod, mod.BREAKER_FAILURE_THRESHOLD, {});

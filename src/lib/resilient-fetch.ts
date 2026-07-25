@@ -142,6 +142,17 @@ export const DEFAULT_RETRY_AFTER_S = 30;
 export const BREAKER_STORE_TIMEOUT_MS = 250;
 
 /**
+ * Budget for the ONE body read the failure classifier performs (the 5xx
+ * envelope peek below). Same reasoning as `BREAKER_STORE_TIMEOUT_MS`: the peek
+ * runs on a response that has ALREADY resolved, but `.text()` still streams,
+ * and a proxy that returns headers and then stalls the body is a real
+ * degradation shape. A peek we cannot complete promptly is treated as "no
+ * readable envelope", which is itself the infrastructure-fault signal — so the
+ * timeout arm fails toward RECORDING, not toward silence.
+ */
+export const BREAKER_BODY_PEEK_TIMEOUT_MS = 250;
+
+/**
  * Retries performed by the core. ZERO in this phase, by design.
  *
  * Phase 141 raises this ONLY for calls the SEAM-05 idempotency audit
@@ -436,18 +447,19 @@ const redis =
       })
     : null;
 
-/** Sentinel distinguishing "the store did not answer in time" from a real value. */
+/** Sentinel distinguishing "the operation did not answer in time" from a real value. */
 const STORE_TIMED_OUT = Symbol("breaker-store-timeout");
 
 /**
- * Run one breaker store operation under `BREAKER_STORE_TIMEOUT_MS`.
+ * Run one bounded breaker-owned side operation (a store read/write, or the
+ * classifier's body peek) under an explicit deadline.
  *
- * BELT AND BRACES, deliberately duplicating the client-level `signal` above.
- * The signal depends on the SDK honouring it on every code path and on a future
- * SDK default not quietly re-opening the hole; this race depends on nothing but
- * the event loop. Neither alone is sufficient evidence for a claim as strong as
- * "the breaker can never cost more than 250ms", which is what the module
- * docblock now promises.
+ * BELT AND BRACES for the store calls, deliberately duplicating the
+ * client-level `signal` above. The signal depends on the SDK honouring it on
+ * every code path and on a future SDK default not quietly re-opening the hole;
+ * this race depends on nothing but the event loop. Neither alone is sufficient
+ * evidence for a claim as strong as "the breaker can never cost more than
+ * 250ms", which is what the module docblock now promises.
  *
  * The loser of the race still has a handler attached by `Promise.race`, so a
  * late rejection from a hung store cannot surface as an unhandled rejection.
@@ -455,18 +467,19 @@ const STORE_TIMED_OUT = Symbol("breaker-store-timeout");
 async function withStoreDeadline<T>(
   op: Promise<T>,
   label: string,
+  timeoutMs: number = BREAKER_STORE_TIMEOUT_MS,
 ): Promise<T | typeof STORE_TIMED_OUT> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<typeof STORE_TIMED_OUT>((resolve) => {
-    timer = setTimeout(() => resolve(STORE_TIMED_OUT), BREAKER_STORE_TIMEOUT_MS);
+    timer = setTimeout(() => resolve(STORE_TIMED_OUT), timeoutMs);
   });
   try {
     const result = await Promise.race([op, deadline]);
     if (result === STORE_TIMED_OUT) {
-      // Never silent: a store slow enough to be abandoned is an operational
-      // fact, and the request proceeds unprotected because of it.
+      // Never silent: an operation slow enough to be abandoned is an
+      // operational fact, and the request proceeds unprotected because of it.
       console.error(
-        `[resilient-fetch] breaker store ${label} exceeded ${BREAKER_STORE_TIMEOUT_MS}ms — failing OPEN`,
+        `[resilient-fetch] ${label} exceeded ${timeoutMs}ms — failing OPEN`,
       );
     }
     return result;
@@ -543,7 +556,7 @@ export async function isBreakerOpen(): Promise<{
           retryAfterS: ttl > 0 ? ttl : DEFAULT_RETRY_AFTER_S,
         };
       })(),
-      "read",
+      "breaker store read",
     );
     // Timed out → the breaker is UNKNOWN, and unknown means proceed.
     if (state === STORE_TIMED_OUT) return { open: false };
@@ -596,7 +609,7 @@ export async function recordSeamFailure(): Promise<void> {
           nx: true,
         });
       })(),
-      "write",
+      "breaker store write",
     );
   } catch (err) {
     console.error(
@@ -622,6 +635,173 @@ export async function recordSeamFailure(): Promise<void> {
  */
 const ANALYTICS_URL =
   process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
+
+// ---------------------------------------------------------------------------
+// WHAT COUNTS AS A BREAKER FAILURE (Phase 140 review / F-1, F-2, D-9, D-10)
+//
+// The breaker exists to answer exactly ONE question: is the Railway analytics
+// deployment unreachable or not responding? Every recording decision below is
+// evidence for THAT proposition and nothing else.
+//
+// The original predicate was `status >= 500`, on the assumption that a 5xx
+// means the deployment is degraded. THE PYTHON SERVICE VIOLATES THAT
+// ASSUMPTION BY DESIGN, in two distinct ways that were verified against the
+// source rather than inferred:
+//
+//   1. SUB-DEPENDENCY FAULTS ARRIVE AS 503. `routers/exchange.py` returns
+//      `503 + NETWORK_ERROR_DETAIL` for MT5-gateway-unconfigured (:215),
+//      MT5-gateway port malformed (:220), MT5 connect timeout (:235), MT5
+//      connect failure (:238) and sFOX client construction failure (:108).
+//      The MT5 gateway is a SEPARATE Railway service that restarts on every
+//      deploy — so a perfectly healthy analytics service answers 503 for the
+//      duration of an unrelated service's rollout. Under the old rule five
+//      such answers in 30s denied key-connect, sync, the optimizer and admin
+//      match to EVERY tenant.
+//
+//   2. PER-KEY DETERMINISTIC FAULTS ARRIVE AS 500/502. `routers/internal.py`
+//      returns `500 "Failed to decrypt credentials"` (:214) for ONE corrupt
+//      key row — permanently, for that key, on every probe. It also returns
+//      `502` for "API key has no exchange set" (:218), "Failed to initialise
+//      exchange connection" (:326) and "Exchange permission probe failed"
+//      (:339) — the last being the USER'S EXCHANGE being down, not ours.
+//      `KeyPermissionBadge` fetches on mount and the permissions route does
+//      not cache failures, so a page showing five key cards produced five
+//      counter increments from a single bad row.
+//
+// THE RULE, therefore, is that the BODY is the evidence, not the status code.
+// FastAPI answers `HTTPException` with a well-formed `application/json`
+// envelope; a Railway/Vercel edge fault answers with an HTML or otherwise
+// unparseable error page, because the container never handled the request at
+// all. So:
+//
+//   RECORD    — network-level throws (`TypeError: fetch failed`: ECONNREFUSED,
+//               DNS, TLS), deadline exceeded (Abort/Timeout), HTTP 504, and
+//               ANY response whose body is not a readable JSON envelope
+//               (HTML interstitial on a 5xx *or* on a 200 — D-10).
+//   DO NOT    — any 4xx (the pre-existing A4 carve-out, unchanged), any
+//               5xx that carries a well-formed JSON error envelope, and
+//               caller-fault `TypeError`s (D-9).
+//
+// ⚠️ DELIBERATE DEVIATION FROM THE REVIEW'S LITERAL WORDING. The review asked
+// for "502/504 always records". 504 does (see `isEdgeOnlyStatus`), but a blanket
+// 502 rule would have re-created finding F-2 verbatim one status code over,
+// because `internal.py` emits application-level 502s for sub-dependency faults
+// as enumerated above. A 502 carrying a FastAPI JSON envelope proves the
+// container answered; a 502 carrying an HTML error page does not, and only the
+// latter records. The review's intent — "did Railway itself fail?" — is what is
+// implemented.
+//
+// The 4xx carve-out this sits beside is unchanged and still load-bearing: a
+// user's bad API key returning 400 is Railway working CORRECTLY, and counting
+// 4xx would let a handful of users fat-fingering credentials trip the breaker
+// for everyone.
+// ---------------------------------------------------------------------------
+
+/**
+ * Statuses NO analytics-service code path can produce, so their only possible
+ * origin is the edge/proxy in front of it.
+ *
+ * VERIFIED by exhaustive grep of `analytics-service/**` for `status_code=5xx`:
+ * the service emits 500, 502 and 503, and NEVER 504. A Gateway Timeout on this
+ * seam is therefore always the platform reporting that the container did not
+ * answer — the single most direct "Railway is not responding" signal available,
+ * and it records regardless of what body the proxy attached to it.
+ */
+function isEdgeOnlyStatus(status: number): boolean {
+  return status === 504;
+}
+
+/**
+ * Does this response carry a well-formed JSON error envelope, i.e. did the
+ * FastAPI application itself answer?
+ *
+ * `res.clone()` so the caller's own `res.json()` / `res.text()` is untouched —
+ * the core RETURNS the response and status interpretation belongs to the
+ * caller. The peek is bounded (`BREAKER_BODY_PEEK_TIMEOUT_MS`) because a proxy
+ * that flushes headers and then stalls the body is a genuine degradation shape,
+ * and it must not extend a request whose outcome is already decided.
+ *
+ * Fails toward "no envelope" (i.e. toward RECORDING) on any doubt: a body we
+ * cannot read or parse is exactly the infrastructure-fault evidence we are
+ * looking for.
+ */
+async function hasJsonErrorEnvelope(res: Response): Promise<boolean> {
+  const contentType = res.headers.get("content-type") ?? "";
+  // Same `.includes` shape analytics-client.ts already uses for this decision.
+  if (!contentType.includes("application/json")) return false;
+  try {
+    const peeked = await withStoreDeadline(
+      res.clone().text(),
+      "response envelope peek",
+      BREAKER_BODY_PEEK_TIMEOUT_MS,
+    );
+    if (peeked === STORE_TIMED_OUT) return false;
+    const parsed: unknown = JSON.parse(peeked);
+    // A JSON scalar (`null`, `"oops"`, `0`) is not an error envelope. FastAPI
+    // always emits an object — `{"detail": ...}` — and so does every handler in
+    // the service. Requiring an object keeps a proxy that returns bare `null`
+    // with a JSON content-type on the RECORD side.
+    return typeof parsed === "object" && parsed !== null;
+  } catch {
+    // Unreadable or unparseable body behind a JSON content-type: the proxy, not
+    // the app, wrote this. Record.
+    return false;
+  }
+}
+
+/**
+ * Should a failure be recorded for this RESPONSE? (The throw path is classified
+ * separately by `isTransportFailure`.)
+ *
+ * Reads as: "is there evidence the analytics service itself did not handle this
+ * request?" See the block comment above for the full derivation.
+ */
+async function shouldRecordResponseFailure(res: Response): Promise<boolean> {
+  if (isEdgeOnlyStatus(res.status)) return true;
+
+  const contentType = res.headers.get("content-type") ?? "";
+
+  // D-10 — a 2xx that is an HTML page is a proxy interstitial (captive portal,
+  // Railway/Vercel maintenance page, an auth wall in front of the service). The
+  // old predicate could not see this at all: it was a "success" that no caller
+  // could parse. Scoped tightly to `text/html` rather than "not JSON" so a
+  // 204 No Content (no content-type at all) can never be misread as an outage;
+  // the analytics service has NO non-JSON 2xx endpoints (verified: zero
+  // PlainTextResponse/HTMLResponse/StreamingResponse in the service).
+  if (res.status < 500) {
+    // 4xx never records — the A4 carve-out, unchanged.
+    return contentType.includes("text/html");
+  }
+
+  // 5xx: the app answers with a JSON envelope, the edge does not.
+  return !(await hasJsonErrorEnvelope(res));
+}
+
+/**
+ * Is this thrown value evidence that the TRANSPORT failed, as opposed to
+ * evidence that WE built a bad request?
+ *
+ * D-9. Every genuine network-layer failure surfaces from undici as
+ * `TypeError("fetch failed")` with the real reason on `.cause` — verified on
+ * both Node 22 (CI) and Node 25 (local) for ECONNREFUSED, DNS ENOTFOUND and
+ * TLS expiry. Request-CONSTRUCTION faults are also `TypeError`s but carry
+ * descriptive messages instead ("Failed to parse URL from …",
+ * "Headers.append: … is an invalid header value"), and they are OUR bug: a
+ * malformed header or URL built at a call site says nothing whatsoever about
+ * Railway's health, and would otherwise have driven the shared breaker on
+ * every request until someone noticed.
+ *
+ * ⚠️ Do not switch this to a `.cause` presence check. Measured: the bad-URL
+ * TypeError DOES carry a `cause`, so that discriminator silently misclassifies
+ * it as a network failure.
+ */
+function isTransportFailure(err: unknown): boolean {
+  if (err instanceof TypeError) return err.message === "fetch failed";
+  // Deadline exceeded, socket resets surfaced as plain Errors, and anything
+  // else that escaped `fetch` are all genuine "we could not complete the round
+  // trip" evidence.
+  return true;
+}
 
 /** `RequestInit` minus `signal` (the core owns the deadline), plus an escape hatch. */
 export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
@@ -707,15 +887,20 @@ export async function resilientFetch(
     const deadlineExceeded =
       err instanceof Error &&
       (err.name === "AbortError" || err.name === "TimeoutError");
+    // D-9 — a request WE built wrong is not an outage. Classified before the
+    // log so the log tells the operator which of the three it was.
+    const transportFailed = deadlineExceeded || isTransportFailure(err);
     console.error(
       deadlineExceeded
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
-        : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`,
+        : transportFailed
+          ? `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`
+          : `[resilient-fetch] ${budgetKey}: request could not be constructed (caller fault — NOT counted against the breaker)`,
     );
     // `recordFailures: false` (the anonymous surface) still fails fast on an
     // OPEN breaker above; it just may not DRIVE the shared counter. See the
     // flag's docblock on ResilientFetchInit for the CR-04 reasoning.
-    if (recordFailures) {
+    if (recordFailures && transportFailed) {
       await recordSeamFailure();
     }
     // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
@@ -724,15 +909,16 @@ export async function resilientFetch(
     throw err;
   }
 
-  if (res.status >= 500 && recordFailures) {
+  // See the "WHAT COUNTS AS A BREAKER FAILURE" block above for the full
+  // derivation. In short: the BODY is the evidence. A 5xx carrying a FastAPI
+  // JSON envelope proves the container answered (an MT5-gateway 503, a per-key
+  // decrypt 500) and must not deny the seam to every tenant; a 504, or any
+  // response the app plainly did not write, does.
+  //
+  // Guarded on `recordFailures` FIRST so the opted-out public teaser path never
+  // pays for the body peek.
+  if (recordFailures && (await shouldRecordResponseFailure(res))) {
     await recordSeamFailure();
   }
-  // 4xx NEVER records. A user's bad API key returning 400 is Railway working
-  // CORRECTLY — `create-with-key` and `composite/add-key` deliberately map that
-  // to a client fault. Counting 4xx would let a handful of users fat-fingering
-  // credentials trip the breaker and take key-connect down for everyone: a user
-  // error must never become an outage. The accepted cost (A4, operator
-  // decision) is that if Railway 4xxes during genuine degradation the breaker
-  // under-trips.
   return res;
 }
