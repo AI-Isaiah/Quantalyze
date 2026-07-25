@@ -337,6 +337,32 @@ def _leg4_server_time_offset(deals: list[dict], utc_now: datetime) -> dict:
     latest = max(times)
     offset_minutes = (latest - utc_now.timestamp()) / 60.0
     candidate = int(round(offset_minutes / 30.0) * 30)
+    # `offset_minutes` = true_offset − deal_age: a deal is stamped server-local
+    # (server_time-as-epoch = true_utc + offset), so `latest − now = offset −
+    # age`. It equals the real offset ONLY when the latest deal is fresh
+    # (age≈0). On a stale last deal (a closed book, a weekend, an idle account)
+    # the age term dominates and pushes the estimate out of range — a 16.5h-old
+    # deal on a UTC+3 server reads as −810min, not +180. Age can't be separated
+    # from offset with a single deal, but real broker offsets sit within ±13h of
+    # UTC (mirrors `_MT5_MAX_SERVER_UTC_OFFSET_S = 13 * 3600` in job_worker — the
+    # offset bound, NOT the wider `_MT5_DEAL_FETCH_MARGIN_S` 24h fetch margin), so
+    # a candidate beyond that is stale-deal noise, not signal — emit no candidate
+    # rather than a red herring the founder has to reason away.
+    MAX_PLAUSIBLE_OFFSET_MIN = 13 * 60
+    if abs(candidate) > MAX_PLAUSIBLE_OFFSET_MIN:
+        return {
+            **base,
+            "latest_deal_time_epoch": latest,
+            "candidate_offset_minutes": None,
+            "raw_offset_minutes": int(round(offset_minutes)),
+            "verdict": "INCONCLUSIVE",
+            "note": (
+                "Deal-derived offset is out of the plausible ±13h range — the "
+                "latest deal is stale, so its age dominates the server↔UTC skew "
+                "and the estimate is meaningless. Confirm from a LIVE tick on a "
+                "trading day or the terminal's VNC clock. " + str(base["note"])
+            ),
+        }
     return {
         **base,
         "latest_deal_time_epoch": latest,

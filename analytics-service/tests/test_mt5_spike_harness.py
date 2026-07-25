@@ -282,6 +282,26 @@ def test_leg4_offset_rounded_to_half_hour():
     assert leg4["founder_confirmation_required"] is True
 
 
+def test_leg4_stale_last_deal_emits_no_candidate():
+    # Regression for the real soak red herring: a UTC+3 server whose last deal
+    # is ~16.5h old reads as candidate -810 (offset 180 − age 990). That is out
+    # of the plausible ±13h band, so the estimate is stale-deal noise and MUST
+    # NOT surface a candidate the founder has to reason away.
+    utc_now = datetime(2026, 7, 25, 12, 0, 0, tzinfo=timezone.utc)
+    # server-stamped epoch = true_utc(deal) + offset; deal 16.5h ago on +3h server
+    latest = int((utc_now - timedelta(hours=16, minutes=30) + timedelta(hours=3)).timestamp())
+    deals = [dict(_POPULATED_DEALS[0], time=latest, time_msc=latest * 1000)]
+    factory = _make_factory(deals=deals)
+
+    report = run_spike(_VALID_ENV, client_factory=factory, utc_now=utc_now)
+
+    leg4 = report["server_time_offset"]
+    assert leg4["candidate_offset_minutes"] is None
+    assert leg4["raw_offset_minutes"] == -810
+    assert leg4["verdict"] == "INCONCLUSIVE"
+    assert leg4["founder_confirmation_required"] is True
+
+
 def test_emitted_report_is_sanitized():
     # A leg captures an rpyc error whose text embeds the broker password + server.
     leaky = Mt5ClientError(
