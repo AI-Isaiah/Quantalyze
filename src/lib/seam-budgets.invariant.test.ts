@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { WIZARD_ERROR_COPY } from "./wizardErrors";
 import {
   MAX_COMPOSITE_MEMBERS_PROBED,
   SEAM_BUDGETS,
@@ -239,6 +240,67 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
           `the cap, or lower the keys-permissions budget — never widen this test.`,
       ).toBeLessThan(breachingBound);
     });
+  });
+
+  /**
+   * CR-03 — the two /process-key budgets are guarded by EVIDENCE, not by taste.
+   *
+   * `process-key-enqueue` was cut 60s → 15s on the reasoning that "nothing
+   * observes these budgets" — an argument that the OLD value was untested, not
+   * that the NEW one is safe, while the sibling row four lines away applies the
+   * opposite standard ("MEASURE BEFORE TIGHTENING … never guess a budget").
+   *
+   * These assertions encode WHY the value matters rather than pinning a
+   * literal. The first is a cross-artifact consistency check against the
+   * product's own promise to the user: `SYNC_TIMEOUT` copy tells managers that
+   * "First sync of the day can require up to 60 seconds while the analytics
+   * service wakes up", and `vercel.json` warms Railway only once a day, so a
+   * cold connect at 09:00 is the normal case, not the tail. A budget SHORTER
+   * than the wait we advertise 504s a request the user was told to be patient
+   * with — and, because /process-key is not idempotent and the enqueue may
+   * already have succeeded server-side, the retry it provokes double-enqueues
+   * the sync.
+   */
+  describe("SC-4e — the /process-key budgets respect the documented cold start", () => {
+    /** The wall-clock the wizard's own SYNC_TIMEOUT copy promises the user. */
+    function advertisedFirstSyncSeconds(): number {
+      const cause = WIZARD_ERROR_COPY.SYNC_TIMEOUT.cause;
+      const m = /up to (\d+) seconds while the analytics service wakes up/.exec(
+        cause,
+      );
+      if (!m) {
+        throw new Error(
+          "SYNC_TIMEOUT copy no longer states the first-sync cold-start window. " +
+            "That sentence is the only in-repo statement of the latency this " +
+            "budget must cover — re-derive the budget from a measurement and " +
+            "update BOTH, rather than deleting this guard.",
+        );
+      }
+      return Number(m[1]);
+    }
+
+    it("process-key-enqueue is not shorter than the cold start we promise users", () => {
+      const advertisedMs = advertisedFirstSyncSeconds() * 1000;
+      expect(
+        SEAM_BUDGETS["process-key-enqueue"].timeoutMs,
+        `The enqueue budget is ${SEAM_BUDGETS["process-key-enqueue"].timeoutMs}ms but ` +
+          `wizardErrors' SYNC_TIMEOUT copy tells the user the first sync of the day ` +
+          `can take ${advertisedMs}ms while Railway wakes (vercel.json warms it ONCE ` +
+          `a day). A shorter budget 504s a cold key-connect the user was told to ` +
+          `wait for, and the enqueue it abandons may already have succeeded — the ` +
+          `retry then double-enqueues a NON-idempotent /process-key. Measure a ` +
+          `cold-start p99 before lowering this.`,
+      ).toBeGreaterThanOrEqual(advertisedMs);
+    });
+
+    it.each(["process-key-enqueue", "process-key-sync"] as const)(
+      "%s carries the MEASURE BEFORE TIGHTENING discipline in its notes",
+      (key) => {
+        // Both rows own a live, money-bearing path and neither has latency
+        // data. Whoever tightens one must delete this warning deliberately.
+        expect(SEAM_BUDGETS[key].notes).toContain("MEASURE BEFORE TIGHTENING");
+      },
+    );
   });
 
   describe("structural completeness", () => {

@@ -231,9 +231,9 @@ export const SEAM_BUDGETS: Record<
       "ZERO CALLERS TODAY — computePortfolioAnalytics (analytics-client.ts:224) is unreachable (research §4.2). Kept rather than deleted: deleting is scope creep and it is a plausible future caller. Phase 141's idempotency audit records 'no callers' for it.",
   },
   "process-key-enqueue": {
-    timeoutMs: 15_000,
+    timeoutMs: 60_000,
     notes:
-      "flow_type in {resync, onboard}: the server merely enqueues onto the worker dyno and returns 202 (verified in analytics-service/routers/process_key.py:_is_long_fetch). An enqueue that takes 15s means Railway is sick. Tightened from the blanket 60s; nothing observes these two budgets (research §6.4).",
+      "flow_type in {resync, onboard}: the server merely enqueues onto the worker dyno and returns 202 (verified in analytics-service/routers/process_key.py:_is_long_fetch). MEASURE BEFORE TIGHTENING — same standard as process-key-sync. This was cut to 15s on the reasoning that 'nothing observes these budgets', which is an argument that the OLD value was untested, not that a new one is safe. The enqueue is not free: it is preceded by a possible Railway cold start (warmup-analytics.ts allocates 10s for a bare /health GET, and vercel.json warms it only ONCE A DAY, so Railway is routinely cold) plus a strategy_verifications SELECT, an INSERT with a 23505 race branch, and an enqueue_compute_job RPC — three-plus Supabase round trips. A cold 09:00 key-connect measured against the old budget fits comfortably in 60s and blows a 15s one. Worse than a plain error: the enqueue may ALREADY have succeeded server-side when the client deadline fires, so the user is told it failed and retries against a non-idempotent /process-key — the exact double-enqueue SEAM_RETRIES=0 exists to prevent. Tightening needs a p99 from a cold-start window AND the SEAM-05 idempotency key first. Live paths: /api/keys/sync and the wizard SUBMIT step.",
   },
   "process-key-sync": {
     timeoutMs: 60_000,
