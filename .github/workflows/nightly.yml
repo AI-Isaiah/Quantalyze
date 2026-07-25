@@ -193,8 +193,24 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: npm audit (high-severity gate)
-        run: npm audit --audit-level=high
+      - name: npm audit (production tree, high-severity gate)
+        # Gate at HIGH on the PRODUCTION dependency tree (`--omit=dev`) — i.e.
+        # what we actually ship and expose. Rationale (2026-07-25): the shipped
+        # highs ARE fixed here — `next@16.2.11` clears the 9 App-Router
+        # SSRF/proxy-bypass/cache-confusion advisories (a lockfile bump inside
+        # the existing caret), and package.json `overrides` clear `sharp`
+        # (prod libvips CVEs) + `fast-uri`/`postcss`. The residual full-tree
+        # highs are ALL build-time dev tooling (eslint/glob/minimatch/@lhci) —
+        # chiefly the `brace-expansion` OOM advisory (GHSA-mh99-v99m-4gvg) whose
+        # ONLY fix is 5.0.8, which drops the CJS function export and breaks
+        # `minimatch@3` (`TypeError: expand is not a function`) and thus eslint.
+        # It is unfixable without replacing the lint toolchain, never ships, and
+        # is not worth breaking the build for. `--omit=dev` keeps full HIGH teeth
+        # on everything we deploy (a real prod RCE/SSRF still hard-fails here)
+        # while not being chronically red on unfixable build-only tooling.
+        # Dependabot tracks the dev surface and auto-PRs anything that gets a
+        # non-breaking fix. See TODOS.md "npm advisories".
+        run: npm audit --omit=dev --audit-level=high
       - name: Open or update GitHub issue on high/critical advisory
         if: failure()
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
@@ -225,13 +241,13 @@ jobs:
               });
               return;
             }
-            const title = `Nightly npm audit found a high/critical advisory (${today})`;
+            const title = `Nightly npm audit found a high/critical PRODUCTION advisory (${today})`;
             const body = [
-              "`npm audit --audit-level=high` failed in the nightly workflow.",
+              "`npm audit --omit=dev --audit-level=high` failed in the nightly workflow — a high/critical advisory landed on a SHIPPED (production) dependency.",
               "",
               `Workflow run: ${runUrl}`,
               "",
-              "Run `npm audit` locally to see the advisory list.",
+              "Run `npm audit --omit=dev` locally to see the production advisory list (dev-tooling advisories are intentionally out of scope for this gate — see the audit step comment).",
               "",
               "Auto-filed by .github/workflows/nightly.yml. This issue is deduplicated by the `" + dedupLabel + "` label; subsequent failures will comment here until this issue is closed.",
             ].join("\n");

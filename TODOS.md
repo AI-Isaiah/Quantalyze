@@ -24,41 +24,47 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
 ## 🔴 FIX NOW — live correctness, trust-boundary security, active go-live
 
-1. **`/api/alert-digest` cron dead** — vercel.json crons it daily (`0 9 * * *`) but the
-   route only exports `POST` → HTTP 405 every tick; alert digest never sends. *Verified
-   live 2026-07-23.* Fix: `export const GET = POST;` (or a GET handler).
-2. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
+1. **`RESEND_API_KEY` unset in Vercel prod** — founder-LP report cron + all transactional
    email are dead (code soft-skips, only Sentry fires). **Founder action:** set the key in
-   Vercel prod. Do before the first warned founder month.
-3. **Deribit / Zavara mandate reconciliation (go-live).** Performance reconstructs from the
+   Vercel prod. Do before the first warned founder month. (Note: portfolio email *alerts*
+   are out of the pipeline as of 2026-07-25 — the `alert-digest` cron was removed; alerts
+   surface in-app + engineering failures via Sentry. This item is now only about the
+   founder-LP report + transactional email.)
+2. **Deribit / Zavara mandate reconciliation (go-live).** Performance reconstructs from the
    API alone (green: cum 62.66% / maxDD −4.13%). The reported capital **4M/10M/1M/2M is
    custodied at Matrixport (keys 1&2) / LiquidityTech (key3), NOT in the Deribit keys** —
-   the accounts hold only a $150–750K working-margin slice. To close end-to-end: obtain a
-   read-only Matrixport / LiquidityTech statement or key. **Founder action.** Zavara live
-   *activation* (write the proven reconciliation config to a `strategies` row) also pending
-   a founder trigger + strategy id.
-4. **sFOX / Nautilus manager-data go-live (v1.13 founder flags).** Pending founder ops:
+   the accounts hold only a $150–750K working-margin slice. **Custodian-statement
+   reconciliation is dropped (founder call 2026-07-25) — the API reconstruction stands as
+   ground truth.** Zavara live *activation* (write the proven reconciliation config to a
+   `strategies` row) remains, pending a founder trigger + strategy id.
+3. **sFOX / Nautilus manager-data go-live (v1.13 founder flags).** Pending founder ops:
    EGRESS / WORKER-01/03/04 / FACTSHEET / E2GT-01 / FLIP / GOLIVE. **Reframe:** manager
    data = Nautilus DD API (`api.nautilus.finance`, x-api-key), not sFOX direct — the "sFOX
    key" was a Nautilus key. Enable path = set `NEXT_PUBLIC_SFOX_ENABLED` + `SFOX_ENABLED`
    in Vercel + redeploy main (build-time flag); IP-whitelist the 3 worker egress IPs
    {208.77.244.242, 152.55.184.240/.241} with Nautilus (7-day access, email all 3).
    **Founder decision:** sFOX-venue vs Nautilus-manager path; actual vs adjusted NAV.
-5. **Land v1.14 Smoothed-MTM milestone.** Code-complete on `feat/phase-83-smoothed-mtm`,
+4. **Land v1.14 Smoothed-MTM milestone.** Code-complete on `feat/phase-83-smoothed-mtm`,
    dark behind kill-switch (`SMOOTHED_MTM_ENABLED` + `NEXT_PUBLIC_SMOOTHED_MTM_ENABLED`,
    both default OFF). Do: version + CHANGELOG bump → PR → merge. Live acceptance (Phoenix
    key) stays deferred. ⚠️ landing risk documented: a structural smoothed mark-hole fails
    the WHOLE job — that's why it ships dark.
-6. **v1.15 MT5 go-live (founder + soak).** Engineering shipped dark (v1.15). Gateway RPyC
-   bridge FIXED + verified 2026-07-25 (rpyc 6.x↔5.x + numpy 2.x↔1.x skew on the gmag11
-   gateway; live Vantage account 26547876 @ `VantageMarkets-Live 5` reads through the full
-   RPyC→Wine→MT5 chain, read-only). Worker RPyC deps + a critical `_default_connect` ctor
-   crash fixed (v0.49.1.0). REMAINING: set `MT5_SPIKE_*` on the worker → run the 5–10
-   business-day soak (`scripts.mt5_soak`, host `mt5-gateway.railway.internal:8001`) →
-   gate-check → flip `MT5_ENABLED` + `NEXT_PUBLIC_MT5_ENABLED` + `MT5_GATEWAY_HOST/PORT`
-   (redeploy worker & Vercel) → verify the `api_verified` MT5 factsheet renders end-to-end
-   (MT5 → dailies → unified backbone → factsheet). **Founder:** investor password (Railway),
-   soak run/window.
+5. **v1.15 MT5 — LIVE on quantalyze.xyz 2026-07-25 (flags flipped).** ✅DONE: worker
+   `MT5_ENABLED=true` + `MT5_GATEWAY_HOST=mt5-gateway.railway.internal` + `MT5_GATEWAY_PORT=8001`
+   (Railway deploy 9d310b40 from main HEAD — also retired the decoupled CLI-snapshot, so the
+   worker deploy source is GitHub-tracked again) + Vercel `NEXT_PUBLIC_MT5_ENABLED=true`
+   (`vercel --prod` fresh build dpl_AMiWsz…, since NEXT_PUBLIC_ is build-time inlined). Founder
+   flipped without pre-rotating the investor pw (read-only) and shortcut the 5–10d soak window
+   (day-1 green + full factsheet already proven on the real Vantage acct). Gateway RPyC bridge +
+   worker deps + soak history: v0.49.1.0→0.49.3.0, see memory `project_v1_15_metatrader5_milestone`.
+   **Server-UTC offset now SET (2026-07-25):** `MT5_SERVER_UTC_OFFSET_S=10800` on the worker
+   (EEST/UTC+3, matching the validated soak) — the live derive was defaulting to 0 (raw
+   server-time bucketing). The spike's misleading `−810` estimate was root-caused (stale-deal
+   artifact: estimator assumed the latest deal ≈ now) and hardened to emit no candidate beyond
+   ±13h. **Only remaining (non-blocking):** founder VNC/live-tick confirm of the DST edge (a
+   fixed env can't auto-switch EET↔EEST at the Oct/Mar transition; affects day-bucketing only,
+   NOT the balance-anchored parity). Optional: rotate the read-only investor pw
+   (`Vantage_investor_password_26547876`).
 
 ### v1.14 Smoothed-MTM go-live blockers — FIXED in the v1.14 landing (2026-07-23)
 Surfaced by the /ship Fable red team; the safety-critical ones fixed in the landing PR so
@@ -149,8 +155,15 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   per-batch); email retry false-alarm on UNIQUE(23505).
 
 ### Security
-- **npm advisories: 3 HIGH + 8 MODERATE** (13 stacked Next.js, on auth/proxy surface); nightly
-  gate only alarms on CRITICAL.
+- **npm advisories (2026-07-25).** Shipped highs FIXED at root: `next` 16.2.10→16.2.11
+  (clears the 9 App-Router SSRF/proxy-bypass/cache-confusion advisories — stable patch exists)
+  + `overrides` `sharp ^0.35.3` (prod libvips), `fast-uri ^3.1.4`, `postcss ^8.5.23`, `tmp
+  ^0.2.7`. Nightly gate scoped to the PRODUCTION tree (`npm audit --omit=dev --audit-level=high`)
+  so it keeps full HIGH teeth on shipped code but isn't red on the one residual, build-only
+  high: `brace-expansion` OOM (GHSA-mh99) is fixed only in 5.0.8, which drops the CJS function
+  export and breaks `minimatch@3`/eslint — unfixable without replacing the lint toolchain.
+  Left to Dependabot. Follow-up: re-check the `sharp` override once `next` bumps its declared
+  `sharp` range past 0.34.5.
 - **CSP uses `unsafe-inline`/`unsafe-eval`** — move to nonce-based CSP.
 - **Signup allows 6-char passwords** — `minLength={6}` client-only; server-side Supabase policy
   unverified/undocumented.
@@ -158,8 +171,6 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   signal/signedAt/pubkey); replace with per-broker allowlist.
 - **ccxt tracebacks not secret-scrubbed** (`exc_info=True`) — an API key could land in Railway
   logs. Add a `redact_secrets` util.
-- **`alert-digest` CRON_SECRET compare is non-constant-time** — use the existing
-  `timingSafeCompare`.
 - **No Python lock file; ccxt unpinned** — unreproducible prod builds in the money-math path.
 
 ### CI / test-infra ratchet
