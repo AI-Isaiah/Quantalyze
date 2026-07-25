@@ -68,6 +68,8 @@ const shared = vi.hoisted(() => {
      * instead of counting. F-5: this must NOT be read as exhaustion.
      */
     limiterTimeoutSentinel: false,
+    /** true → redis.ttl rejects. Only reachable once the lock reads "open". */
+    throwOnTtl: false,
   };
   /** Config object the core passed to `Redis.fromEnv()`, captured per context. */
   const captured = {
@@ -116,6 +118,12 @@ vi.mock("@upstash/redis", async () => {
               return new Promise<never>(() => {});
             }
             return base.get(key);
+          },
+          ttl: async (key: string) => {
+            if (shared.mode.throwOnTtl) {
+              throw new Error("upstash: ttl unavailable");
+            }
+            return base.ttl(key);
           },
         };
       },
@@ -218,6 +226,7 @@ beforeEach(() => {
   shared.captured.redisConfig = undefined;
   shared.captured.limiterConfig = undefined;
   shared.mode.limiterTimeoutSentinel = false;
+  shared.mode.throwOnTtl = false;
   // Every flag resets. A leaked `throwOnLimit` silently disables the failure
   // counter for every later test, which makes "the breaker did not trip"
   // assertions pass for entirely the wrong reason.
@@ -281,6 +290,37 @@ describe("isBreakerOpen", () => {
       open: true,
       retryAfterS: mod.DEFAULT_RETRY_AFTER_S,
     });
+  });
+
+  /**
+   * Phase 140 review / G9 — `isBreakerOpen` PROMISES that every exit path
+   * resolves and nothing throws (the SEAM-03 contract). Two enumerated paths
+   * had no test at all, so the promise rested on inspection.
+   */
+  it("G9: a MALFORMED stored value resolves closed, not open", async () => {
+    // Anything that is not the literal "open" means "no lock". A truthiness
+    // test here would read a stray value — a half-written key, a leftover from
+    // an older encoding — as an outage and deny the seam to everyone.
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: "OPEN",
+      expiresAt: Date.now() + 30_000,
+    });
+    const mod = await import("./resilient-fetch");
+    await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
+  });
+
+  it("G9: a THROWING ttl resolves closed instead of propagating", async () => {
+    // `ttl` is only reached once the lock reads "open", so it is the one store
+    // call that runs while the breaker believes production is degraded — the
+    // worst possible moment to throw out of a function the engine does not
+    // guard.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    seedBreakerOpen(shared.store, 30);
+    const mod = await import("./resilient-fetch");
+    // Patch after import so the module's captured client is the one we break.
+    shared.mode.throwOnTtl = true;
+
+    await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
   });
 
   it("fails OPEN when Redis errors", async () => {
@@ -645,6 +685,52 @@ describe("resilientFetch breaker short-circuit", () => {
       message: "Analytics service circuit is open",
     });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Phase 140 review / G3 — RECOVERY. Locked decision 3 says "TTL expiry IS the
+   * half-open transition", which makes expiry the entire recovery mechanism of
+   * the system — and it had no test. Both directions matter: traffic must
+   * resume when the lock expires, and a still-broken upstream must be able to
+   * re-trip rather than being wedged open or wedged closed.
+   */
+  it("G3 recovery: an EXPIRED lock passes through to Railway again", async () => {
+    // Seeded already-expired: the store evicts on read, exactly as Redis does.
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: "open",
+      expiresAt: Date.now() - 1,
+    });
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).resolves.toBeDefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("G3 recovery: a failure AFTER expiry re-trips the breaker", async () => {
+    // The other half. If the counter did not survive to re-trip — or if the
+    // expired lock could not be rewritten — a still-dead Railway would be
+    // hammered at full rate for as long as the incident lasted.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.store.set(FAKE_BREAKER_KEY, {
+      value: "open",
+      expiresAt: Date.now() - 1,
+    });
+    edgeFetch(502);
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+    }
+
+    const lock = shared.store.get(mod.BREAKER_KEY);
+    expect(lock?.value).toBe("open");
+    // A FRESH lock, not the stale one that just expired.
+    expect(lock!.expiresAt).toBeGreaterThan(Date.now());
   });
 
   it("negative control: with a per-context store the second context does NOT short-circuit", async () => {

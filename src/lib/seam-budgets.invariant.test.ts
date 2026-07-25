@@ -3,6 +3,10 @@ import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { WIZARD_ERROR_COPY } from "./wizardErrors";
 import {
+  BREAKER_COOLDOWN_S,
+  BREAKER_FAILURE_THRESHOLD,
+  BREAKER_WINDOW,
+  DEFAULT_RETRY_AFTER_S,
   MAX_COMPOSITE_MEMBERS_PROBED,
   SEAM_BUDGETS,
   SEAM_ROUTE_BUDGETS,
@@ -341,6 +345,64 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         contradictions,
         `A path cannot both route through the core and be excluded from it: ${contradictions.join(", ")}`,
       ).toEqual([]);
+    });
+  });
+
+  /**
+   * Phase 140 review / G3 — the breaker-constant arithmetic that keeps recovery
+   * from flapping into a PERMANENT outage.
+   *
+   * The four breaker constants were each documented in isolation, but their
+   * relationship to one another was never checked. That relationship is the
+   * whole recovery story, and one of them is a trap: because TTL EXPIRY IS THE
+   * HALF-OPEN TRANSITION (locked decision 3), the cooldown is the ONLY thing
+   * that gives the failure counter time to decay. Drop the cooldown below the
+   * counting window and the first caller after the lock expires meets a counter
+   * that is still at or near the threshold — so ONE failure re-trips
+   * immediately, and the breaker oscillates for as long as the window keeps
+   * being refreshed. The seam would be down far longer than the incident.
+   */
+  describe("SC-4f — breaker recovery arithmetic (G3)", () => {
+    /** Parse an Upstash `Duration` string ("30 s", "1 m") to seconds. */
+    function durationToSeconds(d: string): number {
+      const m = /^(\d+)\s*(ms|s|m|h|d)$/.exec(d.trim());
+      if (!m) throw new Error(`Unparseable Upstash Duration: "${d}"`);
+      const n = Number(m[1]);
+      const unit: Record<string, number> = {
+        ms: 1 / 1000,
+        s: 1,
+        m: 60,
+        h: 3600,
+        d: 86_400,
+      };
+      return n * unit[m[2]];
+    }
+
+    it("the cooldown is at least as long as the failure-counting window", () => {
+      // THE invariant. Asserted arithmetically against the parsed Duration, not
+      // against the literal 30, so retuning either constant is checked rather
+      // than merely reviewed.
+      const windowS = durationToSeconds(BREAKER_WINDOW);
+      expect(
+        BREAKER_COOLDOWN_S,
+        `BREAKER_COOLDOWN_S (${BREAKER_COOLDOWN_S}s) is shorter than ` +
+          `BREAKER_WINDOW (${windowS}s). Because TTL expiry IS the half-open ` +
+          `transition, the counter would not have decayed when the lock ` +
+          `expires: ONE failure re-trips and the breaker flaps into a ` +
+          `permanent outage.`,
+      ).toBeGreaterThanOrEqual(windowS);
+    });
+
+    it("the advertised Retry-After never under-promises the real cooldown", () => {
+      // A client told to retry sooner than the lock can expire is guaranteed a
+      // second 503, which reads to the user as "retrying does not work".
+      expect(DEFAULT_RETRY_AFTER_S).toBeGreaterThanOrEqual(BREAKER_COOLDOWN_S);
+    });
+
+    it("the threshold is above 1, so a single blip cannot open the circuit", () => {
+      // At 1 the breaker is not a breaker: any single transient failure denies
+      // the seam to every tenant for the cooldown.
+      expect(BREAKER_FAILURE_THRESHOLD).toBeGreaterThan(1);
     });
   });
 });
