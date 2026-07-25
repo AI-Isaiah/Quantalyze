@@ -156,7 +156,7 @@ class _FakeMt5Transport:
             return None
         return tuple(_NT(d) for d in self._deals)
 
-    def order_check(self, request):  # noqa: ANN001 - unused by the derive branch
+    def order_check(self, **request):  # noqa: ANN001 - unused by the derive branch
         self.calls.append("order_check")
         return _NT({"retcode": 0})
 

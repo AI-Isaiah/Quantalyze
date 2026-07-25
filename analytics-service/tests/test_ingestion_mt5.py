@@ -92,7 +92,7 @@ class _FakeMt5:
     def account_info(self):
         return self._scenario.get("account")
 
-    def order_check(self, request):
+    def order_check(self, **request):  # client passes KEYWORDS (mt5linux eval form)
         return self._scenario.get("order_check")
 
     def last_error(self):

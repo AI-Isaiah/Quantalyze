@@ -65,6 +65,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, NoReturn
 
 from services.redact import scrub_freeform_string
@@ -155,6 +156,21 @@ def _default_connect(*, host: str, port: int, timeout: float) -> Any:
     # the 5.x line. This is the ONLY per-request timeout knob 0.1.9 exposes.
     mt5._MetaTrader5__conn._config["sync_request_timeout"] = timeout
     return mt5
+
+
+def _epoch_bound(ts: Any) -> Any:
+    """Coerce a history-window bound to int epoch seconds for mt5linux 0.1.9's
+    datetime-less remote eval (see `Mt5Client.history_deals_get`): a `datetime` bound
+    would f-string-interpolate as `datetime.datetime(...)` and remote-NameError.
+    `datetime` -> `int(timestamp())`; int/float -> int; anything else unchanged (a
+    surprising type fails loud downstream rather than being silently mangled)."""
+    if isinstance(ts, datetime):
+        return int(ts.timestamp())
+    if isinstance(ts, bool):  # bool is an int subclass — never a valid epoch bound
+        return ts
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    return ts
 
 
 def _coerce(value: Any) -> Any:
@@ -321,8 +337,17 @@ class Mt5Client:
         the honest empty `()`); `()` -> `[]`; a populated tuple -> materialized
         dicts. The raw
         server-time `time`/`time_msc` epochs are returned VERBATIM — the
-        normalize-to-UTC seam is Phase 136, not this client."""
-        deals = self._guarded_read(lambda: self._mt5.history_deals_get(from_ts, to_ts))
+        normalize-to-UTC seam is Phase 136, not this client.
+
+        Bounds are coerced to INT epoch seconds: mt5linux 0.1.9 f-string-interpolates
+        args into a remote eval whose Wine namespace has NO ``datetime`` import, so a
+        ``datetime`` bound becomes ``datetime.datetime(...)`` → remote ``NameError``
+        (0.1.10 added the import; we pin 0.1.9). MT5 accepts int epoch seconds, so
+        coercing here lets EVERY caller work — the worker passes ints, the soak passes
+        tz-aware datetimes; a naive/aware datetime → ``int(ts.timestamp())`` (the tz
+        offset is immaterial for a range filter)."""
+        _from, _to = _epoch_bound(from_ts), _epoch_bound(to_ts)
+        deals = self._guarded_read(lambda: self._mt5.history_deals_get(_from, _to))
         if deals is None:
             self._raise_last()
         return [_materialize(d) for d in deals]
@@ -337,8 +362,13 @@ class Mt5Client:
         does NOT place an order. The exact investor retcode/comment signal is
         [ASSUMED] pending MT5SPIKE-01 leg 2 — the Phase-135 rule must combine the
         order_check retcode/comment WITH account_info().trade_allowed (Pitfall 4).
-        """
-        result = self._guarded_read(lambda: self._mt5.order_check(request))
+
+        The request is passed as KEYWORDS (``order_check(**request)``): mt5linux 0.1.9
+        evals ``mt5.order_check(*args, **kwargs)``, and MT5's ``order_check`` rejects a
+        positional dict with retcode ``-2 'Unnamed arguments not allowed'`` — it wants
+        the named request fields (verified live). ``**request`` produces
+        ``mt5.order_check(action=…, symbol=…, …)`` which MT5 accepts."""
+        result = self._guarded_read(lambda: self._mt5.order_check(**request))
         if result is None:
             self._raise_last()
         return _materialize(result)
