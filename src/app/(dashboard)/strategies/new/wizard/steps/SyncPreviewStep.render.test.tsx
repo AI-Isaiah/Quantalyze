@@ -113,6 +113,110 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
   });
 });
 
+/**
+ * Phase 140 review / F-4 — THE WIZARD MUST NOT MAKE A FALSE CLAIM ABOUT THE
+ * USER'S MONEY DATA.
+ *
+ * Every non-2xx kickoff collapsed into SYNC_FAILED, whose cause line reads
+ * "We fetched your trades but the analytics computation did not complete."
+ * On a seam failure — breaker open, seam deadline, connection refused — the
+ * request never reached the ingestion service and NOTHING was fetched. Telling
+ * a manager we pulled their trades when we did not is the kind of wrong that
+ * costs trust, and it pointed them at the wrong remedy too: "contact
+ * security@quantalyze.com with your draft ID" instead of "retry in a moment".
+ */
+describe("[F-4] SyncPreviewStep — seam failures are not reported as sync failures", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  /** The exact false sentence SYNC_FAILED renders. */
+  const FALSE_CLAIM = /We fetched your trades/i;
+
+  it.each([
+    { label: "503 breaker trip / seam unavailable", status: 503 },
+    { label: "504 seam deadline exceeded", status: 504 },
+    { label: "502 never reached upstream", status: 502 },
+  ])(
+    "$label renders the outage copy and never claims trades were fetched",
+    async ({ status }) => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(
+          JSON.stringify({ ok: false, code: "CIRCUIT_OPEN" }),
+          { status, headers: { "content-type": "application/json" } },
+        ),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+
+      expect(
+        await screen.findByText("Our service is temporarily unavailable."),
+      ).toBeInTheDocument();
+      // THE assertion. A regression here is a false statement about the
+      // user's money data, not a copy nit.
+      expect(screen.queryByText(FALSE_CLAIM)).not.toBeInTheDocument();
+      errSpy.mockRestore();
+    },
+  );
+
+  it("honours Retry-After, naming the real wait instead of 'a moment'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, code: "CIRCUIT_OPEN" }), {
+        status: 503,
+        headers: { "content-type": "application/json", "Retry-After": "27" },
+      }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    // The seam published a precise hint; "wait a moment" threw it away and in
+    // practice meant retrying instantly into the same wall.
+    expect(
+      await screen.findByText(/Wait about 27 seconds/i),
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("falls back to the generic wait when Retry-After is absent or malformed", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ ok: false, code: "CIRCUIT_OPEN" }), {
+        status: 503,
+        headers: { "content-type": "application/json", "Retry-After": "soon" },
+      }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    expect(
+      await screen.findByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    // Never "Wait about NaN seconds".
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("POSITIVE CONTROL: a genuine 500 still reports SYNC_FAILED", async () => {
+    // Without this, the tests above cannot be distinguished from "SYNC_FAILED
+    // stopped being reachable at all" — and a real analytics failure genuinely
+    // IS the case where the SYNC_FAILED copy is true.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    expect(await screen.findByText(FALSE_CLAIM)).toBeInTheDocument();
+    expect(
+      screen.queryByText("Our service is temporarily unavailable."),
+    ).not.toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Polling-loop dispositions (H-0195 / H-0197 / H-0198), added with the
 // audit batch1 hi-fix on 2026-05-26.

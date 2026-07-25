@@ -337,6 +337,45 @@ function capitalizeExchange(exchange: string): string {
   return exchange.charAt(0).toUpperCase() + exchange.slice(1);
 }
 
+/**
+ * Statuses on which `/api/keys/sync` means "we never reached the ingestion
+ * service", as opposed to "we reached it and the work failed".
+ *
+ * Phase 140 review / F-4. All three are minted by `process-key-client`'s own
+ * arms and pass through `keys/sync` unchanged:
+ *
+ *   503 — CIRCUIT_OPEN (breaker) or the INTERNAL_API_TOKEN misconfiguration
+ *   504 — UPSTREAM_TIMEOUT, the seam deadline fired
+ *   502 — UPSTREAM_NETWORK_ERROR, the connection never completed
+ *
+ * ⚠️ 503 IS DELIBERATELY INCLUDED EVEN THOUGH `keys/sync` ALSO RETURNS 503 FOR
+ * AN UNKNOWABLE COMPOSITE MEMBERSHIP. That arm fails closed for a reason the
+ * user also cannot act on beyond retrying, and SERVICE_UNAVAILABLE_RETRY's copy
+ * ("this is on our side, not your key… try again in a moment") is TRUE for it.
+ * SYNC_FAILED's copy is not: it claims we fetched their trades. Preferring the
+ * honest-for-both message over a false-for-one is the whole point of the fix.
+ */
+const SEAM_KICKOFF_STATUSES = new Set([502, 503, 504]);
+
+/**
+ * Classify a failed `/api/keys/sync` kickoff, returning the seam's recovery
+ * hint when this was a seam failure, or `null` when it was a genuine
+ * sync/analytics failure.
+ */
+function classifySeamKickoffFailure(
+  res: Response,
+): { retryAfterS: number | undefined } | null {
+  if (!SEAM_KICKOFF_STATUSES.has(res.status)) return null;
+  // `Retry-After` is seconds here (the seam never sends the HTTP-date form).
+  // Anything unparseable degrades to the generic copy rather than "NaN".
+  const raw = res.headers.get("Retry-After");
+  const parsed = raw === null ? Number.NaN : Number(raw);
+  return {
+    retryAfterS:
+      Number.isFinite(parsed) && parsed > 0 ? parsed : undefined,
+  };
+}
+
 export function SyncPreviewStep({
   strategyId,
   apiKeyId,
@@ -349,6 +388,14 @@ export function SyncPreviewStep({
   const [phase, setPhase] = useState<Phase>("kicking_off");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
+  /**
+   * Seconds from the seam's `Retry-After`, when it sent one (F-4). Feeds the
+   * SERVICE_UNAVAILABLE_RETRY copy so the user is told the real wait instead of
+   * "a moment" — which in practice means retrying instantly into the same wall.
+   */
+  const [seamRetryAfterS, setSeamRetryAfterS] = useState<number | undefined>(
+    undefined,
+  );
   const [gateResult, setGateResult] = useState<StrategyGateResult | null>(null);
   const [snapshot, setSnapshot] = useState<SyncPreviewSnapshot | null>(null);
   const [computationStatus, setComputationStatus] = useState<string | null>(null);
@@ -503,11 +550,25 @@ export function SyncPreviewStep({
           body: JSON.stringify({ strategy_id: strategyId }),
         });
         if (!res.ok) {
-          // A non-2xx kickoff — INCLUDING the 503 the route returns when
-          // composite membership is UNKNOWABLE — fails CLOSED: surface the
-          // recoverable SYNC_FAILED envelope, never silently assume single-key.
+          // A non-2xx kickoff fails CLOSED — never silently assume single-key.
+          //
+          // WHICH failure it was decides the copy (Phase 140 review / F-4).
+          // Collapsing everything into SYNC_FAILED made the wizard assert
+          // "We fetched your trades but the analytics computation did not
+          // complete" — a statement ABOUT THE USER'S MONEY DATA that is simply
+          // false on a seam failure, where the kickoff never reached the
+          // ingestion service and NOTHING was fetched. Telling a manager we
+          // pulled their trades when we did not is the kind of wrong that
+          // costs trust, and it also pointed them at the wrong remedy (contact
+          // support with a draft ID, rather than retry in a moment).
           if (mountedRef.current) {
-            setErrorCode("SYNC_FAILED");
+            const seam = classifySeamKickoffFailure(res);
+            if (seam) {
+              setSeamRetryAfterS(seam.retryAfterS);
+              setErrorCode("SERVICE_UNAVAILABLE_RETRY");
+            } else {
+              setErrorCode("SYNC_FAILED");
+            }
             setPhase("gate_failed");
           }
           return;
@@ -1117,6 +1178,18 @@ export function SyncPreviewStep({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ strategy_id: strategyId }),
       });
+      if (!res.ok) {
+        // F-4 — do not swallow this silently. The manual Retry deliberately
+        // does NOT route into the terminal SYNC_FAILED gate (a poll may still
+        // be tracking a live job, and abandoning it would be worse), so the
+        // banner correctly stays up for another attempt — but a retry that
+        // fails for a DIFFERENT reason than the one the user is looking at
+        // used to leave no trace anywhere. Log it with the status so a support
+        // conversation has something to work from.
+        console.warn(
+          `[wizard:SyncPreviewStep] retry sync POST returned ${res.status}; keeping the retry banner visible`,
+        );
+      }
       if (res.ok && mountedRef.current) {
         statusChangedAtRef.current = Date.now();
         setStallBackstop(false);
@@ -1152,6 +1225,9 @@ export function SyncPreviewStep({
         trades: gateResult?.detail?.trades as number | undefined,
         days: gateResult?.detail?.days as number | undefined,
         computationError: computationError,
+        // F-4 — the seam already published a precise recovery hint; pass it
+        // through so the copy names the real wait instead of "a moment".
+        retryAfterS: seamRetryAfterS,
       })
     : null;
 

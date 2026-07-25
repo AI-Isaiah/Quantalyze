@@ -838,6 +838,15 @@ export interface WizardErrorContext {
   sizeMb?: string;
   /** Count of blocking cross-key window issues (for MULTI_KEY_WINDOWS_INVALID). */
   issueCount?: number;
+  /**
+   * Seconds from the seam's `Retry-After` header (for SERVICE_UNAVAILABLE_RETRY).
+   *
+   * Phase 140 review / F-4. The breaker and the seam 503s already publish a
+   * precise recovery hint; "wait a moment" throws it away and leaves the user
+   * guessing, which in practice means retrying immediately and hitting the same
+   * wall. When present, the copy names the actual number of seconds.
+   */
+  retryAfterS?: number;
 }
 
 /**
@@ -894,6 +903,26 @@ export function formatKeyError(
     return {
       ...base,
       title: base.title.replace(SIZE_MB_PLACEHOLDER, context.sizeMb),
+    };
+  }
+
+  // Phase 140 review / F-4 — name the real wait when the seam told us one.
+  // Guarded on a positive finite number so a malformed/absent `Retry-After`
+  // silently falls back to the generic copy rather than rendering "in NaN
+  // seconds".
+  if (
+    code === "SERVICE_UNAVAILABLE_RETRY" &&
+    typeof context?.retryAfterS === "number" &&
+    Number.isFinite(context.retryAfterS) &&
+    context.retryAfterS > 0
+  ) {
+    const s = Math.ceil(context.retryAfterS);
+    return {
+      ...base,
+      fix: [
+        `Wait about ${s} second${s === 1 ? "" : "s"}, then try again — that is how long we expect to need.`,
+        ...base.fix.slice(1),
+      ],
     };
   }
 
