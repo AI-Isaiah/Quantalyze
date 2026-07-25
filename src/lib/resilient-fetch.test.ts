@@ -62,9 +62,18 @@ const shared = vi.hoisted(() => {
     hangOnLimit: false,
     /** true → the failure counter rejects, exercising the swallow-and-log arm. */
     throwOnLimit: false,
+    /**
+     * true → the failure counter resolves @upstash/ratelimit's FAIL-OPEN
+     * timeout sentinel ({success:true, limit:0, remaining:0, reason:"timeout"})
+     * instead of counting. F-5: this must NOT be read as exhaustion.
+     */
+    limiterTimeoutSentinel: false,
   };
   /** Config object the core passed to `Redis.fromEnv()`, captured per context. */
-  const captured = { redisConfig: undefined as Record<string, unknown> | undefined };
+  const captured = {
+    redisConfig: undefined as Record<string, unknown> | undefined,
+    limiterConfig: undefined as Record<string, unknown> | undefined,
+  };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
   return {
@@ -122,9 +131,17 @@ vi.mock("@upstash/ratelimit", async () => {
         return { tokens, window };
       }
       private readonly fake: { limit: (id: string) => Promise<unknown> };
-      constructor(opts: { limiter: { tokens: number } }) {
+      /** Captured so a test can assert the core's limiter construction. */
+      static lastConfig: Record<string, unknown> | undefined;
+      constructor(opts: { limiter: { tokens: number } } & Record<string, unknown>) {
+        (this.constructor as { lastConfig?: unknown }).lastConfig = opts;
+        shared.captured.limiterConfig = opts;
         // Binds to whatever store beginContext() just selected.
-        this.fake = fakeRatelimitFor(shared.ctx.store, opts.limiter.tokens);
+        this.fake = fakeRatelimitFor(
+          shared.ctx.store,
+          opts.limiter.tokens,
+          shared.mode.limiterTimeoutSentinel,
+        );
       }
       limit(identifier: string) {
         if (shared.mode.throwOnLimit) {
@@ -199,6 +216,8 @@ beforeEach(() => {
   shared.mode.hangOnGet = false;
   shared.mode.hangOnLimit = false;
   shared.captured.redisConfig = undefined;
+  shared.captured.limiterConfig = undefined;
+  shared.mode.limiterTimeoutSentinel = false;
   // Every flag resets. A leaked `throwOnLimit` silently disables the failure
   // counter for every later test, which makes "the breaker did not trip"
   // assertions pass for entirely the wrong reason.
@@ -494,6 +513,60 @@ describe("recordSeamFailure", () => {
     await mod.recordSeamFailure();
 
     expect(shared.store.get(mod.BREAKER_KEY)?.expiresAt).toBe(firstExpiry);
+  });
+
+  /**
+   * Phase 140 review / F-5 — the limiter's FAIL-OPEN must not become the
+   * breaker's FAIL-CLOSED.
+   *
+   * `@upstash/ratelimit` v2.0.8 answers its own internal timeout by RESOLVING
+   * `{success:true, limit:0, remaining:0, reason:"timeout"}` (dist/index.mjs
+   * `applyTimeout`, default 5000ms) — meaning "I could not reach the store, let
+   * the caller through". Read under `!(success && remaining > 0)` that value is
+   * indistinguishable from real exhaustion, so a degraded Upstash would TRIP
+   * the breaker and deny the whole seam to every tenant: exactly the inversion
+   * locked decision 4 forbids.
+   */
+  it("F-5: the limiter's timeout sentinel does NOT trip the breaker", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.limiterTimeoutSentinel = true;
+    const mod = await import("./resilient-fetch");
+
+    // Well past the threshold: if the sentinel counted, this would be open many
+    // times over.
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD * 3; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    // Loud, not silent: a breaker running without a counter is an operational
+    // fact, and it is why the seam is currently unprotected.
+    expect(
+      errorSpy.mock.calls.some((c) =>
+        String(c[0]).includes("limiter fail-open"),
+      ),
+    ).toBe(true);
+  });
+
+  it("F-5: POSITIVE CONTROL — the same drive without the sentinel DOES trip", async () => {
+    // Without this, the test above cannot be distinguished from "recordSeamFailure
+    // stopped tripping at all".
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("F-5: constructs the limiter with its redundant internal timeout disabled", async () => {
+    // `withStoreDeadline` owns this deadline at 250ms — an order of magnitude
+    // tighter than the library's 5000ms default. Leaving both in place keeps a
+    // second, hostile failure mode alive for no benefit.
+    await import("./resilient-fetch");
+    expect(shared.captured.limiterConfig).toMatchObject({ timeout: 0 });
   });
 
   it("is a no-op when Upstash is unconfigured", async () => {

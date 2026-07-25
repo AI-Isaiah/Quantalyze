@@ -146,6 +146,11 @@ export interface FakeRatelimitResponse {
   limit: number;
   remaining: number;
   reset: number;
+  /**
+   * The library's outcome marker. Only `"timeout"` matters here — see
+   * `FAKE_LIMITER_TIMEOUT_SENTINEL`.
+   */
+  reason?: "timeout" | "cacheBlock" | "denyList";
 }
 
 export interface FakeRatelimit {
@@ -153,21 +158,67 @@ export interface FakeRatelimit {
 }
 
 /**
- * Build a fake sliding-window limiter over the SAME store, so the failure
- * counter crosses module contexts exactly like the open-lock does.
+ * The EXACT fail-open value `@upstash/ratelimit` v2.0.8 resolves when its own
+ * internal timeout expires (`dist/index.mjs` `applyTimeout`, default
+ * `timeout: 5000`).
  *
- * Counting is a fixed window rather than a true sliding one — the breaker only
- * reads `success` and `remaining`, and no test depends on sub-window decay.
- * `success` is `count <= threshold`: the threshold-th call is ALLOWED with
- * `remaining === 0`, and the (threshold+1)-th is denied, matching
- * `Ratelimit.slidingWindow(threshold, ...)`.
+ * Copied verbatim rather than described, because the whole hazard (Phase 140
+ * review / F-5) is that it LOOKS like a successful answer: `success: true`
+ * with `remaining: 0`. A breaker testing `!(success && remaining > 0)` reads
+ * the library's "I could not reach the store, let them through" as "the
+ * failure allowance is exhausted, deny everyone" — turning a fail-open into a
+ * fail-closed at the worst possible moment.
+ *
+ * Exported so a test can drive the sentinel through the real breaker rather
+ * than asserting against a paraphrase of it.
+ */
+export const FAKE_LIMITER_TIMEOUT_SENTINEL: FakeRatelimitResponse = {
+  success: true,
+  limit: 0,
+  remaining: 0,
+  reset: 0,
+  reason: "timeout",
+};
+
+/**
+ * Build a fake limiter over the SAME store, so the failure counter crosses
+ * module contexts exactly like the open-lock does.
+ *
+ * ⚠️ THIS IS A FIXED WINDOW; THE DEPLOYED LIMITER IS A SLIDING ONE (Phase 140
+ * review / F-6). The divergence is deliberate — rebuilding
+ * `Ratelimit.slidingWindow` faithfully would be a second implementation of the
+ * dependency, which is a worse liability than a documented approximation — but
+ * it is written down here because a test author who assumes fidelity will draw
+ * wrong conclusions. Three behaviours differ from `@upstash/ratelimit` v2.0.8:
+ *
+ *  1. NO WEIGHTED CARRY-OVER. The real `slidingWindow` counts the PREVIOUS
+ *     epoch-aligned window pro-rata by how far into the current one you are, so
+ *     the effective count decays continuously. This fake resets abruptly at the
+ *     window edge. Any test that depends on partial decay is testing the fake.
+ *  2. EPOCH-ALIGNED vs FIRST-CALL-ALIGNED. Real windows start at
+ *     `floor(now / windowMs) * windowMs`; this one starts at the first call.
+ *  3. IT INCREMENTS ON DENIAL. The real limiter does not count a request it
+ *     rejects, so a sustained overload does not push the count arbitrarily
+ *     high. This fake keeps incrementing.
+ *
+ * None of the three affects what the breaker actually reads (`success`,
+ * `limit`, `remaining`, `reason`) on the paths under test: the threshold-th
+ * call is ALLOWED with `remaining === 0` and the (threshold+1)-th is denied,
+ * matching `Ratelimit.slidingWindow(threshold, …)` at the trip boundary, which
+ * is the only boundary the breaker has.
+ *
+ * @param timeoutSentinel - when true, every call resolves the library's
+ *   fail-open timeout value instead of counting (see
+ *   `FAKE_LIMITER_TIMEOUT_SENTINEL`).
  */
 export function fakeRatelimitFor(
   store: FakeUpstashStore,
   threshold: number,
+  timeoutSentinel = false,
 ): FakeRatelimit {
   return {
     async limit(identifier: string): Promise<FakeRatelimitResponse> {
+      if (timeoutSentinel) return { ...FAKE_LIMITER_TIMEOUT_SENTINEL };
       const key = `${COUNTER_PREFIX}${identifier}`;
       const existing = readLive(store, key);
       const count = (existing ? Number(existing.value) : 0) + 1;

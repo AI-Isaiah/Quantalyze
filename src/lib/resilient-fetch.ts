@@ -525,6 +525,21 @@ const breakerLimiter = redis
       limiter: Ratelimit.slidingWindow(BREAKER_FAILURE_THRESHOLD, BREAKER_WINDOW),
       analytics: false,
       prefix: "breaker",
+      // F-5 — DISABLE the library's own timeout race. `@upstash/ratelimit`
+      // v2.0.8 defaults to `timeout: 5000` and, on expiry, RESOLVES a fail-open
+      // sentinel `{success:true, limit:0, remaining:0, reason:"timeout"}`
+      // (dist/index.mjs `applyTimeout`). That sentinel is indistinguishable
+      // from real counter exhaustion under a `remaining > 0` test, so the
+      // library's fail-OPEN would have become this breaker's fail-CLOSED —
+      // a direct contradiction of locked decision 4.
+      //
+      // `withStoreDeadline` already owns this deadline at 250ms, an order of
+      // magnitude tighter, so the library's race is pure redundancy with a
+      // hostile failure mode. `0` disables it (`if (this.timeout > 0)`), giving
+      // the store deadline exactly ONE owner. The sentinel is still handled
+      // defensively in `recordSeamFailure` in case a future version reinstates
+      // it by another route.
+      timeout: 0,
     })
   : null;
 
@@ -598,9 +613,31 @@ export async function recordSeamFailure(
     // request whose outcome is already decided.
     await withStoreDeadline(
       (async () => {
-        const { success, limit, remaining } = await breakerLimiter.limit(
+        const { success, limit, remaining, reason } = await breakerLimiter.limit(
           `${BREAKER_KEY}:failures`,
         );
+        // F-5 — THE LIBRARY'S FAIL-OPEN MUST NOT BECOME OUR FAIL-CLOSED.
+        //
+        // `@upstash/ratelimit` answers its own internal timeout by RESOLVING
+        // `{success:true, limit:0, remaining:0, reason:"timeout"}` rather than
+        // rejecting — a deliberate fail-open meaning "I could not reach the
+        // store, let the caller through". Under the `remaining > 0` test below
+        // that sentinel reads as "the allowance is exhausted", so a degraded
+        // Upstash would TRIP the breaker and deny the entire seam to every
+        // tenant, which is precisely the inversion locked decision 4 forbids:
+        // the breaker becoming the outage it exists to prevent.
+        //
+        // Checked on BOTH fields. `reason` is the library's explicit marker;
+        // `limit === 0` is the structural backstop, because a configured
+        // `slidingWindow(BREAKER_FAILURE_THRESHOLD, …)` can never report a zero
+        // limit on a real answer, so a future version that drops `reason` still
+        // cannot silently re-open this hole.
+        if (reason === "timeout" || limit === 0) {
+          console.error(
+            "[resilient-fetch] breaker counter unavailable (limiter fail-open) — NOT tripping",
+          );
+          return;
+        }
         // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`)
         // and denies the (N+1)th. The breaker must open ON the threshold-th
         // failure, not one failure later, so exhaustion counts as a trip signal
