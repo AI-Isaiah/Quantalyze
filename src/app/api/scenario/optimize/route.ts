@@ -2,12 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { assertSameOrigin } from "@/lib/csrf";
 import { assertProfileApproved } from "@/lib/api/approval-gate";
+import { optimizeScenarioWeights } from "@/lib/analytics-client";
+// C9 — ALL THREE seam error classes come from the never-mocked leaf. The
+// T-140-30 reasoning that put `CircuitOpenError` here applies verbatim to the
+// other two: a class reached through a wholesale-mocked module is `undefined`,
+// and `err instanceof undefined` throws from inside a catch block.
 import {
-  optimizeScenarioWeights,
   AnalyticsTimeoutError,
   AnalyticsUpstreamError,
-} from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+  CircuitOpenError,
+} from "@/lib/seam-errors";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 

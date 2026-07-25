@@ -17,20 +17,26 @@ import { CircuitOpenError } from "@/lib/seam-errors";
  * and neither had its happy path. Phase 140 adds the breaker arm, so the file
  * exists now to pin all of them.
  *
- * ⚠️ MOCK-FACTORY NOTE, load-bearing. The `@/lib/analytics-client` factory
- * below carries hand-written `AnalyticsTimeoutError` / `AnalyticsUpstreamError`
- * class shims, mirroring the sibling bridge / simulator route tests. This is
- * NOT decoration: the route imports both classes from that module
- * (`route.ts:5-9`) and branches on both in its catch. A bare factory would
- * leave those two bindings `undefined`, and the FIRST `instanceof` the catch
- * evaluates would throw `TypeError: Right-hand side of 'instanceof' is not
- * callable` — reddening every case in this file, including the ones that never
- * mention an analytics error. The 502 and 504 cases below are what keeps that
- * true: delete either shim and they fail loudly rather than silently.
+ * ⚠️ MOCK-FACTORY NOTE, load-bearing — REWRITTEN BY C9.
  *
- * `CircuitOpenError`, by contrast, is deliberately NOT in the factory — it is
- * imported from the never-mocked leaf above, which is the whole reason that
- * leaf is dependency-free.
+ * This note used to describe hand-written `AnalyticsTimeoutError` /
+ * `AnalyticsUpstreamError` class SHIMS in the `@/lib/analytics-client` factory
+ * below, and argued they were load-bearing because a bare factory would leave
+ * those bindings `undefined` and the first `instanceof` in the route's catch
+ * would throw. The premise was right; the remedy created a different, quieter
+ * problem: the ROUTE imported the same names from the same mocked module, so
+ * route and test agreed only because BOTH resolved to the shims. Every
+ * `instanceof` case in this file was self-referential and would have stayed
+ * green through a real divergence in the shipping classes.
+ *
+ * The route now imports all three seam error classes from the never-mocked
+ * `@/lib/seam-errors` leaf, and the factory RE-EXPORTS the same leaf classes.
+ * The bindings are still present (so the `undefined`-instanceof hazard stays
+ * closed) and they are now the identities that actually ship — including the
+ * real `AnalyticsUpstreamError` status-range fence (H-1144) the shim dropped.
+ *
+ * `CircuitOpenError` was already sourced from the leaf; it is simply no longer
+ * the exception.
  */
 
 // route.ts reaches server-only modules transitively (supabase/server, csrf).
@@ -86,22 +92,19 @@ vi.mock("@/lib/ratelimit", () => ({
 }));
 
 vi.mock("@/lib/analytics-client", async () => {
-  // Hand-written shims — see the MOCK-FACTORY NOTE in the file header. Both
-  // classes must exist as real constructors or the route's catch throws.
-  class AnalyticsUpstreamError extends Error {
-    readonly status: number;
-    constructor(message: string, status: number) {
-      super(message);
-      this.name = "AnalyticsUpstreamError";
-      this.status = status;
-    }
-  }
-  class AnalyticsTimeoutError extends Error {
-    constructor(path: string, timeoutMs: number) {
-      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
-      this.name = "AnalyticsTimeoutError";
-    }
-  }
+  // C9 — RE-EXPORT THE SHIPPING CLASSES, never hand-written shims.
+  //
+  // These were hand-written look-alikes. The route imported the same names from
+  // this same (mocked) module, so route and test agreed only because BOTH
+  // resolved to the mock: the `instanceof` assertions proved nothing about the
+  // class that ships, and the real `AnalyticsUpstreamError`'s H-1144
+  // status-range fence was silently absent from every case.
+  //
+  // The never-mocked `@/lib/seam-errors` leaf is where the route imports them
+  // from now, so this is the same constructor identity production uses.
+  const { AnalyticsUpstreamError, AnalyticsTimeoutError } = await import(
+    "@/lib/seam-errors"
+  );
   return {
     AnalyticsUpstreamError,
     AnalyticsTimeoutError,
@@ -236,7 +239,7 @@ describe("POST /api/scenario/optimize", () => {
 
   it("AnalyticsTimeoutError → 504 with static copy", async () => {
     STATE.optimizeImpl = async () => {
-      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
       throw new AnalyticsTimeoutError("/api/optimize-weights", 30000);
     };
     const { POST } = await import("./route");
@@ -251,7 +254,7 @@ describe("POST /api/scenario/optimize", () => {
 
   it("AnalyticsUpstreamError → 502 without echoing the upstream detail", async () => {
     STATE.optimizeImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError(
         "solver failed: singular covariance at optimizer.py:214",
         500,

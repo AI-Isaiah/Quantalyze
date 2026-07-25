@@ -240,7 +240,10 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
   it("maps AnalyticsTimeoutError to 504 with static copy", async () => {
     // The REAL class, reachable only because the analytics-client mock above is
     // a spread-importActual partial rather than a bare factory.
-    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    // C9 — the LEAF, which nothing mocks, so the class the test throws is the
+    // class the route ships. Reaching it through `@/lib/analytics-client` made
+    // the assertion depend on the mock agreeing with itself.
+    const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
     recomputeState.throwValue = new AnalyticsTimeoutError(
       "/api/match/recompute",
       30_000,

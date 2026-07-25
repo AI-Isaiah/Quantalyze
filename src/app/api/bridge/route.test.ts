@@ -121,20 +121,23 @@ vi.mock("@/lib/ratelimit", () => ({
 }));
 
 vi.mock("@/lib/analytics-client", async () => {
-  class AnalyticsUpstreamError extends Error {
-    readonly status: number;
-    constructor(message: string, status: number) {
-      super(message);
-      this.name = "AnalyticsUpstreamError";
-      this.status = status;
-    }
-  }
-  class AnalyticsTimeoutError extends Error {
-    constructor(path: string, timeoutMs: number) {
-      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
-      this.name = "AnalyticsTimeoutError";
-    }
-  }
+  // C9 — RE-EXPORT THE SHIPPING CLASSES, never hand-rolled look-alikes.
+  //
+  // This factory used to DEFINE its own `AnalyticsUpstreamError` and
+  // `AnalyticsTimeoutError`. The route imported those names from this same
+  // (mocked) module, so route and test agreed only because BOTH resolved to the
+  // mock: every `instanceof` assertion below proved nothing at all about the
+  // class that actually ships, and would have stayed green through a real
+  // divergence.
+  //
+  // Sourcing them from the never-mocked `@/lib/seam-errors` leaf — which is
+  // also where the route imports them from now — makes the identity under test
+  // the identity in production, and keeps the real class behaviour in play
+  // (notably `AnalyticsUpstreamError`'s H-1144 status-range fence, which a
+  // look-alike silently dropped).
+  const { AnalyticsUpstreamError, AnalyticsTimeoutError } = await import(
+    "@/lib/seam-errors"
+  );
   return {
     AnalyticsUpstreamError,
     AnalyticsTimeoutError,
@@ -191,6 +194,42 @@ afterEach(() => {
 });
 
 describe("POST /api/bridge", () => {
+  /**
+   * C9 — ANTI-DRIFT FENCE for the seam error class identity.
+   *
+   * Every `instanceof` case below is only meaningful if the class this file
+   * throws is the class the route narrows against. Before this fix that was
+   * accidentally true for the wrong reason (both sides resolved to a
+   * hand-rolled look-alike in the mock factory), so the cases could not have
+   * detected a divergence. This test asserts the property DIRECTLY: the classes
+   * reachable through the mocked `@/lib/analytics-client` are, by identity, the
+   * ones the never-mocked leaf ships.
+   *
+   * Reintroducing a look-alike in the factory reddens this immediately, with a
+   * message that says what is wrong, instead of leaving the suite green.
+   */
+  it("C9: the mocked analytics-client exposes the SHIPPING seam error classes", async () => {
+    const mocked = await import("@/lib/analytics-client");
+    const leaf = await import("@/lib/seam-errors");
+
+    expect(mocked.AnalyticsUpstreamError).toBe(leaf.AnalyticsUpstreamError);
+    expect(mocked.AnalyticsTimeoutError).toBe(leaf.AnalyticsTimeoutError);
+
+    // And the route narrows against that same identity: an error minted from
+    // the leaf takes the 4xx-forwarding arm rather than the generic 500.
+    STATE.findReplacementImpl = async () => {
+      throw new leaf.AnalyticsUpstreamError("no returns data", 400);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        underperformer_strategy_id: UNDERPERFORMER_ID,
+      }),
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("TC1 — 401 when no user", async () => {
     STATE.authUser = null;
     const { POST } = await import("./route");
@@ -248,7 +287,7 @@ describe("POST /api/bridge", () => {
     STATE.portfolioFound = true;
 
     STATE.findReplacementImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError("no returns data", 400); // 4xx forward
     };
     res = await POST(req());
@@ -256,7 +295,7 @@ describe("POST /api/bridge", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
 
     STATE.findReplacementImpl = async () => {
-      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
       throw new AnalyticsTimeoutError("/api/portfolio-bridge", 15000); // 504
     };
     res = await POST(req());
@@ -264,7 +303,7 @@ describe("POST /api/bridge", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
 
     STATE.findReplacementImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError("traceback", 502); // 500 generic
     };
     res = await POST(req());
@@ -460,7 +499,7 @@ describe("POST /api/bridge", () => {
 
   it("TC9 — upstream 4xx forwarded with its status (H-1061/H-1063)", async () => {
     STATE.findReplacementImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError("Portfolio not found", 404);
     };
     const { POST } = await import("./route");
@@ -480,7 +519,7 @@ describe("POST /api/bridge", () => {
 
   it("TC9b — upstream 5xx stays 500 with static message (no leak)", async () => {
     STATE.findReplacementImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError("upstream traceback line 42", 502);
     };
     const { POST } = await import("./route");
@@ -504,7 +543,7 @@ describe("POST /api/bridge", () => {
 
   it("TC10 — upstream timeout → 504 (H-1061)", async () => {
     STATE.findReplacementImpl = async () => {
-      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
       throw new AnalyticsTimeoutError("/api/portfolio-bridge", 15000);
     };
     const { POST } = await import("./route");

@@ -99,24 +99,21 @@ vi.mock("@/lib/ratelimit", () => ({
     rl.success === false && rl.reason === "ratelimit_misconfigured",
 }));
 
-// Mock analytics-client so we control the upstream response. We re-export
-// the real AnalyticsUpstreamError class so `err instanceof AnalyticsUpstreamError`
-// inside the route resolves against the same constructor identity.
+// Mock analytics-client so we control the upstream response.
+//
+// C9 — the comment here used to say "we re-export the real
+// AnalyticsUpstreamError class"; the code beneath it DEFINED a look-alike. The
+// route imported the same names from this same (mocked) module, so route and
+// test agreed only because BOTH resolved to the mock — the `instanceof`
+// assertions proved nothing about the shipping class and the real
+// `AnalyticsUpstreamError`'s H-1144 status-range fence was silently absent.
+//
+// Now the comment is true: the classes come from the never-mocked
+// `@/lib/seam-errors` leaf, which is also where the route imports them from.
 vi.mock("@/lib/analytics-client", async () => {
-  class AnalyticsUpstreamError extends Error {
-    readonly status: number;
-    constructor(message: string, status: number) {
-      super(message);
-      this.name = "AnalyticsUpstreamError";
-      this.status = status;
-    }
-  }
-  class AnalyticsTimeoutError extends Error {
-    constructor(path: string, timeoutMs: number) {
-      super(`Analytics request to ${path} timed out after ${timeoutMs}ms`);
-      this.name = "AnalyticsTimeoutError";
-    }
-  }
+  const { AnalyticsUpstreamError, AnalyticsTimeoutError } = await import(
+    "@/lib/seam-errors"
+  );
   return {
     AnalyticsUpstreamError,
     AnalyticsTimeoutError,
@@ -232,7 +229,7 @@ describe("POST /api/simulator", () => {
     STATE.portfolioFound = true;
 
     STATE.simulateImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError("already in portfolio", 400); // 4xx fwd
     };
     res = await POST(req());
@@ -240,7 +237,7 @@ describe("POST /api/simulator", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
 
     STATE.simulateImpl = async () => {
-      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
       throw new AnalyticsTimeoutError("/api/portfolio-simulate", 15000); // 504
     };
     res = await POST(req());
@@ -248,7 +245,7 @@ describe("POST /api/simulator", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
 
     STATE.simulateImpl = async () => {
-      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
       throw new AnalyticsUpstreamError("traceback", 502); // 500 generic
     };
     res = await POST(req());
@@ -385,7 +382,7 @@ describe("POST /api/simulator", () => {
   });
 
   it("TC7 — 4xx AnalyticsUpstreamError forwarded as 4xx (NOT collapsed to 500)", async () => {
-    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
     STATE.simulateImpl = async () => {
       throw new AnalyticsUpstreamError("Already in portfolio", 400);
     };
@@ -402,7 +399,7 @@ describe("POST /api/simulator", () => {
   });
 
   it("TC7b — 404 AnalyticsUpstreamError forwarded as 404", async () => {
-    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
     STATE.simulateImpl = async () => {
       throw new AnalyticsUpstreamError("Portfolio not found", 404);
     };
@@ -422,7 +419,7 @@ describe("POST /api/simulator", () => {
     // Route only special-cases 4xx upstream; 5xx falls through to the generic
     // 500 path, which now returns a STATIC message (the byte-identical defect
     // F5 closed in /api/bridge — err.message echoed the upstream 5xx detail).
-    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    const { AnalyticsUpstreamError } = await import("@/lib/seam-errors");
     STATE.simulateImpl = async () => {
       throw new AnalyticsUpstreamError("upstream traceback frame 42", 502);
     };
@@ -469,7 +466,7 @@ describe("POST /api/simulator", () => {
 
   it("TC9b — AnalyticsTimeoutError → 504 (M-0959)", async () => {
     STATE.simulateImpl = async () => {
-      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
       throw new AnalyticsTimeoutError("/api/simulator", 15000);
     };
     const { POST } = await import("./route");

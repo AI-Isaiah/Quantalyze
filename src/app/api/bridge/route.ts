@@ -2,12 +2,24 @@ import { NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { findReplacementCandidates } from "@/lib/analytics-client";
+// C9 — ALL THREE seam error classes come from the never-mocked leaf, not one
+// from the leaf and two from the wholesale-mocked module on the line above.
+// The T-140-30 reasoning that put `CircuitOpenError` here applies verbatim to
+// the other two: reaching a class through a module some test file replaces with
+// a bare factory yields `undefined`, and `err instanceof undefined` throws a
+// TypeError from inside a catch block. `analytics-client` re-exports them, so
+// production behaviour is identical either way — but the re-export is also what
+// let `bridge/route.test.ts` mock the module with a LOCALLY REDEFINED
+// `AnalyticsUpstreamError` and still pass: route and test agreed only because
+// BOTH resolved to the mock, so the test proved nothing about the shipping
+// class. Importing from the leaf makes the identity the test exercises the
+// identity that ships.
 import {
-  findReplacementCandidates,
-  AnalyticsUpstreamError,
   AnalyticsTimeoutError,
-} from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+  AnalyticsUpstreamError,
+  CircuitOpenError,
+} from "@/lib/seam-errors";
 import { BridgeRequestSchema } from "@/lib/api/bridgeSchema";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {

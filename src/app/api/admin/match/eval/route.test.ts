@@ -238,7 +238,10 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     adminFlag.isAdmin = true;
     // The REAL class, reachable only because the analytics-client mock above is
     // a spread-importActual partial rather than a bare factory.
-    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    // C9 — the LEAF, which nothing mocks, so the class the test throws is the
+    // class the route ships. Reaching it through `@/lib/analytics-client` made
+    // the assertion depend on the mock agreeing with itself.
+    const { AnalyticsTimeoutError } = await import("@/lib/seam-errors");
     evalState.throwValue = new AnalyticsTimeoutError(
       "/api/match/eval?lookback_days=28",
       30_000,

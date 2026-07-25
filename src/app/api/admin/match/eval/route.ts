@@ -1,8 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
-import { AnalyticsTimeoutError, evalMatch } from "@/lib/analytics-client";
-import { AnalyticsUpstreamError, CircuitOpenError } from "@/lib/seam-errors";
+import { evalMatch } from "@/lib/analytics-client";
+// C9 — ALL THREE seam error classes come from the never-mocked leaf.
+// `AnalyticsTimeoutError` used to be reached through `analytics-client` on the
+// line above, which is the module route tests mock; the T-140-30 reasoning that
+// homed the other two here applies to it identically.
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUpstreamError,
+  CircuitOpenError,
+} from "@/lib/seam-errors";
 import { assertSameOrigin } from "@/lib/csrf";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
