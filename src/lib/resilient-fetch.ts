@@ -581,8 +581,14 @@ export async function isBreakerOpen(): Promise<{
  * arm, so a throw here would replace the real upstream error with a breaker
  * bookkeeping error. Never log request bodies or header values from this
  * module — the seam carries raw exchange API secrets and INTERNAL_API_TOKEN.
+ *
+ * @param budgetKey - the call site whose failure this is. Logged at the TRIP
+ *   only (D-3), so an operator reading the line knows which seam was the last
+ *   straw. Optional because the breaker is keyed globally, not per budget.
  */
-export async function recordSeamFailure(): Promise<void> {
+export async function recordSeamFailure(
+  budgetKey?: SeamBudgetKey,
+): Promise<void> {
   if (!redis || !breakerLimiter) return;
   try {
     // CR-02 — bounded like the read, and for a sharper reason: this runs inside
@@ -592,7 +598,7 @@ export async function recordSeamFailure(): Promise<void> {
     // request whose outcome is already decided.
     await withStoreDeadline(
       (async () => {
-        const { success, remaining } = await breakerLimiter.limit(
+        const { success, limit, remaining } = await breakerLimiter.limit(
           `${BREAKER_KEY}:failures`,
         );
         // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`)
@@ -604,10 +610,29 @@ export async function recordSeamFailure(): Promise<void> {
         // stands, so a second instance tripping 200ms later cannot ratchet the
         // cooldown window open. Benign race, deliberately not serialised with
         // Lua.
-        await redis.set(BREAKER_KEY, "open", {
+        const wrote = await redis.set(BREAKER_KEY, "open", {
           ex: BREAKER_COOLDOWN_S,
           nx: true,
         });
+        // D-3 — THE BREAKER OPENING IS THE MOST IMPORTANT OPERATIONAL EVENT
+        // THIS MODULE PRODUCES, and it used to be completely silent: every
+        // individual failure logged, but the moment they added up to "the seam
+        // is now refused for everyone" logged nothing at all. An operator
+        // watching a support ticket saw a burst of transport errors and then
+        // a sudden, unexplained absence of them — the breaker doing its job is
+        // indistinguishable in the logs from the incident spontaneously
+        // resolving.
+        //
+        // Gated on `wrote` (the `nx` result), so this is emitted ONCE per
+        // actual trip rather than by every instance that loses the race.
+        if (wrote) {
+          console.error(
+            `[resilient-fetch] BREAKER OPEN — ${BREAKER_KEY} tripped after ` +
+              `${limit - remaining} failures in ${BREAKER_WINDOW}; the seam is ` +
+              `refused for ${BREAKER_COOLDOWN_S}s` +
+              (budgetKey ? ` (last failing call site: ${budgetKey})` : ""),
+          );
+        }
       })(),
       "breaker store write",
     );
@@ -910,7 +935,7 @@ export async function resilientFetch(
     // OPEN breaker above; it just may not DRIVE the shared counter. See the
     // flag's docblock on ResilientFetchInit for the CR-04 reasoning.
     if (recordFailures && transportFailed) {
-      await recordSeamFailure();
+      await recordSeamFailure(budgetKey);
     }
     // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
     // typed errors (AnalyticsTimeoutError / UPSTREAM_TIMEOUT); wrapping here
@@ -927,7 +952,7 @@ export async function resilientFetch(
   // Guarded on `recordFailures` FIRST so the opted-out public teaser path never
   // pays for the body peek.
   if (recordFailures && (await shouldRecordResponseFailure(res))) {
-    await recordSeamFailure();
+    await recordSeamFailure(budgetKey);
   }
   return res;
 }

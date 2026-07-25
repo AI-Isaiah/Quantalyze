@@ -414,6 +414,71 @@ describe("recordSeamFailure", () => {
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
   });
 
+  /**
+   * Phase 140 review / D-3 — the trip must be observable.
+   *
+   * Every individual failure logged, but the moment they added up to "the seam
+   * is now refused for everyone" logged NOTHING. In the logs, the breaker doing
+   * its job was indistinguishable from the incident spontaneously resolving:
+   * a burst of transport errors, then silence.
+   */
+  it("D-3: logs a distinct BREAKER OPEN line at the trip, with the count", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+
+    const tripLines = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("BREAKER OPEN"));
+
+    // Exactly ONE line — gated on the `nx` write result, so instances that lose
+    // the race stay quiet instead of spamming a duplicate per failure.
+    expect(tripLines).toHaveLength(1);
+    expect(tripLines[0]).toContain(mod.BREAKER_KEY);
+    // The failure count and the cooldown are what make the line actionable.
+    expect(tripLines[0]).toContain(String(mod.BREAKER_FAILURE_THRESHOLD));
+    expect(tripLines[0]).toContain(String(mod.BREAKER_COOLDOWN_S));
+    // And which call site was the last straw.
+    expect(tripLines[0]).toContain("bridge");
+  });
+
+  it("D-3: stays silent on failures that do NOT trip", async () => {
+    // A line per failure would drown the one that matters.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD - 1; i++) {
+      await mod.recordSeamFailure("bridge");
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
+    expect(
+      errorSpy.mock.calls.filter((c) => String(c[0]).includes("BREAKER OPEN")),
+    ).toHaveLength(0);
+  });
+
+  it("D-3: the engine threads its budgetKey into the trip line", async () => {
+    // The core knows which seam it was; recordSeamFailure only knows if the
+    // engine passes it. A dropped argument makes the line say "some call site".
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    edgeFetch(502);
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      await mod.resilientFetch("simulator", "/api/simulator", { method: "POST" });
+    }
+
+    const tripLines = errorSpy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("BREAKER OPEN"));
+    expect(tripLines).toHaveLength(1);
+    expect(tripLines[0]).toContain("simulator");
+  });
+
   it("does not extend the cooldown when a second instance trips concurrently", async () => {
     // `nx: true` makes the trip idempotent — the first writer's TTL stands, so
     // a second instance tripping moments later cannot ratchet the outage
