@@ -57,6 +57,20 @@ _ROUTE_B_LIMIT = 30
 _ROUTE_B_LIMIT_TEXT = "30 per 1 hour"
 _ROUTE_B_WINDOW_S = 3600
 
+# Phase 140.1.1 / PYAPIFIX-05, review survivor #5 — the tight band.
+#
+# Both `_ROUTE_x_WINDOW_S` above are the seconds in the route's own DECLARED
+# limit string ("... per 1 hour"), typed into this file. They are NOT read back
+# from `main._retry_after_seconds`, whose return value is the thing under test.
+#
+# `fresh_limiter` empties the bucket and the trip drivers spend it in
+# milliseconds, so at the moment the 429 is minted the TRUE remaining wait is
+# essentially the FULL window. Anything materially smaller is wrong. 0.9 leaves
+# six minutes of slack on a 1-hour window — orders of magnitude more than the
+# suite's own runtime, and orders of magnitude less than the mutation it exists
+# to catch.
+_FRESH_BUCKET_BAND = 0.9
+
 
 @pytest.fixture
 def service_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -215,7 +229,21 @@ async def test_08a_slowapi_default_error_key_is_gone(
 async def test_08b_429_carries_a_parseable_positive_retry_after(
     service_key: None, fresh_limiter: Any
 ) -> None:
-    """B-11: without this header 140.3 has to invent a wait."""
+    """B-11: without this header 140.3 has to invent a wait.
+
+    ⚠️ The presence + upper-bound assertions below are necessary and were NOT
+    sufficient. `0 < seconds <= 3600` is satisfied by a hard-coded `1`, and that
+    mutation SURVIVED the Phase 140.1 review (PYAPIFIX-05 survivor #5): the
+    header existed, was parseable, was positive, and was wrong. A
+    wrong-but-small Retry-After is the retry-storm shape — every throttled
+    client is told to come back in one second, so the header that exists to
+    PREVENT a stampede causes one. The band assertion is the teeth.
+
+    The value is read from the response HEADER (minted at `main.py:526`); the
+    computation under test is `main._retry_after_seconds` (`main.py:458-487`).
+    Those are different lines on purpose — the oracle observes the wire, not the
+    function.
+    """
     async with _client() as client:
         resp = await _trip_route_a(client)
 
@@ -226,6 +254,14 @@ async def test_08b_429_carries_a_parseable_positive_retry_after(
     seconds = int(resp.headers["Retry-After"])
     assert 0 < seconds <= _ROUTE_A_WINDOW_S, (
         f"Retry-After must be a positive wait inside the 1-hour window, got {seconds}"
+    )
+    assert seconds > _ROUTE_A_WINDOW_S * _FRESH_BUCKET_BAND, (
+        f"Retry-After is {seconds}s on a bucket that was reset milliseconds ago "
+        f"and whose declared window is {_ROUTE_A_LIMIT_TEXT!r} "
+        f"({_ROUTE_A_WINDOW_S}s). The true remaining wait is essentially the "
+        "whole window, so anything below "
+        f"{int(_ROUTE_A_WINDOW_S * _FRESH_BUCKET_BAND)}s is understating it — "
+        "and understating it is what turns this header into a retry storm."
     )
 
 
@@ -270,6 +306,13 @@ async def test_08c_second_route_gets_the_same_envelope_and_header(
     assert "error" not in body
     seconds = int(resp.headers["Retry-After"])
     assert 0 < seconds <= _ROUTE_B_WINDOW_S
+    # Survivor #5 again, at the SECOND site. The weak `0 < seconds <= window`
+    # oracle appeared twice in this file, and closing one of two is the
+    # instances-not-classes failure mode the repair programme exists to shut.
+    assert seconds > _ROUTE_B_WINDOW_S * _FRESH_BUCKET_BAND, (
+        f"Retry-After is {seconds}s on a freshly-reset "
+        f"{_ROUTE_B_LIMIT_TEXT!r} bucket ({_ROUTE_B_WINDOW_S}s window)"
+    )
 
 
 # ---------------------------------------------------------------------------
