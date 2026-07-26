@@ -288,3 +288,138 @@ def test_s17_eval_failure_leaks_no_exception_text(
     correlation_id = resp.json()["detail"]["correlation_id"]
     assert correlation_id
     assert correlation_id in logged
+
+
+# --------------------------------------------------------------------------- #
+# routers/simulator.py — S-18
+# --------------------------------------------------------------------------- #
+
+
+def test_s18_simulation_failure_is_permanent_500_keeping_correlation_id(
+    monkeypatch,
+) -> None:
+    """S-18 — a numpy/pandas blow-up inside the sim is OUR bug, permanently.
+
+    This site was already the closest thing to the R-2 envelope in the service
+    (``{error, correlation_id}``); PYAPI-05 aligns it to the shared helper so
+    140.2 reads ONE shape. The correlation_id that G15-007 added — the whole
+    point of the dict detail — must survive the alignment.
+    """
+    from routers import simulator as simulator_router
+    from tests.test_simulator_router import _build_returns_records, _table_router
+
+    supabase_mock = MagicMock()
+    monkeypatch.setattr(simulator_router, "get_supabase", lambda: supabase_mock)
+    monkeypatch.setattr(simulator_router, "log_audit_event", MagicMock(return_value=None))
+    _table_router(
+        supabase_mock,
+        portfolio_data={"id": "p-1"},
+        candidate_data={"id": "c-1", "name": "Candidate Alpha", "status": "published"},
+        portfolio_strategies_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+        sa_portfolio_data=[
+            {"strategy_id": "s-1", "returns_series": _build_returns_records(60)},
+        ],
+        sa_candidate_data={
+            "strategy_id": "c-1",
+            "returns_series": _build_returns_records(60),
+        },
+    )
+
+    def _boom(**kwargs):
+        raise ValueError("synthetic simulator crash")
+
+    monkeypatch.setattr(simulator_router, "simulate_add_candidate", _boom)
+
+    app = FastAPI()
+    app.state.limiter = simulator_router.limiter
+    app.include_router(simulator_router.router)
+    client = TestClient(app)
+
+    correlation_id = "corr-id-s18"
+    resp = client.post(
+        "/api/simulator",
+        headers={"X-Correlation-Id": correlation_id},
+        json={"portfolio_id": "p-1", "candidate_strategy_id": "c-1", "user_id": "u-1"},
+    )
+
+    assert resp.status_code == 500
+    envelope = resp.json()["detail"]
+    assert envelope["code"] == "SIMULATION_FAILED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert envelope["correlation_id"] == correlation_id
+    assert isinstance(envelope["detail"], str)
+    assert "Retry-After" not in resp.headers
+
+
+# --------------------------------------------------------------------------- #
+# routers/portfolio.py — S-19, S-20
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_s19_analytics_insert_returning_no_row_is_transient_503() -> None:
+    """S-19 — the ``computing`` INSERT succeeded but PostgREST returned no row.
+
+    Nothing about the request is wrong and nothing is permanently broken: this
+    is the Supabase-blip shape, and an identical retry is exactly what should
+    happen. As a 500 the caller was told "do not retry" about a condition that
+    clears in seconds.
+    """
+    from fastapi import HTTPException
+
+    from routers import portfolio as portfolio_mod
+    from tests.test_portfolio_compute_integration import _make_supabase_for_compute
+
+    sb, tables = _make_supabase_for_compute(portfolio_strategies=[], analytics_rows=[])
+    # The INSERT itself does not raise — it comes back with an empty payload.
+    tables["portfolio_analytics"].insert.return_value.execute.return_value = MagicMock(
+        data=[]
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(portfolio_mod, "get_supabase", lambda: sb)
+        with pytest.raises(HTTPException) as excinfo:
+            await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+    exc = excinfo.value
+    assert exc.status_code == 503
+    envelope = exc.detail
+    assert envelope["code"] == "ANALYTICS_ROW_NOT_CREATED"
+    assert envelope["dependency"] == "supabase"
+    assert envelope["retryable"] is True
+    assert isinstance(envelope["detail"], str)
+    retry_after = (exc.headers or {}).get("Retry-After")
+    assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+    assert int(retry_after) > 0
+
+
+@pytest.mark.asyncio
+async def test_s20_analytics_computation_failure_is_permanent_500() -> None:
+    """S-20 — the compute pipeline itself raised.
+
+    The row is marked FAILED and the caller is told, permanently. An identical
+    retry re-runs the identical pipeline over the identical rows.
+    """
+    from fastapi import HTTPException
+
+    from routers import portfolio as portfolio_mod
+    from tests.test_portfolio_compute_integration import _make_supabase_for_compute
+
+    sb, tables = _make_supabase_for_compute(portfolio_strategies=[], analytics_rows=[])
+    tables["portfolio_strategies"].select.return_value.eq.return_value.execute.side_effect = (
+        RuntimeError("synthetic compute crash")
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(portfolio_mod, "get_supabase", lambda: sb)
+        with pytest.raises(HTTPException) as excinfo:
+            await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+
+    exc = excinfo.value
+    assert exc.status_code == 500
+    envelope = exc.detail
+    assert envelope["code"] == "PORTFOLIO_ANALYTICS_FAILED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert not (exc.headers or {}).get("Retry-After")
