@@ -3079,3 +3079,326 @@ def test_pyapi_01e_missing_user_id_fails_closed(client):
     assert r.status_code == 403, r.text
     assert r.json()["code"] == "STRATEGY_NOT_OWNED"
     assert sb.selects("strategy_verifications") == []
+
+
+# ---------------------------------------------------------------------------
+# PYAPI-09 — idempotency completion (findings C-19 / C-20 / C-21).
+#
+# The draft strategy_verifications INSERT commits ~170 lines BEFORE
+# enqueue_compute_job, and they are two independent PostgREST round trips (no
+# client-side transaction). Dying in between — or simply double-submitting —
+# left the session in `WIZARD_DUPLICATE, queued:false` FOREVER: the duplicate
+# path returned before ever reaching the enqueue, so no retry could recover it,
+# and keys/sync/route.ts:438 rendered that dead end to the user as success.
+#
+# `queued` is redefined here from "this call enqueued a job" (unobservable to
+# the caller, and false by construction on the duplicate path) to "a
+# non-terminal compute_job exists for this verification at the moment of
+# reply", with `job_state` naming the three cases the old `queued:false`
+# collapsed. The reply is made TRUE rather than merely asserted, which is why
+# every oracle below checks the enqueue RPC, not just the reply field.
+# ---------------------------------------------------------------------------
+
+
+def _scoped_onboard_body(**context_overrides):
+    """onboard/okx body — a long-fetch flow, so the duplicate path has a job."""
+    context = {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "user_id": _OWNER_ID,
+        "wizard_session_id": _SESSION_ID,
+        "api_key": "k",
+        "api_secret": "s",
+    }
+    context.update(context_overrides)
+    return {"flow_type": "onboard", "source": "okx", "context": context}
+
+
+def test_pyapi_09a_wedged_session_replay_enqueues_and_reports_queued(client):
+    """PYAPI-09a (economic) — the wedge is recoverable by replay.
+
+    State: the SV row exists and is still `draft`, and NO compute_job was ever
+    written (the process died between the two round trips). Replaying the same
+    session must leave a job behind and say so.
+
+    The load-bearing assertion is the recorded enqueue_compute_job RPC, NOT the
+    `queued` field: mutation M6 (hardcode `queued: True` and skip the enqueue)
+    satisfies the field and still leaves the user wedged forever.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-wedged",
+                    "status": "draft",
+                    "trust_tier": "api_verified",
+                }
+            ],
+            # The job this call is about to create, read back for its state.
+            ("compute_jobs", "select"): [{"status": "pending"}],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-created-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-wedged"
+    assert payload["queued"] is True
+    assert payload["job_state"] == "enqueued"
+
+    enqueues = sb.rpc_named("enqueue_compute_job")
+    assert len(enqueues) == 1, (
+        "the duplicate path must actually enqueue — a `queued:true` that no job "
+        "backs is the C-19 wedge with nicer wording"
+    )
+    assert enqueues[0]["p_strategy_id"] == "22222222-bbbb-4bbb-8bbb-000000000002"
+    assert enqueues[0]["p_kind"] == "process_key_long"
+    assert enqueues[0]["p_metadata"]["verification_id"] == "ver-wedged"
+
+
+def test_pyapi_09_duplicate_with_live_job_reports_running(client):
+    """Duplicate whose job is already in flight ⇒ queued:true, job_state
+    "running". The RPC is still called (it dedupes on
+    `(target, kind)` over non-terminal statuses and returns the existing id),
+    so this asserts the reply distinguishes "already working" from "just
+    started" instead of collapsing both into the old `queued:false`."""
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {"id": "ver-live", "status": "draft", "trust_tier": "api_verified"}
+            ],
+            ("compute_jobs", "select"): [{"status": "running"}],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-existing-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    payload = r.json()
+    assert payload["queued"] is True
+    assert payload["job_state"] == "running"
+    assert len(sb.rpc_named("enqueue_compute_job")) == 1
+
+
+def test_pyapi_09_duplicate_on_finished_session_does_not_resync(client):
+    """A session that already reached a terminal status must NOT be silently
+    re-synced by a stray replay.
+
+    `_enqueue_compute_job_internal` dedupes only over NON-terminal job statuses,
+    so an unguarded re-enqueue on a finished verification would mint a brand new
+    job every time the user refreshed. The gate is the SV row's own status.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-finished",
+                    "status": "published",
+                    "trust_tier": "api_verified",
+                }
+            ],
+        },
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    payload = r.json()
+    assert payload["status"] == "published"
+    assert payload["queued"] is False
+    assert payload["job_state"] == "not_applicable"
+    assert sb.rpc_named("enqueue_compute_job") == [], (
+        "a completed verification must not be re-enqueued"
+    )
+
+
+def test_pyapi_09_synchronous_duplicate_is_not_applicable(client):
+    """Emitter 1/2 — the PRE-CHECK emitter, on a synchronous flow.
+
+    csv/teaser/internal_report run the pipeline inline, so no background job
+    ever applies to them. `queued:false` was already correct here; what was
+    missing is the caller's ability to tell this apart from the wedge — hence
+    the literal `job_state`.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-existing",
+                    "status": "published",
+                    "trust_tier": "csv_uploaded",
+                }
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_csv_body(), headers=_auth_headers()
+        )
+
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["queued"] is False
+    assert payload["job_state"] == "not_applicable"
+    assert sb.rpc_named("enqueue_compute_job") == []
+
+
+def test_pyapi_09_race_winner_duplicate_carries_job_state(client):
+    """Emitter 2/2 — the 23505 RACE-WINNER emitter.
+
+    Both WIZARD_DUPLICATE emitters must carry the new contract; a fix applied to
+    the pre-check alone leaves the race arm emitting the old lying shape. This
+    fixture reaches ONLY the race arm (the pre-check misses, the insert 23505s),
+    which is what makes it a distinct member-of-class detector rather than a
+    grep.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                None,  # pre-check misses
+                {"id": "ver-raced", "status": "draft", "trust_tier": "api_verified"},
+            ],
+            ("strategy_verifications", "insert"): [
+                Exception(
+                    "duplicate key value violates unique constraint "
+                    "(SQLSTATE 23505)"
+                )
+            ],
+            ("compute_jobs", "select"): [{"status": "running"}],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-raced-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-raced"
+    assert payload["queued"] is True
+    assert payload["job_state"] == "running"
+    assert len(sb.rpc_named("enqueue_compute_job")) == 1
+
+
+def test_pyapi_09c_csv_finalize_double_submit_reaches_finalize_branch(client):
+    """PYAPI-09c (control flow) — C-20's dead end is closed.
+
+    csv-finalize posts NO strategy_id (the strategies row does not exist yet).
+    The pre-check used to run above that branch, so once finalize_csv_strategy
+    had written an SV row carrying the session id, every later call for the
+    session short-circuited into WIZARD_DUPLICATE and the finalize branch became
+    unreachable — a plain double-submit, no timeout required.
+
+    This is the DURABLE proof that the pre-check moved: the SV row below WOULD
+    short-circuit if the pre-check still ran first.
+    """
+    new_sid = "44444444-eeee-4eee-8eee-000000000004"
+    sb = _RecordingSupabase(
+        responses={
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-from-finalize",
+                    "status": "published",
+                    "trust_tier": "csv_uploaded",
+                }
+            ],
+        }
+    )
+    user_sb = MagicMock()
+    user_sb.rpc.return_value = MagicMock(
+        execute=MagicMock(return_value=MagicMock(data=new_sid))
+    )
+
+    with patch("routers.process_key.get_supabase", return_value=sb), patch(
+        "routers.process_key.get_user_scoped_supabase", return_value=user_sb
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": _SESSION_ID,
+                    "user_id": _OWNER_ID,
+                    "fmt": "trades",
+                    "strategy_name": "Test Strategy",
+                    "step": "finalize",
+                },
+            },
+            headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["step"] == "finalize", (
+        "the second submit must reach the csv-finalize branch, not the "
+        "duplicate short-circuit"
+    )
+    assert payload["ok"] is True
+    assert payload["strategy_id"] == "44444444-eeee-4eee-8eee-000000000004"
+    assert "code" not in payload
+    assert sb.selects("strategy_verifications") == [], (
+        "a strategy_id-less flow writes no SV row, so it must not consult one"
+    )
+
+
+def test_pyapi_09d_resync_can_never_emit_wizard_duplicate(client):
+    """PYAPI-09d (C-21) — /api/keys/sync sends `context:{strategy_id, user_id}`
+    and no wizard_session_id, so the route mints a fresh uuid4 for it.
+
+    Idempotency-by-session therefore has no meaning for resync, and
+    keys/sync/route.ts:438's WIZARD_DUPLICATE branch was dead code that
+    nonetheless documented a reachable state. This asserts the BRANCH IS ABSENT
+    for the flow — no SV read is issued at all — rather than asserting that a
+    uuid4 happened not to collide.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            # Would short-circuit into WIZARD_DUPLICATE if ever consulted.
+            ("strategy_verifications", "select"): [
+                {"id": "ver-someone", "status": "draft", "trust_tier": "api_verified"}
+            ],
+            ("strategy_verifications", "insert"): [[{"id": "ver-resync"}]],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-resync-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "resync",
+                "source": "okx",
+                "context": {
+                    "strategy_id": _OWNED_STRATEGY_ID,
+                    "user_id": _OWNER_ID,
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert "code" not in payload, (
+        "resync has no caller-supplied session identity, so it must never be "
+        f"told its submission was a duplicate; got {payload}"
+    )
+    assert payload["queued"] is True
+    assert payload["verification_id"] == "ver-resync"
+    assert sb.selects("strategy_verifications") == [], (
+        "a server-minted session id must not consult the idempotency pre-check"
+    )
