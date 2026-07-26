@@ -24,6 +24,13 @@ NOT run lifespan, so the worker loops never start) — the same harness
 would not exercise the middleware at all and the whole file would pass
 vacuously.
 
+⚠️ 140.1-08 (PYAPI-07) landed an app-global 422 handler that builds `detail`
+from `type` + `loc` ONLY, so the flag names no longer appear in a 422 body for
+ANY caller — authenticated or not. `_FLAG_SUBSTRINGS` is therefore asserted
+absent on BOTH the 401 (this file's original claim) and the 422 (new). The two
+fixes are additive: auth ORDERING closes the anonymous path, the handler closes
+the body echo everywhere. Neither stands in for the other.
+
 Oracle discipline (programme non-negotiable #3): every expected status, code and
 substring below is a LITERAL. Nothing is read back out of the code under test.
 """
@@ -198,14 +205,32 @@ async def test_unauthenticated_requests_consume_no_throttle_budget(
 
 
 @pytest.mark.asyncio
-async def test_authenticated_invalid_body_still_422_naming_the_flag(
+async def test_authenticated_invalid_body_reaches_validation_and_422s(
     monkeypatch: pytest.MonkeyPatch, flags_off: None, fresh_limiter: Any
 ) -> None:
-    """PYAPI-04c: the SAME body with a VALID bearer still 422s WITH the flag.
+    """PYAPI-04c: the SAME body with a VALID bearer reaches VALIDATION and 422s.
 
     This is what stops 04a passing vacuously — it proves 04a's silence is the
     auth gate and not a broken harness (e.g. a body that stopped failing
     validation, or a route that stopped existing).
+
+    ⚠️ REWRITTEN by 140.1-08 (PYAPI-07), and the change is a real contract
+    change, not a test repair. This test used to assert::
+
+        assert "SFOX_ENABLED" in resp.text
+
+    i.e. that an AUTHENTICATED caller still saw the flag name echoed out of
+    pydantic's ``msg``. PYAPI-07's app-global 422 handler builds ``detail`` from
+    ``type`` + ``loc`` ONLY and drops ``msg``/``ctx``/``input``/``url``, so the
+    flag name is now absent for EVERY caller — a strictly stronger property than
+    04a's (which only closed the ANONYMOUS path, by ordering). The two fixes are
+    additive and neither stands in for the other; the flag assertion is
+    therefore inverted below rather than deleted.
+
+    The anti-vacuity role survives intact, carried by a DIFFERENT literal: the
+    422 detail names ``body.source`` — the exact field ``_validate_source_per_flow``
+    rejects. A broken harness (route gone, body no longer invalid, validation
+    skipped) cannot produce that string.
     """
     monkeypatch.setenv("INTERNAL_API_TOKEN", _GOOD_TOKEN)
 
@@ -220,10 +245,17 @@ async def test_authenticated_invalid_body_still_422_naming_the_flag(
         "PYAPI-04c positive control: a VALID bearer with the same invalid body "
         f"must still reach validation. Got {resp.status_code}: {resp.text[:400]}"
     )
-    assert "SFOX_ENABLED" in resp.text, (
-        "PYAPI-04c positive control: the 422 must still name the flag for an "
-        "authenticated caller — otherwise 04a proves nothing about auth."
+    assert resp.json()["detail"] == "body.source: value_error", (
+        "PYAPI-04c positive control: the 422 must name the field the flag "
+        "validator rejected — otherwise 04a proves nothing about auth. Got: "
+        f"{resp.text[:400]}"
     )
+    assert resp.json()["code"] == "VALIDATION_FAILED"
+    for needle in _FLAG_SUBSTRINGS:
+        assert needle not in resp.text, (
+            f"PYAPI-07: the 422 body leaked {needle!r} to an AUTHENTICATED "
+            f"caller — the handler is echoing pydantic's `msg`. Body: {resp.text}"
+        )
 
 
 # ---------------------------------------------------------------------------

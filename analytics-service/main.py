@@ -4,11 +4,14 @@ import secrets
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Any, Sequence, cast
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
+from starlette.responses import Response
 from dotenv import load_dotenv
 import structlog
 
@@ -38,7 +41,11 @@ from services.error_contract import service_error_response
 # (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
 # CORSMiddleware below. structlog wraps stdlib logging — coexists with
 # logging.basicConfig() above; both can emit at the same time.
-from services.logging_config import CorrelationMiddleware, configure_logging
+from services.logging_config import (
+    CorrelationMiddleware,
+    configure_logging,
+    correlation_id_var,
+)
 
 configure_logging()
 
@@ -178,6 +185,113 @@ app = FastAPI(
 )
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# --------------------------------------------------------------------------
+# PYAPI-07 (C-13 / C-14) — the app-global 422 handler.
+#
+# FastAPI's default is `content={"detail": jsonable_encoder(exc.errors())}`
+# (fastapi/exception_handlers.py). pydantic v2 puts the *input value* in every
+# error's `input` key, and for a `model_validator(mode="after")` failure — which
+# routers/process_key.py::_validate_per_flow_required_keys is — `loc` is
+# ["body"] and `input` is the ENTIRE payload, INCLUDING `context.api_secret`.
+# src/lib/process-key-client.ts:245-250 forwards any non-2xx body untouched and
+# src/app/api/verify-strategy/route.ts:194 returns it to an ANONYMOUS browser
+# before its own response allowlist is ever reached. That is C-13.
+#
+# C-14 is the same body from the other end: `detail` is a LIST OF DICTS, so the
+# three TS sites doing `err.detail ?? "..."` render "[object Object]".
+#
+# One handler closes both: build a SCALAR STRING from `type` + `loc` ONLY, and
+# drop `input`, `ctx`, `msg` and `url`.
+#   * `input`  — the credential carrier.
+#   * `ctx`    — `ctx.error` re-embeds the validator's own message.
+#   * `msg`    — the validator's message, which for a generic pydantic error can
+#                embed the input (`union_tag_invalid` carries the tag value) and
+#                for our own validators names server-side feature flags
+#                ("SFOX_ENABLED is off" — the C-18 enumeration payload).
+#   * `url`    — pydantic's docs link; noise.
+#
+# The status stays 422: a malformed body is a CALLER fault (STATUS_CONTRACT.md
+# §1), so it never counts against this service's health.
+#
+# ⚠️ Deliberate divergence from STATUS_CONTRACT.md §2, which puts the envelope
+# at `body.detail` as an OBJECT for `service_error()` sites: the 422 and 429
+# handlers keep a SCALAR top-level `detail`, which is exactly what makes them
+# require ZERO TypeScript change. §2 records the distinction; do not "unify"
+# them without re-reading it.
+# --------------------------------------------------------------------------
+
+#: How many individual field errors the detail summarises before truncating.
+#: Bounded because the error count is caller-controlled (one error per bad
+#: field), and an unbounded summary is a caller-sized response.
+_MAX_REPORTED_VALIDATION_ERRORS = 5
+
+#: Per-`loc`-part cap. `loc` parts are STRUCTURAL — model field names and list
+#: indices — not values; no request model in this service validates a
+#: `dict[str, <concrete>]`, so a caller-supplied KEY cannot reach a `loc` today.
+#: Capped anyway so that if one ever does, the echo is bounded.
+_MAX_LOC_PART_CHARS = 60
+
+_validation_log = structlog.get_logger("quantalyze.analytics.validation")
+
+
+def _validation_detail(errors: Sequence[Any]) -> str:
+    """Summarise pydantic errors as ONE scalar string, from `type` + `loc` only.
+
+    Never reads `input`, `ctx`, `msg` or `url`. This function is the whole of
+    PYAPI-07's credential safety — everything else is plumbing.
+    """
+    parts: list[str] = []
+    for err in errors[:_MAX_REPORTED_VALIDATION_ERRORS]:
+        loc = err.get("loc") or ()
+        path = ".".join(str(p)[:_MAX_LOC_PART_CHARS] for p in loc) or "body"
+        parts.append(f"{path}: {err.get('type') or 'invalid'}")
+    overflow = len(errors) - _MAX_REPORTED_VALIDATION_ERRORS
+    if overflow > 0:
+        parts.append(f"(+{overflow} more)")
+    return "; ".join(parts) or "body: invalid"
+
+
+async def validation_exception_handler(
+    request: Request, exc: Exception
+) -> Response:
+    """422 for any `RequestValidationError`, on every router.
+
+    Signature is `(Request, Exception) -> Response` to satisfy Starlette's
+    `add_exception_handler` overloads under `mypy --strict`; narrowed with
+    `cast`, never a mypy suppression comment (140.1-CONTEXT locked decision;
+    the literal token is spelled out nowhere in this file so the acceptance
+    grep stays a real gate rather than matching its own rationale).
+    """
+    detail = _validation_detail(cast(RequestValidationError, exc).errors())
+    correlation_id = (
+        correlation_id_var.get() or request.headers.get("x-correlation-id") or ""
+    )
+    # Server-side log carries the SAME type+loc summary, deliberately — not the
+    # full pydantic errors. A log line is a second copy of the credential if it
+    # carries `input`, and it is the copy that survives longest.
+    _validation_log.warning(
+        "request.validation_failed",
+        path=request.url.path,
+        detail=detail,
+        correlation_id=correlation_id,
+    )
+    return JSONResponse(
+        status_code=422,
+        content={
+            "ok": False,
+            "code": "VALIDATION_FAILED",
+            "human_message": (
+                "Some of the values sent with this request are not valid."
+            ),
+            "detail": detail,
+            "correlation_id": correlation_id,
+            "recoverable": False,
+        },
+    )
+
+
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 
 # Phase 16 / OBSERV-02 + plan acceptance: CorrelationMiddleware is registered
 # BEFORE CORSMiddleware in source order. In Starlette this means CORS wraps
