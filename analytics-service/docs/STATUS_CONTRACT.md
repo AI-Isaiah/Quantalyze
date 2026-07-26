@@ -265,6 +265,37 @@ superseding the handler's 403-first behaviour**; `_verify_internal_token`'s `403
 stays in the handler as defence-in-depth but is unreachable through the full app.
 S-22 (any *unhandled* exception on `/process-key` → bodyless `500`) is unchanged.
 
+**Added by PYAPI-07 / PYAPI-08 (plan 08), and likewise NOT numbered into the
+S-table** — the S-table enumerates 5xx-capable sites, and these two are 4xx.
+Both are `app.add_exception_handler` registrations in `main.py`, so **every**
+route inherits them:
+
+| Handler | Status | Body | `Retry-After` |
+|---|---|---|---|
+| `RequestValidationError` | **422** | `{ok:false, code:"VALIDATION_FAILED", human_message, detail, correlation_id, recoverable:false}` — `detail` is a **scalar string** built from the pydantic error's `type` + `loc` ONLY | never |
+| `RateLimitExceeded` | **429** | `{ok:false, code:"RATE_LIMITED", human_message, detail, correlation_id, recoverable:true, retry_after_seconds}` — `detail` is a **scalar string** | **always** |
+
+These are the §2 SCALAR-`detail` case, not the object-`detail` case. That is
+deliberate and is why they need **zero** TypeScript change: the three
+`err.detail ?? "..."` sites (Class 5) render the human string correctly as-is.
+Do not "unify" them onto the `service_error()` object envelope without
+re-reading §2 — doing so would reintroduce the `"[object Object]"` render on the
+two most common error statuses in the service.
+
+The 422 handler **deliberately drops** pydantic's `input`, `ctx`, `msg` and
+`url`. `input` is the credential carrier (C-13: `context.api_secret` reached an
+anonymous browser verbatim); `ctx.error` and `msg` re-embed the validator's own
+message, which for our founder-flag validators names server-side feature flags.
+`ResponseValidationError` is **not** handled here on purpose — a response that
+fails its own `response_model` is OUR bug, so it correctly remains an
+unclassified bodyless `500` (S-21, safe by R-1).
+
+**Added by PYAPI-06 (plan 08):** `/health` gains `config_ok` and
+`config_degraded_secrets` (secret NAMES only). The **status is unchanged** —
+S-24's stale-heartbeat `503` is still the only way `/health` goes red, because
+Railway's `healthcheckPath` restarts the pod on a red probe and an unset env var
+must not become a crash-loop.
+
 **Hygiene flag (no code change):** `services/analytics_runner.py:1725` raises
 `HTTPException(500)` from `run_csv_strategy_analytics`, whose only caller is
 `services/job_worker.py:1947` — the **worker**. An `HTTPException` raised outside an HTTP
