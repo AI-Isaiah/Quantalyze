@@ -184,8 +184,15 @@ one of ours, so the two vocabularies cannot be confused.
 > *A 502 for "the user's exchange is down" must not trip our breaker, but it is
 > genuinely not the user's fault either. What status does it get, and why?*
 
-**`424 Failed Dependency`**, with a `code` of `EXCHANGE_PROBE_FAILED` /
-`EXCHANGE_INIT_FAILED` and the venue named in `dependency`.
+**`424 Failed Dependency`**, with a `code` of `EXCHANGE_PROBE_FAILED` and the venue
+named in `dependency`.
+
+> ⚠️ This section answers *"the user's exchange is down"*. It does **not** license
+> attributing an arm to the venue merely because a venue name is in scope. Phase
+> 140.1.1 (PYAPIFIX-03) retired `EXCHANGE_INIT_FAILED` for exactly that misuse: the
+> callee performed no network I/O, so the venue could not have failed. **The test is
+> whether we actually spoke to the venue on that path** — if we did not, the fault is
+> ours and §7's S-11 note applies instead.
 
 The reasoning, in the order it must survive review:
 
@@ -248,7 +255,7 @@ remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 | S-08 | `routers/internal.py:208` | `/internal/keys/{id}/permissions` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `dependency:kek` + rate-limited Sentry capture | 03 | ✅ |
 | S-09 | `routers/internal.py:214` | `/internal/keys/{id}/permissions` | 500 | `decrypt_credentials` raises | SERVICE-PERMANENT | **500** `KEY_UNDECRYPTABLE`, `retryable:false`, `dependency:kek` | 03 | ✅ |
 | S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ✅ |
-| S-11 | `routers/internal.py:326` | `/internal/keys/{id}/permissions` | 502 | `create_exchange` raised non-`ValueError` | CALLER'S EXCHANGE | **424** `EXCHANGE_INIT_FAILED` | 03 | ✅ |
+| S-11 | `routers/internal.py:414` | `/internal/keys/{id}/permissions` | 502 → 424 | `create_exchange` raised non-`ValueError` | **SERVICE-PERMANENT** (was CALLER'S EXCHANGE — **deliberately reversed**, see below) | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, **`dependency: null`**, no `Retry-After` | 03, **re-classed 140.1.1-04** | ✅ |
 | S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ✅ |
 | S-13 | `routers/match.py:1655` | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `ADMIN_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
 | S-14 | `routers/match.py:1689` | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `ROLE_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
@@ -267,6 +274,36 @@ remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 plus S-23 the `JSONResponse` literal) + 2 implicit unhandled-500s (S-21, S-22, no edit
 possible or needed) + 1 deliberately unchanged (S-24). The `21` is the number that an
 `HTTPException` grep sweep under-counts by one, because S-23 is not an `HTTPException`.
+
+### ⚠️ S-11 was re-classed by Phase 140.1.1 (PYAPIFIX-03 / H-2) — this is deliberate
+
+S-11 is the one row in this table whose class was **reversed** after it shipped. Plan
+140.1-03 assigned it CALLER'S EXCHANGE (`424 EXCHANGE_INIT_FAILED`, venue named) by
+analogy with S-12, which sits 18 lines below it in the same handler. The analogy is
+false, and the reason is mechanical rather than a matter of judgement:
+
+> `services/exchange.py` `create_exchange` is `EXCHANGE_CLASSES.get()`, a dict build,
+> `cls(config)` and two attribute sets. **It performs no network I/O.**
+
+Nothing has been sent to the venue when that arm fires, so a non-`ValueError` escape is
+a `TypeError` / `AttributeError` / `ImportError` / OOM in **our** adapter construction.
+S-12 is genuinely the venue (`detect_permissions` does talk to it); S-11 never was.
+
+The 424 was wrong in the direction that **hides** the fault: a 424 is breaker-inert
+*and* a 4xx, so a plain bug in our own code counted nowhere and paged nobody, while the
+body told the user their exchange was down. Under R-1 it is SERVICE-PERMANENT: `500`,
+`retryable:false`, no `Retry-After` (only a deploy can clear it).
+
+**`ADAPTER_INIT_FAILED`, registered here for 140.2's discriminator map.** The code names
+*our adapter construction*, not the venue. `EXCHANGE_INIT_FAILED` is **retired** — it
+appears at zero raise sites — because a code that names the exchange contradicts a
+SERVICE-PERMANENT attribution in the one field 140.2 discriminates on.
+
+**`dependency` is `null` and must stay `null`.** 140.2 keys its breaker on that field
+(SEAMCORE-01, O-2), so a venue name on a `500` would mint a per-dependency breaker key
+for something that is not ours. Phase 140.1.1 plan 01's membership guard in
+`_validate` now **refuses it at construction** — the old shape is unconstructable, not
+merely discouraged.
 
 **Not seam-reachable, deliberately excluded** (listed so the enumeration is provably
 complete, not because they were missed): `routers/exchange.py:453,491,553`

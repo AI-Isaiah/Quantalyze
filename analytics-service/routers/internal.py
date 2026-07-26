@@ -213,10 +213,13 @@ async def get_key_permissions(
       404 — key_id not found.
       422 — the caller's own api_keys row has no exchange set (S-10).
       429 — per-key rate limit hit.
-      424 — the caller's EXCHANGE failed to connect or to answer the probe
-            (S-11/S-12). Breaker-inert; `dependency` names the venue.
-      500 — KEK unavailable (S-08) or the stored key is undecryptable (S-09).
-            Both are `retryable:false`: permanent until an operator acts.
+      424 — the caller's EXCHANGE did not answer the permission probe (S-12).
+            Breaker-inert; `dependency` names the venue.
+      500 — KEK unavailable (S-08), the stored key is undecryptable (S-09), or
+            OUR adapter construction failed (S-11 — `create_exchange` does no
+            network I/O, so its non-ValueError escapes are ours, not the
+            venue's; PYAPIFIX-03). All are `retryable:false`: permanent until
+            an operator or a deploy acts, and none names a venue.
     """
     _verify_internal_token(request)
 
@@ -416,20 +419,39 @@ async def get_key_permissions(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
-        # S-11 / PYAPI-05 — C-12. A non-ValueError out of create_exchange is the
-        # caller's venue refusing us, not our service degrading. 424 is a 4xx, so
-        # it is breaker-inert by construction, and `dependency` names the venue
-        # so the UI can say WHICH one. The raw exception stays out of the body.
-        logger.warning(
-            "Exchange init failed for key=%s exchange=%s (venue-attributable)",
+        # S-11 / PYAPIFIX-03 (H-2) — the 424 this arm used to raise was wrong,
+        # and deliberately reversed here. `services/exchange.py` create_exchange
+        # is EXCHANGE_CLASSES.get(), a dict build, cls(config) and two attribute
+        # sets: ZERO network I/O. Nothing has been sent to the venue when this
+        # fires, so a non-ValueError escape is a TypeError / AttributeError /
+        # ImportError / OOM in OUR adapter construction — ours, always.
+        #
+        # As a 424 it was breaker-inert AND a 4xx, so an outright bug in our own
+        # code counted nowhere and paged nobody, while the body told the user
+        # their venue was down. R-1 classes it SERVICE-PERMANENT: 500,
+        # retryable:false, no Retry-After (only a deploy can clear it).
+        #
+        # No `dependency`: 140.2 keys its breaker on that field (SEAMCORE-01), so
+        # a venue name on a 500 mints a per-dependency breaker key for something
+        # that is not ours. Plan 140.1.1-01's C3 membership guard now REFUSES it
+        # at construction — this is enforced, not merely intended.
+        #
+        # Code is ADAPTER_INIT_FAILED, not EXCHANGE_INIT_FAILED: the code names
+        # OUR adapter construction. A code that names the exchange contradicts a
+        # SERVICE-PERMANENT attribution in the one field 140.2 discriminates on.
+        #
+        # logger.error, not warning: a 500 is page-worthy, and the sibling arm
+        # 18 lines below (permission detection) already uses error. The raw
+        # exception stays in the log, never in the body.
+        logger.error(
+            "Adapter init failed for key=%s exchange=%s (our fault — create_exchange does no network I/O)",
             key_id, exchange_name,
         )
         raise service_error(
-            424,
-            "EXCHANGE_INIT_FAILED",
-            dependency=str(exchange_name),
-            retryable=True,
-            detail="We could not open a connection to your exchange. This is a problem at the venue — try again shortly.",
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
         )
 
     try:
