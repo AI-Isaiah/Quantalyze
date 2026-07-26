@@ -1291,8 +1291,28 @@ async def process_key(
                 correlation_id=correlation_id,
                 error=str(_rpc_err),
             )
-        return _envelope_error(
-            _reject_code, val.human_message, correlation_id, verification_id
+        # PYAPI-10b (C-22, Phase 140.1) — this is a VERDICT about the caller's
+        # credentials, and it used to be delivered as HTTP 200 with ok:false. A
+        # consumer that branches on the status line alone — which TRAP-2 says it
+        # may have to, since an unhandled fault is a bodyless 500 — read that as
+        # "your write-capable key was accepted". 403 per PYAPI-05's CALLER class:
+        # the caller's credentials are at fault, nothing of ours failed, an
+        # identical retry cannot succeed, and a 4xx is breaker-inert.
+        #
+        # The gate above is deliberately unified, so this covers ordinary
+        # validation failures (`not val.valid` — AUTH_FAILED, PERMISSION_DENIED,
+        # a malformed CSV) as well as the two scope arms. They are all
+        # caller-credential/input faults, and one return site means the security
+        # arm cannot drift back to a success status while the others move.
+        #
+        # The body is unchanged: the route's own top-level DESIGN-05 envelope,
+        # not error_contract's `body.detail` one. Same envelope as the 401/422
+        # arms above, wrapped the same way.
+        return JSONResponse(
+            status_code=403,
+            content=_envelope_error(
+                _reject_code, val.human_message, correlation_id, verification_id
+            ),
         )
 
     supabase.rpc(
