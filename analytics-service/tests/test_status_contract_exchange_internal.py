@@ -785,3 +785,107 @@ async def test_s12_raw_exception_text_never_reaches_the_response_body(internal_c
     )
 
     assert "CANARY_ERR_9a03" not in r.text
+
+
+# --- PYAPIFIX2-03: the per-key throttle answers the service's own envelope ---
+
+# ORACLE DISCIPLINE (see the module docstring): every number and string below is
+# typed HERE and never imported from ``routers.internal``. ``10`` is the bucket
+# size that DRIVES the fixture into the throttled state; ``"60"`` is the window
+# the wire must advertise; the sentence is the human copy the caller reads. An
+# oracle that read any of the three back out of ``routers.internal`` would ship
+# green through a reworded body, a widened window and a raised cap alike.
+_INTERNAL_BUCKET_CALLS = 10
+_EXPECTED_INTERNAL_RETRY_AFTER = "60"
+_EXPECTED_INTERNAL_THROTTLE_DETAIL = (
+    "Too many permission probes for this key. Try again in a moment."
+)
+
+
+async def test_internal_throttle_429_carries_the_service_envelope(internal_client):
+    """PYAPIFIX2-03 — the ``/internal`` 429 emits the contract's own envelope.
+
+    Before this, the site raised a bare ``HTTPException(429, detail="<string>")``
+    one line away from an ``error_contract`` arm that would validate it cleanly,
+    and that arm had **zero call sites**: it was unadopted, not unreachable. A
+    throttle with no machine ``code`` is indistinguishable, to a discriminator
+    keying on ``body.detail.code``, from any other 4xx — so the one 4xx an
+    identical retry DOES clear reads as one an identical retry cannot, and the
+    caller is told to give up on a condition that expires in a minute.
+
+    The assertions are on the WIRE (status line, body, headers), because the
+    wire is what 140.2's discriminator and the Next.js proxy consume.
+
+    ⚠️ A THIRD 429 body shape now coexists in this service (flat ``main.py``
+    handler · this nested envelope · the bare scalars still at
+    match/simulator/portfolio). That is deliberate and recorded — TS-23's owner
+    (140.2 / 146) picks the winner when it migrates the remaining two. This test
+    pins THIS site's shape so the choice is made explicitly, not by drift.
+    """
+    for i in range(_INTERNAL_BUCKET_CALLS):
+        ok = _probe_internal(internal_client)
+        assert ok.status_code == 200, (
+            f"call {i + 1} of {_INTERNAL_BUCKET_CALLS} must be admitted before the "
+            f"bucket is spent; got {ok.status_code}"
+        )
+
+    r = _probe_internal(internal_client)
+
+    assert r.status_code == 429
+    env = _wire_envelope(r)
+    assert env["code"] == "RATE_LIMITED", (
+        "the throttle must carry the SAME machine code the app-global limiter "
+        "handler already emits — reused vocabulary, not a re-minted synonym"
+    )
+    assert env["retryable"] is True, (
+        "a 429 is the one CALLER fault an identical retry clears after the "
+        "advertised wait; retryable:false beside a Retry-After is the "
+        "self-contradicting body R-1 forbids"
+    )
+    assert env["dependency"] is None, (
+        "a 429 is a CALLER fault — naming a dependency here would mint a "
+        "breaker key for a throttle we imposed ourselves (the A-01 class)"
+    )
+    assert isinstance(env["detail"], str), "body.detail.detail stays a scalar human string"
+    assert env["detail"] == _EXPECTED_INTERNAL_THROTTLE_DETAIL, (
+        "the human copy is byte-identical to what shipped before the migration; "
+        "this edit changes the envelope, not what the user is told"
+    )
+    assert r.headers["Retry-After"] == _EXPECTED_INTERNAL_RETRY_AFTER, (
+        "the wait is the limiter's own window, advertised on the wire — the "
+        "builder sets this header itself, so the raise site no longer does"
+    )
+
+
+async def test_internal_throttle_is_never_consumed_before_the_token_check(
+    internal_client,
+):
+    """T-140.1.2-04 — the throttle sits AFTER ``_verify_internal_token`` (ASVS V2).
+
+    Ordering is the whole point, and it is not observable from the 403 alone: a
+    single unauthenticated call answers 403 under EITHER ordering. What
+    distinguishes them is whether the anonymous call SPENT bucket capacity. So
+    the bucket is emptied by unauthenticated callers first — if the throttle ran
+    first, call 11 would answer 429 (leaking the existence and cadence of the
+    key's probe traffic to an unauthenticated caller) and the legitimate caller
+    that follows would be locked out by traffic it never sent.
+
+    Under the correct ordering every anonymous call is refused at the token gate
+    and the bucket is untouched, so the authenticated call that follows is
+    admitted.
+    """
+    for _ in range(_INTERNAL_BUCKET_CALLS + 1):
+        anon = internal_client.post(
+            "/internal/keys/key-1/permissions",
+            headers={"x-internal-token": "wrong-token"},
+        )
+        assert anon.status_code == 403, (
+            "an unauthenticated caller is refused at the token gate, never at "
+            f"the throttle; got {anon.status_code}"
+        )
+
+    admitted = _probe_internal(internal_client)
+    assert admitted.status_code == 200, (
+        "unauthenticated traffic must not spend the per-key bucket — a 429 here "
+        "would mean the throttle runs before the authn boundary"
+    )
