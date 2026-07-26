@@ -19,7 +19,8 @@ Covers:
     filter is caught.
 
   * L-0045 — bridge endpoint per-user rate limit (defense-in-depth
-    behind the IP-only slowapi quota).
+    behind the slowapi quota — which was IP-only until PYAPI-03 rekeyed
+    it to `tenant_or_platform_key`; see services/rate_limit.py).
 
   * H-0594 — verify_strategy candidate cap + returns_series payload
     trim, bounding the JSONB memory footprint.

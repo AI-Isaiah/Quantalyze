@@ -514,6 +514,28 @@ class TestClassClosure:
                        routers.optimizer, routers.simulator):
             assert module.limiter is rl.limiter, f"{module.__name__} has a different Limiter"
 
+    def test_app_state_limiter_is_the_same_object_the_decorators_use(self) -> None:
+        """The API-5 invariant, actually asserted.
+
+        ⚠️ Written here because the test that claims to cover it does not:
+        ``test_simulator_router.py::TestG15_004_LimiterIsCanonicalSingleton
+        ::test_main_app_state_limiter_is_same_singleton`` says in its docstring
+        that it checks ``app.state.limiter``, but its body is a verbatim copy of
+        its sibling's ``simulator_router.limiter is rate_limit_module.limiter``
+        and never touches ``app.state`` at all. Pre-existing and NOT introduced
+        by PYAPI-03 — but PYAPI-03 raises the stakes, because nine more routes
+        now depend on that object being the one ``main.py`` registers. Reported
+        rather than edited: that file is outside this plan's scope.
+
+        slowapi resolves rate-limit STORAGE via the decorator's Limiter, not via
+        ``app.state.limiter``; if the two ever drift, a Redis migration silently
+        applies to neither, and the ``RateLimitExceeded`` handler is keyed to an
+        instance that never counts anything.
+        """
+        import main
+
+        assert main.app.state.limiter is rl.limiter
+
     def test_rate_limited_route_set_is_a_literal(self) -> None:
         """A new rate-limited route cannot join the surface unnoticed.
 

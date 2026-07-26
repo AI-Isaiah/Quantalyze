@@ -36,9 +36,13 @@ from tests.limiter_stub import evict_module, patch_shared_limiter
 # replace them in sys.modules with MagicMocks — doing so leaks mock modules
 # into every test file collected after this one (this file sorts before
 # test_cron_router / test_debug_key_flow_router / test_match_router), turning
-# their async route handlers into un-awaitable MagicMocks. We only patch
-# slowapi.Limiter *in place* to a no-op shim (so @limiter.limit decorators are
-# passthroughs without a Starlette Request) and restore it at module teardown.
+# their async route handlers into un-awaitable MagicMocks. We patch
+# slowapi.Limiter *in place* to a no-op shim and restore it at module teardown.
+#
+# PYAPI-03: that swap alone is no longer sufficient — routers.portfolio imports
+# an already-CONSTRUCTED limiter, so the passthrough now comes from the
+# `_noop_shared_limiter` autouse fixture below. The class swap is kept only for
+# any module that still constructs its own.
 # ---------------------------------------------------------------------------
 
 class _NoopLimiter:
