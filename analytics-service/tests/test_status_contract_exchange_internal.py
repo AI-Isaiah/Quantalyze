@@ -541,24 +541,62 @@ async def test_s08_permissions_missing_kek_is_permanent_500(internal_client):
     assert "retry-after" not in {k.lower() for k in r.headers}
 
 
-async def test_s08_kek_failure_captures_exactly_one_sentry_alert_per_window(
+class _FakeClock:
+    """A monotonic clock the test drives, substituted for ``routers.internal``'s
+    ``time`` module. ``internal.py`` uses ``time.monotonic`` and nothing else
+    (its two ``datetime.now`` sites import ``datetime`` separately), so this is
+    a complete stand-in for that module's whole time surface."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+async def test_s08_kek_alert_is_one_per_window_and_fires_again_after_it_expires(
     internal_client, monkeypatch
 ):
     """PYAPI-06 site 4 — a KEK misconfiguration leaves NO operator signal today
-    (verified: internal.py:207-208 logs nothing). It gains one, but bounded: a
-    stale KEK fires on EVERY permission probe, and five badges per dashboard
+    (verified: internal.py's KEK arm logged nothing). It gains one, but bounded:
+    a stale KEK fires on EVERY permission probe, and five badges per dashboard
     render would turn the signal into a Sentry flood that gets muted — which is
     indistinguishable from having no signal at all.
 
+    SURVIVOR #7 (140.1-REVIEW): the previous form fired four times against a
+    free-running clock and asserted ``call_count == 1``. That assertion is
+    satisfied by ANY window at least as long as the test's own runtime, so
+    widening ``_KEK_ALERT_WINDOW_S`` from 300 to 1e18 — a window that never
+    expires, i.e. exactly ONE Sentry alert per process lifetime for a fault that
+    persists until an operator acts — shipped green. Suppression is only half the
+    contract; the other half is that the signal RETURNS, and an unexpired-window
+    test cannot see it.
+
+    So the clock is driven, in three phases, and the window is a LITERAL 300
+    seconds typed here — never imported from ``routers.internal``:
+
+      1. the first fault opens the window and captures once;
+      2. a second fault 299 s later is INSIDE the window and captures nothing more;
+      3. a third fault at 301 s is PAST it and captures again.
+
+    Phase 3 is the one that has teeth against a widened window.
+
     Also pins that neither the tag nor the message carries any substring of a
     secret: an alert that leaks the credential it is complaining about is worse
-    than the outage."""
+    than the outage.
+    """
     import routers.internal as internal_mod
 
     spy = MagicMock()
     monkeypatch.setattr(internal_mod, "sentry_sdk", spy)
+    clock = _FakeClock()
+    monkeypatch.setattr(internal_mod, "time", clock)
+    internal_mod._reset_kek_alert()
 
-    for i in range(4):
+    def _fire(i: int) -> None:
         internal_mod._reset_rate_limit()
         r = _probe_internal(
             internal_client,
@@ -567,11 +605,34 @@ async def test_s08_kek_failure_captures_exactly_one_sentry_alert_per_window(
         )
         assert r.status_code == 500
 
+    # Phase 1 — the first fault opens the window.
+    _fire(0)
     assert spy.capture_message.call_count == 1, (
-        "a KEK outage must produce ONE bounded operator signal, not one per request"
+        "the first KEK fault must reach the operator"
     )
-    tag_calls = [c for c in spy.set_tag.call_args_list]
-    assert len(tag_calls) == 1
+
+    # Phase 2 — 299 s later, still INSIDE the 300 s window: no second flood.
+    clock.advance(299.0)
+    _fire(1)
+    assert spy.capture_message.call_count == 1, (
+        "a KEK outage must produce ONE bounded operator signal per window, not "
+        "one per request — five badges per dashboard render would mute it"
+    )
+
+    # Phase 3 — 301 s in total, PAST the 300 s window: the signal comes back.
+    # A window that never expires is indistinguishable from no signal at all
+    # once the first alert has been triaged and closed.
+    clock.advance(2.0)
+    _fire(2)
+    assert spy.capture_message.call_count == 2, (
+        "the operator signal must RETURN once the 300 s window expires — a "
+        "suppression window that never lets go silences a fault that only an "
+        "operator can clear"
+    )
+
+    assert len(spy.set_tag.call_args_list) == 2, (
+        "every capture is tagged, so tags and captures move together"
+    )
     rendered = repr(spy.set_tag.call_args_list) + repr(spy.capture_message.call_args_list)
     for secret in ("KEK not configured", "test-token", "kek"):
         if secret == "kek":

@@ -480,7 +480,18 @@ async def test_mt5_missing_gateway_env_is_permanent_500_and_secret_free(
     assert ei.value.detail["retryable"] is False
     # R-1: a permanent fault never advertises a wait.
     assert not (ei.value.headers or {}).get("Retry-After")
-    # Still never the misleading credential accusation.
+    # Survivor #12: an INEQUALITY against a DIFFERENT constant is not an oracle —
+    # junk copy, an empty string and a stack trace all satisfy `!= AUTH_FAILED_DETAIL`,
+    # so replacing the human sentence shipped green. The copy IS the contract on this
+    # arm (140.3 renders it verbatim and it is the only thing telling the operator
+    # that no retry can clear this), so it is pinned as a string LITERAL typed here
+    # — never imported from routers.exchange, which would make the oracle read its
+    # expectation out of the thing under test.
+    assert ei.value.detail["detail"] == (
+        "The MetaTrader gateway is not configured. This needs an operator, not a retry."
+    )
+    # Kept as a second guard: the copy must also never become the credential
+    # accusation, whatever else it says.
     assert ei.value.detail["detail"] != AUTH_FAILED_DETAIL
     factory.assert_not_called()
     # No credential value may reach ANY log line.

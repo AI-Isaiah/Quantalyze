@@ -2633,7 +2633,10 @@ class TestIsAllocatorProfileErrorHandling:
         assert envelope["retryable"] is True
         retry_after = r.headers.get("Retry-After")
         assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
-        assert int(retry_after) > 0
+        # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+        # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+        # is a fifteen-minute wait advertised for a Supabase blip.
+        assert retry_after == "15"
         human = envelope["detail"]
         assert isinstance(human, str), (
             "body.detail.detail is always a scalar human string (contract §2)"

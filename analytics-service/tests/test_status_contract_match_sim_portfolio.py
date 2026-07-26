@@ -124,7 +124,10 @@ def test_s13_actor_admin_check_transient_is_503_naming_supabase(
     assert isinstance(envelope["detail"], str)
     retry_after = resp.headers.get("Retry-After")
     assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
-    assert int(retry_after) > 0
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
 
 
 def test_s14_profile_role_check_transient_is_503_naming_supabase(
@@ -151,7 +154,10 @@ def test_s14_profile_role_check_transient_is_503_naming_supabase(
     assert envelope["retryable"] is True
     retry_after = resp.headers.get("Retry-After")
     assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
-    assert int(retry_after) > 0
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
 
 
 def test_s15_scoring_failure_is_permanent_500(match_client, monkeypatch) -> None:
@@ -391,7 +397,10 @@ async def test_s19_analytics_insert_returning_no_row_is_transient_503() -> None:
     assert isinstance(envelope["detail"], str)
     retry_after = (exc.headers or {}).get("Retry-After")
     assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
-    assert int(retry_after) > 0
+    # Literal, NOT imported from RETRY_AFTER_SECONDS — this pins the wire value.
+    # A bare `> 0` inequality was survivor #6: 15 -> 900 shipped green, and 900s
+    # is a fifteen-minute wait advertised for a Supabase blip.
+    assert retry_after == "15"
 
 
 @pytest.mark.asyncio
