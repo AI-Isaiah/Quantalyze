@@ -591,6 +591,17 @@ async def venue_transient_exception_handler(
             "code": verdict.code,
             "recoverable": verdict.recoverable,
         },
+        # Parity with the FastAPI default `HTTPException` handler this one
+        # SHADOWS: that handler forwards `exc.headers`, so dropping them here
+        # would make the shadowing lossy. `HTTPException.headers` is
+        # `Mapping[str, str] | None` and `JSONResponse` accepts `None`, so this
+        # is a no-op for every current site (the subclass `__init__` forwards
+        # no header today). It is here so the sibling handler two blocks above
+        # — which exists PRECISELY to emit `Retry-After` — stays a viable
+        # pattern for a future venue-transient site instead of a silent
+        # header-eater. Deliberately NOT a `Retry-After` default: this class is
+        # a CALLER-class 4xx that names no wait.
+        headers=verdict.headers,
     )
 
 
