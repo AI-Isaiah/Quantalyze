@@ -163,9 +163,9 @@ def _validate(
             )
         if retryable:
             raise ValueError("a 500 is SERVICE-PERMANENT and must not be retryable (R-1)")
-        # MEMBERSHIP, not prohibition: six live sites legitimately name one of
+        # MEMBERSHIP, not prohibition: six of sixteen legitimately name one of
         # ours here so an operator learns WHICH dependency is misconfigured, and
-        # seven pass none at all. Only a name from OUTSIDE the vocabulary is
+        # ten pass none at all. Only a name from OUTSIDE the vocabulary is
         # refused — 140.2 keys the breaker on this value (SEAMCORE-01), so a
         # venue name would mint a per-dependency breaker key for something that
         # is not ours (the A-01 defect class in a new disguise).
