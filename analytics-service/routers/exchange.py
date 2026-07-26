@@ -34,19 +34,14 @@ from services.mt5_validation import (
 )
 from services.db import get_supabase, db_execute, one, rows
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
-# this file goes through service_error so the classes cannot drift apart
+# this file goes through service_error so the four classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
-#
-# PYAPIFIX2-01 — VenueTransientHTTPException is the FLAT venue-transient shape
-# for the SEVEN classified-upstream sites on /api/validate-key. Deliberately NOT
-# service_error: see the C1 raise block below and the class's own docstring for
-# why an object at body.detail regresses three working wizard codes to
-# UNKNOWN/500 on this seam.
-from services.error_contract import (
-    RETRY_AFTER_SECONDS,
-    VenueTransientHTTPException,
-    service_error,
-)
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
+# PYAPIFIX2-01 — the FLAT venue-transient shape for the SEVEN classified-upstream
+# sites on /api/validate-key. Deliberately NOT service_error: see the C1 raise
+# block below and the class's own docstring for why an object at body.detail
+# regresses three working wizard codes to UNKNOWN/500 on this seam.
+from services.error_contract import VenueTransientHTTPException
 # PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
 # own ``Limiter(key_func=get_remote_address)``, which (a) keyed on the Railway
 # EDGE ip so both 100/hour budgets were platform-wide (G-10/G-11) and (b) got its
