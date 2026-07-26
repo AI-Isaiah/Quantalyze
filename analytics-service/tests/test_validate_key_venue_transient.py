@@ -185,16 +185,50 @@ def app_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
 
-    from services.rate_limit import limiter
+    import main
 
-    _reset = getattr(limiter, "reset", None)
+    # Reset the limiter the APP holds, not whatever `services.rate_limit` resolves
+    # to now — same stale-module hazard as `_handler_globals` documents.
+    _reset = getattr(getattr(main.app.state, "limiter", None), "reset", None)
     if callable(_reset):
         _reset()
 
-    import main
-
     monkeypatch.setattr(main, "SERVICE_KEY", _SERVICE_KEY)
     return TestClient(main.app, raise_server_exceptions=False)
+
+
+def _handler_globals(path: str, method: str = "POST") -> dict[str, Any]:
+    """The namespace the REGISTERED route handler actually reads at request time.
+
+    ⚠️ Resolving the router by ``from routers import exchange`` is WRONG here and
+    silently produces false greens. Several sibling suites call
+    ``tests/limiter_stub.evict_module("routers.exchange")``, which pops the module
+    from ``sys.modules``; the next import builds a **new module object**, while
+    ``main.app``'s routes still hold the function objects from the FIRST import —
+    whose ``__globals__`` is the ORIGINAL module dict. Patching the re-imported
+    module therefore does not reach the code the wire request executes: run alone
+    this file passed, run inside the full suite the venue boundary was UNPATCHED
+    and the stubs never applied.
+
+    So the namespace is taken from the registered endpoint itself (unwrapped past
+    the slowapi decorator, whose own ``__globals__`` belongs to slowapi). That is
+    the one dict the handler is guaranteed to read, whatever import order the rest
+    of the suite imposed.
+    """
+    import inspect
+
+    import main
+
+    for route in main.app.routes:
+        if getattr(route, "path", None) != path:
+            continue
+        if method not in (getattr(route, "methods", None) or set()):
+            continue
+        return inspect.unwrap(route.endpoint).__globals__
+    raise AssertionError(
+        f"no {method} {path} route is registered on main.app — the harness is "
+        f"pointing at nothing and every assertion below would be vacuous"
+    )
 
 
 def _post_validate_key(client: TestClient, **overrides: Any) -> Any:
@@ -232,28 +266,27 @@ def _verdict(error: str, error_code: str) -> dict[str, Any]:
 
 def _arrange_ccxt(monkeypatch: pytest.MonkeyPatch, verdict: dict[str, Any]) -> None:
     """Walk POST /api/validate-key's ccxt path down to the C6 collapse."""
-    from routers import exchange as exchange_mod
+    g = _handler_globals("/api/validate-key")
 
-    monkeypatch.setattr(
-        exchange_mod, "create_exchange", MagicMock(return_value=MagicMock(name="ccxt"))
+    monkeypatch.setitem(
+        g, "create_exchange", MagicMock(return_value=MagicMock(name="ccxt"))
     )
-    monkeypatch.setattr(exchange_mod, "aclose_exchange", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        exchange_mod, "validate_key_permissions", AsyncMock(return_value=verdict)
+    monkeypatch.setitem(g, "aclose_exchange", AsyncMock(return_value=None))
+    monkeypatch.setitem(
+        g, "validate_key_permissions", AsyncMock(return_value=verdict)
     )
 
 
 def _arrange_sfox(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
     """Walk the sFOX branch into ``except SfoxApiError`` with the given status."""
-    from routers import exchange as exchange_mod
     from services.sfox_client import SfoxApiError
+
+    g = _handler_globals("/api/validate-key")
 
     client = MagicMock(name="SfoxClient-instance")
     client.get_balances = AsyncMock(side_effect=SfoxApiError(status, "synthetic"))
     client.aclose = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        exchange_mod, "make_sfox_client", MagicMock(return_value=client)
-    )
+    monkeypatch.setitem(g, "make_sfox_client", MagicMock(return_value=client))
 
 
 def _arrange_mt5(
@@ -263,7 +296,7 @@ def _arrange_mt5(
     account: dict[str, Any] | None = None,
 ) -> None:
     """Walk the MT5 branch to the probe with a stubbed synchronous Mt5Client."""
-    from routers import exchange as exchange_mod
+    g = _handler_globals("/api/validate-key")
 
     client = MagicMock(name="Mt5Client-instance")
     if login_raises is not None:
@@ -273,7 +306,7 @@ def _arrange_mt5(
     client.account_info = MagicMock(return_value=account if account is not None else {})
     client.order_check = MagicMock(return_value={})
     client.close = MagicMock()
-    monkeypatch.setattr(exchange_mod, "Mt5Client", MagicMock(return_value=client))
+    monkeypatch.setitem(g, "Mt5Client", MagicMock(return_value=client))
 
 
 _MT5_FIELDS: dict[str, Any] = {
@@ -687,14 +720,14 @@ def _post_verify_strategy(client: TestClient, email: str) -> Any:
 def _arrange_verify_strategy(
     monkeypatch: pytest.MonkeyPatch, verdict: dict[str, Any]
 ) -> None:
-    from routers import portfolio as portfolio_mod
+    g = _handler_globals("/api/verify-strategy")
 
-    monkeypatch.setattr(
-        portfolio_mod, "create_exchange", MagicMock(return_value=MagicMock(name="ccxt"))
+    monkeypatch.setitem(
+        g, "create_exchange", MagicMock(return_value=MagicMock(name="ccxt"))
     )
-    monkeypatch.setattr(portfolio_mod, "aclose_exchange", AsyncMock(return_value=None))
-    monkeypatch.setattr(
-        portfolio_mod, "validate_key_permissions", AsyncMock(return_value=verdict)
+    monkeypatch.setitem(g, "aclose_exchange", AsyncMock(return_value=None))
+    monkeypatch.setitem(
+        g, "validate_key_permissions", AsyncMock(return_value=verdict)
     )
 
 
