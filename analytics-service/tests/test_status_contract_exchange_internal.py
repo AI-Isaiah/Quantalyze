@@ -564,20 +564,79 @@ async def test_s10_key_with_no_exchange_is_caller_422(internal_client, exchange)
 # --- S-11 -------------------------------------------------------------------
 
 
-async def test_s11_exchange_init_failure_is_venue_attributable_424(internal_client):
-    """S-11 (internal.py:326) — C-12. A non-ValueError out of create_exchange is
-    the caller's venue refusing us, not our service degrading. 424 keeps it out
-    of the breaker entirely and names the venue."""
+async def test_s11_exchange_init_failure_is_permanent_500_and_names_no_venue(
+    internal_client,
+):
+    """S-11 (internal.py:414-433) — PYAPIFIX-03 / H-2, the 424 REVERSED.
+
+    ``services/exchange.py`` ``create_exchange`` is ``EXCHANGE_CLASSES.get()``, a
+    dict build, ``cls(config)`` and two attribute sets: **zero network I/O**. So a
+    non-``ValueError`` escape is a ``TypeError`` / ``AttributeError`` /
+    ``ImportError`` / OOM in OUR adapter construction — it cannot be the venue
+    refusing us, because at that point we have not spoken to the venue at all.
+
+    The shipped 424 was wrong in the direction that HIDES the fault: a 424 is
+    breaker-inert *and* a 4xx, so an outright bug in our own code counted nowhere
+    and paged nobody, while the body told the user their exchange was down. R-1's
+    SERVICE-PERMANENT class answers **500 retryable:false** — which counts as a
+    real 5xx in the platform's own health signal, and never as a breaker input.
+
+    The WHOLE body is pinned as a dict literal (the
+    ``tests/test_verify_service_key_middleware.py`` idiom): a key-by-key
+    assertion would let a re-added ``dependency`` or a stray extra field survive
+    unnoticed, and this arm's entire defect was an extra field.
+    """
     r = _probe_internal(
         internal_client,
         create_exchange=MagicMock(side_effect=RuntimeError("binance handshake refused")),
     )
 
-    assert r.status_code == 424
+    assert r.status_code == 500
+    assert r.json() == {
+        "detail": {
+            "code": "ADAPTER_INIT_FAILED",
+            "dependency": None,
+            "retryable": False,
+            "detail": (
+                "Something went wrong on our side while opening this connection. "
+                "Nothing is wrong with your key."
+            ),
+        }
+    }
+    # R-1: a permanent fault never advertises a wait. Nothing can clear it but a
+    # deploy, so a Retry-After here invites the retry loop R-1 exists to stop.
+    assert "Retry-After" not in r.headers
+
     env = _wire_envelope(r)
-    assert env["code"] == "EXCHANGE_INIT_FAILED"
-    assert env["dependency"] == "binance"
-    assert env["retryable"] is True
+    # 140.2 keys its breaker on `dependency` (SEAMCORE-01), so "binance" on a 500
+    # would mint a per-dependency breaker key for something that is not ours —
+    # the A-01 defect class in a new disguise. Plan 140.1.1-01's C3 membership
+    # guard now raises at CONSTRUCTION if anyone re-adds it; this is the wire-side
+    # half of the same fence, and it is the assertion that fails if the guard is
+    # ever loosened.
+    assert env["dependency"] is None
+    assert "binance" not in r.text, (
+        "a SERVICE-PERMANENT body must name no venue — the venue is not at fault "
+        "and naming it re-teaches the caller the wrong remedy"
+    )
+
+
+async def test_s11_unsupported_exchange_name_stays_a_caller_400(internal_client):
+    """The other half of the split, and the reason this is not a blanket remap.
+
+    ``create_exchange`` raises ``ValueError`` for an exchange name that is not in
+    ``EXCHANGE_CLASSES``. That IS caller input (the name comes off the caller's
+    own ``api_keys`` row), so it stays a 400 CALLER fault. Pinned here so the
+    PYAPIFIX-03 remap cannot later be widened into "every escape is a 500",
+    which would blame us for a name we never supported.
+    """
+    r = _probe_internal(
+        internal_client,
+        create_exchange=MagicMock(side_effect=ValueError("Unsupported exchange: nasdaq")),
+    )
+
+    assert r.status_code == 400
+    assert r.json() == {"detail": "Unsupported exchange: nasdaq"}
 
 
 # --- S-12 -------------------------------------------------------------------
