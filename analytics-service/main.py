@@ -9,7 +9,6 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import Response
 from dotenv import load_dotenv
@@ -184,7 +183,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # --------------------------------------------------------------------------
 # PYAPI-07 (C-13 / C-14) — the app-global 422 handler.
@@ -292,6 +290,115 @@ async def validation_exception_handler(
 
 
 app.add_exception_handler(RequestValidationError, validation_exception_handler)
+
+
+# --------------------------------------------------------------------------
+# PYAPI-08 (C-15) — the app-global 429 handler, replacing slowapi's default.
+#
+# slowapi's `_rate_limit_exceeded_handler` (extension.py:76-87 — byte-identical
+# in the installed 0.1.9 and the requirements.txt-pinned 0.1.10, checked against
+# the v0.1.10 tag) is::
+#
+#     JSONResponse({"error": f"Rate limit exceeded: {exc.detail}"}, 429)
+#
+# Two defects in one line:
+#   * the key is `error`, not `detail`, so analytics-client.ts:179 reads
+#     `err.detail` -> undefined -> the literal "Analytics service error", which
+#     matches no classifier branch and renders as UNKNOWN (C-15 / G-9);
+#   * it then calls `limiter._inject_headers(...)`, gated on `_headers_enabled`
+#     — default False (extension.py:135 in BOTH versions) and never raised
+#     anywhere in this repo — so there is no `Retry-After` and 140.3 cannot name
+#     the real wait (B-11).
+#
+# The replacement carries BOTH a scalar `detail` string AND `code:"RATE_LIMITED"`
+# — a code ALREADY registered as a recoverable WizardErrorCode
+# (routers/process_key.py:358-359), reused rather than re-minted. Because
+# `detail` is a scalar, the three TS `err.detail ?? "..."` sites work on this
+# response with ZERO TypeScript change; 140.2 has nothing to do here.
+#
+# Scope note: this fixes the RESPONSE. It deliberately does NOT set
+# `headers_enabled=True` on the shared Limiter — that only adds the
+# X-RateLimit-* informational headers and would change every 2xx on 10 routes,
+# which is a limiter-configuration change (Phase 146 / RATE-04), not a contract
+# one.
+# --------------------------------------------------------------------------
+
+_rate_limit_log = structlog.get_logger("quantalyze.analytics.ratelimit")
+
+
+def _retry_after_seconds(request: Request, exc: RateLimitExceeded) -> int:
+    """Seconds the caller should wait, as a positive int.
+
+    Prefers the TRUE remaining time in the current window, read from the
+    limiter's storage via the `(RateLimitItem, [key, scope])` tuple slowapi
+    stashes on `request.state.view_rate_limit` immediately before raising
+    (extension.py:525). Falls back to the FULL window length, which is the
+    only value that is safe to advertise when the true remainder is unknown:
+    advertising less would invite the retry storm the header exists to prevent.
+    """
+    window = 60
+    limit_item = getattr(getattr(exc, "limit", None), "limit", None)
+    if limit_item is not None:
+        try:
+            window = max(int(limit_item.get_expiry()), 1)
+        except (AttributeError, TypeError, ValueError):
+            window = 60
+    try:
+        current = request.state.view_rate_limit
+        reset_at, _remaining = limiter.limiter.get_window_stats(
+            current[0], *current[1]
+        )
+        remaining = int(reset_at - time.time()) + 1
+        if 0 < remaining <= window:
+            return remaining
+    except Exception:
+        # Storage backends differ and `view_rate_limit` is slowapi-internal;
+        # a failure here must degrade to the window, never to no header.
+        pass
+    return window
+
+
+async def rate_limit_exceeded_handler(
+    request: Request, exc: Exception
+) -> Response:
+    """429 for any `RateLimitExceeded`, on every decorated route.
+
+    Signature is `(Request, Exception) -> Response` for the same
+    `add_exception_handler` overload reason as the 422 handler above; narrowed
+    with `cast`.
+    """
+    throttle = cast(RateLimitExceeded, exc)
+    retry_after = _retry_after_seconds(request, throttle)
+    correlation_id = (
+        correlation_id_var.get() or request.headers.get("x-correlation-id") or ""
+    )
+    # `exc.detail` is the LIMIT string ("5 per 1 hour") built at decoration time
+    # from a literal in the router — server configuration, never caller input.
+    _rate_limit_log.warning(
+        "request.rate_limited",
+        path=request.url.path,
+        limit=str(throttle.detail),
+        retry_after_seconds=retry_after,
+        correlation_id=correlation_id,
+    )
+    return JSONResponse(
+        status_code=429,
+        content={
+            "ok": False,
+            "code": "RATE_LIMITED",
+            "human_message": (
+                "Too many requests. Please wait a moment and try again."
+            ),
+            "detail": f"Rate limit exceeded: {throttle.detail}",
+            "correlation_id": correlation_id,
+            "recoverable": True,
+            "retry_after_seconds": retry_after,
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 
 # Phase 16 / OBSERV-02 + plan acceptance: CorrelationMiddleware is registered
 # BEFORE CORSMiddleware in source order. In Starlette this means CORS wraps
