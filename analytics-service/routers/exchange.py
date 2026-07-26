@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
+import ccxt
 from fastapi import APIRouter, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -33,6 +34,10 @@ from services.mt5_validation import (
     parse_mt5_credentials,
 )
 from services.db import get_supabase, db_execute, one, rows
+# PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
+# this file goes through service_error so the four classes cannot drift apart
+# site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
@@ -101,11 +106,23 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         # (WORKER_EGRESS_PROXY_URL malformed) — NOT the user's key. It was thrown
         # OUTSIDE the get_balances try below, so it used to escape as an unhandled
         # 500 + Sentry traceback (and pre-fix carried the proxy token in the
-        # message). Fail as a clean 503 — never a 500, never a misleading
-        # AUTH_FAILED that blames the user's credentials. The factory's ValueError
-        # is already secret-free (sfox_factory.py), but do not log it here either.
+        # message). Never a misleading AUTH_FAILED that blames the user's
+        # credentials. The factory's ValueError is already secret-free
+        # (sfox_factory.py), but do not log it here either.
+        #
+        # S-01 / PYAPI-05: this is SERVICE-PERMANENT, not transient. A malformed
+        # env var stays malformed until an operator edits it, so no retry can
+        # ever clear it — the previous 503 made the platform breaker trip,
+        # expire, re-probe and re-trip forever (A-08/A-25). R-1: 500,
+        # retryable:false. See docs/STATUS_CONTRACT.md.
         logger.error("validate_key: sFOX client construction failed (egress proxy misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "EGRESS_PROXY_MISCONFIGURED",
+            dependency="egress-proxy",
+            retryable=False,
+            detail="The service's outbound proxy is misconfigured. This needs an operator, not a retry.",
+        )
     try:
         await client.get_balances()
         return {"valid": True, "read_only": True}
@@ -205,26 +222,49 @@ async def _validate_mt5_key(
 
     # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
     # SERVER misconfig, NEVER the user's key — mirror the sfox construction-time
-    # 503 posture. Log secret-free (no login/pw/server values) and fail as a clean
-    # 503, never a 500, never a misleading AUTH_FAILED. (Phase 139 sets these live;
-    # unset now = the server-misconfig path.)
+    # posture. Log secret-free (no login/pw/server values), never a misleading
+    # AUTH_FAILED. (Phase 139 sets these live; unset now = the server-misconfig
+    # path.)
+    #
+    # S-02 / S-03 / PYAPI-05: SERVICE-PERMANENT. Unset env is deterministic — it
+    # is exactly half of A-01, where the 503 tripped the ONE global breaker key
+    # and denied every Deribit user over an MT5 config gap. R-1: 500,
+    # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
     host = os.getenv("MT5_GATEWAY_HOST")
     port_raw = os.getenv("MT5_GATEWAY_PORT")
     if not host or not port_raw:
         logger.error("validate_key: MT5 gateway not configured (server misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+        )
     try:
         port = int(port_raw)
     except ValueError:
         logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+        )
 
     # RED-TEAM: Mt5Client.__init__ opens the RPyC socket SYNCHRONOUSLY (a blocking
     # connect). Run construction — and the close in the finally — OFF the event
     # loop under a wait_for ceiling; a hung/unreachable gateway connect on the loop
     # would wedge FastAPI / healthz (the v1.11 WEDGE-01 class), exactly what the
     # probe body already guards. A connect failure is a server/bridge fault, never
-    # the user's key → 503 (mirrors the missing-config 503 above), never a 500.
+    # the user's key.
+    #
+    # S-04 / S-05 / PYAPI-05: these two are the GENUINELY transient MT5 arms — the
+    # gateway restarts on every deploy — so they stay 503. What they gain is the
+    # dependency name (so 140.2 keys the breaker on `mt5-gateway` instead of the
+    # single global `breaker:railway` that made A-01 a platform outage) and an
+    # honest Retry-After from the ONE literal table in services/error_contract.py.
     try:
         client = await asyncio.wait_for(
             asyncio.to_thread(lambda: Mt5Client(host, port)),
@@ -232,10 +272,24 @@ async def _validate_mt5_key(
         )
     except asyncio.TimeoutError:
         logger.warning("validate_key: MT5 gateway connect timed out (bridge hung)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            503,
+            "MT5_GATEWAY_UNREACHABLE",
+            dependency="mt5-gateway",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
+            detail="The MetaTrader gateway is not responding. Try again shortly.",
+        )
     except Exception:  # noqa: BLE001 — connect failure is server/bridge, not the key
         logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            503,
+            "MT5_GATEWAY_UNREACHABLE",
+            dependency="mt5-gateway",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
+            detail="The MetaTrader gateway is not responding. Try again shortly.",
+        )
 
     try:
         # Mt5Client is SYNCHRONOUS blocking RPyC. Run the login+read+probe body off
@@ -394,6 +448,28 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
 
     try:
         result = await validate_key_permissions(exchange)
+    # S-06 / PYAPI-05 — the SPLIT. services/exchange.py:982-1021 already
+    # classifies every known ccxt error into a stable `error_code`, so a ccxt
+    # exception ESCAPING to here is by definition unclassified — but a `ccxt.*`
+    # escape is still attributable to the VENUE, not to us. Answer 424 (CALLER'S
+    # EXCHANGE): a 4xx, therefore breaker-inert by construction, carrying the
+    # venue name so the UI can say which venue. A 5xx here is C-12 verbatim —
+    # five keys on one dashboard render during a Binance maintenance window
+    # becomes five 5xx and a platform-wide trip. This arm MUST stay above the
+    # generic one.
+    except ccxt.BaseError as e:
+        logger.warning(
+            "validate_key: venue-attributable ccxt escape on %s — %s",
+            req.exchange,
+            type(e).__name__,
+        )
+        raise service_error(
+            424,
+            "EXCHANGE_PROBE_FAILED",
+            dependency=req.exchange,
+            retryable=True,
+            detail="Your exchange did not complete the permission check. This is a problem at the venue — try again shortly.",
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception(
             "validate_key: validate_key_permissions raised on %s — %s: %s",
@@ -401,7 +477,17 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             type(e).__name__,
             e,
         )
-        raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
+        # C-16: the shipped copy here was "Key validation failed. Please check
+        # your credentials." — an accusation aimed at the user for OUR
+        # unclassified bug, and one they cannot act on. A non-ccxt escape is
+        # SERVICE-PERMANENT: 500, retryable:false, and copy that names no
+        # credential. The raw exception stays in the log above, never in the body.
+        raise service_error(
+            500,
+            "INTERNAL",
+            retryable=False,
+            detail="Something went wrong on our side while checking this key. Nothing is wrong with your key.",
+        )
     finally:
         try:
             await aclose_exchange(exchange)
@@ -421,7 +507,19 @@ async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any
     try:
         kek = get_kek()
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="Encryption not configured")
+        # S-07 / PYAPI-05 — C-17 verbatim. A missing or rotated KEK is permanent
+        # until an operator acts, and /api/encrypt-key is the busiest seam
+        # endpoint, so the previous 503 was the self-sustaining-outage shape at
+        # its worst: trip, expire, re-probe, re-trip, forever. R-1: 500,
+        # retryable:false, so it can never feed the breaker.
+        logger.error("encrypt_key: KEK unavailable (encryption not configured)")
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
 
     # ==============================================================================
     # MT5 CREDENTIAL-SLOT MAPPING (MT5SRC-02, CONTEXT-locked) — THE ONE CHOKEPOINT
