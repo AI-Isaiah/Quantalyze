@@ -35,8 +35,6 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Annotated, Any
 
-import hashlib
-
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -51,7 +49,7 @@ from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
 from services.closed_sets import mt5_enabled_server
 from services.metrics import periods_per_year_for_asset_class
-from services.rate_limit import limiter
+from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
 
 if TYPE_CHECKING:
@@ -72,37 +70,79 @@ log = structlog.get_logger("quantalyze.analytics.process_key")
 _audit_tasks: set[asyncio.Task[None]] = set()
 
 
+# ---------------------------------------------------------------------------
+# Rate limiting (PYAPI-02 — RESEARCH Q1.2, mechanisms (a) + (c) + (d))
+# ---------------------------------------------------------------------------
+#
+# API-5 keyed this route on a hash of the bearer token, which was the strongest
+# identity available at the time: `X-User-Id` is unsigned client-controlled
+# input, so composing it in let a caller mint a fresh bucket per request (the
+# PR#241 bypass). But the bearer is a SINGLE SHARED platform token, so "one
+# bucket per calling service" is in practice ONE 100/hour bucket for the entire
+# platform — and Vercel caps the anonymous teaser at 10 req/60s per IP, i.e.
+# 600/hour, so one anonymous IP drained the whole platform's window in about ten
+# minutes (RESEARCH G-16 / X-3 / C-09).
+#
+# X-Tenant-Claim is the signed identity surface API-5's docstring was waiting
+# for. The verification half lives in services/rate_limit.py so PYAPI-03 can
+# re-key its nine IP-keyed routes onto the same mechanism instead of copying it.
+
+#: Per-tenant window. Unchanged from the pre-fix number — what changes is that
+#: it is now PER TENANT rather than per platform.
+_PROCESS_KEY_TENANT_LIMIT = "100/hour"
+
+#: The public teaser's shared window. Deliberately BELOW a tenant's (OPEN-3's
+#: technical recommendation; founder-retunable): anonymous traffic is the
+#: untrusted half and must not be able to consume a paying tenant's worth of
+#: capacity. It is also the arm with the least recourse — an anonymous visitor
+#: cannot be contacted, rate-limited by account, or billed.
+_PROCESS_KEY_ANON_LIMIT = "30/hour"
+
+#: The stacked backstop, keyed on the credential hash. Post-PYAPI-04 every
+#: admitted caller presents the same INTERNAL_API_TOKEN, so this is one
+#: platform-wide bucket — 5x the 100/hour the whole platform shared before this
+#: phase, and the only thing standing between N tenants each inside their own
+#: window and a collectively buried service.
+_PROCESS_KEY_CEILING_LIMIT = "500/hour"
+
+
 def _process_key_rate_limit_key(request: Request) -> str:
-    """API-5 — rate-limit key for /process-key.
+    """Per-identity limiter key for /process-key. See services/rate_limit.py.
 
-    Pre-fix used ``get_remote_address`` which buckets all Vercel egress
-    behind a single shared NAT into the same window — so one tenant's
-    burst could starve every other tenant. The unified backbone is
-    service-to-service auth via INTERNAL_API_TOKEN; we key on a hash of
-    the bearer token so each calling service gets an isolated 100/hour
-    window.
-
-    Tokens are SHA-256-hashed with a non-cryptographic suffix because
-    the resulting key shows up in slowapi error logs and we don't want
-    raw bearer tokens in observability output. The hash collapses the
-    bearer to a stable 16-char prefix.
-
-    PR #241 red-team: an earlier version composed (token_id, X-User-Id)
-    into the key so multi-user traffic on a single token got isolated
-    buckets. But `X-User-Id` is unsigned client-controlled input — a
-    caller holding the bearer token could set
-    `X-User-Id: <random-uuid-per-request>` and allocate a new bucket
-    per request, bypassing the limiter. The header read is removed
-    until a signed identity surface lands (e.g. mTLS or a JWT body
-    field bound to the token).
+    Returns ``process_key:t:<user_id>`` for a valid tenant claim,
+    ``process_key:anon`` for the public teaser, and
+    ``process_key:unverified:<credential-hash>`` (plus a WARN) when the claim is
+    absent, malformed, expired or forged. NEVER raises — RESEARCH G-8.
     """
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        token = auth[len("Bearer "):]
-    else:
-        token = auth or "unauthenticated"
-    token_id = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
-    return f"process_key:{token_id}"
+    return tenant_rate_limit_key(request, "process_key")
+
+
+def _process_key_ceiling_key(request: Request) -> str:
+    """Stacked platform-ceiling key for /process-key. NEVER raises."""
+    return platform_ceiling_key(request, "process_key")
+
+
+def _process_key_limit_for(key: str) -> str:
+    """Size the per-identity window from the bucket the key function chose.
+
+    slowapi supports a CALLABLE limit provider and passes it the key function's
+    output when the provider declares a parameter named ``key``
+    (``slowapi/wrappers.py`` ``LimitGroup.__iter__``). That is what lets one
+    decorator serve two different sizes: ``exempt_when`` cannot see the request,
+    and a second decorator whose key function returned ``""`` for non-anon
+    traffic would make slowapi log an ERROR on every authenticated call.
+    """
+    return _PROCESS_KEY_ANON_LIMIT if key == "process_key:anon" else _PROCESS_KEY_TENANT_LIMIT
+
+
+def _process_key_ceiling_limit_for(key: str) -> str:
+    """The ceiling, as a callable provider so it is read per-request.
+
+    Same size for every bucket; a provider rather than a literal so the two
+    stacked limits are configured the same way and either can be exercised in a
+    test without a five-hundred-request loop.
+    """
+    return _PROCESS_KEY_CEILING_LIMIT
 
 
 # ---------------------------------------------------------------------------
@@ -713,7 +753,16 @@ async def _run_validate_only(
 
 
 @router.post("", response_model=None)
-@limiter.limit("100/hour", key_func=_process_key_rate_limit_key)
+# TWO stacked limits, evaluated in ONE pass (RESEARCH G-9): functools.wraps
+# keeps __module__.__name__ identical, so both land under the same endpoint name
+# and the outermost wrapper evaluates the whole list before setting
+# request.state._rate_limiting_complete. Inner = per-identity (tenant / anon /
+# unverified); outer = the platform ceiling. Both are pinned by live-TestClient
+# tests because RESEARCH read slowapi 0.1.9 while production pins 0.1.10
+# (ASSUMPTION-1) — if a patch bump broke stacking, one limit would silently
+# never evaluate.
+@limiter.limit(_process_key_limit_for, key_func=_process_key_rate_limit_key)
+@limiter.limit(_process_key_ceiling_limit_for, key_func=_process_key_ceiling_key)
 async def process_key(
     request: Request,
     body: Annotated[_ProcessKeyBody, Body()],
