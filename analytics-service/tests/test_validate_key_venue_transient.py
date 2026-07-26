@@ -93,7 +93,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -850,6 +850,86 @@ def test_venue_transient_exception_refuses_an_empty_code() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# The HANDLER's parity with the handler it SHADOWS
+# --------------------------------------------------------------------------- #
+
+
+def test_venue_transient_handler_forwards_exception_headers() -> None:
+    """A shadowing handler must not be lossy.
+
+    `VenueTransientHTTPException` is an `HTTPException` SUBCLASS, so Starlette's
+    `type(exc).__mro__` walk routes it to `main.venue_transient_exception_handler`
+    INSTEAD of FastAPI's default `HTTPException` handler — which forwards
+    `exc.headers` onto the response. Dropping them here would make the shadowing
+    silently lossy for any future site, and the sibling handler two blocks above
+    in `main.py` exists PRECISELY to emit a `Retry-After`, so "a venue-transient
+    site that wants a header" is a plausible next step rather than a hypothetical.
+
+    Asserted at the handler rather than over the wire because no raise site sets a
+    header today (the subclass `__init__` forwards none) — there is no request
+    that could exercise it end to end, and a test that waits for one is a test
+    that never runs.
+    """
+    import main
+    from services.error_contract import VenueTransientHTTPException
+
+    verdict = VenueTransientHTTPException(
+        status_code=EXPECTED_STATUS,
+        code="NETWORK_UNAVAILABLE",
+        detail=EXPECTED_NETWORK_ERROR_DETAIL,
+        recoverable=True,
+    )
+    verdict.headers = {"Retry-After": "37", "X-Venue-Probe": "synthetic"}
+
+    response = asyncio.run(
+        main.venue_transient_exception_handler(cast(Any, None), verdict)
+    )
+
+    assert response.headers["Retry-After"] == "37", (
+        "the handler dropped exc.headers. FastAPI's default HTTPException "
+        "handler — the one this subclass handler shadows — forwards them, so "
+        "dropping them makes the shadowing lossy with no trace."
+    )
+    assert response.headers["X-Venue-Probe"] == "synthetic"
+
+    # …and forwarding headers must not have disturbed the body contract.
+    assert json.loads(bytes(response.body)) == {
+        "detail": EXPECTED_NETWORK_ERROR_DETAIL,
+        "code": "NETWORK_UNAVAILABLE",
+        "recoverable": True,
+    }
+
+
+def test_venue_transient_handler_handles_the_no_header_case() -> None:
+    """`exc.headers` is `None` at all seven current sites — the forwarding must
+    be a no-op there, not a crash. This is the case every wire test above
+    actually exercises; it is pinned directly so the two cannot drift apart.
+    """
+    import main
+    from services.error_contract import VenueTransientHTTPException
+
+    verdict = VenueTransientHTTPException(
+        status_code=EXPECTED_STATUS,
+        code="RATE_LIMITED",
+        detail=EXPECTED_RATE_LIMITED_DETAIL,
+        recoverable=True,
+    )
+    assert verdict.headers is None
+
+    response = asyncio.run(
+        main.venue_transient_exception_handler(cast(Any, None), verdict)
+    )
+
+    assert response.status_code == EXPECTED_STATUS
+    assert "retry-after" not in {k.lower() for k in response.headers}
+    assert json.loads(bytes(response.body)) == {
+        "detail": EXPECTED_RATE_LIMITED_DETAIL,
+        "code": "RATE_LIMITED",
+        "recoverable": True,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # W-3 — the CROSS-ARTIFACT copy pins.
 #
 # THE ONE permitted production import in this file, and it is REQUIRED. The wire
@@ -952,6 +1032,20 @@ def test_error_implies_error_code_at_every_producer_branch() -> None:
     `validate_key_permissions` that sets `error` alone, it reddens HERE — at the
     producer — instead of surfacing as a `ValueError` on the live key-connect
     route.
+
+    ⚠️ Two failure modes of the walk itself are fenced, because a mechanised
+    invariant that stops matching its own subject passes vacuously:
+
+    * **Order.** The obligation is "the SAME branch also sets `error_code`", not
+      "sets it AFTERWARDS". A branch writing the code first is correct and must
+      not be reported as unpaired, so the two assignment sets are collected over
+      the whole statement list and compared, never walked as a pending pair.
+    * **Vacuity.** If a refactor moves the producer off bare
+      `result["error"] = …` (e.g. onto `result.update({...})`, an `ast.Call`
+      this walk cannot see), the walk finds NOTHING and every branch trivially
+      satisfies the invariant. `found` is therefore asserted non-empty against a
+      literal floor, so that refactor reddens HERE and forces the walk to be
+      re-pointed rather than silently going blind.
     """
     import ast
     import inspect
@@ -960,7 +1054,19 @@ def test_error_implies_error_code_at_every_producer_branch() -> None:
 
     tree = ast.parse(inspect.getsource(exchange_service))
 
+    # The number of `result["error"] = …` sites the walk must keep seeing. A
+    # literal FLOOR, not `==`: 12 were counted at HEAD, and the slack is
+    # deliberate so that adding or retiring a correctly-paired branch is not a
+    # test edit, while the walk going blind (12 -> ~0) still reddens.
+    MIN_ERROR_ASSIGNMENTS = 9
+
+    # `body` alone is not the whole tree: an `else:` / `finally:` suite is a
+    # separate statement list, so a branch that set `error` there would be an
+    # invisible false green. None exist at HEAD; scanning them keeps it that way.
+    _STMT_LISTS = ("body", "orelse", "finalbody")
+
     unpaired: list[int] = []
+    found: list[int] = []
     for node in ast.walk(tree):
         if not (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -968,28 +1074,37 @@ def test_error_implies_error_code_at_every_producer_branch() -> None:
         ):
             continue
         for block in ast.walk(node):
-            body = getattr(block, "body", None)
-            if not isinstance(body, list):
-                continue
-            open_error: int | None = None
-            for stmt in body:
-                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                    target = ast.unparse(stmt.targets[0])
-                    if target == "result['error']":
-                        if open_error is not None:
-                            unpaired.append(open_error)
-                        open_error = stmt.lineno
-                        continue
-                    if target == "result['error_code']":
-                        open_error = None
-                        continue
-            if open_error is not None:
-                unpaired.append(open_error)
+            for attr in _STMT_LISTS:
+                suite = getattr(block, attr, None)
+                if not isinstance(suite, list):
+                    continue
+                error_lines: list[int] = []
+                code_assigned = False
+                for stmt in suite:
+                    if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                        target = ast.unparse(stmt.targets[0])
+                        if target == "result['error']":
+                            error_lines.append(stmt.lineno)
+                            continue
+                        if target == "result['error_code']":
+                            code_assigned = True
+                            continue
+                found.extend(error_lines)
+                if error_lines and not code_assigned:
+                    unpaired.extend(error_lines)
 
     assert unpaired == [], (
         "validate_key_permissions sets result['error'] with no result['error_code'] "
-        f"in the same branch at line(s) {unpaired}. The routers carry the code "
-        "VERBATIM with no fallback (a route-minted default is forbidden), so this "
-        "branch would raise on the LIVE key-connect route. Set the code at its own "
-        "branch in services/exchange.py."
+        f"anywhere in the same branch at line(s) {unpaired}. The routers carry the "
+        "code VERBATIM with no fallback (a route-minted default is forbidden), so "
+        "this branch would raise on the LIVE key-connect route. Set the code in the "
+        "same branch in services/exchange.py."
+    )
+    assert len(found) >= MIN_ERROR_ASSIGNMENTS, (
+        f"this walk found only {len(found)} `result['error'] = …` assignment(s) in "
+        f"validate_key_permissions, below the floor of {MIN_ERROR_ASSIGNMENTS} read "
+        "at HEAD. The producer invariant is unchecked, not satisfied: the sites "
+        "probably moved to a form this AST walk cannot see (result.update({...}), "
+        "a helper, a comprehension). Re-point the walk — do not lower the floor to "
+        "make this pass."
     )
