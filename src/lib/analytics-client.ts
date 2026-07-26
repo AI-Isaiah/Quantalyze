@@ -16,7 +16,7 @@ import {
   type SeamBudgetKey,
   type SeamResponse,
 } from "./resilient-fetch";
-import { CircuitOpenError } from "./seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
@@ -70,6 +70,39 @@ export class AnalyticsUpstreamError extends Error {
     }
     this.status = status;
   }
+}
+
+/**
+ * The "connection never completed" copy, extracted so the transport arm and the
+ * body-read arm below cannot drift apart. Byte-identical to what this module
+ * has always thrown — plan 140.2-05 authors NO new user-facing copy; 140.3 owns
+ * the client-facing surface.
+ */
+const NOT_REACHABLE_MESSAGE =
+  "Analytics service is not reachable. Please ensure it is running.";
+
+/**
+ * Map a `SeamBodyReadError` onto the taxonomy this module ALREADY has.
+ *
+ * The core records the breaker failure and throws this class from inside its
+ * classification window; the nine wrapper consumers must keep seeing only
+ * `AnalyticsTimeoutError`, `AnalyticsUpstreamError`, `CircuitOpenError` and the
+ * generic not-reachable `Error` — a new type escaping here would reach every
+ * caller with no arm for it. `deadlineExceeded` is the only discriminator, and
+ * it means exactly what the transport arm's own name test means, because the
+ * core derives both from one definition.
+ *
+ * Anything that is NOT a body-read failure is rethrown untouched: this helper
+ * classifies, it does not swallow.
+ */
+function mapBodyReadFailure(err: unknown, path: string, timeoutMs: number): never {
+  if (err instanceof SeamBodyReadError) {
+    if (err.deadlineExceeded) {
+      throw new AnalyticsTimeoutError(path, timeoutMs);
+    }
+    throw new Error(NOT_REACHABLE_MESSAGE);
+  }
+  throw err;
 }
 
 /**
@@ -165,7 +198,7 @@ async function analyticsRequest(
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
     // 3. Everything else: the connection never completed.
-    throw new Error("Analytics service is not reachable. Please ensure it is running.");
+    throw new Error(NOT_REACHABLE_MESSAGE);
   }
 
   // Warn on API version mismatch (don't fail — just surface contract drift).
@@ -179,14 +212,32 @@ async function analyticsRequest(
   if (!res.ok) {
     const contentType = res.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
-      const error = await res.json().catch(() => ({ detail: res.statusText }));
+      // TWO CASES, conflated before SEAMCORE-02. A body that is genuinely
+      // absent or unparseable KEEPS the fallback — a 500 whose body is not the
+      // JSON its content-type promised is real, and `{ detail: statusText }` is
+      // the right answer for it. An ABORT is not: the core has already recorded
+      // that failure against the breaker, so converting it into a fabricated
+      // body would report a dying Railway as a well-formed upstream error.
+      const error = await res.json().catch((err: unknown) => {
+        if (err instanceof SeamBodyReadError) {
+          mapBodyReadFailure(err, path, timeoutMs);
+        }
+        return { detail: res.statusText };
+      });
       throw new AnalyticsUpstreamError(
         error.detail ?? "Analytics service error",
         res.status,
       );
     }
-    // Non-JSON error (FastAPI unhandled exception returns text/plain)
-    const text = await res.text().catch(() => res.statusText);
+    // Non-JSON error (FastAPI unhandled exception returns text/plain).
+    // Same distinction as above: an unreadable text/plain body falls back to
+    // the status text, an abort does not.
+    const text = await res.text().catch((err: unknown) => {
+      if (err instanceof SeamBodyReadError) {
+        mapBodyReadFailure(err, path, timeoutMs);
+      }
+      return res.statusText;
+    });
     throw new AnalyticsUpstreamError(
       text || `Analytics service error (${res.status})`,
       res.status,
@@ -198,7 +249,16 @@ async function analyticsRequest(
     throw new Error("Analytics service returned an unexpected response. Is it running on the correct port?");
   }
 
-  return res.json();
+  // THE SUCCESS ARM HAD NO CATCH AT ALL. This is SC1's downstream half: the
+  // deadline can fire while the body streams, long after the transport `try`
+  // above has closed, so the raw rejection escaped `analyticsRequest` past
+  // every `instanceof` arm at the top of this function and surfaced to nine
+  // wrappers as an unclassified crash.
+  try {
+    return await res.json();
+  } catch (err) {
+    mapBodyReadFailure(err, path, timeoutMs);
+  }
 }
 
 /**

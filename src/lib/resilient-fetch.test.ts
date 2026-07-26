@@ -655,6 +655,37 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     expect(shared.counters.limitCalls).toBe(0);
   });
 
+  it("an UNPARSEABLE body is not a breaker failure — the parse error is rethrown raw", async () => {
+    // The A-22 defect rebuilt inside the fix, if this regressed: an upstream
+    // answering 503 with an empty body, or a FastAPI traceback as text/plain,
+    // is Railway REPLYING — not Railway failing to reply. `json()` both reads
+    // and parses, and only the reading half is the classification window's
+    // business. Callers' `.catch(() => fallback)` arms depend on seeing the
+    // parse error unchanged.
+    const mock = installFetchMock();
+    mock.mockResolvedValue(
+      new Response("", {
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    const thrown = await res.json().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(thrown).toBeInstanceOf(SyntaxError);
+    expect(thrown).not.toBeInstanceOf(mod.SeamBodyReadError);
+    // The 503 status arm recorded once; the parse recorded nothing on top.
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+
   it("the closed surface still delegates: ok, status, statusText and headers.get", async () => {
     const mock = installFetchMock();
     mock.mockResolvedValue(

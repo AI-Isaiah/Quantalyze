@@ -6,7 +6,7 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -143,12 +143,30 @@ function makeCachedFetcher(keyId: string): {
       if (!res.ok) {
         const contentType = res.headers.get("content-type") ?? "";
         if (contentType.includes("application/json")) {
-          const err = await res.json().catch(() => ({ detail: res.statusText }));
+          // TWO CASES, conflated before SEAMCORE-02. A body that is genuinely
+          // absent or unparseable keeps the fallback. An ABORT must not become
+          // a fabricated `{ detail: statusText }`: the core has already
+          // recorded that failure, so the typed error is allowed through to the
+          // handler's catch — see the propagation note below.
+          const err = await res.json().catch((readErr: unknown) => {
+            if (readErr instanceof SeamBodyReadError) throw readErr;
+            return { detail: res.statusText };
+          });
           throw new Error(err.detail ?? `Upstream ${res.status}`);
         }
         throw new Error(`Upstream ${res.status}`);
       }
 
+      // 3. A body-read failure PROPAGATES out of this callback, deliberately.
+      //    `res.json()` is now the core's instrumented read: it records the
+      //    breaker failure and throws `SeamBodyReadError`. That throw is the
+      //    DESIRED behaviour here for exactly the reason stated in 2 above —
+      //    the fork writes no cache entry for a callback that rejected, so a
+      //    503-shaped failure cannot outlive the 30s breaker cooldown by
+      //    sitting in a 60s cache. The handler's catch below classifies it;
+      //    it needs no new arm, because the message-sniffing classifier's
+      //    generic `PROBE_FAILED` 502 is the correct answer for it and no new
+      //    user-facing copy belongs in this plan.
       return (await res.json()) as PermissionPayload;
     },
     [`key-permissions:${keyId}`],

@@ -5,7 +5,7 @@ import {
   AnalyticsUpstreamError,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { withAuth } from "@/lib/api/withAuth";
@@ -215,9 +215,21 @@ async function _unifiedValidateAndEncryptHandler(args: {
   });
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
+    // SEAMCORE-02, same distinction as every other seam body read: an absent or
+    // unparseable body keeps the `{}` fallback; an ABORT does not become a
+    // fabricated body, because the core has already recorded it as a breaker
+    // failure. This handler is dormant (zero callers today) and is fixed anyway
+    // — leaving one member of the class unfixed is the instance-not-class
+    // defect this programme has paid for repeatedly, and whoever revives it
+    // inherits the correct behaviour rather than the 2026 one.
+    const err = await res.json().catch((readErr: unknown) => {
+      if (readErr instanceof SeamBodyReadError) throw readErr;
+      return {};
+    });
     return NextResponse.json(err, { status: res.status, headers: NO_STORE_HEADERS });
   }
+  // The success-arm read propagates its typed failure to this handler's caller,
+  // deliberately: there is no caller to give a softer answer to.
   return NextResponse.json(await res.json(), { headers: NO_STORE_HEADERS });
 }
 

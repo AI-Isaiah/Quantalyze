@@ -7,7 +7,7 @@ import {
   type SeamBudgetKey,
   type SeamResponse,
 } from "@/lib/resilient-fetch";
-import { CircuitOpenError } from "@/lib/seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -118,6 +118,21 @@ function mintTenantClaim(payload: string, secret: string): string {
   return `${signed}.${mac}`;
 }
 
+/**
+ * Body-read fallback for the upstream response.
+ *
+ * TWO CASES, conflated before SEAMCORE-02. A genuinely absent or unparseable
+ * body keeps the `{}` fallback — an upstream that answers a non-2xx with an
+ * empty or non-JSON body is real and this client has always tolerated it. An
+ * ABORT does not: the core has already recorded that failure against the
+ * breaker, so turning it into an empty object would report a dying Railway as a
+ * well-formed upstream reply, with the request's own status on the envelope.
+ */
+function emptyBodyUnlessSeamRead(err: unknown): Record<string, never> {
+  if (err instanceof SeamBodyReadError) throw err;
+  return {};
+}
+
 export interface PostProcessKeyArgs {
   flow_type: FlowType;
   source: string;
@@ -194,6 +209,26 @@ export async function postProcessKey(
   // run inside its classification window. Only `ok`, `status` and `json` are
   // used here, all of which the closed surface carries.
   let res: SeamResponse;
+  /**
+   * The upstream body.
+   *
+   * ⚠️ THE READ BELOW IS INSIDE THE `try` ON PURPOSE, AND MUST STAY THERE.
+   * This client's `try` used to wrap ONLY the `resilientFetch` call, with both
+   * body reads sitting after the catch — so a `SeamBodyReadError` from either
+   * would have escaped `postProcessKey`, a function whose declared type is
+   * `Promise<PostProcessKeyResult>` and which has NEVER thrown, at all five
+   * caller routes (strategies/csv-validate, strategies/csv-finalize,
+   * strategies/finalize-wizard, keys/sync, verify-strategy), none of which has
+   * a catch for it. That would be five new unhandled-throw paths shipped as a
+   * side effect of a body-read fix. A later refactor that "simplifies" this try
+   * back to wrapping only the fetch re-opens all five.
+   *
+   * The two reads the plan enumerates as sites 4 and 5 were byte-identical
+   * (`await res.json().catch(() => ({}))`) and sat on mutually exclusive
+   * branches, so ONE instrumented read before the branch covers both without
+   * calling `json()` twice.
+   */
+  let body: unknown;
   try {
     // Headers and body pass through the core byte-for-byte. A dropped
     // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
@@ -229,6 +264,7 @@ export async function postProcessKey(
       }),
       cache: "no-store",
     });
+    body = await res.json().catch(emptyBodyUnlessSeamRead);
   } catch (err) {
     const tag = args.routeTag ?? "process-key-client";
     // ORDER IS LOAD-BEARING: CircuitOpenError FIRST. The generic arms below
@@ -257,9 +293,17 @@ export async function postProcessKey(
         ),
       };
     }
+    // A body-read failure maps onto the taxonomy ALREADY here rather than
+    // getting an envelope of its own: `deadlineExceeded` true is the same fact
+    // as a transport abort (the deadline covers the response STREAM, not just
+    // the header exchange), and false is the same fact as a connection that
+    // never completed. Zero new codes, zero new human_message copy — 140.3 owns
+    // the client-facing surface, and both envelopes below already exist.
     const isAbort =
-      (err instanceof Error || err instanceof DOMException) &&
-      (err.name === "AbortError" || err.name === "TimeoutError");
+      err instanceof SeamBodyReadError
+        ? err.deadlineExceeded
+        : (err instanceof Error || err instanceof DOMException) &&
+          (err.name === "AbortError" || err.name === "TimeoutError");
     if (isAbort) {
       console.error(
         // The budget is no longer universally 60s — report the one that fired.
@@ -300,14 +344,16 @@ export async function postProcessKey(
     };
   }
 
+  // The NextResponse construction stays OUTSIDE the try. Only the fetch and the
+  // body read belong in the classification window; widening it further would
+  // swallow the A-27 null-body-status crash (`NextResponse.json(body, {status:
+  // 304})` throws), which plan 140.2-11 owns and must still be able to observe.
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
     return {
       ok: false,
-      response: NextResponse.json(err, { status: res.status }),
+      response: NextResponse.json(body, { status: res.status }),
     };
   }
 
-  const body = await res.json().catch(() => ({}));
   return { ok: true, status: res.status, body };
 }

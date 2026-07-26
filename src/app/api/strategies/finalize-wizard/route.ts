@@ -130,6 +130,13 @@ async function fetchLivePermissions(
   if (!res.ok) {
     throw new Error(`permissions probe failed: ${res.status}`);
   }
+  // SEAMCORE-02: `res.json()` is the core's INSTRUMENTED read — a body-read
+  // failure records one breaker failure and throws `SeamBodyReadError`. Letting
+  // it propagate is DELIBERATE and needs no new arm here: `runScopeBroadeningProbe`
+  // already catches every probe failure and FAILS CLOSED (T-140-22), which is
+  // the only safe answer — a key whose live scopes could not be re-checked must
+  // never be promoted to pending_review. A body that stalled mid-stream is a
+  // probe that did not run.
   return (await res.json()) as LivePermissions;
 }
 

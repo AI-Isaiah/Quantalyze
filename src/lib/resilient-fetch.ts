@@ -614,6 +614,19 @@ function instrumentBody(
     try {
       return await readBody();
     } catch (err) {
+      // A PARSE failure is not a TRANSPORT failure, and conflating them would
+      // rebuild the A-22 defect inside the fix: an upstream that answers 503
+      // with an empty body or a `text/plain` traceback is Railway REPLYING, not
+      // Railway failing to reply. `res.json()` does two things — read the bytes
+      // and parse them — and only the first is this window's business.
+      // `SyntaxError` is the only shape the parse half produces (undici reports
+      // an aborted read as a DOMException and a dropped connection as a
+      // TypeError), so it is rethrown RAW: callers' existing
+      // `.catch(() => fallback)` arms keep seeing exactly what they saw before,
+      // and the breaker hears nothing.
+      if (err instanceof SyntaxError) {
+        throw err;
+      }
       const deadlineExceeded = isDeadlineError(err);
       // The budget key is logged, never the path, body or header values — the
       // seam carries raw exchange credentials and INTERNAL_API_TOKEN.
