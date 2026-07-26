@@ -492,3 +492,167 @@ def test_pyapi_10a_race_winner_emitter_also_carries_ok(client):
     assert body["ok"] is True
     assert body["code"] == "WIZARD_DUPLICATE"
     assert body["job_state"] == "running"
+
+
+# ---------------------------------------------------------------------------
+# PYAPI-10b — the security verdict is not delivered under a success status
+# ---------------------------------------------------------------------------
+
+_CANARY_SECRET = "CANARY-SECRET-3f9a2b"
+
+
+def _post_sync_rejection(client, *, read_only, error_code, human_message):
+    """Drive the synchronous pipeline's rejection gate.
+
+    ``flow_type=teaser`` because it is exempt from the ownership gate and is a
+    real caller of the synchronous pipeline.
+    """
+    fake = _supabase(existing_row=None, insert_id="ver-reject")
+    adapter = _sync_adapter(
+        valid=True,
+        read_only=read_only,
+        error_code=error_code,
+        human_message=human_message,
+    )
+    with patch(
+        "routers.process_key.get_supabase", return_value=fake
+    ), patch("routers.process_key.get_adapter", return_value=adapter):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-reject-10b",
+                    "api_key": "k",
+                    "api_secret": _CANARY_SECRET,
+                },
+            },
+            headers=_auth_headers(),
+        )
+    return r, fake, adapter
+
+
+@pytest.mark.parametrize(
+    "read_only,error_code,expected_code",
+    [
+        (False, "TRADE_SCOPE", "TRADE_SCOPE"),
+        (False, "WITHDRAW_SCOPE", "WITHDRAW_SCOPE"),
+        # IMP-2: the error_code arm wins even when the adapter left
+        # read_only=True.
+        (True, "WITHDRAW_SCOPE", "WITHDRAW_SCOPE"),
+        # SF-2: no error_code at all still rejects, under the registered
+        # fallback code.
+        (False, None, "VALIDATION_UNEXPECTED"),
+    ],
+    ids=["trade_scope", "withdraw_scope", "error_code_wins", "fallback_code"],
+)
+def test_pyapi_10b_write_capable_key_rejection_is_403(
+    client, read_only, error_code, expected_code
+):
+    """PYAPI-10b: a write-capable-key rejection answers **403**, never 200.
+
+    This is a security VERDICT about the caller's credentials. Delivering it
+    under a success status is the finding's actual severity — a consumer that
+    branches on the status line alone (and TRAP-2 says it may have to) reads
+    "your write-capable key was accepted".
+
+    Statuses and codes below are LITERALS. Nothing is imported from the router.
+    """
+    r, fake, adapter = _post_sync_rejection(
+        client,
+        read_only=read_only,
+        error_code=error_code,
+        human_message="Key has trading permissions. Please use a read-only key.",
+    )
+
+    assert r.status_code == 403, (
+        f"a scope rejection must not be a success status; got "
+        f"{r.status_code} with body {r.text}"
+    )
+    body = r.json()
+    # The full envelope survives the status move — 140.3 renders from it.
+    assert body["ok"] is False
+    assert body["code"] == expected_code
+    assert body["human_message"]
+    assert body["correlation_id"] == _TEST_CID
+    assert body["recoverable"] is False
+    assert body["debug_context"]["verification_id"] == "ver-reject"
+
+    # Orthogonal invariants that must survive the status change.
+    adapter.fetch_raw.assert_not_called()
+    assert _CANARY_SECRET not in r.text, "the rejection must not echo credentials"
+    draft_calls = [
+        c
+        for c in fake.rpc.call_args_list
+        if c.args
+        and c.args[0] == "transition_strategy_verification"
+        and c.args[1].get("p_new_status") == "draft"
+    ]
+    assert draft_calls, "the rejection must transition the verification to draft"
+
+
+def test_pyapi_10b_validate_only_failure_stays_200(client):
+    """The scope fence, stated as a test: 10b moved ONE arm, not both.
+
+    ``_run_validate_only``'s failure return is the *other* bare
+    ``_envelope_error`` on this route. It is a validation RESULT for a session
+    that has no verification row and no authorization decision behind it, so it
+    keeps 200 + ``ok:false``. Pinning it means this plan can be proven not to
+    have over-reached — and means a later "consistency" edit that moves it has
+    to argue with a test.
+    """
+    r = _reach_shape_6_envelope_error_at_200(client)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "CSV_PARSE_FAILED"
+
+
+def test_pyapi_10b_csv_finalize_401_and_422_arms_unchanged(client):
+    """Anti-over-reach control: the route's other 4xx envelopes are untouched.
+
+    If the 403 change had been applied to ``_envelope_error`` itself rather
+    than to one return site, these two would move too.
+    """
+    fake = _supabase(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake), patch(
+        "routers.process_key.get_user_scoped_supabase"
+    ):
+        no_token = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "step": "finalize",
+                    "user_id": "33333333-3333-3333-3333-333333333333",
+                    "wizard_session_id": "22222222-2222-2222-2222-222222222222",
+                    "fmt": "trades",
+                    "strategy_name": "No token",
+                },
+            },
+            headers=_auth_headers(),  # no X-User-Access-Token
+        )
+    assert no_token.status_code == 401, no_token.text
+    assert no_token.json()["code"] == "CSV_FINALIZE_FAILED"
+
+    fake2 = _supabase(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake2):
+        missing_sid = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "user_id": "u1",
+                    "wizard_session_id": "wiz-no-sid-10b",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
+                },
+            },
+            headers=_auth_headers(),
+        )
+    assert missing_sid.status_code == 422, missing_sid.text
+    assert missing_sid.json()["code"] == "MISSING_STRATEGY_ID"

@@ -880,7 +880,12 @@ def test_process_key_validate_failure_returns_envelope(client):
             },
             headers=_auth_headers(),
         )
-    assert r.status_code == 200  # envelope returns 200 with ok=False per DESIGN-05.
+    # PYAPI-10b (Phase 140.1 plan 05) — this arm is the SAME return site as the
+    # write-capable-key rejection: `_scope_rejected` is one gate covering
+    # `not val.valid` as well as the two scope arms. That verdict is no longer
+    # delivered under a success status, so this now answers 403. The envelope
+    # itself is unchanged — every assertion below the status is verbatim.
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == "AUTH_FAILED"
@@ -2386,8 +2391,10 @@ def test_process_key_sync_pipeline_rejects_write_capable_key(
             headers=_auth_headers(),
         )
 
-    # Envelope returns 200 with ok=False per DESIGN-05 — but the key must be rejected.
-    assert r.status_code == 200, r.text
+    # PYAPI-10b (Phase 140.1 plan 05): the verdict answers 403. It used to be a
+    # 200 with ok=False — a security decision under a success status, which a
+    # consumer branching on the status line alone reads as "key accepted".
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == error_code
@@ -2453,7 +2460,9 @@ def test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback(cl
             headers=_auth_headers(),
         )
 
-    assert r.status_code == 200, r.text
+    # PYAPI-10b (Phase 140.1 plan 05): 403, not 200. SF-2's subject — WHICH code
+    # the envelope carries — is unchanged and asserted verbatim below.
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     # SF-2: code in the envelope must be the registered fallback, not the bare
@@ -2513,8 +2522,10 @@ def test_process_key_sync_scope_rejection_survives_rpc_failure(client):
         )
 
     # SF-3: even with a failing RPC the endpoint must return the security-
-    # correct envelope error, not an unhandled 500.
-    assert r.status_code == 200, r.text
+    # correct envelope error, not an unhandled 500. PYAPI-10b (plan 05) moved
+    # that envelope from 200 to 403; SF-3's subject — that a Supabase blip does
+    # not turn the verdict into a 500 — is what the literal 403 now pins.
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == "TRADE_SCOPE"
