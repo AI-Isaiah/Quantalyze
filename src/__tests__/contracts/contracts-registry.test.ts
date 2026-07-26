@@ -145,6 +145,8 @@ const CONTRACT_GUARDS: Guard[] = [
   { path: "src/app/factsheet/[id]/v2/factsheet-context.codec.test.ts", batch: "B7c", invariant: "factsheet view-state codec byte-compat + poison-strip" },
   { path: "src/app/(dashboard)/allocations/context/TweaksContext.codec.test.ts", batch: "B7", invariant: "tweaks codec byte-compat + poison-strip" },
   { path: "src/lib/sample-floor.test.ts", batch: "Phase22", invariant: "SAMPLE_FLOOR_OVERLAPPING_DAYS=60 + gate branch behavior (HONEST-02 single source)" },
+  { path: "src/lib/seam-constants.pin.test.ts", batch: "140.2", invariant: "seam core tuning values pinned to hand-typed literals: 13 SEAM_BUDGETS timeoutMs + the SeamBudgetKey SET (sorted equality, not length) + all 6 breaker constants + the A-14 cooldown>=window ordering + the two fake<->production literal pins (FAKE_THRESHOLD<->BREAKER_FAILURE_THRESHOLD, FAKE_WINDOW_MS<->BREAKER_WINDOW)" },
+  { path: "src/lib/seam-budgets.invariant.test.ts", batch: "140.2", invariant: "SEAM_ROUTE_BUDGETS row CONTENTS deep-compared to a hand-typed 15-row map (catches a dropped leg from a multi-leg row, which SC-4a/SC-4b cannot see) + on-disk maxDuration parity + the 3-path SEAM_EXCLUSIONS set" },
   // Check scripts (run as CI gates, not vitest):
   { path: "scripts/check-admin-route-manifest.ts", batch: "C-0153", invariant: "ADMIN_ROUTE_MANIFEST ↔ admin route files completeness (lint gate)" },
   { path: "scripts/check-route-contract.ts", batch: "NAV-03", invariant: "ROUTE_CONTRACT_MANIFEST ↔ PUBLIC_ROUTES + redirects() lockstep (the #512 class, lint gate)" },
