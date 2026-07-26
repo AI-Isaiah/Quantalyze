@@ -4,7 +4,7 @@ import secrets
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import Any, Sequence, cast
+from typing import Any, Final, Sequence, cast
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -12,6 +12,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from starlette.responses import Response
 from dotenv import load_dotenv
+
+# PYAPI-06 — imported as a MODULE (not `from sentry_sdk import capture_message`)
+# so the operator-signal captures below resolve through `main.sentry_sdk` and can
+# be spied on in tests. Importing the module has no side effects; `init_sentry()`
+# further down is what configures it.
+import sentry_sdk
 import structlog
 
 load_dotenv()
@@ -101,11 +107,134 @@ _DEPLOYED_SHA = (
 )
 
 
+# --------------------------------------------------------------------------
+# PYAPI-06 (C-11) — an operator signal for a missing or stale platform secret.
+#
+# C-11 has two directions and BOTH were silent:
+#   * Railway side — `SERVICE_KEY` unset ⇒ every guarded route refuses, while
+#     /process-key and /internal/* keep working (they are skipped below). No
+#     log, no Sentry, /health green.
+#   * Vercel side — a stale `ANALYTICS_SERVICE_KEY` ⇒ a 401 storm. 4xx, so
+#     140.2's breaker never trips and /health stays green. Indistinguishable
+#     from an attacker.
+#
+# THE CONSTRAINT THAT OUTRANKS THE SIGNAL: no log, tag or capture may contain a
+# secret VALUE, or any substring of one — not the configured secret, and not the
+# value the caller presented (on a rotation that IS the previous real secret).
+# Naming the env var is the whole point; naming its value turns the operator
+# signal into the leak it exists to detect.
+# --------------------------------------------------------------------------
+
+#: The platform secrets that gate the seam. Enumerated by BEHAVIOUR — "which
+#: secret's absence changes what a route answers" — not by grep:
+#: `SERVICE_KEY` guards every route except /health, /internal/* and
+#: /process-key; `INTERNAL_API_TOKEN` guards /process-key.
+#:
+#: KEK is deliberately ABSENT. It already has its own startup validation
+#: (`services.encryption.validate_kek_on_startup`, called from the same
+#: lifespan) plus plan 03's request-time captures at the S-07/S-08 sites; a
+#: second, weaker probe here would only create a competing source of truth.
+REQUIRED_PLATFORM_SECRETS: Final[tuple[str, ...]] = (
+    "SERVICE_KEY",
+    "INTERNAL_API_TOKEN",
+)
+
+#: Minimum seconds between two identical captures. T-140.1-23: a stale key
+#: fires on EVERY request, so an unthrottled capture is its own outage — the
+#: signal would DoS the thing it is meant to alert.
+_SECRET_CAPTURE_MIN_INTERVAL_S = 300.0
+
+#: `"<fault>:<secret name>" -> monotonic seconds`. Never holds a secret value.
+_secret_capture_last_at: dict[str, float] = {}
+
+_config_log = structlog.get_logger("quantalyze.analytics.config")
+
+
+def _platform_secret_is_set(name: str) -> bool:
+    """Is `name` configured, AS THE GATE THAT USES IT SEES IT?
+
+    `SERVICE_KEY` is read from the MODULE GLOBAL because that is precisely what
+    `verify_service_key` compares against (it is captured once at import).
+    Reading `os.getenv` here instead would let /health report "configured"
+    while the gate refuses every request, which is the same class of silent
+    disagreement C-11 is about.
+    """
+    if name == "SERVICE_KEY":
+        return bool(SERVICE_KEY)
+    return bool(os.getenv(name))
+
+
+def _degraded_platform_secrets() -> list[str]:
+    """Required secrets that are absent or empty, in declaration order."""
+    return [n for n in REQUIRED_PLATFORM_SECRETS if not _platform_secret_is_set(n)]
+
+
+def _capture_secret_misconfig(fault: str, secret_name: str) -> None:
+    """Rate-limited Sentry capture naming the SECRET, never its value.
+
+    `fault` is `"unset"` (nobody configured it — a deploy/config fault) or
+    `"mismatched"` (a caller presented the wrong value — rotation drift, or an
+    attack). They are separate tags on purpose: collapsing them into one event
+    is what makes a rotation indistinguishable from an attacker, which is C-11
+    site 3 verbatim.
+
+    Follows `services/audit.py:441`'s tag-then-capture shape, with the
+    `new_scope()` isolation `CorrelationMiddleware` uses so the tags do not
+    leak onto unrelated events. The whole emit is wrapped in try/except: a
+    Sentry transport failure must never turn a config warning into a 500.
+    """
+    throttle_key = f"{fault}:{secret_name}"
+    now = time.monotonic()
+    last = _secret_capture_last_at.get(throttle_key)
+    if last is not None and (now - last) < _SECRET_CAPTURE_MIN_INTERVAL_S:
+        return
+    _secret_capture_last_at[throttle_key] = now
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("config_fault", fault)
+            scope.set_tag("config_secret", secret_name)
+            sentry_sdk.capture_message(
+                f"Platform secret {secret_name} is {fault}", level="error"
+            )
+    except Exception:
+        pass
+
+
+def assert_platform_secrets_configured() -> list[str]:
+    """Startup check. Loud, once per missing secret — and NEVER fatal.
+
+    Returns the degraded names so a caller (and the tests) can see the verdict.
+
+    ⚠️ DELIBERATELY NOT `sys.exit`. Railway restarts a pod that exits, so a hard
+    failure here is a crash-loop: an unset env var — a thirty-second fix an
+    operator can only make against a RUNNING service — becomes a total outage,
+    and the /health signal added below never gets served. Loud-and-degraded
+    beats dead (T-140.1-24).
+    """
+    degraded = _degraded_platform_secrets()
+    for name in degraded:
+        logger.error(
+            "PYAPI-06: platform secret %s is not configured — the routes it "
+            "guards will refuse every request until an operator sets it",
+            name,
+        )
+        _config_log.error("config.secret_unset", secret=name)
+        _capture_secret_misconfig("unset", name)
+    if not degraded:
+        _config_log.info(
+            "config.secrets_ok", count=len(REQUIRED_PLATFORM_SECRETS)
+        )
+    return degraded
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     from services.encryption import validate_kek_on_startup
 
     validate_kek_on_startup()
+    # PYAPI-06 — runs BEFORE the worker loops start, so the operator sees the
+    # config fault even if a loop crashes on the way up.
+    assert_platform_secrets_configured()
     logger.info("Startup validation complete")
 
     # Import lazily so unit tests that import main.py without env vars
@@ -463,6 +592,8 @@ def _gate_process_key(request: Request) -> JSONResponse | None:
     expected = os.getenv("INTERNAL_API_TOKEN")
     if not expected:
         _auth_log.error("process_key.auth.secret_unset", path=request.url.path)
+        # PYAPI-06 site 2 — rate-limited, so a stale deploy cannot flood Sentry.
+        _capture_secret_misconfig("unset", "INTERNAL_API_TOKEN")
         return service_error_response(
             500,
             "INTERNAL_TOKEN_UNCONFIGURED",
@@ -484,6 +615,11 @@ def _gate_process_key(request: Request) -> JSONResponse | None:
 
     if not secrets.compare_digest(provided, expected):
         _auth_log.warning("process_key.auth.token_mismatch", path=request.url.path)
+        # PYAPI-06 site 3 — a DISTINCT tag from the unset arm above. A stale
+        # `INTERNAL_API_TOKEN` on the Vercel side and an attacker both land
+        # here; conflating them with "nobody configured it" is what made a
+        # rotation indistinguishable from an attack.
+        _capture_secret_misconfig("mismatched", "INTERNAL_API_TOKEN")
         return service_error_response(
             401, "UNAUTHENTICATED", retryable=False, detail="Unauthorized"
         )
@@ -549,6 +685,9 @@ async def verify_service_key(request: Request, call_next):
     # rule documented above: it nests the SAME envelope under `detail` as the
     # HTTPException sites, so 140.2 reads one shape from one location.
     if not SERVICE_KEY:
+        # PYAPI-06 site 1 — C-11's Railway half. Rate-limited: this arm fires on
+        # EVERY request to EVERY guarded route while the env var is unset.
+        _capture_secret_misconfig("unset", "SERVICE_KEY")
         return service_error_response(
             500,
             "SERVICE_KEY_UNCONFIGURED",
@@ -558,6 +697,17 @@ async def verify_service_key(request: Request, call_next):
 
     provided = request.headers.get("X-Service-Key", "")
     if not secrets.compare_digest(provided, SERVICE_KEY):
+        # PYAPI-06 site 5 — C-11's HEADLINE, seen from the receiving end. A
+        # stale `ANALYTICS_SERVICE_KEY` on Vercel produces exactly this 401,
+        # and a 401 never trips 140.2's breaker, so before this capture the
+        # entire seam could be down with /health green and zero alerts.
+        #
+        # Only a NON-EMPTY wrong key is captured. An absent header is an
+        # unauthenticated prober — internet background noise — and capturing it
+        # would make the signal meaningless. The response is unchanged either
+        # way: this is additive observability, not a new refusal.
+        if provided:
+            _capture_secret_misconfig("mismatched", "SERVICE_KEY")
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
     return await call_next(request)
@@ -595,12 +745,28 @@ async def health():
         not startup_grace_ok
         and (now - WORKER_LAST_TICK_AT) > WORKER_STALE_THRESHOLD_S
     )
+    # PYAPI-06 (C-11) — config integrity, reported as a TERM and never as a
+    # STATUS. C-11's headline is "/health green while every guarded route
+    # refuses"; this closes the reporting gap without closing the pod.
+    #
+    # ⚠️ The status deliberately does NOT move. Railway's healthcheckPath is
+    # /health, so a red /health restarts the pod — turning an unset env var
+    # (which only a human can fix, against a RUNNING service) into a restart
+    # loop (T-140.1-24). `status` stays the WORKER-heartbeat verdict and
+    # `config_ok` stays the SECRET verdict; crossing them is the bug.
+    #
+    # Only secret NAMES appear here, never values — /health is unauthenticated
+    # (the middleware skips it), so this is the one payload where an echo would
+    # be a straight public disclosure.
+    degraded_secrets = _degraded_platform_secrets()
     body = {
         "status": "stale" if stale else "ok",
         "version": "0.1.0",
         "git_sha": _DEPLOYED_SHA,
         "worker_last_tick_at": WORKER_LAST_TICK_AT,
         "worker_age_s": (now - WORKER_LAST_TICK_AT) if WORKER_LAST_TICK_AT else None,
+        "config_ok": not degraded_secrets,
+        "config_degraded_secrets": degraded_secrets,
     }
     if stale:
         return JSONResponse(body, status_code=503)
