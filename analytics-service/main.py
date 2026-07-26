@@ -28,6 +28,11 @@ from routers import cron, exchange, internal, match, optimizer, portfolio, simul
 from routers import process_key as process_key_router
 from routers.debug_key_flow import router as debug_key_flow_router
 
+# PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
+# service_error_RESPONSE is the middleware-safe half: it RETURNS a JSONResponse
+# carrying the same envelope the raise sites nest under `detail`.
+from services.error_contract import service_error_response
+
 # Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
 # (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
 # CORSMiddleware below. structlog wraps stdlib logging — coexists with
@@ -226,8 +231,23 @@ async def verify_service_key(request: Request, call_next):
     # missing/empty X-Service-Key produced a 500 + a captured error instead of
     # a clean 401 (Sentry QUANTALYZE-4). Returning the response fails closed
     # with the correct status and zero Sentry noise.
+    # PYAPI-05 S-23: SERVICE-PERMANENT, not transient. An unset SERVICE_KEY is
+    # an operator-only fault: every request to every guarded route answers the
+    # same way until a human sets the env var. As a 503 it was the worst shape
+    # of the permanent flap — 140.2's breaker would trip, expire, re-probe and
+    # trip again forever, with no retry able to clear it (A-08/A-25/C-17). R-1
+    # makes it a 500 with retryable:false, which never counts.
+    #
+    # service_error_response (NOT service_error) because of the never-raise
+    # rule documented above: it nests the SAME envelope under `detail` as the
+    # HTTPException sites, so 140.2 reads one shape from one location.
     if not SERVICE_KEY:
-        return JSONResponse({"detail": "Service not configured"}, status_code=503)
+        return service_error_response(
+            500,
+            "SERVICE_KEY_UNCONFIGURED",
+            retryable=False,
+            detail="Service not configured",
+        )
 
     provided = request.headers.get("X-Service-Key", "")
     if not secrets.compare_digest(provided, SERVICE_KEY):
