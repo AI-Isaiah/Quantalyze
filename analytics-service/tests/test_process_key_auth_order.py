@@ -373,13 +373,17 @@ def test_verify_service_key_contains_no_raise() -> None:
 
     import main
 
-    src = textwrap.dedent(inspect.getsource(main.verify_service_key))
-    # AST, not a substring grep: the function's own comment block contains the
-    # word "raise" (it documents this very trap), so a grep would be permanently
-    # red. `ast.Raise` counts statements only.
-    raises = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Raise)]
-    assert raises == [], (
-        "QUANTALYZE-4: verify_service_key must RETURN a JSONResponse on every "
-        f"refusal arm, never raise. Found {len(raises)} raise statement(s) at "
-        f"line(s) {[n.lineno for n in raises]} of:\n{src}"
-    )
+    # BOTH functions: the middleware body AND the gate helper it delegates the
+    # /process-key refusal arms to. Checking only `verify_service_key` would let
+    # a raise hide one call away.
+    for fn in (main.verify_service_key, main._gate_process_key):
+        src = textwrap.dedent(inspect.getsource(fn))
+        # AST, not a substring grep: both functions' comment blocks contain the
+        # word "raise" (they document this very trap), so a grep would be
+        # permanently red. `ast.Raise` counts statements only.
+        raises = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Raise)]
+        assert raises == [], (
+            f"QUANTALYZE-4: {fn.__name__} must RETURN a JSONResponse on every "
+            f"refusal arm, never raise. Found {len(raises)} raise statement(s) "
+            f"at line(s) {[n.lineno for n in raises]} of:\n{src}"
+        )

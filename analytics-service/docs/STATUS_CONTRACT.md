@@ -250,6 +250,21 @@ complete, not because they were missed): `routers/exchange.py:453,491,553`
 (Python `/api/verify-strategy`, no TS caller); `routers/cron.py:613,631`;
 `routers/debug_key_flow.py:56,100`; `services/analytics_runner.py:1725`.
 
+**Added by PYAPI-04 (plan 06), and deliberately NOT numbered into the S-table**
+because neither is a *remap* of an existing site — both are new refusals in
+`main.py:_gate_process_key`, the middleware bearer gate on `/process-key`:
+
+| Site | Endpoint | Trigger | Class | Emits |
+|---|---|---|---|---|
+| `main.py:_gate_process_key` | `/process-key` | `INTERNAL_API_TOKEN` unset SERVER-side | SERVICE-PERMANENT | **500** `INTERNAL_TOKEN_UNCONFIGURED`, `retryable:false` — the twin of S-23, and checked BEFORE any compare so an empty bearer can never match an empty secret |
+| `main.py:_gate_process_key` | `/process-key` | bearer absent or mismatched | CALLER | **401** `UNAUTHENTICATED` |
+
+Both use `service_error_response` (never `service_error`) for the §6 never-raise
+reason. **`/process-key` unauthenticated is now `401` at the middleware,
+superseding the handler's 403-first behaviour**; `_verify_internal_token`'s `403`
+stays in the handler as defence-in-depth but is unreachable through the full app.
+S-22 (any *unhandled* exception on `/process-key` → bodyless `500`) is unchanged.
+
 **Hygiene flag (no code change):** `services/analytics_runner.py:1725` raises
 `HTTPException(500)` from `run_csv_strategy_analytics`, whose only caller is
 `services/job_worker.py:1947` — the **worker**. An `HTTPException` raised outside an HTTP

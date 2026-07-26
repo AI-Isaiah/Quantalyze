@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from dotenv import load_dotenv
+import structlog
 
 load_dotenv()
 
@@ -199,6 +200,75 @@ app.add_middleware(
 # Service-to-service auth (no default, fail closed)
 SERVICE_KEY = os.getenv("SERVICE_KEY")
 
+# PYAPI-04 / PYAPI-06 — the /process-key auth gate's own logger. Three DISTINCT
+# events, because an operator has to tell three different situations apart from
+# the log alone: a secret nobody set (deploy/config fault), a caller that sent
+# nothing (a rotation that dropped the header, or an unauthenticated prober),
+# and a caller that sent the WRONG value (a stale token mid-rotation, or an
+# attack). Collapsing them into one line is what made C-11's "no operator
+# signal" true. NONE of them may carry token material — not the token, not a
+# prefix, not a length.
+_auth_log = structlog.get_logger("quantalyze.analytics.auth")
+
+
+def _gate_process_key(request: Request) -> JSONResponse | None:
+    """PYAPI-04 — authenticate /process-key BEFORE routing.
+
+    Returns the refusal to send, or ``None`` to admit the request.
+
+    NEVER raises: the caller is a ``BaseHTTPMiddleware``, which sits ABOVE the
+    ExceptionMiddleware that would translate an ``HTTPException``. A raise here
+    escapes to ServerErrorMiddleware, which renders a bodyless 500 ``text/plain``
+    AND re-raises into Sentry (QUANTALYZE-4). Note this is exactly where a
+    copy-paste of ``routers/process_key.py:_verify_internal_token`` — which DOES
+    ``raise HTTPException`` — would reintroduce that bug.
+
+    ARM ORDER IS LOAD-BEARING. The unset-secret arm runs FIRST, before any
+    comparison, and it is not an optimisation: the naive shape
+
+        secrets.compare_digest(provided, os.getenv("INTERNAL_API_TOKEN") or "")
+
+    compares ``""`` against ``""`` when the secret is unset and an empty bearer
+    is on the wire — which is TRUE, so it ADMITS the request. That is the exact
+    misconfiguration state PYAPI-06 exists to detect, and it must fail CLOSED.
+
+    An unset secret answers **500 `retryable:false`** (SERVICE-PERMANENT, R-1 in
+    docs/STATUS_CONTRACT.md), mirroring the SERVICE_KEY arm below: it is OUR
+    misconfiguration, so 401 would blame the caller for it and 503 would make an
+    operator-only fault flap 140.2's breaker forever. A missing or mismatched
+    bearer answers **401** (CALLER) — "we do not know who you are" is
+    authentication, so it is 401 rather than the handler's legacy 403.
+    """
+    expected = os.getenv("INTERNAL_API_TOKEN")
+    if not expected:
+        _auth_log.error("process_key.auth.secret_unset", path=request.url.path)
+        return service_error_response(
+            500,
+            "INTERNAL_TOKEN_UNCONFIGURED",
+            retryable=False,
+            detail="Service not configured",
+        )
+
+    # Accept both wire shapes for the same reason _verify_internal_token does:
+    # the Phase-19 thin adapters post `Authorization: Bearer <token>`, and any
+    # internal caller piggybacking on this seam may send a bare token.
+    auth = request.headers.get("Authorization", "")
+    provided = auth[len("Bearer ") :] if auth.startswith("Bearer ") else auth
+
+    if not provided:
+        _auth_log.warning("process_key.auth.token_absent", path=request.url.path)
+        return service_error_response(
+            401, "UNAUTHENTICATED", retryable=False, detail="Unauthorized"
+        )
+
+    if not secrets.compare_digest(provided, expected):
+        _auth_log.warning("process_key.auth.token_mismatch", path=request.url.path)
+        return service_error_response(
+            401, "UNAUTHENTICATED", retryable=False, detail="Unauthorized"
+        )
+
+    return None
+
 
 @app.middleware("http")
 async def verify_service_key(request: Request, call_next):
@@ -213,14 +283,30 @@ async def verify_service_key(request: Request, call_next):
     if request.url.path.startswith("/internal/"):
         return await call_next(request)
 
-    # /process-key (Phase 19 / BACKBONE-01) authenticates via the same
-    # rotateable INTERNAL_API_TOKEN gate (Authorization: Bearer <token>)
-    # validated inside routers/process_key.py:_verify_internal_token. Without
-    # this skip the X-Service-Key middleware rejects every Vercel→FastAPI
-    # call with 401 Unauthorized BEFORE the route's own auth runs (API-1).
+    # /process-key (Phase 19 / BACKBONE-01) authenticates via the rotateable
+    # INTERNAL_API_TOKEN gate (Authorization: Bearer <token>), NOT X-Service-Key
+    # — without that carve-out this middleware rejected every Vercel→FastAPI
+    # call with 401 before the route's own auth ran (API-1).
+    #
+    # PYAPI-04 (C-18): the carve-out used to be a bare `return await
+    # call_next(request)`, which made auth the THIRD gate on this route —
+    # pydantic 422 → slowapi 429 → handler 403 (RESEARCH G-4/G-5/G-6). Two
+    # consequences, both live: an anonymous caller read server-side feature
+    # flags straight out of the 422 body ("SFOX_ENABLED is off"), and the
+    # throttle layer was reachable with no credential at all. Middleware is the
+    # ONLY layer that runs earlier than both — a decorator cannot get ahead of
+    # pydantic, which resolves before any handler decorator. So the skip becomes
+    # a GATE. X-Service-Key is still not required here; API-1 is preserved.
+    #
+    # `_verify_internal_token` stays as the first statement of the handler body:
+    # this gate is ADDITIVE defence-in-depth, not a move (the router is mounted
+    # bare in unit tests, where it is the only thing standing).
     if request.url.path == "/process-key" or request.url.path.startswith(
         "/process-key/"
     ):
+        refusal = _gate_process_key(request)
+        if refusal is not None:
+            return refusal
         return await call_next(request)
 
     # Return a JSONResponse directly — do NOT `raise HTTPException` here. This

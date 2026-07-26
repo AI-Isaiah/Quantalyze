@@ -2741,35 +2741,47 @@ def test_process_key_rate_limit_key_func_uses_token_only():
     assert key_func(req_a) == ka
 
 
-def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
-    """API-1 regression: main.verify_service_key middleware must skip
-    /process-key the same way it skips /internal/*.
+def test_process_key_exempt_from_x_service_key_in_middleware(monkeypatch):
+    """API-1 regression: main.verify_service_key must NOT demand X-Service-Key
+    on /process-key.
 
-    Pre-fix, every Vercel→FastAPI POST returned 401 'Unauthorized' BEFORE
-    the route's own _verify_internal_token ran, because the middleware
-    only whitelisted /health and /internal/*. This test imports the
-    real `verify_service_key` from main.py via inspect.getsource and
-    re-evaluates it (the actual function is bound to the global FastAPI
-    app instance which we can't reuse here without booting the entire
-    lifespan). We assert that the on-disk source explicitly contains
-    `/process-key` in its skip-list — a regression that drops the skip
-    would surface as a string-match failure here.
+    Pre-API-1, every Vercel→FastAPI POST returned 401 'Unauthorized' because the
+    middleware only whitelisted /health and /internal/*. The carve-out fixed it.
+
+    RENAMED + RESTATED at Phase 140.1 / PYAPI-04 (TRAP-9): the carve-out is no
+    longer a SKIP. It is now a GATE that authenticates the same rotateable
+    INTERNAL_API_TOKEN bearer the handler checks, one layer earlier — so the
+    old name and docstring ("must skip /process-key") describe a contract that
+    no longer exists, while the assertion below still passes. A test whose prose
+    is wrong is worse than no test.
+
+    What survives unchanged is the API-1 invariant itself: /process-key is
+    exempt from the X-SERVICE-KEY branch. This file mounts the router bare so it
+    cannot execute the middleware; the behavioural proof lives at
+    tests/test_process_key_auth_order.py::test_valid_bearer_passes_without_x_service_key.
     """
     import inspect
     from main import verify_service_key
 
     src = inspect.getsource(verify_service_key)
-    # API-1 invariant: the middleware MUST whitelist /process-key the same
-    # way it whitelists /internal/*. If a future refactor drops this
-    # branch, every Vercel→FastAPI call regresses to 401.
+    # API-1 invariant: /process-key must be handled by its OWN branch, which
+    # returns before the X-Service-Key compare below it. A refactor that drops
+    # the branch sends every Vercel→FastAPI call back to 401.
     assert "/process-key" in src, (
-        "API-1: main.verify_service_key must explicitly skip /process-key. "
-        "Without this, the middleware rejects every Vercel→FastAPI call "
-        "with 401 BEFORE the route's bearer-token gate runs.\n"
+        "API-1: main.verify_service_key must handle /process-key in its own "
+        "branch, ahead of the X-Service-Key compare. Without it the middleware "
+        "rejects every Vercel→FastAPI call with 401.\n"
         f"Source:\n{src}"
     )
     assert "/internal/" in src, (
         "Sanity: middleware must still skip /internal/* (existing contract)."
+    )
+    # PYAPI-04: the branch must DELEGATE to the bearer gate, not fall through.
+    assert "_gate_process_key" in src, (
+        "PYAPI-04: the /process-key branch must call _gate_process_key so auth "
+        "precedes pydantic validation and slowapi. A bare `return await "
+        "call_next(request)` here restores the 422 → 429 → 403 order that let "
+        "anonymous callers enumerate SFOX_ENABLED/MT5_ENABLED."
     )
 
 
