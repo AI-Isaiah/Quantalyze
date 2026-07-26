@@ -96,5 +96,18 @@ ruleTester.run("no-raw-analytics-fetch", rule, {
       code: 'const svc = process.env["ANALYTICS_SERVICE_URL"];\nconst res = await fetch(`${svc}/api/x`);',
       errors: [{ messageId: "raw" }],
     },
+    // 9. SHAPE 3 — the seam URL is built into a SECOND binding and that binding
+    //    is fetched. Two hops from the env read, so the one-hop taint ceiling
+    //    missed it. M57 TARGET.
+    {
+      code: "const base = process.env.ANALYTICS_SERVICE_URL;\nconst url = `${base}/api/x`;\nconst res = await fetch(url);",
+      errors: [{ messageId: "raw" }],
+    },
+    // 10. SHAPE 4 — same two-hop ceiling, via a `new URL(path, base)` binding.
+    //     M57 TARGET.
+    {
+      code: 'const base = process.env.ANALYTICS_SERVICE_URL;\nconst u = new URL("/api/x", base);\nconst res = await fetch(u);',
+      errors: [{ messageId: "raw" }],
+    },
   ],
 });
