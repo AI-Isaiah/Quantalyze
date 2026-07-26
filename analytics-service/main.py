@@ -40,7 +40,10 @@ from routers.debug_key_flow import router as debug_key_flow_router
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 # service_error_RESPONSE is the middleware-safe half: it RETURNS a JSONResponse
 # carrying the same envelope the raise sites nest under `detail`.
-from services.error_contract import service_error_response
+from services.error_contract import (
+    VenueTransientHTTPException,
+    service_error_response,
+)
 
 # Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
 # (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
@@ -528,6 +531,72 @@ async def rate_limit_exceeded_handler(
 
 
 app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
+
+
+# --------------------------------------------------------------------------
+# PYAPIFIX2-01 — the venue-transient handler, deliberately beside the 429 above
+# because it exists for the SAME reason and answers the SAME constraint.
+#
+# `/api/validate-key` is the LIVE key-connect path. When a venue is having a bad
+# day the router has already classified WHICH condition occurred and then threw
+# that classification away, emitting only a human sentence. The TS seam
+# (analytics-client.ts:174-181) turns `error.detail` into an
+# AnalyticsUpstreamError MESSAGE and classifyKeyValidationError
+# (wizardErrors.ts:936-1035) substring-matches it — deriving both the wizard code
+# AND the returned status from the string, discarding the upstream status
+# entirely. Two of the five transient verdicts match no branch, so a Binance
+# maintenance window during key-connect rendered as "something went wrong, our
+# team has been notified" with no retry affordance.
+#
+# Same fix as the 429 above, for the same reason: a FLAT body carrying a scalar
+# `detail` AND a machine `code`. Because `detail` stays a scalar — byte-identical
+# to the copy that shipped before — the three TS `err.detail ?? "..."` sites keep
+# working with ZERO TypeScript change and nothing that classifies correctly today
+# stops doing so. `recoverable` rides alongside as a RENDER hint.
+#
+# ⚠️ The nested `service_error(...)` envelope is FORBIDDEN at these sites: it puts
+# an OBJECT at body.detail, which stringifies to "[object Object]" and regresses
+# RATE_LIMITED / PROBE_FAILED / DDOS_PROTECTION to UNKNOWN/500. The exception
+# class refuses a non-scalar detail at construction time so the mistake cannot
+# reach the wire; see services/error_contract.py's VenueTransientHTTPException
+# docstring for the full rationale and the TS-07 negative obligation.
+#
+# Status stays 400. The 400 -> 424 remap is user-invisible while the classifier
+# discards the status, and it is owed as ONE unit with TS-05 (ledger row TS-32).
+#
+# Starlette resolves handlers by walking `type(exc).__mro__`, so this subclass
+# handler wins over FastAPI's default HTTPException handler. That is NOT assumed:
+# tests/test_validate_key_venue_transient.py asserts the WIRE body's exact key
+# set, so a lookup that fell through to the default would redden immediately.
+# --------------------------------------------------------------------------
+
+
+async def venue_transient_exception_handler(
+    request: Request, exc: Exception
+) -> Response:
+    """The FLAT `{detail, code, recoverable}` body for a classified venue verdict.
+
+    Signature is `(Request, Exception) -> Response` for the same
+    `add_exception_handler` overload reason as the two handlers above; narrowed
+    with `cast`.
+    """
+    verdict = cast(VenueTransientHTTPException, exc)
+    return JSONResponse(
+        status_code=verdict.status_code,
+        content={
+            # SCALAR, and byte-identical to what this site emitted before the
+            # machine fields existed. This is the classifier's input — do not
+            # reword, do not nest.
+            "detail": verdict.detail,
+            "code": verdict.code,
+            "recoverable": verdict.recoverable,
+        },
+    )
+
+
+app.add_exception_handler(
+    VenueTransientHTTPException, venue_transient_exception_handler
+)
 
 # Phase 16 / OBSERV-02 + plan acceptance: CorrelationMiddleware is registered
 # BEFORE CORSMiddleware in source order. In Starlette this means CORS wraps

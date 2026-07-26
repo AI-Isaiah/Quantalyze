@@ -334,3 +334,95 @@ def service_error_response(
         },
         headers=_retry_after_headers(retry_after),
     )
+
+
+# ---------------------------------------------------------------------------
+# PYAPIFIX2-01 — the FLAT venue-transient shape (a DELIBERATE, DOCUMENTED
+# departure from this module's "one envelope, one location" rule)
+# ---------------------------------------------------------------------------
+
+
+class VenueTransientHTTPException(HTTPException):
+    """A classified venue verdict on ``/api/validate-key``: FLAT, not nested.
+
+    **This is a deliberate, documented departure from the module rule stated in
+    the docstring above** ("The envelope ALWAYS lives at ``body['detail']``").
+    It is recorded here, in code, so the next reader does not "unify" these
+    sites onto :func:`service_error` as an obvious-looking cleanup.
+
+    **Why the departure is mandatory.** ``src/lib/analytics-client.ts:174-181``
+    does ``error.detail ?? "Analytics service error"`` and hands the result to
+    ``new AnalyticsUpstreamError(message, status)``;
+    ``classifyKeyValidationError`` (``src/lib/wizardErrors.ts:936-1035``) is a
+    SUBSTRING CASCADE over that message, and it derives BOTH the wizard code and
+    the returned status from it — the upstream HTTP status is read and then never
+    used. So on this seam:
+
+    * a nested envelope (what :func:`service_error` emits) makes ``error.detail``
+      an OBJECT, ``message`` becomes ``"[object Object]"``, every branch misses,
+      and ``RATE_LIMITED`` / ``PROBE_FAILED`` / ``DDOS_PROTECTION`` regress from
+      correct classification to ``UNKNOWN``/500 — a THREE-code regression;
+    * changing the status alone buys nothing, because the status is discarded.
+
+    The sanctioned precedent is ``main.py``'s app-global 429 (PYAPI-08), whose
+    own rationale block says it carries a scalar ``detail`` beside a machine
+    ``code`` precisely so "the three TS ``err.detail ?? '...'`` sites work on this
+    response with ZERO TypeScript change".  ``140.1-TS-OBLIGATIONS.md`` **TS-07**
+    is the NEGATIVE obligation confirming that shape needs no TypeScript change.
+
+    **Why it lives HERE and not somewhere else.** This module is already the
+    single home of the service's error vocabulary — it owns :func:`service_error`,
+    :func:`service_error_response`, :func:`_validate`, ``RETRY_AFTER_SECONDS`` and
+    the class rules — and every 5xx site in the service imports from it. Defining
+    the flat shape in a new module (or beside its handler in ``main.py``) would
+    FORK the error vocabulary across two locations, which is the exact failure
+    mode the "one envelope, one location" rule exists to prevent. The departure is
+    therefore *toward* this module's philosophy, not away from it.
+
+    **The rendering half lives in ``main.py``**: a single
+    ``@app.exception_handler(VenueTransientHTTPException)`` serialises this to
+    ``{"detail": <scalar str>, "code": <str>, "recoverable": <bool>}``. Being an
+    ``HTTPException`` SUBCLASS is load-bearing twice over: Starlette resolves
+    handlers by walking ``type(exc).__mro__``, so the subclass handler wins over
+    FastAPI's default; and every existing ``pytest.raises(HTTPException)``
+    direct-call test still catches it with ``.detail`` unchanged.
+
+    **The guards raise ``ValueError``**, like every other rule in this module: a
+    violation is a programming error at a raise site, not a runtime condition. A
+    ``ValueError`` escaping becomes a bodyless 500, which R-1 makes safe — and
+    loud (CLAUDE.md Rule 12). The ``code`` guard is what lets the call sites carry
+    a producer-computed discriminator VERBATIM with **no fallback**: a
+    route-minted code default would hand the wizard a fabricated code and hide a
+    real service-layer bug behind a plausible-looking envelope.
+    """
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        code: str,
+        detail: str,
+        recoverable: bool,
+    ) -> None:
+        if type(detail) is not str or not detail:
+            raise ValueError(
+                "VenueTransientHTTPException.detail must be a NON-EMPTY SCALAR "
+                "str — it is the string the TypeScript substring classifier "
+                "reads. An object here renders as '[object Object]' and "
+                f"regresses three working codes to UNKNOWN/500. got {detail!r}"
+            )
+        if type(code) is not str or not code:
+            raise ValueError(
+                "VenueTransientHTTPException.code must be a non-empty str. The "
+                "call sites carry the producer's discriminator verbatim with no "
+                "fallback, so an absent code is a broken producer invariant and "
+                f"must fail LOUD, never default. got {code!r}"
+            )
+        if type(recoverable) is not bool:
+            raise ValueError(
+                "VenueTransientHTTPException.recoverable must be a bool — it "
+                f"goes on the wire as a JSON boolean. got {recoverable!r}"
+            )
+        super().__init__(status_code=status_code, detail=detail)
+        self.code = code
+        self.recoverable = recoverable
