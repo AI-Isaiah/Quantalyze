@@ -1959,6 +1959,12 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
         raise HTTPException(
             status_code=429,
             detail="Too many bridge requests for this user. Try again later.",
+            # PYAPIFIX2-04 — advertise the window this cap actually enforces,
+            # read from the SAME constant `_check_bridge_user_rate` uses. Body
+            # shape deliberately unchanged (header-only): migrating it would
+            # mint a fourth 429 body shape, and which shape wins belongs to
+            # TS-23's owner.
+            headers={"Retry-After": str(_BRIDGE_USER_RATE_WINDOW_SEC)},
         )
 
     # Verify the underperformer is actually in this portfolio
@@ -2244,6 +2250,13 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
         raise HTTPException(
             status_code=429,
             detail="Too many verification attempts for this email. Try again later.",
+            # PYAPIFIX2-04, from the same constant
+            # `_check_verify_strategy_email_rate` uses. ⚠️ This route has NO TS
+            # caller today (0 hits for "verify-strategy" in
+            # src/lib/analytics-client.ts), so the rationale is CLASS INTEGRITY,
+            # not user impact: a class closed at three of its four sites
+            # re-opens the moment the fourth is revived.
+            headers={"Retry-After": str(_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC)},
         )
 
     # Audit H-0592 — Idempotency-Key support. A flaky-client retry on the

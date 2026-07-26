@@ -251,6 +251,13 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
                 "Simulator rate limit exceeded "
                 f"({_SIMULATOR_USER_RATE_LIMIT}/hour per user) — please retry later"
             ),
+            # PYAPIFIX2-04 — the wait is the WINDOW, not the LIMIT.
+            # `_SIMULATOR_USER_RATE_LIMIT` (interpolated in the copy above) is a
+            # COUNT of 20; using it here would advertise a 20-second wait for an
+            # hour-long window and invite ~180 rejected retries per throttled
+            # user. Read from the same constant `_check_simulator_user_rate`
+            # enforces.
+            headers={"Retry-After": str(_SIMULATOR_USER_RATE_WINDOW_SEC)},
         )
 
     supabase = get_supabase()

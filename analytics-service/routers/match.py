@@ -1744,6 +1744,16 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
                         f"force recompute for {allocator_id} throttled: "
                         f"retry after {wait_s}s (min interval {FORCE_RECOMPUTE_MIN_INTERVAL_S}s)"
                     ),
+                    # PYAPIFIX2-04. `wait_s` — the SAME number the copy above
+                    # promises, and derived from the same interval the guard
+                    # checks. Never RETRY_AFTER_SECONDS (services/error_contract
+                    # is explicit that a 429's wait is a limiter WINDOW, not a
+                    # property of a dependency) and never a fresh literal.
+                    # NOT clamped with max(1, ...): int() truncation near expiry
+                    # yields 0, and "Retry-After: 0" means "retry now" — RFC
+                    # 9110 §10.2.3 — which is exactly what the body says. A
+                    # clamp would make header and body disagree.
+                    headers={"Retry-After": str(wait_s)},
                 )
             # Stamp optimistically inside the lock so concurrent requests that
             # arrive while scoring is in-flight also see the window. On scoring
