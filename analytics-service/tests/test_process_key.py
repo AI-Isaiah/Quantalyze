@@ -245,8 +245,90 @@ def _csv_validate_body() -> dict:
     }
 
 
-def test_process_key_auth_missing_token(client, monkeypatch):
-    """Missing INTERNAL_API_TOKEN env → 403 'Internal API not configured'."""
+@pytest.fixture
+def middleware_client(monkeypatch):
+    """The FULL main.app stack (so `verify_service_key` runs), as a TestClient.
+
+    The module-level `client` fixture mounts routers/process_key.py in a BARE
+    FastAPI app on purpose — it unit-tests the handler in isolation. That is the
+    right harness for the handler's own defence-in-depth arm, but it CANNOT see
+    the PYAPI-04 middleware gate, which is where `/process-key`'s auth contract
+    now lives. This fixture is the harness for the shipped contract.
+    """
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "a" * 64)
+    import main
+
+    return TestClient(main.app, raise_server_exceptions=False)
+
+
+def test_process_key_auth_missing_token(middleware_client, monkeypatch):
+    """PYAPI-04d — INTERNAL_API_TOKEN UNSET server-side ⇒ 500 INTERNAL_TOKEN_UNCONFIGURED.
+
+    REWRITTEN, not extended (TRAP-9). The pre-140.1 assertion was
+    `403 + "Internal API not configured"`, and it is broken twice over:
+
+    1. The gate moved. `main.verify_service_key` now answers before the handler
+       ever runs, so the handler's 403 arm is unreachable through the full app.
+    2. The status was wrong. An unset platform secret is OUR misconfiguration —
+       SERVICE-PERMANENT per STATUS_CONTRACT.md R-1, i.e. 500 `retryable:false`.
+       403 blamed the caller for an operator-only fault, and 140.2's
+       discriminator would have classified it as "fix your credentials".
+
+    The handler-level 403 arm is still pinned, explicitly as such, by
+    `test_process_key_handler_level_auth_missing_token_403` below.
+    """
+    monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
+    r = middleware_client.post(
+        "/process-key",
+        json=_csv_validate_body(),
+        headers={"Authorization": "Bearer whatever"},
+    )
+    assert r.status_code == 500
+    assert r.json() == {
+        "detail": {
+            "code": "INTERNAL_TOKEN_UNCONFIGURED",
+            "dependency": None,
+            "retryable": False,
+            "detail": "Service not configured",
+        }
+    }
+
+
+def test_process_key_auth_wrong_token(middleware_client):
+    """PYAPI-04 — a mismatched bearer ⇒ 401 UNAUTHENTICATED at the middleware.
+
+    REWRITTEN, not extended (TRAP-9). The pre-140.1 assertion was
+    `403 + "Forbidden"` from the handler; the middleware now answers first, and
+    it answers 401 because "we do not know who you are" is authentication, not
+    authorization. The handler's 403 survives as defence-in-depth and is pinned
+    by `test_process_key_handler_level_auth_wrong_token_403` below.
+    """
+    r = middleware_client.post(
+        "/process-key",
+        json=_csv_validate_body(),
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert r.status_code == 401
+    assert r.json() == {
+        "detail": {
+            "code": "UNAUTHENTICATED",
+            "dependency": None,
+            "retryable": False,
+            "detail": "Unauthorized",
+        }
+    }
+
+
+def test_process_key_handler_level_auth_missing_token_403(client, monkeypatch):
+    """HANDLER-LEVEL (defence-in-depth): the ORIGINAL 403 assertion, verbatim.
+
+    `_verify_internal_token` is deliberately KEPT as the first statement of the
+    handler body — the PYAPI-04 middleware gate is additive, not a move. If the
+    router is ever mounted on an app without `verify_service_key` (as the
+    `client` fixture does), this arm is the only thing standing. Explicitly
+    marked handler-level so nobody reads it as the shipped wire contract, which
+    is 500 / 401 (see the two tests above).
+    """
     monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
     r = client.post(
         "/process-key",
@@ -257,8 +339,12 @@ def test_process_key_auth_missing_token(client, monkeypatch):
     assert "Internal API not configured" in r.text
 
 
-def test_process_key_auth_wrong_token(client):
-    """Wrong bearer → 403 'Forbidden' (constant-time compare path)."""
+def test_process_key_handler_level_auth_wrong_token_403(client):
+    """HANDLER-LEVEL (defence-in-depth): the ORIGINAL 403 assertion, verbatim.
+
+    See the sibling above for why this is kept and why it is not the wire
+    contract.
+    """
     r = client.post(
         "/process-key",
         json=_csv_validate_body(),
