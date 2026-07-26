@@ -285,12 +285,91 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   typing the expected copy as a literal in the test, the way 140.1.1 fixed the one assertion
   in this file that it did touch.
 - **`analytics-service/docs/STATUS_CONTRACT.md` not-seam-reachable coordinate drift beyond the
-  item 140.1.2 repaired** — `routers/portfolio.py:2242` is a comment line (the 429 raise is at
-  `:2244-2247`) and `:2446` is unverified. 140.1.2 plan 04 corrected the `exchange.py` and
+  item 140.1.2 repaired** — `routers/portfolio.py:2242` is a comment line (`# Audit H-0535 —
+  the credential fields are pydantic.SecretStr…`; the 429 raise is at `:2254-2264`, located by
+  the text `if not _check_verify_strategy_email_rate(` at `:2253`) and `:2446` is a comment
+  line too (`# Vectorized matching: build a DataFrame…`), not a deliberate error arm.
+  **Re-derive both by text before fixing — do not trust these numbers either**; the raise
+  shifts whenever anything above it in a 2500-line router moves. 140.1.2 plan 04 corrected
+  the `exchange.py` and
   `internal.py` coordinates in that bullet plus the S-11 row and the classes heading, and
   deliberately stopped there. *(Same file, same class: `routers/exchange.py:37` and
   `services/error_contract.py:6,8` still say "the four classes" in prose — the table has had
   five rows since 140.1.1 plan 01. One-word comment fix, batch it with the above.)*
+
+### v1.16 Phase-140.1.2 review — findings routed onward (added 2026-07-26)
+
+> From the 140.1.2 code review (0 Critical, 0 High, 7 Medium, 6 Low). The four in-fence items
+> (M-02, M-04, M-05, M-06) plus L-03/L-04/L-05 and W-02 were fixed in that phase. These are the
+> ones deliberately NOT fixed there, each with the reason and the owner. **Every coordinate
+> below was re-derived at HEAD by locating the code text; re-derive again before acting.**
+
+- **→ 140.3 (TypeScript, out of 140.1.2's Python fence).** `internal.py:246`'s throttle now
+  raises `service_error(429, "RATE_LIMITED", …)`, a NESTED envelope, where it used to answer a
+  bare `{"detail": "<scalar str>"}`. Its consumer
+  `src/app/api/keys/[id]/permissions/route.ts:147` does `throw new Error(err.detail ?? …)`, so
+  `new Error(<object>)` gives `message === "[object Object]"` and the operator log at `:275`
+  reads `Error: [object Object]` instead of the human sentence. **Diagnostics only** — the
+  classifier at `route.ts:254-268` keys on message substrings (`INTERNAL_API_TOKEN`,
+  `Upstream 5`, `ECONNREFUSED`, `not configured`, `aborted`, `timeout`) and the OLD sentence
+  matched none of them either, so the reply is `PROBE_FAILED`/502 before and after. Recorded in
+  `docs/STATUS_CONTRACT.md` §2 as joining the object-detail set. Fix it **with** the three
+  `err.detail ?? …` sites already owed there, not separately — they are one edit.
+- **→ 140.3, schedule WITH TS-05 / TS-35 so the ROUTE closes, not a subset.**
+  `routers/exchange.py:538`'s `except ccxt.BaseError` arm on the LIVE `/api/validate-key` route
+  raises at `:544` `service_error(424, "EXCHANGE_PROBE_FAILED", dependency=req.exchange, retryable=True, …)`
+  — a nested envelope, so `analytics-client.ts:179`'s `error.detail ?? …` yields
+  "[object Object]", `classifyKeyValidationError` misses every branch, and a verdict the site
+  itself marks `retryable=True` renders as `UNKNOWN`/500 "our team has been notified" with no
+  retry affordance. **Same user-visible symptom PYAPIFIX2-01 exists to kill, on the same
+  route.** It is NOT an escape 140.1.2 created or hid: the site IS typed at `body.detail.code`,
+  and the render defect is the pre-existing owned obligation TS-05. But closing TS-05/TS-35
+  without this arm leaves the route half-fixed. (140.1.2-VERIFICATION W-01.)
+- **→ backlog, beside the four-vocabulary unification.** The provenance channel
+  (`ValidationResult.permanent`) has ONE consumer. `routers/process_key.py`'s `_envelope_error`
+  `recoverable` derivation and the sync-arm 424 venue-transient pre-gate both still key on
+  `_ROUTE_TERMINAL_ERROR_CODES` ∪ `PERMANENT_VALIDATION_ERROR_CODES`, neither of which knows
+  `MT5_WRONG_SERVER` / `MT5_MASTER_PASSWORD` or any pandera-minted CSV code. **Unreachable for
+  MT5 today** — `process_key.py` admits `mt5` to `onboard`/`resync` only and `_is_long_fetch`
+  routes both to the worker — so this is latent, not live. It goes live the moment a second
+  adapter states permanence, or `_is_long_fetch` changes: two contradictory verdicts on two
+  paths for one rejection. Plumbing exists (`_envelope_error` already takes an explicit
+  `recoverable: bool | None`). (Review M-03.)
+- **→ backlog. One route, two body shapes for one condition.** After 140.1.2,
+  `POST /api/validate-key` answers 400 with `{detail, code, recoverable}` for a ccxt
+  `AuthenticationError` but bare `{detail}` — byte-identical `detail`, **no `code` at all** —
+  for an sFOX 401 or an MT5 bad password. Same for `MT5_WRONG_SERVER_DETAIL` and
+  `MT5_MASTER_PASSWORD_DETAIL`, which carry no machine code anywhere on the HTTP path even
+  though the WORKER path now knows they are permanent (PYAPIFIX2-02). A 140.3 consumer
+  branching on `body.code` therefore behaves differently per venue for an identical condition.
+  Pre-existing class (the permanent 400 arms were never in PYAPIFIX2-01's venue-transient
+  scope), but the asymmetry is newly VISIBLE. Close it by giving the permanent 400 arms the
+  same flat shape with `recoverable=false`. (Review M-07.)
+- **→ backlog, no behaviour change requested.** `recoverable: true` is advertised for
+  `UNSUPPORTED_EXCHANGE`, which can never clear by retrying, because it is not in
+  `PERMANENT_VALIDATION_ERROR_CODES`. The arm is effectively unreachable (`create_exchange`
+  gates on `EXCHANGE_CLASSES` and raises `ValueError` for unknown ids) and
+  `UNSUPPORTED_EXCHANGE` was explicitly REFUTED and fenced out of 140.1.2, so the
+  classification is inherited; what is new is that the derived boolean is now on the wire.
+  Fold into the four-vocabulary unification. (Review L-06.)
+- **→ backlog, optional.** Three `Retry-After` values advertise the FULL window when the true
+  remainder is known: `routers/simulator.py:260`, `routers/portfolio.py:1971`, `:2263`. All
+  three guards are SLIDING windows keeping a list of timestamps, so the true wait is
+  `bucket[0] + WINDOW - now` — which can be one second, while the header says `3600`. Safe (it
+  never under-advertises) but it can tell a user one second from a free slot to come back in an
+  hour. The service already has the better pattern at `main.py:_retry_after_seconds` (`:461`),
+  which reads the real remainder and falls back to the window only when it cannot. Fix shape:
+  have `_check_*_rate` return `(ok, retry_after)`. (Review L-01.)
+- **⚠️ Declined in 140.1.2, recorded so it is not re-filed.** Review L-02 asked for one
+  `from services.error_contract import …` per module in `routers/exchange.py` and
+  `routers/portfolio.py` (each has two, with a comment block above each). It was applied and
+  then **reverted**: merging the imports adds 5 lines near the top of both files, which shifts
+  every line below and silently invalidated ~16 verified line coordinates in
+  `docs/STATUS_CONTRACT.md` — including the six `fetch_trades` arms
+  (`exchange.py:660,670,685,689,698,760`) a verifier had just checked line-by-line. In a
+  programme this coordinate-dense, a cosmetic import merge is not worth invalidating the
+  document 140.2/140.3 read. Do it only as part of a change that re-derives those coordinates,
+  or after they stop being line-based.
 
 ---
 
