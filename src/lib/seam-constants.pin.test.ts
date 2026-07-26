@@ -8,6 +8,11 @@ import {
   DEFAULT_RETRY_AFTER_S,
   SEAM_RETRIES,
 } from "./resilient-fetch";
+import {
+  FAKE_BREAKER_KEY,
+  FAKE_THRESHOLD,
+  FAKE_WINDOW_MS,
+} from "@/test/helpers/upstash-breaker";
 
 /**
  * SC3 / SEAMCORE-07 — the literal-pinned oracle for the seam core's tuning values.
@@ -245,5 +250,44 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "not decayed when the lock expires, so ONE failure re-trips and the " +
         "breaker flaps permanently — an ordering fault, not a tuning choice.",
     ).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+describe("fake ↔ production — the breaker double's tuning cannot drift silently", () => {
+  /**
+   * The anti-drift fence for Layer 1.
+   *
+   * `src/test/helpers/upstash-breaker.ts` hand-types its own key, threshold and
+   * window: it cannot import the core (that would run the core's module-load
+   * side effects from inside a hoisted mock factory), and — the real reason — a
+   * double that reads its tuning out of production cannot ever contradict
+   * production. Two INDEPENDENTLY typed literals asserted equal is what makes
+   * that duplication safe: either side may change, but not both silently.
+   */
+  const DRIFT = (what: string) =>
+    `The breaker double's ${what} has drifted from production's. Every ` +
+    `behavioural breaker test in this repo runs against that double, so they ` +
+    `are now measuring the fake against itself and will stay green through a ` +
+    `real change to the seam core. Fix whichever side is wrong — never make ` +
+    `the fake read production's value to close the gap; that IS the defect.`;
+
+  it("FAKE_BREAKER_KEY equals BREAKER_KEY", () => {
+    expect(FAKE_BREAKER_KEY, DRIFT("breaker key")).toBe(BREAKER_KEY);
+  });
+
+  it("FAKE_THRESHOLD equals BREAKER_FAILURE_THRESHOLD", () => {
+    expect(FAKE_THRESHOLD, DRIFT("failure threshold")).toBe(
+      BREAKER_FAILURE_THRESHOLD,
+    );
+  });
+
+  it("FAKE_WINDOW_MS equals the millisecond form of BREAKER_WINDOW", () => {
+    // Parsed in the test, with a hand-typed 30_000 on both sides, so this
+    // catches a UNIT change ("30 s" → "30 m") as well as a magnitude change.
+    expect(FAKE_WINDOW_MS).toBe(30_000);
+    expect(durationToMs(BREAKER_WINDOW)).toBe(30_000);
+    expect(FAKE_WINDOW_MS, DRIFT("failure window")).toBe(
+      durationToMs(BREAKER_WINDOW),
+    );
   });
 });

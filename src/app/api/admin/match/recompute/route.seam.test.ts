@@ -80,8 +80,18 @@ vi.mock("@upstash/ratelimit", async () => {
         return { tokens, window };
       }
       private readonly fake: ReturnType<typeof fakeRatelimitFor>;
-      constructor(opts: { limiter: { tokens: number } }) {
-        this.fake = fakeRatelimitFor(shared.store, opts.limiter.tokens);
+      // `_opts` is deliberately UNREAD. This previously passed the mocked
+      // constructor's own options value straight into the fake as its
+      // threshold — i.e. production's own
+      // `slidingWindow(BREAKER_FAILURE_THRESHOLD, ...)` argument read straight
+      // back out — so the double inherited every mutation to it and could not
+      // disagree with production by construction. The fake now
+      // takes its hand-typed FAKE_THRESHOLD default. The parameter and
+      // `slidingWindow` both stay: the core must still be able to CONSTRUCT
+      // this class with the table's values, and `resilient-fetch.test.ts`
+      // asserts those values as a plumbing pin.
+      constructor(_opts: { limiter: { tokens: number } }) {
+        this.fake = fakeRatelimitFor(shared.store);
       }
       limit(identifier: string) {
         return this.fake.limit(identifier);

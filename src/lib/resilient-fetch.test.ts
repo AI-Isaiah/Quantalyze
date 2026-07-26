@@ -57,10 +57,18 @@ const shared = vi.hoisted(() => {
   };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
+  /**
+   * What the core passed to `new Ratelimit({ limiter })`, OBSERVED and never
+   * CONSUMED. This is the plumbing record: it proves the core builds its
+   * limiter from the table's constants. The double's own trip point comes from
+   * `FAKE_THRESHOLD`, hand-typed in the helper — see the note at the factory.
+   */
+  const constructed: Array<{ tokens: number; window: string }> = [];
   return {
     store,
     mode,
     ctx,
+    constructed,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -103,9 +111,21 @@ vi.mock("@upstash/ratelimit", async () => {
         return { tokens, window };
       }
       private readonly fake: { limit: (id: string) => Promise<unknown> };
-      constructor(opts: { limiter: { tokens: number } }) {
+      constructor(opts: { limiter: { tokens: number; window: string } }) {
+        // OBSERVE production's constructor argument; never CONSUME it.
+        //
+        // This double used to pass that argument straight into the fake as its
+        // threshold — the fake harvesting its tuning from production's own
+        // `slidingWindow(BREAKER_FAILURE_THRESHOLD, …)` call, so it inherited
+        // every mutation to it and could not disagree with production by
+        // construction. The fake now takes its hand-typed FAKE_THRESHOLD
+        // default (see `@/test/helpers/upstash-breaker`), and what the core
+        // constructed is merely RECORDED here, for the plumbing assertion in
+        // the `recordSeamFailure` block below to check against literals.
+        const { tokens, window } = opts.limiter;
+        shared.constructed.push({ tokens, window });
         // Binds to whatever store beginContext() just selected.
-        this.fake = fakeRatelimitFor(shared.ctx.store, opts.limiter.tokens);
+        this.fake = fakeRatelimitFor(shared.ctx.store);
       }
       limit(identifier: string) {
         if (shared.mode.throwOnLimit) {
@@ -146,6 +166,7 @@ beforeEach(() => {
   // counter for every later test, which makes "the breaker did not trip"
   // assertions pass for entirely the wrong reason.
   shared.mode.throwOnLimit = false;
+  shared.constructed.length = 0;
   configureUpstash();
 });
 
@@ -254,7 +275,33 @@ describe("isBreakerOpen", () => {
 });
 
 describe("recordSeamFailure", () => {
+  it("constructs the failure counter from the table's threshold and window", async () => {
+    // PLUMBING, with hand-typed expectations. The double no longer consumes
+    // what the core passed it, so this is the assertion that keeps the core's
+    // `Ratelimit.slidingWindow(BREAKER_FAILURE_THRESHOLD, BREAKER_WINDOW)` call
+    // observable at all. Both expected values are literals typed here, so a
+    // retune of either constant reddens this rather than being absorbed.
+    await import("./resilient-fetch");
+
+    expect(
+      shared.constructed,
+      "The core did not construct exactly one breaker limiter for this module " +
+        "context. A second construction means a second counter and two breakers " +
+        "that can disagree about whether Railway is up.",
+    ).toHaveLength(1);
+    expect(shared.constructed[0]).toEqual({ tokens: 5, window: "30 s" });
+  });
+
   it("trips the breaker once the failure allowance is exhausted", async () => {
+    // ⚠️ THE LOOP BOUND IS PRODUCTION'S DECLARED THRESHOLD, AND THAT IS THE
+    // POINT (ledger row M14b). The two sides of this test now come from
+    // INDEPENDENT sources: the number of failures driven is production's
+    // `BREAKER_FAILURE_THRESHOLD`, while the point at which the counter
+    // actually denies is the fake's hand-typed `FAKE_THRESHOLD`. Before the
+    // Layer-1 fix the double harvested production's value, so the two sides
+    // were the same number and raising the threshold 5 → 30 kept this GREEN.
+    // Now a divergence reddens here — which is what makes this a BEHAVIOURAL
+    // falsifier rather than a restatement of the number in the pin file.
     const mod = await import("./resilient-fetch");
 
     for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD - 1; i++) {

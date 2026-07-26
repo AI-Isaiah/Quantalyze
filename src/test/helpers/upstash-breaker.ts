@@ -35,7 +35,9 @@
  *
  * vi.mock("@upstash/ratelimit", async () => {
  *   const { fakeRatelimitFor } = await import("@/test/helpers/upstash-breaker");
- *   const fake = fakeRatelimitFor(shared.store, 5);
+ *   // NO second argument. The threshold is FAKE_THRESHOLD, hand-typed below —
+ *   // never the value the core passed in. See the DOUBLE-INDEPENDENCE block.
+ *   const fake = fakeRatelimitFor(shared.store);
  *   return {
  *     Ratelimit: class {
  *       static slidingWindow = (tokens: number, window: string) => ({ tokens, window });
@@ -44,6 +46,33 @@
  *   };
  * });
  * ```
+ *
+ * ⚠️ DOUBLE INDEPENDENCE — THE RULE THIS FILE EXISTS TO ENFORCE
+ * ------------------------------------------------------------
+ * **No tuning value in this double may be harvested from production.**
+ *
+ * Until plan 140.2-02 every consumer passed this function a SECOND argument
+ * harvested from the mocked constructor's own options object — i.e. whatever
+ * `Ratelimit.slidingWindow(BREAKER_FAILURE_THRESHOLD, BREAKER_WINDOW)` was
+ * called with, production's own constructor argument read straight back out.
+ * A double wired that way **cannot disagree with production, ever, by
+ * construction**: raise `BREAKER_FAILURE_THRESHOLD` to 30 and the fake
+ * silently raises with it, so
+ * every trip-count, short-circuit and cooldown test in the repo keeps passing
+ * having proved nothing. Ten simultaneous semantic mutations to the seam core
+ * produced a byte-identical `8859 passed | 287 skipped` through exactly this
+ * mechanism.
+ *
+ * So `BREAKER_KEY_LITERAL`, `FAKE_THRESHOLD` and `FAKE_WINDOW_MS` are all
+ * hand-typed HERE, and `src/lib/seam-constants.pin.test.ts` asserts each one
+ * equal to production's own literal. Two independently typed literals asserted
+ * equal: production can change and the fake can change, but they cannot BOTH
+ * change silently.
+ *
+ * KEEP the mocked class's `static slidingWindow` in every consumer. The fix is
+ * to stop the double CONSUMING production's value, not to stop a test
+ * OBSERVING it — removing the options object would delete the correct plumbing
+ * assertion that the core constructs its limiter from the table.
  *
  * The store is a `Map` keyed exactly like the real Redis keyspace, so a test can
  * inspect or seed breaker state directly (`seedBreakerOpen`) without driving
@@ -68,8 +97,34 @@ export type FakeUpstashStore = Map<string, FakeUpstashEntry>;
  */
 const BREAKER_KEY_LITERAL = "breaker:railway";
 
-/** Window (ms) the fake failure counter uses. Mirrors `BREAKER_WINDOW` ("30 s"). */
-const FAKE_WINDOW_MS = 30_000;
+/**
+ * The failure threshold this double trips at, duplicated from
+ * `BREAKER_FAILURE_THRESHOLD` in `src/lib/resilient-fetch.ts` — on purpose, for
+ * BOTH of the reasons `BREAKER_KEY_LITERAL` carries:
+ *
+ * 1. Importing the core here would execute its module-load side effects (the
+ *    `Redis.fromEnv()` singleton and its unconfigured notice) from inside a
+ *    `vi.mock` factory, i.e. before the mock it is defining exists.
+ * 2. More importantly, a double that reads its tuning from production cannot
+ *    ever contradict production. That is not a fake — it is a mirror.
+ *
+ * `src/lib/seam-constants.pin.test.ts` asserts this literal equals
+ * `BREAKER_FAILURE_THRESHOLD`, so the duplication cannot drift silently.
+ */
+export const FAKE_THRESHOLD = 5;
+
+/**
+ * Window (ms) the fake failure counter uses — the millisecond form of
+ * `BREAKER_WINDOW` ("30 s"), hand-typed here for the same two reasons as
+ * `FAKE_THRESHOLD`.
+ *
+ * This value was already a hand-typed literal, but its only tie to production
+ * was a comment claiming it "mirrors `BREAKER_WINDOW`" with NO assertion behind
+ * it — which is precisely how a 30 s → 3600 s change stays invisible to every
+ * test driven through this double. It is EXPORTED so
+ * `src/lib/seam-constants.pin.test.ts` can pin it literal-against-literal.
+ */
+export const FAKE_WINDOW_MS = 30_000;
 
 /** Prefix for the fake limiter's per-identifier counters inside the same store. */
 const COUNTER_PREFIX = "__fake_breaker_count__:";
@@ -161,10 +216,17 @@ export interface FakeRatelimit {
  * `success` is `count <= threshold`: the threshold-th call is ALLOWED with
  * `remaining === 0`, and the (threshold+1)-th is denied, matching
  * `Ratelimit.slidingWindow(threshold, ...)`.
+ *
+ * `threshold` DEFAULTS to the hand-typed `FAKE_THRESHOLD` and every consumer
+ * takes that default. The parameter is deliberately KEPT rather than removed: a
+ * test that legitimately wants a different threshold to prove a boundary should
+ * still be able to pass one. The rule is that the value is a LITERAL — never
+ * production's own `slidingWindow(...)` argument read back off the mocked
+ * constructor's options object — not that it is fixed.
  */
 export function fakeRatelimitFor(
   store: FakeUpstashStore,
-  threshold: number,
+  threshold: number = FAKE_THRESHOLD,
 ): FakeRatelimit {
   return {
     async limit(identifier: string): Promise<FakeRatelimitResponse> {
