@@ -2604,7 +2604,14 @@ class TestIsAllocatorProfileErrorHandling:
         _is_allocator_profile signals a transient DB error via None.
 
         A real allocator must never see "allocator_id is not an allocator
-        profile" during a Supabase connection blip."""
+        profile" during a Supabase connection blip.
+
+        PYAPI-05 (S-14): the 503 now carries the R-2 envelope at
+        ``body.detail`` — ``dependency:"supabase"`` so 140.2 keys the breaker
+        on Supabase alone instead of globally, plus a ``Retry-After``. The
+        human copy survives as a SCALAR string at ``body.detail.detail``; the
+        original "is it legible as transient?" assertion is kept, moved to
+        where the string now lives."""
         from routers import match as match_mod
 
         alloc_id = str(uuid4())
@@ -2618,8 +2625,20 @@ class TestIsAllocatorProfileErrorHandling:
         assert r.status_code == 503, (
             "transient _is_allocator_profile error must return 503, not 422"
         )
-        body = r.json()
-        assert "retry" in body.get("detail", "").lower() or "temporarily" in body.get("detail", "").lower(), (
+        envelope = r.json()["detail"]
+        assert envelope["dependency"] == "supabase", (
+            "a SERVICE-TRANSIENT 503 must name WHICH dependency failed so the "
+            "breaker is keyed per-dependency, never globally (O-2)"
+        )
+        assert envelope["retryable"] is True
+        retry_after = r.headers.get("Retry-After")
+        assert retry_after is not None, "a SERVICE-TRANSIENT 503 must carry Retry-After"
+        assert int(retry_after) > 0
+        human = envelope["detail"]
+        assert isinstance(human, str), (
+            "body.detail.detail is always a scalar human string (contract §2)"
+        )
+        assert "retry" in human.lower() or "temporarily" in human.lower(), (
             "503 response must hint that the error is transient"
         )
 
