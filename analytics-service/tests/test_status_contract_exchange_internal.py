@@ -272,30 +272,85 @@ async def test_s05_mt5_gateway_connect_failure_is_transient_503(exchange_router)
 
 # --- S-06 (SPLIT) -----------------------------------------------------------
 
+# The S-06 split is pinned by the ccxt exception FAMILY, never by one member.
+#
+# WHY (140.1-REVIEW H-4 / survivors #1 and #2): the first version of this fence
+# raised exactly ONE subclass — ``ccxt.ExchangeNotAvailable`` — so narrowing the
+# arm from ``except ccxt.BaseError`` to ``except ccxt.NetworkError`` (or to
+# ``except ccxt.ExchangeNotAvailable`` itself) SURVIVED the mutation twice with a
+# fully green suite. Under either narrowing, ``ccxt.PermissionDenied`` and
+# ``ccxt.AuthenticationError`` fall through to the generic arm and answer **500**
+# — which is A-01/C-12 verbatim, the exact defect this entire programme exists to
+# fix, shipped under a green test.
+#
+# The oracle below is the **ccxt class hierarchy**, not the arm's own except
+# clause: the family straddles both ccxt roots (``ExchangeError`` and
+# ``NetworkError``), so no single narrowing can satisfy all seven rows.
+# ``RuntimeError`` is the non-ccxt control that keeps the *split* visible — a fix
+# that widened the 424 arm to ``except Exception`` would satisfy the seven venue
+# rows and fail this one.
+#
+# Every expected status and code below is a LITERAL typed into this file.
+_S06_ESCAPES = [
+    # (exception class, expected status, expected code)
+    (ccxt.RateLimitExceeded, 424, "EXCHANGE_PROBE_FAILED"),
+    (ccxt.PermissionDenied, 424, "EXCHANGE_PROBE_FAILED"),
+    (ccxt.AuthenticationError, 424, "EXCHANGE_PROBE_FAILED"),
+    (ccxt.RequestTimeout, 424, "EXCHANGE_PROBE_FAILED"),
+    (ccxt.ExchangeError, 424, "EXCHANGE_PROBE_FAILED"),
+    (ccxt.ExchangeNotAvailable, 424, "EXCHANGE_PROBE_FAILED"),
+    (ccxt.DDoSProtection, 424, "EXCHANGE_PROBE_FAILED"),
+    (RuntimeError, 500, "INTERNAL"),
+]
 
-async def test_s06_ccxt_escape_is_exchange_attributable_424(exchange_router):
-    """S-06a (exchange.py:404) — ``services/exchange.py`` already classifies every
-    known ccxt error, so a ccxt exception ESCAPING to this bare except is by
-    definition unclassified — but it is still attributable to the VENUE. The
-    contract answers 424: breaker-inert (4xx), recoverable, and carrying the
-    venue name so 140.3 can say "Binance is not responding" rather than blaming
-    the user's key. A 5xx here is C-12 verbatim."""
+
+@pytest.mark.parametrize(
+    "exc_class,expected_status,expected_code",
+    _S06_ESCAPES,
+    ids=[c.__name__ for c, _, _ in _S06_ESCAPES],
+)
+async def test_s06_ccxt_family_escape_is_exchange_attributable_424(
+    exchange_router, exc_class, expected_status: int, expected_code: str
+):
+    """S-06a (exchange.py, the ``except ccxt.BaseError`` arm) —
+    ``services/exchange.py`` already classifies every known ccxt error, so a ccxt
+    exception ESCAPING to this arm is by definition unclassified — but it is
+    still attributable to the VENUE. The contract answers 424: breaker-inert
+    (4xx), recoverable, and carrying the venue name so 140.3 can say "Binance is
+    not responding" rather than blaming the user's key.
+
+    A 5xx on ANY member of the family is C-12 verbatim: five keys on one
+    dashboard render during a venue throttle become five 5xx and a platform-wide
+    breaker trip that then denies every other venue, the optimizer, admin match
+    and CSV finalize. ``RateLimitExceeded`` is the single most likely member to
+    fire in production and the one a naive narrowing loses first.
+    """
     router = exchange_router
     router.create_exchange = MagicMock(return_value=MagicMock(name="ccxt-exchange"))
     router.validate_key_permissions = AsyncMock(
-        side_effect=ccxt.ExchangeNotAvailable("binance GET /api/v3/account 503")
+        side_effect=exc_class("binance GET /api/v3/account failed")
     )
     router.aclose_exchange = AsyncMock()
 
     with pytest.raises(HTTPException) as ei:
         await _call_validate(router, _validate_req(router, exchange="binance"))
 
-    assert ei.value.status_code == 424
+    assert ei.value.status_code == expected_status, (
+        f"{exc_class.__name__} must answer {expected_status}, got "
+        f"{ei.value.status_code} — a ccxt escape answering 5xx is C-12, and a "
+        f"non-ccxt escape answering 4xx hides OUR bug"
+    )
     _assert_r2_keys(ei.value)
     body = _envelope(ei.value)
-    assert body["code"] == "EXCHANGE_PROBE_FAILED"
-    assert body["dependency"] == "binance"
-    assert body["retryable"] is True
+    assert body["code"] == expected_code
+    if expected_status == 424:
+        assert body["dependency"] == "binance"
+        assert body["retryable"] is True
+    else:
+        # The non-ccxt control: OUR unclassified bug names no venue and is
+        # permanent, so it counts as a real 5xx and never as a breaker input.
+        assert body["dependency"] is None
+        assert body["retryable"] is False
     router.aclose_exchange.assert_awaited_once()
 
 
