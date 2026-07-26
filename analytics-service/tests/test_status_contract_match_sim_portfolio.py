@@ -505,3 +505,151 @@ async def test_s24_health_stale_response_is_unchanged(monkeypatch) -> None:
     # The envelope must NOT have leaked into /health.
     assert "detail" not in body
     assert "retryable" not in body
+
+
+# --------------------------------------------------------------------------- #
+# PYAPIFIX2-04 — every user-facing 429 advertises the wait it is enforcing
+# --------------------------------------------------------------------------- #
+#
+# A 429 is the one CALLER fault an identical retry DOES clear, and the only
+# thing that tells the caller WHEN is ``Retry-After``. Without it a client
+# either gives up on a condition that expires, or retries immediately and
+# forever — the retry storm the throttle existed to prevent, aimed at the
+# throttle itself. These three sites enforce a ONE HOUR window and advertised
+# nothing at all.
+#
+# ``"3600"`` is a string LITERAL typed here, never imported from the routers.
+# Survivor #5 (140.1.1-REVIEW) proved a `0 < x <= window` inequality is not
+# teeth: widening the window ships green under it. The value is the wire
+# contract, so the wire value is what is pinned.
+#
+# ⚠️ Header-only by design. The bodies of these three stay the bare scalar
+# ``{"detail": "<string>"}`` — migrating them would mint a FOURTH 429 body shape
+# in the same phase that deliberately minted a third (PYAPIFIX2-03 at
+# routers/internal.py). Which shape wins is TS-23's owner's call (140.2 / 146).
+# The body assertions below therefore pin the scalar shape as UNCHANGED.
+_EXPECTED_HOURLY_RETRY_AFTER = "3600"
+
+
+def test_simulator_per_user_quota_429_advertises_its_window(monkeypatch) -> None:
+    """``POST /api/simulator``'s per-user hourly quota now carries Retry-After.
+
+    ⚠️ The wait is the WINDOW (``_SIMULATOR_USER_RATE_WINDOW_SEC`` = 1 hour),
+    not the LIMIT (``_SIMULATOR_USER_RATE_LIMIT`` = 20, a COUNT — and the number
+    the human copy interpolates). Sourcing the header from the count would
+    advertise a 20-second wait for an hour-long window and invite 180 rejected
+    retries per throttled user. That confusion is exactly why this is pinned to
+    3600 and why the body copy is asserted separately.
+    """
+    from routers import simulator as simulator_router
+
+    monkeypatch.setattr(simulator_router, "_check_simulator_user_rate", lambda _uid: False)
+
+    app = FastAPI()
+    app.state.limiter = simulator_router.limiter
+    app.include_router(simulator_router.router)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/simulator",
+        json={"portfolio_id": "p-1", "candidate_strategy_id": "c-1", "user_id": "u-1"},
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER, (
+        "the per-user simulator quota must advertise its own window; sourcing "
+        "the header from the 20/hour COUNT instead would promise a 20-second wait"
+    )
+    # Body shape UNCHANGED — a bare scalar detail, not an envelope (see above).
+    assert isinstance(resp.json()["detail"], str)
+    assert "Simulator rate limit exceeded" in resp.json()["detail"]
+
+
+@pytest.fixture()
+def portfolio_client() -> TestClient:
+    """Bare FastAPI app with ``routers.portfolio`` mounted.
+
+    ``app.state.limiter`` is wired and the shared limiter is RESET, because
+    PYAPI-03 made every router share ONE ``memory://`` store: without the reset
+    a sibling module's earlier requests can push these routes past their slowapi
+    ceiling, and a slowapi 429 would masquerade as the handler 429 under test.
+    The body assertions below are the second, independent guard against that
+    false green — slowapi's body is a different shape entirely.
+    """
+    from routers import portfolio as portfolio_mod
+
+    _reset = getattr(portfolio_mod.limiter, "reset", None)
+    if callable(_reset):
+        _reset()
+    app = FastAPI()
+    app.state.limiter = portfolio_mod.limiter
+    app.include_router(portfolio_mod.router)
+    return TestClient(app)
+
+
+def test_bridge_per_user_cap_429_advertises_its_window(
+    portfolio_client, monkeypatch
+) -> None:
+    """``POST /api/portfolio-bridge``'s per-user hourly cap now carries Retry-After.
+
+    This is the live seam path (``src/lib/analytics-client.ts`` calls it), so a
+    throttled allocator is a real user staring at an error with no idea whether
+    to wait a second or an hour.
+
+    The ownership SELECT runs BEFORE the cap by design (an attacker-supplied
+    user_id must not be able to spend a bucket slot), so the supabase double has
+    to answer it — a bare ``MagicMock`` chain does, its ``.data`` being truthy.
+    """
+    from routers import portfolio as portfolio_mod
+
+    monkeypatch.setattr(portfolio_mod, "get_supabase", lambda: MagicMock())
+    monkeypatch.setattr(portfolio_mod, "_check_bridge_user_rate", lambda _uid: False)
+
+    resp = portfolio_client.post(
+        "/api/portfolio-bridge",
+        json={
+            "portfolio_id": str(uuid4()),
+            "underperformer_strategy_id": str(uuid4()),
+            "user_id": str(uuid4()),
+        },
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER
+    assert isinstance(resp.json()["detail"], str)
+    assert "Too many bridge requests for this user." in resp.json()["detail"]
+
+
+def test_verify_strategy_per_email_cap_429_advertises_its_window(
+    portfolio_client, monkeypatch
+) -> None:
+    """``POST /api/verify-strategy``'s per-email cap now carries Retry-After.
+
+    ⚠️ **DEAD ROUTE — included for CLASS INTEGRITY, not user impact.**
+    ``grep -n "verify-strategy" src/lib/analytics-client.ts`` returns **zero**
+    hits (re-run at execution time, 2026-07-26): no seam path reaches this
+    handler today. It is pinned anyway because a class closed at three of four
+    sites is a class that re-opens the moment the fourth is revived — the
+    partial-closure defect this whole programme exists to stop. The cost is one
+    ``headers=`` kwarg and this test.
+    """
+    from routers import portfolio as portfolio_mod
+
+    monkeypatch.setattr(
+        portfolio_mod, "_check_verify_strategy_email_rate", lambda _email: False
+    )
+
+    resp = portfolio_client.post(
+        "/api/verify-strategy",
+        json={
+            "email": "trader@example.com",
+            "exchange": "binance",
+            "api_key": "AKIDLIVE0123456789abcdef",
+            "api_secret": "s" * 24,
+        },
+    )
+
+    assert resp.status_code == 429
+    assert resp.headers["Retry-After"] == _EXPECTED_HOURLY_RETRY_AFTER
+    assert isinstance(resp.json()["detail"], str)
+    assert "Too many verification attempts for this email." in resp.json()["detail"]

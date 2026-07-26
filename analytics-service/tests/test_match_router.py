@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import re
 from typing import Any
 from unittest.mock import MagicMock
 from uuid import uuid4
@@ -1387,6 +1388,41 @@ class TestForceRecomputeThrottle:
             "force=True within the min-interval must be throttled 429 (NEW-C08-06)"
         )
         assert "throttled" in r.json()["detail"].lower()
+
+        # PYAPIFIX2-04 — the throttle must ADVERTISE the wait it is enforcing.
+        # Without Retry-After the caller either gives up on a condition that
+        # clears in seconds, or hammers immediately and forever: the retry storm
+        # the 30s floor exists to prevent, aimed at the floor itself.
+        retry_after = r.headers.get("Retry-After")
+        assert retry_after is not None, (
+            "a 429 is the one CALLER fault an identical retry clears — the "
+            "header is the only thing that says WHEN"
+        )
+
+        # (a) CONSISTENCY: the body already promises a number ("retry after Ns").
+        # The header must be that same number. A header that disagrees with the
+        # sentence beside it is worse than either alone — the caller cannot tell
+        # which to believe. This is also why the value is NOT clamped with
+        # max(1, ...): near window expiry int() truncation yields 0, and
+        # "Retry-After: 0" (retry now) is both RFC-valid and exactly what the
+        # body says.
+        promised = re.search(r"retry after (\d+)s", r.json()["detail"])
+        assert promised is not None, (
+            "the throttle copy interpolates the wait; if that changed, this "
+            "consistency pin must be re-derived, not deleted"
+        )
+        assert retry_after == promised.group(1)
+
+        # (b) VALUE: a tight band, not a bare inequality. Survivor #5
+        # (140.1.1-REVIEW) proved `0 < x <= window` has no teeth — it passes for
+        # any window, so widening 30s to an hour ships green under it. The bucket
+        # was stamped microseconds ago, so the wait must be within a whisker of
+        # the full 30-second interval. `30` is a LITERAL typed here, never
+        # imported from routers.match.
+        assert 27 < int(retry_after) <= 30, (
+            f"a freshly-stamped bucket must advertise nearly the whole 30s "
+            f"interval; got {retry_after!r}"
+        )
 
     def test_force_true_allowed_after_interval_clears(
         self, client, monkeypatch
