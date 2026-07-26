@@ -687,6 +687,12 @@ async def verify_service_key(request: Request, call_next):
     if not SERVICE_KEY:
         # PYAPI-06 site 1 — C-11's Railway half. Rate-limited: this arm fires on
         # EVERY request to EVERY guarded route while the env var is unset.
+        # M-14: `error` matches the `process_key.auth.secret_unset` sibling at
+        # :594 — an unset platform secret is a deploy fault that refuses every
+        # request until a human acts. The Sentry capture below is the throttled
+        # half; the log is the trail that survives Sentry being muted, over
+        # quota, or simply not where the operator is looking.
+        _auth_log.error("service_key.secret_unset", path=request.url.path)
         _capture_secret_misconfig("unset", "SERVICE_KEY")
         return service_error_response(
             500,
@@ -707,6 +713,13 @@ async def verify_service_key(request: Request, call_next):
         # would make the signal meaningless. The response is unchanged either
         # way: this is additive observability, not a new refusal.
         if provided:
+            # M-14: `warning` matches the `process_key.auth.token_mismatch`
+            # sibling at :620 — a mismatched credential is a rotation mid-flight
+            # or an attacker, not the operator-must-act-now fault an unset
+            # secret is. This line MUST stay inside `if provided:`: dedented one
+            # level it fires on every unauthenticated prober on the internet,
+            # which buries the real signal exactly the way C-11 was buried.
+            _auth_log.warning("service_key.mismatch", path=request.url.path)
             _capture_secret_misconfig("mismatched", "SERVICE_KEY")
         return JSONResponse({"detail": "Unauthorized"}, status_code=401)
 
