@@ -27,11 +27,16 @@ from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
-from services.error_contract import RETRY_AFTER_SECONDS, service_error
-# PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
-# collapse) is the seventh member of the class whose other six live in
-# routers/exchange.py; the shape rationale is documented at the C6 raise there.
-from services.error_contract import VenueTransientHTTPException
+#
+# PYAPIFIX2-01 — VenueTransientHTTPException is the FLAT venue-transient shape.
+# C7 (the verify-strategy verdict collapse) is the seventh member of the class
+# whose other six live in routers/exchange.py; the shape rationale is documented
+# at the C6 raise there.
+from services.error_contract import (
+    RETRY_AFTER_SECONDS,
+    VenueTransientHTTPException,
+    service_error,
+)
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
