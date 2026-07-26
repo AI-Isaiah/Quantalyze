@@ -152,6 +152,30 @@ _SPEC: dict[str, Any] = json.loads(_FIXTURE.read_text(encoding="utf-8"))
 _CASES: list[dict[str, Any]] = _SPEC["cases"]
 _BY_TRIGGER: dict[str, dict[str, Any]] = {c["trigger"]: c for c in _CASES}
 
+# The census of cases this suite CLAIMS, retyped from the fixture at HEAD. The
+# fence below is one-to-one in BOTH directions, which the per-case assertions
+# alone are not: deleting a case reddens (`_BY_TRIGGER[trigger]` → KeyError), but
+# nothing stopped a case being ADDED. The fixture is 140.3's TypeScript parity
+# input, so a fabricated 15th case would hand the other language a contract this
+# service never emits — the same drift the `spec["body"] == body` assertion
+# prevents, arriving from the other side.
+EXPECTED_FIXTURE_TRIGGERS = {
+    "sfox_http_429",
+    "sfox_http_503",
+    "mt5_probe_timeout",
+    "mt5_account_mismatch",
+    "mt5_client_error_transient",
+    "ccxt_rate_limited",
+    "ccxt_ddos_protection",
+    "ccxt_exchange_unavailable",
+    "ccxt_network_unavailable",
+    "ccxt_probe_failed",
+    "ccxt_auth_failed_permanent_control",
+    "unknown_future_code_control",
+    "verify_strategy_exchange_unavailable",
+    "verify_strategy_auth_failed_permanent_control",
+}
+
 
 # --------------------------------------------------------------------------- #
 # Harness
@@ -968,6 +992,63 @@ def test_venue_transient_handler_handles_the_no_header_case() -> None:
         "code": "RATE_LIMITED",
         "recoverable": True,
     }
+
+
+# --------------------------------------------------------------------------- #
+# The fixture's OTHER direction — no case may exist that no test drives
+# --------------------------------------------------------------------------- #
+
+
+def test_every_fixture_case_is_named_and_driven_here() -> None:
+    """One-to-one, both ways, between the committed fixture and this suite.
+
+    Two independent oracles, because either alone leaves a hole:
+
+    1. **Named.** `EXPECTED_FIXTURE_TRIGGERS` is retyped at the top of this file
+       from the fixture at HEAD. A case added to the JSON and not to that set
+       reddens. This is the assertion the phase's own verification asked for
+       (W-03) and it is what stops a fabricated case reaching 140.3's TS parity
+       test with no Python counterpart.
+    2. **Driven.** The literal set could itself be padded in the same edit, so
+       the second oracle reads the CALL SITES: every wire case in this file
+       funnels through `_assert_flat_venue_body(..., trigger="…")`, and those
+       trigger literals are extracted from this module's own AST. A fixture case
+       with no call site therefore reddens even if someone remembered to widen
+       the literal set.
+
+    Neither side is self-referential: the fixture is JSON, the literal set is
+    typed prose, the driven set is this file's syntax tree. All three must agree.
+    """
+    import ast
+
+    source = Path(__file__).read_text(encoding="utf-8")
+    driven: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "id", None) != "_assert_flat_venue_body":
+            continue
+        for kw in node.keywords:
+            if kw.arg == "trigger" and isinstance(kw.value, ast.Constant):
+                driven.add(kw.value.value)
+
+    assert set(_BY_TRIGGER) == EXPECTED_FIXTURE_TRIGGERS, (
+        "the committed fixture's case set drifted from the census typed in this "
+        f"file. only in fixture: {sorted(set(_BY_TRIGGER) - EXPECTED_FIXTURE_TRIGGERS)}; "
+        f"only in census: {sorted(EXPECTED_FIXTURE_TRIGGERS - set(_BY_TRIGGER))}. "
+        "The fixture is 140.3's TypeScript parity input — an unpinned case there "
+        "is a contract the other language will test and this service never emits."
+    )
+    assert driven == EXPECTED_FIXTURE_TRIGGERS, (
+        "the fixture cases actually exercised by a wire test in this file do not "
+        f"match the census. named but not driven: {sorted(EXPECTED_FIXTURE_TRIGGERS - driven)}; "
+        f"driven but not named: {sorted(driven - EXPECTED_FIXTURE_TRIGGERS)}. "
+        "A case nobody drives is a claim nobody checked."
+    )
+    assert len(_CASES) == len(_BY_TRIGGER), (
+        "two fixture cases share a `trigger`, so one of them is silently "
+        "shadowed in _BY_TRIGGER and is never asserted against the wire."
+    )
 
 
 # --------------------------------------------------------------------------- #
