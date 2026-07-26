@@ -388,12 +388,31 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         # adapter itself sets VALIDATION_UNEXPECTED (unexpected exception during
         # validate), the failure MAY be transient (e.g. ccxt.ExchangeNotAvailable
         # not in the typed exception hierarchy) and must remain retryable.
+        #
+        # PYAPIFIX2-02 (Phase 140.1.2): this local set is STRUCTURALLY
+        # UNCOMPLETABLE and must not be grown code-by-code. csv_adapter.py mints
+        # error_code from a pandera rule name (`first_rule.upper()`) — an open
+        # code space no enumeration can close — and MT5 mints MT5_WRONG_SERVER /
+        # MT5_MASTER_PASSWORD, neither of which any list here remembered. Both
+        # are unfixable-by-retry, so both were classified transient and retried
+        # 3x, each attempt serialising through the single MT5 gateway lock.
+        # The correct channel is PROVENANCE: the adapter that minted the code
+        # states `ValidationResult.permanent`, consulted FIRST below. The set
+        # stays byte-unchanged as the fallback for adapters that state no
+        # verdict (permanent=None) — in particular MISSING_SCOPE stays OMITTED,
+        # the deliberate divergence from PERMANENT_VALIDATION_ERROR_CODES
+        # recorded at services/exchange.py (re-pointing it is a production
+        # behaviour change named in no requirement).
         permanent_codes = {
             "AUTH_FAILED", "PERMISSION_DENIED",
             "TRADE_SCOPE", "WITHDRAW_SCOPE",
         }
         _is_permanent = (
-            _reject_code in permanent_codes
+            # Adapter-stated verdict wins when there is one. `is True` (not
+            # truthiness) so None — "no verdict", every adapter but MT5 today —
+            # falls through to the list logic below completely unchanged.
+            val.permanent is True
+            or _reject_code in permanent_codes
             or (_reject_code == "VALIDATION_UNEXPECTED" and _is_unexpected_fallback)
         )
         return DispatchResult(

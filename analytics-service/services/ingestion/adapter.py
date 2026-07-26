@@ -130,6 +130,27 @@ class ValidationResult:
     # CsvUploadStep.tsx; the success envelope in csv_validator.py.
     preview: dict[str, Any] | None = None
     daily_returns_series: list[dict[str, Any]] | None = None
+    # PYAPIFIX2-02 (Phase 140.1.2) — the ADAPTER's own permanence verdict on a
+    # rejection, consumed by the retry classifier in
+    # services/ingestion/long_fetch.py. TRI-STATE, and the third state is the
+    # point:
+    #   True  -> "this rejection can never clear by retrying" (bad broker
+    #            server; a trade-capable master password we refuse by design).
+    #   False -> "retrying may succeed" (an explicit transient verdict).
+    #   None  -> "this adapter states no verdict" — the DEFAULT, and what every
+    #            adapter other than MT5 returns today. Consumers MUST fall
+    #            through to their existing classification logic on None so this
+    #            field changes no behaviour it does not explicitly opt into.
+    # Why provenance instead of a longer code list: the consumers' permanent-code
+    # sets are structurally uncompletable — services/ingestion/csv_adapter.py
+    # mints error_code from a pandera rule name (``first_rule.upper()``), an open
+    # code space no enumeration can close. Only the adapter that minted a code
+    # knows whether it can clear. This field is the seed of the backlogged
+    # four-vocabulary unification (OB-11/OB-12); that unification is NOT proposed
+    # here and no existing set is re-pointed at it.
+    # A default is mandatory: this dataclass is constructed in ≥6 modules and
+    # ``mypy --strict`` is a CI gate.
+    permanent: bool | None = None
 
 
 # ---------------------------------------------------------------------------

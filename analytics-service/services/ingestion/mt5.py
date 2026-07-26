@@ -104,6 +104,9 @@ def _wrong_server() -> ValidationResult:
         error_code="MT5_WRONG_SERVER",
         human_message=MT5_WRONG_SERVER_DETAIL,
         debug_context=None,
+        # PYAPIFIX2-02: a broker server that does not exist cannot start
+        # existing on a retry. Stated here because only this adapter knows it.
+        permanent=True,
     )
 
 
@@ -224,6 +227,12 @@ class Mt5Adapter:
                     error_code="MT5_MASTER_PASSWORD",
                     human_message=MT5_MASTER_PASSWORD_DETAIL,
                     debug_context=None,
+                    # PYAPIFIX2-02: the refusal is deterministic — the same
+                    # password probes trade-capable on every attempt. Only the
+                    # user swapping to the investor password can clear it, so a
+                    # retry is 3 serialised gateway probes spent on a verdict we
+                    # already hold. The REJECTION itself is unchanged.
+                    permanent=True,
                 )
             # Investor (read-only) login. read_only=True is STRUCTURAL (Mt5Client
             # exposes no trade surface — the sFOX A1 posture), NOT a probed scope.
