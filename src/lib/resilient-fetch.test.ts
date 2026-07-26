@@ -64,11 +64,24 @@ const shared = vi.hoisted(() => {
    * `FAKE_THRESHOLD`, hand-typed in the helper — see the note at the factory.
    */
   const constructed: Array<{ tokens: number; window: string }> = [];
+  /**
+   * How many times the core ATTEMPTED to record a seam failure, counted at the
+   * double's `limit()` entry.
+   *
+   * The store's open/closed state answers "did the breaker trip"; it cannot
+   * answer "how many failures did ONE call record", which is the whole of SC1
+   * ("exactly ONE") and of A-22/A-28 ("ZERO"). Counting at the boundary the
+   * core crosses is the direct oracle for both, and it is not self-referential:
+   * it observes production's call into the double and asserts against
+   * hand-typed integers.
+   */
+  const counters = { limitCalls: 0 };
   return {
     store,
     mode,
     ctx,
     constructed,
+    counters,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -128,6 +141,10 @@ vi.mock("@upstash/ratelimit", async () => {
         this.fake = fakeRatelimitFor(shared.ctx.store);
       }
       limit(identifier: string) {
+        // Counted BEFORE the throwOnLimit branch: an attempted recording that
+        // the store then refuses is still one recording the core decided to
+        // make, and that decision is what the zero/one assertions are about.
+        shared.counters.limitCalls += 1;
         if (shared.mode.throwOnLimit) {
           return Promise.reject(new Error("upstash: limiter unavailable"));
         }
@@ -150,6 +167,27 @@ function okFetch(status = 200): FetchMock {
   return mock;
 }
 
+/**
+ * Install a fetch mock that RESOLVES its headers and then REJECTS its body.
+ *
+ * This is the modal Railway degradation and the whole of SC1: `fetch` settles,
+ * so the transport arm never sees anything, and the failure only appears later
+ * inside the caller's `res.json()`. A bare object rather than a `Response`
+ * because a real `Response` cannot be constructed with a body that rejects.
+ */
+function bodyRejectingFetch(rejection: unknown, status = 200): FetchMock {
+  const mock = installFetchMock();
+  mock.mockResolvedValue({
+    ok: status < 400,
+    status,
+    statusText: "OK",
+    headers: new Headers({ "content-type": "application/json" }),
+    json: () => Promise.reject(rejection),
+    text: () => Promise.reject(rejection),
+  } as unknown as Response);
+  return mock;
+}
+
 /** Configure Upstash as PRESENT (the default for most tests). */
 function configureUpstash(): void {
   process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
@@ -167,6 +205,7 @@ beforeEach(() => {
   // assertions pass for entirely the wrong reason.
   shared.mode.throwOnLimit = false;
   shared.constructed.length = 0;
+  shared.counters.limitCalls = 0;
   configureUpstash();
 });
 
@@ -503,6 +542,299 @@ describe("resilientFetch failure classification", () => {
     await expect(
       mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
     ).rejects.toBe(original);
+  });
+});
+
+describe("[SC1 / SEAMCORE-02] the classification window covers the body read", () => {
+  it("headers arrive, the body then aborts ⇒ exactly ONE recorded failure and a typed SeamBodyReadError", async () => {
+    // THE case this plan exists for. `AbortSignal.timeout` aborts the response
+    // STREAM, not just the header exchange, so a Railway that answers headers
+    // fast and then stalls resolves `fetch` — the try closes, the transport arm
+    // sees nothing, and pre-fix the rejection surfaced later as a raw
+    // DOMException that missed every `instanceof` arm and told the breaker
+    // nothing at all.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const bodyRejection = new DOMException("aborted", "TimeoutError");
+    bodyRejectingFetch(bodyRejection);
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    // Nothing recorded yet — proof the transport arm genuinely did not fire and
+    // that the recording below can only have come from the body read.
+    expect(shared.counters.limitCalls).toBe(0);
+
+    const thrown = await res.json().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(thrown).toBeInstanceOf(mod.SeamBodyReadError);
+    // "…never a raw DOMException": the pre-fix behaviour, stated as a negative
+    // so a regression that stopped wrapping cannot pass this on the first
+    // assertion alone.
+    expect(thrown).not.toBeInstanceOf(DOMException);
+    expect(thrown).toMatchObject({
+      name: "SeamBodyReadError",
+      deadlineExceeded: true,
+      // Static message — no URL, no header, no upstream detail (T-140-05).
+      message: "Analytics service response body could not be read",
+    });
+    // The ORIGINAL rejection travels as `cause`, so nothing diagnostic is lost.
+    expect((thrown as Error).cause).toBe(bodyRejection);
+
+    // EXACTLY one. Not zero (the pre-fix bug) and not two (a double-record from
+    // the >= 500 arm plus the body arm, or an accidental retry).
+    expect(shared.counters.limitCalls).toBe(1);
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("body-read failures arm the breaker like any other classified failure", async () => {
+    // The count assertion above proves the recording happened; this proves the
+    // recording is the SAME one the breaker is built on, end to end.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
+      vi.unstubAllGlobals();
+      bodyRejectingFetch(new DOMException("aborted", "TimeoutError"));
+      const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+      await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
+    }
+
+    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("a non-deadline body failure is recorded too, with deadlineExceeded false", async () => {
+    // A connection dropped mid-stream ("terminated") is degradation exactly
+    // like a deadline; only the flag the clients branch on differs.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    bodyRejectingFetch(new TypeError("terminated"));
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    const thrown = await res.text().then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(thrown).toBeInstanceOf(mod.SeamBodyReadError);
+    expect(thrown).toMatchObject({ deadlineExceeded: false });
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+
+  it("a second body read is one-shot, exactly as a Response is, and records NOTHING", async () => {
+    // A caller reading the body twice is a CALLER fault, not Railway
+    // degradation — recording it would be the A-22 defect in a new place. The
+    // underlying Response's own "body already used" rejection is preserved.
+    const mock = installFetchMock();
+    mock.mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    await expect(res.json()).resolves.toEqual({ ok: true });
+
+    const second = await res.json().then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(second).not.toBeNull();
+    expect(second).not.toBeInstanceOf(mod.SeamBodyReadError);
+    expect(shared.counters.limitCalls).toBe(0);
+  });
+
+  it("the closed surface still delegates: ok, status, statusText and headers.get", async () => {
+    const mock = installFetchMock();
+    mock.mockResolvedValue(
+      new Response("nope", {
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: { "content-type": "text/plain", "X-Api-Version": "1" },
+      }),
+    );
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(503);
+    expect(res.statusText).toBe("Service Unavailable");
+    expect(res.headers.get("content-type")).toBe("text/plain");
+    expect(res.headers.get("X-Api-Version")).toBe("1");
+    await expect(res.text()).resolves.toBe("nope");
+  });
+
+  it("a >= 500 status records exactly one failure; a 4xx records zero", async () => {
+    const mod = await import("./resilient-fetch");
+
+    okFetch(503);
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(shared.counters.limitCalls).toBe(1);
+
+    vi.unstubAllGlobals();
+    okFetch(400);
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+describe("[SEAMCORE-11 / A-23] the seam refuses redirects", () => {
+  it("passes redirect: \"error\" in the fetch init", async () => {
+    // Across a cross-origin 302 Node strips `Authorization` but forwards
+    // `X-Service-Key`, `X-Internal-Token` and `X-User-Access-Token` VERBATIM —
+    // this seam carries all three. Refusing the redirect also removes the "up
+    // to 20 hops silently consume the budget" problem. Pinned on the init the
+    // core passes, not on a live redirect.
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.redirect).toBe("error");
+  });
+
+  it("a caller cannot re-enable redirect following", async () => {
+    // The control is only a control if it outranks the call site. `follow` is
+    // the platform DEFAULT, so a caller spreading a stored init could restore
+    // today's behaviour by accident rather than by decision.
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+      redirect: "follow",
+    });
+
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.redirect).toBe("error");
+  });
+});
+
+describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway degradation", () => {
+  /**
+   * Every shape `AbortSignal.timeout` itself rejects on, hand-typed.
+   *
+   * Pre-fix each of these threw INSIDE the try, so a caller fault was logged as
+   * "network failure reaching the analytics service" and, five of them in a
+   * 30s window, opened the global breaker — from a call-site bug, with the log
+   * pointing ops at Railway.
+   */
+  const INVALID_OVERRIDES: Array<[string, unknown]> = [
+    ["NaN", Number.NaN],
+    ["undefined as a value", undefined],
+    ["negative", -1],
+    ["zero", 0],
+    ["absurdly large", 1e15],
+    ["non-numeric", "15000"],
+    ["Infinity", Number.POSITIVE_INFINITY],
+  ];
+
+  it.each(INVALID_OVERRIDES)(
+    "an invalid timeoutMsOverride (%s) throws at entry and records ZERO failures",
+    async (_label, value) => {
+      const fetchMock = okFetch();
+      const mod = await import("./resilient-fetch");
+
+      const thrown = await mod
+        .resilientFetch("bridge", "/api/portfolio-bridge", {
+          method: "POST",
+          timeoutMsOverride: value as number,
+        })
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+
+      expect(thrown).toBeInstanceOf(mod.SeamConfigError);
+      expect(thrown).toMatchObject({ name: "SeamConfigError" });
+      // No packet left, and the breaker heard nothing.
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(shared.counters.limitCalls).toBe(0);
+    },
+  );
+
+  it("a valid timeoutMsOverride still reaches AbortSignal.timeout", async () => {
+    // The negative control for the validation above: a guard that rejected
+    // everything would pass all seven cases and break the escape hatch.
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+      timeoutMsOverride: 7_000,
+    });
+    expect(timeoutSpy).toHaveBeenCalledWith(7_000);
+    expect(shared.counters.limitCalls).toBe(0);
+  });
+
+  it("a malformed ANALYTICS_SERVICE_URL records ZERO failures and logs CONFIG, not network", async () => {
+    // The failure mode this closes: `fetch("notaurl/api/x")` REJECTS (it is not
+    // a synchronous throw), so pre-fix it landed in the transport catch, was
+    // logged as "network failure reaching the analytics service", and after
+    // five requests opened the global breaker permanently — from a config typo,
+    // with the log pointing ops at Railway.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.ANALYTICS_SERVICE_URL = "notaurl";
+    vi.resetModules();
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    const thrown = await mod
+      .resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" })
+      .then(
+        () => null,
+        (e: unknown) => e,
+      );
+
+    expect(thrown).toBeInstanceOf(mod.SeamConfigError);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(shared.counters.limitCalls).toBe(0);
+
+    const logged = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    // The sentence that points ops at Railway must NOT fire for a config typo.
+    expect(logged).not.toContain(
+      "network failure reaching the analytics service",
+    );
+    // …and the one that does fire must name the configuration.
+    expect(logged).toContain("ANALYTICS_SERVICE_URL");
+  });
+
+  it("a base URL with an unusable protocol is the same CONFIG fault", async () => {
+    // `new URL("localhost:8002/x")` PARSES — protocol "localhost:" — so a
+    // parse-only guard would pass the single most likely typo straight through
+    // to a fetch rejection and back into the network arm.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.ANALYTICS_SERVICE_URL = "localhost:8002";
+    vi.resetModules();
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toBeInstanceOf(mod.SeamConfigError);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(shared.counters.limitCalls).toBe(0);
   });
 });
 

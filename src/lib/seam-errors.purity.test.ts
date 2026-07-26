@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import * as seamErrors from "./seam-errors";
-import { CircuitOpenError } from "./seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 
 /**
  * Phase 140.2 / SEAMCORE-08 (ROADMAP SC6, clause a) — the dependency-free leaf
@@ -68,13 +68,13 @@ const LEAF_CODE = stripComments(
 /**
  * The leaf's exported surface, typed HERE as a literal.
  *
- * Exactly one member today. This is deliberately a set and not a lower bound:
- * plan 140.2-05 adds a second error class to this leaf, and having to edit this
- * literal is precisely the conscious decision the pin exists to force — the
- * same shape as the frozen four-path lint allowlist and the same shape as the
- * budget-key binding roster.
+ * Two members. This is deliberately a set and not a lower bound: plan 140.2-05
+ * added `SeamBodyReadError` and had to EDIT this literal to do it, which is
+ * precisely the conscious decision the pin exists to force — the same shape as
+ * the frozen four-path lint allowlist and the same shape as the budget-key
+ * binding roster. The redness that edit produced was the pin working.
  */
-const EXPECTED_EXPORTS: string[] = ["CircuitOpenError"];
+const EXPECTED_EXPORTS: string[] = ["CircuitOpenError", "SeamBodyReadError"];
 
 /**
  * `CircuitOpenError`'s message, typed HERE as a literal (threat T-140-05).
@@ -84,6 +84,18 @@ const EXPECTED_EXPORTS: string[] = ["CircuitOpenError"];
  * no upstream URL, no header name, no Python traceback and no request detail.
  */
 const EXPECTED_CIRCUIT_OPEN_MESSAGE = "Analytics service circuit is open";
+
+/**
+ * `SeamBodyReadError`'s message, typed HERE as a literal (threat T-140-05).
+ *
+ * Same reachability argument as above: the body-read failure this class reports
+ * happens on the public teaser's own seam call, so the string an anonymous
+ * caller can end up reading must carry no upstream URL, no header name, no
+ * status and no transport detail. The original rejection travels as `cause`,
+ * which is logged server-side and never rendered.
+ */
+const EXPECTED_BODY_READ_MESSAGE =
+  "Analytics service response body could not be read";
 
 const PURITY_RATIONALE =
   "Two things break at once. (1) BUNDLE BOUNDARY: wizardErrors.ts value-imports " +
@@ -173,5 +185,45 @@ describe("[SEAMCORE-08 / T-140-05] CircuitOpenError leaks nothing", () => {
     expect(err.name).toBe("CircuitOpenError");
     expect(err.retryAfterS).toBe(30);
     expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe("[SEAMCORE-02 / T-140-05] SeamBodyReadError leaks nothing", () => {
+  it("carries the static message, byte-for-byte, whatever the cause said", () => {
+    // Two DIFFERENT causes, one expected string. A message that interpolated
+    // the transport error would pass a single-input equality by coincidence of
+    // the cause chosen — and would publish `TypeError: fetch failed reading
+    // https://<railway-host>/…` to an anonymous teaser caller.
+    const fromTimeout = new SeamBodyReadError(
+      true,
+      new DOMException("aborted", "TimeoutError"),
+    );
+    const fromNetwork = new SeamBodyReadError(
+      false,
+      new TypeError("terminated: other side closed"),
+    );
+    expect(
+      fromTimeout.message,
+      "SeamBodyReadError's message changed. It is reachable by the ANONYMOUS " +
+        "verify-strategy teaser, so it must stay a static infrastructure " +
+        "statement: no upstream URL, no header name, no status, no traceback. " +
+        "The diagnosable half is the server log and `cause`, neither rendered.",
+    ).toBe(EXPECTED_BODY_READ_MESSAGE);
+    expect(fromNetwork.message).toBe(EXPECTED_BODY_READ_MESSAGE);
+    expect(fromTimeout.message).toBe(fromNetwork.message);
+  });
+
+  it("keeps its name, its deadlineExceeded flag and its cause", () => {
+    // `deadlineExceeded` is the ONLY thing the two clients branch on to reach
+    // their EXISTING envelopes (504 vs 502, AnalyticsTimeoutError vs "not
+    // reachable"). If it stopped being carried, every body-read failure would
+    // collapse into one of the two and the distinction would vanish silently.
+    const cause = new DOMException("aborted", "TimeoutError");
+    const err = new SeamBodyReadError(true, cause);
+    expect(err.name).toBe("SeamBodyReadError");
+    expect(err.deadlineExceeded).toBe(true);
+    expect(err.cause).toBe(cause);
+    expect(err).toBeInstanceOf(Error);
+    expect(new SeamBodyReadError(false, cause).deadlineExceeded).toBe(false);
   });
 });

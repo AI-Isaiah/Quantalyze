@@ -55,3 +55,42 @@ export class CircuitOpenError extends Error {
     this.retryAfterS = retryAfterS;
   }
 }
+
+/**
+ * Phase 140.2 / SEAMCORE-02 — thrown by the shared resilience core when reading
+ * the RESPONSE BODY fails.
+ *
+ * WHY A SECOND CLASS RATHER THAN RETHROWING THE ORIGINAL. `AbortSignal.timeout`
+ * aborts the response STREAM, not just the header exchange, so the modal Railway
+ * degradation — headers fast, body slow — resolves `fetch` and then rejects
+ * later, inside the caller's `res.json()`. Before this class the rejection was a
+ * raw `DOMException` escaping every client's `instanceof` ladder: the deadline
+ * arm had already been passed, so a genuine timeout surfaced as an unclassified
+ * crash and the breaker was never told. The core now reads the body inside its
+ * own classification window and throws THIS, so a body-read failure is as typed
+ * and as attributable as a transport failure.
+ *
+ * The message is STATIC for the same T-140-05 reason as `CircuitOpenError`: the
+ * unauthenticated landing-page teaser reaches this seam, so no upstream URL, no
+ * header name, no traceback and no request detail may appear in it. The
+ * diagnosable half is the server log next to the budget key, plus `cause`, which
+ * is the ORIGINAL rejection and is never rendered.
+ */
+export class SeamBodyReadError extends Error {
+  /**
+   * True when the failure was the wall-clock deadline firing mid-stream
+   * (`AbortError` / `TimeoutError`), false for any other body-read failure.
+   *
+   * Callers map this onto the taxonomy they ALREADY have — the analytics client
+   * onto `AnalyticsTimeoutError` vs "not reachable", the process-key client onto
+   * its existing `UPSTREAM_TIMEOUT` 504 vs `UPSTREAM_NETWORK_ERROR` 502 — so no
+   * new user-facing copy exists for this class anywhere.
+   */
+  readonly deadlineExceeded: boolean;
+
+  constructor(deadlineExceeded: boolean, cause: unknown) {
+    super("Analytics service response body could not be read", { cause });
+    this.name = "SeamBodyReadError";
+    this.deadlineExceeded = deadlineExceeded;
+  }
+}
