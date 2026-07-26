@@ -42,6 +42,7 @@ from unittest.mock import AsyncMock, MagicMock
 import ccxt
 import pytest
 from fastapi import HTTPException
+from tests.limiter_stub import patch_shared_limiter
 
 
 pytestmark = pytest.mark.asyncio
@@ -79,6 +80,13 @@ def exchange_router(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
+
+    # PYAPI-03: the routers no longer CONSTRUCT a Limiter, they import the
+    # singleton from services.rate_limit — so rebinding `slowapi.Limiter` above
+    # no longer reaches them and the REAL slowapi wrapper would reject the
+    # MagicMock request this suite passes. Stub the INSTANCE too; must run
+    # before the router is re-imported below. See tests/limiter_stub.py.
+    patch_shared_limiter(monkeypatch)
 
     monkeypatch.setenv("SFOX_ENABLED", "true")
     monkeypatch.setenv("MT5_ENABLED", "true")

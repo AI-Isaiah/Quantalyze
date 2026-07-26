@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.limiter_stub import patch_shared_limiter
+
 
 # ---------------------------------------------------------------------------
 # Bootstrap (non-polluting, mirrors test_routers_audit_2026_05_17).
@@ -94,6 +96,21 @@ from routers.portfolio import (  # noqa: E402
     _build_normalized_weights,
 )
 from services.portfolio_optimizer import generate_narrative  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _noop_shared_limiter(monkeypatch):
+    """PYAPI-03: routers.portfolio no longer CONSTRUCTS a Limiter — it imports
+    the singleton from `services.rate_limit`, so rebinding `slowapi.Limiter`
+    above no longer reaches it and the real slowapi wrapper rejects the
+    MagicMock requests the M-002 HTTP-level tests pass.
+
+    Function-scoped and monkeypatch-based rather than installed at module
+    import: `test_process_key.py` evicts `services.rate_limit` from sys.modules
+    during COLLECTION, so a module object captured at import time is stale
+    before any test runs. See tests/limiter_stub.py.
+    """
+    patch_shared_limiter(monkeypatch)
 
 
 @pytest.fixture(scope="module", autouse=True)

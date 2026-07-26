@@ -56,6 +56,7 @@ from services.closed_sets import (
 )
 from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL
 from services.mt5_client import Mt5ClientError
+from tests.limiter_stub import patch_shared_limiter
 
 
 @pytest.fixture()
@@ -81,6 +82,13 @@ def exchange_router(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
+
+    # PYAPI-03: the routers no longer CONSTRUCT a Limiter, they import the
+    # singleton from services.rate_limit — so rebinding `slowapi.Limiter` above
+    # no longer reaches them and the REAL slowapi wrapper would reject the
+    # MagicMock request this suite passes. Stub the INSTANCE too; must run
+    # before the router is re-imported below. See tests/limiter_stub.py.
+    patch_shared_limiter(monkeypatch)
 
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")

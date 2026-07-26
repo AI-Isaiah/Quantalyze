@@ -5,8 +5,6 @@ from datetime import datetime, timezone
 from typing import Any
 import ccxt
 from fastapi import APIRouter, HTTPException, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
 from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
@@ -38,11 +36,17 @@ from services.db import get_supabase, db_execute, one, rows
 # this file goes through service_error so the four classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
+# PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
+# own ``Limiter(key_func=get_remote_address)``, which (a) keyed on the Railway
+# EDGE ip so both 100/hour budgets were platform-wide (G-10/G-11) and (b) got its
+# own isolated ``memory://`` storage (G-3), so its counters were invisible to
+# ``app.state.limiter``. Same repair, same reasoning as the Phase-19/API-5 fix
+# documented in services/rate_limit.py's own docstring.
+from services.rate_limit import limiter
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
 logger = logging.getLogger("quantalyze.analytics")
-limiter = Limiter(key_func=get_remote_address)
 
 # The event-loop bound for the SYNCHRONOUS Mt5Client probe (login+read+order_check
 # run off the loop via asyncio.to_thread). A margin above the client's own rpyc

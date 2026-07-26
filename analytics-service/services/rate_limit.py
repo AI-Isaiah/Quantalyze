@@ -44,6 +44,76 @@ Railway's edge ``get_remote_address`` collapses to the proxy IP), except it is
 now honestly named instead of wearing a per-client disguise.
 
 **Never introduce a new IP-derived key.** That is the defect, not the fix.
+
+Phase 140.1 / PYAPI-03 — the IP-keyed class, CLOSED
+---------------------------------------------------
+Nine decorated routes keyed on ``get_remote_address``. Behind Railway's edge
+proxy that is the EDGE IP, so every one of them was a PLATFORM-WIDE bucket
+wearing a per-client disguise (G-10/G-11). Three routers also declared their own
+``Limiter()`` — each with its own isolated ``memory://`` storage (G-3), so they
+did not even share counters with ``app.state.limiter``.
+
+⚠️ **The class is IP KEYING (behaviour), not "private ``Limiter()``" (syntax).**
+Enumerating by the syntax finds 3 modules / 8 routes and MISSES
+``routers/optimizer.py``, which imports THIS singleton and silently inherits its
+default ``key_func``. That under-count is the instance-vs-class failure mode the
+repair programme exists to close (RESEARCH X-4 / TRAP-5) — it was latent inside
+the finding that documents TRAP-5.
+
+The structural fix for the silent-inheritance half is that this module's
+singleton no longer defaults to an IP key at all: see
+:func:`default_platform_key`. A future undecorated route can no longer acquire
+L-9's defect by omission.
+
+Token cost per user-visible flow (RESEARCH Q1.4)
+------------------------------------------------
+Buckets are keyed on (key, **endpoint**) — G-2 — so two routes never share a
+counter even when their keys are byte-identical. "Bucket" below is the key
+string this module returns; the endpoint half is slowapi's.
+
+==========================  ==========================================  ===============  ================================================
+Flow                        TS entry                                    Routes spent     Cost
+==========================  ==========================================  ===============  ================================================
+Key connect (wizard)        ``keys/validate-and-encrypt/route.ts``       L-1 **and** L-2  **2 tokens from two SEPARATE 100/hour buckets**
+                            ``:243,256``                                                 — not one shared pool (RESEARCH X-5)
+Scenario optimize           ``analytics-client.ts:280``                  L-9              1 of **20/minute** — the tightest ceiling on
+                                                                                         the seam, and the worst number on this table
+Bridge                      ``analytics-client.ts:338``                  L-7              1 of 10/hour
+Portfolio optimizer         ``analytics-client.ts:320``                  L-6              1 of 10/hour
+Portfolio analytics         *(zero callers — ``resilient-fetch.ts:203``  L-5              1 of 10/hour
+                            has the budget row, nothing calls it)*
+Fetch trades                *(no TS caller)*                             L-3              1 of 10/hour
+CSV validate (Python)       *(no TS caller — ``csv-validate/route.ts``   L-4              1 of 30/hour
+                            ``:206`` goes via ``/process-key``)*
+Verify strategy (Python)    *(no TS caller — the teaser goes via         L-8              1 of 5/hour
+                            ``/process-key``)*
+Simulator                   ``analytics-client.ts:363``                  —                see FINDING-10 below
+``/process-key``            ``process-key-client.ts:151``                —                1 tenant + 1 ceiling token (Plan 06)
+Key-permission badge        ``keys/[id]/permissions/route.ts:131``       —                1 of ``internal.py``'s hand-rolled
+                                                                                         per-``key_id`` 10/min bucket
+==========================  ==========================================  ===============  ================================================
+
+**Limit VALUES above are unchanged by PYAPI-03** — it changes bucket IDENTITY
+only. The value audit is RATE-04 / Phase 146.
+
+⚠️ **FINDING-10 (not predicted by the plan).** ``routers/simulator.py:92``
+``_simulator_rate_limit_key`` returns ``f"simulator:ip:{get_remote_address(...)}"``.
+By BEHAVIOUR that is a tenth IP-keyed route; the plan's do-not-touch list calls it
+"correctly user-keyed", which was true before the PR#241 follow-up reverted it (its
+own docstring records the revert). It is left untouched here per the plan's explicit
+scope fence, and ``tests/test_limiter_identity.py`` quarantines it with a literal
+one-file allow-list so it cannot grow and cannot be forgotten. Its EFFECTIVE
+per-tenant quota lives in-handler against ``req.user_id``
+(``_check_simulator_user_rate``), so the IP key is a ceiling, not the quota — but
+the ceiling is still platform-wide behind the edge proxy.
+
+⚠️ **No limiter at all:** ``routers/match.py`` ``POST /api/match/recompute`` and
+``GET /api/match/eval``, both seam-reachable (``analytics-client.ts:399,418``).
+RATE-03 / Phase 146 owns adding one. Recorded here, not fixed here.
+
+⚠️ **Storage is ``memory://`` and therefore per-replica** (ASSUMPTION-3). With N
+Railway replicas every number above is N× looser and buckets reset unevenly on
+rolling deploys.
 """
 from __future__ import annotations
 
@@ -56,14 +126,12 @@ from typing import Any, Final
 import structlog
 from fastapi import Request
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
-# Single canonical Limiter for the whole process. Imported by main.py for
-# ``app.state.limiter = limiter`` AND by every router that uses
-# ``@limiter.limit(...)``. The default key_func is remote-address; routes
-# that need a different key (e.g. token + user_id) override on the
-# decorator.
-limiter: Limiter = Limiter(key_func=get_remote_address)
+# ⚠️ PYAPI-03: ``slowapi.util.get_remote_address`` is deliberately NOT imported
+# here any more. It was this module's singleton default, and
+# ``routers/optimizer.py`` inherited it by omission — the L-9 defect. Nothing in
+# ``analytics-service`` outside ``routers/simulator.py`` (FINDING-10) may key on
+# it. Re-adding the import is how the class re-opens.
 
 log = structlog.get_logger("quantalyze.analytics.rate_limit")
 
@@ -85,6 +153,66 @@ _CLAIM_MAX_CHARS: Final[int] = 512
 #: no-credential bucket is stable rather than empty (an empty key makes slowapi
 #: SKIP the limit entirely — ``__evaluate_limits``' ``if all(args)``).
 _NO_CREDENTIAL: Final[str] = "unauthenticated"
+
+#: Prefix of the DELIBERATE platform ceiling. Read this literally: a key that
+#: starts with it is one bucket for the whole platform, on purpose, because the
+#: caller presented no verifiable tenant identity. That is materially different
+#: from the accidental platform bucket PYAPI-03 removes — an IP key behind a
+#: proxy LOOKS per-client and is not.
+PLATFORM_BUCKET_PREFIX: Final[str] = "platform:"
+
+#: The bucket a key function falls to when it cannot even read the path. Never
+#: empty — an empty key makes slowapi skip the limit entirely.
+PLATFORM_DEGRADED_KEY: Final[str] = "platform:degraded"
+
+
+def _platform_bucket(request: Request) -> str:
+    """``platform:<route-path>`` — the documented ceiling. NEVER raises.
+
+    One bucket per endpoint, shared by every caller that presents no verified
+    tenant claim. It is named for what it is so nobody has to re-derive it from
+    proxy semantics three years from now.
+
+    ⚠️ This is a CEILING, not a per-tenant quota. It is the honest spelling of
+    what the nine PYAPI-03 routes already had; the defect being repaired is that
+    ``get_remote_address`` spelled the same thing as if it were per-client.
+    """
+    try:
+        path: Any = request.url.path
+        # Defensive isinstance for the same reason as :func:`_header`: these
+        # functions are driven with hostile and mocked inputs in tests, and a
+        # key function may not raise (G-8).
+        return f"{PLATFORM_BUCKET_PREFIX}{path}" if isinstance(path, str) and path else PLATFORM_DEGRADED_KEY
+    except Exception:
+        log.error("rate_limit.platform_bucket_degraded", exc_info=True)
+        return PLATFORM_DEGRADED_KEY
+
+
+def default_platform_key(request: Request) -> str:
+    """The shared :data:`limiter`'s default key. NEVER IP-derived, NEVER raises.
+
+    **This function exists to make L-9 structurally impossible.** The singleton
+    used to default to ``get_remote_address``; ``routers/optimizer.py`` imported
+    the singleton correctly, declared ``@limiter.limit("20/minute")`` with no
+    ``key_func``, and thereby acquired the IP-keying defect by OMISSION — which
+    is why enumerating the class by "private ``Limiter()``" missed it entirely
+    (RESEARCH X-4 / TRAP-5).
+
+    The default is deliberately the CONSERVATIVE choice — one documented
+    platform bucket — and NOT a per-tenant key: a route that wants tenant
+    isolation must name its scope explicitly via
+    ``key_func=partial(tenant_or_platform_key, scope=...)``. Silent inheritance
+    of an identity decision is the bug; making the inherited value nicer would
+    not have fixed it.
+    """
+    return _platform_bucket(request)
+
+
+# Single canonical Limiter for the whole process. Imported by main.py for
+# ``app.state.limiter = limiter`` AND by every router that uses
+# ``@limiter.limit(...)``. Declared HERE, below its key function, because the
+# default is now a real function in this module rather than a slowapi import.
+limiter: Limiter = Limiter(key_func=default_platform_key)
 
 
 def _header(request: Request, name: str) -> str:
@@ -239,3 +367,60 @@ def platform_ceiling_key(request: Request, scope: str) -> str:
     except Exception:
         log.error("rate_limit.ceiling_key_func_degraded", scope=scope, exc_info=True)
         return f"{scope}:ceiling:fallback"
+
+
+def tenant_or_platform_key(request: Request, scope: str) -> str:
+    """PYAPI-03's key for the nine ex-IP-keyed routes. NEVER raises.
+
+    ==========================================  =================================
+    valid claim, payload != "public"            ``<scope>:t:<user_id>``
+    valid claim, payload == "public"            ``<scope>:anon``
+    no verifiable claim                         ``platform:<route-path>``
+    ==========================================  =================================
+
+    Adopted as::
+
+        @limiter.limit("20/minute",
+                       key_func=partial(tenant_or_platform_key,
+                                        scope="optimize_weights"))
+
+    **Why the claimless arm is ``platform:<path>`` and not**
+    :func:`tenant_rate_limit_key`'s ``<scope>:unverified:<credential-hash>``:
+    every one of these nine routes authenticates with the SAME shared
+    ``X-Service-Key`` (``main.verify_service_key``), so hashing the credential
+    yields exactly one bucket anyway — with a name that implies otherwise. This
+    plan's whole subject is buckets whose NAME lies about their width, so the
+    fallback is spelled as the platform ceiling it is. ``/process-key`` keeps the
+    credential-hash form because there the credential genuinely varies per
+    caller class.
+
+    **This becomes per-tenant on its own.** ``src/lib/analytics-client.ts``
+    mints no ``X-Tenant-Claim`` today (a recorded 140.2 obligation). The moment
+    it does, the claim arms above fire and these routes acquire real per-tenant
+    isolation with **no change to this function and no change to any decorator**
+    — that is why the claimless case is a documented fallback rather than a
+    hard-coded platform key.
+
+    **No WARN on the claimless arm**, deliberately — unlike
+    :func:`tenant_rate_limit_key`, where an absent claim means "a caller that
+    SHOULD be minting stopped". Here the claimless case is the expected steady
+    state until 140.2 lands, so warning would emit one line per request on the
+    busiest routes on the seam and train operators to ignore the signal.
+
+    Never-raise contract, verbatim from :func:`tenant_rate_limit_key`: slowapi
+    re-raises whatever a key function throws (``swallow_errors`` is ``False``),
+    so it escapes as a bodyless ``500 text/plain`` that 140.2's discriminator
+    cannot classify and that feeds the breaker (G-8).
+    """
+    try:
+        payload = verify_tenant_claim(request)
+        if payload == ANON_PAYLOAD:
+            return f"{scope}:anon"
+        if payload is not None:
+            return f"{scope}:t:{payload}"
+        return _platform_bucket(request)
+    except Exception:
+        log.error(
+            "rate_limit.tenant_or_platform_key_degraded", scope=scope, exc_info=True
+        )
+        return PLATFORM_DEGRADED_KEY

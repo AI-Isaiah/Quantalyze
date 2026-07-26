@@ -39,6 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from tests.limiter_stub import patch_shared_limiter
 
 # The EXACT string the TS classifyKeyValidationError matches on
 # (lower.includes("authentication failed")) — byte-identical to
@@ -70,6 +71,13 @@ def exchange_router(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
+
+    # PYAPI-03: the routers no longer CONSTRUCT a Limiter, they import the
+    # singleton from services.rate_limit — so rebinding `slowapi.Limiter` above
+    # no longer reaches them and the REAL slowapi wrapper would reject the
+    # MagicMock request this suite passes. Stub the INSTANCE too; must run
+    # before the router is re-imported below. See tests/limiter_stub.py.
+    patch_shared_limiter(monkeypatch)
 
     # F2 (Phase 122): these tests exercise the ENABLED sfox validation path, so
     # pin the server go-live flag ON. The disabled default is covered by the

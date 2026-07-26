@@ -10,8 +10,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from supabase import Client
 
 from models.schemas import (
@@ -52,6 +50,13 @@ from services.portfolio_limits import (
     MAX_PORTFOLIO_STRATEGIES as _MAX_PORTFOLIO_STRATEGIES,
     assert_portfolio_within_cap as _assert_portfolio_within_cap,
 )
+# PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
+# own ``Limiter(key_func=get_remote_address)``, giving all four of its routes
+# (analytics, optimizer, bridge, verify-strategy) buckets keyed on the Railway
+# EDGE ip (G-10/G-11) — platform-wide, in isolated ``memory://`` storage (G-3)
+# that ``app.state.limiter`` could not see. The L-0045 comment below this import
+# block was the existing in-file record of exactly this defect.
+from services.rate_limit import limiter
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -145,13 +150,16 @@ _MATCH_CORRELATION_THRESHOLD = 0.95
 _COMPUTING_ROW_STALE_MINUTES = 30
 
 
-limiter = Limiter(key_func=get_remote_address)
-
-# Per-email sliding-window rate limit for verify_strategy. IP-only limiting
-# (slowapi) is decorative against rotated-IP attackers. We track recent
-# verification attempts in-process so a single email can't burn through the
-# IP-budget by rotating cloud IPs. NOT distributed-safe across workers; the
-# IP-based limiter is still authoritative for the global ceiling.
+# Per-email sliding-window rate limit for verify_strategy.
+#
+# PYAPI-03 (2026-07-26): the slowapi decorator on this route no longer keys on
+# the remote address — it keys on the verified tenant claim, falling back to the
+# documented `platform:/api/verify-strategy` ceiling. The prose here used to say
+# "IP-only limiting is decorative against rotated-IP attackers"; the sharper
+# statement now is that the slowapi tier is a PLATFORM ceiling and cannot
+# distinguish one submitter from another at all. This per-email window is
+# therefore still the only per-submitter dimension. NOT distributed-safe across
+# workers; the slowapi limiter remains authoritative for the global ceiling.
 _VERIFY_STRATEGY_EMAIL_RATE_LIMIT = 5          # max per window
 _VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC = 3600  # 1 hour
 # Bound on distinct emails tracked simultaneously. Without a cap an attacker
@@ -164,15 +172,23 @@ _verify_strategy_email_attempts: dict[str, list[float]] = {}
 # Per-user sliding-window rate limit for portfolio-bridge.
 #
 # audit-2026-05-07 L-0045 — slowapi's @limiter.limit("10/hour") on the
-# bridge endpoint uses get_remote_address by default. Behind Next.js
+# bridge endpoint used get_remote_address by default. Behind Next.js
 # Vercel-functions every request arrives from the same egress IP pool,
-# so the 10/hour ceiling collapses to a SINGLE bucket shared across
-# every authenticated user — a noisy or hostile user can starve the
+# so the 10/hour ceiling collapsed to a SINGLE bucket shared across
+# every authenticated user — a noisy or hostile user could starve the
 # bucket for everyone on the same IP. The Next.js per-user
 # `bridge:${user.id}` Upstash limiter (src/app/api/bridge/route.ts:20,
 # 5/min) is the only EFFECTIVE quota today; if that ever degrades
 # (Upstash outage) or is bypassed by a future caller, the Python tier
 # provides no per-user cap.
+#
+# PYAPI-03 (2026-07-26) — the IP key is GONE (see the decorator below), but
+# L-0045's substance is NOT closed: without an `X-Tenant-Claim` on the wire the
+# key falls to `platform:/api/portfolio-bridge`, which is one bucket by design
+# rather than one bucket by accident. `src/lib/analytics-client.ts` minting the
+# claim (a 140.2 obligation) is what turns this into a real per-user cap — at
+# which point THIS in-process window becomes the redundant tier, not the only
+# one. Keep it until then.
 #
 # In-process per-user limit is the defense-in-depth. Same cap+window
 # as the email limiter; bound on distinct users tracked to keep memory

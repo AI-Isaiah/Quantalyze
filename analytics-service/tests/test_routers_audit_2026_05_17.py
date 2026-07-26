@@ -46,6 +46,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests.limiter_stub import patch_shared_limiter
+
 
 # ---------------------------------------------------------------------------
 # Pre-import shared stubs (mirrors test_portfolio_router_logic).
@@ -124,6 +126,21 @@ def _restore_slowapi():
 
 
 _install_router_stubs()
+
+
+@pytest.fixture(autouse=True)
+def _noop_shared_limiter(monkeypatch):
+    """PYAPI-03: routers.portfolio no longer CONSTRUCTS a Limiter — it imports
+    the singleton from `services.rate_limit`, so rebinding `slowapi.Limiter`
+    above no longer reaches it and the real slowapi wrapper rejects the
+    MagicMock requests this file passes.
+
+    Function-scoped and monkeypatch-based rather than installed at module
+    import: `test_process_key.py` evicts `services.rate_limit` from sys.modules
+    during COLLECTION, so a module object captured at import time is stale
+    before any test runs. See tests/limiter_stub.py.
+    """
+    patch_shared_limiter(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
