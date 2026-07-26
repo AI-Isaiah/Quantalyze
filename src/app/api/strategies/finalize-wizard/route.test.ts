@@ -1467,11 +1467,20 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     fetchSpy.mockRestore();
   });
 
-  // Phase C simplify — discriminated guard: a mixed envelope
-  // (queued=true + code/idempotent set) is a backbone bug, NOT a valid
-  // shape. Wizard chrome would otherwise treat it as both "queued" AND
-  // "duplicate" and double-process. Reject with 502 + Sentry.
-  it("rejects mixed envelope (queued=true with code field) with 502", async () => {
+  // Phase 140.1.1 / PYAPIFIX-01 — the INVERTED contract. This test used to
+  // assert the opposite ("rejects mixed envelope … with 502"); it is rewritten,
+  // not deleted, because the shape it called a backbone bug is the shape the
+  // backbone actually emits.
+  //
+  // `queued` (a job fact) and `code`/`idempotent` (a submission fact) are
+  // ORTHOGONAL, and process_key.py's `_resume_duplicate_job` exists precisely
+  // to produce the state where both are true: a duplicate submission whose
+  // WEDGED job we re-enqueued. Rejecting it fired a 502 + Sentry on a
+  // SUCCESSFUL resume. The exact body below is the fixture's P1 case
+  // (analytics-service/tests/fixtures/process_key_onboard_contract.json),
+  // proven equal to a real /process-key reply by
+  // analytics-service/tests/test_process_key_onboard_contract.py.
+  it("accepts the resumed-wedge reply (queued=true WITH code + idempotent) and returns 200", async () => {
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi
       .spyOn(console, "error")
@@ -1479,9 +1488,103 @@ describe("POST /api/strategies/finalize-wizard — H-0327 unified contract viola
     STATE.processKeyResult = {
       ok: true,
       body: {
-        queued: true,
-        verification_id: "ver-1",
+        ok: true,
         code: "WIZARD_DUPLICATE",
+        idempotent: true,
+        verification_id: "ver-resumed",
+        status: "draft",
+        trust_tier: "api_verified",
+        queued: true,
+        job_state: "enqueued",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+    expect(body.queued).toBe(true);
+    expect(body.verification_id).toBe("ver-resumed");
+    // The queued=true forward arm (route.ts:1352-1361) does NOT forward
+    // `code`/`idempotent`/`job_state` — pinned here so a future phase that
+    // wires the duplicate copy onto this arm (TS-01's "prefer discriminating
+    // on ok + job_state") sees this test, rather than silently changing what
+    // wizard chrome receives.
+    expect(body.code).toBeUndefined();
+    expect(body.idempotent).toBeUndefined();
+    expect(body.job_state).toBeUndefined();
+
+    // The 502/Sentry contract-violation arm must NOT have fired.
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "unified-response-parse",
+    );
+    expect(sentryCall).toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  // Phase 140.1.1 / PYAPIFIX-01 — the RETAINED negative. The widening is
+  // scoped to the WIZARD_DUPLICATE contract, never a blanket allowance: a
+  // predicate that simply stopped inspecting `code`/`idempotent` would pass
+  // the test above and fail here. This is the fixture's N3 case; `idempotent`
+  // is only ever emitted alongside code "WIZARD_DUPLICATE"
+  // (process_key.py:680-690 sets both in the same dict literal), so an
+  // `idempotent: true` beside any other code is genuine malformation and must
+  // still reach the 502 + Sentry arm.
+  it("still rejects idempotent:true paired with a NON-duplicate code with 502", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        ok: true,
+        code: "OTHER",
+        idempotent: true,
+        verification_id: "ver-1",
+        queued: true,
+        job_state: "enqueued",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toMatch(/unexpected response/i);
+
+    const sentryCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "unified-response-parse",
+    );
+    expect(sentryCall).toBeDefined();
+    expect(sentryCall!.options.tags.surface).toBe("finalize-wizard");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  // Phase 140.1.1 / PYAPIFIX-01 — the second retained negative (fixture N2).
+  // `typeof "" === "string"`, so an EMPTY code passes a type-only check and
+  // would render an unnamed condition as a named one in wizard chrome.
+  it("still rejects an EMPTY code on the duplicate arm with 502", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        ok: true,
+        code: "",
+        verification_id: "ver-1",
+        queued: false,
+        job_state: "not_applicable",
       },
     };
 
