@@ -413,15 +413,224 @@ def test_pyapi_10a_every_200_carries_ok_discriminator(
         )
 
 
-def test_pyapi_10a_exactly_six_shapes_are_covered():
-    """TRAP-5 / enumeration fence: the 200 surface has SIX shapes.
+# ---------------------------------------------------------------------------
+# M-15 — the enumeration fence, read from the ROUTER'S OWN AST
+# ---------------------------------------------------------------------------
+#
+# What was here before: a bare length assertion on ``_SHAPES`` against the
+# literal six — a literal compared against a list literal declared 40 lines
+# above it, in this same file. It was the
+# programme's own counter-example (non-negotiable #3): the only edit that could
+# ever redden it is an edit to the list beside it, so a seventh return site in
+# ``routers/process_key.py`` shipped in total silence. Its docstring claimed the
+# opposite, which is worse than no fence at all.
+#
+# RESEARCH C-20 also proves the number itself was a COINCIDENCE: two of the
+# handler's returns COLLAPSE onto one shape (both ``_wizard_duplicate_reply``
+# call sites) while one EXPANDS into two (``_run_validate_only`` has two
+# returns). One collapse cancelling one expansion is what made "six" look
+# meaningful. So this fence never counts — it compares SETS.
+#
+# Direction of the oracle: the ACTUAL side is derived from the router's source
+# via ``ast``; the EXPECTED side is a literal set typed here. That is the
+# sanctioned direction — a pinned contract confronted with the code's real
+# shape — and it is the opposite of literal-vs-literal-in-the-same-file.
 
-    Pinned as a literal so that adding a seventh return site without adding a
-    case here is a red test rather than a silent hole. The enumeration is by
-    BEHAVIOUR (every ``return`` reachable from the handler that serialises at
-    200), not by grepping the syntax of a known instance.
+import ast  # noqa: E402  (imported here, beside the only test that uses it)
+import pathlib  # noqa: E402
+
+# The module under test, by its own import location — never a hand-built path.
+_ROUTER_SRC = pathlib.Path(process_key_router.__file__)
+
+# The handler plus every helper one of its returns DELEGATES to. A delegate's
+# own returns are 200 shapes just as much as an inline dict is.
+_SHAPE_BEARING_FUNCTIONS = ("process_key", "_wizard_duplicate_reply", "_run_validate_only")
+
+# The pinned CONTRACT. Eight entries, not six: five reachable wire shapes
+# (rendered by their sorted top-level key names), two delegation edges out of
+# ``process_key`` and one delegated error envelope. Adding a 200-capable return
+# to any of the three functions adds an entry and reddens this.
+_EXPECTED_200_FINGERPRINTS = frozenset(
+    {
+        "call:_envelope_error",
+        "call:_run_validate_only",
+        "call:_wizard_duplicate_reply",
+        "dict:code,correlation_id,encrypted_credentials,errors,fingerprint,"
+        "matched_strategy_id,metrics_snapshot,ok,status,trust_tier,verification_id",
+        "dict:code,correlation_id,idempotent,job_state,ok,queued,status,trust_tier,"
+        "verification_id",
+        "dict:correlation_id,daily_returns_series,ok,preview,read_only,step,valid",
+        "dict:correlation_id,ok,queued,verification_id",
+        "dict:correlation_id,ok,status,step,strategy_id",
+    }
+)
+
+
+def _own_returns(fn: ast.AST) -> list[ast.Return]:
+    """Every ``return <expr>`` in ``fn``'s OWN body.
+
+    Nested ``def``/``lambda`` bodies are skipped: ``process_key`` defines
+    ``_write_audit_sync`` inline, and a closure's return value never reaches the
+    wire as a response.
     """
-    assert len(_SHAPES) == 6
+    found: list[ast.Return] = []
+
+    def _walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if isinstance(child, ast.Return) and child.value is not None:
+                found.append(child)
+            _walk(child)
+
+    _walk(fn)
+    return found
+
+
+def _declared_status(value: ast.expr) -> int | str | None:
+    """The literal ``status_code=`` on a call return, or ``None`` if absent.
+
+    Returns the sentinel ``"NON-LITERAL"`` for a computed status, which the
+    fence refuses rather than silently classifying (Rule 12 — fail loud).
+    """
+    if isinstance(value, ast.Call):
+        for kw in value.keywords:
+            if kw.arg == "status_code":
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, int):
+                    return kw.value.value
+                return "NON-LITERAL"
+    return None
+
+
+def _dict_literal_keys(node: ast.Dict) -> set[str]:
+    keys: set[str] = set()
+    for key in node.keys:
+        assert isinstance(key, ast.Constant) and isinstance(key.value, str), (
+            "a 200 shape built with a computed or **-spread key cannot be "
+            "fingerprinted — make it an explicit dict literal or teach this fence"
+        )
+        keys.add(key.value)
+    return keys
+
+
+def _keys_assigned_to(fn: ast.AST, name: str) -> set[str]:
+    """Every key ever put into the local dict called ``name`` — from the dict
+    literal it is bound to AND from later ``name["k"] = ...`` assignments.
+
+    ``_run_validate_only`` builds its success envelope this way and adds
+    ``preview`` / ``daily_returns_series`` conditionally, so a key-set read from
+    the literal alone would miss half the shape.
+    """
+    keys: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Name)
+                and target.id == name
+                and isinstance(node.value, ast.Dict)
+            ):
+                keys |= _dict_literal_keys(node.value)
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == name
+                and isinstance(target.slice, ast.Constant)
+                and isinstance(target.slice.value, str)
+            ):
+                keys.add(target.slice.value)
+    return keys
+
+
+def _fingerprint(fn: ast.AST, value: ast.expr) -> str:
+    """A rendering that is stable under line churn and changes on shape change.
+
+    Deliberately NEVER keyed on a line number or an ordinal — M-15b.
+    """
+    if isinstance(value, ast.Await):
+        value = value.value
+    if isinstance(value, ast.Dict):
+        return "dict:" + ",".join(sorted(_dict_literal_keys(value)))
+    if isinstance(value, ast.Call):
+        func = value.func
+        callee = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+        assert callee, f"un-nameable callee in a 200-capable return: {ast.dump(value)[:120]}"
+        return "call:" + callee
+    if isinstance(value, ast.Name):
+        return "dict:" + ",".join(sorted(_keys_assigned_to(fn, value.id)))
+    raise AssertionError(
+        f"a 200-capable return this fence cannot render: {type(value).__name__} — "
+        "teach the fence rather than deleting the shape"
+    )
+
+
+def _collect_200_shapes() -> tuple[set[str], list[tuple[str, int, object]]]:
+    """Walk the router's source; split its returns into 200-capable shapes and
+    the explicitly-statused ones the fence must ignore."""
+    tree = ast.parse(_ROUTER_SRC.read_text(encoding="utf-8"))
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    shapes: set[str] = set()
+    excluded: list[tuple[str, int, object]] = []
+    for name in _SHAPE_BEARING_FUNCTIONS:
+        assert name in functions, f"{name} vanished from {_ROUTER_SRC.name}"
+        fn = functions[name]
+        for ret in _own_returns(fn):
+            status = _declared_status(ret.value)
+            if status is not None and status != 200:
+                excluded.append((name, ret.lineno, status))
+                continue
+            shapes.add(_fingerprint(fn, ret.value))
+    return shapes, excluded
+
+
+def test_pyapi_10a_the_200_shape_set_matches_the_pinned_contract():
+    """M-15 — the enumeration fence, derived from ``routers/process_key.py``'s AST.
+
+    A 200-capable return is one with no ``status_code=`` keyword, or one whose
+    ``status_code=`` is the literal 200. That predicate is load-bearing: this
+    handler also returns ``JSONResponse(status_code=401/403/422/424, ...)``, and a
+    naive walk would sweep those in — either reddening on a legitimate error arm
+    or silently widening the pinned set, which is the very defect class the fence
+    exists to catch.
+    """
+    shapes, excluded = _collect_200_shapes()
+
+    assert shapes == _EXPECTED_200_FINGERPRINTS, (
+        "the /process-key 200 surface changed shape.\n"
+        f"  only in the router:   {sorted(shapes - _EXPECTED_200_FINGERPRINTS)}\n"
+        f"  only in the contract: {sorted(_EXPECTED_200_FINGERPRINTS - shapes)}\n"
+        "Add a reachability fixture to _SHAPES and pin the new shape here, or "
+        "restore the removed one."
+    )
+
+
+def test_pyapi_10a_non_200_returns_are_excluded_from_the_shape_fence():
+    """The 200-capable filter, asserted from the other side (checker W-4).
+
+    Named explicitly: the ``403`` ownership/scope refusals and plan
+    140.1.1-02's ``424`` venue-transient arm are error arms on this same
+    handler. They must never enter the 200 fingerprint set — if they did, the
+    fence would be pinning error shapes as success shapes and a genuinely new
+    200 could hide among them.
+    """
+    _, excluded = _collect_200_shapes()
+    statuses = {status for _, _, status in excluded}
+
+    assert "NON-LITERAL" not in statuses, (
+        "a return with a computed status_code cannot be classified 200-capable "
+        "or not — make it a literal so this fence stays decidable"
+    )
+    assert 403 in statuses, "the 403 refusal arms must be excluded by the filter"
+    assert 424 in statuses, (
+        "plan 140.1.1-02's 424 venue-transient arm must be excluded by the filter"
+    )
+    assert all(status != 200 for _, _, status in excluded)
 
 
 def test_pyapi_10a_shape_5_code_is_explicit_null(client):
