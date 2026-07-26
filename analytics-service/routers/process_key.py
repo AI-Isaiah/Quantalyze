@@ -494,6 +494,141 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
     return body.flow_type in {"onboard", "resync"}
 
 
+# PYAPI-09 (Phase 140.1) — the WIZARD_DUPLICATE reply contract.
+#
+# `queued` used to mean "this call reached the enqueue statement", which is
+# unobservable to the caller and was FALSE BY CONSTRUCTION on the duplicate
+# path: that path returns ~170 lines above the enqueue. It now means:
+#
+#     a non-terminal compute_job exists for this verification at the moment
+#     of reply
+#
+# — a predicate the caller can act on, and one this code makes TRUE rather than
+# merely asserting. `job_state` names the three cases the old blanket
+# `queued:false` collapsed into one (140.1-RESEARCH Q4):
+#
+#   "not_applicable" — no background job applies: a synchronous flow, or a
+#                      verification that already finished
+#   "running"        — a compute_job for this strategy is already in flight
+#   "enqueued"       — a compute_job exists because this call put it there
+#
+# strategy_verifications statuses a long-fetch session can still be resumed
+# from. Anything else is a FINISHED session: `_enqueue_compute_job_internal`
+# dedupes only over non-terminal job statuses, so an unguarded re-enqueue there
+# would mint a fresh job on every stray refresh and silently re-sync a
+# verification the user already completed.
+_RESUMABLE_VERIFICATION_STATUSES = frozenset({"draft"})
+
+# compute_jobs statuses that mean "already being worked" rather than "waiting".
+# Mirrors the non-terminal set _enqueue_compute_job_internal dedupes over
+# (migrations/20260716090000...sql:181+) minus 'pending'.
+_IN_FLIGHT_JOB_STATUSES = frozenset({"running", "done_pending_children"})
+
+
+def _resume_duplicate_job(
+    *,
+    supabase: Any,
+    body: _ProcessKeyBody,
+    strategy_id: Any,
+    existing: dict[str, Any],
+    correlation_id: str,
+) -> tuple[bool, str]:
+    """Make an idempotent hit's ``(queued, job_state)`` true, and return it.
+
+    This is the fix for C-19: re-calling ``enqueue_compute_job`` on the
+    duplicate path is safe because the RPC already dedupes on
+    ``(target, kind)`` over non-terminal statuses and returns the existing id
+    instead of inserting — so a live job is not duplicated, and a MISSING job
+    (the wedge: the draft INSERT committed, the enqueue never ran) is created.
+    That behaviour is a shared RPC's, with many other callers, so it is pinned
+    by ``supabase/tests/test_enqueue_compute_job_dedupe_non_terminal.sql``
+    rather than assumed.
+
+    The RPC failure is deliberately NOT swallowed — it propagates exactly as it
+    does on the fresh enqueue below. Reporting ``queued`` for an enqueue that
+    raised would re-create the same lie in a new place.
+    """
+    if not _is_long_fetch(body):
+        return False, "not_applicable"
+    if existing.get("status") not in _RESUMABLE_VERIFICATION_STATUSES:
+        return False, "not_applicable"
+
+    job_id = supabase.rpc(
+        "enqueue_compute_job",
+        {
+            "p_strategy_id": strategy_id,
+            "p_kind": "process_key_long",
+            "p_metadata": {
+                "correlation_id": correlation_id,
+                "verification_id": existing["id"],
+                "flow_type": body.flow_type,
+                "source": body.source,
+            },
+        },
+    ).execute().data
+    log.info(
+        "process_key.duplicate_resumed",
+        verification_id=existing["id"],
+        job_id=str(job_id),
+    )
+
+    # The RPC returns only the job id, so read the state back to label it. This
+    # read is LABEL-ONLY: the RPC returning an id already establishes that a
+    # non-terminal job exists, so a failure here cannot make `queued` wrong —
+    # it can only cost precision between the two true labels. Degrade to
+    # "enqueued" with a WARN rather than failing an otherwise-correct reply.
+    job_state = "enqueued"
+    if job_id:
+        try:
+            job = one(
+                supabase.table("compute_jobs")
+                .select("status")
+                .eq("id", job_id)
+                .maybe_single()
+                .execute()
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "process_key.duplicate_job_state_read_failed",
+                error=str(exc)[:200],
+                job_id=str(job_id),
+            )
+            job = None
+        if job is not None and job.get("status") in _IN_FLIGHT_JOB_STATUSES:
+            job_state = "running"
+    return True, job_state
+
+
+def _wizard_duplicate_reply(
+    *,
+    existing: dict[str, Any],
+    correlation_id: str,
+    queued: bool,
+    job_state: str,
+) -> dict[str, Any]:
+    """The single WIZARD_DUPLICATE body, shared by BOTH emitters.
+
+    There are two of them — the pre-check and the 23505 race-winner arm — and
+    they drifted apart in every prior fix to this contract. One builder means a
+    future change to the shape cannot land on one arm only.
+
+    Status 200 (NOT 409) per the API-7 spec: idempotency is a feature, not a
+    failure. `ok` is deliberately NOT added here — unifying the six 200 shapes
+    on `/process-key` is Plan 140.1-05's job, and adding it piecemeal would
+    make that plan's exhaustive shape oracle harder to write, not easier.
+    """
+    return {
+        "code": "WIZARD_DUPLICATE",
+        "idempotent": True,
+        "verification_id": existing["id"],
+        "status": existing["status"],
+        "trust_tier": existing.get("trust_tier"),
+        "correlation_id": correlation_id,
+        "queued": queued,
+        "job_state": job_state,
+    }
+
+
 async def _run_validate_only(
     *,
     body: "_ProcessKeyBody",
@@ -950,17 +1085,27 @@ async def process_key(
             # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
             # idempotent-resume affordance. Pre-fix this path returned a
             # plain happy-shape dict and the wizard had no observable
-            # signal that the row pre-existed. Status 200 (NOT a 409) per
-            # the spec — idempotency is a feature, not a failure.
-            return {
-                "code": "WIZARD_DUPLICATE",
-                "idempotent": True,
-                "verification_id": existing["id"],
-                "status": existing["status"],
-                "trust_tier": existing.get("trust_tier"),
-                "correlation_id": correlation_id,
-                "queued": False,
-            }
+            # signal that the row pre-existed.
+            #
+            # PYAPI-09a: it also returned a hardcoded `queued: False` without
+            # ever reaching the enqueue below, so a session whose draft INSERT
+            # committed but whose enqueue never ran was told "duplicate, not
+            # queued" on every subsequent retry — forever, with no state from
+            # which it could recover. Resume the job first, then report what is
+            # actually true.
+            _queued, _job_state = _resume_duplicate_job(
+                supabase=supabase,
+                body=body,
+                strategy_id=strategy_id,
+                existing=existing,
+                correlation_id=correlation_id,
+            )
+            return _wizard_duplicate_reply(
+                existing=existing,
+                correlation_id=correlation_id,
+                queued=_queued,
+                job_state=_job_state,
+            )
 
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
@@ -1020,16 +1165,24 @@ async def process_key(
                 verification_id=race_winner["id"],
             )
             # API-7 — race-resolved idempotent hit emits WIZARD_DUPLICATE
-            # for the same reason as the SELECT-pre-check path above.
-            return {
-                "code": "WIZARD_DUPLICATE",
-                "idempotent": True,
-                "verification_id": race_winner["id"],
-                "status": race_winner["status"],
-                "trust_tier": race_winner.get("trust_tier"),
-                "correlation_id": correlation_id,
-                "queued": False,
-            }
+            # for the same reason as the SELECT-pre-check path above, and is
+            # enqueue-aware for the same reason (PYAPI-09a): losing the insert
+            # race says nothing about whether the winner's job was ever
+            # enqueued, so this arm must resume it too. Both emitters go
+            # through one builder so the contract cannot drift between them.
+            _queued, _job_state = _resume_duplicate_job(
+                supabase=supabase,
+                body=body,
+                strategy_id=strategy_id,
+                existing=race_winner,
+                correlation_id=correlation_id,
+            )
+            return _wizard_duplicate_reply(
+                existing=race_winner,
+                correlation_id=correlation_id,
+                queued=_queued,
+                job_state=_job_state,
+            )
         raise
 
     # 3) Long-fetch dispatch (BACKBONE-09) — onboard/resync go to worker dyno.
