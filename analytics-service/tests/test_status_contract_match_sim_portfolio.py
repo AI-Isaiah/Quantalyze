@@ -423,3 +423,76 @@ async def test_s20_analytics_computation_failure_is_permanent_500() -> None:
     assert envelope["retryable"] is False
     assert envelope["dependency"] is None
     assert not (exc.headers or {}).get("Retry-After")
+
+
+# --------------------------------------------------------------------------- #
+# main.py — S-23 (and S-24, pinned as UNCHANGED)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_s23_unconfigured_service_key_is_permanent_500(monkeypatch) -> None:
+    """S-23 — ``SERVICE_KEY`` unset is an operator-only fault, forever.
+
+    As a 503 this was the permanent-flap shape at its worst: EVERY request to
+    EVERY guarded route answers 503 until a human sets an env var, so under
+    140.2 the breaker trips, expires, re-probes, trips again, indefinitely —
+    and no retry can ever clear it. R-1: 500, ``retryable:false``.
+
+    The response must still be RETURNED, never raised: this middleware sits
+    above the ExceptionMiddleware, so a raise escapes to ServerErrorMiddleware,
+    which renders a 500 AND re-raises into Sentry (QUANTALYZE-4). A
+    well-formed JSON body is the proof the return path was taken — the raise
+    path yields ``text/plain`` "Internal Server Error" with no JSON at all.
+    """
+    import httpx
+
+    import main
+
+    monkeypatch.setattr(main, "SERVICE_KEY", None)
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post("/cron-sync", headers={"X-Service-Key": "anything"})
+
+    assert resp.status_code == 500
+    body = resp.json()  # raises if the raise-path text/plain body was produced
+    envelope = body["detail"]
+    assert envelope["code"] == "SERVICE_KEY_UNCONFIGURED"
+    assert envelope["retryable"] is False
+    assert envelope["dependency"] is None
+    assert isinstance(envelope["detail"], str)
+    assert "Retry-After" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_s24_health_stale_response_is_unchanged(monkeypatch) -> None:
+    """S-24 — ``/health``'s stale 503 is CORRECT and this plan must not touch it.
+
+    ``/health`` is outside the seam by design (O-7): routing the warmer through
+    the seam core lets a cold probe feed ``recordSeamFailure``, after which the
+    breaker blocks its own recovery probe. Pinned here — with the pre-contract
+    top-level body shape, NOT the envelope — so a later "let's unify main.py's
+    two 503s" edit turns this red instead of shipping.
+    """
+    import time as _time
+
+    import httpx
+
+    import main
+
+    monkeypatch.setattr(main, "SERVICE_KEY", "the-configured-key")
+    # Age both the process start and the worker tick past the stale threshold.
+    monkeypatch.setattr(main, "_PROCESS_START_AT", _time.time() - 10_000)
+    monkeypatch.setattr(main, "WORKER_LAST_TICK_AT", _time.time() - 10_000)
+
+    transport = httpx.ASGITransport(app=main.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/health")
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["status"] == "stale"
+    # The envelope must NOT have leaked into /health.
+    assert "detail" not in body
+    assert "retryable" not in body
