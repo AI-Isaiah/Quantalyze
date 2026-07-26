@@ -1219,3 +1219,186 @@ def test_long_fetch_uses_shared_metrics_encoder() -> None:
     out = long_fetch._metrics_to_jsonb(m)
     assert out["sharpe"] == 1.2
     assert out["trade_count"] == 7
+
+
+# ---------------------------------------------------------------------------
+# PYAPIFIX2-02 (phase 140.1.2) — MT5 permanent credential faults on the LIVE
+# worker path.
+#
+# MT5_ENABLED=true in production. An MT5 credential the user can never fix
+# (wrong broker server; a trade-capable master password we reject on purpose)
+# must not be classified `transient`: transient means the queue retries the job
+# until attempts >= max_attempts (3), and every attempt serialises through the
+# SINGLE MT5 gateway lock — three live RPyC probes burned on a credential that
+# cannot succeed, while every other user's MT5 job waits behind them.
+#
+# Oracle integrity: every expectation below is a literal typed in this file.
+# Nothing is imported from long_fetch / mt5 / closed_sets — importing the code's
+# own constants would make the test agree with any future rewording.
+#
+# The `mt5_enabled_server` patch in the first two tests is LOAD-BEARING: without
+# it the kill-switch at long_fetch's `if source == "mt5" and not
+# mt5_enabled_server():` short-circuits to permanent for the DISABLED reason and
+# both tests would pass while the defect stays live. The third test is the
+# negative control that proves the kill-switch really does produce that
+# permanent-for-the-wrong-reason verdict.
+# ---------------------------------------------------------------------------
+
+
+def _mt5_job(job_id: str, error_tag: str) -> dict[str, Any]:
+    """An MT5 onboard long-fetch job, credentials inline so the worker's
+    stored-credential resolution branch is not exercised."""
+    return {
+        "id": job_id,
+        "kind": "process_key_long",
+        "strategy_id": f"s-{error_tag}",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": f"v-{error_tag}",
+            "source": "mt5",
+            "flow_type": "onboard",
+            "correlation_id": f"cid-{error_tag}",
+            "context": {
+                "strategy_id": f"s-{error_tag}",
+                "api_key": "12345678",
+                "api_secret": "investor-pw",
+                "passphrase": "SomeBroker-Live 5",
+            },
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_wrong_server_is_permanent() -> None:
+    """A wrong broker-server name is a permanent user-credential fault.
+
+    The MT5 adapter rejects it offline (no login attempt can ever match a
+    server that does not exist), so retrying cannot change the outcome — it
+    only burns 3 gateway-serialised probes and delays every queued MT5 job
+    behind the single terminal lock.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = _mt5_job("job-mt5-wrong-server", "mt5-wrong-server")
+
+    wrong_server_adapter = MagicMock()
+    wrong_server_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="MT5_WRONG_SERVER",
+            human_message="Broker server not found.",
+            debug_context=None,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=wrong_server_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.ingestion.long_fetch.mt5_enabled_server", return_value=True):
+        result = await run_process_key_long_job(job)
+
+    # The adapter really was consulted — this verdict came from the credential
+    # rejection, not from the MT5 kill-switch (see the negative control below).
+    wrong_server_adapter.validate.assert_awaited_once()
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "A wrong-server MT5 credential can never succeed; classifying it "
+        "transient makes the queue retry it 3x, and every attempt serialises "
+        "through the single MT5 gateway lock — three live RPyC probes burned "
+        "on an unfixable credential, blocking every other user's MT5 job."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_master_password_is_permanent() -> None:
+    """A trade-capable MT5 master password is a permanent credential fault.
+
+    We reject it deliberately (a master login can place trades; we only ever
+    persist a read-only investor login). The user must reconnect with a
+    different password — no retry can turn a master password into an investor
+    one, so retrying only re-probes the gateway with a credential we have
+    already decided to refuse.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = _mt5_job("job-mt5-master-pw", "mt5-master-pw")
+
+    master_pw_adapter = MagicMock()
+    master_pw_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="MT5_MASTER_PASSWORD",
+            human_message="Master password detected.",
+            debug_context=None,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=master_pw_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.ingestion.long_fetch.mt5_enabled_server", return_value=True):
+        result = await run_process_key_long_job(job)
+
+    master_pw_adapter.validate.assert_awaited_once()
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "A trade-capable MT5 master password is refused by design and the "
+        "refusal is deterministic; classifying it transient retries a "
+        "credential we will reject identically every time, burning 3 "
+        "serialised gateway probes before failed_final."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_mt5_disabled_gate_is_not_why_permanent() -> None:
+    """Negative control for the two tests above.
+
+    With the MT5 kill-switch OFF, the worker returns permanent for the
+    KILL-SWITCH reason and never consults the adapter at all. That is exactly
+    the false-green the `mt5_enabled_server=True` patch above exists to
+    prevent: an unpatched run would assert "permanent" and pass while
+    MT5_WRONG_SERVER / MT5_MASTER_PASSWORD were still being retried in
+    production.
+
+    The distinguishing substring is typed here as a literal, read once from the
+    disabled-detail copy at source. It is deliberately NOT imported — an import
+    would make this control agree with any future rewording and stop
+    distinguishing the two reasons.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = _mt5_job("job-mt5-disabled", "mt5-disabled")
+
+    never_called_adapter = MagicMock()
+    never_called_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="MT5_WRONG_SERVER",
+            human_message="Broker server not found.",
+            debug_context=None,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=never_called_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb), \
+         patch("services.ingestion.long_fetch.mt5_enabled_server", return_value=False):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert "MT5 integration is not yet available." in (result.error_message or ""), (
+        "The kill-switch path must be distinguishable from a credential "
+        "rejection by its message; if it is not, a 'permanent' assertion in "
+        "the two tests above proves nothing about credential classification."
+    )
+    # The kill-switch fires BEFORE validate — no live RPyC probe when MT5 is off.
+    never_called_adapter.validate.assert_not_awaited()
