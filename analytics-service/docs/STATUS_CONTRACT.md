@@ -211,18 +211,18 @@ The authoritative enumeration of every 5xx-capable site reachable from the seam.
 
 | # | Site | Endpoint | Today | Trigger | Class | Target | Plan | Done |
 |---|---|---|---|---|---|---|---|---|
-| S-01 | `routers/exchange.py:108` | `/api/validate-key` | 503 | sFOX client ctor `ValueError` — malformed `WORKER_EGRESS_PROXY_URL` | SERVICE-PERMANENT | **500** `EGRESS_PROXY_MISCONFIGURED`, `retryable:false`, `dependency:egress-proxy` | 03 | ⬜ |
-| S-02 | `routers/exchange.py:215` | `/api/validate-key` | 503 | `MT5_GATEWAY_HOST`/`PORT` unset | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ⬜ |
-| S-03 | `routers/exchange.py:220` | `/api/validate-key` | 503 | `MT5_GATEWAY_PORT` not an int | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ⬜ |
-| S-04 | `routers/exchange.py:235` | `/api/validate-key` | 503 | MT5 gateway connect **timed out** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ⬜ |
-| S-05 | `routers/exchange.py:238` | `/api/validate-key` | 503 | MT5 gateway connect **failed** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ⬜ |
-| S-06 | `routers/exchange.py:404` | `/api/validate-key` | 500 | bare `except` around `validate_key_permissions` | **SPLIT** | `ccxt.BaseError` → **424** `EXCHANGE_PROBE_FAILED`; else **500** `INTERNAL` with copy that does not blame credentials | 03 | ⬜ |
-| S-07 | `routers/exchange.py:424` | `/api/encrypt-key` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `retryable:false`, `dependency:kek` | 03 | ⬜ |
-| S-08 | `routers/internal.py:208` | `/internal/keys/{id}/permissions` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `dependency:kek` + rate-limited Sentry capture | 03 | ⬜ |
-| S-09 | `routers/internal.py:214` | `/internal/keys/{id}/permissions` | 500 | `decrypt_credentials` raises | SERVICE-PERMANENT | **500** `KEY_UNDECRYPTABLE`, `retryable:false`, `dependency:kek` | 03 | ⬜ |
-| S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ⬜ |
-| S-11 | `routers/internal.py:326` | `/internal/keys/{id}/permissions` | 502 | `create_exchange` raised non-`ValueError` | CALLER'S EXCHANGE | **424** `EXCHANGE_INIT_FAILED` | 03 | ⬜ |
-| S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ⬜ |
+| S-01 | `routers/exchange.py:108` | `/api/validate-key` | 503 | sFOX client ctor `ValueError` — malformed `WORKER_EGRESS_PROXY_URL` | SERVICE-PERMANENT | **500** `EGRESS_PROXY_MISCONFIGURED`, `retryable:false`, `dependency:egress-proxy` | 03 | ✅ |
+| S-02 | `routers/exchange.py:215` | `/api/validate-key` | 503 | `MT5_GATEWAY_HOST`/`PORT` unset | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ✅ |
+| S-03 | `routers/exchange.py:220` | `/api/validate-key` | 503 | `MT5_GATEWAY_PORT` not an int | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ✅ |
+| S-04 | `routers/exchange.py:235` | `/api/validate-key` | 503 | MT5 gateway connect **timed out** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ✅ |
+| S-05 | `routers/exchange.py:238` | `/api/validate-key` | 503 | MT5 gateway connect **failed** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ✅ |
+| S-06 | `routers/exchange.py:404` | `/api/validate-key` | 500 | bare `except` around `validate_key_permissions` | **SPLIT** | `ccxt.BaseError` → **424** `EXCHANGE_PROBE_FAILED`; else **500** `INTERNAL` with copy that does not blame credentials | 03 | ✅ |
+| S-07 | `routers/exchange.py:424` | `/api/encrypt-key` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `retryable:false`, `dependency:kek` | 03 | ✅ |
+| S-08 | `routers/internal.py:208` | `/internal/keys/{id}/permissions` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `dependency:kek` + rate-limited Sentry capture | 03 | ✅ |
+| S-09 | `routers/internal.py:214` | `/internal/keys/{id}/permissions` | 500 | `decrypt_credentials` raises | SERVICE-PERMANENT | **500** `KEY_UNDECRYPTABLE`, `retryable:false`, `dependency:kek` | 03 | ✅ |
+| S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ✅ |
+| S-11 | `routers/internal.py:326` | `/internal/keys/{id}/permissions` | 502 | `create_exchange` raised non-`ValueError` | CALLER'S EXCHANGE | **424** `EXCHANGE_INIT_FAILED` | 03 | ✅ |
+| S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ✅ |
 | S-13 | `routers/match.py:1648` | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `dependency:supabase` + `Retry-After` | 04 | ⬜ |
 | S-14 | `routers/match.py:1674` | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `dependency:supabase` + `Retry-After` | 04 | ⬜ |
 | S-15 | `routers/match.py:1765` | `/api/match/recompute` | 500 `f"Scoring failed: {err}"` | `_score_one_allocator` raised | SERVICE-PERMANENT | **500** `SCORING_FAILED`, **strip `{err}`** | 04 | ⬜ |
