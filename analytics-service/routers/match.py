@@ -37,7 +37,7 @@ import logging
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
@@ -52,6 +52,10 @@ from services.db import (
     rows,
 )
 from services.equity_reconstruction import reconstruct_symbol_returns
+# PYAPI-05 — every deliberate error in this file's seam-reachable arms goes
+# through service_error so the four status classes cannot drift apart
+# site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
 from services.match_engine import (
     ENGINE_VERSION,
     WEIGHTS_VERSION,
@@ -1644,8 +1648,15 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
         if actor_id != allocator_id:
             _is_admin = await asyncio.to_thread(_is_admin_profile, actor_id)
             if _is_admin is None:
-                raise HTTPException(
-                    status_code=503,
+                # PYAPI-05 S-13: SERVICE-TRANSIENT. Supabase is genuinely
+                # unavailable, so this one IS ours — but it is keyed on
+                # `supabase`, not on the service as a whole (O-2).
+                raise service_error(
+                    503,
+                    "ADMIN_CHECK_UNAVAILABLE",
+                    dependency="supabase",
+                    retryable=True,
+                    retry_after=RETRY_AFTER_SECONDS["supabase"],
                     detail="actor admin check temporarily unavailable — please retry",
                 )
             if not _is_admin:
@@ -1668,10 +1679,18 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
     # Raise 503 (not 422) in that case — 422 semantically means the input is
     # invalid, which is incorrect and misleading during a DB blip. A real
     # allocator must not see "you are not an allocator" during a Supabase outage.
+    #
+    # PYAPI-05 S-14 extends that reasoning rather than replacing it: the 503 now
+    # also says WHICH dependency is down (`supabase`) and how long to wait, so
+    # 140.2 keys its breaker on Supabase alone instead of on the whole service.
     _role_check = await asyncio.to_thread(_is_allocator_profile, allocator_id)
     if _role_check is None:
-        raise HTTPException(
-            status_code=503,
+        raise service_error(
+            503,
+            "ROLE_CHECK_UNAVAILABLE",
+            dependency="supabase",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["supabase"],
             detail="profile role check temporarily unavailable — please retry",
         )
     if not _role_check:
@@ -1756,13 +1775,32 @@ async def recompute(req: RecomputeRequest) -> dict[str, Any]:
         try:
             result = await _score_one_allocator(allocator_id, universe)
         except Exception as err:
-            logger.exception("match_engine recompute failed for %s", allocator_id)
+            # PYAPI-05 S-15: SERVICE-PERMANENT. The exception text stays
+            # SERVER-SIDE — the old f-string interpolation of `err` into the
+            # detail shipped whatever a pandas/Supabase exception happened to
+            # carry (table names, row payloads, connection strings)
+            # straight to the caller. The
+            # operator loses nothing: the message + traceback are logged here
+            # under a correlation_id that the response body also carries, so a
+            # user report joins to the log line without the leak.
+            correlation_id = str(uuid4())
+            logger.error(
+                "match_engine recompute failed for %s (correlation_id=%s): %s",
+                allocator_id, correlation_id, err,
+                exc_info=True,
+            )
             # M-1 (red-team): clear the optimistic stamp so the operator can retry
             # immediately after a scoring failure. The stamp was written inside the
             # lock before scoring; clearing it here releases the throttle window.
             if req.force:
                 _force_last_run.pop(allocator_id, None)
-            raise HTTPException(status_code=500, detail=f"Scoring failed: {err}") from err
+            raise service_error(
+                500,
+                "SCORING_FAILED",
+                retryable=False,
+                detail="Scoring failed on our side. This has been logged.",
+                correlation_id=correlation_id,
+            ) from err
 
     # Retention sweep (keep last 7). A sweep failure must not 500 the
     # request after the batch was successfully persisted — log and continue.
@@ -1811,19 +1849,42 @@ async def eval_metrics(
         )
     except PaginatedSelectTruncated as err:
         # paginated_select hit its hard cap — without this we'd silently
-        # aggregate over a partial window. 503 (data scale exceeded) is a
-        # cleaner monitoring signal than a generic 500.
+        # aggregate over a partial window.
+        #
+        # PYAPI-05 S-16: this is a CALLER fault, not an outage. The service is
+        # healthy; the caller's `lookback_days` window contains more rows than
+        # the paginator will drain. The old 503 both lied about our uptime and
+        # (under 140.2) fed the breaker, so an admin hammering lookback_days=365
+        # could trip a platform-wide outage. 400 is truthful and breaker-inert,
+        # and the copy says what to DO. `hint` is operator-curated and
+        # explicitly non-PII (see services/db.py:PaginatedSelectTruncated).
         logger.exception("match_engine eval truncated at hard cap: %s", err)
-        raise HTTPException(
-            status_code=503,
+        raise service_error(
+            400,
+            "EVAL_WINDOW_TOO_LARGE",
+            retryable=False,
             detail=(
                 f"Eval truncated at {err.page_count} pages × {err.page_size} rows"
                 + (f" (hint: {err.hint})" if err.hint else "")
+                + " — narrow lookback_days (or scope with partner_tag) and retry."
             ),
         ) from err
     except Exception as err:
-        logger.exception("match_engine eval failed")
-        raise HTTPException(status_code=500, detail=f"Eval failed: {err}") from err
+        # PYAPI-05 S-17: SERVICE-PERMANENT, and the same leak discipline as
+        # S-15 — the exception text is logged, never interpolated into the body.
+        correlation_id = str(uuid4())
+        logger.error(
+            "match_engine eval failed (correlation_id=%s): %s",
+            correlation_id, err,
+            exc_info=True,
+        )
+        raise service_error(
+            500,
+            "EVAL_FAILED",
+            retryable=False,
+            detail="Eval failed on our side. This has been logged.",
+            correlation_id=correlation_id,
+        ) from err
 
 
 @router.post("/cron-recompute")
