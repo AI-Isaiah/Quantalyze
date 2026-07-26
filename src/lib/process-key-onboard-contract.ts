@@ -39,18 +39,46 @@
  * `{queued: undefined}` cannot silently coerce into `queued: true` via a
  * `?? true` fallback at the read site.
  *
- * Phase C simplify — split into a discriminated union on `queued`. The
- * Python contract (analytics-service/routers/process_key.py) only ever
- * returns one of two shapes:
+ * Phase C simplify — split into a discriminated union on `queued`.
+ *
+ * Phase 140.1.1 / PYAPIFIX-01 (TS-01 + TS-03) — the union is WIDENED and the
+ * mixed-envelope rejection is DELETED, because that rejection asserted a
+ * mutual exclusion the domain does not have. The reply carries two
+ * INDEPENDENT facts:
+ *   - `queued` / `job_state` — a compute job is now enqueued or running for
+ *     this verification (`process_key.py:_resume_duplicate_job`).
+ *   - `code: "WIZARD_DUPLICATE"` + `idempotent: true` — this submission was a
+ *     duplicate; no new verification was created (the duplicate pre-check).
+ * Neither implies the other, and `_resume_duplicate_job` exists precisely to
+ * produce the state where BOTH are true. So
+ * `{queued: true, code: "WIZARD_DUPLICATE", idempotent: true}` is NOT a
+ * backbone bug — it is the normal **resumed-wedge** reply: *a duplicate
+ * submission whose wedged job we re-enqueued*. Rejecting it fired a 502 +
+ * Sentry "process-key onboard contract violation" on a successful resume.
+ *
+ * The three shapes the Python contract returns:
  *   - `{queued: true,  verification_id: string}` — newly queued.
+ *   - `{queued: true,  verification_id: string, code, idempotent}` — a
+ *     duplicate whose wedged job was re-enqueued (the resumed wedge).
  *   - `{queued: false, code: string, verification_id?, idempotent?}` —
- *     dedup hit (WIZARD_DUPLICATE).
- * A mixed envelope (e.g., `{queued: true, code: "WIZARD_DUPLICATE"}`) is
- * a backbone bug; the guard rejects it so the unified-response-parse
- * 502+Sentry path fires instead of silently misrouting wizard chrome.
+ *     a duplicate for which no background job applies.
+ *
+ * ⚠️ The widening deleted ONE false assertion and added THREE true ones (see
+ * the invariants in the predicate below). Do NOT widen further: the
+ * committed fixture
+ * `analytics-service/tests/fixtures/process_key_onboard_contract.json` carries
+ * three negative cases whose rejection is asserted by BOTH
+ * `tests/lib/process-key-onboard-contract-parity.test.ts` and
+ * `analytics-service/tests/test_process_key_onboard_contract.py`. A predicate
+ * that degraded toward `() => true` reddens them.
  */
 export type ProcessKeyOnboardResponse =
-  | { queued: true; verification_id: string }
+  | {
+      queued: true;
+      verification_id: string;
+      code?: string;
+      idempotent?: boolean;
+    }
   | {
       queued: false;
       code: string;
@@ -58,30 +86,62 @@ export type ProcessKeyOnboardResponse =
       idempotent?: boolean;
     };
 
+/**
+ * The one duplicate signal the backbone emits
+ * (`process_key.py:_wizard_duplicate_reply`, `:680-690`). Pinned as a literal
+ * here and independently in both cross-process test consumers — never read
+ * out of the other side's implementation.
+ */
+const WIZARD_DUPLICATE_CODE = "WIZARD_DUPLICATE";
+
 export function isProcessKeyOnboardResponse(
   body: unknown,
 ): body is ProcessKeyOnboardResponse {
   if (body === null || typeof body !== "object") return false;
   const r = body as Record<string, unknown>;
   if (typeof r.queued !== "boolean") return false;
-  if (r.queued) {
-    // queued=true branch: verification_id MUST be a string, and
-    // code/idempotent MUST NOT be present (mixed envelope = bug).
-    if (typeof r.verification_id !== "string") return false;
-    if ("code" in r || "idempotent" in r) return false;
-    return true;
+
+  // ── Invariant 1 (BOTH arms, PYAPIFIX-01) — `code`, when present, must be a
+  // NON-EMPTY string. `typeof "" === "string"`, so a type-only check would
+  // render an unnamed condition as a named one in wizard chrome.
+  if (
+    r.code !== undefined &&
+    (typeof r.code !== "string" || r.code.length === 0)
+  ) {
+    return false;
   }
-  // queued=false branch: code MUST be a string; verification_id and
-  // idempotent are optional but must match types if present.
+
+  // ── Invariant 2 (BOTH arms, PYAPIFIX-01) — `idempotent`, when present, must
+  // be exactly `true` AND paired with the duplicate code. This pins the
+  // pairing the emitter guarantees (`process_key.py:680-690` sets both keys in
+  // the same dict literal) and is what keeps the widening scoped to the
+  // WIZARD_DUPLICATE contract instead of collapsing into a blanket allowance
+  // for any mixed envelope.
+  //   NOTE: the converse is deliberately NOT enforced — a reply may carry
+  //   `code: "WIZARD_DUPLICATE"` without `idempotent` (that shape was legal
+  //   before 140.1 and nothing in the contract retired it).
+  if (r.idempotent !== undefined) {
+    if (r.idempotent !== true) return false;
+    if (r.code !== WIZARD_DUPLICATE_CODE) return false;
+  }
+
+  if (r.queued) {
+    // ── Invariant 3 (queued=true arm) — verification_id MUST be a string.
+    // This is the one real invariant this arm has; the widening keeps it.
+    // `code`/`idempotent` are now ADMISSIBLE here (the resumed-wedge reply)
+    // and were constrained above; the arm already tolerated every other extra
+    // key the Python reply carries (ok, job_state, status, trust_tier,
+    // correlation_id), so this is a narrowing of falsehood, not of teeth.
+    return typeof r.verification_id === "string";
+  }
+  // queued=false branch: code MUST be present (and, per Invariant 1,
+  // a non-empty string); verification_id is optional but typed if present.
   if (typeof r.code !== "string") return false;
   if (
     r.verification_id !== undefined &&
     r.verification_id !== null &&
     typeof r.verification_id !== "string"
   ) {
-    return false;
-  }
-  if (r.idempotent !== undefined && typeof r.idempotent !== "boolean") {
     return false;
   }
   return true;
