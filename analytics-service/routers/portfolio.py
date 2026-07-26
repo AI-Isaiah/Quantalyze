@@ -2274,7 +2274,27 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             "verify_strategy: create_exchange failed (%s): %s",
             type(exc).__name__, _redact_credentials(str(exc), req),
         )
-        raise HTTPException(status_code=400, detail="Failed to initialise exchange connection")
+        # B3 / PYAPIFIX-03 (H-2). create_exchange performs ZERO network I/O, so a
+        # non-ValueError escape here is ours (a ccxt signature change, an
+        # ImportError on a missing extra, an OOM) and never the venue's. The 400
+        # this used to raise blamed the caller for our bug and, being a 4xx,
+        # counted against nothing.
+        #
+        # Read this arm beside the SECOND create_exchange ~50 lines below, whose
+        # handler already answers 500 "Strategy verification failed". One
+        # function, one callee, two verdicts — that divergence is what proved the
+        # class was real, and 500 is the half that was already right.
+        #
+        # SERVICE-PERMANENT (R-1): 500, retryable:false, no dependency (140.2 keys
+        # its breaker on it — SEAMCORE-01), no Retry-After. Same code, same copy
+        # as B1 (routers/internal.py) and B2 (routers/exchange.py). The redacted
+        # diagnostics stay in the logger.exception above, never in the body.
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         validation = await validate_key_permissions(exchange)

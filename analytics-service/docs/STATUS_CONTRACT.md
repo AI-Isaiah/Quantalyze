@@ -305,6 +305,42 @@ for something that is not ours. Phase 140.1.1 plan 01's membership guard in
 `_validate` now **refuses it at construction** — the old shape is unconstructable, not
 merely discouraged.
 
+#### S-11 was one of THREE, and the table's completeness claim depends on the other two
+
+`ADAPTER_INIT_FAILED` is raised at **three** sites, not one. The review named only S-11;
+these two answered `400` before Phase 140.1.1 and were therefore **correctly absent from
+a table of 5xx-capable sites** — the remap is what makes them belong here. They are not
+numbered into `S-nn` because neither is a *remap of an existing S-row*:
+
+| Site | Endpoint | Trigger | Class | Emits |
+|---|---|---|---|---|
+| `routers/exchange.py:454` (`validate_key`) | `/api/validate-key` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initialize exchange connection"` |
+| `routers/portfolio.py:2277` (`verify_strategy`) | `/api/verify-strategy` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initiali**s**e exchange connection"` |
+
+The second row was named by **nobody** — not the code review, not RESEARCH, not CONTEXT.
+It differs from the first only in the **British spelling** of "initialise", which is
+exactly what defeats a `grep "Failed to initialize"` sweep. Record this: the enumeration
+predicate for this class is *"an `except` arm around a callee that performs no network
+I/O"*, **not** a copy string.
+
+The in-repo proof the class was real: `verify_strategy` calls `create_exchange`
+**twice**, ~50 lines apart, and the second call's handler already answered
+`500 "Strategy verification failed"`. One function, one callee, two verdicts. That arm
+was already correct and is deliberately unchanged.
+
+`ValueError` → `400` is preserved at all three sites: an exchange name absent from
+`EXCHANGE_CLASSES` genuinely IS caller input.
+
+**Consequence for TypeScript, deliberate and recorded.** Both sites now emit an
+**object** `body.detail` where they previously emitted a scalar, so per §2's obligation
+the seam-reachable one (`/api/validate-key`) renders as the generic dead end via
+`src/lib/analytics-client.ts` until 140.2 reads `body.detail.detail` (O-5). For a
+SERVICE-PERMANENT fault that is the CORRECT render — there is no user remedy and no wait
+worth advertising. This is the opposite of the venue-transient case, where a generic
+dead end would hide a real "try again shortly". (`/api/verify-strategy`'s own 5xx sites
+are on the not-seam-reachable list above; the envelope change there is for log/operator
+consistency, not for a TS renderer.)
+
 **Not seam-reachable, deliberately excluded** (listed so the enumeration is provably
 complete, not because they were missed): `routers/exchange.py:453,491,553`
 (`/api/fetch-trades`, no TS caller); `routers/csv.py:95`; `routers/portfolio.py:2242,2446`

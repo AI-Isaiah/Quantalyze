@@ -451,7 +451,25 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             type(e).__name__,
             e,
         )
-        raise HTTPException(status_code=400, detail="Failed to initialize exchange connection")
+        # B2 / PYAPIFIX-03 (H-2). create_exchange is EXCHANGE_CLASSES.get(), a
+        # dict build, cls(config) and two attribute sets — ZERO network I/O — so
+        # nothing has been sent to the venue when this fires. A non-ValueError
+        # escape is a ccxt signature change, an ImportError on a missing extra or
+        # an OOM: OURS. The shipped 400 told the user their REQUEST was malformed
+        # — a lie they cannot act on — and being a 4xx it meant a plain bug in our
+        # code counted against nothing and paged nobody.
+        #
+        # SERVICE-PERMANENT (R-1): 500, retryable:false, no dependency (140.2 keys
+        # its breaker on that field — SEAMCORE-01), no Retry-After. The same code
+        # and the same copy as B1 (routers/internal.py) and B3
+        # (routers/portfolio.py): one class, one verdict, no drift. The raw
+        # exception stays in the logger.exception above, never in the body.
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         result = await validate_key_permissions(exchange)
