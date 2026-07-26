@@ -29,8 +29,10 @@ Regression gates — WHY each case matters (Rule 9):
   - fail-CLOSED + HONEST on transient/timeout (F4): a hung bridge or an
     unrecognized error maps to the shared NETWORK_ERROR_DETAIL — a 400 that fails
     CLOSED (never {"valid": true}) and never blames the credentials.
-  - server-misconfig is a 503, never the user's key: missing MT5_GATEWAY_HOST/PORT
-    is OUR fault, logged secret-free.
+  - server-misconfig is OUR fault, never the user's key: missing
+    MT5_GATEWAY_HOST/PORT answers a PERMANENT 500 (PYAPI-05 R-1 — a config gap no
+    retry can clear must never feed the breaker; see docs/STATUS_CONTRACT.md
+    S-02/S-03), logged secret-free.
   - close() on EVERY path after construction: the terminal session must never leak.
   - ccxt path untouched: a binance request must still flow through create_exchange
     -> validate_key_permissions — pinned so branch placement can't perturb ccxt.
@@ -428,14 +430,29 @@ async def test_mt5_blank_investor_password_fails_auth_without_client(exchange_ro
 
 
 # --------------------------------------------------------------------------- #
-# Server misconfig — a 503, never the user's key, logged secret-free
+# Server misconfig — a PERMANENT 500, never the user's key, logged secret-free
 # --------------------------------------------------------------------------- #
 
 
-async def test_mt5_missing_gateway_env_is_503_and_secret_free(exchange_router, monkeypatch):
-    """Missing MT5_GATEWAY_HOST/PORT is a SERVER misconfig -> 503
-    NETWORK_ERROR_DETAIL (never a 500, never AUTH_FAILED that blames the user), and
-    the log line carries NO credential values."""
+async def test_mt5_missing_gateway_env_is_permanent_500_and_secret_free(
+    exchange_router, monkeypatch
+):
+    """Missing MT5_GATEWAY_HOST/PORT is a SERVER misconfig, never AUTH_FAILED that
+    blames the user, and the log line carries NO credential values.
+
+    REWRITTEN 2026-07-26 (Phase 140.1 plan 03, S-02 / TRAP-9). This test used to
+    pin `503 == NETWORK_ERROR_DETAIL`. The PYAPI-05 status contract
+    (docs/STATUS_CONTRACT.md) reclassifies it: unset env is deterministic, so no
+    retry can ever clear it, and answering 503 made the platform breaker trip,
+    expire, re-probe and re-trip forever over a config gap (A-01 / A-08 / A-25).
+    R-1 says a permanent fault is 500 with retryable:false so it never counts.
+
+    The status/code below are LITERALS typed here, never imported from
+    services.error_contract — an oracle that reads its expectation out of the
+    thing under test cannot fail (programme non-negotiable #3). The
+    no-credential-in-logs assertions are orthogonal to the status change and are
+    preserved verbatim.
+    """
     router = exchange_router
     monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
     monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
@@ -449,8 +466,14 @@ async def test_mt5_missing_gateway_env_is_503_and_secret_free(exchange_router, m
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"))
 
-    assert ei.value.status_code == 503
-    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Still never the misleading credential accusation.
+    assert ei.value.detail["detail"] != AUTH_FAILED_DETAIL
     factory.assert_not_called()
     # No credential value may reach ANY log line.
     for meth in ("exception", "error", "warning", "info", "debug"):
