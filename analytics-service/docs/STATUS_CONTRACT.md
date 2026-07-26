@@ -106,7 +106,8 @@ FastAPI's default `HTTPException` handler serialises to `{"detail": <detail>}`, 
 `service_error_response()`, which nests identically — so a consumer never has to know
 which mechanism produced the response.
 
-**Precedent, not invention:** `routers/simulator.py:466` (S-18) already raised
+**Precedent, not invention:** `routers/simulator.py:466` at HEAD (S-18 — §7's row records
+that site's PRE-migration coordinate `:460`, which is a bare `)` today) already raised
 `HTTPException(500, detail={"error": ..., "correlation_id": ...})` before this contract
 existed. The envelope is a superset of that shape, so aligning that site in plan 04 was
 a rename of `error` → `detail` plus the machine keys — its `correlation_id` is
@@ -130,12 +131,14 @@ construction time.
 | **`VenueTransientHTTPException`** (PYAPIFIX2-01) | `services/error_contract.py:345`, rendered by `main.py:574` | `{detail (scalar str), code, recoverable}` — **exactly three keys, nothing else** | `body.code` |
 
 `VenueTransientHTTPException`'s seven raise sites at HEAD:
-`routers/exchange.py:168` (sFOX 429), `:183` (sFOX 5xx/transport), `:376` (MT5 probe
-timeout), `:392` (MT5 account mismatch), `:414` (MT5 transient client error), `:603`
+`routers/exchange.py:163` (sFOX 429), `:178` (sFOX 5xx/transport), `:371` (MT5 probe
+timeout), `:387` (MT5 account mismatch), `:409` (MT5 transient client error), `:598`
 (the ccxt verdict collapse) — all on **`POST /api/validate-key`**
-(`routers/exchange.py:452`), the live key-connect path — plus `routers/portfolio.py:2359`
-on **`POST /api/verify-strategy`** (`routers/portfolio.py:2206`), which has no
-TypeScript caller and is closed on class-integrity grounds only.
+(`routers/exchange.py:447`), the live key-connect path — plus `routers/portfolio.py:2354`
+on **`POST /api/verify-strategy`** (`routers/portfolio.py:2201`), which has no
+TypeScript caller and is closed on class-integrity grounds only. (Re-derive these by
+`grep -n "raise VenueTransientHTTPException"` before trusting them — they move whenever
+anything above them in either router does.)
 
 The class is a **CALLER-class 4xx by construction** and refuses anything outside
 `400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no

@@ -360,6 +360,16 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   hour. The service already has the better pattern at `main.py:_retry_after_seconds` (`:461`),
   which reads the real remainder and falls back to the window only when it cannot. Fix shape:
   have `_check_*_rate` return `(ok, retry_after)`. (Review L-01.)
+- **→ backlog, adds to the STATUS_CONTRACT coordinate-drift item above.** A mechanical sweep of
+  all 51 `path:line` coordinates in `docs/STATUS_CONTRACT.md` (added while fixing review M-05)
+  found three more pointing at a blank line at HEAD, none of them in M-05's scope:
+  `services/exchange.py:978` (cited as the range start `:978-1021` in R-2), `routers/exchange.py:96`
+  and `routers/exchange.py:215` (the S-02 row). The §7 S-table is a HISTORICAL census — its
+  `Site` column records where each site was when the table was built, alongside a `Today`
+  column describing the pre-migration shape — so a row's coordinate going stale is expected
+  and is not by itself a defect. Prose coordinates outside the table are a different matter.
+  **The durable fix is not another sweep**: cite by searchable code text (or an anchor comment
+  in the source), so a coordinate cannot rot silently. Until then, re-derive before trusting.
 - **⚠️ Declined in 140.1.2, recorded so it is not re-filed.** Review L-02 asked for one
   `from services.error_contract import …` per module in `routers/exchange.py` and
   `routers/portfolio.py` (each has two, with a comment block above each). It was applied and
