@@ -24,7 +24,7 @@ classifier that requires a body is undefined on the single most common 5xx.
 
 ---
 
-## 1. The four classes
+## 1. The five classes
 
 Every error-capable site is assignable to exactly one class **at the site**, with no
 downstream inference.
@@ -255,7 +255,7 @@ remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 | S-08 | `routers/internal.py:208` | `/internal/keys/{id}/permissions` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `dependency:kek` + rate-limited Sentry capture | 03 | ✅ |
 | S-09 | `routers/internal.py:214` | `/internal/keys/{id}/permissions` | 500 | `decrypt_credentials` raises | SERVICE-PERMANENT | **500** `KEY_UNDECRYPTABLE`, `retryable:false`, `dependency:kek` | 03 | ✅ |
 | S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ✅ |
-| S-11 | `routers/internal.py:414` | `/internal/keys/{id}/permissions` | 502 → 424 | `create_exchange` raised non-`ValueError` | **SERVICE-PERMANENT** (was CALLER'S EXCHANGE — **deliberately reversed**, see below) | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, **`dependency: null`**, no `Retry-After` | 03, **re-classed 140.1.1-04** | ✅ |
+| S-11 | `routers/internal.py:442` (`except Exception:`), raise at `:471` | `/internal/keys/{id}/permissions` | 502 → 424 | `create_exchange` raised non-`ValueError` | **SERVICE-PERMANENT** (was CALLER'S EXCHANGE — **deliberately reversed**, see below) | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, **`dependency: null`**, no `Retry-After` | 03, **re-classed 140.1.1-04** | ✅ |
 | S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ✅ |
 | S-13 | `routers/match.py:1655` | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `ADMIN_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
 | S-14 | `routers/match.py:1689` | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `ROLE_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
@@ -342,8 +342,11 @@ are on the not-seam-reachable list above; the envelope change there is for log/o
 consistency, not for a TS renderer.)
 
 **Not seam-reachable, deliberately excluded** (listed so the enumeration is provably
-complete, not because they were missed): `routers/exchange.py:453,491,553`
-(`/api/fetch-trades`, no TS caller); `routers/csv.py:95`; `routers/portfolio.py:2242,2446`
+complete, not because they were missed): the six deliberate error arms inside the
+`fetch_trades` handler — `routers/exchange.py:660` (503 `get_kek` unavailable), `:670`
+(400 no connected key), `:685` (404 key not found), `:689` (403 key/owner mismatch),
+`:698` (500 decrypt failed), `:760` (500 venue fetch failed) — (`/api/fetch-trades`, no
+TS caller); `routers/csv.py:95`; `routers/portfolio.py:2242,2446`
 (Python `/api/verify-strategy`, no TS caller); `routers/cron.py:613,631`;
 `routers/debug_key_flow.py:56,100`; `services/analytics_runner.py:1725`.
 
