@@ -40,6 +40,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
+from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
 from services.db import get_supabase, get_user_scoped_supabase, one, rows
 from services.ingestion import get_adapter
@@ -342,21 +343,73 @@ def _verify_internal_token(request: Request) -> None:
 # envelope, which nests under `body.detail` and exists for the 5xx-capable seam
 # routes — `/process-key` has zero explicit 5xx sites (STATUS_CONTRACT.md S-22).
 # One route, one envelope: never a second parallel one.
+# PYAPIFIX-02 (Phase 140.1.1) — the error codes THIS ROUTE mints itself, as
+# opposed to the codes a venue probe produced. They are terminal by
+# construction: no retry of an identical request changes the verdict (a caller
+# does not become the owner of someone else's strategy by asking twice). They
+# are enumerated so the probe-code derivation below cannot reach them.
+#
+# The two universes fail safe in OPPOSITE directions, which is why both are
+# named rather than one blanket default: an unknown VENUE code must default
+# RECOVERABLE (retry and succeed, rather than "go rotate credentials that were
+# never broken"), while an unknown code from OUR OWN vocabulary must default
+# TERMINAL. `_envelope_error` cannot tell the universes apart from the string,
+# so the caller may also STATE the verdict outright — the 424 arm does.
+#
+# "VALIDATION_UNEXPECTED" sits here because the code string alone cannot say
+# whether it was OUR fallback (a confirmed write-capable key with no scope code
+# — permanent) or adapter-set (an unexpected exception during validate — may be
+# transient). Terminal is the safe default; the 424 arm, the only place an
+# adapter-set one can land, passes recoverable=True explicitly.
+_ROUTE_TERMINAL_ERROR_CODES = frozenset(
+    {
+        "UNKNOWN",
+        "CSV_FINALIZE_FAILED",
+        "MISSING_STRATEGY_ID",
+        "STRATEGY_NOT_OWNED",
+        "VALIDATION_UNEXPECTED",
+    }
+)
+
+
 def _envelope_error(
     code: str | None,
     msg: str | None,
     cid: str,
     vid: str | None,
+    recoverable: bool | None = None,
 ) -> dict[str, Any]:
-    """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI."""
+    """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI.
+
+    ``recoverable`` (PYAPIFIX-02): pass an explicit bool to STATE the verdict.
+    Left as ``None`` it is DERIVED from ``code`` — a probe code that is in
+    neither the shared permanent-code allow-list (``services/exchange.py``) nor
+    this route's own vocabulary is a fault at the caller's VENUE and IS
+    recoverable.
+
+    Pre-140.1.1 the derivation was an allow-list of RECOVERABLE codes
+    (``{RATE_LIMITED, EXCHANGE_UNAVAILABLE, NETWORK_UNAVAILABLE}``). It omitted
+    ``PROBE_FAILED`` and ``DDOS_PROTECTION``, so those shipped ``recoverable:
+    false`` beside the human copy "Try again in a moment." — one reply saying
+    the opposite of itself. That shape fails UNSAFE: a code nobody remembered
+    to list is reported terminal. Inverting it to an allow-list of PERMANENT
+    codes makes the forgetful case retryable instead.
+    """
+    _code = code or "UNKNOWN"
     return {
         "ok": False,
-        "code": code or "UNKNOWN",
+        "code": _code,
         "human_message": msg or "Unknown error",
         "debug_context": {"verification_id": vid} if vid else {},
         "correlation_id": cid,
-        "recoverable": code
-        in {"RATE_LIMITED", "EXCHANGE_UNAVAILABLE", "NETWORK_UNAVAILABLE"},
+        "recoverable": (
+            recoverable
+            if recoverable is not None
+            else (
+                _code not in _ROUTE_TERMINAL_ERROR_CODES
+                and _code not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+            )
+        ),
     }
 
 
@@ -1340,6 +1393,60 @@ async def process_key(
                 correlation_id=correlation_id,
                 error=str(_rpc_err),
             )
+        # PYAPIFIX-02 (H-1, Phase 140.1.1) — VENUE-TRANSIENT PRE-GATE. This
+        # MUST precede the 403 return below, mirroring long_fetch.py:296-319
+        # where the transient escape comes first and the scope verdict second.
+        #
+        # The gate above fires on `read_only is False`, and
+        # services/exchange.py derives read_only=False from the fail-CLOSED
+        # {read:T, trade:T, withdraw:T} default whenever the permission probe
+        # hit a network / WAF / exchange-5xx failure (DOGFOOD-3) — those scopes
+        # are NOT evidence. Delivering that as 403 tells the caller their
+        # credentials are at fault and that an identical retry cannot succeed,
+        # when the truth is that their exchange blipped and a retry WOULD
+        # succeed. 424 FAILED_DEPENDENCY is the UPSTREAM-TRANSIENT class
+        # (STATUS_CONTRACT R-1): not the caller's fault, retry can succeed,
+        # still 4xx and therefore breaker-inert.
+        #
+        # The condition is an ALLOW-LIST of PERMANENT codes defaulting to
+        # transient, never a denylist of transient ones. A denylist fails
+        # UNSAFE — a venue code nobody remembered to list becomes a permanent
+        # credential accusation — and is literally the shape of the defect
+        # being closed here. A caller-fault code must be NAMED in the shared
+        # allow-list (services/exchange.py) to stay on the 403 path.
+        #
+        # `val.error_code is not None` keeps OUR OWN VALIDATION_UNEXPECTED
+        # fallback on the permanent path: no error_code at all means the
+        # adapter confirmed a write-capable key and had no scope code to name
+        # it, which is a caller fault. An ADAPTER-set VALIDATION_UNEXPECTED may
+        # be a transient exchange error and does escape here — the same
+        # distinction long_fetch draws with `_is_unexpected_fallback`.
+        if (
+            val.error_code is not None
+            and val.error_code
+            not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+        ):
+            log.warning(
+                "process_key.venue_transient_validation",
+                reject_code=_reject_code,
+                read_only=val.read_only,
+                verification_id=verification_id,
+                correlation_id=correlation_id,
+            )
+            # recoverable is STATED, not derived: everything reaching this arm
+            # is retryable by construction — that is what selected the arm.
+            # The envelope key set is identical to the 403 return below.
+            return JSONResponse(
+                status_code=424,
+                content=_envelope_error(
+                    _reject_code,
+                    val.human_message,
+                    correlation_id,
+                    verification_id,
+                    recoverable=True,
+                ),
+            )
+
         # PYAPI-10b (C-22, Phase 140.1) — this is a VERDICT about the caller's
         # credentials, and it used to be delivered as HTTP 200 with ok:false. A
         # consumer that branches on the status line alone — which TRAP-2 says it

@@ -14,13 +14,24 @@ LITERAL typed in this file. `PERMANENT_VALIDATION_ERROR_CODES` is NEVER imported
 here — an oracle that iterated the set under test could not fail when a member is
 added to or removed from it, which is the exact self-referential shape that let
 the review's mutation survivors ship green.
+
+IMPORT DISCIPLINE — `routers.process_key` is imported INSIDE each test, never at
+module scope. `tests/test_process_key.py` deliberately does
+`sys.modules.pop("routers.process_key")` and re-imports at ITS import time (see
+the H-0806 note there). This file sorts BEFORE it, so a module-scope import here
+would load the router first and the sibling's re-import would register the
+`@limiter.limit` decorators a SECOND time on the shared `services.rate_limit`
+singleton — halving every per-bucket allowance and doubling
+`_dynamic_route_limits`. Observed first-hand: it turned
+`test_anon_bucket_exhausts_at_30_without_touching_a_tenant` red at call 16 of 30
+and `test_process_key_route_registers_both_limits` red with 4 groups, while both
+files passed in isolation. Deferring the import to run time means the module is
+already in `sys.modules` and no re-registration occurs.
 """
 
 from __future__ import annotations
 
 import pytest
-
-from routers.process_key import _envelope_error
 
 _CID = "11111111-1111-4111-8111-111111111111"
 
@@ -60,6 +71,8 @@ def test_venue_transient_code_is_recoverable(code: str) -> None:
     PROBE_FAILED and DDOS_PROTECTION and therefore failed UNSAFE: an unknown or
     forgotten venue code was reported terminal.
     """
+    from routers.process_key import _envelope_error  # noqa: PLC0415
+
     body = _envelope_error(code, "some message", _CID, None)
     assert body["recoverable"] is True, (
         f"{code} is a fault at the caller's venue — an identical retry can "
@@ -77,6 +90,8 @@ def test_caller_fault_code_is_not_recoverable(code: str) -> None:
     so a naive "reuse the existing set" fix would drop a permanently-missing
     read scope into the retryable default and mint an infinitely-retried key.
     """
+    from routers.process_key import _envelope_error  # noqa: PLC0415
+
     body = _envelope_error(code, "some message", _CID, None)
     assert body["recoverable"] is False, (
         f"{code} names something wrong with the submitted credentials; "
@@ -108,6 +123,8 @@ def test_route_minted_code_keeps_its_pre_fix_recoverable_value(code: str) -> Non
     transient) — defaulting it terminal is the safe half, and the 424 arm, the
     only place an adapter-set one can land, states `recoverable=True` outright.
     """
+    from routers.process_key import _envelope_error  # noqa: PLC0415
+
     body = _envelope_error(code, "some message", _CID, None)
     assert body["recoverable"] is False, (
         f"{code} is minted by /process-key itself, not by a venue probe; the "
@@ -117,6 +134,8 @@ def test_route_minted_code_keeps_its_pre_fix_recoverable_value(code: str) -> Non
 
 def test_absent_code_is_not_recoverable() -> None:
     """`code=None` renders as "UNKNOWN" and stays terminal (pre-fix value)."""
+    from routers.process_key import _envelope_error  # noqa: PLC0415
+
     body = _envelope_error(None, None, _CID, None)
     assert body["code"] == "UNKNOWN"
     assert body["recoverable"] is False
@@ -130,6 +149,8 @@ def test_explicit_recoverable_overrides_the_code_derivation() -> None:
     and must carry `recoverable: true`, even though the same code string
     derives to False when it is our own fallback on the 403 arm.
     """
+    from routers.process_key import _envelope_error  # noqa: PLC0415
+
     body = _envelope_error(
         "VALIDATION_UNEXPECTED", "boom", _CID, "ver-1", recoverable=True
     )
@@ -148,6 +169,8 @@ def test_envelope_key_set_is_unchanged() -> None:
     a deliberate act with a failing test, not a silent information-disclosure
     surface.
     """
+    from routers.process_key import _envelope_error  # noqa: PLC0415
+
     body = _envelope_error("RATE_LIMITED", "slow down", _CID, "ver-1")
     assert set(body) == {
         "ok",
