@@ -1,6 +1,14 @@
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+} from "vitest";
 
 import { isBreakerOpen, recordSeamFailure } from "@/lib/resilient-fetch";
 
@@ -189,6 +197,16 @@ async function drainEphemeralBlock(): Promise<void> {
   await sleepUntil((Math.floor(Date.now() / WINDOW_MS) + 1) * WINDOW_MS + 100);
 }
 
+/**
+ * Armed by a case BEFORE it drives the call that will be denied, and consumed by
+ * `afterEach`. The flag is set ahead of the denial rather than after it so the
+ * drain still happens when the case FAILS partway through — otherwise a
+ * mutation that reddens a denying case leaks its in-process block into the next
+ * case, which then reddens for a borrowed reason and muddies the mutation
+ * receipt this lane exists to produce.
+ */
+let expectsDenial = false;
+
 /** Clear ONLY the keys this lane owns. Never FLUSHALL. Never resetUsedTokens. */
 async function clearLaneKeys(): Promise<void> {
   const keys = await probe.keys("breaker:*");
@@ -228,6 +246,14 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
 
   beforeEach(async () => {
     await clearLaneKeys();
+  });
+
+  afterEach(async () => {
+    // Runs on PASS and on FAIL alike — that is the whole point.
+    if (expectsDenial) {
+      expectsDenial = false;
+      await drainEphemeralBlock();
+    }
   });
 
   afterAll(() => {
@@ -290,8 +316,10 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
 
     // Let a hand-typed 4 seconds of the cooldown burn down, then force a second
     // trip: the counter is exhausted, so the limiter denies and the core
-    // re-issues its SET.
+    // re-issues its SET. Arm the drain BEFORE the denial, not after the
+    // assertions — those may not be reached.
     await sleep(4000);
+    expectsDenial = true;
     await recordSeamFailure();
 
     const ttlAfter = await probe.ttl(LOCK_KEY);
@@ -300,10 +328,6 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // TTL snaps back to the full 30, landing outside this band.
     expect(ttlAfter).toBeGreaterThanOrEqual(25);
     expect(ttlAfter).toBeLessThanOrEqual(27);
-
-    // This case DENIES (the forced second trip), so it leaves an in-process
-    // block behind. Drain it or the next case never reaches Redis.
-    await drainEphemeralBlock();
 
     casesExecuted++;
   });
@@ -387,7 +411,9 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     await ensureWindowHeadroom(WINDOW_MS, 5000);
 
     const t0 = Date.now();
-    // Literal 8 = three failures past the literal threshold of 5.
+    // Literal 8 = three failures past the literal threshold of 5, so calls 6-8
+    // are denials. Arm the drain up front.
+    expectsDenial = true;
     for (let i = 0; i < 8; i++) {
       await recordSeamFailure();
     }
@@ -399,9 +425,6 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // read 8. `recordSeamFailure` reads `remaining` as well as `success`, so
     // the difference is load-bearing, not cosmetic.
     expect(Number(await probe.get(counterKeyFor(Math.floor(t0 / WINDOW_MS))))).toBe(5);
-
-    // Calls 6, 7 and 8 were denials, so this case leaves an in-process block.
-    await drainEphemeralBlock();
 
     casesExecuted++;
   });
