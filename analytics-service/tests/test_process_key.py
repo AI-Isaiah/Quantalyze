@@ -2674,3 +2674,341 @@ def test_ct4_logs_warning_when_x_user_id_missing_on_non_teaser():
         "CT-4: the X-User-Id missing warning must skip flow_type='teaser' "
         "(the public landing form is authentic-anonymous)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 140.1 Plan 02 — PYAPI-01 (cross-tenant leak) and PYAPI-09 (idempotency
+# completion). See .planning/phases/140.1-*/140.1-RESEARCH.md Q3 + Q4.
+#
+# The leak class has TWO read sites and TWO return sites, not one:
+#   site 1 — the WIZARD_DUPLICATE pre-check
+#   site 2 — the 23505 race-winner re-fetch
+# Both run on the RLS-bypassing service-role client, so a fix that closes only
+# site 1 leaves the MORE reachable one open: once the unique index is
+# tenant-scoped (Plan 140.1-01), site 2 is the arm that fires on a foreign
+# collision. There is a separate oracle per site so a single-site fix cannot
+# pass (this is mutation M2's detector).
+#
+# The fake below RECORDS the filter set the router actually issued, and the
+# assertions compare it to inline literals. Nothing here reads its expected
+# value back out of the code under test.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RecordedQuery:
+    """One PostgREST statement, exactly as /process-key issued it."""
+
+    table: str
+    op: str
+    filters: dict
+    payload: object = None
+
+
+class _RecordingBuilder:
+    """Self-chaining PostgREST query builder that records its filter set.
+
+    `_build_supabase_mock`'s MagicMock chain cannot express this: its `.eq()`
+    returns a fresh auto-mock on the second call, and it collapses every table
+    onto one object, so "which columns did site 2 filter on" is unanswerable.
+    """
+
+    def __init__(self, table_name, client):
+        self._table = table_name
+        self._client = client
+        self._op = "select"
+        self._filters = {}
+        self._payload = None
+
+    def select(self, *_args, **_kwargs):
+        self._op = "select"
+        return self
+
+    def insert(self, payload, *_args, **_kwargs):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def update(self, payload, *_args, **_kwargs):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def single(self):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def order(self, *_args, **_kwargs):
+        return self
+
+    def execute(self):
+        return self._client._execute(
+            RecordedQuery(self._table, self._op, dict(self._filters), self._payload)
+        )
+
+
+class _RecordingSupabase:
+    """Supabase client fake that records every executed statement + RPC.
+
+    `responses` maps `(table, op)` -> list of `.data` values consumed in call
+    order (the last entry repeats). `rpc_responses` maps an RPC name the same
+    way. An `Exception` instance in either sequence is raised instead of
+    returned, which is how the 23505 race is driven.
+    """
+
+    _DEFAULT_DATA = {
+        "insert": [{"id": "ver-1"}],
+        "select": None,
+        "update": [{"id": "s1"}],
+    }
+
+    def __init__(self, *, responses=None, rpc_responses=None):
+        self.queries = []
+        self.rpc_calls = []
+        self._responses = {k: list(v) for k, v in (responses or {}).items()}
+        self._rpc_responses = {k: list(v) for k, v in (rpc_responses or {}).items()}
+
+    @staticmethod
+    def _next(store, key, default):
+        seq = store.get(key)
+        if not seq:
+            return default
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def selects(self, table):
+        return [q for q in self.queries if q.table == table and q.op == "select"]
+
+    def rpc_named(self, name):
+        return [params for called, params in self.rpc_calls if called == name]
+
+    def table(self, name):
+        return _RecordingBuilder(name, self)
+
+    def rpc(self, name, params=None):
+        outer = self
+
+        class _RpcChain:
+            def execute(self):
+                outer.rpc_calls.append((name, params))
+                value = outer._next(outer._rpc_responses, name, None)
+                if isinstance(value, Exception):
+                    raise value
+                return MagicMock(data=value)
+
+        return _RpcChain()
+
+    def _execute(self, record):
+        self.queries.append(record)
+        value = self._next(
+            self._responses,
+            (record.table, record.op),
+            self._DEFAULT_DATA.get(record.op),
+        )
+        if isinstance(value, Exception):
+            raise value
+        return MagicMock(data=value)
+
+
+# Fixture identities. Written as literals in the assertions too — an oracle
+# that compares a recorded value to a constant the router also reads would be
+# self-referential.
+_OWNER_ID = "11111111-aaaa-4aaa-8aaa-000000000001"
+_OWNED_STRATEGY_ID = "22222222-bbbb-4bbb-8bbb-000000000002"
+_SESSION_ID = "33333333-cccc-4ccc-8ccc-000000000003"
+_ATTACKER_ID = "99999999-dddd-4ddd-8ddd-000000000009"
+
+
+def _scoped_csv_body(**context_overrides):
+    """csv/csv body carrying a concrete strategy_id — the shape that reaches
+    the duplicate pre-check after the Plan 02 move."""
+    context = {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "user_id": _OWNER_ID,
+        "wizard_session_id": _SESSION_ID,
+        "fmt": "trades",
+        "raw_bytes_base64": "Y29sCjE=",
+    }
+    context.update(context_overrides)
+    return {"flow_type": "csv", "source": "csv", "context": context}
+
+
+def test_pyapi_01d_precheck_read_is_tenant_scoped(client):
+    """PYAPI-01d, site 1/2 — the duplicate pre-check filters on strategy_id.
+
+    Economic statement: the pre-check's read key must equal the uniqueness key
+    the DB enforces. Plan 140.1-01 made that key
+    `(strategy_id, wizard_session_id)`; a read filtered on wizard_session_id
+    alone can therefore return a row belonging to a DIFFERENT strategy — i.e.
+    another tenant's verification_id / status / trust_tier.
+
+    Also the positive control for PYAPI-01e: the legitimate owner, replaying
+    their own session, still gets the idempotent reply.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-existing",
+                    "status": "published",
+                    "trust_tier": "csv_uploaded",
+                }
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_csv_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-existing"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 1, (
+        "the pre-check must issue exactly one strategy_verifications read; "
+        f"recorded {[q.filters for q in sv_selects]}"
+    )
+    assert sv_selects[0].filters == {
+        "strategy_id": "22222222-bbbb-4bbb-8bbb-000000000002",
+        "wizard_session_id": "33333333-cccc-4ccc-8ccc-000000000003",
+    }, (
+        "PYAPI-01d: the pre-check read must be scoped to the caller's strategy, "
+        "not to the caller-supplied wizard_session_id alone"
+    )
+
+
+def test_pyapi_01d_race_winner_read_is_tenant_scoped(client):
+    """PYAPI-01d, site 2/2 — the 23505 race-winner re-fetch filters on
+    strategy_id (mutation M2's detector).
+
+    This is the site finding C-08 never named and the one that becomes MORE
+    reachable after Plan 140.1-01: with a tenant-scoped unique index, a foreign
+    wizard_session_id no longer collides at all, but any genuine collision that
+    does reach the 23505 arm must re-fetch the caller's OWN row.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                None,  # pre-check misses — the row is written by the racer
+                {
+                    "id": "ver-raced",
+                    "status": "validated",
+                    "trust_tier": "csv_uploaded",
+                },
+            ],
+            ("strategy_verifications", "insert"): [
+                Exception(
+                    "duplicate key value violates unique constraint "
+                    "(SQLSTATE 23505)"
+                )
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_csv_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-raced"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 2, (
+        "expected pre-check + race re-fetch; recorded "
+        f"{[q.filters for q in sv_selects]}"
+    )
+    assert sv_selects[1].filters == {
+        "strategy_id": "22222222-bbbb-4bbb-8bbb-000000000002",
+        "wizard_session_id": "33333333-cccc-4ccc-8ccc-000000000003",
+    }, (
+        "PYAPI-01d: the 23505 race-winner re-fetch must be scoped to the "
+        "caller's strategy. Closing only the pre-check leaves this site leaking."
+    )
+
+
+def test_pyapi_01e_non_owner_gets_403_and_no_verification_read(client):
+    """PYAPI-01e — `strategy_id` is caller-supplied, so scoping the read by it
+    is necessary but NOT sufficient: a caller that supplies a FOREIGN
+    strategy_id gets a consistently-foreign read.
+
+    Ownership is asserted first, and the refusal happens BEFORE any
+    strategy_verifications row is read — so the leak cannot happen even in the
+    reply-construction code.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [None],  # attacker does not own it
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-victim",
+                    "status": "published",
+                    "trust_tier": "api_verified",
+                }
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key",
+            json=_scoped_csv_body(user_id=_ATTACKER_ID),
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 403, r.text
+    payload = r.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "STRATEGY_NOT_OWNED"
+    assert "ver-victim" not in r.text, "the victim's verification id must not leak"
+
+    assert sb.selects("strategy_verifications") == [], (
+        "PYAPI-01e: a non-owner must not cause ANY strategy_verifications read"
+    )
+    owner_lookups = sb.selects("strategies")
+    assert len(owner_lookups) == 1
+    assert owner_lookups[0].filters == {
+        "id": "22222222-bbbb-4bbb-8bbb-000000000002",
+        "user_id": "99999999-dddd-4ddd-8ddd-000000000009",
+    }, "ownership must be asserted on id AND user_id, never id alone"
+
+
+def test_pyapi_01e_missing_user_id_fails_closed(client):
+    """PYAPI-01e, fail-closed arm — a non-teaser flow that carries no
+    `context.user_id` cannot have its ownership asserted, so it is refused.
+
+    A row cannot be owned by nobody: treating "no user_id" as a skip would make
+    the whole ownership gate opt-out by omission. Every non-teaser production
+    caller forwards user_id (keys/sync/route.ts:417,
+    finalize-wizard/route.ts:1310, keys/validate-and-encrypt/route.ts:210,
+    csv-finalize/route.ts:1183), so this refuses only a misconfigured caller —
+    exactly the state the I-SEC2 warning already flags.
+    """
+    body = _scoped_csv_body()
+    body["context"].pop("user_id")
+    sb = _RecordingSupabase(
+        responses={
+            ("strategy_verifications", "select"): [
+                {"id": "ver-victim", "status": "published", "trust_tier": "api_verified"}
+            ]
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post("/process-key", json=body, headers=_auth_headers())
+
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "STRATEGY_NOT_OWNED"
+    assert sb.selects("strategy_verifications") == []
