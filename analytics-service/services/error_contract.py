@@ -224,6 +224,18 @@ def service_error_body(
     (``None`` when nothing of ours failed) so a consumer never has to probe for
     the key's existence.
     """
+    # C1 — the scalar guarantee, enforced rather than documented. Tested as the
+    # POSITIVE property: enumerating the bad types (list, dict) would miss int,
+    # bytes and a pydantic model. NEVER coerced with str() — emitting
+    # "['a', 'b']" to a user is the same defect in a string costume, and it
+    # hides the calling bug. The annotation alone closes nothing: callers hand
+    # this ``Any`` (``exc.args``, ``err.detail``, ``key_data.get(...)``), which
+    # mypy cannot narrow at the call boundary. 140.2 renders from here (O-5).
+    if detail is not None and not isinstance(detail, str):
+        raise ValueError(
+            "body.detail.detail must be a scalar human string; got "
+            f"{type(detail).__name__}"
+        )
     body: dict[str, Any] = {
         "code": code,
         "dependency": dependency,
