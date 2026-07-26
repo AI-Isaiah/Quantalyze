@@ -112,6 +112,27 @@ def _validate(
             )
         if retry_after is None:
             raise ValueError("a 503 must carry Retry-After (see RETRY_AFTER_SECONDS)")
+        # C4(a) — the advertised wait must come FROM the table, never from the
+        # raise site. `.get`, deliberately NOT `RETRY_AFTER_SECONDS[dependency]`:
+        # `kek` and `egress-proxy` pass the membership check above but are
+        # ABSENT from the table by design, so a bare index would turn a contract
+        # violation into an opaque KeyError — contradicting this module's
+        # documented posture that the guards raise ValueError.
+        _expected = RETRY_AFTER_SECONDS.get(dependency)
+        if _expected is None:
+            raise ValueError(
+                f"{dependency!r} has no declared transient arm in "
+                f"RETRY_AFTER_SECONDS {sorted(RETRY_AFTER_SECONDS)}, so it cannot "
+                "be the dependency of a 503; a fault there is a permanent 500 "
+                "(retryable:false) and advertising a wait would invite the retry "
+                "loop R-1 exists to stop"
+            )
+        if retry_after != _expected:
+            raise ValueError(
+                f"a 503 naming {dependency!r} must advertise "
+                f"RETRY_AFTER_SECONDS[{dependency!r}] == {_expected}, got "
+                f"{retry_after}; a raise site never inlines its own wait"
+            )
         return
 
     if status_code >= 500:
@@ -124,6 +145,18 @@ def _validate(
             )
         if retryable:
             raise ValueError("a 500 is SERVICE-PERMANENT and must not be retryable (R-1)")
+        # MEMBERSHIP, not prohibition: six live sites legitimately name one of
+        # ours here so an operator learns WHICH dependency is misconfigured, and
+        # seven pass none at all. Only a name from OUTSIDE the vocabulary is
+        # refused — 140.2 keys the breaker on this value (SEAMCORE-01), so a
+        # venue name would mint a per-dependency breaker key for something that
+        # is not ours (the A-01 defect class in a new disguise).
+        if dependency is not None and dependency not in SERVICE_DEPENDENCIES:
+            raise ValueError(
+                f"a 500 may only name one of this service's dependencies "
+                f"{sorted(SERVICE_DEPENDENCIES)}, got {dependency!r}; a fault at "
+                "the caller's venue is 424, not 500"
+            )
         return
 
     if status_code == 424:
@@ -141,6 +174,27 @@ def _validate(
                 "a 424 is recoverable — the venue may come back; marking it "
                 "non-retryable produces the B-01/B-22 dead-end render"
             )
+        return
+
+    if status_code == 429:
+        # CALLER, throttled. Unlike every other CALLER fault an identical retry
+        # DOES succeed — after the advertised wait — so the generic arm's "a
+        # retry cannot help" rule must not reach here. Still breaker-inert by
+        # construction (4xx). The 424 arm above is the in-file precedent for a
+        # retryable 4xx, so "4xx implies not retryable" is the DEFAULT arm's
+        # rule, not an invariant of the contract.
+        if dependency is not None:
+            raise ValueError("a 429 is a CALLER fault and must not name a dependency")
+        if not retryable:
+            # retryable:false in the body beside a Retry-After header on the
+            # wire is the self-contradicting response R-1 forbids. Chosen over
+            # exempting 429 from the retry_after/retryable rule above.
+            raise ValueError(
+                "a 429 is recoverable after the advertised wait; retryable:false "
+                "beside a Retry-After is the self-contradicting body R-1 forbids"
+            )
+        if retry_after is None:
+            raise ValueError("a 429 must carry Retry-After (STATUS_CONTRACT.md §1)")
         return
 
     # CALLER (every other 4xx). Nothing of ours failed, so there is no dependency
