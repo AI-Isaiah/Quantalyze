@@ -52,12 +52,29 @@ from fastapi.testclient import TestClient
 # once from `from slowapi import Limiter` — cached as that no-op for the rest of the
 # session, which would make test_process_key_shares_main_limiter_instance pass
 # vacuously (noop-is-noop). The real class is never swapped (it lives at
-# `slowapi.extension.Limiter`), so restore the re-export from it and re-pop our own
-# router + service singletons so they rebind to a real Limiter — WITHOUT touching
+# `slowapi.extension.Limiter`), so restore the re-export from it — WITHOUT touching
 # fastapi/slowapi module identity.
 slowapi.Limiter = slowapi.extension.Limiter  # type: ignore[attr-defined]
-for _stale in ("services.rate_limit", "routers.process_key"):
-    sys.modules.pop(_stale, None)
+
+# PYAPI-03 (140.1-07) — `services.rate_limit` is NO LONGER re-popped here.
+#
+# It used to be, alongside `routers.process_key`, to rebuild the singleton from a
+# real Limiter after the sibling poisoning described above. Two things changed:
+#
+#   1. Those siblings now import `services.rate_limit` BEFORE they swap
+#      `slowapi.Limiter`, so the canonical singleton is never built from the shim
+#      and there is nothing to rebuild.
+#   2. Popping it became actively HARMFUL. Since PYAPI-03, exchange.py, csv.py,
+#      portfolio.py and optimizer.py all bind the singleton with
+#      `from services.rate_limit import limiter` at THEIR import time. Re-popping
+#      mints a SECOND `services.rate_limit` module with a SECOND Limiter, so every
+#      router imported before this file keeps the first one while `app.state.limiter`
+#      gets the second — silently breaking the API-5 shared-storage invariant that
+#      `test_process_key_shares_main_limiter_instance` and
+#      `test_simulator_router.py::TestG15_004_LimiterIsCanonicalSingleton` exist to
+#      protect. Same class of harm as the fastapi purge in the paragraph above:
+#      re-importing a module to fix one identity problem creates another.
+sys.modules.pop("routers.process_key", None)
 
 import routers.process_key as process_key_router  # noqa: E402
 

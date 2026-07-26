@@ -18,7 +18,7 @@ import sys
 from unittest.mock import MagicMock
 
 import pytest
-from tests.limiter_stub import patch_shared_limiter
+from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
 @pytest.fixture()
@@ -53,12 +53,12 @@ def stubbed_exchange_router(monkeypatch):
     patch_shared_limiter(monkeypatch)
 
     # Reload so the module picks up our stubs
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
     from routers import exchange as exchange_router
 
     yield exchange_router
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
 class TestC0202_DeactivatedKeyRejected:

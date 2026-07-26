@@ -193,23 +193,28 @@ class TestPerRouteKeyIdentity:
         from slowapi.util import get_remote_address
 
         limits = _registered_limits(registry_name)
-        assert len(limits) == 1, (
-            f"{row} {path}: expected exactly one registered limit, got {len(limits)}"
-        )
-        key_func = limits[0].key_func
-        assert key_func is not get_remote_address, (
-            f"{row} {path} still keys on get_remote_address. Behind Railway's "
-            "edge proxy that is the EDGE ip, so this 'per-IP' bucket is "
-            "platform-wide (G-10/G-11)."
-        )
-        # Also reject the singleton's default: reaching this key by OMISSION is
-        # how L-9 happened, and the default is no longer IP-derived, so
-        # `is not get_remote_address` alone would now pass vacuously for it.
-        assert key_func is not rl.default_platform_key, (
-            f"{row} {path} inherits the shared limiter's DEFAULT key rather than "
-            "declaring one. That is L-9's exact failure mode — an identity "
-            "decision acquired by omission."
-        )
+        assert limits, f"{row} {path}: no limit registered at all"
+        # EVERY registration, not just the first. slowapi appends to
+        # `_route_limits[name]` on each decoration, and sibling suites reload
+        # router modules to swap in a no-op limiter, so the list can hold N
+        # copies of the same limit within one pytest session. Asserting over all
+        # of them is strictly stronger than indexing [0] — a second, WRONGLY
+        # keyed decorator would hide behind a correct first one.
+        for limit in limits:
+            key_func = limit.key_func
+            assert key_func is not get_remote_address, (
+                f"{row} {path} still keys on get_remote_address. Behind Railway's "
+                "edge proxy that is the EDGE ip, so this 'per-IP' bucket is "
+                "platform-wide (G-10/G-11)."
+            )
+            # Also reject the singleton's default: reaching this key by OMISSION
+            # is how L-9 happened, and the default is no longer IP-derived, so
+            # `is not get_remote_address` alone would now pass vacuously for it.
+            assert key_func is not rl.default_platform_key, (
+                f"{row} {path} inherits the shared limiter's DEFAULT key rather "
+                "than declaring one. That is L-9's exact failure mode — an "
+                "identity decision acquired by omission."
+            )
 
     @pytest.mark.parametrize(
         "row,path,registry_name,limit_str,scope",
@@ -225,19 +230,21 @@ class TestPerRouteKeyIdentity:
         failure mode the repair programme exists to close, so "not IP-keyed" is
         not sufficient — it must be the one function.
         """
-        key_func = _registered_limits(registry_name)[0].key_func
-        assert isinstance(key_func, functools.partial), (
-            f"{row} {path}: expected functools.partial(tenant_or_platform_key, "
-            f"scope={scope!r}), got {key_func!r}"
-        )
-        assert key_func.func is rl.tenant_or_platform_key, (
-            f"{row} {path} keys on {key_func.func!r}, not the shared "
-            "services.rate_limit.tenant_or_platform_key"
-        )
-        assert key_func.keywords == {"scope": scope}, (
-            f"{row} {path} is bound to {key_func.keywords!r}, expected "
-            f"{{'scope': {scope!r}}}"
-        )
+        limits = _registered_limits(registry_name)
+        assert limits, f"{row} {path}: no limit registered at all"
+        for key_func in (limit.key_func for limit in limits):
+            assert isinstance(key_func, functools.partial), (
+                f"{row} {path}: expected functools.partial(tenant_or_platform_key, "
+                f"scope={scope!r}), got {key_func!r}"
+            )
+            assert key_func.func is rl.tenant_or_platform_key, (
+                f"{row} {path} keys on {key_func.func!r}, not the shared "
+                "services.rate_limit.tenant_or_platform_key"
+            )
+            assert key_func.keywords == {"scope": scope}, (
+                f"{row} {path} is bound to {key_func.keywords!r}, expected "
+                f"{{'scope': {scope!r}}}"
+            )
 
     @pytest.mark.parametrize(
         "row,path,registry_name,limit_str,scope",
@@ -252,11 +259,16 @@ class TestPerRouteKeyIdentity:
         The limit VALUE audit is RATE-04 / Phase 146. A rekey that also loosened
         a ceiling — the easiest way to make a throttling complaint go away —
         would be invisible without this.
+
+        The DISTINCT set is asserted, not the list: reloading a router in a
+        sibling suite re-registers the identical limit, but a route may still
+        only ever carry ONE limit VALUE. A second, different decorator — the way
+        a stacked ceiling would be added without saying so — makes this set grow.
         """
-        assert str(_registered_limits(registry_name)[0].limit) == limit_str, (
-            f"{row} {path}: limit value changed to "
-            f"{str(_registered_limits(registry_name)[0].limit)!r}; PYAPI-03 must "
-            f"leave it at {limit_str!r} (RATE-04 owns values)."
+        registered = {str(limit.limit) for limit in _registered_limits(registry_name)}
+        assert registered == {limit_str}, (
+            f"{row} {path}: registered limit values are {sorted(registered)}; "
+            f"PYAPI-03 must leave exactly {limit_str!r} (RATE-04 owns values)."
         )
 
     def test_scopes_are_distinct_so_no_two_routes_share_a_bucket(self) -> None:

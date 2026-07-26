@@ -4,6 +4,7 @@ import hashlib
 import logging
 import time
 import uuid
+from functools import partial
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -56,7 +57,7 @@ from services.portfolio_limits import (
 # EDGE ip (G-10/G-11) — platform-wide, in isolated ``memory://`` storage (G-3)
 # that ``app.state.limiter`` could not see. The L-0045 comment below this import
 # block was the existing in-file record of exactly this defect.
-from services.rate_limit import limiter
+from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -1567,7 +1568,9 @@ def _generate_rebalance_drift_alert(supabase: Client, portfolio_id: str) -> None
 # ---------------------------------------------------------------------------
 
 @router.post("/portfolio-analytics", response_model=PortfolioAnalyticsResponse)
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="portfolio_analytics")
+)
 async def portfolio_analytics(request: Request, req: PortfolioAnalyticsRequest) -> dict[str, Any]:
     """Compute full portfolio analytics for a given portfolio."""
     supabase = get_supabase()
@@ -1627,7 +1630,9 @@ _OPTIMIZER_PUBLISHED_LIMIT = 200  # max published strategies pulled per optimize
 
 
 @router.post("/portfolio-optimizer", response_model=PortfolioOptimizerResponse)
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="portfolio_optimizer")
+)
 async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) -> dict[str, Any]:
     """Find diversification candidates for a portfolio.
 
@@ -1887,7 +1892,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
 # ---------------------------------------------------------------------------
 
 @router.post("/portfolio-bridge", response_model=PortfolioBridgeResponse)
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="portfolio_bridge")
+)
 async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, Any]:
     """Find replacement candidates for an underperforming strategy (Bridge V1).
 
@@ -2182,7 +2189,9 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
 # ---------------------------------------------------------------------------
 
 @router.post("/verify-strategy", response_model=VerifyStrategyResponse)
-@limiter.limit("5/hour")
+@limiter.limit(
+    "5/hour", key_func=partial(tenant_or_platform_key, scope="verify_strategy")
+)
 async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[str, Any]:
     """Verify a strategy from exchange API keys (landing page flow).
 

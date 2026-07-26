@@ -66,19 +66,47 @@ class NoopLimiter:
 def _rate_limit_module() -> ModuleType:
     """Resolve ``services.rate_limit`` **at call time**, never at import time.
 
-    ⚠️ Load-bearing. ``tests/test_process_key.py`` pops ``services.rate_limit``
-    out of ``sys.modules`` at its own IMPORT time (so its router re-binds a real
-    ``Limiter`` after the sibling files that shim ``slowapi.Limiter``). pytest
-    imports every test module during collection, so that eviction happens before
-    a single test runs. A module object captured at helper-import time is
-    therefore stale for the rest of the session: patching it changes nothing the
-    routers can see, and the 58 failures above come straight back — silently,
-    because the patch itself still "succeeds".
+    ⚠️ Load-bearing, and it cost a debugging round to learn why.
+    ``tests/test_process_key.py`` used to pop ``services.rate_limit`` out of
+    ``sys.modules`` at its own IMPORT time — and pytest imports every test module
+    during COLLECTION, so that eviction landed before a single test ran. A module
+    object captured at helper-import time was therefore stale for the whole
+    session: patching it changed nothing any router could see, the 58 failures
+    came straight back, and the patch itself still reported success.
+
+    That pop is gone as of PYAPI-03 (see the comment in ``test_process_key.py``,
+    which explains why re-popping the singleton became actively harmful once four
+    routers started binding it at import). Resolving lazily here anyway: nothing
+    is gained by caching, and the failure mode is silent.
     """
     mod = sys.modules.get("services.rate_limit")
     if mod is None:
         import services.rate_limit as mod  # noqa: PLC0415
     return mod
+
+
+def evict_module(name: str) -> None:
+    """Really evict ``name`` so the next import RE-EXECUTES it.
+
+    ⚠️ ``sys.modules.pop("routers.exchange")`` alone does **not** do this.
+    ``from routers import exchange`` runs importlib's ``_handle_fromlist``, which
+    only imports the submodule when the parent package lacks the attribute — and
+    the parent keeps its ``exchange`` attribute after the pop. So the pop returns
+    the STALE module object, silently, with its original decorators intact.
+
+    Harmless while every fixture that pops was also the first thing in the
+    session to import the router. PYAPI-03 ended that: ``routers.exchange`` now
+    binds a shared limiter, so any earlier module that imports it (e.g.
+    ``tests/test_limiter_identity.py``) leaves the attribute set, the "reload"
+    silently no-ops, and the handler still carries the REAL slowapi wrapper —
+    which then rejects the fixture's MagicMock request. 48 failures, none of them
+    at the line that looked wrong.
+    """
+    sys.modules.pop(name, None)
+    package_name, _, attribute = name.rpartition(".")
+    package = sys.modules.get(package_name)
+    if package is not None and hasattr(package, attribute):
+        delattr(package, attribute)
 
 
 def patch_shared_limiter(monkeypatch: Any) -> None:

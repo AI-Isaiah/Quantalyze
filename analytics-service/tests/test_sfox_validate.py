@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
-from tests.limiter_stub import patch_shared_limiter
+from tests.limiter_stub import evict_module, patch_shared_limiter
 
 # The EXACT string the TS classifyKeyValidationError matches on
 # (lower.includes("authentication failed")) — byte-identical to
@@ -84,12 +84,12 @@ def exchange_router(monkeypatch):
     # dedicated fail-closed test below (which delenv's it after this setup).
     monkeypatch.setenv("SFOX_ENABLED", "true")
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
     from routers import exchange as exchange_router
 
     yield exchange_router
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
 def _make_client(get_balances_side_effect=None):

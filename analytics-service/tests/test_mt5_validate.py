@@ -56,7 +56,7 @@ from services.closed_sets import (
 )
 from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL
 from services.mt5_client import Mt5ClientError
-from tests.limiter_stub import patch_shared_limiter
+from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
 @pytest.fixture()
@@ -94,12 +94,12 @@ def exchange_router(monkeypatch):
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
     from routers import exchange as exchange_router
 
     yield exchange_router
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
 def _make_client(*, login_raises=None, account=None, order_check=None):

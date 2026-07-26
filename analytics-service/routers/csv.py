@@ -11,6 +11,7 @@ and asserts auth.uid() = p_user_id; a service-role echo here would have
 been dead code.
 """
 import logging
+from functools import partial
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
@@ -21,7 +22,7 @@ from services.csv_validator import validate_csv
 # (G-10/G-11) so the 30/hour budget was platform-wide, and with its own isolated
 # ``memory://`` storage (G-3) invisible to ``app.state.limiter``. Same repair as
 # the Phase-19/API-5 fix in services/rate_limit.py's docstring.
-from services.rate_limit import limiter
+from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api", tags=["csv"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -57,7 +58,9 @@ async def _read_capped(file: UploadFile, cap: int) -> bytes:
 
 
 @router.post("/csv/validate")
-@limiter.limit("30/hour")
+@limiter.limit(
+    "30/hour", key_func=partial(tenant_or_platform_key, scope="csv_validate")
+)
 async def csv_validate(
     request: Request,
     file: UploadFile = File(...),

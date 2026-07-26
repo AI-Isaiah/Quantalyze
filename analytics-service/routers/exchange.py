@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from functools import partial
 from datetime import datetime, timezone
 from typing import Any
 import ccxt
@@ -42,7 +43,7 @@ from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # own isolated ``memory://`` storage (G-3), so its counters were invisible to
 # ``app.state.limiter``. Same repair, same reasoning as the Phase-19/API-5 fix
 # documented in services/rate_limit.py's own docstring.
-from services.rate_limit import limiter
+from services.rate_limit import limiter, tenant_or_platform_key
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
@@ -391,7 +392,9 @@ async def _validate_mt5_key(
 
 
 @router.post("/validate-key")
-@limiter.limit("100/hour")
+@limiter.limit(
+    "100/hour", key_func=partial(tenant_or_platform_key, scope="validate_key")
+)
 async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, Any]:
     """Validate that an API key is read-only and functional.
 
@@ -505,7 +508,9 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
 
 
 @router.post("/encrypt-key")
-@limiter.limit("100/hour")
+@limiter.limit(
+    "100/hour", key_func=partial(tenant_or_platform_key, scope="encrypt_key")
+)
 async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any]:
     """Encrypt exchange credentials for storage. Returns encrypted fields to store in Supabase."""
     try:
@@ -546,7 +551,9 @@ async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any
 
 
 @router.post("/fetch-trades")
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="fetch_trades")
+)
 async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, Any]:
     """Fetch trades from exchange for a strategy using stored encrypted API key."""
     try:

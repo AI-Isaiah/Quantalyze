@@ -42,7 +42,7 @@ from unittest.mock import AsyncMock, MagicMock
 import ccxt
 import pytest
 from fastapi import HTTPException
-from tests.limiter_stub import patch_shared_limiter
+from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
 pytestmark = pytest.mark.asyncio
@@ -93,12 +93,12 @@ def exchange_router(monkeypatch):
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
     from routers import exchange as exchange_router
 
     yield exchange_router
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
 def _validate_req(router, **overrides):
