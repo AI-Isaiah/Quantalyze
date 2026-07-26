@@ -164,6 +164,11 @@ ruleTester.run("no-raw-analytics-fetch", rule, {
     //     pins that the FIXED POINT is also resolved at Program:exit, which is
     //     the property an "iterate as you traverse" implementation would lose
     //     while keeping every other fixture green.
+    //     >>> ALSO an M57 target, recorded after the fact: reverting the fixed
+    //     >>> point reddens this too, because it is a two-hop case as well. It
+    //     >>> is a SEPARATE fixture rather than a duplicate of shape 3, since
+    //     >>> only this one can fail while shape 3 passes (an implementation
+    //     >>> that iterates during traversal instead of at Program:exit).
     {
       code: "async function probe() {\n  return fetch(u);\n}\nconst base = process.env.ANALYTICS_SERVICE_URL;\nconst u = `${base}/health`;",
       errors: [{ messageId: "raw" }],
