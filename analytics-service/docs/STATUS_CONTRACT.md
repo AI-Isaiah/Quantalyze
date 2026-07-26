@@ -89,9 +89,11 @@ FastAPI's default `HTTPException` handler serialises to `{"detail": <detail>}`, 
 `service_error_response()`, which nests identically — so a consumer never has to know
 which mechanism produced the response.
 
-**Precedent, not invention:** `routers/simulator.py:453` already raises
-`HTTPException(500, detail={"error": ..., "correlation_id": ...})`. The envelope is a
-superset of that shape.
+**Precedent, not invention:** `routers/simulator.py:460` (S-18) already raised
+`HTTPException(500, detail={"error": ..., "correlation_id": ...})` before this contract
+existed. The envelope is a superset of that shape, so aligning that site in plan 04 was
+a rename of `error` → `detail` plus the machine keys — its `correlation_id` is
+unchanged.
 
 ### ⚠️ Obligation this creates for 140.2 (mandatory)
 
@@ -207,7 +209,8 @@ The authoritative enumeration of every 5xx-capable site reachable from the seam.
 `140.2` can diff its assumptions against this table.
 
 **Legend.** *Plan* is the Phase 140.1 plan that owns the edit.
-`✅` = implemented as of plan 03. `⬜` = owned by a later plan.
+`✅` = implemented. As of plan 04 **all 21 explicit sites are ✅**; the three
+remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 
 | # | Site | Endpoint | Today | Trigger | Class | Target | Plan | Done |
 |---|---|---|---|---|---|---|---|---|
@@ -223,18 +226,18 @@ The authoritative enumeration of every 5xx-capable site reachable from the seam.
 | S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ✅ |
 | S-11 | `routers/internal.py:326` | `/internal/keys/{id}/permissions` | 502 | `create_exchange` raised non-`ValueError` | CALLER'S EXCHANGE | **424** `EXCHANGE_INIT_FAILED` | 03 | ✅ |
 | S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ✅ |
-| S-13 | `routers/match.py:1648` | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `dependency:supabase` + `Retry-After` | 04 | ⬜ |
-| S-14 | `routers/match.py:1674` | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `dependency:supabase` + `Retry-After` | 04 | ⬜ |
-| S-15 | `routers/match.py:1765` | `/api/match/recompute` | 500 `f"Scoring failed: {err}"` | `_score_one_allocator` raised | SERVICE-PERMANENT | **500** `SCORING_FAILED`, **strip `{err}`** | 04 | ⬜ |
-| S-16 | `routers/match.py:1818` | `/api/match/eval` | 503 | `PaginatedSelectTruncated` — caller's `lookback_days` too large | **CALLER** | **400** `EVAL_WINDOW_TOO_LARGE` | 04 | ⬜ |
-| S-17 | `routers/match.py:1826` | `/api/match/eval` | 500 `f"Eval failed: {err}"` | any exception | SERVICE-PERMANENT | **500** `EVAL_FAILED`, **strip `{err}`** | 04 | ⬜ |
-| S-18 | `routers/simulator.py:453` | `/api/simulator` | 500 `{error, correlation_id}` | any exception in the sim body | SERVICE-PERMANENT | **500** `SIMULATION_FAILED` | 04 | ⬜ |
-| S-19 | `routers/portfolio.py:653` | `/api/portfolio-analytics` | 500 | insert returned no row | SERVICE-TRANSIENT | **503** `dependency:supabase` | 04 | ⬜ |
-| S-20 | `routers/portfolio.py:1163` | `/api/portfolio-analytics` | 500 | compute raised | SERVICE-PERMANENT | **500** `PORTFOLIO_ANALYTICS_FAILED` | 04 | ⬜ |
+| S-13 | `routers/match.py:1655` | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `ADMIN_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-14 | `routers/match.py:1689` | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `ROLE_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-15 | `routers/match.py:1798` | `/api/match/recompute` | 500 `f"Scoring failed: {err}"` | `_score_one_allocator` raised | SERVICE-PERMANENT | **500** `SCORING_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
+| S-16 | `routers/match.py:1863` | `/api/match/eval` | 503 | `PaginatedSelectTruncated` — caller's `lookback_days` too large | **CALLER** | **400** `EVAL_WINDOW_TOO_LARGE` | 04 | ✅ |
+| S-17 | `routers/match.py:1882` | `/api/match/eval` | 500 `f"Eval failed: {err}"` | any exception | SERVICE-PERMANENT | **500** `EVAL_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
+| S-18 | `routers/simulator.py:460` | `/api/simulator` | 500 `{error, correlation_id}` | any exception in the sim body | SERVICE-PERMANENT | **500** `SIMULATION_FAILED` (keeps `correlation_id`) | 04 | ✅ |
+| S-19 | `routers/portfolio.py:661` | `/api/portfolio-analytics` | 500 | insert returned no row | SERVICE-TRANSIENT | **503** `ANALYTICS_ROW_NOT_CREATED`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-20 | `routers/portfolio.py:1181` | `/api/portfolio-analytics` | 500 | compute raised | SERVICE-PERMANENT | **500** `PORTFOLIO_ANALYTICS_FAILED` | 04 | ✅ |
 | S-21 | *(implicit)* every seam endpoint | all 11 | **500 `text/plain`** | any unhandled exception | UNCLASSIFIED | **500**, no body — safe by R-1 | — | n/a |
 | S-22 | *(implicit)* `/process-key` | `/process-key` | **500 `text/plain`** | any unhandled exception | UNCLASSIFIED | **500**, no body. `routers/process_key.py` contains ZERO explicit 5xx sites | — | n/a |
-| S-23 | `main.py:230` | all except `/health`, `/internal/*`, `/process-key` | 503 | `SERVICE_KEY` env unset | SERVICE-PERMANENT | **500** `SERVICE_KEY_UNCONFIGURED`. ⚠️ a `JSONResponse` **literal**, not an `HTTPException` — it does NOT appear in a `status_code=5` `HTTPException` grep, and it must stay **returned**, never raised | 04 | ⬜ |
-| S-24 | `main.py:279` | `/health` | 503 `{status:"stale"}` | worker heartbeat stale | SERVICE-TRANSIENT | **unchanged** — `/health` is outside the seam; see O-7 | — | n/a |
+| S-23 | `main.py:246` | all except `/health`, `/internal/*`, `/process-key` | 503 | `SERVICE_KEY` env unset | SERVICE-PERMANENT | **500** `SERVICE_KEY_UNCONFIGURED`. ⚠️ a `JSONResponse` **literal**, not an `HTTPException` — it does NOT appear in a `status_code=5` `HTTPException` grep, and it must stay **returned**, never raised | 04 | ✅ |
+| S-24 | `main.py:299` | `/health` | 503 `{status:"stale"}` | worker heartbeat stale | SERVICE-TRANSIENT | **unchanged** — `/health` is outside the seam; see O-7 | — | n/a |
 
 **Tally:** 24 rows = **21 explicit editable sites** (S-01…S-20 `HTTPException` raises,
 plus S-23 the `JSONResponse` literal) + 2 implicit unhandled-500s (S-21, S-22, no edit
