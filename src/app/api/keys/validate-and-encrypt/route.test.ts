@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { NextRequest } from "next/server";
 // Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
 // leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
@@ -644,5 +646,53 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       "investor-password-123",
       "MetaQuotes-Demo",
     );
+  });
+});
+
+/**
+ * B-13 (Phase 140.2 / SEAMCORE-08, ROADMAP SC6 clause c) — the dormant
+ * handler's budget-key pin.
+ *
+ * `_unifiedValidateAndEncryptHandler` is module-private and has ZERO callers:
+ * the exported POST always takes the legacy branch, because `/process-key` has
+ * no encrypt step yet and delegating would write all-NULL ciphertext to
+ * api_keys. So there is no way to DRIVE this binding, and every behavioural pin
+ * in the phase's thirteen is unavailable here. Reading the source is the only
+ * honest oracle left.
+ *
+ * Pinning it anyway is the whole point of routing a dormant call through the
+ * core in the first place: whoever revives this handler inherits a budget and
+ * the breaker automatically. If the key silently drifts while the handler
+ * sleeps, they inherit the WRONG budget instead — 60s of a Vercel concurrency
+ * slot versus 15s — and nothing would have said so.
+ *
+ * ⚠️ This is a DISK read, deliberately, not an assertion through this file's
+ * mocks. Every mock above replaces `@/lib/analytics-client`; a pin that read
+ * the binding through a wholesale mock would prove only that the mock returns
+ * what the mock was told to return.
+ *
+ * The pattern requires the call syntax and both literals adjacent, so an
+ * explanatory comment mentioning either string cannot satisfy it (this repo has
+ * hit prose-defeats-the-guard three times).
+ */
+describe("[SEAMCORE-08 / B-13] the dormant unified handler's budget key", () => {
+  it("binds process-key-unified-dormant to /process-key at the core call", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/app/api/keys/validate-and-encrypt/route.ts"),
+      "utf8",
+    );
+
+    expect(
+      /resilientFetch\(\s*"process-key-unified-dormant"\s*,\s*"\/process-key"/.test(
+        src,
+      ),
+      "The dormant unified handler no longer binds the " +
+        '"process-key-unified-dormant" budget to "/process-key". This handler ' +
+        "cannot be driven by a test (it is private and has no callers), so this " +
+        "source pin is the ONLY thing standing between a silent key swap and a " +
+        "revived handler running on someone else's deadline. It is also one of " +
+        "the thirteen bindings the roster in " +
+        "src/lib/resilient-fetch.wiring.test.ts keeps closed — update both.",
+    ).toBe(true);
   });
 });
