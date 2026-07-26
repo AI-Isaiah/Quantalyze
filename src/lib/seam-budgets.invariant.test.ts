@@ -186,6 +186,43 @@ const EXPECTED_EXCLUSION_PATHS: string[] = [
   "src/lib/warmup-analytics.ts",
 ];
 
+/**
+ * The two `/health` warmers, typed here as a literal set that must be PRESENT.
+ *
+ * ⚠️ THIS IS NOT A DUPLICATE of `EXPECTED_EXCLUSION_PATHS` above, and collapsing
+ * the two would delete a property. That one is a SET EQUALITY over the whole
+ * table: it catches a path being swapped or added. This one is a MEMBERSHIP
+ * pin over a named subset, and it is the half that survives the edit the set
+ * equality cannot see — an author who deletes a warmer's exclusion row AND
+ * updates the roster in the same commit leaves the set equality green while
+ * silently removing that warmer from the guard below, because the guard
+ * iterates the table. Membership is what keeps the guard's own reach pinned.
+ *
+ * A-12, which is why these two specifically may never enter the core: a cold
+ * `/health` probe FAILING is the normal case, so a warmer routed through the
+ * core would feed `recordSeamFailure` on every cold start, trip the breaker,
+ * and the open breaker would then short-circuit the recovery probe — the
+ * warmer's success being precisely the recovery signal. A self-sustaining
+ * outage manufactured by the mitigation.
+ */
+const WARMER_EXCLUSION_PATHS: string[] = [
+  "src/app/api/cron/warm-analytics/route.ts",
+  "src/lib/warmup-analytics.ts",
+];
+
+/**
+ * Whole-line and block comments go before matching, per this file's grep-gate
+ * hygiene rule; a trailing comment stays, because leaving one in can only make
+ * the guard fail when it should not, which is the safe direction.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+}
+
 /** The declared ceiling as the DEPLOYMENT ADAPTER would read it, from disk. */
 function readMaxDurationFromDisk(routePath: string): number {
   const abs = join(REPO, routePath);
@@ -328,6 +365,63 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         );
       }
     });
+
+    it("keeps both /health warmers in the exclusion table (membership, not equality)", () => {
+      // See WARMER_EXCLUSION_PATHS: the set equality above cannot see a warmer
+      // being dropped from the table AND from the roster in one commit, which
+      // would silently narrow the reach of the source scan below.
+      const missing = WARMER_EXCLUSION_PATHS.filter(
+        (p) => !(p in SEAM_EXCLUSIONS),
+      );
+      expect(
+        missing,
+        `A /health warmer left SEAM_EXCLUSIONS: ${missing.join(", ")}. The ` +
+          `exclusion row is not paperwork — it is what puts this warmer under ` +
+          `the source scan that stops it entering the resilience core. Removing ` +
+          `the row removes the guard, quietly, and the A-12 self-sustaining ` +
+          `outage becomes reachable again (a cold /health failing is NORMAL, so ` +
+          `a warmer inside the core trips the breaker, and the open breaker then ` +
+          `blocks the very probe that would prove recovery).`,
+      ).toEqual([]);
+    });
+
+    it.each(Object.keys(SEAM_EXCLUSIONS))(
+      "excluded path %s does not enter the resilience core",
+      (excludedPath) => {
+        // A-12, mechanically. Before this assertion, adding a resilientFetch()
+        // call inside a warmer reddened ZERO tests and ZERO lint rules: the
+        // ESLint allowlist sets `no-raw-analytics-fetch` to "off" on both warmer
+        // paths — which permits a raw fetch, it does not forbid the core — and
+        // the contradiction check below fires only if the author ALSO adds the
+        // path to SEAM_ROUTE_BUDGETS. SC6's warmer clause had no guard to
+        // extend; this is it.
+        const code = stripComments(
+          readFileSync(join(REPO, excludedPath), "utf8"),
+        );
+
+        const reason =
+          `An excluded path must not consume the core. For the two /health ` +
+          `warmers the consequence is A-12: a cold probe failing is the NORMAL ` +
+          `case, so routing one through the core feeds recordSeamFailure on ` +
+          `every cold start, trips breaker:railway, and the open breaker then ` +
+          `short-circuits the recovery probe — the mitigation becomes the ` +
+          `outage. For debug-key-flow it is the bespoke client-abort SSE design ` +
+          `the core does not model. If an exclusion genuinely belongs in the ` +
+          `core, delete its row and give it a budget; never keep the row and ` +
+          `call the core anyway.`;
+
+        expect(
+          /^\s*import[^\n]*resilient-fetch/m.test(code) ||
+            /\bfrom\s+["'][^"']*resilient-fetch["']/.test(code),
+          `"${excludedPath}" now imports the resilience core. ${reason}`,
+        ).toBe(false);
+
+        expect(
+          /\bresilientFetch\s*\(/.test(code),
+          `"${excludedPath}" now calls the resilience core. ${reason}`,
+        ).toBe(false);
+      },
+    );
 
     it("never lists the same path as both budgeted and excluded", () => {
       const budgeted = new Set(Object.keys(SEAM_ROUTE_BUDGETS));
