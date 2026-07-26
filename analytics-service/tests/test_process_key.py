@@ -3045,6 +3045,46 @@ def test_process_key_route_registers_both_limits():
     )
 
 
+def test_cross_language_claim_from_ts_client_buckets_to_tenant(monkeypatch):
+    """The TS mint and the Python verifier agree — proven by a shared LITERAL.
+
+    This exact string is COPY-PASTED from
+    src/lib/process-key-client.test.ts::"CROSS-LANGUAGE FIXTURE", where a vitest
+    proves `node:crypto` produces it for
+    (secret="internal-test-token", payload="cross-lang-user", exp=2524608300).
+    Copy-paste, never import: the two halves are in different languages and the
+    only thing that can prove they agree is a value neither side derived from
+    the other.
+
+    Without this, "the TS mints a claim" and "the Python verifies a claim" can
+    both be green while the two disagree on the signed message, the digest
+    encoding, or the separator — and every real caller silently lands in the
+    unverified bucket with PYAPI-02 declared closed.
+
+    exp is in 2050 so the expiry check is not a time bomb.
+    """
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "internal-test-token")
+
+    ts_minted_claim = (
+        "cross-lang-user.2524608300."
+        "1c6f1e147d8c58605c1196ac7e2a70220f21ff999208701224de6afbd03a296c"
+    )
+
+    key = process_key_router._process_key_rate_limit_key(
+        _req(
+            {
+                "Authorization": "Bearer internal-test-token",
+                "X-Tenant-Claim": ts_minted_claim,
+            }
+        )
+    )
+
+    assert key == "process_key:t:cross-lang-user", (
+        "the TS-minted claim did not verify server-side — the two halves of "
+        f"PYAPI-02 disagree. Got {key!r}."
+    )
+
+
 @pytest.fixture
 def throttled_client(monkeypatch):
     """A TestClient with the 429 handler registered and limiter storage reset.

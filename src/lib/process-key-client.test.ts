@@ -254,3 +254,165 @@ describe("postProcessKey — enqueue vs sync budget selection", () => {
     },
   );
 });
+
+/**
+ * Phase 140.1 / PYAPI-02 — the `X-Tenant-Claim` mint.
+ *
+ * The Python limiter buckets `/process-key` on an HMAC-verified tenant claim
+ * (`analytics-service/services/rate_limit.py:verify_tenant_claim`). Before this
+ * phase one 100/hour bucket keyed on the SHARED internal token served the whole
+ * platform, and Vercel caps the anonymous teaser at 600/hour per IP — so one
+ * anonymous visitor drained every tenant's window in about ten minutes.
+ *
+ * Python shipped FIRST and tolerates a missing header by falling back to the
+ * unverified bucket, which is what makes this TS half purely additive. Without
+ * it every caller lands in that fallback and PYAPI-02 is not actually closed.
+ *
+ * ORACLE DISCIPLINE: the expected HMAC is computed here with `node:crypto`,
+ * NEVER by importing the client's mint helper. An oracle that asks the code
+ * under test what it expects cannot fail.
+ */
+describe("postProcessKey — X-Tenant-Claim (PYAPI-02)", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+  });
+
+  function mockFetchOk() {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  function sentHeaders(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Record<string, string> {
+    return (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+  }
+
+  /** The independent oracle. Same algorithm, written out by hand. */
+  async function hmacHex(secret: string, message: string): Promise<string> {
+    const { createHmac } = await import("node:crypto");
+    return createHmac("sha256", secret).update(message).digest("hex");
+  }
+
+  it("mints a claim whose HMAC verifies, over the userId it forwards", async () => {
+    const fetchMock = mockFetchOk();
+
+    await postProcessKey({
+      flow_type: "onboard",
+      source: "binance",
+      context: {},
+      userId: "user-42",
+      correlationId: "c1",
+    });
+
+    const headers = sentHeaders(fetchMock);
+    const claim = headers["X-Tenant-Claim"];
+    expect(claim).toBeDefined();
+
+    const parts = claim.split(".");
+    expect(parts).toHaveLength(3);
+    const [payload, exp, mac] = parts;
+
+    // The payload is the SAME identifier already forwarded as X-User-Id — the
+    // claim is the signed half of an identity the service already receives
+    // unsigned (and, being unsigned, may never select a bucket).
+    expect(payload).toBe("user-42");
+    expect(headers["X-User-Id"]).toBe("user-42");
+
+    expect(mac).toBe(await hmacHex("internal-test-token", `${payload}.${exp}`));
+
+    // The secret is the HMAC key, never the payload and never the wire value.
+    expect(claim).not.toContain("internal-test-token");
+  });
+
+  it("mints an exp in the future and inside a short TTL", async () => {
+    const fetchMock = mockFetchOk();
+    const before = Math.floor(Date.now() / 1000);
+
+    await postProcessKey({
+      flow_type: "resync",
+      source: "binance",
+      context: {},
+      userId: "user-42",
+      correlationId: "c1",
+    });
+
+    const exp = Number(sentHeaders(fetchMock)["X-Tenant-Claim"].split(".")[1]);
+    expect(Number.isInteger(exp)).toBe(true);
+    expect(exp).toBeGreaterThan(before);
+    // A captured claim must not be a permanent tenant-bucket credential.
+    expect(exp).toBeLessThanOrEqual(before + 300);
+  });
+
+  it("mints the literal payload 'public' on the anonymous teaser path", async () => {
+    const fetchMock = mockFetchOk();
+
+    // src/app/api/verify-strategy/route.ts:192 passes userId: "public".
+    await postProcessKey({
+      flow_type: "teaser",
+      source: "binance",
+      context: {},
+      userId: "public",
+      correlationId: "c1",
+    });
+
+    const claim = sentHeaders(fetchMock)["X-Tenant-Claim"];
+    expect(claim.split(".")[0]).toBe("public");
+  });
+
+  it.each([
+    ["teaser", "public"],
+    ["onboard", "u1"],
+    ["resync", "u2"],
+    ["csv", "u3"],
+  ] as const)(
+    "attaches X-Tenant-Claim on the %s flow (one shared headers assembly)",
+    async (flowType, userId) => {
+      const fetchMock = mockFetchOk();
+
+      await postProcessKey({
+        flow_type: flowType,
+        source: "binance",
+        context: {},
+        userId,
+        correlationId: "c1",
+      });
+
+      const claim = sentHeaders(fetchMock)["X-Tenant-Claim"];
+      expect(claim.split(".")[0]).toBe(userId);
+    },
+  );
+
+  it("CROSS-LANGUAGE FIXTURE: the algorithm matches the string pytest pins", async () => {
+    // This exact string is COPY-PASTED (never imported) into
+    // analytics-service/tests/test_process_key.py::
+    //   test_cross_language_claim_from_ts_client_buckets_to_tenant
+    // where the Python key function must bucket it to
+    // "process_key:t:cross-lang-user". exp is year-2050 so the pytest's expiry
+    // check does not turn into a time bomb.
+    const CROSS_LANGUAGE_CLAIM =
+      "cross-lang-user.2524608300.1c6f1e147d8c58605c1196ac7e2a70220f21ff999208701224de6afbd03a296c";
+
+    const [payload, exp, mac] = CROSS_LANGUAGE_CLAIM.split(".");
+    expect(mac).toBe(await hmacHex("internal-test-token", `${payload}.${exp}`));
+    expect(payload).toBe("cross-lang-user");
+  });
+});
