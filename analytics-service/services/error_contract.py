@@ -60,9 +60,19 @@ SERVICE_DEPENDENCIES: Final[frozenset[str]] = frozenset(
 
 #: Seconds to advertise on a SERVICE-TRANSIENT ``503``, keyed by dependency.
 #:
-#: These are the ONLY Retry-After integers in the service — a raise site reads
-#: ``RETRY_AFTER_SECONDS["<dependency>"]``, it NEVER inlines a number. A
-#: dependency that has no transient arm is deliberately ABSENT: ``kek`` and
+#: These are the only PER-DEPENDENCY Retry-After integers in the service — a
+#: ``503`` raise site reads ``RETRY_AFTER_SECONDS["<dependency>"]``, it NEVER
+#: inlines a number, and :func:`_validate` enforces that: a ``503`` whose
+#: ``retry_after`` disagrees with this table raises ``ValueError``.
+#:
+#: They are NOT the only Retry-After integers on the wire. A ``429``'s wait is a
+#: limiter WINDOW computed per request, not a property of a dependency, and two
+#: sites mint one directly and deliberately bypass this helper:
+#: ``routers/internal.py:227`` (``str(int(_RATE_LIMIT_WINDOW_S))``) and the
+#: app-global ``RateLimitExceeded`` handler at ``main.py:526``. ``_validate``
+#: cannot reach either, so this half of the rule is documented, not guarded.
+#:
+#: A dependency that has no transient arm is deliberately ABSENT: ``kek`` and
 #: ``egress-proxy`` faults are permanent misconfigurations (``500``
 #: ``retryable:false``), and advertising a wait for them would invite exactly the
 #: self-sustaining retry loop R-1 exists to stop. Add a key here only when a

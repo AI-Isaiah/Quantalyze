@@ -31,10 +31,25 @@ downstream inference.
 
 | Class | Decision question | Status | `Retry-After` | `dependency` | `retryable` | 140.2 obligation |
 |---|---|---|---|---|---|---|
-| **CALLER** | Is the caller's request, credentials, or authorization at fault? | `400` `401` `403` `404` `422` `429` | on `429` only | `null` | `false` | **never counts** |
+| **CALLER** | Is the caller's request, credentials, or authorization at fault? | `400` `401` `403` `404` `422` | **never** | `null` | `false` | **never counts** |
+| **CALLER, THROTTLED** | Is the caller over a rate limit *we* imposed? | **`429`** | **required** | `null` (forbidden) | **`true`** | **never counts** |
 | **CALLER'S EXCHANGE** | Is the third party *the caller named* at fault (venue down, throttling us, key revoked at the venue, IP-allowlist change)? | **`424`** | optional | venue slug | `true` | **never counts**, and renders as **recoverable** |
 | **SERVICE-TRANSIENT** | Is one of *our* dependencies temporarily unavailable such that an identical retry could succeed? | `503` | **required** | one of ours | `true` | **counts — keyed on the named `dependency`, never globally** |
 | **SERVICE-PERMANENT** | Is this a misconfiguration or a bug that an identical retry cannot fix? | `500` | **never** | one of ours, or `null` | `false` | **never counts** |
+
+#### Why `429` is `retryable: true` (Phase 140.1.1, plan 01)
+
+`429` sat inside the CALLER row until 140.1.1, which made a `429` carrying `Retry-After`
+**unconstructable**: `error_contract._validate` requires `retryable=true` for any
+`retry_after`, while the generic CALLER arm raises on `retryable=true`. Both fired.
+
+The row is split rather than exempting `429` from the `retry_after`⇒`retryable` rule,
+because that alternative emits `retryable:false` in the body while sending a
+`Retry-After` header on the wire — a response that contradicts itself, which is the
+failure R-1 exists to stop. `429` is the one CALLER fault where an identical retry
+**does** succeed, after the advertised wait. It is still breaker-inert by construction
+(4xx) and still names no `dependency`. The `424` row is the in-file precedent for a
+retryable 4xx, so this is consistent with the existing structure, not a special case.
 
 ### R-1 — `500` means "do not retry"
 
@@ -116,9 +131,18 @@ Deliberate 4xx/5xx from `service_error()` are the object-detail case.
 ## 3. `Retry-After`
 
 Per-dependency **integer literals declared in exactly one table**:
-`RETRY_AFTER_SECONDS` in `services/error_contract.py`. A raise site reads
+`RETRY_AFTER_SECONDS` in `services/error_contract.py`. A **`503`** raise site reads
 `RETRY_AFTER_SECONDS["<dependency>"]`; it never inlines a number (OPEN-2 /
-Cluster-D lesson).
+Cluster-D lesson). Since Phase 140.1.1 that is **enforced, not merely stated**:
+`_validate` refuses a `503` whose `retry_after` disagrees with the table entry for its
+`dependency`, and refuses one naming a dependency with no entry at all.
+
+**A `429`'s wait is NOT in this table and must not be.** It is a limiter *window*,
+computed per request from the rate-limit configuration — not a property of any
+dependency. Two sites mint one directly and deliberately bypass the helper:
+`routers/internal.py:227` (`str(int(_RATE_LIMIT_WINDOW_S))`) and the app-global
+`RateLimitExceeded` handler at `main.py:526`. This table's scope is **per-dependency
+`503` waits only**.
 
 | Dependency | Seconds | Why |
 |---|---|---|
