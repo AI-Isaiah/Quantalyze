@@ -1476,3 +1476,133 @@ async def test_long_fetch_unknown_code_with_no_adapter_verdict_stays_transient()
         "must stay retryable. Failing closed here would turn every code we "
         "forgot to list into a permanent ban on a legitimate key."
     )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_explicit_transient_verdict_overrides_the_permanent_list() -> None:
+    """The THIRD state of the tri-state, which had no behaviour until now.
+
+    `permanent` is documented as tri-state, but the consumer read
+    `val.permanent is True or _reject_code in permanent_codes` — an explicit
+    `False` short-circuited nothing and fell straight through to the list. So an
+    adapter that CAN tell a genuine bad key from a venue-side auth blip, and says
+    so, was overruled by a string list that by construction cannot know: the key
+    goes failed_final and the author's explicit statement is dropped on the
+    floor.
+
+    `AUTH_FAILED` is the load-bearing choice — it is a MEMBER of the consumer's
+    `permanent_codes`, so this asserts the stated verdict genuinely wins rather
+    than merely agreeing with the list. Reverting the consumer to
+    `val.permanent is True or …` reddens here and nowhere else.
+
+    The direction is the fail-safe one: a stated `False` can only move a
+    rejection permanent -> transient (retried, bounded by max_attempts), never
+    transient -> permanent (a user locked out of a key that works).
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-explicit-transient",
+        "kind": "process_key_long",
+        "strategy_id": "s-explicit-transient",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-explicit-transient",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-explicit-transient",
+            "context": {
+                "strategy_id": "s-explicit-transient",
+                "api_key": "k",
+                "api_secret": "s",
+            },
+        },
+    }
+
+    blip_adapter = MagicMock()
+    blip_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            # Typed as a literal, not imported: this string IS a member of
+            # long_fetch's permanent_codes at HEAD, which is the whole point.
+            error_code="AUTH_FAILED",
+            human_message="The venue rejected the key while its auth tier was "
+                          "resyncing; it accepted the same key a minute later.",
+            debug_context=None,
+            permanent=False,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=blip_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "An adapter stated permanent=False — 'retrying may succeed' — on a "
+        "rejection it also tagged AUTH_FAILED for copy reuse. The stated verdict "
+        "must win: only the adapter that minted the code knows whether it can "
+        "clear, and the consumer's list is structurally uncompletable. Ignoring "
+        "the explicit False sends a recoverable key to failed_final."
+    )
+
+
+@pytest.mark.asyncio
+async def test_long_fetch_stated_permanence_still_wins_over_an_unlisted_code() -> None:
+    """The mirror of the test above — the True direction, on an UNLISTED code.
+
+    Together the two pin the field as genuinely tri-state at the consumer:
+    `True` beats an absent list entry, `False` beats a present one, and `None`
+    (the test two above) defers to the list. Any consumer rewrite that collapses
+    the field back to bi-state fails one of the three.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    job = {
+        "id": "job-stated-permanent",
+        "kind": "process_key_long",
+        "strategy_id": "s-stated-permanent",
+        "metadata": {
+            "unified_backbone_at_claim": "true",
+            "verification_id": "v-stated-permanent",
+            "source": "binance",
+            "flow_type": "onboard",
+            "correlation_id": "cid-stated-permanent",
+            "context": {
+                "strategy_id": "s-stated-permanent",
+                "api_key": "k",
+                "api_secret": "s",
+            },
+        },
+    }
+
+    stating_adapter = MagicMock()
+    stating_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            # Deliberately NOT a member of any permanent list — the pandera-minted
+            # open code space this channel exists for.
+            error_code="SOME_FUTURE_UNLISTABLE_CODE",
+            human_message="A rejection only the adapter can classify.",
+            debug_context=None,
+            permanent=True,
+        )
+    )
+
+    sb = _build_supabase_mock(existing_status="draft")
+
+    with patch("services.ingestion.long_fetch.get_adapter", return_value=stating_adapter), \
+         patch("services.ingestion.long_fetch.get_supabase", return_value=sb):
+        result = await run_process_key_long_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent", (
+        "A stated permanent=True on a code no list contains must be honoured — "
+        "that is the provenance channel's reason to exist, since csv_adapter "
+        "mints error_code from a pandera rule name and no enumeration can close "
+        "that space."
+    )

@@ -407,14 +407,35 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
             "AUTH_FAILED", "PERMISSION_DENIED",
             "TRADE_SCOPE", "WITHDRAW_SCOPE",
         }
-        _is_permanent = (
-            # Adapter-stated verdict wins when there is one. `is True` (not
-            # truthiness) so None — "no verdict", every adapter but MT5 today —
-            # falls through to the list logic below completely unchanged.
-            val.permanent is True
-            or _reject_code in permanent_codes
-            or (_reject_code == "VALIDATION_UNEXPECTED" and _is_unexpected_fallback)
-        )
+        if val.permanent is not None:
+            # The adapter that MINTED the code is the only component that knows
+            # whether it can clear, so a STATED verdict is authoritative in BOTH
+            # directions — that is what makes the field tri-state rather than an
+            # extra way to spell "add me to the list".
+            #
+            # An explicit False therefore SUPPRESSES the list, which is the
+            # fail-safe direction: it can only move a rejection permanent ->
+            # transient (retry next attempt), never transient -> permanent
+            # (failed_final, a user locked out of a key that works). That is the
+            # same omission polarity cron.py's CREDENTIAL_REJECTION_CODES has and
+            # the one this programme unifies toward. Cost of a wrong False is
+            # bounded by max_attempts; cost of a wrong permanent is a support
+            # ticket.
+            #
+            # `is not None` (identity, not truthiness) so None — "no verdict",
+            # every adapter but MT5 today — still falls through to the list logic
+            # below completely unchanged. No adapter states False at HEAD, so
+            # this branch is behaviour-identical to `val.permanent is True` for
+            # every code path in production today.
+            _is_permanent = val.permanent
+        else:
+            _is_permanent = (
+                _reject_code in permanent_codes
+                or (
+                    _reject_code == "VALIDATION_UNEXPECTED"
+                    and _is_unexpected_fallback
+                )
+            )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=f"validate failed: {_reject_code}",

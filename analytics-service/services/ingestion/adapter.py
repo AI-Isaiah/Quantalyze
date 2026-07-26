@@ -136,11 +136,23 @@ class ValidationResult:
     # point:
     #   True  -> "this rejection can never clear by retrying" (bad broker
     #            server; a trade-capable master password we refuse by design).
-    #   False -> "retrying may succeed" (an explicit transient verdict).
+    #   False -> "retrying may succeed" (an explicit transient verdict). This
+    #            OVERRIDES the consumer's own permanent-code list — an adapter
+    #            that can tell a genuine bad key from a venue-side auth blip may
+    #            state False on the blip while still tagging it AUTH_FAILED for
+    #            copy reuse, and the blip is then retried. Suppressing the list
+    #            is safe in this direction only: it can move a rejection
+    #            permanent -> transient (bounded by max_attempts), never
+    #            transient -> permanent (a user locked out of a working key).
     #   None  -> "this adapter states no verdict" — the DEFAULT, and what every
     #            adapter other than MT5 returns today. Consumers MUST fall
     #            through to their existing classification logic on None so this
     #            field changes no behaviour it does not explicitly opt into.
+    # All three states are LIVE at the one consumer that reads the field
+    # (services/ingestion/long_fetch.py): a stated verdict is authoritative in
+    # both directions, and only None falls through. A consumer that honours
+    # True but silently ignores False would make this docstring a lie and drop
+    # the author's explicit statement on the floor.
     # Why provenance instead of a longer code list: the consumers' permanent-code
     # sets are structurally uncompletable — services/ingestion/csv_adapter.py
     # mints error_code from a pandera rule name (``first_rule.upper()``), an open
