@@ -3993,3 +3993,297 @@ def test_pyapi_09d_resync_can_never_emit_wizard_duplicate(client):
     assert sb.selects("strategy_verifications") == [], (
         "a server-minted session id must not consult the idempotency pre-check"
     )
+
+
+# ---------------------------------------------------------------------------
+# PYAPIFIX-02 (Phase 140.1.1) — H-1: a fault at the CALLER'S VENUE answers 424
+# recoverable, not 403 terminal.
+#
+# Pre-fix the unified `_scope_rejected` gate routed every rejection to one 403
+# return. But services/exchange.py derives `read_only=False` from the
+# fail-CLOSED {read:T, trade:T, withdraw:T} default whenever the permission
+# probe hit a network/WAF failure (DOGFOOD-3) — that is NOT scope evidence. A
+# caller whose exchange blipped was told their credentials were unfixably
+# wrong, under a status whose whole meaning is "an identical retry cannot
+# succeed", while the body carried the copy "Try again in a moment."
+#
+# The fix is an ALLOW-LIST of PERMANENT codes defaulting to transient
+# (services/exchange.py::PERMANENT_VALIDATION_ERROR_CODES), never a denylist of
+# transient ones — a denylist fails UNSAFE and is the shape of this very
+# defect. The negative-control parametrisation below is the load-bearing half:
+# it proves the fix did not over-reach into genuine caller faults.
+# ---------------------------------------------------------------------------
+
+
+# The five venue-transient probe codes, with the `valid` flag each one really
+# carries out of services/exchange.py::validate_key_permissions. PROBE_FAILED is
+# set at :1207, AFTER fetch_balance succeeded (valid=True) — it enters the gate
+# through the `read_only is False` arm. The four ccxt classification arms
+# (:1112/:1123/:1135/:1145) return early with valid still False.
+@pytest.mark.parametrize(
+    "error_code,valid",
+    [
+        ("PROBE_FAILED", True),
+        ("DDOS_PROTECTION", False),
+        ("RATE_LIMITED", False),
+        ("EXCHANGE_UNAVAILABLE", False),
+        ("NETWORK_UNAVAILABLE", False),
+    ],
+    ids=[
+        "probe_failed",
+        "ddos_protection",
+        "rate_limited",
+        "exchange_unavailable",
+        "network_unavailable",
+    ],
+)
+def test_process_key_sync_venue_transient_answers_424_recoverable(
+    client, error_code: str, valid: bool
+):
+    """H-1 regression: a venue-transient probe code answers 424 + recoverable.
+
+    424 FAILED_DEPENDENCY is the UPSTREAM-TRANSIENT class (STATUS_CONTRACT
+    R-1): the fault is at a dependency, not with the caller, and a retry can
+    succeed. It is still 4xx, so it stays breaker-inert.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-transient")
+
+    transient_adapter = MagicMock()
+    transient_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=valid,
+            read_only=False,
+            error_code=error_code,
+            human_message="Exchange is currently unavailable. Try again in a few minutes.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=transient_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": f"wiz-transient-{error_code}",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == error_code
+    assert body["recoverable"] is True, (
+        f"{error_code} is a fault at the caller's venue — telling them the "
+        f"failure is unrecoverable sends them to rotate credentials that were "
+        f"never broken"
+    )
+    # No broker round-trip on a rejection, transient or not.
+    transient_adapter.fetch_raw.assert_not_called()
+
+
+# The five genuine caller faults. THIS IS THE NEGATIVE CONTROL: the fix widens
+# the transient class by DEFAULT, so without this parametrisation an
+# over-broad pre-gate would silently turn "your key has withdrawal
+# permissions" into "retry in a moment" and loop forever. MISSING_SCOPE is the
+# load-bearing member — it is absent from long_fetch's local `permanent_codes`,
+# so a fix that reused that set would drop it into the retryable default.
+@pytest.mark.parametrize(
+    "error_code,valid",
+    [
+        ("AUTH_FAILED", False),
+        ("PERMISSION_DENIED", False),
+        ("TRADE_SCOPE", True),
+        ("WITHDRAW_SCOPE", True),
+        ("MISSING_SCOPE", False),
+    ],
+    ids=[
+        "auth_failed",
+        "permission_denied",
+        "trade_scope",
+        "withdraw_scope",
+        "missing_scope",
+    ],
+)
+def test_process_key_sync_caller_fault_stays_403_terminal(
+    client, error_code: str, valid: bool
+):
+    """H-1 negative control: a genuine caller fault still answers 403."""
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-permanent")
+
+    permanent_adapter = MagicMock()
+    permanent_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=valid,
+            read_only=False,
+            error_code=error_code,
+            human_message="Key has trading permissions. Please use a read-only key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=permanent_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": f"wiz-permanent-{error_code}",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == error_code
+    assert body["recoverable"] is False, (
+        f"{error_code} names something wrong with the submitted credentials; "
+        f"an identical retry cannot succeed"
+    )
+    permanent_adapter.fetch_raw.assert_not_called()
+
+
+def test_process_key_sync_probe_failed_body_does_not_contradict_itself(client):
+    """The self-contradiction, pinned in ONE case.
+
+    services/exchange.py:1203-1206 emits the copy "Try again in a moment." for
+    PROBE_FAILED. Pre-fix that copy shipped beside `recoverable: false` under a
+    403 — three signals, two of them saying the opposite of the third. The
+    human copy is quoted here as a LITERAL, not imported from the module that
+    produces it: an oracle that read the string back out of exchange.py could
+    not fail if the copy and the flag drifted apart again.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-probe")
+
+    probe_adapter = MagicMock()
+    probe_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code="PROBE_FAILED",
+            human_message=(
+                "Could not verify the key's permission scopes — the permission "
+                "probe failed. Try again in a moment."
+            ),
+            debug_context={"probe_error": True},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=probe_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-probe-contradiction",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    body = r.json()
+    assert "Try again in a moment." in body["human_message"]
+    assert body["recoverable"] is True, (
+        "the body told the caller to try again while flagging the failure "
+        "unrecoverable — the two halves of one reply must agree"
+    )
+    assert r.status_code == 424, (
+        "and the status line must agree with both: 403 promises that an "
+        "identical retry cannot succeed, which contradicts the copy"
+    )
+
+
+def test_process_key_sync_our_own_validation_unexpected_fallback_stays_403(client):
+    """The fallback carve-out: OUR OWN VALIDATION_UNEXPECTED is permanent.
+
+    When the adapter sets NO error_code, `_reject_code` falls back to
+    VALIDATION_UNEXPECTED — which means a write-capable key was confirmed with
+    no scope code to name it. That is a caller fault and must NOT escape to the
+    424 arm. long_fetch's `_is_unexpected_fallback` carries the same
+    distinction; the route mirrors it with `val.error_code is not None`.
+
+    This is the positive statement of what fence test
+    `test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback`
+    pins from the code side — kept separate so that test stays byte-unedited.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-fallback")
+
+    fallback_adapter = MagicMock()
+    fallback_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code=None,
+            human_message="Key validation failed.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=fallback_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-fallback-permanent",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["code"] == "VALIDATION_UNEXPECTED"
+    assert body["recoverable"] is False
