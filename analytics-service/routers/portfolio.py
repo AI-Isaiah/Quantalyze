@@ -27,6 +27,8 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
+# PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
 from services.metrics import (
     _safe_float,
@@ -650,7 +652,19 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         raise
 
     if not insert_result.data:
-        raise HTTPException(status_code=500, detail="Failed to create analytics row")
+        # PYAPI-05 S-19: SERVICE-TRANSIENT. The INSERT did not raise — PostgREST
+        # simply returned no representation. Nothing about the request is wrong
+        # and nothing is permanently broken, so telling the caller "do not
+        # retry" (which is what a 500 means under R-1) is false about a
+        # condition that clears in seconds.
+        raise service_error(
+            503,
+            "ANALYTICS_ROW_NOT_CREATED",
+            dependency="supabase",
+            retryable=True,
+            retry_after=RETRY_AFTER_SECONDS["supabase"],
+            detail="Could not start the analytics computation — please retry.",
+        )
 
     analytics_id = rows(insert_result)[0]["id"]
 
@@ -1160,7 +1174,15 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 "be stuck in 'computing'; cron reaper will recover): %s",
                 portfolio_id, fail_exc,
             )
-        raise HTTPException(status_code=500, detail="Portfolio analytics computation failed")
+        # PYAPI-05 S-20: SERVICE-PERMANENT. The row is already marked FAILED
+        # above; an identical retry re-runs the identical pipeline over the
+        # identical rows, so this must never feed the breaker (R-1).
+        raise service_error(
+            500,
+            "PORTFOLIO_ANALYTICS_FAILED",
+            retryable=False,
+            detail="Portfolio analytics computation failed",
+        )
 
 
 def _generate_alerts(
