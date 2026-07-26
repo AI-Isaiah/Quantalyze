@@ -14,6 +14,7 @@ import {
   resilientFetch,
   SEAM_BUDGETS,
   type SeamBudgetKey,
+  type SeamResponse,
 } from "./resilient-fetch";
 import { CircuitOpenError } from "./seam-errors";
 
@@ -111,7 +112,11 @@ async function analyticsRequest(
   // FastAPI side has a stable join key.
   const correlationId = options.correlationId ?? crypto.randomUUID();
 
-  let res: Response;
+  // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
+  // run inside its classification window. The surface is the closed set this
+  // function already used (`ok`, `status`, `statusText`, `headers.get`, `json`,
+  // `text`); nothing here reaches for a `Response`-only member.
+  let res: SeamResponse;
   try {
     // Headers are built HERE and passed through the core byte-for-byte. A
     // dropped X-Service-Key silently unauthenticates every analytics call.

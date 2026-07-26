@@ -1,6 +1,6 @@
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
-import { CircuitOpenError } from "./seam-errors";
+import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -56,13 +56,22 @@ import { CircuitOpenError } from "./seam-errors";
  */
 
 /**
- * `CircuitOpenError` is defined in the dependency-free leaf `./seam-errors` so
- * client-bundle-reachable code (`wizardErrors.ts` → ten `"use client"`
- * components) and wholesale-mocked route tests can both branch on it. It is
- * re-exported here so server-side callers already importing the core do not
- * need a second import; the class identity is the leaf's, singular.
+ * `CircuitOpenError` and `SeamBodyReadError` are defined in the dependency-free
+ * leaf `./seam-errors` so client-bundle-reachable code (`wizardErrors.ts` → ten
+ * `"use client"` components) and wholesale-mocked route tests can both branch on
+ * them. They are re-exported here so server-side callers already importing the
+ * core do not need a second import; the class identities are the leaf's,
+ * singular.
+ *
+ * ⚠️ `@/lib/seam-errors` REMAINS THE CANONICAL IMPORT PATH, and every production
+ * site imports from there. This alias exists for ergonomics only. Both classes
+ * are thrown BY this module, which is why both appear here: an asymmetry would
+ * read as meaningful and would invite a reader to "fix" it in the wrong
+ * direction — importing the leaf's class from the CORE inside a
+ * `"use client"`-reachable module and dragging `@upstash/redis` into the browser
+ * bundle, which is the exact thing the leaf exists to prevent.
  */
-export { CircuitOpenError };
+export { CircuitOpenError, SeamBodyReadError };
 
 // ---------------------------------------------------------------------------
 // Breaker tuning constants
@@ -497,9 +506,171 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
 };
 
 /**
+ * A caller or configuration fault detected BEFORE the classification window.
+ *
+ * Deliberately NOT homed in the dependency-free leaf: nothing catches this by
+ * type, it is never rendered, and it can only be produced by a call-site bug or
+ * a deployment misconfiguration. Adding it to the leaf would widen a surface
+ * whose every member is browser-reachable and mock-surviving, for no reader.
+ *
+ * What it exists to separate: an invalid `timeoutMsOverride` and a malformed
+ * base URL both used to fail INSIDE the try — the override synchronously at
+ * `AbortSignal.timeout()`, the URL as a `fetch` REJECTION — so both were logged
+ * as "network failure reaching the analytics service" and both counted toward
+ * the breaker. Five of either in a 30s window opened the global circuit from a
+ * config typo, with the log pointing ops at Railway.
+ */
+export class SeamConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SeamConfigError";
+  }
+}
+
+/**
+ * Bounds for `timeoutMsOverride`, validated at function entry.
+ *
+ * The ceiling is the Vercel function ceiling every seam route declares
+ * (`SEAM_ROUTE_BUDGETS.expectedMaxDurationS` = 300s): a deadline beyond the
+ * lambda's own ceiling can never fire, so the request is unbounded in practice
+ * and the SC-4b headroom invariant is violated by construction. The floor is
+ * 1ms — `0` is not "no timeout", it is a deadline that fires immediately.
+ */
+const MIN_TIMEOUT_MS = 1;
+const MAX_TIMEOUT_MS = 300_000;
+
+/**
+ * The closed surface every seam call site uses on the value the core returns —
+ * enumerated by reading all five, not guessed.
+ *
+ * Each member is spelled as `Response["…"]` so a real `Response` remains
+ * assignable to this type: route tests that stub the core with `new Response()`
+ * keep type-checking, and the wrapper below can only ever narrow the surface,
+ * never widen it. `json()` and `text()` are the INSTRUMENTED reads — see
+ * `instrumentBody`.
+ */
+export interface SeamResponse {
+  readonly ok: Response["ok"];
+  readonly status: Response["status"];
+  readonly statusText: Response["statusText"];
+  readonly headers: Response["headers"];
+  json: Response["json"];
+  text: Response["text"];
+}
+
+/**
+ * Is this rejection the wall-clock deadline firing?
+ *
+ * ONE definition, used by both the transport arm and the body-read arm, because
+ * two copies drifted once already: the transport arm tested `err instanceof
+ * Error` alone, which is correct on Node (whose `DOMException` extends `Error`)
+ * and WRONG under jsdom (whose `DOMException` does not) — so every timeout in
+ * the vitest environment was logged as a network failure. Only the log line
+ * differed, which is exactly why it survived: no assertion could see it.
+ */
+function isDeadlineError(err: unknown): boolean {
+  return (
+    (err instanceof Error || err instanceof DOMException) &&
+    (err.name === "AbortError" || err.name === "TimeoutError")
+  );
+}
+
+/**
+ * Wrap a settled `Response` so its body reads run INSIDE the classification
+ * window (SEAMCORE-02 / ROADMAP SC1).
+ *
+ * WHY THE CORE OWNS THE READ. `AbortSignal.timeout` aborts the response STREAM,
+ * not just the header exchange. For the modal Railway degradation — headers
+ * fast, body slow — `fetch` RESOLVES, so the transport `try` closes and the
+ * rejection happens later inside the caller's `res.json()`. Before this wrapper
+ * the breaker was never told, and the raw `DOMException` escaped past every
+ * client's `instanceof` ladder.
+ *
+ * WHY A WRAPPER RATHER THAN A CALLBACK. The rejected alternatives were a
+ * `readBody` callback parameter or an exported `recordBodyReadFailure()` the
+ * caller invokes — convention, not mechanism, and a caller who forgets is
+ * silently back to today's behaviour. A returned object whose ONLY body methods
+ * are the instrumented ones has no uninstrumented path to reach. It also avoids
+ * making the core decide the PARSE shape, which would collide with SEAMCORE-01's
+ * requirement that the breaker verdict be decidable from the status line alone,
+ * before any body is read.
+ */
+function instrumentBody(
+  res: Response,
+  budgetKey: SeamBudgetKey,
+  timeoutMs: number,
+): SeamResponse {
+  let bodyConsumed = false;
+
+  async function read<T>(readBody: () => Promise<T>): Promise<T> {
+    if (bodyConsumed) {
+      // A SECOND read of the same body is a CALLER fault — the same one a raw
+      // `Response` reports as "Body is unusable". Delegate so the shape is
+      // unchanged, and record NOTHING: attributing a call-site bug to Railway
+      // is the A-22 defect wearing different clothes.
+      return readBody();
+    }
+    bodyConsumed = true;
+    try {
+      return await readBody();
+    } catch (err) {
+      const deadlineExceeded = isDeadlineError(err);
+      // The budget key is logged, never the path, body or header values — the
+      // seam carries raw exchange credentials and INTERNAL_API_TOKEN.
+      console.error(
+        deadlineExceeded
+          ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms while reading the response body`
+          : `[resilient-fetch] ${budgetKey}: response body read failed`,
+      );
+      // AWAITED INLINE, exactly like the transport arm. A "record in the
+      // background so we don't add latency" IIFE is orphaned by Fluid Compute
+      // freeze, so the breaker would never arm during precisely the correlated
+      // incident it exists for (TRAP-7).
+      await recordSeamFailure();
+      // THROWS, and must keep throwing. `keys/[id]/permissions` runs its seam
+      // call inside an `unstable_cache` callback and depends on the throw to
+      // leave NO cache entry; returning the failure as a VALUE would cache a
+      // 503 for 60s against a 30s breaker cooldown — the mitigation becoming
+      // the outage (T-140-32).
+      throw new SeamBodyReadError(deadlineExceeded, err);
+    }
+  }
+
+  return {
+    get ok() {
+      return res.ok;
+    },
+    get status() {
+      return res.status;
+    },
+    get statusText() {
+      return res.statusText;
+    },
+    get headers() {
+      return res.headers;
+    },
+    json: () => read(() => res.json()),
+    text: () => read(() => res.text()),
+  };
+}
+
+/**
  * The ONE way to call the Railway analytics service.
  *
- * Sequence: breaker check → budgeted fetch → classified failure recording.
+ * Sequence: caller/config validation → breaker check → budgeted fetch →
+ * classified failure recording → INSTRUMENTED body read.
+ *
+ * "Classified" now covers the whole request lifecycle, which is the SEAMCORE-02
+ * correction: the transport arm (deadline or connection failure), the `>= 500`
+ * status arm, AND the body read, which `AbortSignal.timeout` can abort long
+ * after `fetch` itself has resolved. Before this, the docblock claimed a
+ * sequence the module did not implement — the body-read window was outside the
+ * try, so the modal Railway degradation recorded nothing.
+ *
+ * Validation comes FIRST and deliberately sits outside the window: an invalid
+ * `timeoutMsOverride` or a malformed `ANALYTICS_SERVICE_URL` is a caller or
+ * deployment fault, and counting it as Railway degradation is how a config typo
+ * opens the global breaker permanently.
  *
  * ⚠️ CALL ORDER RELATIVE TO AUTH. This must be invoked from INSIDE a route
  * handler body, AFTER that handler's `withAuth` / `isAdminUser` / `CRON_SECRET`
@@ -508,8 +679,12 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
  * before routing and cannot know the call site's budget, which is the second
  * reason the check lives here and is per-call.
  *
- * Errors: throws `CircuitOpenError` when the circuit is open; otherwise
- * rethrows whatever `fetch` threw, UNWRAPPED. Non-2xx responses are RETURNED,
+ * Errors: throws `SeamConfigError` for a caller/config fault (before any store
+ * or network I/O); throws `CircuitOpenError` when the circuit is open;
+ * otherwise rethrows whatever `fetch` threw, UNWRAPPED. A body read that fails
+ * throws `SeamBodyReadError` — the ONE place the core wraps rather than
+ * rethrows, because the raw rejection arrives after every client's transport
+ * `instanceof` ladder has already been passed. Non-2xx responses are RETURNED,
  * not thrown — status interpretation is the caller's contract, and only the
  * caller knows whether a 404 is an error or an expected empty result.
  */
@@ -517,24 +692,93 @@ export async function resilientFetch(
   budgetKey: SeamBudgetKey,
   path: string,
   init: ResilientFetchInit = {},
-): Promise<Response> {
+): Promise<SeamResponse> {
   const { timeoutMsOverride, ...requestInit } = init;
+
+  // ── ABOVE THE WINDOW ────────────────────────────────────────────────────
+  // Everything from here to the `try` is a CALLER or CONFIG fault if it fails,
+  // and none of it may be recorded as Railway degradation (A-22 / A-28).
+
+  // A-28. `AbortSignal.timeout()` itself rejects these — NaN and a non-number
+  // with a TypeError, a negative or absurd value with a RangeError — and it
+  // used to do so from INSIDE the try. Validate at entry instead, and name the
+  // offending value: it is a number the caller passed, never a secret.
+  if ("timeoutMsOverride" in init) {
+    if (
+      typeof timeoutMsOverride !== "number" ||
+      !Number.isFinite(timeoutMsOverride) ||
+      timeoutMsOverride < MIN_TIMEOUT_MS ||
+      timeoutMsOverride > MAX_TIMEOUT_MS
+    ) {
+      throw new SeamConfigError(
+        `[resilient-fetch] ${budgetKey}: invalid timeoutMsOverride ${String(timeoutMsOverride)} — expected a finite number of milliseconds between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}`,
+      );
+    }
+  }
   const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
+
+  // A-22. Hoisting the template alone is NOT sufficient: a malformed base URL
+  // does not throw here, it makes `fetch` REJECT — landing in the transport
+  // catch below, logged as "network failure reaching the analytics service" and
+  // counted, so five requests opened the global breaker from a config typo.
+  // Construct and validate eagerly instead. The env var NAME is logged, never
+  // its value: a base URL can legitimately carry userinfo.
+  const requestUrl = `${ANALYTICS_URL}${path}`;
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(requestUrl);
+  } catch {
+    console.error(
+      `[resilient-fetch] ${budgetKey}: CONFIG fault — ANALYTICS_SERVICE_URL is not a usable base URL. This is a deployment misconfiguration, NOT an analytics-service failure.`,
+    );
+    throw new SeamConfigError(
+      "[resilient-fetch] ANALYTICS_SERVICE_URL is not a usable base URL",
+    );
+  }
+  // `new URL("localhost:8002/x")` PARSES — protocol "localhost:" — so a
+  // parse-only guard would pass the single most likely typo (a missing scheme)
+  // straight through to a fetch rejection and back into the network arm.
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    console.error(
+      `[resilient-fetch] ${budgetKey}: CONFIG fault — ANALYTICS_SERVICE_URL has an unusable protocol. This is a deployment misconfiguration, NOT an analytics-service failure.`,
+    );
+    throw new SeamConfigError(
+      "[resilient-fetch] ANALYTICS_SERVICE_URL has an unusable protocol",
+    );
+  }
 
   const breaker = await isBreakerOpen();
   if (breaker.open) {
     throw new CircuitOpenError(breaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S);
   }
 
+  // Constructed after the breaker check so the budget covers the REQUEST, not
+  // the store round-trip that decides whether to make one.
+  const deadline = AbortSignal.timeout(timeoutMs);
+
+  // ── THE CLASSIFICATION WINDOW ───────────────────────────────────────────
   let res: Response;
   try {
     // Headers, body, and cache pass through byte-for-byte. A dropped
-    // `X-User-Id` re-opens the CT-4 cross-tenant rate-limit-bucket defect, and
-    // a dropped `Authorization` turns a working call into a 401 the breaker
-    // would then count as degradation.
-    res = await fetch(`${ANALYTICS_URL}${path}`, {
+    // `Authorization` turns a working call into a 401 the breaker would then
+    // count as degradation, and a dropped `X-Service-Key` silently
+    // unauthenticates every analytics call. (`X-User-Id` is forwarded too, but
+    // it is UNSIGNED client input and is deliberately NOT what the Python
+    // limiter buckets on — the signed `X-Tenant-Claim` is. An earlier comment
+    // here claimed dropping `X-User-Id` re-opens the CT-4 cross-tenant
+    // rate-limit defect; that is false, and a false claim that plausibly masks
+    // a real defect is worth the line to correct.)
+    res = await fetch(requestUrl, {
       ...requestInit,
-      signal: AbortSignal.timeout(timeoutMs),
+      // A-23, and it outranks the call site deliberately: `follow` is the
+      // platform default, so a caller spreading a stored init could restore the
+      // old behaviour by accident rather than by decision. Across a
+      // cross-origin 302 Node strips `Authorization` but forwards
+      // `X-Service-Key`, `X-Internal-Token` and `X-User-Access-Token`
+      // VERBATIM — this seam carries all three. It also removes the "up to 20
+      // hops silently consume the budget" problem.
+      redirect: "error",
+      signal: deadline,
     });
   } catch (err) {
     // Both failure classes count toward the breaker: the deadline fired, or the
@@ -544,9 +788,7 @@ export async function resilientFetch(
     // which would then be misreported as "service not reachable". Only the log
     // line differs; the budget key is logged, never the path, body, or headers
     // (the seam carries raw exchange credentials and INTERNAL_API_TOKEN).
-    const deadlineExceeded =
-      err instanceof Error &&
-      (err.name === "AbortError" || err.name === "TimeoutError");
+    const deadlineExceeded = isDeadlineError(err);
     console.error(
       deadlineExceeded
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
@@ -569,5 +811,9 @@ export async function resilientFetch(
   // error must never become an outage. The accepted cost (A4, operator
   // decision) is that if Railway 4xxes during genuine degradation the breaker
   // under-trips.
-  return res;
+
+  // The window does not close here. `instrumentBody` keeps `json()` and
+  // `text()` inside it, which is what makes the docblock's "classified failure
+  // recording" true for a stalling upstream (SEAMCORE-02 / SC1).
+  return instrumentBody(res, budgetKey, timeoutMs);
 }

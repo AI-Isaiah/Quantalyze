@@ -5,6 +5,7 @@ import {
   resilientFetch,
   SEAM_BUDGETS,
   type SeamBudgetKey,
+  type SeamResponse,
 } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 
@@ -189,7 +190,10 @@ export async function postProcessKey(
   const budgetKey = budgetKeyFor(args.flow_type);
   const timeoutMs = SEAM_BUDGETS[budgetKey].timeoutMs;
 
-  let res: Response;
+  // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
+  // run inside its classification window. Only `ok`, `status` and `json` are
+  // used here, all of which the closed surface carries.
+  let res: SeamResponse;
   try {
     // Headers and body pass through the core byte-for-byte. A dropped
     // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
