@@ -283,6 +283,25 @@ def _verify_internal_token(request: Request) -> None:
 # ---------------------------------------------------------------------------
 
 
+# PYAPI-10 (C-22, Phase 140.1) — the ONE discriminator on this route's 200
+# surface. Two rules, and they hold for EVERY 200 `/process-key` can emit:
+#
+#   1. `ok` is present and is a JSON boolean.
+#   2. when `ok` is false, `code` is a non-empty string.
+#
+# Before this, three of the six 200 shapes carried no discriminator at all and
+# consumers classified replies by sniffing which fields happened to be present.
+# The shapes, by behaviour: WIZARD_DUPLICATE (`_wizard_duplicate_reply`, TWO
+# emitters), `queued:true`, validate-only success, csv-finalize success,
+# synchronous success, and this envelope. `job_state` (PYAPI-09) rides the
+# duplicate shape rather than existing as a parallel discriminator.
+#
+# This envelope is the route's OWN vocabulary (Phase 17 DESIGN-05: top-level
+# `ok`/`code`/`human_message`, read directly off the body by the wizard's error
+# renderer). It is deliberately NOT `services/error_contract.py`'s PYAPI-05
+# envelope, which nests under `body.detail` and exists for the 5xx-capable seam
+# routes — `/process-key` has zero explicit 5xx sites (STATUS_CONTRACT.md S-22).
+# One route, one envelope: never a second parallel one.
 def _envelope_error(
     code: str | None,
     msg: str | None,
@@ -613,11 +632,13 @@ def _wizard_duplicate_reply(
     future change to the shape cannot land on one arm only.
 
     Status 200 (NOT 409) per the API-7 spec: idempotency is a feature, not a
-    failure. `ok` is deliberately NOT added here — unifying the six 200 shapes
-    on `/process-key` is Plan 140.1-05's job, and adding it piecemeal would
-    make that plan's exhaustive shape oracle harder to write, not easier.
+    failure — hence `ok: True` (PYAPI-10a). `code` is present alongside it
+    because "this was a duplicate" is a condition worth naming even on a
+    success; the contract is `code` MUST be a non-empty string when `ok` is
+    false, not that it is absent when `ok` is true.
     """
     return {
+        "ok": True,
         "code": "WIZARD_DUPLICATE",
         "idempotent": True,
         "verification_id": existing["id"],
@@ -1202,6 +1223,8 @@ async def process_key(
         ).execute()
         log.info("process_key.queued", verification_id=verification_id)
         return {
+            # PYAPI-10a — accepting the session for the worker is a success.
+            "ok": True,
             "queued": True,
             "verification_id": verification_id,
             "correlation_id": correlation_id,
@@ -1463,6 +1486,14 @@ async def process_key(
     )
 
     return {
+        # PYAPI-10a — the shape consumers used to SNIFF (they keyed on
+        # `verification_id` being present: verify-strategy/route.ts:197-198,
+        # csv-finalize/route.ts:1213-1214). `code` is an explicit null rather
+        # than an absent key: this terminal success names no sub-condition, and
+        # making the absence explicit means a consumer reading `body.code` on
+        # the one shape it used to sniff never gets `undefined`.
+        "ok": True,
+        "code": None,
         "verification_id": verification_id,
         "status": "published",
         "trust_tier": trust_tier,
