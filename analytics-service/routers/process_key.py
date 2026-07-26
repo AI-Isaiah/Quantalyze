@@ -301,6 +301,48 @@ def _envelope_error(
     }
 
 
+def _caller_owns_strategy(
+    supabase: Any, strategy_id: str, user_id: Any
+) -> bool:
+    """PYAPI-01e / C-08 — does ``user_id`` own ``strategy_id``?
+
+    Scoping the strategy_verifications reads by ``strategy_id`` (PYAPI-01d) is
+    necessary but NOT sufficient, because ``context.strategy_id`` is entirely
+    caller-supplied: a caller that supplies a FOREIGN strategy_id simply gets a
+    read that is consistently foreign. This is the second layer.
+
+    **Fails closed on a missing/blank user_id.** A row cannot be owned by
+    nobody, so "no user_id" is a miss, not a bypass — otherwise the whole gate
+    would be opt-out by omission. Every non-teaser production caller forwards
+    ``context.user_id`` (``keys/sync/route.ts:417``,
+    ``finalize-wizard/route.ts:1310``, ``keys/validate-and-encrypt/route.ts:210``,
+    ``csv-finalize/route.ts:1183``), and the I-SEC2 warning below already flags
+    the absent case — this promotes that warning to a refusal on the one path
+    that then reads ANOTHER table by that caller-supplied id.
+
+    Deliberately uses the service-role client: only the csv flow forwards
+    ``X-User-Access-Token`` today, so a user-scoped (RLS-enforcing) client is
+    not available on onboard/resync and the ownership predicate has to be an
+    explicit filter. Forwarding that header on every authenticated flow is a
+    recorded Phase 140.2 obligation.
+
+    Not wrapped in try/except on purpose: a lookup failure is a service-side
+    fault, and answering 403 to it would blame the caller for our outage. The
+    exception propagates, exactly like the draft INSERT below.
+    """
+    if not user_id or not isinstance(user_id, str):
+        return False
+    owned = one(
+        supabase.table("strategies")
+        .select("id")
+        .eq("id", strategy_id)
+        .eq("user_id", user_id)
+        .maybe_single()
+        .execute()
+    )
+    return owned is not None
+
+
 def _trade_to_dict(t: Trade | dict[str, Any]) -> dict[str, Any]:
     """Normalize a fetch_raw element to a plain dict for trades_to_daily_returns.
 
@@ -706,53 +748,30 @@ async def process_key(
         context=body.context,
     )
 
-    # 1) Idempotency check (BACKBONE-08): wizard_session_id UNIQUE INDEX.
-    #
     # strategy_verifications.wizard_session_id is NOT NULL. The wizard-driven
     # flows (onboard/csv finalize) always supply one, but `resync` via
     # /api/keys/sync carries no wizard_session_id (it re-syncs an existing
     # strategy, not a wizard session) -- so the draft insert below 23502'd with
     # a NULL wizard_session_id once resync got past the validator. Mint a fresh
-    # uuid4 when absent (same pattern teaser uses above). resync is then
-    # deliberately not idempotent-by-session (each refresh is its own
-    # verification), which matches teaser's contract; downstream sync_trades
-    # enqueues still dedupe on (strategy_id, kind).
+    # uuid4 when absent (same pattern teaser uses above).
     wizard_session_id = body.context.get("wizard_session_id") or str(uuid.uuid4())
-    if wizard_session_id:
-        existing = one(
-            supabase.table("strategy_verifications")
-            .select("*")
-            .eq("wizard_session_id", wizard_session_id)
-            .maybe_single()
-            .execute()
-        )
-        # `.maybe_single().execute()` returns None (NOT a response object with
-        # data=None) when zero rows match — which is the normal case for a
-        # brand-new upload (no prior strategy_verifications row for this
-        # wizard_session_id). The pre-fix `if existing.data:` therefore raised
-        # `AttributeError: 'NoneType' object has no attribute 'data'` and 500'd
-        # the ENTIRE ingestion for every first-time upload once the
-        # unified-backbone flag was flipped on. Guard the None: absent row →
-        # not idempotent → fall through to the normal insert path below.
-        if existing:
-            log.info(
-                "process_key.idempotent_hit",
-                verification_id=existing["id"],
-            )
-            # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
-            # idempotent-resume affordance. Pre-fix this path returned a
-            # plain happy-shape dict and the wizard had no observable
-            # signal that the row pre-existed. Status 200 (NOT a 409) per
-            # the spec — idempotency is a feature, not a failure.
-            return {
-                "code": "WIZARD_DUPLICATE",
-                "idempotent": True,
-                "verification_id": existing["id"],
-                "status": existing["status"],
-                "trust_tier": existing.get("trust_tier"),
-                "correlation_id": correlation_id,
-                "queued": False,
-            }
+
+    # PYAPI-09d (Phase 140.1) — idempotency-by-session is available ONLY to a
+    # flow that CARRIES a caller-supplied wizard_session_id.
+    #
+    # resync (/api/keys/sync sends `context: {strategy_id, user_id}` only) and
+    # teaser (its session id is overwritten with a fresh uuid4 above) both run
+    # on a SERVER-MINTED id, so their duplicate arm was unreachable by luck — a
+    # fresh uuid4 never matches — rather than by construction. That left
+    # `keys/sync/route.ts:438`'s `WIZARD_DUPLICATE` branch as dead code which
+    # nonetheless documented a reachable state. Make it unreachable by
+    # construction instead: a server-minted session id never consults, and
+    # never emits, the idempotent-hit path. Each resync/teaser submission is
+    # its own verification; downstream sync_trades enqueues still dedupe on
+    # (strategy_id, kind).
+    idempotent_by_session = body.flow_type != "teaser" and bool(
+        body.context.get("wizard_session_id")
+    )
 
     # CR-02 fix (REVIEW.md 2026-05-08): two flag-on entry routes do NOT carry
     # strategy_id because the wizard step runs BEFORE the strategy row exists:
@@ -863,6 +882,86 @@ async def process_key(
                 None,
             ),
         )
+    # 1) Ownership gate (PYAPI-01e / C-08, Phase 140.1).
+    #
+    # From here down the handler reads and writes rows keyed on the
+    # caller-supplied `strategy_id`. Assert the caller owns it BEFORE the first
+    # such read, so a foreign strategy_id can never produce a row — not even
+    # one the reply then echoes. teaser is exempt: it has no tenant, and its
+    # strategy_id is force-overwritten with TEASER_ANCHOR_STRATEGY_ID above, so
+    # there is nothing caller-supplied left to check.
+    if body.flow_type != "teaser" and not _caller_owns_strategy(
+        supabase, strategy_id, body.context.get("user_id")
+    ):
+        log.warning(
+            "process_key.strategy_not_owned",
+            flow_type=body.flow_type,
+            source=body.source,
+            strategy_id=strategy_id,
+        )
+        return JSONResponse(
+            status_code=403,
+            content=_envelope_error(
+                "STRATEGY_NOT_OWNED",
+                "context.strategy_id is not owned by context.user_id.",
+                correlation_id,
+                None,
+            ),
+        )
+
+    # 2) Idempotency check (BACKBONE-08): the wizard_session_id UNIQUE INDEX.
+    #
+    # POSITION IS LOAD-BEARING (Phase 140.1, C-19/C-20 + PYAPI-01d). This block
+    # used to run ~150 lines earlier, above the `strategy_id is None` branch,
+    # which caused two distinct defects:
+    #   (a) there was no strategy_id in scope yet, so the read could only
+    #       filter on the caller-supplied wizard_session_id — a platform-global
+    #       key — and returned another tenant's row on any collision;
+    #   (b) it short-circuited EVERY flow, including csv-finalize. Once
+    #       finalize_csv_strategy had written an SV row carrying that session
+    #       id, every later csv call for the session hit this return instead of
+    #       the finalize branch — a plain double-submit, no timeout needed.
+    # Running it here fixes both: `strategy_id` exists (so the read key equals
+    # the DB's `UNIQUE (strategy_id, wizard_session_id)` key), and the arms that
+    # write no SV row at all — validate-only and the csv-finalize delegate —
+    # have already returned above.
+    if idempotent_by_session:
+        existing = one(
+            supabase.table("strategy_verifications")
+            .select("*")
+            .eq("strategy_id", strategy_id)
+            .eq("wizard_session_id", wizard_session_id)
+            .maybe_single()
+            .execute()
+        )
+        # `.maybe_single().execute()` returns None (NOT a response object with
+        # data=None) when zero rows match — which is the normal case for a
+        # brand-new upload (no prior strategy_verifications row for this
+        # wizard_session_id). The pre-fix `if existing.data:` therefore raised
+        # `AttributeError: 'NoneType' object has no attribute 'data'` and 500'd
+        # the ENTIRE ingestion for every first-time upload once the
+        # unified-backbone flag was flipped on. Guard the None: absent row →
+        # not idempotent → fall through to the normal insert path below.
+        if existing:
+            log.info(
+                "process_key.idempotent_hit",
+                verification_id=existing["id"],
+            )
+            # API-7 — emit WIZARD_DUPLICATE so the wizard renders the
+            # idempotent-resume affordance. Pre-fix this path returned a
+            # plain happy-shape dict and the wizard had no observable
+            # signal that the row pre-existed. Status 200 (NOT a 409) per
+            # the spec — idempotency is a feature, not a failure.
+            return {
+                "code": "WIZARD_DUPLICATE",
+                "idempotent": True,
+                "verification_id": existing["id"],
+                "status": existing["status"],
+                "trust_tier": existing.get("trust_tier"),
+                "correlation_id": correlation_id,
+                "queued": False,
+            }
+
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
     try:
         draft_insert = (
@@ -887,6 +986,20 @@ async def process_key(
         # 23505 and return the row that actually won the race.
         msg = str(exc)
         if "23505" in msg or "duplicate key" in msg.lower():
+            # PYAPI-09d — a server-minted session id has no idempotent identity
+            # (see `idempotent_by_session` above), so a 23505 on such a request
+            # is NOT a wizard duplicate: it is a real constraint violation from
+            # some other index, and returning someone's row for it would be a
+            # fabricated success. Surface the original error.
+            if not idempotent_by_session:
+                raise
+            # PYAPI-01d — the SECOND read site of the cross-tenant class, and
+            # the more reachable one: with `UNIQUE (strategy_id,
+            # wizard_session_id)` live, this is the arm a genuine collision
+            # takes. It MUST carry the same tenant scope as the pre-check —
+            # filtering on wizard_session_id alone would re-fetch, and echo,
+            # another strategy's row.
+            #
             # Re-fetch the row that won the race. Use maybe_single (returns
             # None on zero rows) rather than single (raises PGRST116): if a
             # TOCTOU delete / RLS hide between the failed insert and this
@@ -895,6 +1008,7 @@ async def process_key(
             race_winner = one(
                 supabase.table("strategy_verifications")
                 .select("*")
+                .eq("strategy_id", strategy_id)
                 .eq("wizard_session_id", wizard_session_id)
                 .maybe_single()
                 .execute()

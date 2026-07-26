@@ -99,6 +99,12 @@ def client(app):
 # for it to round-trip into the response envelope.
 _TEST_CID = "11111111-1111-4111-8111-111111111111"
 
+# Phase 140.1 Plan 02 defaults for the two tables `/process-key` gained a read
+# on. The default `strategies` row makes the caller the OWNER of the fixture
+# strategy (PYAPI-01e's gate passes); pass `owner_row=None` to make them not.
+_DEFAULT_OWNER_ROW = {"id": "s1"}
+_DEFAULT_JOB_ROW = {"status": "pending"}
+
 
 def _auth_headers() -> dict[str, str]:
     """Bearer header that matches the fixture-set INTERNAL_API_TOKEN."""
@@ -111,6 +117,8 @@ def _build_supabase_mock(
     insert_id: str = "ver-1",
     insert_raises: Exception | None = None,
     insert_raises_then_existing=None,
+    owner_row=_DEFAULT_OWNER_ROW,
+    job_row=_DEFAULT_JOB_ROW,
 ):
     """Construct a chained-MagicMock supabase client for the tests below.
 
@@ -120,6 +128,18 @@ def _build_supabase_mock(
       - `.select(...).eq(...).maybe_single().execute()` → ValidationResult
       - `.insert(...).execute()` → row with id
       - `.rpc(...).execute()` → empty success
+
+    Phase 140.1 Plan 02: `/process-key` now reads THREE tables, and two of them
+    must not share the strategy_verifications response script — the ownership
+    gate (`strategies`, PYAPI-01e) and the duplicate path's job-state read
+    (`compute_jobs`, PYAPI-09) would otherwise consume the SV `side_effect`
+    queue and desynchronise the pre-check/race-winner sequence. `.table()`
+    therefore routes by name. `return_value` is deliberately left pointing at
+    the strategy_verifications mock so the existing
+    `fake.table.return_value.insert.call_args_list` assertions keep working.
+
+    `owner_row=None` makes the caller a non-owner (403); `job_row` sets the
+    compute_jobs status the duplicate reply's `job_state` is derived from.
     """
     fake = MagicMock()
 
@@ -136,6 +156,12 @@ def _build_supabase_mock(
     else:
         select_chain.execute.return_value = MagicMock(data=existing_row)
     eq_chain = MagicMock()
+    # Self-chaining: both strategy_verifications reads are now
+    # `.eq("strategy_id", …).eq("wizard_session_id", …)` (PYAPI-01d). Without
+    # this, the SECOND .eq() returns a fresh auto-mock whose .execute().data is
+    # a MagicMock — `one()` narrows that to None and every idempotent-hit test
+    # silently falls through to the insert path instead of asserting anything.
+    eq_chain.eq.return_value = eq_chain
     eq_chain.maybe_single.return_value = select_chain
     eq_chain.single.return_value = select_chain  # legacy; race now uses maybe_single
     select_obj = MagicMock()
@@ -161,6 +187,34 @@ def _build_supabase_mock(
     table.update.return_value = update_chain
 
     fake.table.return_value = table
+
+    # `strategies` — the PYAPI-01e ownership gate
+    # (`.select("id").eq("id",…).eq("user_id",…).maybe_single()`), plus the
+    # incidental `asset_class` read and the fingerprint UPDATE.
+    strategies_table = MagicMock()
+    strategies_select = MagicMock()
+    strategies_eq = MagicMock()
+    strategies_eq.eq.return_value = strategies_eq
+    strategies_eq.maybe_single.return_value = MagicMock(
+        execute=MagicMock(return_value=MagicMock(data=owner_row))
+    )
+    strategies_select.eq.return_value = strategies_eq
+    strategies_table.select.return_value = strategies_select
+    strategies_table.update.return_value = update_chain
+
+    # `compute_jobs` — the PYAPI-09 job-state read-back on the duplicate path.
+    jobs_table = MagicMock()
+    jobs_select = MagicMock()
+    jobs_eq = MagicMock()
+    jobs_eq.eq.return_value = jobs_eq
+    jobs_eq.maybe_single.return_value = MagicMock(
+        execute=MagicMock(return_value=MagicMock(data=job_row))
+    )
+    jobs_select.eq.return_value = jobs_eq
+    jobs_table.select.return_value = jobs_select
+
+    _by_name = {"strategies": strategies_table, "compute_jobs": jobs_table}
+    fake.table.side_effect = lambda name, *a, **k: _by_name.get(name, table)
 
     # RPC path (transition_strategy_verification, enqueue_compute_job, log_audit_event)
     rpc_chain = MagicMock()
@@ -454,6 +508,7 @@ def test_process_key_idempotent_double_submit(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-1",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -494,6 +549,7 @@ def test_process_key_unique_violation_returns_existing(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-race",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -530,6 +586,7 @@ def test_process_key_race_catch_zero_rows_reraises_original(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-race-gone",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -595,6 +652,7 @@ def test_process_key_csv_sync_path(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-csv-1",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -675,6 +733,7 @@ def test_process_key_new_upload_maybe_single_none_does_not_500(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-fresh-1",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -701,6 +760,7 @@ def test_process_key_onboard_queues(client):
                 "source": "okx",
                 "context": {
                     "strategy_id": "s1",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-onb-1",
                     "api_key": "k",
                     "api_secret": "s",
@@ -1353,6 +1413,9 @@ def _run_sync_pipeline(
     }
     if strategy_id is not None:
         context["strategy_id"] = strategy_id
+        # PYAPI-01e: a non-teaser flow carrying a strategy_id must also carry
+        # the owner's user_id, or the ownership gate refuses it (403).
+        context["user_id"] = "u1"
 
     with patch(
         "routers.process_key.get_supabase",
@@ -1624,6 +1687,7 @@ def test_process_key_sfox_onboard_draft_carries_trust_tier_api_verified(client, 
                 "source": "sfox",
                 "context": {
                     "strategy_id": "s1",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-sfox-1",
                     "api_key": "k",
                     "api_secret": "s",
@@ -1745,6 +1809,7 @@ def test_process_key_mt5_onboard_draft_carries_trust_tier_api_verified(
                 "source": "mt5",
                 "context": {
                     "strategy_id": "s1",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-mt5-1",
                     "api_key": "1234567",
                     "api_secret": "pw",
@@ -1779,7 +1844,7 @@ def test_process_key_mt5_resync_draft_carries_trust_tier_api_verified(
             json={
                 "flow_type": "resync",
                 "source": "mt5",
-                "context": {"strategy_id": "s1"},
+                "context": {"strategy_id": "s1", "user_id": "u1"},
             },
             headers=_auth_headers(),
         )
@@ -2193,6 +2258,7 @@ def test_process_key_writes_audit_row(client):
                 "source": "csv",
                 "context": {
                     "strategy_id": "s1-audit",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-audit-1",
                     "fmt": "trades",
                     "raw_bytes_base64": "Y29sCjE=",
@@ -2497,6 +2563,7 @@ def test_process_key_csv_read_only_none_not_rejected_sync(client):
                 "source": "csv",
                 "context": {
                     "strategy_id": "s-csv-none",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-csv-none",
                     "fmt": "trades",
                     "raw_bytes_base64": "Y29sCjE=",
