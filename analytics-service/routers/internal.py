@@ -224,10 +224,31 @@ async def get_key_permissions(
     _verify_internal_token(request)
 
     if not _consume_rate_limit(key_id):
-        raise HTTPException(
-            status_code=429,
+        # PYAPIFIX2-03. This throttle answers the service's OWN envelope: the
+        # 429 arm of `error_contract._validate` existed but had zero call sites
+        # — unadopted, not unreachable — so a throttle carried no machine
+        # `code` and read, to a discriminator keying on `body.detail.code`, like
+        # any other 4xx. It is the one CALLER fault an identical retry clears.
+        #
+        # `code` is REUSED from the app-global RateLimitExceeded handler's
+        # vocabulary (`main.py`'s 429 JSONResponse), never re-minted — two
+        # synonyms for one condition is the defect this contract exists to stop.
+        # The explicit `headers={"Retry-After": ...}` kwarg is REPLACED, not
+        # dropped: `service_error` sets the header itself from `retry_after` via
+        # `_retry_after_headers`. `dependency` is omitted (a 429 is ours to
+        # impose, so naming one would mint a breaker key for our own throttle).
+        #
+        # ⚠️ This makes a THIRD 429 body shape coexist in the service: the flat
+        # `main.py` handler body, this nested envelope, and the bare scalar
+        # `{"detail": "<string>"}` still raised at match.py / simulator.py /
+        # portfolio.py. Deliberate. Picking the winner belongs to TS-23's owner
+        # (140.2 / 146) when it migrates those two — not here.
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=int(_RATE_LIMIT_WINDOW_S),
             detail="Too many permission probes for this key. Try again in a moment.",
-            headers={"Retry-After": str(int(_RATE_LIMIT_WINDOW_S))},
         )
 
     supabase = get_supabase()

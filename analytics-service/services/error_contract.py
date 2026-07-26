@@ -66,11 +66,19 @@ SERVICE_DEPENDENCIES: Final[frozenset[str]] = frozenset(
 #: ``retry_after`` disagrees with this table raises ``ValueError``.
 #:
 #: They are NOT the only Retry-After integers on the wire. A ``429``'s wait is a
-#: limiter WINDOW computed per request, not a property of a dependency, and two
-#: sites mint one directly and deliberately bypass this helper:
-#: ``routers/internal.py:227`` (``str(int(_RATE_LIMIT_WINDOW_S))``) and the
-#: app-global ``RateLimitExceeded`` handler at ``main.py:526``. ``_validate``
-#: cannot reach either, so this half of the rule is documented, not guarded.
+#: limiter WINDOW computed per request, not a property of a dependency, and ONE
+#: site still mints one directly and deliberately bypasses this helper: the
+#: app-global ``RateLimitExceeded`` handler's ``JSONResponse``
+#: (``main.py:513-527``), which must RETURN from an exception handler and answers
+#: the flat ``{ok, code, human_message, …, retry_after_seconds}`` body.
+#: ``_validate`` cannot reach that one, so that half of the rule is documented,
+#: not guarded.
+#:
+#: The other former bypass — ``routers/internal.py``'s per-key probe throttle —
+#: was migrated onto ``service_error(429, "RATE_LIMITED", …)`` by PYAPIFIX2-03
+#: and gave the ``429`` arm its first call site. ``_validate`` DOES reach it, and
+#: :func:`_retry_after_headers` sets its header from ``retry_after``; the site no
+#: longer builds a ``headers=`` kwarg of its own.
 #:
 #: A dependency that has no transient arm is deliberately ABSENT: ``kek`` and
 #: ``egress-proxy`` faults are permanent misconfigurations (``500``
