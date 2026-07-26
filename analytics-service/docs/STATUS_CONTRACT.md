@@ -79,7 +79,9 @@ unclassified, and R-1 is what makes that safe.
 
 ## 2. Where the envelope lives
 
-**Always at `body.detail`.** One location, one rule.
+**At `body.detail`, with exactly two documented exceptions — both FLAT, both
+named in §2.1.** One location, one rule, and the rule includes its exceptions
+rather than leaving a consumer to discover them at runtime.
 
 ```jsonc
 // A deliberate 503 from an HTTPException raise site
@@ -104,11 +106,64 @@ FastAPI's default `HTTPException` handler serialises to `{"detail": <detail>}`, 
 `service_error_response()`, which nests identically — so a consumer never has to know
 which mechanism produced the response.
 
-**Precedent, not invention:** `routers/simulator.py:460` (S-18) already raised
+**Precedent, not invention:** `routers/simulator.py:466` (S-18) already raised
 `HTTPException(500, detail={"error": ..., "correlation_id": ...})` before this contract
 existed. The envelope is a superset of that shape, so aligning that site in plan 04 was
 a rename of `error` → `detail` plus the machine keys — its `correlation_id` is
 unchanged.
+
+## 2.1 The two FLAT exceptions — and the one discriminator that reads both
+
+Two shapes put the machine `code` at the **top level** and a **scalar string** at
+`body.detail`. Both exist for the *same* reason and it is not stylistic: the
+TypeScript seams that consume them do `err.detail ?? "…"` and hand the result to a
+**substring cascade over the resulting message**
+(`src/lib/wizardErrors.ts` `classifyKeyValidationError`). A nested object at
+`body.detail` stringifies to `"[object Object]"` there, misses every branch, and
+regresses codes that classify correctly today to `UNKNOWN`/500. So on these seams the
+nested envelope is not merely unhelpful — it is a **regression**, and it is refused at
+construction time.
+
+| Shape | Emitted by | Body | Consumer reads |
+|---|---|---|---|
+| **App-global handlers** (§7: `RequestValidationError` 422, `RateLimitExceeded` 429) | `main.py` handlers | `{ok, code, human_message, detail (scalar str), correlation_id, recoverable[, retry_after_seconds]}` | `body.code` |
+| **`VenueTransientHTTPException`** (PYAPIFIX2-01) | `services/error_contract.py:345`, rendered by `main.py:574` | `{detail (scalar str), code, recoverable}` — **exactly three keys, nothing else** | `body.code` |
+
+`VenueTransientHTTPException`'s seven raise sites at HEAD:
+`routers/exchange.py:168` (sFOX 429), `:183` (sFOX 5xx/transport), `:376` (MT5 probe
+timeout), `:392` (MT5 account mismatch), `:414` (MT5 transient client error), `:603`
+(the ccxt verdict collapse) — all on **`POST /api/validate-key`**
+(`routers/exchange.py:452`), the live key-connect path — plus `routers/portfolio.py:2359`
+on **`POST /api/verify-strategy`** (`routers/portfolio.py:2206`), which has no
+TypeScript caller and is closed on class-integrity grounds only.
+
+The class is a **CALLER-class 4xx by construction** and refuses anything outside
+`400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
+`correlation_id`, so a 5xx in this shape would violate R-2 and mis-key 140.2's
+per-dependency breaker. **Anything needing a `dependency` must use `service_error`.**
+
+### The discriminator 140.2 must build (SEAMCORE-01)
+
+Reading `body.detail.code` unconditionally yields `undefined` on both flat shapes and
+falls through to `UNKNOWN` — which is the exact dead end PYAPIFIX2-01 exists to kill,
+reintroduced at the layer that was supposed to consume the fix. Branch on the **type of
+`body.detail`**, which is decidable without knowing which route answered:
+
+```ts
+// `detail` is an OBJECT  => the nested service_error envelope (§2)
+// `detail` is a STRING   => one of the two flat shapes (§2.1)
+const code =
+  body?.detail !== null && typeof body?.detail === "object"
+    ? body.detail.code          // nested: also has dependency + retryable
+    : body?.code;               // flat:   also has recoverable (or ok/human_message)
+
+const human =
+  typeof body?.detail === "string" ? body.detail : body?.detail?.detail;
+```
+
+`code` is the single stable discriminator in both branches; `dependency` exists **only**
+in the nested branch (the flat shapes are 4xx and name none), and that asymmetry is the
+contract, not an omission.
 
 ### ⚠️ Obligation this creates for 140.2 (mandatory)
 
@@ -125,6 +180,23 @@ oversight. It is invisible to users before 140.2 lands because the branch
 Note the distinction from PYAPI-07/PYAPI-08: the **422 and 429** handlers emit a
 **scalar** `detail` at the top level, which is why those need no TypeScript change.
 Deliberate 4xx/5xx from `service_error()` are the object-detail case.
+
+**Added to the object-detail set by PYAPIFIX2-03 (Phase 140.1.2):**
+`routers/internal.py:246` — the `/internal/keys/{key_id}/permissions` per-key throttle
+— now raises `service_error(429, "RATE_LIMITED", …)` where it previously answered a
+bare `{"detail": "<scalar str>"}`. Its consumer
+`src/app/api/keys/[id]/permissions/route.ts:147` does
+`throw new Error(err.detail ?? …)`, so from this change until 140.3 lands, a throttled
+probe logs `Error: [object Object]` at `route.ts:275` instead of the human sentence.
+
+**Diagnostics only, verified end to end:** the downstream classifier at
+`route.ts:254-268` keys on message substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
+`ECONNREFUSED`, `not configured`, `aborted`, `timeout`), and the *old* sentence matched
+none of them either — the reply is `PROBE_FAILED` / 502 both before and after. It is
+listed here so 140.3 knows this
+429 joined the object-detail set rather than discovering it from a log. Fixing it is a
+TypeScript edit on the same three-site `err.detail ?? …` pattern already owed above,
+so it is owed **with** them, not separately.
 
 ---
 
@@ -365,22 +437,35 @@ superseding the handler's 403-first behaviour**; `_verify_internal_token`'s `403
 stays in the handler as defence-in-depth but is unreachable through the full app.
 S-22 (any *unhandled* exception on `/process-key` → bodyless `500`) is unchanged.
 
-**Added by PYAPI-07 / PYAPI-08 (plan 08), and likewise NOT numbered into the
-S-table** — the S-table enumerates 5xx-capable sites, and these two are 4xx.
-Both are `app.add_exception_handler` registrations in `main.py`, so **every**
-route inherits them:
+**Added by PYAPI-07 / PYAPI-08 (plan 08) and PYAPIFIX2-01 (plan 140.1.2), and
+likewise NOT numbered into the S-table** — the S-table enumerates 5xx-capable
+sites, and all three of these are 4xx. All three are `app.add_exception_handler`
+registrations in `main.py`, so **every** route inherits them:
 
-| Handler | Status | Body | `Retry-After` |
-|---|---|---|---|
-| `RequestValidationError` | **422** | `{ok:false, code:"VALIDATION_FAILED", human_message, detail, correlation_id, recoverable:false}` — `detail` is a **scalar string** built from the pydantic error's `type` + `loc` ONLY | never |
-| `RateLimitExceeded` | **429** | `{ok:false, code:"RATE_LIMITED", human_message, detail, correlation_id, recoverable:true, retry_after_seconds}` — `detail` is a **scalar string** | **always** |
+| Handler | Registered | Status | Body | `Retry-After` |
+|---|---|---|---|---|
+| `RequestValidationError` | `main.py:424` | **422** | `{ok:false, code:"VALIDATION_FAILED", human_message, detail, correlation_id, recoverable:false}` — `detail` is a **scalar string** built from the pydantic error's `type` + `loc` ONLY | never |
+| `RateLimitExceeded` | `main.py:533` | **429** | `{ok:false, code:"RATE_LIMITED", human_message, detail, correlation_id, recoverable:true, retry_after_seconds}` — `detail` is a **scalar string** | **always** |
+| `VenueTransientHTTPException` | `main.py:608` | **400** (class admits any 4xx) | `{detail, code, recoverable}` and **nothing else** — `detail` is a **scalar string**, byte-identical to the copy the site emitted before the machine fields existed | never |
 
-These are the §2 SCALAR-`detail` case, not the object-`detail` case. That is
-deliberate and is why they need **zero** TypeScript change: the three
+All three are the §2.1 SCALAR-`detail` case, not the object-`detail` case. That
+is deliberate and is why they need **zero** TypeScript change: the three
 `err.detail ?? "..."` sites (Class 5) render the human string correctly as-is.
 Do not "unify" them onto the `service_error()` object envelope without
-re-reading §2 — doing so would reintroduce the `"[object Object]"` render on the
-two most common error statuses in the service.
+re-reading §2 and §2.1 — doing so would reintroduce the `"[object Object]"`
+render on the two most common error statuses in the service, and on
+`/api/validate-key` it would additionally regress `RATE_LIMITED`,
+`PROBE_FAILED` and `DDOS_PROTECTION` from correct classification to
+`UNKNOWN`/500. The `VenueTransientHTTPException` constructor
+(`services/error_contract.py:399`) refuses a non-scalar `detail`, an empty
+`code`, a non-`bool` `recoverable` and a non-4xx status, so three of those four
+mistakes cannot reach the wire at all.
+
+The third handler differs from the first two in one way worth stating: it is
+keyed on an `HTTPException` **subclass**, so Starlette's `type(exc).__mro__`
+lookup routes to it *instead of* FastAPI's default `HTTPException` handler. It
+therefore forwards `exc.headers` itself — a shadowing handler that dropped them
+would be silently lossy.
 
 The 422 handler **deliberately drops** pydantic's `input`, `ctx`, `msg` and
 `url`. `input` is the credential carrier (C-13: `context.api_secret` reached an
@@ -408,10 +493,47 @@ request is a category error that can never render. Recorded, not fixed.
 1. Decide the class from §1's decision questions. If more than one seems to fit, the
    tie-break is R-1: *could an identical retry succeed?*
 2. `from services.error_contract import service_error` (or `RETRY_AFTER_SECONDS`).
-3. `raise service_error(<status>, "<CODE>", dependency=…, retryable=…, detail="…")`.
+3. Emit the shape the **seam** can read. There are two, and choosing wrongly is a
+   user-visible regression, not a style slip:
+
+   **3a — the default, and what almost every site wants.**
+   `raise service_error(<status>, "<CODE>", dependency=…, retryable=…, detail="…")`.
    The helper refuses contradictory combinations with a `ValueError` at construction.
+   The envelope lands at `body.detail` (§2).
+
+   **3b — the FLAT shape, and ONLY when both of these hold.** The site is a **4xx**
+   that names no `dependency`, **and** its consumer is a seam that classifies by
+   SUBSTRING over `err.detail` — today that means `POST /api/validate-key` through
+   `src/lib/analytics-client.ts:179` → `classifyKeyValidationError`. There, a
+   `service_error` envelope makes `err.detail` an object, the message becomes
+   `"[object Object]"`, and codes that classify correctly today regress to
+   `UNKNOWN`/500. Then:
+
+   ```python
+   from services.error_contract import VenueTransientHTTPException
+
+   raise VenueTransientHTTPException(
+       status_code=400,          # 4xx only; the class refuses 5xx
+       code=result["error_code"],  # the PRODUCER's code, verbatim, no fallback
+       detail=result["error"],     # the scalar string, BYTE-IDENTICAL to before
+       recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+   )
+   ```
+
+   Three rules that are not negotiable at a 3b site: `detail` must be **byte-identical**
+   to the copy the site already emitted (it is the classifier's live input — a reword
+   changes behaviour), `code` is carried **verbatim from the producer with no
+   route-minted default** (a fabricated code hides a real service-layer bug behind a
+   plausible envelope), and the site names **no `dependency`** (it has nowhere to put
+   one, and 140.2's breaker must not be keyed off a caller-class fault).
+
+   If the site is a 5xx, or needs a `dependency`, or needs a `Retry-After`, it is **3a**.
+   There is no third option.
 4. Write the test with **literal** expected values — never import the expected status or
    code from `error_contract`. An oracle that reads its expectation out of the thing
    under test cannot fail (programme non-negotiable #3: 10 simultaneous semantic
-   mutations once produced a byte-identical `8859 passed`).
-5. Add the row to §7.
+   mutations once produced a byte-identical `8859 passed`). For a 3b site also assert
+   the **exact key set** of the wire body: a `set(body) == {"detail","code","recoverable"}`
+   assertion is what catches a fall-through to the default `HTTPException` handler,
+   which would otherwise render a plausible-looking `{"detail": …}` and pass.
+5. Add the row to §7 — and for a 3b site, to §2.1's raise-site list as well.
