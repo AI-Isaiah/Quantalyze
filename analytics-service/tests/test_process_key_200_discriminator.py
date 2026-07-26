@@ -444,17 +444,30 @@ _ROUTER_SRC = pathlib.Path(process_key_router.__file__)
 
 # The handler plus every helper one of its returns DELEGATES to. A delegate's
 # own returns are 200 shapes just as much as an inline dict is.
-_SHAPE_BEARING_FUNCTIONS = ("process_key", "_wizard_duplicate_reply", "_run_validate_only")
+#
+# ``_envelope_error`` joined this tuple in 140.1.2 plan 04. Shape 6 reaches the
+# wire as a bare ``return _envelope_error(...)`` at HTTP 200, so its dict IS a
+# 200 shape — but while the delegate sat outside this tuple only the
+# ``call:_envelope_error`` EDGE was pinned, never the shape at the end of it.
+# Its non-200 uses are unaffected: those returns wrap it in
+# ``JSONResponse(status_code=4xx, ...)``, which ``_declared_status`` excludes.
+_SHAPE_BEARING_FUNCTIONS = (
+    "process_key",
+    "_wizard_duplicate_reply",
+    "_run_validate_only",
+    "_envelope_error",
+)
 
-# The pinned CONTRACT. Eight entries, not six: five reachable wire shapes
-# (rendered by their sorted top-level key names), two delegation edges out of
-# ``process_key`` and one delegated error envelope. Adding a 200-capable return
-# to any of the three functions adds an entry and reddens this.
+# The pinned CONTRACT. Nine entries, not six: six reachable wire shapes
+# (rendered by their sorted top-level key names) and three delegation edges out
+# of ``process_key``. Adding a 200-capable return to any of the four functions
+# adds an entry and reddens this.
 _EXPECTED_200_FINGERPRINTS = frozenset(
     {
         "call:_envelope_error",
         "call:_run_validate_only",
         "call:_wizard_duplicate_reply",
+        "dict:code,correlation_id,debug_context,human_message,ok,recoverable",
         "dict:code,correlation_id,encrypted_credentials,errors,fingerprint,"
         "matched_strategy_id,metrics_snapshot,ok,status,trust_tier,verification_id",
         "dict:code,correlation_id,idempotent,job_state,ok,queued,status,trust_tier,"
@@ -631,6 +644,141 @@ def test_pyapi_10a_non_200_returns_are_excluded_from_the_shape_fence():
         "plan 140.1.1-02's 424 venue-transient arm must be excluded by the filter"
     )
     assert all(status != 200 for _, _, status in excluded)
+
+
+# ---------------------------------------------------------------------------
+# PYAPIFIX2-05 — the CORPUS fence: _SHAPES bound to the router's AST
+# ---------------------------------------------------------------------------
+#
+# The gap this closes, observed by the 140.1.1 review: ``_SHAPES`` was consumed
+# ONLY by the parametrised test above, and the M-15 fence reads ``_ROUTER_SRC``
+# and never ``_SHAPES``. Deleting a row therefore deleted a case and BOTH tests
+# stayed green (`141 → 140 passed`). The fence that used to catch that was a
+# bare length assertion over ``_SHAPES`` against the literal six — correctly
+# deleted as self-referential, but it was also the only corpus fence, so its
+# removal left the hole open.
+#
+# The replacement is NOT a count and NOT a literal typed beside ``_SHAPES``.
+# Its two sides come from two DIFFERENT artifacts:
+#   side A — the 200 dict shapes the ROUTER'S SOURCE declares (``ast`` over
+#            ``_ROUTER_SRC``, the same walker the M-15 fence uses);
+#   side B — the key sets of the REAL HTTP BODIES produced by driving every
+#            ``_SHAPES`` row through TestClient.
+# Delete a row and a router-declared shape is left with no reaching fixture.
+#
+# OQ-2, settled EMPIRICALLY before pinning (140.1.2 plan 04) — set equality
+# between the two sides is NOT available, and the reason is not the one the
+# research hypothesised:
+#   * NOT FastAPI ``response_model`` post-processing (the route declares
+#     ``response_model=None``);
+#   * ``_run_validate_only`` assembles its success envelope CONDITIONALLY
+#     (``routers/process_key.py`` — ``if val.preview is not None:`` /
+#     ``if val.daily_returns_series is not None:``), and ``_keys_assigned_to``
+#     renders the UNION of every key ever assigned. So the AST fingerprint
+#     ``dict:correlation_id,daily_returns_series,ok,preview,read_only,step,valid``
+#     is a strict SUPERSET of shape 3's observed wire body
+#     ``dict:correlation_id,ok,read_only,step,valid``.
+# Hence the relation is CONTAINMENT (wire ⊆ declared), not equality — design (b).
+#
+# Containment alone is too weak, and this was checked rather than assumed:
+# shape 2's body ``{correlation_id, ok, queued, verification_id}`` is a subset
+# of shape 1's declared shape, so a non-injective "some row covers it" test
+# would let the shape-1 row be deleted in silence. The matching is therefore
+# ONE-TO-ONE: every declared shape must have its OWN reaching fixture.
+
+
+def _drive_shapes(client) -> list[tuple[str, frozenset[str]]]:
+    """Every ``_SHAPES`` row, driven for real; its response body's key set.
+
+    This is side B. It is a wire observation, not a declaration — nothing here
+    is read from the router's source or from a literal in this file.
+    """
+    driven: list[tuple[str, frozenset[str]]] = []
+    for shape_id, reach, _expected_ok in _SHAPES:
+        response = reach(client)
+        assert response.status_code == 200, (
+            f"shape {shape_id} no longer answers 200 ({response.status_code}); "
+            "the corpus fence can only speak about the 200 surface"
+        )
+        driven.append((shape_id, frozenset(response.json())))
+    return driven
+
+
+def _match_one_to_one(candidates: dict[int, set[int]]) -> dict[int, int]:
+    """Maximum bipartite matching, declared-shape index → driven-row index.
+
+    Kuhn's augmenting path. Small and exact (six a side); a greedy pass would
+    report a false uncovered shape whenever one fixture's body fits two
+    declared shapes, which is the exact ambiguity documented above.
+    """
+    taken: dict[int, int] = {}  # driven index -> declared index
+
+    def _augment(declared_idx: int, seen: set[int]) -> bool:
+        for driven_idx in sorted(candidates[declared_idx]):
+            if driven_idx in seen:
+                continue
+            seen.add(driven_idx)
+            if driven_idx not in taken or _augment(taken[driven_idx], seen):
+                taken[driven_idx] = declared_idx
+                return True
+        return False
+
+    for declared_idx in sorted(candidates):
+        _augment(declared_idx, set())
+    return {declared: driven for driven, declared in taken.items()}
+
+
+def test_pyapifix2_05_every_router_declared_200_shape_has_its_own_reaching_fixture(
+    client,
+):
+    """PYAPIFIX2-05 — the 200-discriminator corpus cannot silently shrink.
+
+    Binds ``_SHAPES`` to ``routers/process_key.py``'s AST. Deleting a row
+    leaves a shape the router really can emit with nothing driving it, and this
+    reddens naming that shape.
+    """
+    declared_fingerprints = sorted(
+        fp for fp in _collect_200_shapes()[0] if fp.startswith("dict:")
+    )
+    declared_keys = [
+        frozenset(fp[len("dict:") :].split(",")) for fp in declared_fingerprints
+    ]
+    driven = _drive_shapes(client)
+
+    candidates = {
+        i: {j for j, (_sid, keys) in enumerate(driven) if keys <= declared_keys[i]}
+        for i in range(len(declared_fingerprints))
+    }
+    matched = _match_one_to_one(candidates)
+
+    uncovered = [
+        declared_fingerprints[i]
+        for i in range(len(declared_fingerprints))
+        if i not in matched
+    ]
+    assert not uncovered, (
+        "a router-declared 200 shape has no reaching fixture — the corpus "
+        "silently shrank.\n"
+        f"  uncovered shape(s): {uncovered}\n"
+        f"  driven by _SHAPES:  {[sid for sid, _ in driven]}\n"
+        "routers/process_key.py can emit that body on a 200 and no case in "
+        "_SHAPES reaches it, so every assertion in this file is blind to it. "
+        "Restore the deleted _SHAPES row, or add a fixture that reaches the "
+        "new shape."
+    )
+
+    orphans = [
+        sid
+        for sid, keys in driven
+        if not any(keys <= declared for declared in declared_keys)
+    ]
+    assert not orphans, (
+        "a _SHAPES row produced a body that no 200-capable return in "
+        f"routers/process_key.py declares: {orphans}. Either the fixture is "
+        "fabricating a shape the route cannot emit, or the fence cannot see "
+        "the emitter — teach _SHAPE_BEARING_FUNCTIONS rather than loosening "
+        "this assertion."
+    )
 
 
 def test_pyapi_10a_shape_5_code_is_explicit_null(client):
