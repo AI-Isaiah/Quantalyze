@@ -2703,42 +2703,467 @@ def test_process_key_shares_main_limiter_instance():
     )
 
 
-def test_process_key_rate_limit_key_func_uses_token_only():
-    """PR #241 red-team — the limiter key must vary by Authorization
-    token ONLY. The earlier shape composed (token, X-User-Id) so each
-    tenant got isolated buckets — but X-User-Id is unsigned
-    client-controlled input, so a caller holding the bearer token
-    could set ``X-User-Id: <random-uuid-per-request>`` and allocate a
-    new bucket per request, bypassing the limiter entirely. Until a
-    signed identity surface lands (mTLS / JWT body bound to the
-    token), per-token bucketing is the strongest guarantee available.
-    Two requests from the same bearer token land in the SAME bucket
-    regardless of the X-User-Id value.
+# ===========================================================================
+# PYAPI-02 — the tenant-claim limiter oracle suite (RESEARCH Q1.2 / Q1.3)
+#
+# `test_process_key_rate_limit_key_func_uses_token_only` USED TO LIVE HERE.
+# It has been DELETED AND REPLACED, deliberately (TRAP-9), because it pinned
+# the behaviour being replaced: "the limiter key must vary by Authorization
+# token ONLY". That contract was correct only for as long as no forgery-
+# resistant identity existed — its own docstring said so ("Until a signed
+# identity surface lands ... per-token bucketing is the strongest guarantee
+# available"). X-Tenant-Claim IS that surface, so the assertion is now false
+# by design rather than by regression.
+#
+# Its three orthogonal assertions are KEPT VERBATIM and re-homed onto the
+# unverified-fallback path, which is the arm that still behaves token-only:
+#   * same token  -> same key
+#   * other token -> different key
+#   * the raw bearer NEVER appears in plaintext (the key lands in slowapi's
+#     error logs)
+# See test_key_func_unverified_fallback_is_token_keyed below.
+#
+# ORACLE DISCIPLINE: every expected bucket string below is a LITERAL. Nothing
+# is re-derived from services.rate_limit (programme non-negotiable #3).
+# ===========================================================================
+
+# The bearer the fixtures set as INTERNAL_API_TOKEN, and therefore the HMAC key.
+_CLAIM_SECRET = "a" * 64
+
+
+def _mint_claim(payload, *, secret=_CLAIM_SECRET, exp=None):
+    """Mint an X-Tenant-Claim the way the TS client does.
+
+    Computed here from the stdlib, NOT by importing the production verifier —
+    an oracle that asks the code under test what it expects cannot fail.
     """
+    import hashlib
+    import hmac
+    import time as _time
+
+    exp = int(_time.time()) + 300 if exp is None else exp
+    signed = f"{payload}.{exp}"
+    mac = hmac.new(
+        secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{signed}.{mac}"
+
+
+def _req(headers):
     from unittest.mock import MagicMock
 
+    r = MagicMock()
+    r.headers = headers
+    return r
+
+
+@pytest.fixture
+def claim_secret(monkeypatch):
+    """INTERNAL_API_TOKEN is the HMAC key (RESEARCH G-15 — no new secret)."""
+    monkeypatch.setenv("INTERNAL_API_TOKEN", _CLAIM_SECRET)
+
+
+def test_key_func_two_tenants_get_distinct_buckets(claim_secret):
+    """A valid claim buckets on the tenant: literal "process_key:t:<user_id>".
+
+    This is the whole point of PYAPI-02 — one 100/hour bucket keyed on the
+    SHARED internal token served the entire platform, so any one caller could
+    starve every other (C-09/X-3).
+    """
     key_func = process_key_router._process_key_rate_limit_key
 
-    req_a = MagicMock()
-    req_a.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-a"}
-    req_b = MagicMock()
-    req_b.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-b"}
-    req_c = MagicMock()
-    req_c.headers = {"Authorization": "Bearer bbb", "X-User-Id": "user-a"}
+    ka = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("tenant-a"),
+            }
+        )
+    )
+    kb = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("tenant-b"),
+            }
+        )
+    )
 
-    ka = key_func(req_a)
-    kb = key_func(req_b)
-    kc = key_func(req_c)
+    assert ka == "process_key:t:tenant-a"
+    assert kb == "process_key:t:tenant-b"
+    assert ka != kb
 
-    # PR #241 red-team contract: same token → same key regardless of
-    # X-User-Id (closes the per-request-uuid bypass).
+
+def test_key_func_forged_claim_falls_to_unverified(claim_secret):
+    """T-140.1-16 — a TAMPERED claim must NOT buy tenant-level allowance.
+
+    Same user_id, one HMAC character flipped. The attacker must land in the
+    unverified bucket, NOT in "process_key:t:victim". If this ever passes with
+    the tenant bucket, the claim is decorative and anyone can pick a victim's
+    window (or mint themselves a fresh one per request, the PR#241 bypass).
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    honest = _mint_claim("victim")
+    # Flip the last hex character of the MAC — same payload, same exp.
+    tampered = honest[:-1] + ("0" if honest[-1] != "0" else "1")
+    assert tampered != honest
+
+    forged_key = key_func(
+        _req({"Authorization": "Bearer attacker-token", "X-Tenant-Claim": tampered})
+    )
+
+    assert not forged_key.startswith("process_key:t:"), (
+        "T-140.1-16: a forged claim was admitted to a TENANT bucket — the HMAC "
+        f"is not being verified. Got {forged_key!r}."
+    )
+    assert forged_key != "process_key:t:victim"
+    assert forged_key != "process_key:anon"
+    assert forged_key.startswith("process_key:unverified:")
+
+
+def test_key_func_garbage_secret_cannot_forge_tenant_bucket(claim_secret):
+    """The claim is unforgeable WITHOUT INTERNAL_API_TOKEN.
+
+    A well-formed claim minted with the WRONG secret is structurally perfect —
+    right shape, unexpired, plausible user_id — and must still fall to
+    unverified. Separates "we checked the shape" from "we checked the MAC".
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    forged = _mint_claim("victim", secret="b" * 64)
+    key = key_func(
+        _req({"Authorization": "Bearer attacker-token", "X-Tenant-Claim": forged})
+    )
+
+    assert key.startswith("process_key:unverified:")
+    assert key != "process_key:t:victim"
+
+
+def test_key_func_expired_claim_falls_to_unverified(claim_secret):
+    """An EXPIRED claim is not a valid claim.
+
+    Without the expiry check a claim captured once from a log or a proxy is a
+    permanent tenant-bucket credential.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+    import time as _time
+
+    stale = _mint_claim("tenant-a", exp=int(_time.time()) - 1)
+    key = key_func(
+        _req({"Authorization": f"Bearer {_CLAIM_SECRET}", "X-Tenant-Claim": stale})
+    )
+
+    assert key.startswith("process_key:unverified:")
+    assert key != "process_key:t:tenant-a"
+
+
+def test_key_func_ignores_unsigned_x_user_id(claim_secret):
+    """PR #241, pinned permanently: X-User-Id ALONE can never select a bucket.
+
+    `X-User-Id` is unsigned client-controlled input. A caller that sets
+    `X-User-Id: <random-uuid-per-request>` would allocate a fresh bucket per
+    request and bypass the limiter entirely; one that sets a victim's uuid
+    would drain the victim's window. Only the HMAC'd claim selects a tenant.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    key = key_func(
+        _req({"Authorization": f"Bearer {_CLAIM_SECRET}", "X-User-Id": "victim"})
+    )
+
+    assert key != "process_key:t:victim"
+    assert not key.startswith("process_key:t:")
+    assert key.startswith("process_key:unverified:")
+
+    # And an X-User-Id must not be able to OVERRIDE a valid claim either.
+    keyed = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("tenant-a"),
+                "X-User-Id": "victim",
+            }
+        )
+    )
+    assert keyed == "process_key:t:tenant-a"
+
+
+def test_teaser_claim_buckets_to_anon(claim_secret):
+    """C-09 gate — the whole public teaser shares ONE literal bucket.
+
+    Vercel caps the teaser at 10 req/60s per IP, i.e. 600/hour, so a single
+    anonymous IP could drain a 100/hour platform bucket in ~10 minutes (G-16 /
+    X-3). "process_key:anon" is where that traffic is confined.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    key = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("public"),
+            }
+        )
+    )
+
+    assert key == "process_key:anon"
+    assert key != "process_key:t:public"
+
+
+def test_key_func_unverified_fallback_is_token_keyed(claim_secret):
+    """The REPLACEMENT for test_process_key_rate_limit_key_func_uses_token_only.
+
+    Its three orthogonal assertions, kept verbatim, now pinned on the arm they
+    still describe: with NO claim header the key degrades to today's token-hash
+    behaviour, so a caller that stops sending the header keeps working (and is
+    WARN-visible) rather than raising — RESEARCH G-8: a raising key_func escapes
+    slowapi and becomes an unhandled 500 text/plain.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    ka = key_func(_req({"Authorization": "Bearer aaa", "X-User-Id": "user-a"}))
+    kb = key_func(_req({"Authorization": "Bearer aaa", "X-User-Id": "user-b"}))
+    kc = key_func(_req({"Authorization": "Bearer bbb", "X-User-Id": "user-a"}))
+
     assert ka == kb, "Same token must produce same key, regardless of X-User-Id"
     assert ka != kc, "Different token must produce different keys"
-    # Bearer token must NEVER appear in plaintext (it shows up in slowapi
-    # error logs).
     assert "aaa" not in ka and "bbb" not in kc
-    # Stable: same input → same key.
-    assert key_func(req_a) == ka
+    assert key_func(_req({"Authorization": "Bearer aaa", "X-User-Id": "user-a"})) == ka
+
+    # NEW: the literal prefix, so the fallback is identifiable in slowapi logs.
+    assert ka.startswith("process_key:unverified:")
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        None,
+        "",
+        "a.b",
+        b"\xff\xfe not utf-8",
+        "x" * 65536,  # 64 KB header
+        "tenant-a.not-a-number.deadbeef",
+    ],
+    ids=["none", "empty", "two-parts", "non-utf8-bytes", "64kb", "non-numeric-exp"],
+)
+def test_key_func_never_raises(claim_secret, claim):
+    """RESEARCH G-8 — a raising key_func is an unhandled 500 text/plain.
+
+    slowapi re-raises anything the key function throws out of
+    `_check_request_limit` (swallow_errors is False), so it escapes to
+    ServerErrorMiddleware: a bodyless 500 that 140.2's discriminator then has to
+    classify with no JSON at all. Converting a throttling concern into that is
+    the exact defect class this programme exists to close, reintroduced one
+    layer down.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+    ceiling_func = process_key_router._process_key_ceiling_key
+
+    headers = {"Authorization": f"Bearer {_CLAIM_SECRET}"}
+    if claim is not None:
+        headers["X-Tenant-Claim"] = claim
+
+    key = key_func(_req(headers))
+    ceiling = ceiling_func(_req(headers))
+
+    assert isinstance(key, str) and key
+    assert isinstance(ceiling, str) and ceiling
+    # Nothing malformed may be promoted to a tenant bucket.
+    assert not key.startswith("process_key:t:")
+
+
+def test_key_func_never_raises_on_hostile_authorization(claim_secret):
+    """Same G-8 guarantee when the AUTHORIZATION header is the hostile input.
+
+    The claim is not the only attacker-reachable header the key function reads.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+    ceiling_func = process_key_router._process_key_ceiling_key
+
+    for auth in (None, "", b"\xff\xfe", "x" * 65536, 12345):
+        headers = {} if auth is None else {"Authorization": auth}
+        assert isinstance(key_func(_req(headers)), str)
+        assert isinstance(ceiling_func(_req(headers)), str)
+
+
+def test_process_key_limit_key_func_is_not_get_remote_address():
+    """PYAPI-03 identity assertion — /process-key must never be IP-keyed.
+
+    Behind Railway's edge, uvicorn runs with the default
+    `forwarded_allow_ips="127.0.0.1"`, so ProxyHeadersMiddleware refuses to
+    rewrite `client.host` for a non-loopback peer and `get_remote_address`
+    collapses to the EDGE proxy IP — one platform-wide bucket wearing a
+    per-client disguise (G-10 + G-11). Mirrors
+    tests/test_simulator_router.py's identity assertion.
+    """
+    from slowapi.util import get_remote_address
+
+    assert process_key_router._process_key_rate_limit_key is not get_remote_address
+    assert process_key_router._process_key_ceiling_key is not get_remote_address
+    assert (
+        process_key_router._process_key_rate_limit_key
+        is not process_key_router._process_key_ceiling_key
+    )
+
+
+def test_process_key_limit_sizing_literals():
+    """The three bucket sizes, as LITERALS (founder-retunable).
+
+    tenant 100/hour  — unchanged from the pre-fix single bucket
+    anon    30/hour  — deliberately BELOW a tenant bucket (OPEN-3): the public
+                       teaser is the untrusted half and must not be able to
+                       consume a paying tenant's worth of platform capacity
+    ceiling 500/hour — the stacked backstop; post-PYAPI-04 every admitted
+                       caller presents the SAME INTERNAL_API_TOKEN, so this is
+                       one platform-wide bucket by construction, and 5x the
+                       100/hour the whole platform shared before this phase
+    """
+    limit_for = process_key_router._process_key_limit_for
+    ceiling_for = process_key_router._process_key_ceiling_limit_for
+
+    assert limit_for("process_key:t:tenant-a") == "100/hour"
+    assert limit_for("process_key:unverified:abc123") == "100/hour"
+    assert limit_for("process_key:anon") == "30/hour"
+    assert ceiling_for("process_key:ceiling:abc123") == "500/hour"
+    assert ceiling_for("process_key:anon") == "500/hour"
+
+
+def test_process_key_route_registers_both_limits():
+    """Two stacked limits must be REGISTERED on the endpoint, not one.
+
+    Complements the live-traffic proof below: this catches a decorator being
+    dropped in a refactor even when the remaining one would mask it at runtime.
+    """
+    from services import rate_limit as _rl
+
+    name = "routers.process_key.process_key"
+    groups = _rl.limiter._dynamic_route_limits.get(name, [])
+    assert len(groups) == 2, (
+        "PYAPI-02: /process-key must carry BOTH the per-identity limit and the "
+        f"stacked platform ceiling. Registered groups: {len(groups)}."
+    )
+
+
+@pytest.fixture
+def throttled_client(monkeypatch):
+    """A TestClient with the 429 handler registered and limiter storage reset.
+
+    The module-level `app` fixture deliberately omits the RateLimitExceeded
+    handler because rate limiting is not exercised there. These tests DO
+    exercise it, so they need their own app — and they need the module-global
+    `memory://` storage wiped either side, since it is process-wide (G-3).
+    """
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+
+    monkeypatch.setenv("INTERNAL_API_TOKEN", _CLAIM_SECRET)
+
+    app = FastAPI()
+    app.state.limiter = process_key_router.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.include_router(process_key_router.router)
+
+    process_key_router.limiter.reset()
+    # raise_server_exceptions=False: an ADMITTED request runs the real handler
+    # and fails downstream (no DB in unit tests). We only care whether the
+    # limiter admitted it, so any non-429 counts as admitted.
+    yield TestClient(app, raise_server_exceptions=False)
+    process_key_router.limiter.reset()
+
+
+def _post(client, claim):
+    return client.post(
+        "/process-key",
+        json=_csv_validate_body(),
+        headers={
+            "Authorization": f"Bearer {_CLAIM_SECRET}",
+            "X-Correlation-Id": _TEST_CID,
+            "X-Tenant-Claim": claim,
+        },
+    )
+
+
+def test_anon_bucket_exhausts_at_30_without_touching_a_tenant(throttled_client):
+    """C-09, end to end on the REAL route: 31 anonymous calls, tenant unharmed.
+
+    Proves three things at once against live traffic: the dynamic limit provider
+    is wired (anon gets 30, not 100), the anon bucket is separate, and an
+    exhausted teaser cannot deny a paying tenant. Under the pre-fix single
+    token-keyed bucket the tenant call at the end would have been the 32nd hit
+    on the SAME window.
+    """
+    anon = _mint_claim("public")
+
+    for i in range(30):
+        resp = _post(throttled_client, anon)
+        assert resp.status_code != 429, f"anon call {i + 1} of 30 was throttled early"
+
+    assert _post(throttled_client, anon).status_code == 429, (
+        "the 31st anonymous call must be throttled — the anon bucket is 30/hour"
+    )
+
+    assert _post(throttled_client, _mint_claim("tenant-a")).status_code != 429, (
+        "C-09: an exhausted anonymous teaser must NOT deny a tenant."
+    )
+
+
+def test_two_stacked_limits_both_evaluated(throttled_client, monkeypatch):
+    """ASSUMPTION-1 closure — slowapi evaluates BOTH stacked decorators.
+
+    RESEARCH read slowapi 0.1.9; production pins 0.1.10. If the patch bump
+    changed decorator stacking, one of the two limits would simply never
+    evaluate and NOTHING else in this suite would notice. So: exercise both
+    against a live TestClient on the real route.
+
+    The ceiling is shrunk to 3/hour for this test ONLY — 500 requests is not a
+    test. The oracle is not the number: it is that tenant-b, whose OWN 100/hour
+    bucket is untouched, is nevertheless throttled because tenant-a exhausted
+    the SHARED outer limit. That can only happen if the second decorator ran.
+    The 500/hour literal is pinned separately in
+    test_process_key_limit_sizing_literals.
+    """
+    monkeypatch.setattr(process_key_router, "_PROCESS_KEY_CEILING_LIMIT", "3/hour")
+
+    a = _mint_claim("tenant-a")
+    b = _mint_claim("tenant-b")
+
+    for i in range(3):
+        assert _post(throttled_client, a).status_code != 429, f"call {i + 1} of 3"
+
+    # Inner limit: tenant-a has spent 3 of ITS 100 — so this 429 is the ceiling.
+    assert _post(throttled_client, a).status_code == 429
+
+    # The proof: a DIFFERENT tenant with a virgin per-tenant bucket is throttled
+    # anyway. Only the stacked ceiling can produce that.
+    assert _post(throttled_client, b).status_code == 429, (
+        "ASSUMPTION-1: the stacked platform ceiling never evaluated — tenant-b "
+        "has an untouched 100/hour bucket and should have been refused by the "
+        "500/hour (here 3/hour) outer limit."
+    )
+
+
+def test_inner_tenant_limit_evaluates_independently_of_the_ceiling(
+    throttled_client, monkeypatch
+):
+    """The other half of the stack: the PER-TENANT limit must also fire.
+
+    Shrink the tenant limit and leave the ceiling wide. tenant-a is refused
+    while tenant-b sails through — impossible if only the ceiling were live.
+    """
+    monkeypatch.setattr(process_key_router, "_PROCESS_KEY_TENANT_LIMIT", "2/hour")
+
+    a = _mint_claim("tenant-a")
+    b = _mint_claim("tenant-b")
+
+    assert _post(throttled_client, a).status_code != 429
+    assert _post(throttled_client, a).status_code != 429
+    assert _post(throttled_client, a).status_code == 429, (
+        "the per-tenant limit never evaluated"
+    )
+    assert _post(throttled_client, b).status_code != 429, (
+        "PYAPI-02: tenant-a's exhaustion must not touch tenant-b."
+    )
 
 
 def test_process_key_exempt_from_x_service_key_in_middleware(monkeypatch):
