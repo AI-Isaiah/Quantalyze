@@ -17,7 +17,7 @@ limiter and compared to itself (programme non-negotiable #3 — 10 simultaneous
 semantic mutations once produced a byte-identical green because every oracle was
 self-referential).
 
-Three gates:
+Four gates:
 
 1. :class:`TestPerRouteKeyIdentity` — the wiring. For each of L-1..L-9, the
    limit REGISTERED on the endpoint carries the shared tenant-or-platform key
@@ -28,6 +28,14 @@ Three gates:
 3. :class:`TestClassClosure` — the count. No source token ``get_remote_address``
    survives under ``routers/`` except the quarantined FINDING-10 site, and the
    set of rate-limited routes is a literal.
+4. :class:`TestDefaultKeyBehaviour` — Phase 140.1.1 / PYAPIFIX-05, review
+   survivors **#3** and **#4**. Gate 3's
+   ``assert rl.limiter._key_func is rl.default_platform_key`` is an object
+   IDENTITY assertion: it holds for *any* body, including ``return ""`` (which
+   makes slowapi skip the limit entirely — see below) and including a
+   per-request-unique value (which gives every caller a private bucket). Gate 4
+   drives real HTTP requests through a route that inherits the default key and
+   asserts throttling actually happens.
 """
 
 from __future__ import annotations
@@ -41,6 +49,10 @@ import tokenize
 from typing import Any
 
 import pytest
+from fastapi import FastAPI, Request
+from fastapi.testclient import TestClient
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
 # Import every router that registers a limit, so `limiter._route_limits` is
 # fully populated no matter which tests pytest collected first.
@@ -587,3 +599,199 @@ class TestClassClosure:
 
         assert not [n for n in rl.limiter._route_limits if n.startswith("routers.match.")]
         assert not [n for n in rl.limiter._dynamic_route_limits if n.startswith("routers.match.")]
+
+
+# ---------------------------------------------------------------------------
+# Gate 4 — the DEFAULT key's BEHAVIOUR (Phase 140.1.1 / PYAPIFIX-05, review
+# survivors #3 and #4).
+#
+# `TestClassClosure.test_shared_limiter_default_key_is_not_ip_derived` asserts
+# `rl.limiter._key_func is rl.default_platform_key` — object identity, which is
+# true for ANY body. Two single-line mutations of `default_platform_key`
+# therefore shipped green through the whole of Phase 140.1:
+#
+#   #3  `return ""`      — slowapi's `__evaluate_limits` builds
+#                          `args = [limit_key, limit_scope]` and only counts the
+#                          hit `if all(args)`; an empty key takes the `else`
+#                          branch, logs "Skipping limit", and `continue`s. The
+#                          route is then UNLIMITED, silently, forever
+#                          (slowapi 0.1.10 extension.py:506-527 — the CI pin;
+#                          `services/rate_limit.py:152-154` and `:164-166`
+#                          document the hazard in prose, and nothing enforced it).
+#   #4  a per-request-unique value — every caller gets a private bucket, which
+#                          is the same outcome by a different route.
+#
+# Neither is observable from a key STRING assertion alone, so this gate does
+# both: it pins the returned key as a LITERAL and against a second, distinct
+# request object (killing #4), and it drives real HTTP requests through a route
+# that DECLARES NO `key_func` and asserts a 429 actually arrives (killing #3 —
+# an empty key produces no 429 ever).
+# ---------------------------------------------------------------------------
+
+#: A path that exists nowhere in `routers/`, so its `platform:<path>` bucket
+#: cannot collide with a production counter.
+_DEFAULT_KEY_PROBE_PATH = "/pyapifix05-default-key-probe"
+
+#: Literals. The limit VALUE is this file's, not a production constant.
+_DEFAULT_KEY_PROBE_LIMIT = 3
+_DEFAULT_KEY_PROBE_LIMIT_TEXT = "3/minute"
+
+#: The bucket `default_platform_key` must return for the probe path — written
+#: out in full rather than derived by calling `_platform_bucket`, which would
+#: assert only that the module agrees with itself.
+_DEFAULT_KEY_PROBE_BUCKET = "platform:/pyapifix05-default-key-probe"
+
+
+async def _default_key_probe(request: Request) -> dict[str, bool]:
+    """A rate-limited route that declares NO ``key_func``.
+
+    That omission is the whole point: it is L-9's exact shape, so the limit it
+    carries is keyed by whatever `rl.limiter._key_func` — i.e.
+    :func:`services.rate_limit.default_platform_key` — returns.
+    """
+    return {"ok": True}
+
+
+# Decorated exactly ONCE, at module import, deliberately. slowapi APPENDS to
+# `_route_limits[name]` on every decoration and all copies share one bucket, so
+# decorating inside a test body would make one request cost N tokens on the Nth
+# run. The registered name is `test_limiter_identity._default_key_probe`, which
+# does not start with "routers." and so is invisible to every closure gate above.
+_default_key_probe_limited = rl.limiter.limit(_DEFAULT_KEY_PROBE_LIMIT_TEXT)(
+    _default_key_probe
+)
+
+
+def _probe_app() -> FastAPI:
+    """A throwaway app mounting the probe route.
+
+    Deliberately NOT `main.app`: every production route declares an explicit
+    `key_func`, so none of them exercises the singleton's default at all. A
+    dedicated app is the only way to drive the default through real requests
+    without mutating the production app object.
+    """
+    app = FastAPI()
+    app.state.limiter = rl.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.add_api_route(
+        _DEFAULT_KEY_PROBE_PATH, _default_key_probe_limited, methods=["GET"]
+    )
+    return app
+
+
+def _drive_until_throttled(client: TestClient, cap: int) -> Any:
+    """Request until a 429 arrives, or ``None`` if the cap is exhausted.
+
+    BOUNDED-AND-DRIVEN, never a fixed call count: sibling suites reload router
+    modules, which re-runs `@limiter.limit` against this same singleton, so the
+    per-request token cost is not knowable from this file. The cap still pins an
+    UPPER bound on the quota (a route that never throttles inside
+    ``limit + 1`` calls is not limited at all), and the limit's exact value is
+    pinned separately by :func:`test_default_keyed_probe_carries_its_literal_limit`.
+    """
+    for _ in range(cap):
+        resp = client.get(_DEFAULT_KEY_PROBE_PATH)
+        if resp.status_code == 429:
+            return resp
+        assert resp.status_code == 200, (
+            "harness: a budget-spending call must reach the handler. Got "
+            f"{resp.status_code}: {resp.text[:300]}"
+        )
+    return None
+
+
+class TestDefaultKeyBehaviour:
+    """Survivors #3 / #4 — the singleton default, pinned by consequence.
+
+    Measured on the CI-pinned **slowapi 0.1.10** (`requirements.txt:226`); the
+    original mutation evidence was taken on 0.1.9 and the `if all(args)` skip is
+    a slowapi internal a patch release could have moved.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_limiter(self) -> Any:
+        """`rl.limiter` is a process-wide singleton over `memory://` (G-3)."""
+        rl.limiter.reset()
+        yield
+        rl.limiter.reset()
+
+    def test_default_key_is_never_the_empty_string(self) -> None:
+        """#3. An empty key is not "no bucket" — it is NO LIMIT AT ALL.
+
+        Pinned as an equality against a literal, plus the `!= ""` inequality
+        spelled out separately so the failure message names the actual hazard.
+        """
+        key = rl.default_platform_key(_FakeRequest(_DEFAULT_KEY_PROBE_PATH))
+        assert key != "", (
+            "default_platform_key returned the empty string. slowapi's "
+            "__evaluate_limits only counts a hit `if all(args)`, so an empty key "
+            "SKIPS the limit entirely and every route inheriting this default "
+            "becomes silently unlimited."
+        )
+        assert key == _DEFAULT_KEY_PROBE_BUCKET
+
+    def test_default_key_is_stable_across_two_distinct_requests(self) -> None:
+        """#4. A per-request key gives every caller a private bucket.
+
+        Two SEPARATE `_FakeRequest` objects for the same path must produce the
+        same string. Both are also compared to the literal, so a mutant that
+        returned one constant per process would be caught too.
+        """
+        first = rl.default_platform_key(_FakeRequest(_DEFAULT_KEY_PROBE_PATH))
+        second = rl.default_platform_key(_FakeRequest(_DEFAULT_KEY_PROBE_PATH))
+        assert first == second, (
+            "default_platform_key is not stable across requests — a key that "
+            "varies per request hands every caller a private bucket, so the "
+            "limit can never be reached."
+        )
+        assert first == _DEFAULT_KEY_PROBE_BUCKET
+        assert second == _DEFAULT_KEY_PROBE_BUCKET
+
+    def test_default_keyed_route_actually_throttles(self) -> None:
+        """The behavioural oracle: real requests, a real 429.
+
+        This is what neither the identity assertion nor a key-string assertion
+        can give. Under mutation #3 the loop below runs to its cap and NO 429
+        ever arrives; under #4 the same, for a different reason.
+        """
+        with TestClient(_probe_app()) as client:
+            throttled = _drive_until_throttled(client, _DEFAULT_KEY_PROBE_LIMIT + 1)
+
+        assert throttled is not None, (
+            f"{_DEFAULT_KEY_PROBE_PATH} never answered 429 within "
+            f"{_DEFAULT_KEY_PROBE_LIMIT + 1} calls. The route inherits the shared "
+            "limiter's DEFAULT key function, so either that key is empty "
+            "(slowapi skips the limit) or it varies per request (every caller "
+            "gets a private bucket). Either way the limit is not enforced."
+        )
+        assert throttled.status_code == 429
+
+    def test_default_keyed_probe_carries_its_literal_limit(self) -> None:
+        """The driven loop pins an upper bound; this pins the value.
+
+        Together they mean "throttles, and at 3" rather than "throttles at some
+        number the test cannot see".
+        """
+        registered = {
+            str(limit.limit)
+            for limit in rl.limiter._route_limits.get(
+                f"{_default_key_probe.__module__}.{_default_key_probe.__name__}", []
+            )
+        }
+        assert registered == {"3 per 1 minute"}, (
+            f"probe limit registrations are {sorted(registered)}"
+        )
+
+    def test_default_keyed_probe_inherits_the_singleton_default(self) -> None:
+        """The probe is only evidence if it really carries the default key.
+
+        A probe that had silently acquired an explicit `key_func` would throttle
+        happily while `default_platform_key` was broken — the same
+        proves-nothing shape as the identity assertion it exists to reinforce.
+        """
+        limits = rl.limiter._route_limits.get(
+            f"{_default_key_probe.__module__}.{_default_key_probe.__name__}", []
+        )
+        assert limits, "the probe route registered no limit at all"
+        for limit in limits:
+            assert limit.key_func is rl.default_platform_key
