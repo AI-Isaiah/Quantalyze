@@ -70,6 +70,122 @@ const MAX_DURATION_EXPORT = /^export const maxDuration = (\d+)/m;
 
 const ROUTE_ENTRIES = Object.entries(SEAM_ROUTE_BUDGETS);
 
+/**
+ * The 15 route rows, with their FULL `budgets` arrays, typed HERE as literals.
+ *
+ * Following `tests/lib/process-key-onboard-contract-parity.test.ts`'s
+ * `EXPECTED_VERDICTS` convention: never derived from the table it guards, and
+ * never derived from the module under test.
+ *
+ * WHY THE CONTENTS AND NOT JUST THE COUNT (D-10). Everything above reads the
+ * `budgets` array back out of `SEAM_ROUTE_BUDGETS` and sums it, so DROPPING a
+ * leg is invisible: `finalize-wizard` losing its `process-key-enqueue` entry
+ * halves that route's declared worst case and every assertion in this file
+ * still passes, more comfortably than before. The deep compare below is what
+ * makes that mutation falsifiable.
+ *
+ * ⚠️ FORWARD NOTE, so a later reader does not mistake the honesty note in the
+ * file header for a permanent state: plan 140.2-07 adds Upstash store round
+ * trips to the SC-4b arithmetic (the breaker's own `get`/`ttl`/`set` are wall
+ * clock this route spends too). The "not, today, near its limit" reading is
+ * true of the CURRENT arithmetic only.
+ */
+const EXPECTED_ROUTE_BUDGETS: Record<
+  string,
+  {
+    expectedMaxDurationS: number;
+    budgets: Array<{ key: string; calls: number }>;
+  }
+> = {
+  "src/app/api/keys/validate-and-encrypt/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [
+      { key: "validate-key", calls: 1 },
+      { key: "encrypt-key", calls: 1 },
+      { key: "process-key-unified-dormant", calls: 1 },
+    ],
+  },
+  "src/app/api/strategies/create-with-key/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [
+      { key: "validate-key", calls: 1 },
+      { key: "encrypt-key", calls: 1 },
+    ],
+  },
+  "src/app/api/strategies/composite/add-key/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [
+      { key: "validate-key", calls: 1 },
+      { key: "encrypt-key", calls: 1 },
+    ],
+  },
+  "src/app/api/bridge/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "bridge", calls: 1 }],
+  },
+  "src/app/api/simulator/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "simulator", calls: 1 }],
+  },
+  "src/app/api/portfolio-optimizer/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "portfolio-optimizer", calls: 1 }],
+  },
+  "src/app/api/scenario/optimize/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "optimize-weights", calls: 1 }],
+  },
+  "src/app/api/admin/match/eval/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "match-eval", calls: 1 }],
+  },
+  "src/app/api/admin/match/recompute/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "match-recompute", calls: 1 }],
+  },
+  "src/app/api/keys/sync/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "process-key-enqueue", calls: 1 }],
+  },
+  "src/app/api/strategies/finalize-wizard/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [
+      { key: "keys-permissions", calls: 1 },
+      { key: "process-key-enqueue", calls: 1 },
+    ],
+  },
+  "src/app/api/verify-strategy/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "process-key-sync", calls: 1 }],
+  },
+  "src/app/api/strategies/csv-validate/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "process-key-sync", calls: 1 }],
+  },
+  "src/app/api/strategies/csv-finalize/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "process-key-sync", calls: 1 }],
+  },
+  "src/app/api/keys/[id]/permissions/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "keys-permissions", calls: 1 }],
+  },
+};
+
+/**
+ * The three documented exclusion paths, typed here as literals.
+ *
+ * Complements — never replaces — the `>= 3` count assertion, the on-disk
+ * existence check and the non-empty-reason check below. Those three catch a
+ * table that is emptied, stale or lazily filled; this one catches a path being
+ * SWAPPED, which leaves all three green.
+ */
+const EXPECTED_EXCLUSION_PATHS: string[] = [
+  "src/app/api/debug-key-flow/route.ts",
+  "src/app/api/cron/warm-analytics/route.ts",
+  "src/lib/warmup-analytics.ts",
+];
+
 /** The declared ceiling as the DEPLOYMENT ADAPTER would read it, from disk. */
 function readMaxDurationFromDisk(routePath: string): number {
   const abs = join(REPO, routePath);
@@ -97,6 +213,23 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
     // Guards against the table being silently emptied, which would make every
     // it.each below vacuous — zero cases is a passing suite.
     expect(ROUTE_ENTRIES.length).toBe(15);
+  });
+
+  it("SC-4d / D-10 — every route row's CONTENTS match the hand-typed map", () => {
+    // A deep equality against a roster typed in this file, not a re-read of the
+    // table. This is the only assertion here that can see a leg being DROPPED
+    // from a multi-leg row: `finalize-wizard` losing its `process-key-enqueue`
+    // entry halves that route's declared worst case, and SC-4a, SC-4b and the
+    // length fence above all stay green under it.
+    expect(
+      SEAM_ROUTE_BUDGETS,
+      "SEAM_ROUTE_BUDGETS no longer matches the hand-typed roster in this " +
+        "file. A route was added or removed, a ceiling changed, or — the case " +
+        "that motivated this assertion — a LEG was dropped from a multi-leg " +
+        "row, silently halving that route's declared worst case. Update the " +
+        "roster deliberately in the same commit; never delete this assertion " +
+        "to make a diff pass.",
+    ).toEqual(EXPECTED_ROUTE_BUDGETS);
   });
 
   describe("SC-4a — maxDuration is pinned on disk and matches the declaration", () => {
@@ -157,6 +290,23 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       // silence. Emptying the exclusions table must not be a quiet way to make
       // this file's other assertions easier to satisfy.
       expect(Object.keys(SEAM_EXCLUSIONS).length).toBeGreaterThanOrEqual(3);
+    });
+
+    it("excludes exactly the three hand-typed paths (SET equality, not count)", () => {
+      // The `>= 3` assertion above cannot see a path being SWAPPED for another,
+      // and the on-disk existence check below is satisfied by ANY real file. A
+      // sorted SET equality against a roster typed in this file is what pins
+      // WHICH paths are exempt — the two /health warmers must stay excluded
+      // (their failures are the normal case and would trip the breaker during
+      // routine warmup) and nothing else may quietly join them.
+      expect(
+        Object.keys(SEAM_EXCLUSIONS).sort(),
+        "The SEAM_EXCLUSIONS path set drifted. An exclusion is a decision that " +
+          "a Railway call site deliberately does NOT get a budget or a breaker; " +
+          "adding one silently is exactly how the third, unbudgeted seam " +
+          "survived for months. Pin the new path here in the same commit, with " +
+          "its reason in the table.",
+      ).toEqual([...EXPECTED_EXCLUSION_PATHS].sort());
     });
 
     it.each(Object.keys(SEAM_EXCLUSIONS))(
