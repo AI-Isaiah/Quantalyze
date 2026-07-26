@@ -28,7 +28,11 @@ from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
-from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions
+# PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
+# collapse) is the seventh member of the class whose other six live in
+# routers/exchange.py; the shape rationale is documented at the C6 raise there.
+from services.error_contract import VenueTransientHTTPException
+from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
     sanitize_metrics,
@@ -2332,7 +2336,27 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             )
 
     if validation.get("error"):
-        raise HTTPException(status_code=400, detail=validation["error"])
+        # PYAPIFIX2-01 (C7) — the seventh and last member of the venue-transient
+        # class: byte-equivalent to the C6 collapse in routers/exchange.py, same
+        # producer (`validate_key_permissions`), same discarded discriminator.
+        #
+        # ⚠️ This route is DEAD — `/api/verify-strategy` appears among none of the
+        # nine seam paths in src/lib/analytics-client.ts, and the Next.js route of
+        # the same name calls /process-key, not this handler. It is closed on
+        # CLASS INTEGRITY grounds only, never on a "carries real traffic"
+        # argument, which is false here: a class closed at six of its seven
+        # structurally identical sites re-opens the moment the seventh is revived.
+        #
+        # Shape rationale, the verbatim-code rule and the recoverable derivation
+        # are all documented at the C6 site in routers/exchange.py; this site
+        # applies the SAME rule rather than re-deriving a local one, because a
+        # site-local re-derivation is how two sites drift apart.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code=validation["error_code"],
+            detail=validation["error"],
+            recoverable=validation["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+        )
 
     verification_id = str(uuid.uuid4())
     supabase = get_supabase()

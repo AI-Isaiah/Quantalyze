@@ -7,7 +7,7 @@ from typing import Any
 import ccxt
 from fastapi import APIRouter, HTTPException, Request
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
@@ -37,6 +37,11 @@ from services.db import get_supabase, db_execute, one, rows
 # this file goes through service_error so the four classes cannot drift apart
 # site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
+# PYAPIFIX2-01 — the FLAT venue-transient shape for the SEVEN classified-upstream
+# sites on /api/validate-key. Deliberately NOT service_error: see the C1 raise
+# block below and the class's own docstring for why an object at body.detail
+# regresses three working wizard codes to UNKNOWN/500 on this seam.
+from services.error_contract import VenueTransientHTTPException
 # PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
 # own ``Limiter(key_func=get_remote_address)``, which (a) keyed on the Railway
 # EDGE ip so both 100/hour budgets were platform-wide (G-10/G-11) and (b) got its
@@ -142,14 +147,40 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
             # misleading "check your credentials"). Fails CLOSED (never valid:true);
             # logged at WARNING (not exception) since a throttle is not Sentry-grade.
             logger.warning("validate_key: sFOX rate-limited (status=429)")
-            raise HTTPException(status_code=400, detail=RATE_LIMITED_DETAIL)
+            # PYAPIFIX2-01 (C1). Flat shape, NOT service_error: this reply is
+            # classified by a SUBSTRING CASCADE over body.detail
+            # (wizardErrors.ts:936-1035, reached via analytics-client.ts's
+            # `error.detail ?? …`), so nesting an envelope under `detail` would
+            # stringify to "[object Object]" and regress RATE_LIMITED,
+            # PROBE_FAILED and DDOS_PROTECTION to UNKNOWN/500. Same reasoning,
+            # same shape as main.py's app-global 429 (PYAPI-08): scalar `detail`
+            # byte-unchanged so the TS side needs ZERO change (TS-07 is the
+            # negative obligation confirming it), machine `code` beside it so
+            # 140.3 can retire the cascade. DO NOT "unify" these seven sites onto
+            # service_error. Status stays 400 — the classifier discards the
+            # upstream status, so the 400->424 remap is user-invisible and is
+            # owed as ONE unit with TS-05 (ledger row TS-32).
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="RATE_LIMITED",
+                detail=RATE_LIMITED_DETAIL,
+                recoverable=True,
+            )
         # 5xx (exchange down) or status==0 (transport/shape blip): an UPSTREAM /
         # transport problem, never the user's key. Same shared NETWORK_ERROR_DETAIL
         # the ccxt NetworkError arm emits so the TS classifier maps it identically.
         # Still fails CLOSED; WARNING-level (mirrors the ccxt transient arms) so a
         # transient blip no longer spams Sentry via logger.exception.
         logger.warning("validate_key: sFOX transient upstream failure (status=%s)", e.status)
-        raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+        # PYAPIFIX2-01 (C2) — see the C1 block above for the shape rationale. The
+        # code matches what the copy already says; vocabulary reused, never
+        # re-minted.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code="NETWORK_UNAVAILABLE",
+            detail=NETWORK_ERROR_DETAIL,
+            recoverable=True,
+        )
     except ValueError:
         # F5: a token with an embedded control char (\n / \r survive
         # trimCredential, which strips only LEADING/TRAILING whitespace) makes
@@ -332,7 +363,17 @@ async def _validate_mt5_key(
             # with the shared NETWORK detail (mirrors the sfox transient arm);
             # WARNING (not exception) so a blip does not spam Sentry.
             logger.warning("validate_key: MT5 probe timed out (upstream bridge hung)")
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C3) — see the C1 block for the shape rationale. This
+            # arm and the two below were found by the BEHAVIOURAL predicate, not
+            # by the consumer list: `_validate_mt5_key` never calls
+            # `validate_key_permissions`, so a call-graph enumeration misses all
+            # three even though they are structurally identical to C2.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5AccountMismatchError:
             # RED-TEAM: a concurrent validate re-logged the shared terminal onto
             # another account mid-probe — an INFRA/concurrency fault, never the
@@ -342,7 +383,13 @@ async def _validate_mt5_key(
                 "validate_key: MT5 terminal account mismatch mid-probe "
                 "(concurrent validate) — failing closed transient"
             )
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5ClientError as e:
             # Classify via the ONE mt5_validation seam. NEVER log the interpolated
             # remote text (it can carry the scrubbed code only) and never
@@ -358,7 +405,13 @@ async def _validate_mt5_key(
             logger.warning(
                 "validate_key: MT5 transient upstream failure (code=%s)", e.code
             )
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
+            raise VenueTransientHTTPException(
+                status_code=400,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
 
         if is_trade_capable(info, probe):
             # Master (trade-capable) login REJECTED — never persisted (the TS
@@ -520,7 +573,34 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             pass
 
     if result["error"]:
-        raise HTTPException(status_code=400, detail=result["error"])
+        # PYAPIFIX2-01 (C6) — the LIVE key-connect collapse, and the site the
+        # whole class is named after. `validate_key_permissions` computes a
+        # stable `error_code` discriminator and this raise used to DISCARD it,
+        # leaving the human sentence as the only carrier. See the C1 block for
+        # why the shape is flat and why service_error is forbidden here.
+        #
+        # The code is carried VERBATIM — no fallback, no route-minted default.
+        # A default here would hand the wizard a fabricated code and hide a real
+        # service-layer bug behind a plausible-looking envelope (CLAUDE.md
+        # Rule 12: fail loud). It is safe because the producer's invariant holds:
+        # every branch of `validate_key_permissions` that sets `error` also sets
+        # `error_code` in the same branch — verified branch-by-branch, and
+        # mechanised as a test so a future branch that breaks it reddens at the
+        # PRODUCER rather than raising here. If it is ever broken anyway, the
+        # exception class's own guard raises a loud ValueError.
+        #
+        # `recoverable` derives from PERMANENT_VALIDATION_ERROR_CODES, which is
+        # an ALLOW-LIST OF PERMANENT: non-membership means "not known to be
+        # permanent", which that constant's contract defines as retryable. So an
+        # unrecognised future code fails SAFE (offers a retry). The code rides
+        # for EVERY verdict here, permanent ones included — that is closing the
+        # site, not absorbing the separate permanent-only gap.
+        raise VenueTransientHTTPException(
+            status_code=400,
+            code=result["error_code"],
+            detail=result["error"],
+            recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+        )
 
     return {"valid": result["valid"], "read_only": result["read_only"]}
 
