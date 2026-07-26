@@ -404,21 +404,42 @@ class VenueTransientHTTPException(HTTPException):
         detail: str,
         recoverable: bool,
     ) -> None:
-        if type(detail) is not str or not detail:
+        # The CLASS-membership guard, and it is not decorative: this shape is a
+        # CALLER-class 4xx by construction — it carries no `dependency`, no
+        # `Retry-After` and no `correlation_id`. A site that copied one of these
+        # blocks and wrote `status_code=503` would emit a FLAT 5xx naming no
+        # dependency: a direct R-2 violation that `service_error`'s `_validate`
+        # refuses, and one that 140.2's per-dependency breaker (SEAMCORE-01)
+        # would mis-key onto the global bucket A-01 shows is false. Nothing else
+        # pins this — the wire tests pin 400 at the seven sites, not the class's
+        # admissible range.
+        if not 400 <= status_code < 500:
+            raise ValueError(
+                "VenueTransientHTTPException is a CALLER-class 4xx shape: it "
+                "carries no `dependency` and no Retry-After, so a 5xx here "
+                "would violate R-2 and mis-key 140.2's per-dependency breaker. "
+                f"Use service_error() for 5xx. got {status_code!r}"
+            )
+        if not isinstance(detail, str) or not detail:
             raise ValueError(
                 "VenueTransientHTTPException.detail must be a NON-EMPTY SCALAR "
                 "str — it is the string the TypeScript substring classifier "
                 "reads. An object here renders as '[object Object]' and "
                 f"regresses three working codes to UNKNOWN/500. got {detail!r}"
             )
-        if type(code) is not str or not code:
+        if not isinstance(code, str) or not code:
             raise ValueError(
                 "VenueTransientHTTPException.code must be a non-empty str. The "
                 "call sites carry the producer's discriminator verbatim with no "
                 "fallback, so an absent code is a broken producer invariant and "
                 f"must fail LOUD, never default. got {code!r}"
             )
-        if type(recoverable) is not bool:
+        # `isinstance`, matching `service_error_body`'s scalar guard at the top
+        # of this module — one module, one idiom. Behaviour-identical for `bool`
+        # (it cannot be subclassed) and for `str` the only difference is that a
+        # `str` SUBCLASS is now admitted, which is still a scalar string that
+        # serialises identically.
+        if not isinstance(recoverable, bool):
             raise ValueError(
                 "VenueTransientHTTPException.recoverable must be a bool — it "
                 f"goes on the wire as a JSON boolean. got {recoverable!r}"

@@ -849,6 +849,47 @@ def test_venue_transient_exception_refuses_an_empty_code() -> None:
             )
 
 
+def test_venue_transient_exception_refuses_a_non_4xx_status() -> None:
+    """The class is a CALLER-class 4xx shape, and that is now enforced.
+
+    The flat body carries no `dependency`, no `Retry-After` and no
+    `correlation_id`. A future site copying one of the C3-C5 blocks and writing
+    `status_code=503` would therefore emit a flat 5xx naming no dependency — a
+    direct R-2 violation, refused by `service_error`'s own `_validate`, and one
+    that 140.2's per-dependency breaker would mis-key onto the global bucket.
+    The wire tests pin 400 at the seven sites; nothing pinned the class's
+    ADMISSIBLE RANGE until this guard existed.
+
+    The whole 4xx band is admitted, not just 400: the 400 -> 424 remap is owed
+    as one unit with TS-05 (ledger TS-32), so refusing 424 here would fence out
+    the very move the contract schedules.
+    """
+    from services.error_contract import VenueTransientHTTPException
+
+    for refused in (500, 502, 503, 504, 200, 302, 399, 600):
+        with pytest.raises(ValueError) as ei:
+            VenueTransientHTTPException(
+                status_code=refused,
+                code="NETWORK_UNAVAILABLE",
+                detail=EXPECTED_NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
+        assert "4xx" in str(ei.value), (
+            f"status {refused} was refused, but not for the documented reason — "
+            f"the message must name the class rule: {ei.value}"
+        )
+
+    # …and the band the class OWNS still constructs, including the scheduled 424.
+    for admitted in (400, 424, 429, 499):
+        allowed = VenueTransientHTTPException(
+            status_code=admitted,
+            code="NETWORK_UNAVAILABLE",
+            detail=EXPECTED_NETWORK_ERROR_DETAIL,
+            recoverable=True,
+        )
+        assert allowed.status_code == admitted
+
+
 # --------------------------------------------------------------------------- #
 # The HANDLER's parity with the handler it SHADOWS
 # --------------------------------------------------------------------------- #
