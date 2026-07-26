@@ -358,3 +358,247 @@ async def test_s07_encrypt_key_missing_kek_is_permanent_500(exchange_router):
     assert body["dependency"] == "kek"
     assert body["retryable"] is False
     assert not (ei.value.headers or {}).get("Retry-After")
+
+
+# --------------------------------------------------------------------------- #
+# routers/internal.py — S-08..S-12
+#
+# Driven through a TestClient (the idiom this router's existing suite uses,
+# tests/test_sfox_internal_probe.py) so the assertions are against the WIRE
+# response — status line, body and headers — rather than the exception object.
+# The wire is what 140.2's discriminator consumes.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def internal_client(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from routers.internal import router, _reset_kek_alert, _reset_rate_limit
+
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "test-token")
+    _reset_rate_limit()
+    _reset_kek_alert()
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+
+def _supabase_with_key(exchange: str | None = "binance") -> MagicMock:
+    """An api_keys row plus a no-op key_permission_audit insert."""
+    fake = MagicMock()
+
+    def _table(name: str):
+        tbl = MagicMock()
+        if name == "api_keys":
+            chain = tbl.select.return_value.eq.return_value.maybe_single.return_value
+            chain.execute.return_value = MagicMock(
+                data={"id": "key-1", "exchange": exchange, "is_active": True}
+            )
+        else:
+            tbl.insert.return_value.execute.return_value = MagicMock(data=[{"id": 1}])
+        return tbl
+
+    fake.table.side_effect = _table
+    return fake
+
+
+def _probe_internal(
+    internal_client,
+    *,
+    key_id: str = "key-1",
+    exchange: str | None = "binance",
+    get_kek=None,
+    decrypt=None,
+    create_exchange=None,
+    detect_permissions=None,
+):
+    from unittest.mock import patch
+
+    stack = [
+        patch("routers.internal.get_supabase", return_value=_supabase_with_key(exchange)),
+        patch("routers.internal.get_kek", get_kek or MagicMock(return_value=b"kek")),
+        patch(
+            "routers.internal.decrypt_credentials",
+            decrypt or MagicMock(return_value=("k", "s", None)),
+        ),
+        patch(
+            "routers.internal.create_exchange",
+            create_exchange or MagicMock(return_value=MagicMock(name="ccxt")),
+        ),
+        patch(
+            "routers.internal.detect_permissions",
+            detect_permissions
+            or AsyncMock(return_value={"read": True, "trade": False, "withdraw": False}),
+        ),
+        patch("routers.internal.aclose_exchange", AsyncMock()),
+    ]
+    for ctx in stack:
+        ctx.__enter__()
+    try:
+        return internal_client.post(
+            f"/internal/keys/{key_id}/permissions",
+            headers={"x-internal-token": "test-token"},
+        )
+    finally:
+        for ctx in reversed(stack):
+            ctx.__exit__(None, None, None)
+
+
+def _wire_envelope(resp) -> dict:
+    """STATUS_CONTRACT.md §2 — the R-2 envelope always lives at body.detail."""
+    body = resp.json()
+    assert isinstance(body.get("detail"), dict), (
+        f"every deliberate error body must carry the R-2 envelope at .detail, got {body!r}"
+    )
+    env = body["detail"]
+    for key in ("code", "dependency", "retryable", "detail"):
+        assert key in env, f"R-2 envelope is missing {key!r}: {env!r}"
+    assert isinstance(env["detail"], str), "body.detail.detail must be a scalar string"
+    return env
+
+
+# --- S-08 -------------------------------------------------------------------
+
+
+async def test_s08_permissions_missing_kek_is_permanent_500(internal_client):
+    """S-08 (internal.py:208) — the same missing/rotated KEK as S-07, on the
+    OTHER endpoint the findings doc never listed. Permanent until an operator
+    acts, therefore 500 retryable:false, therefore breaker-inert."""
+    r = _probe_internal(
+        internal_client, get_kek=MagicMock(side_effect=RuntimeError("KEK not configured"))
+    )
+
+    assert r.status_code == 500
+    env = _wire_envelope(r)
+    assert env["code"] == "KEK_UNAVAILABLE"
+    assert env["dependency"] == "kek"
+    assert env["retryable"] is False
+    assert "retry-after" not in {k.lower() for k in r.headers}
+
+
+async def test_s08_kek_failure_captures_exactly_one_sentry_alert_per_window(
+    internal_client, monkeypatch
+):
+    """PYAPI-06 site 4 — a KEK misconfiguration leaves NO operator signal today
+    (verified: internal.py:207-208 logs nothing). It gains one, but bounded: a
+    stale KEK fires on EVERY permission probe, and five badges per dashboard
+    render would turn the signal into a Sentry flood that gets muted — which is
+    indistinguishable from having no signal at all.
+
+    Also pins that neither the tag nor the message carries any substring of a
+    secret: an alert that leaks the credential it is complaining about is worse
+    than the outage."""
+    import routers.internal as internal_mod
+
+    spy = MagicMock()
+    monkeypatch.setattr(internal_mod, "sentry_sdk", spy)
+
+    for i in range(4):
+        internal_mod._reset_rate_limit()
+        r = _probe_internal(
+            internal_client,
+            key_id=f"key-{i}",
+            get_kek=MagicMock(side_effect=RuntimeError("KEK not configured")),
+        )
+        assert r.status_code == 500
+
+    assert spy.capture_message.call_count == 1, (
+        "a KEK outage must produce ONE bounded operator signal, not one per request"
+    )
+    tag_calls = [c for c in spy.set_tag.call_args_list]
+    assert len(tag_calls) == 1
+    rendered = repr(spy.set_tag.call_args_list) + repr(spy.capture_message.call_args_list)
+    for secret in ("KEK not configured", "test-token", "kek"):
+        if secret == "kek":
+            continue  # the dependency NAME is not a secret
+        assert secret not in rendered, f"{secret!r} must never reach a Sentry tag/message"
+
+
+# --- S-09 -------------------------------------------------------------------
+
+
+async def test_s09_undecryptable_key_is_permanent_500(internal_client):
+    """S-09 (internal.py:214) — A-02. The status was already right; what was
+    missing is the machine code and the explicit retryable:false that stops 140.2
+    counting a deterministic fault. A key that cannot be decrypted will never
+    decrypt on a retry, so counting it guarantees a self-sustaining outage."""
+    r = _probe_internal(
+        internal_client, decrypt=MagicMock(side_effect=ValueError("bad ciphertext"))
+    )
+
+    assert r.status_code == 500
+    env = _wire_envelope(r)
+    assert env["code"] == "KEY_UNDECRYPTABLE"
+    assert env["dependency"] == "kek"
+    assert env["retryable"] is False
+
+
+# --- S-10 -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("exchange", [None, ""])
+async def test_s10_key_with_no_exchange_is_caller_422(internal_client, exchange):
+    """S-10 (internal.py:218) — the clearest mis-attribution in the file. A NULL
+    column on the CALLER'S OWN row answered 502, i.e. "our upstream is broken",
+    which is false under any reading and counts against our health. It is caller
+    data: 422."""
+    r = _probe_internal(internal_client, exchange=exchange)
+
+    assert r.status_code == 422
+    env = _wire_envelope(r)
+    assert env["code"] == "KEY_MISSING_EXCHANGE"
+    assert env["dependency"] is None
+    assert env["retryable"] is False
+
+
+# --- S-11 -------------------------------------------------------------------
+
+
+async def test_s11_exchange_init_failure_is_venue_attributable_424(internal_client):
+    """S-11 (internal.py:326) — C-12. A non-ValueError out of create_exchange is
+    the caller's venue refusing us, not our service degrading. 424 keeps it out
+    of the breaker entirely and names the venue."""
+    r = _probe_internal(
+        internal_client,
+        create_exchange=MagicMock(side_effect=RuntimeError("binance handshake refused")),
+    )
+
+    assert r.status_code == 424
+    env = _wire_envelope(r)
+    assert env["code"] == "EXCHANGE_INIT_FAILED"
+    assert env["dependency"] == "binance"
+    assert env["retryable"] is True
+
+
+# --- S-12 -------------------------------------------------------------------
+
+
+async def test_s12_permission_probe_failure_is_venue_attributable_424(internal_client):
+    """S-12 (internal.py:339) — C-12's headline. Binance maintenance, a key
+    revoked at the venue and an IP-allowlist change ALL land here, uncached, five
+    badges per dashboard render. As a 502 that is five recorded failures and a
+    platform-wide trip that then denies Deribit users, the optimizer, admin match
+    and CSV finalize. As a 424 it is zero recorded failures."""
+    r = _probe_internal(
+        internal_client,
+        detect_permissions=AsyncMock(side_effect=RuntimeError("binance 503 maintenance")),
+    )
+
+    assert r.status_code == 424
+    env = _wire_envelope(r)
+    assert env["code"] == "EXCHANGE_PROBE_FAILED"
+    assert env["dependency"] == "binance"
+    assert env["retryable"] is True
+
+
+async def test_s12_raw_exception_text_never_reaches_the_response_body(internal_client):
+    """S-11/S-12 canary — the venue's raw exception must not be interpolated into
+    a user-reachable body (C-13's class on a response body)."""
+    r = _probe_internal(
+        internal_client,
+        detect_permissions=AsyncMock(side_effect=RuntimeError("CANARY_ERR_9a03 stack")),
+    )
+
+    assert "CANARY_ERR_9a03" not in r.text
