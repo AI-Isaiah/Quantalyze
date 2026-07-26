@@ -93,6 +93,59 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   book channel at a boundary consistent with the anchor) is best validated against real options
   books in the live dogfood, not blind. Watch for it in the /qa + Phoenix acceptance.
 
+### v1.16 branch `feat/v1.16-production-resilience` — merge guards (added 2026-07-26)
+
+- **No branch protection on `main` at all.** GitHub `rulesets: []` and
+  `branches/main/protection` → 404 — verified first-hand. There are **no required status checks**,
+  so nothing mechanically blocks a merge with red CI. Combined with the next item this is the live
+  risk. **Founder action:** enable branch protection requiring the `frontend`, `python` and
+  `sql-tests` aggregator checks.
+- **`sql-tests` will be RED on the v1.16 PR until migration `20260726000225` is hand-applied to
+  TEST** (`qmnijlgmdhviwzwfyzlc`), per this repo's standing MCP→TEST-before-merge convention.
+  Failure mode: reviewer sees an *expected* red, merges anyway, and **merging auto-applies the
+  migration to PROD**. The migration itself was validated hard (real PG15, idempotent, abort-safe,
+  20 PROD rows) so the apply risk is low — the risk is normalising red-check merges on a
+  prod-DB event.
+
+### v1.16 Phase-140.1 review — HOMELESS findings (no owning phase; added 2026-07-26)
+
+> ⚠️ **Why these are here:** they lived only in `.planning/phases/140.1-*/140.1-REVIEW.md` and
+> `140.1-TS-OBLIGATIONS.md`, which are **gitignored and have zero git backup** (`git ls-files
+> .planning` → 5 legacy phase-19 files only), in a repo whose memory records two prior accidental
+> destructions of exactly these ledgers. Full evidence stays in those files while they exist.
+
+- **Tests that run in NO environment (three findings).** (a) `TEST_SUPABASE_DB_URL` is wired into
+  the `sql-tests` CI job only (`ci.yml:810`), never the `python` job (`ci.yml:1030-1033`) — so
+  **31 pytest cases skip in CI exactly as they do locally**. (b) `HAS_PY_ENV` is set in **zero files
+  repo-wide** — the 5 Phase-4-vs-Phase-5 **money-math KPI parity** cases it gates are permanently
+  dormant. (c) 4 `tests/test_repro_key_flow.py` cases skip on missing **binance** cassettes
+  (`tests/cassettes/` holds only `okx/` and `bybit/`). CI wiring; no owning phase.
+- **A tenth IP-keyed route + the test that conceals it.** `analytics-service/routers/simulator.py:92`
+  returns `f"simulator:ip:{get_remote_address(request)}"`; its module docstring still claims it reads
+  `X-User-Id`, which it does not. `test_simulator_router.py::…::test_route_uses_user_keyed_key_func_not_ip`
+  asserts `key_func is not get_remote_address` — which **passes because the key func *wraps* the IP
+  function** rather than being it. Mechanically quarantined by `IP_KEYED_QUARANTINE` with an
+  *equality* assertion, so the exemption cannot grow and goes red when repaired. **PYAPI-03's
+  reconciliation is 9/9 — do not report 10 closed.** Repairing the route must also repair the test's
+  name and docstring.
+- **Nine test modules mount a bare `FastAPI()`**, so they never see the app-global 422/429 handlers
+  and their 422s render in FastAPI's default **leaking** shape. **Negative half: none of them is
+  vacuous today — do NOT schedule a "fix the broken tests" sweep.** Positive half: the credential-safe
+  422 is gated by exactly ONE file (`tests/test_validation_error_contract.py`), and
+  `test_process_key.py` is where a future author would "prove the 422 is safe" and prove nothing.
+  A shared app-factory fixture closes it.
+- **403-vs-422 split unowned.** `_scope_rejected` (`routers/process_key.py:1295-1299`) is a three-arm
+  OR behind one return, so ordinary `not val.valid` failures (incl. a malformed CSV) now answer
+  **403** where 422 would be sharper. The consumer half is tracked as TS-14; the split decision itself
+  has no owner.
+- **Worker raises an HTTP exception.** `analytics_runner.py:1725` raises `HTTPException(500)` from the
+  WORKER — a category error that can never render.
+- **Anonymous teaser bucket 30/hour** (`routers/process_key.py:99`) — deliberate and founder-retunable;
+  wants a saturation alert so exhaustion is visible rather than silent.
+- **Process item (TRAP-9 class B2):** plans enumerate production sites exhaustively but not the TESTS
+  those changes invalidate. Plan-check found 4; plans 06, 07 and 08 each found one *more* the plan did
+  not predict. Fold into the planning template, not a code phase.
+
 ---
 
 ## 🟡 FIX MID-TERM
@@ -216,6 +269,28 @@ flipping `SMOOTHED_MTM_ENABLED` ON can never sink a healthy book's cash+MTM fact
   mechanisms to codify + consolidate: multiple auth wrappers, multiple cron mechanisms
   (vercel.json vs `pg_cron`+`pg_net`), multiple admin checks. (17 existing decisions to
   document + 5 open questions per the 2026-04 architecture audit.)
+
+### v1.16 Phase-140.1.2 — routed findings (added 2026-07-26)
+
+> Both are **pre-existing** and were deliberately fenced OUT of Phase 140.1.2, whose scope was
+> four named artifact items and no general sweep. Routed here per that phase's own CONTEXT rule.
+
+- **`analytics-service/tests/test_mt5_validate.py` carries 8 self-referential detail
+  assertions** — `:286`, `:310`, `:328`, `:347`, `:383`, `:404`, `:420`, `:436` are each
+  `assert ei.value.detail == <CONSTANT>` where the constant is imported from the module under
+  test, so the assertion cannot fail when the copy changes. (All 8 re-read at HEAD
+  `2c55ece0`; the file is untouched by 140.1/140.1.1/140.1.2.) 140.1.1's oracle audit found
+  zero self-referential oracles *in the 19 files it added* — this is an older file it never
+  rewrote, so that audit's verdict is not contradicted. **Do not copy this pattern**; fix by
+  typing the expected copy as a literal in the test, the way 140.1.1 fixed the one assertion
+  in this file that it did touch.
+- **`analytics-service/docs/STATUS_CONTRACT.md` not-seam-reachable coordinate drift beyond the
+  item 140.1.2 repaired** — `routers/portfolio.py:2242` is a comment line (the 429 raise is at
+  `:2244-2247`) and `:2446` is unverified. 140.1.2 plan 04 corrected the `exchange.py` and
+  `internal.py` coordinates in that bullet plus the S-11 row and the classes heading, and
+  deliberately stopped there. *(Same file, same class: `routers/exchange.py:37` and
+  `services/error_contract.py:6,8` still say "the four classes" in prose — the table has had
+  five rows since 140.1.1 plan 01. One-word comment fix, batch it with the above.)*
 
 ---
 
