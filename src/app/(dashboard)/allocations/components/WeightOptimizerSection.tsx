@@ -80,6 +80,45 @@ const FALLBACK_EMPTY = {
   body: "The optimizer couldn't produce weights for this selection. Try a different objective or selection.",
 };
 
+/**
+ * 140.3-08 / SEAMUX-05 (B-13) — WHICH failure occurred.
+ *
+ * `requestWeights` used to answer every failure with one undifferentiated
+ * `status: "error"` whose copy reads *"The optimizer is unavailable right now.
+ * Try again shortly."* — because the `!res.ok` arm read no status and the catch
+ * bound no variable at all, so it read no caught value either. (The old bare
+ * catch is deliberately NOT reproduced here: an acceptance grep counts that
+ * exact text in this file, and a comment quoting it would keep the grep red
+ * while the code was genuinely fixed.) Three different facts collapsed into one
+ * sentence, and for two of them the sentence is false:
+ *
+ *   - a 4xx means the optimizer ANSWERED and refused. Telling the allocator it
+ *     is unavailable and to "try again shortly" is both untrue and steering —
+ *     the identical request will be refused identically every time.
+ *   - an unreadable body means we do not KNOW whether it ran. Asserting
+ *     availability there claims something we cannot see.
+ *
+ * Availability copy is kept for the cases where availability really is the fact
+ * (5xx, a rejected fetch, and any status we could not read — the conservative
+ * default, since "refused" is the stronger claim of the two).
+ */
+type OptimizerFailure = "unavailable" | "refused" | "unreadable";
+
+const FAILURE_COPY: Record<OptimizerFailure, { heading: string; body: string }> = {
+  unavailable: {
+    heading: "Couldn't reach the optimizer",
+    body: "The optimizer is unavailable right now. Try again shortly.",
+  },
+  refused: {
+    heading: "The optimizer refused this request",
+    body: "The optimizer answered but would not run this request. Change the objective or the selected strategies and run it again.",
+  },
+  unreadable: {
+    heading: "Couldn't read the optimizer's answer",
+    body: "The optimizer answered with something this page could not read, so we can't tell whether it ran. Nothing was written to your draft. Run it again, and contact support if it repeats.",
+  },
+};
+
 interface WeightOptimizerSectionProps {
   /** The active engine-set strategies the optimizer allocates across. */
   strategies: OptimizerStrategy[];
@@ -92,6 +131,9 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
   const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [result, setResult] = useState<OptimizeResult | null>(null);
   const [applied, setApplied] = useState(false);
+  // Which failure the "error" status is standing for (B-13). Only read when
+  // `status === "error"`, and always written together with it.
+  const [failure, setFailure] = useState<OptimizerFailure>("unavailable");
 
   // < 2 active strategies — nothing to optimize across (mirror the Python gate).
   if (strategies.length < 2) {
@@ -116,13 +158,25 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
         body: JSON.stringify({ series, objective }),
       });
       if (!res.ok) {
+        // A 4xx is the optimizer answering; anything else (5xx, or a status we
+        // could not read) is treated as availability — the weaker claim.
+        setFailure(res.status >= 400 && res.status < 500 ? "refused" : "unavailable");
         setStatus("error");
         return;
       }
       const data = (await res.json()) as OptimizeResult;
       setResult(data);
       setStatus("done");
-    } catch {
+    } catch (err) {
+      // Read the caught value instead of discarding it. A `SyntaxError` here is
+      // `res.json()` choking on a proxy's HTML page over a 2xx — we could not
+      // READ the answer, which is not the same fact as the service being down.
+      // Anything else (a rejected fetch, a `TypeError`) is availability.
+      //
+      // The caught value goes to the operator log and NEVER to the DOM: it can
+      // embed an internal URL or header name (140.3-07's B-27 discipline).
+      console.error("[WeightOptimizerSection] optimizer request failed:", err);
+      setFailure(err instanceof SyntaxError ? "unreadable" : "unavailable");
       setStatus("error");
     }
   };
@@ -176,8 +230,8 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
       {status === "error" && (
         <div className="mt-3">
           <EmptyStateCard
-            heading="Couldn't reach the optimizer"
-            body="The optimizer is unavailable right now. Try again shortly."
+            heading={FAILURE_COPY[failure].heading}
+            body={FAILURE_COPY[failure].body}
           />
         </div>
       )}
