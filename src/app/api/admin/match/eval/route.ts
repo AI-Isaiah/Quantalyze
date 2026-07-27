@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
-import { AnalyticsTimeoutError, evalMatch } from "@/lib/analytics-client";
+import {
+  AnalyticsTimeoutError,
+  AnalyticsUpstreamError,
+  evalMatch,
+} from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { assertSameOrigin } from "@/lib/csrf";
@@ -112,6 +116,40 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json(
         { error: TIMEOUT_COPY },
         { status: 504, headers: NO_STORE_HEADERS },
+      );
+    }
+    // 140.3-11 / TS-19 — an upstream 4xx SURVIVES this route.
+    //
+    // The same arm as `src/app/api/admin/match/recompute/route.ts`, delivered
+    // here in the SAME commit. These two files have the same shape and had the
+    // same gap (`AnalyticsUpstreamError` appeared 0 times in each before this
+    // plan); fixing one and reporting the class closed is this programme's
+    // signature failure, so both counts are asserted per file.
+    //
+    // THE RANGE SPLIT IS THE POINT, copied from
+    // `src/app/api/simulator/route.ts:201` rather than invented. Only 4xx
+    // forwards: a 4xx `detail` is operator-curated copy, while a 5xx `message`
+    // carries the FastAPI detail, the `parseResponse()` contract-drift string
+    // and this service's base URL — what the STATIC-bodies docblock above
+    // exists to keep off the wire (T-140-11). A 5xx keeps falling through to
+    // the static arm below.
+    //
+    // The status only. No header rides along: `AnalyticsUpstreamError` carries
+    // none, so a forwarded upstream 429 reaches the client WITHOUT its
+    // `Retry-After`, and inventing one would name a wait no upstream stated.
+    if (
+      err instanceof AnalyticsUpstreamError &&
+      err.status >= 400 &&
+      err.status < 500
+    ) {
+      // Status and machine code only — never the message, which is already
+      // going to the client and would double the disclosure surface in the log.
+      console.error(
+        `[api/admin/match/eval] upstream ${err.status} (${err.seamCode ?? "no code"})`,
+      );
+      return NextResponse.json(
+        { error: err.message },
+        { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
     console.error("[api/admin/match/eval] upstream error:", err);
