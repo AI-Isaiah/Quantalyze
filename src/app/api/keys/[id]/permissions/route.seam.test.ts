@@ -286,6 +286,47 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
     expect(incrementalStore.size).toBe(1);
   });
 
+  it("headers arrive, the body then aborts → NOTHING is cached and the next call re-attempts", async () => {
+    // SEAMCORE-02 / SC1 at the boundary that actually matters. Before the fix
+    // the body read sat OUTSIDE the core's classification window, so this shape
+    // recorded no breaker failure at all; the throw itself is what keeps the
+    // fork from writing an entry, and this Next layer caches for 60s against a
+    // 30s breaker cooldown. A failure converted into a RETURNED value here
+    // would keep answering for half a minute after Railway recovered —
+    // T-140-32, the mitigation becoming the outage.
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+      text: () => Promise.reject(new DOMException("aborted", "TimeoutError")),
+    });
+    const { GET } = await import("./route");
+
+    const res = await GET(makeRequest());
+
+    expect(res.status).toBe(502);
+    const raw = await res.text();
+    // No new arm and no new copy: the route's existing generic classification
+    // is the right answer for a body-read failure, and 140.3 owns the surface.
+    expect(JSON.parse(raw).code).toBe("PROBE_FAILED");
+    // The static message carries no transport detail (T-140-05).
+    expect(raw).not.toContain("aborted");
+    expect(raw).not.toMatch(/upstash|railway|DOMException/i);
+
+    // ── THE assertion: the fork wrote NO entry for the rejected callback ────
+    expect(incrementalStore.size).toBe(0);
+
+    // …so the very next call re-attempts for real rather than replaying a
+    // 60s-lived failure.
+    fetchMock.mockResolvedValue(okProbeResponse());
+    const res2 = await GET(makeRequest());
+    expect(res2.status).toBe(200);
+    expect((await res2.json()).read).toBe(true);
+    expect(incrementalStore.size).toBe(1);
+  });
+
   it("cache HIT replays without running the callback — the breaker is never consulted", async () => {
     const { GET } = await import("./route");
 

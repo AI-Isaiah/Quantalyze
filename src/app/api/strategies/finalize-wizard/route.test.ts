@@ -562,6 +562,40 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     fetchSpy.mockRestore();
   });
 
+  it("SEAMCORE-02: a probe whose BODY aborts still fails CLOSED", async () => {
+    // The shape that used to slip through. `AbortSignal.timeout` aborts the
+    // response STREAM, so headers can arrive and the body then stall: `fetch`
+    // RESOLVES, and pre-fix the rejection escaped as a raw DOMException from
+    // `res.json()` after the core's window had closed. The probe MUST still
+    // block finalize — a key whose live scopes could not be re-checked must
+    // never be promoted to pending_review (T-140-22), and a body that stalled
+    // mid-stream is a probe that did not run.
+    const aborted = new DOMException("aborted", "TimeoutError");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(aborted),
+      text: () => Promise.reject(aborted),
+    } as unknown as Response);
+    const consoleErr = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("KEY_NETWORK_TIMEOUT");
+    // FAIL CLOSED: the finalize RPC must not have run.
+    expect(STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"))
+      .toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
   it("returns 502 KEY_NETWORK_TIMEOUT when the probe returns probe_error=true", async () => {
     // probe_error=true is the Python fail-CLOSED default that fires
     // when the live exchange call itself raised. We must NOT treat

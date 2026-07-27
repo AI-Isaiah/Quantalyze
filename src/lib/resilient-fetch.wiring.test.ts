@@ -132,6 +132,17 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
     coreSpy.mockReset();
     // A FRESH Response per call — a single shared instance would have its body
     // consumed by the first `.json()` and make the second client's read throw.
+    //
+    // ⚠️ A real `Response` is STILL the right stub after SEAMCORE-02 changed
+    // the core's return type to `SeamResponse`. That type is spelled as a
+    // subset of `Response` (`ok`, `status`, `statusText`, `headers`, `json`,
+    // `text`, each as `Response["…"]`), so `Response` remains assignable to it
+    // and this stub keeps type-checking. What the stub cannot reproduce is the
+    // INSTRUMENTATION — a body-read failure recording a breaker failure — and
+    // it is not supposed to: this file pins WIRING (which budget key, which
+    // headers, which path). The instrumented behaviour is proven against the
+    // real core in `resilient-fetch.test.ts` and end-to-end in each client's
+    // own file. Do not "upgrade" this stub to a hand-rolled SeamResponse.
     coreSpy.mockImplementation(
       async () =>
         new Response(

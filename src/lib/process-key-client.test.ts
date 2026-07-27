@@ -416,3 +416,135 @@ describe("postProcessKey — X-Tenant-Claim (PYAPI-02)", () => {
     expect(payload).toBe("cross-lang-user");
   });
 });
+
+/**
+ * Phase 140.2 / SEAMCORE-02 — the body read is inside the window, and the
+ * choke point STILL never throws.
+ *
+ * `postProcessKey` is declared `Promise<PostProcessKeyResult>` and has never
+ * thrown. Its `try` used to wrap ONLY the `resilientFetch` call, with both body
+ * reads sitting after the catch — so once the core started throwing a typed
+ * error from `res.json()`, letting it propagate would have added an unhandled
+ * throw path at all FIVE caller routes (strategies/csv-validate,
+ * strategies/csv-finalize, strategies/finalize-wizard, keys/sync,
+ * verify-strategy), none of which has a catch for it.
+ *
+ * These cases drive the REAL core (the file-level `coreSpy` delegates to the
+ * actual implementation) with a transport that resolves its headers and then
+ * rejects its body — the modal Railway degradation. The expected envelopes are
+ * the two that ALREADY existed; this plan authors no new code and no new copy.
+ */
+describe("postProcessKey — a body-read failure never escapes the choke point", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+    // A leaked fetch stub is this repo's known CI-only (Node 22) failure cause.
+    vi.unstubAllGlobals();
+  });
+
+  /** Headers resolve, body rejects. A real Response cannot express this. */
+  function bodyRejectingFetch(rejection: unknown, status = 200) {
+    const fetchMock = vi.fn(async () => ({
+      ok: status < 400,
+      status,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(rejection),
+      text: () => Promise.reject(rejection),
+    }));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  async function call() {
+    return postProcessKey({
+      flow_type: "csv",
+      source: "csv",
+      context: {},
+      userId: "u1",
+      correlationId: "body-read-corr",
+    });
+  }
+
+  it("a deadline mid-body maps onto the EXISTING UPSTREAM_TIMEOUT 504 envelope", async () => {
+    bodyRejectingFetch(new DOMException("aborted", "TimeoutError"));
+
+    const result = await call();
+
+    expect(result.ok).toBe(false);
+    const response = failureResponse(result);
+    expect(response.status).toBe(504);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.code).toBe("UPSTREAM_TIMEOUT");
+    expect(body.recoverable).toBe(true);
+    expect(body.correlation_id).toBe("body-read-corr");
+    // No new user-facing copy: byte-identical to the transport-timeout arm.
+    expect(body.human_message).toBe(
+      "The ingestion service did not respond in time. Please try again.",
+    );
+  });
+
+  it("a non-deadline body failure maps onto the EXISTING UPSTREAM_NETWORK_ERROR 502 envelope", async () => {
+    bodyRejectingFetch(new TypeError("terminated"));
+
+    const result = await call();
+
+    expect(result.ok).toBe(false);
+    const response = failureResponse(result);
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.code).toBe("UPSTREAM_NETWORK_ERROR");
+    expect(body.human_message).toBe("Could not reach the ingestion service.");
+  });
+
+  it("the non-2xx arm's body read is inside the window too", async () => {
+    // The `!ok` read used to sit after the catch as well, and swallowed every
+    // failure into `{}` — so an aborted body on a 500 produced a 500 envelope
+    // with an empty body, reporting a dying Railway as a well-formed reply.
+    bodyRejectingFetch(new DOMException("aborted", "TimeoutError"), 500);
+
+    const response = failureResponse(await call());
+    expect(response.status).toBe(504);
+    expect(((await response.json()) as { code: string }).code).toBe(
+      "UPSTREAM_TIMEOUT",
+    );
+  });
+
+  it("STILL never throws — the declared contract of all five caller routes", async () => {
+    for (const rejection of [
+      new DOMException("aborted", "TimeoutError"),
+      new TypeError("terminated"),
+      new Error("something else entirely"),
+    ]) {
+      bodyRejectingFetch(rejection);
+      // `.resolves` is the assertion: a throw here is the five-unhandled-paths
+      // regression, and it would surface as a rejected promise, not a bad code.
+      await expect(call()).resolves.toMatchObject({ ok: false });
+    }
+  });
+
+  it("an unparseable body still resolves ok — a parse failure is not degradation", async () => {
+    // Negative control. An upstream that answers 200 with an empty body is
+    // REPLYING; the pre-existing `{}` fallback must survive the fix, or every
+    // 204-shaped reply becomes a 502.
+    const fetchMock = vi.fn(
+      async () =>
+        new Response("", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await call();
+    expect(result).toEqual({ ok: true, status: 200, body: {} });
+  });
+});

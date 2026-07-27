@@ -402,6 +402,140 @@ describe("AnalyticsUpstreamError", () => {
   });
 });
 
+/**
+ * Phase 140.2 / SEAMCORE-02 — a body-read failure never escapes this module
+ * untyped.
+ *
+ * The pre-fix shape: `AbortSignal.timeout` aborts the response STREAM, so for
+ * the modal Railway degradation (headers fast, body slow) `fetch` RESOLVES and
+ * the rejection happens later, inside `res.json()` — AFTER the transport catch
+ * at the top of `analyticsRequest` has already been passed. The raw
+ * `DOMException` therefore escaped to nine wrapper consumers, none of which has
+ * an arm for it, and the breaker was never told.
+ *
+ * These cases pin the mapping onto the taxonomy that ALREADY existed. No new
+ * error type reaches a wrapper; 140.3 owns the client-facing surface.
+ */
+describe("[SEAMCORE-02] analytics-client maps a body-read failure onto its own taxonomy", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Headers resolve; the body then rejects. A bare object, because a real
+   * `Response` cannot be constructed with a body that rejects.
+   */
+  function bodyRejectingFetch(rejection: unknown, status = 200) {
+    return vi.fn().mockResolvedValue({
+      ok: status < 400,
+      status,
+      statusText: "OK",
+      headers: new Headers({ "content-type": "application/json" }),
+      json: () => Promise.reject(rejection),
+      text: () => Promise.reject(rejection),
+    });
+  }
+
+  async function callInternal(
+    fetchMock: ReturnType<typeof vi.fn>,
+  ): Promise<unknown> {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+        options: { budgetKey: string },
+      ) => Promise<unknown>;
+    };
+    return (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+      "/test",
+      { ping: 1 },
+      { budgetKey: "validate-key" },
+    );
+  }
+
+  it("SUCCESS arm: a deadline mid-body throws AnalyticsTimeoutError, not a raw DOMException", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./analytics-client");
+    const caught = await callInternal(
+      bodyRejectingFetch(new DOMException("aborted", "TimeoutError")),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect(caught).not.toBeInstanceOf(DOMException);
+    // The class the core throws must NOT be what a wrapper consumer sees.
+    expect((caught as Error).name).toBe("AnalyticsTimeoutError");
+  });
+
+  it("SUCCESS arm: a non-deadline body failure maps onto the existing not-reachable Error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./analytics-client");
+    const caught = await callInternal(
+      bodyRejectingFetch(new TypeError("terminated")),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toMatch(/not reachable/i);
+  });
+
+  it("NON-OK arm: an abort is NOT converted into a fabricated { detail: statusText } body", async () => {
+    // The swallow this replaces reported a dying Railway as a well-formed
+    // upstream error carrying the status line's own text — indistinguishable,
+    // downstream, from the service answering properly.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./analytics-client");
+    const caught = await callInternal(
+      bodyRejectingFetch(new DOMException("aborted", "TimeoutError"), 503),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsUpstreamError);
+  });
+
+  it("NON-OK arm: a genuinely unparseable body KEEPS the fallback", async () => {
+    // The negative control for the case above. Distinguishing the two is the
+    // whole point: an empty or non-JSON body on a 503 is Railway REPLYING.
+    const mod = await import("./analytics-client");
+    const caught = await callInternal(
+      vi.fn().mockResolvedValue(
+        new Response("", {
+          status: 503,
+          statusText: "Service Unavailable",
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    );
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as InstanceType<typeof mod.AnalyticsUpstreamError>).status).toBe(
+      503,
+    );
+    expect((caught as Error).message).toBe("Service Unavailable");
+  });
+});
+
 // DOGFOOD (2026-07-18) — credential whitespace normalization. Reproduced live:
 // a CORRECT Deribit production key with a trailing space+newline on the secret
 // makes the exchange return 13004 invalid_credentials → the user reads "my
