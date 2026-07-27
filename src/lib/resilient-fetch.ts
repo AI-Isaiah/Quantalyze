@@ -188,6 +188,63 @@ export const DEFAULT_RETRY_AFTER_S = 30;
 export const SEAM_RETRIES = 0;
 
 // ---------------------------------------------------------------------------
+// SEAMCORE-03 — bounding the breaker's OWN store (A-04)
+//
+// Before these three, the client was a bare `Redis.fromEnv()` and therefore
+// took the SDK defaults, read at source in
+// `node_modules/@upstash/redis/chunk-2X4SLXT7.mjs`:
+//
+//   attempts = (config.retry?.retries ?? 5) and the loop is `i <= attempts`,
+//   so SIX fetches; backoff = `Math.exp(i) * 50`, summing to ≈4 290 ms; and
+//   `signal: undefined`, so NOT ONE of the six had a deadline.
+//
+// Fail-open covers REJECTIONS. A HANG is not a rejection, so a degraded Upstash
+// held the lambda for as long as it liked — and none of that wall clock appeared
+// in the SC-4b arithmetic, which summed only `timeoutMs × calls × (1 + retries)`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Wall-clock deadline handed to each breaker-store command.
+ *
+ * ⚠️ THE SDK EVALUATES THE FACTORY ONCE PER COMMAND, NOT ONCE PER ATTEMPT
+ * (`chunk-2X4SLXT7.mjs`: `requestOptions` is built before the retry loop, with
+ * `signal: isSignalFunction ? signal() : signal`). So this is a per-COMMAND
+ * deadline that all of that command's attempts share, and the real worst case
+ * for one command is closer to `TIMEOUT + one backoff` than to
+ * `attempts × TIMEOUT`. The SC-4b arithmetic nonetheless charges
+ * `attempts × TIMEOUT + retries × BACKOFF`, which OVER-states the cost — the
+ * safe direction for a headroom assertion, and stated rather than implied.
+ *
+ * 2 000 ms sits an order of magnitude above Upstash's REST latency from Vercel
+ * (tens of ms in-region, low hundreds cross-region). Setting it near that
+ * latency would turn healthy round trips into aborts, and an aborted breaker
+ * read fails OPEN — i.e. a too-tight deadline silently DISABLES the breaker
+ * rather than tightening it.
+ */
+export const BREAKER_STORE_TIMEOUT_MS = 2_000;
+
+/**
+ * Retries per breaker-store command, on top of the first attempt.
+ *
+ * One, not the SDK's five. The store's failure mode is already benign in the
+ * read direction (fail OPEN, the seam call proceeds), so buying resilience with
+ * five extra attempts spends the lambda's budget to protect a lookup whose
+ * failure costs nothing. It is a term in the SC-4b worst case, which is the
+ * whole reason it is declared rather than defaulted.
+ */
+export const BREAKER_STORE_RETRIES = 1;
+
+/**
+ * Fixed pause between store attempts.
+ *
+ * FIXED rather than exponential, deliberately. The SDK default `Math.exp(i)*50`
+ * is 50 ms at i=0 and 1 004 ms at i=3, so its contribution to a worst case
+ * depends on the attempt index and cannot be stated as one number in the budget
+ * arithmetic. A constant is the property SC-4b needs.
+ */
+export const BREAKER_STORE_BACKOFF_MS = 250;
+
+// ---------------------------------------------------------------------------
 // SEAM-02 — the ONE timeout budget table
 // ---------------------------------------------------------------------------
 
@@ -515,10 +572,38 @@ export const SEAM_EXCLUSIONS: Record<string, string> = {
  * imported: `ratelimit.ts` does not export its singleton, and importing it
  * would drag `next/server` plus fifteen limiter constructions into every module
  * that touches the seam (research §7.4).
+ *
+ * ⚠️ BOUNDED, AND THE `signal` IS A FACTORY (SEAMCORE-03 / A-04). `fromEnv`
+ * spreads its config into the constructor, which forwards `retry` and `signal`
+ * straight to the HttpClient — so this is a CONFIG change, not a rewrite.
+ *
+ * THE FACTORY FORM IS CHOSEN, and both reasons are read at source in
+ * `@upstash/redis/chunk-2X4SLXT7.mjs`:
+ *
+ *  1. `signal: isSignalFunction ? signal() : signal` is evaluated once per
+ *     `request()`. A single `AbortSignal` INSTANCE would therefore be
+ *     already-aborted on the second store command, aborting every command after
+ *     the first.
+ *  2. THE ABORT SEMANTICS DIFFER. In the catch arm, `if (signal?.aborted &&
+ *     isSignalFunction) throw error_;` — the factory form RETHROWS. The plain
+ *     form takes the `else` branch and fabricates `new Response(blob, { status:
+ *     200 })` whose body is `signal.reason ?? "Aborted"`. That fabricated 200
+ *     would make an aborted `mget` look like a SUCCESSFUL read of values that
+ *     are not locks (harmlessly fail-open) and an aborted `set` look like a lock
+ *     that was WRITTEN — an unarmed breaker reported as armed, silently. The
+ *     read direction's wrong answer is this module's doctrine; the write
+ *     direction's is a lie. A rethrow gives both arms the truth and lets each
+ *     decide, which is why the default is not allowed to choose.
  */
 const redis =
   process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
-    ? Redis.fromEnv()
+    ? Redis.fromEnv({
+        retry: {
+          retries: BREAKER_STORE_RETRIES,
+          backoff: () => BREAKER_STORE_BACKOFF_MS,
+        },
+        signal: () => AbortSignal.timeout(BREAKER_STORE_TIMEOUT_MS),
+      })
     : null;
 
 if (!redis) {
@@ -681,9 +766,31 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
 export async function recordSeamFailure(breakerKey: string): Promise<void> {
   if (!redis || !breakerLimiter) return;
   try {
-    const { success, remaining } = await breakerLimiter.limit(
-      `${breakerKey}:failures`,
-    );
+    const verdict = await breakerLimiter.limit(`${breakerKey}:failures`);
+    // ── A-09, AND IT WAS A LIVE DEFECT ──────────────────────────────────────
+    // `@upstash/ratelimit`'s `timeout` defaults to 5 000 ms, and when it fires
+    // `applyTimeout` resolves `{ success: true, limit: 0, remaining: 0, reset:
+    // 0, reason: "timeout" }`. The library's intent is unambiguous:
+    // `success: true` means LET TRAFFIC THROUGH, because it could not reach the
+    // counter. The trip test below is `success && remaining > 0`, so the
+    // sentinel's `remaining === 0` fell THROUGH it and armed the lock. One
+    // recorded failure plus one slow Upstash was a full trip.
+    //
+    // THE DISCRIMINATOR IS `reason`, not `limit === 0`. Both identify the
+    // sentinel (no real limit is ever 0), but `reason` says WHICH fail-open the
+    // library took, and that matters: `"cacheBlock"` is the OTHER reason the
+    // limiter can answer without touching Redis, and it is a genuine DENIAL that
+    // must still trip. A `limit === 0` test would be correct today only because
+    // the cacheBlock path happens to carry a real limit.
+    if (verdict.reason === "timeout") {
+      console.error(
+        `[resilient-fetch] ${breakerKey}: the failure counter was unreachable ` +
+          `(store timeout) — NOT tripping the breaker. This is the store being ` +
+          `slow, not the seam being degraded.`,
+      );
+      return;
+    }
+    const { success, remaining } = verdict;
     // A sliding window of N ALLOWS the Nth call (leaving `remaining === 0`) and
     // denies the (N+1)th. The breaker must open ON the threshold-th failure,
     // not one failure later, so exhaustion counts as a trip signal alongside
