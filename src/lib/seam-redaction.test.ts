@@ -102,6 +102,21 @@ function undiciMessage(): string {
   ].join("\n");
 }
 
+/**
+ * Drop the leaf's trailing `[seam-redaction: …]` notices before a PRESERVE
+ * assertion.
+ *
+ * ⚠️ ORACLE DEFECT FOUND WHILE OBSERVING LEDGER ROW M33, AND FIXED RATHER THAN
+ * RECORDED AS A PASS. The collision notice NAMES the tokens it destroyed, so a
+ * bare `expect(scrubbed).toContain("ECONNREFUSED")` was satisfied by the notice
+ * text itself while the message body had been mangled to `E<redacted>REFUSED`.
+ * A preserve assertion has to look at the LINE, never at the leaf's own report
+ * about the line — that is a self-referential oracle wearing a different hat.
+ */
+function messageBody(scrubbed: string): string {
+  return scrubbed.replace(/ \[seam-redaction: [^\]]*\]/g, "");
+}
+
 afterEach(() => {
   // Env is stubbed per case. A leaked stub silently changes which secrets the
   // NEXT case's scrub knows about, which is exactly how a redaction test starts
@@ -125,14 +140,13 @@ describe("[SEAMCORE-06 / TRAP-1] the redaction leaf is safe in BOTH directions",
 
     // ── the DIAGNOSIS side, on the SAME scrub ────────────────────────────
     expect(
-      scrubbed,
+      messageBody(scrubbed),
       "ECONNREFUSED was destroyed by redaction. That is the over-redaction " +
         "half of TRAP-1: without the syscall token, TLS expiry, DNS failure " +
         "and a refused connection are one indistinguishable line.",
-    ).toContain("ECONNREFUSED");
-    expect(scrubbed).toContain("syscall: 'connect'");
-    expect(scrubbed).toContain("10.0.0.1");
-    expect(scrubbed).toContain("errno: -111");
+    ).toContain("connect ECONNREFUSED 10.0.0.1:8002");
+    expect(messageBody(scrubbed)).toContain("syscall: 'connect'");
+    expect(messageBody(scrubbed)).toContain("errno: -111");
   });
 
   it("strips a PER-REQUEST secret the module list cannot know — a live user JWT", () => {
@@ -175,10 +189,13 @@ describe("[SEAMCORE-06 / TRAP-1] the redaction leaf is safe in BOTH directions",
     const scrubbed = scrubSeamString(undiciMessage());
 
     expect(
-      scrubbed,
+      messageBody(scrubbed),
       "A secret shorter than the minimum was substring-replaced and it ate " +
-        "the syscall token. Short candidates must be REFUSED, not applied.",
-    ).toContain("ECONNREFUSED");
+        "the syscall token. Short candidates must be REFUSED, not applied. " +
+        "Asserted against the message BODY, never the whole line: the leaf's " +
+        "own collision notice NAMES the destroyed token, so a naive toContain " +
+        "passes on a line that has been ruined.",
+    ).toContain("connect ECONNREFUSED 10.0.0.1:8002");
     expect(scrubbed).not.toContain("<redacted>REFUSED");
     // The refusal is SIGNALLED, not silent: the line may be under-redacted and
     // the operator has to be able to see that from the line itself.
@@ -236,7 +253,10 @@ describe("[SEAMCORE-06 / TRAP-1] the redaction leaf is safe in BOTH directions",
       "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
       "DEPTH_ZERO_SELF_SIGNED_CERT",
     ]) {
-      expect(scrubbed, `${token} did not survive redaction`).toContain(token);
+      expect(
+        messageBody(scrubbed),
+        `${token} did not survive redaction`,
+      ).toContain(token);
     }
   });
 });
