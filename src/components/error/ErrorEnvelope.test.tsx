@@ -430,4 +430,109 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(screen.getByLabelText("Retry")).toBeInTheDocument();
     expect(screen.getByLabelText("Cancel and return")).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // 140.3-09 / SEAMUX-06 — rendering the advertised wait.
+  //
+  // Two gates, tested independently so a regression in one cannot hide behind
+  // the other: the wait must be PRESENT, and the error must be retryable.
+  // -------------------------------------------------------------------------
+  describe("[140.3-09 / SEAMUX-06] the advertised wait", () => {
+    it("renders the wait, in seconds, when one is present and the error is retryable", () => {
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: 90 })}
+          onRetry={() => {}}
+        />,
+      );
+      const wait = screen.getByTestId("error-envelope-wait");
+      expect(wait).toBeInTheDocument();
+      expect(wait.textContent).toBe("Try again in 90s.");
+      // The figure uses the same tabular-numerals idiom as the correlation_id
+      // line — a counting figure that reflows on every tick is a visual defect.
+      const figure = wait.querySelector("code");
+      expect(figure).not.toBeNull();
+      expect(figure!.className).toContain("font-metric");
+      expect(figure!.className).toContain("tabular-nums");
+    });
+
+    it("renders a LONG wait verbatim — the value is advisory and unclamped", () => {
+      // 2520s = 42 minutes. The in-file B20 note argues an unclamped display
+      // deliberately: a 42-minute server wait must read as 42 minutes, not be
+      // capped to a friendlier-looking number the server never said.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: 2520 })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.getByTestId("error-envelope-wait").textContent).toBe(
+        "Try again in 2520s.",
+      );
+    });
+
+    it("TRAP-3: renders NO wait line at all when the envelope carries none", () => {
+      // The whole surface must behave exactly as it did before this plan when
+      // no wait arrived. Naming a duration nobody sent turns a vague error into
+      // a specific lie, so absence renders nothing — not "0s", not "shortly".
+      render(<ErrorEnvelope envelope={makeEnvelope()} onRetry={() => {}} />);
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+      expect(screen.getByRole("alert").textContent).not.toContain("Try again in");
+      // The Retry control is unaffected — the additive-safety property.
+      expect(screen.getByLabelText("Retry")).toBeInTheDocument();
+    });
+
+    it("renders no wait for a zero or negative value — absence, not 'retry now'", () => {
+      // The ONE parser never emits 0 or a negative, so either reaching here
+      // means the value came around it. Rendering "Try again in 0s." beside a
+      // control the user just clicked is worse than rendering nothing.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: 0 })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: -5 })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+    });
+
+    it("FALSE AFFORDANCE: renders no wait beside a NON-recoverable error", () => {
+      // A countdown promises that waiting changes the outcome. For a
+      // non-recoverable code it does not, and there is no Retry control to
+      // count down to.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({
+            recoverable: false,
+            retry_after_seconds: 90,
+          })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+      expect(screen.queryByLabelText("Retry")).toBeNull();
+    });
+
+    it("FALSE AFFORDANCE: renders no wait when the surface passed no onRetry handler", () => {
+      // Independent of `recoverable`: a recoverable error with nowhere to retry
+      // to still has no control for the countdown to govern. Tested separately
+      // from the case above so a regression that collapsed the two conditions
+      // into one reddens here.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({
+            recoverable: true,
+            retry_after_seconds: 90,
+          })}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+    });
+  });
 });

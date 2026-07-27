@@ -959,6 +959,23 @@ export interface WizardErrorContext {
   sizeMb?: string;
   /** Count of blocking cross-key window issues (for MULTI_KEY_WINDOWS_INVALID). */
   issueCount?: number;
+  /**
+   * 140.3-09 / SEAMUX-06 — the advertised wait, in SECONDS, for a recoverable
+   * error that carries one (KEY_RATE_LIMIT / SERVICE_UNAVAILABLE_RETRY and any
+   * other throttle- or breaker-flavoured code).
+   *
+   * UNITS ARE SECONDS, end to end, and this field is the only place the choice
+   * is made. `parseRetryAfterSeconds` (the ONE header parser) returns seconds
+   * and `CircuitOpenError.retryAfterS` is seconds, so nothing between the wire
+   * and this field converts. Mixing units across this boundary is how the raw
+   * `Number(header)` NaN bug reached a live surface (B20).
+   *
+   * OPTIONAL, and absence means "no wait was advertised" — never "zero" and
+   * never "retry immediately". A surface MUST NOT name a duration it did not
+   * receive: an error arm that invents a wait turns a vague failure into a
+   * specific lie (TRAP-3). The renderer skips the line entirely when absent.
+   */
+  retryAfterSeconds?: number;
 }
 
 /**

@@ -1188,4 +1188,38 @@ describe("[140.3-05 / TS-35] the wire code decides before the substring cascade 
       classifyKeyValidationError("Could not verify the key's permission scopes").code,
     ).toBe("KEY_PROBE_FAILED");
   });
+
+  // -------------------------------------------------------------------------
+  // 140.3-09 / SEAMUX-06 — `WizardErrorContext.retryAfterSeconds`.
+  //
+  // The context field is the ONE place the unit decision (seconds) is made.
+  // These cases pin that the field is inert with respect to COPY: this plan
+  // adds a channel, not a sentence. 140.3-12 owns every sentence that will use
+  // it, and a copy edit smuggled in here would be invisible to that plan.
+  // -------------------------------------------------------------------------
+  describe("[140.3-09 / SEAMUX-06] retryAfterSeconds is a channel, not copy", () => {
+    it("supplying a wait does not alter any rendered string", () => {
+      const without = formatKeyError("KEY_RATE_LIMIT");
+      const with_ = formatKeyError("KEY_RATE_LIMIT", { retryAfterSeconds: 90 });
+      expect(with_.title).toBe(without.title);
+      expect(with_.cause).toBe(without.cause);
+      expect(with_.fix).toEqual(without.fix);
+      expect(with_.actions).toEqual(without.actions);
+    });
+
+    it("no copy entry interpolates the wait — 140.3-12 owns that sentence", () => {
+      // Hand-typed literal, not a read of the table under test. If a future
+      // edit interpolates the number into KEY_RATE_LIMIT's cause, this reddens
+      // and the copy plan's hand-off is forced to be explicit.
+      const result = formatKeyError("KEY_RATE_LIMIT", {
+        retryAfterSeconds: 90,
+      });
+      expect(result.cause).toBe(
+        "The exchange asked us to slow down. This is a transient, exchange-side throttle and not a problem with your key.",
+      );
+      expect(result.cause).not.toContain("90");
+      expect(result.title).not.toContain("90");
+      expect(result.fix.join(" ")).not.toContain("90");
+    });
+  });
 });
