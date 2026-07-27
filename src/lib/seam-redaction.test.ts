@@ -393,6 +393,17 @@ describe("[SEAMCORE-06] scrubSeamError covers the shapes undici and the core pro
     expect(out).toContain("railway");
   });
 
+  it("bounds the serialised fallback so an opaque payload cannot flood the log", () => {
+    // The fallback exists so an opaque object says SOMETHING, not so an
+    // arbitrarily large payload lands in the Vercel log during exactly the
+    // correlated incident this leaf runs inside. 500 is hand-typed here and in
+    // the leaf; the input is 4 000 characters of a single letter.
+    const out = scrubSeamError({ blob: "z".repeat(4_000) });
+
+    expect(out).toContain("[truncated]");
+    expect(out.length).toBeLessThan(600);
+  });
+
   it("keeps a USEFUL custom toString instead of serialising over it", () => {
     // A `URL`, a `Date`, or any class with its own renderer says more through
     // `toString()` than through its (empty) own-property set. The branch must

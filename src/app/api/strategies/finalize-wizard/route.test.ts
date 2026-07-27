@@ -90,7 +90,12 @@ const STATE = vi.hoisted(() => ({
   // hoist's O-1 per-member scope-broadening loop (select api_key_id ORDER BY
   // seq). A read error fails CLOSED (never enqueue an un-enumerable composite).
   strategyKeysList: [] as Array<{ api_key_id: string | null }> | null,
-  strategyKeysListError: null as { message: string } | null,
+  // CR-01: typed as an open record, not `{ message: string }`. A Supabase error
+  // on the NON-throwing path is a PLAIN parsed-JSON object carrying `code`,
+  // `details` and `hint` as well — the fields the operator actually needs — and
+  // a narrower type here would have made the "[object Object]" defect
+  // unexpressible in a test.
+  strategyKeysListError: null as Record<string, unknown> | null,
   // Phase 140.2-10 / SEAMCORE-10 — the `.limit(n)` argument the member read
   // carried, captured so a test can assert the fan-out is bounded AT THE QUERY
   // rather than only inside the loop. `null` means the route issued the read
@@ -2141,6 +2146,52 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
     );
     expect(enqueue).toBeDefined();
     expect(enqueue!.args.p_kind).toBe("stitch_composite");
+    fetchSpy.mockRestore();
+  });
+
+  it("CR-01: a member-list read error reaches the OPERATOR LOG with its SQLSTATE, not as [object Object]", async () => {
+    // ⚠️ THE WIRING, NOT THE HELPER. `seam-redaction.test.ts` pins that the leaf
+    // renders a plain object; this pins that the ROUTE actually gets that
+    // rendering. The two are different claims, and this phase converted six
+    // sites in THIS file from `err.message` to `scrubSeamError(err)` — a
+    // conversion that was a strict regression until CR-01 landed, because a
+    // Supabase error on the non-throwing path is a PLAIN object and
+    // `String(plainObject)` is "[object Object]".
+    //
+    // The route fails closed with a 503 the user is told to retry, so this log
+    // line is the ONLY operator artefact for a composite that will not finalise.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 2;
+    STATE.strategyKeysListError = {
+      code: "42501",
+      message: "permission denied for table strategy_keys",
+      details: "RLS policy strategy_keys_owner_select denied the read",
+      hint: "check auth.uid() against owner_id",
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .find((line) => line.includes("composite member list read failed"));
+
+    expect(
+      logged,
+      "The composite member-list read failure produced no operator log line at all.",
+    ).toBeDefined();
+    // Every expected substring is hand-typed above and asserted here; nothing is
+    // read back out of the route or the leaf.
+    expect(logged).not.toContain("[object Object]");
+    expect(logged).toContain("42501");
+    expect(logged).toContain("permission denied for table strategy_keys");
+    expect(logged).toContain("RLS policy strategy_keys_owner_select denied the read");
+
+    consoleErr.mockRestore();
     fetchSpy.mockRestore();
   });
 

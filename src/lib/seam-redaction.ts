@@ -131,6 +131,46 @@ export const MIN_REDACTABLE_SECRET_LENGTH = 12;
 /** How deep a `cause` chain is walked before it is truncated. */
 const MAX_CAUSE_DEPTH = 4;
 
+/**
+ * The fields read off a PLAIN OBJECT that is not an `Error`, in render order.
+ *
+ * Hand-typed, and every member is here because a shape this seam actually
+ * produces carries it:
+ *   · `code` / `message` / `details` / `hint` — a Supabase/PostgREST error.
+ *     `code` is the SQLSTATE; `details` and `hint` are the two fields an
+ *     operator needs to reproduce an RLS or constraint refusal.
+ *   · `errno` / `syscall` — a Node system error that arrived as a plain object
+ *     rather than an `Error` instance.
+ *   · `name` — anything error-shaped that was structured-cloned or JSON
+ *     round-tripped across a boundary, which strips the prototype.
+ *
+ * Nothing else is read. A whitelist rather than a dump is the TRAP-1-safe
+ * direction: an arbitrary object on this seam can carry a request body, and a
+ * request body on the key-connect path carries raw exchange credentials.
+ */
+const PLAIN_OBJECT_DIAGNOSTIC_KEYS: readonly string[] = [
+  "name",
+  "code",
+  "message",
+  "details",
+  "hint",
+  "errno",
+  "syscall",
+];
+
+/**
+ * Ceiling on the serialised fallback for an object with no named field.
+ *
+ * The fallback exists so an opaque object says SOMETHING rather than nothing,
+ * not so an arbitrarily large payload can be pasted into a log line. 500 is
+ * comfortably above every shape on this seam and far below anything that would
+ * flood the Vercel log during the correlated incident this leaf runs inside.
+ */
+const MAX_SERIALISED_OBJECT_CHARS = 500;
+
+/** What `String()` renders for any object using the INHERITED `toString`. */
+const DEFAULT_OBJECT_RENDERING = "[object Object]";
+
 /** A secret candidate: a label safe to LOG, and a value that never is. */
 interface SecretCandidate {
   /** An env var NAME, or a generic marker for a caller-supplied value. */
@@ -262,9 +302,14 @@ export function scrubSeamString(
  *   · `cause` — since plan 140.2-05 `SeamBodyReadError` attaches the original
  *     rejection there, so a renderer that reads only the top level reports
  *     "SeamBodyReadError: …" and throws the actual diagnosis away.
- *   · anything else — a string, a number, a plain object, `undefined`. A route
- *     can `throw` any value, and `String()` is not total (a null-prototype
- *     object and a hostile `toString` both throw).
+ *   · a PLAIN OBJECT — the shape a Supabase/PostgREST error takes on the
+ *     NON-throwing path, which is every `const { data, error } = await
+ *     supabase…` in this repo. `String()` renders it "[object Object]", so this
+ *     is the one shape where the DEFAULT rendering destroys the whole
+ *     diagnosis; its named diagnostic fields are read instead.
+ *   · anything else — a string, a number, `undefined`. A route can `throw` any
+ *     value, and `String()` is not total (a null-prototype object and a hostile
+ *     `toString` both throw).
  *
  * Cycles are broken by identity, and depth is capped, because an error graph is
  * caller-supplied data.
@@ -291,6 +336,59 @@ function describeThrown(
         rendered += ` [cause: ${describeThrown(cause, depth + 1, seen)}]`;
       }
       return rendered;
+    }
+    if (typeof err === "object") {
+      // ⚠️ THE PLAIN-OBJECT BRANCH, AND WHY IT IS NOT OPTIONAL.
+      //
+      // A Supabase/PostgREST error on the NON-throwing path is a plain parsed
+      // JSON object, NOT a `PostgrestError` instance: `postgrest-js` constructs
+      // the class only when `shouldThrowOnError` is set, and every
+      // `const { data, error } = await supabase…` in this repo takes the other
+      // path. Without this branch `String(err)` renders "[object Object]" and
+      // the SQLSTATE, the message, the details and the hint are all destroyed —
+      // the A-10 harm ("the operator could see THAT the seam failed and never
+      // WHY") reintroduced by the leaf built to close it.
+      //
+      // An ARRAY falls through the named-field pass with nothing to show and
+      // then renders through `String()`, which joins it — the same bytes as
+      // before, so no case regresses.
+      const record = err as Record<string, unknown>;
+      const parts: string[] = [];
+      for (const key of PLAIN_OBJECT_DIAGNOSTIC_KEYS) {
+        const field = record[key];
+        if (typeof field === "string" || typeof field === "number") {
+          parts.push(`${key}=${field}`);
+        }
+      }
+      if (parts.length > 0) return parts.join(" ");
+
+      // No named field. A CUSTOM `toString` (a `URL`, a `Date`, a class with
+      // its own renderer) still says something useful, so it wins — only the
+      // INHERITED `Object.prototype.toString` is overridden, because
+      // "[object Object]" is precisely the rendering this branch exists to
+      // stop. `String()` is not total (a null-prototype object throws), so its
+      // failure is treated as "no useful rendering" rather than propagated.
+      let rendered: string | null = null;
+      try {
+        rendered = String(err);
+      } catch {
+        rendered = null;
+      }
+      if (rendered !== null && rendered !== DEFAULT_OBJECT_RENDERING) {
+        return rendered;
+      }
+      try {
+        // `JSON.stringify` returns `undefined` for a value it cannot represent
+        // and THROWS on a cycle, so both outcomes are handled rather than
+        // assumed away.
+        const serialised = JSON.stringify(err);
+        if (typeof serialised !== "string") return "[unserialisable object]";
+        return serialised.length > MAX_SERIALISED_OBJECT_CHARS
+          ? `${serialised.slice(0, MAX_SERIALISED_OBJECT_CHARS)}…[truncated]`
+          : serialised;
+      } catch {
+        return "[unserialisable object]";
+      }
     }
     return String(err);
   } catch {
