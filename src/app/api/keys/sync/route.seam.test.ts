@@ -278,7 +278,12 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     // Deliberately NOT 30: 30 is simultaneously BREAKER_COOLDOWN_S and
     // DEFAULT_RETRY_AFTER_S, so a hardcoded "30" would satisfy a 30-valued
     // assertion while forwarding nothing from the breaker's actual TTL.
-    seedBreakerOpen(shared.store, 13);
+    //
+    // 140.2-06 per-site decision: THE GLOBAL KEY. `process-key-enqueue` declares
+    // NO dependencies — no /process-key site raises a counting 503 naming one —
+    // so the global key is the only key in this row's check set, and it is what
+    // "the breaker is open for this route" now means here.
+    seedBreakerOpen(shared.store, "breaker:railway", 13);
 
     const res = await postAsUser();
 
@@ -300,7 +305,11 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
   });
 
   it("T-140-12: UNAUTHENTICATED + breaker open → 401, never a breaker-state oracle", async () => {
-    seedBreakerOpen(shared.store, 13);
+    // 140.2-06 per-site decision: THE GLOBAL KEY — same reasoning as the case
+    // above, and additionally the ordering argument: the seed must be a key the
+    // route WOULD read, or "the gate ran first" is indistinguishable from "that
+    // key is never consulted here".
+    seedBreakerOpen(shared.store, "breaker:railway", 13);
     authState.user = null;
 
     const res = await postAsUser();

@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+// `SEAM_RETRIES` is deliberately NOT imported here. It survives as the value
+// every `SEAM_BUDGETS` row is seeded from and as the subject of the module-level
+// negative pin in `seam-constants.pin.test.ts`, but the SC-4b arithmetic below
+// reads each ROW's own `retries` — see the header. Importing it here and
+// asserting the two equal would redden on Phase 141's legitimate per-row flip,
+// which is exactly the change the per-row shape exists to allow.
 import {
   SEAM_BUDGETS,
   SEAM_ROUTE_BUDGETS,
   SEAM_EXCLUSIONS,
-  SEAM_RETRIES,
 } from "./resilient-fetch";
 
 /**
@@ -16,8 +21,8 @@ import {
  * The invariant has two sides and they deliberately live in two different
  * places:
  *
- *   - the BUDGET side (`timeoutMs`, `calls`, `SEAM_RETRIES`) comes from the
- *     exported tables in `resilient-fetch.ts`;
+ *   - the BUDGET side (`timeoutMs`, `calls`, and each row's own `retries`) comes
+ *     from the exported tables in `resilient-fetch.ts`;
  *   - the CEILING side (`maxDuration`) is read from each route file ON DISK
  *     with `readFileSync`.
  *
@@ -33,16 +38,24 @@ import {
  * the very dashboard-changeable assumption the pins exist to convert into a
  * checked in-repo fact.
  *
- * HONEST READING OF THE HEADROOM ASSERTION. With `SEAM_RETRIES = 0` the
+ * HONEST READING OF THE HEADROOM ASSERTION. With every row at `retries: 0` the
  * headroom is generous — the worst route (`keys/validate-and-encrypt`, three
  * sequential live-exchange probes) spends 120 000 ms against a 300 000 ms
  * ceiling, and most spend 15 000-60 000 ms. So the arithmetic in SC-4b is not,
  * today, near its limit, and a reader should NOT mistake it for a tight guard.
- * Its two real jobs are (a) to hold automatically when Phase 141 raises
- * `SEAM_RETRIES` — at retries=1 the worst route is already at 240 000 ms and at
+ * Its two real jobs are (a) to hold automatically when Phase 141 raises a row's
+ * retries — at retries=1 the worst route is already at 240 000 ms and at
  * retries=2 it BREACHES — and (b) to fail if a future budget is raised without
  * the ceiling moving with it. The teeth in the meantime come from the on-disk
  * read in SC-4a, which was mutation-checked (see the plan summary).
+ *
+ * ⚠️ THE ARITHMETIC READS THE ROW, NOT THE MODULE CONSTANT (plan 140.2-06).
+ * `SEAM_RETRIES` survives as the value every row is SEEDED from and as the
+ * subject of the module-level negative pin, but Phase 141 flips rows one at a
+ * time, so a sum built on the module constant would keep reporting 0 for every
+ * route after the first flip — silently under-stating the exact worst case this
+ * assertion exists to bound. Summing per row is also correct in principle: a
+ * multi-leg route can mix a retried leg with a non-retried one.
  *
  * CEILING (honest): this file reads ONLY the fifteen route files enumerated in
  * `SEAM_ROUTE_BUDGETS`, plus the exclusion paths. It does NOT walk the import
@@ -287,7 +300,7 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
 
   describe("SC-4b — summed budget fits inside the on-disk ceiling", () => {
     it.each(ROUTE_ENTRIES)(
-      "%s: sum(timeoutMs x calls x (1 + SEAM_RETRIES)) < maxDuration x 1000",
+      "%s: sum(timeoutMs x calls x (1 + row.retries)) < maxDuration x 1000",
       (routePath, entry) => {
         // The ceiling is re-read from DISK rather than taken from the table,
         // so this assertion never compares the table against itself even if
@@ -301,17 +314,24 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         // triple — wrong for a third of the surface (140-RESEARCH §6.3).
         const worstCaseMs = entry.budgets.reduce(
           (acc, b) =>
-            acc + SEAM_BUDGETS[b.key].timeoutMs * b.calls * (1 + SEAM_RETRIES),
+            acc +
+            SEAM_BUDGETS[b.key].timeoutMs *
+              b.calls *
+              (1 + SEAM_BUDGETS[b.key].retries),
           0,
         );
 
         const spent = entry.budgets
-          .map((b) => `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms`)
+          .map(
+            (b) =>
+              `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms` +
+              `x(1+${SEAM_BUDGETS[b.key].retries})`,
+          )
           .join(" + ");
 
         expect(
           worstCaseMs,
-          `"${routePath}" can spend ${worstCaseMs}ms (${spent}, retries=${SEAM_RETRIES}) ` +
+          `"${routePath}" can spend ${worstCaseMs}ms (${spent}) ` +
             `against a ${ceilingMs}ms function ceiling. The lambda would be killed ` +
             `mid-request with no typed envelope. Lower a budget in SEAM_BUDGETS, or ` +
             `raise this route's maxDuration AND expectedMaxDurationS together.`,

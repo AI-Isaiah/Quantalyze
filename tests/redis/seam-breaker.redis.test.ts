@@ -62,21 +62,67 @@ import { isBreakerOpen, recordSeamFailure } from "@/lib/resilient-fetch";
  */
 
 // ---------------------------------------------------------------------------
-// The oracle. Hand-typed literals, mirroring the PRE-PHASE deployed shape.
+// The oracle. Hand-typed literals.
 //
-// ⚠️ Plans 140.2-06 and 140.2-07 deliberately CHANGE this shape (06 replaces the
-// single global key with per-dependency keys; 07 encodes the expiry in the
-// lock's value). Each of those plans owns the re-expression of the constants
-// below and declares this file in its `files_modified`. Pinning the wave-1
-// shape here is correct, not stale.
+// ⚠️ Plan 140.2-07 deliberately CHANGES this shape again (it encodes the expiry
+// in the lock's value) and owns the re-expression of the constants below.
+//
+// ⚠️ RE-EXPRESSED BY PLAN 140.2-06, AND IT IS A RE-EXPRESSION, NOT A RELAXATION.
+// Before per-dependency keying there was ONE counter identifier and R-1 pinned
+// it exactly:
+//     old: breaker:breaker:railway:failures:<epoch window index>
+//     new: breaker:<breaker key>:failures:<epoch window index>
+// where `<breaker key>` is `breaker:railway` for a failure that names no
+// dependency and `breaker:<dependency>` for a counting 503 that does. The
+// property being pinned is UNCHANGED — "the store received exactly the key we
+// think it did" — and R-1 still asserts an EXACT key SET, never a prefix match
+// and never a `contains`. That distinction is load-bearing: a substring check
+// would pass a key built from a caller-influenced value, which is precisely the
+// threat (T-140-01) this assertion guards.
+//
+// R-1 is also STRENGTHENED, because the new shape admits a failure the old one
+// could not express: it now drives TWO different keys in one case and asserts
+// both counter identities and both counts, so collapsing the per-dependency
+// component onto a single shared counter (ledger row M20R) reddens here.
 // ---------------------------------------------------------------------------
 
-/** The breaker's open-lock key, as the store receives it. */
+/**
+ * The RESIDUAL GLOBAL breaker key, as the store receives it.
+ *
+ * Also what `recordSeamFailure` is handed for every failure naming no
+ * dependency. Passed EXPLICITLY at every call site below rather than defaulted:
+ * the core takes a required key argument, and this lane's whole discipline is
+ * that its literals come from here, never from `src/lib/resilient-fetch.ts`.
+ */
 const LOCK_KEY = "breaker:railway";
 
-/** `<limiter prefix>:<identifier>:<epoch window index>`, as the store receives it. */
-const counterKeyFor = (windowIndex: number) =>
-  `breaker:breaker:railway:failures:${windowIndex}`;
+/**
+ * A per-dependency breaker key, as the store receives it. Hand-typed, and
+ * deliberately one of the four members of `STATUS_CONTRACT.md` §4's closed
+ * service set — never derived from the core's own vocabulary.
+ */
+const MT5_LOCK_KEY = "breaker:mt5-gateway";
+
+/**
+ * `<limiter prefix>:<identifier>:<epoch window index>`, as the store receives it.
+ *
+ * The limiter's prefix is the literal `breaker`, and the identifier the core
+ * builds is `` `${breakerKey}:failures` `` — hence the doubled `breaker:` that
+ * looked like a typo in the wave-1 shape and is in fact the prefix meeting the
+ * key.
+ */
+const counterKeyFor = (breakerKey: string, windowIndex: number) =>
+  `breaker:${breakerKey}:failures:${windowIndex}`;
+
+/**
+ * The budget key this lane drives `isBreakerOpen` with.
+ *
+ * Hand-typed, and `bridge` specifically because its `SEAM_BUDGETS` row declares
+ * NO dependencies — so every assertion below about the global lock is also an
+ * assertion that a row with an empty declared set still consults the residual
+ * global key.
+ */
+const LANE_BUDGET_KEY = "bridge" as const;
 
 /** The production sliding window, in milliseconds. */
 const WINDOW_MS = 30000;
@@ -261,27 +307,46 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     expect(casesExecuted).toBe(EXPECTED_CASES);
   });
 
-  it("R-1 counter identity and namespace — the store receives breaker:breaker:railway:failures:<epoch window>", async () => {
+  it("R-1 counter identity and namespace — the store receives breaker:<breaker key>:failures:<epoch window>, one counter PER KEY", async () => {
     await ensureWindowHeadroom(WINDOW_MS, 5000);
 
     const t0 = Date.now();
-    // Literal 4 — deliberately BELOW the trip threshold so the only key the
-    // store should hold afterwards is the counter itself.
+    // Literals 4 and 3 — both deliberately BELOW the trip threshold, so the only
+    // keys the store should hold afterwards are the two counters themselves. The
+    // two counts DIFFER on purpose: equal counts would still pass if the two
+    // identifiers had collapsed into one and the reads happened to line up.
     for (let i = 0; i < 4; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
+    }
+    for (let i = 0; i < 3; i++) {
+      await recordSeamFailure(MT5_LOCK_KEY);
     }
     const t1 = Date.now();
 
     // Headroom guard: the burst must not have straddled a bucket boundary.
     expect(Math.floor(t1 / WINDOW_MS)).toBe(Math.floor(t0 / WINDOW_MS));
 
-    const expected = counterKeyFor(Math.floor(t0 / WINDOW_MS));
+    const windowIndex = Math.floor(t0 / WINDOW_MS);
+    const expectedGlobal = counterKeyFor(LOCK_KEY, windowIndex);
+    const expectedMt5 = counterKeyFor(MT5_LOCK_KEY, windowIndex);
     const actual = (await probe.keys("*")).sort();
 
-    // EXACT set, not a containment check: a mutation that writes a differently
-    // namespaced key must show up as a diff rather than as a missing lookup.
-    expect(actual).toEqual([expected]);
-    expect(Number(await probe.get(expected))).toBe(4);
+    // EXACT set, not a containment check and not a prefix match: a mutation that
+    // writes a differently namespaced key must show up as a diff rather than as
+    // a missing lookup, and a substring assertion would pass a key built from a
+    // caller-influenced value (T-140-01).
+    expect(
+      actual,
+      "The store does not hold exactly the two counter keys this lane names. " +
+        "Either the counter identifier changed shape, or the per-dependency " +
+        "component was dropped and both call sites collapsed onto ONE counter — " +
+        "which is the single global breaker wearing a per-dependency name.",
+    ).toEqual([expectedGlobal, expectedMt5].sort());
+
+    // Per-key COUNTS, not just per-key names. A shared counter would read 7 on
+    // whichever single key survived.
+    expect(Number(await probe.get(expectedGlobal))).toBe(4);
+    expect(Number(await probe.get(expectedMt5))).toBe(3);
 
     casesExecuted++;
   });
@@ -293,12 +358,12 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // `BREAKER_FAILURE_THRESHOLD - 1`. That is the whole point: raising the
     // production threshold must not silently raise this expectation with it.
     for (let i = 0; i < 4; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
     }
     expect(await probe.get(LOCK_KEY)).toBeNull();
 
     // The 5th.
-    await recordSeamFailure();
+    await recordSeamFailure(LOCK_KEY);
     expect(await probe.get<string>(LOCK_KEY)).toBe("open");
 
     casesExecuted++;
@@ -308,7 +373,7 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     await ensureWindowHeadroom(WINDOW_MS, 12000);
 
     for (let i = 0; i < THRESHOLD; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
     }
     const ttlAtTrip = await probe.ttl(LOCK_KEY);
     expect(ttlAtTrip).toBeGreaterThanOrEqual(29);
@@ -320,7 +385,7 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // assertions — those may not be reached.
     await sleep(4000);
     expectsDenial = true;
-    await recordSeamFailure();
+    await recordSeamFailure(LOCK_KEY);
 
     const ttlAfter = await probe.ttl(LOCK_KEY);
     // With `nx: true` the FIRST writer's expiry stands, so ~4 s has elapsed off
@@ -336,14 +401,14 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     await ensureWindowHeadroom(WINDOW_MS, 5000);
 
     for (let i = 0; i < THRESHOLD; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
     }
 
     const ttl = await probe.ttl(LOCK_KEY);
     expect(ttl).toBeGreaterThanOrEqual(29);
     expect(ttl).toBeLessThanOrEqual(30);
 
-    const state = await isBreakerOpen();
+    const state = await isBreakerOpen(LANE_BUDGET_KEY);
     expect(state.open).toBe(true);
     expect(state.retryAfterS).toBeGreaterThanOrEqual(29);
     expect(state.retryAfterS).toBeLessThanOrEqual(30);
@@ -399,8 +464,8 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     await ensureWindowHeadroom(WINDOW_MS, 5000);
 
     const t0 = Date.now();
-    await recordSeamFailure();
-    const pttl = await probe.pttl(counterKeyFor(Math.floor(t0 / WINDOW_MS)));
+    await recordSeamFailure(LOCK_KEY);
+    const pttl = await probe.pttl(counterKeyFor(LOCK_KEY, Math.floor(t0 / WINDOW_MS)));
     expect(pttl).toBeGreaterThan(59000);
     expect(pttl).toBeLessThanOrEqual(61000);
 
@@ -415,7 +480,7 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // are denials. Arm the drain up front.
     expectsDenial = true;
     for (let i = 0; i < 8; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
     }
     const t1 = Date.now();
     expect(Math.floor(t1 / WINDOW_MS)).toBe(Math.floor(t0 / WINDOW_MS));
@@ -424,7 +489,7 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     // exhausted. The in-repo double increments on denial; against it this would
     // read 8. `recordSeamFailure` reads `remaining` as well as `success`, so
     // the difference is load-bearing, not cosmetic.
-    expect(Number(await probe.get(counterKeyFor(Math.floor(t0 / WINDOW_MS))))).toBe(5);
+    expect(Number(await probe.get(counterKeyFor(LOCK_KEY, Math.floor(t0 / WINDOW_MS))))).toBe(5);
 
     casesExecuted++;
   });
@@ -444,19 +509,19 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     await landAtWindowPosition(WINDOW_MS, 0.05);
     const trippedAtA = Date.now();
     for (let i = 0; i < THRESHOLD; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
     }
     expect(await probe.get<string>(LOCK_KEY)).toBe("open");
 
     // Hand-typed 25 s — comfortably INSIDE a 30 s cooldown.
     await sleepUntil(trippedAtA + 25000);
-    expect((await isBreakerOpen()).open).toBe(true);
+    expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(true);
 
     // Hand-typed 32 s — comfortably PAST it.
     await sleepUntil(trippedAtA + 32000);
-    expect((await isBreakerOpen()).open).toBe(false);
+    expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(false);
 
-    await recordSeamFailure();
+    await recordSeamFailure(LOCK_KEY);
     expect(await probe.get<string>(LOCK_KEY)).toBe("open");
 
     // --- Scenario B: identical 32 s wait, DIFFERENT alignment. Trip at
@@ -467,17 +532,17 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     await landAtWindowPosition(WINDOW_MS, 0.5);
     const trippedAtB = Date.now();
     for (let i = 0; i < THRESHOLD; i++) {
-      await recordSeamFailure();
+      await recordSeamFailure(LOCK_KEY);
     }
     expect(await probe.get<string>(LOCK_KEY)).toBe("open");
 
     await sleepUntil(trippedAtB + 25000);
-    expect((await isBreakerOpen()).open).toBe(true);
+    expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(true);
 
     await sleepUntil(trippedAtB + 32000);
-    expect((await isBreakerOpen()).open).toBe(false);
+    expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(false);
 
-    await recordSeamFailure();
+    await recordSeamFailure(LOCK_KEY);
     expect(await probe.get(LOCK_KEY)).toBeNull();
 
     // Recorded so the numbers are not re-derived downstream: the lock itself is

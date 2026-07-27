@@ -7,7 +7,9 @@ import {
   BREAKER_COOLDOWN_S,
   DEFAULT_RETRY_AFTER_S,
   SEAM_RETRIES,
+  breakerKeyFor,
 } from "./resilient-fetch";
+import { seamBreakerVerdict } from "./seam-discriminator";
 import {
   FAKE_BREAKER_KEY,
   FAKE_THRESHOLD,
@@ -116,13 +118,74 @@ const EXPECTED_BUDGET_KEYS: string[] = [
 ];
 
 /**
+ * The per-row DEPENDENCY DECLARATIONS, typed HERE as literals (plan 140.2-06).
+ *
+ * This map is the only thing that makes a wrong or stale declaration
+ * FALSIFIABLE. Option A — each row declaring the dependencies it can be blocked
+ * by, and the open-check reading exactly those keys plus the global one — was
+ * chosen over checking all four service keys always (which re-creates a partial
+ * A-01: an `egress-proxy` trip would block `/api/simulator`, which cannot reach
+ * it) and over a global check with per-dependency counters (option C, which
+ * fails OB-8 outright). Its stated risk is that a wrong declaration silently
+ * UNDER-protects, and silence is exactly what this literal map removes.
+ *
+ * The values are EVIDENCE. Only a `503` counts, so only a `503` can open a
+ * per-dependency key, and at HEAD the whole reachable set is:
+ * `exchange.py:314,324` (mt5-gateway, reached by POST /api/validate-key),
+ * `portfolio.py:684` and `match.py:1657,1691` (supabase). `breaker:kek` and
+ * `breaker:egress-proxy` cannot be opened by ANY site — every `kek` and
+ * `egress-proxy` arm is a `500`, which never counts — so declaring them anywhere
+ * would declare a key that can never be set. Ledger row M39 mutates one of these
+ * rows; this map is its falsifier.
+ */
+const EXPECTED_DEPENDENCIES: Record<string, string[]> = {
+  "validate-key": ["mt5-gateway"],
+  "encrypt-key": [],
+  bridge: [],
+  simulator: [],
+  "portfolio-optimizer": [],
+  "optimize-weights": [],
+  "match-eval": [],
+  "match-recompute": ["supabase"],
+  "portfolio-analytics": ["supabase"],
+  "process-key-enqueue": [],
+  "process-key-sync": [],
+  "keys-permissions": [],
+  "process-key-unified-dormant": [],
+};
+
+/**
+ * The closed SERVICE-dependency vocabulary, typed HERE as literals
+ * (`STATUS_CONTRACT.md` §4). The only values that may become a breaker key.
+ *
+ * A `424`'s `dependency` is the caller's VENUE and is deliberately absent.
+ */
+const EXPECTED_SERVICE_DEPENDENCIES: string[] = [
+  "mt5-gateway",
+  "kek",
+  "supabase",
+  "egress-proxy",
+];
+
+/** The four per-dependency breaker keys, spelled out rather than derived. */
+const EXPECTED_BREAKER_KEYS: Record<string, string> = {
+  "mt5-gateway": "breaker:mt5-gateway",
+  kek: "breaker:kek",
+  supabase: "breaker:supabase",
+  "egress-proxy": "breaker:egress-proxy",
+};
+
+/**
  * Widened view of the table so the per-row lookup below can be driven by a
  * hand-typed string key. Declared once, so the string `SEAM_BUDGETS` followed by
  * a subscript never appears in this file — the acceptance grep for the
  * self-referential shape must stay clean, comments included.
  */
-const BUDGET_TABLE: Record<string, { timeoutMs: number } | undefined> =
-  SEAM_BUDGETS;
+const BUDGET_TABLE: Record<
+  string,
+  | { timeoutMs: number; dependencies: readonly string[]; retries: number }
+  | undefined
+> = SEAM_BUDGETS;
 
 /**
  * Parse an Upstash `Duration` string to milliseconds, IN THE TEST.
@@ -182,6 +245,45 @@ describe("SEAM_BUDGETS — every timeout pinned to a hand-typed literal", () => 
           `Retuning a budget is a legitimate change — make it HERE too, in the ` +
           `same commit, so the new number is reviewed rather than absorbed.`,
       ).toBe(expectedMs);
+    },
+  );
+
+  it.each(Object.entries(EXPECTED_DEPENDENCIES))(
+    "%s declares exactly the pinned dependency set",
+    (key, expectedDependencies) => {
+      const row = BUDGET_TABLE[key];
+      expect(
+        row,
+        `The budget table has NO row for "${key}", which this oracle pins with ` +
+          `the dependency set [${expectedDependencies.join(", ")}].`,
+      ).toBeDefined();
+      // Sorted SET equality, never a length: a length check passes a SWAP
+      // (supabase → mt5-gateway), which silently re-points a call site at a
+      // circuit it does not depend on and leaves the one it does unprotected.
+      expect(
+        [...(row?.dependencies ?? [])].sort(),
+        `"${key}" now declares [${(row?.dependencies ?? []).join(", ")}]; this ` +
+          `oracle pins [${expectedDependencies.join(", ")}]. A declaration that ` +
+          `drifts silently UNDER-protects (a dependency whose circuit is open no ` +
+          `longer gates this call) or OVER-protects (A-01: an unrelated ` +
+          `dependency's trip suppresses this call). Change it HERE in the same ` +
+          `commit, with the 503 raise site that justifies it named in the row.`,
+      ).toEqual([...expectedDependencies].sort());
+    },
+  );
+
+  it.each(Object.keys(EXPECTED_DEPENDENCIES))(
+    "%s.retries is 0 — the per-row NEGATIVE pin",
+    (key) => {
+      // Phase 141 flips these one row at a time, and every route's worst-case
+      // lambda hold scales with (1 + retries). Raising one here is out of fence.
+      expect(
+        BUDGET_TABLE[key]?.retries,
+        `"${key}" now performs retries. Retry is Phase 141's, gated on the ` +
+          `SEAM-05 idempotency audit — replaying a non-idempotent /process-key ` +
+          `double-enqueues a sync — and raising it silently multiplies this ` +
+          `route's SC-4b worst case.`,
+      ).toBe(0);
     },
   );
 
@@ -250,6 +352,93 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "not decayed when the lock expires, so ONE failure re-trips and the " +
         "breaker flaps permanently — an ordering fault, not a tuning choice.",
     ).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+describe("[SEAMCORE-01 / T-140-01] the breaker-key vocabulary, pinned three ways", () => {
+  /**
+   * THREE independent statements of the same vocabulary, asserted equal:
+   *   1. `EXPECTED_BREAKER_KEYS` / `EXPECTED_SERVICE_DEPENDENCIES` — typed here;
+   *   2. `breakerKeyFor` — the CORE's builder, over its own hand-typed union;
+   *   3. `seamBreakerVerdict` — the LEAF's builder, over its own frozen set,
+   *      which is the one that actually runs on a wire response.
+   *
+   * The duplication between (2) and (3) is deliberate — the leaf must import
+   * nothing, so it cannot read the core's union, and a consumer that read its
+   * vocabulary out of the emitter could never disagree with it. Asserting the
+   * three equal is what makes the duplication safe: any one may change, but not
+   * all three silently.
+   */
+  it.each(Object.entries(EXPECTED_BREAKER_KEYS))(
+    "the core builds breaker:%s as the pinned literal",
+    (dependency, expectedKey) => {
+      expect(
+        breakerKeyFor(dependency as Parameters<typeof breakerKeyFor>[0]),
+      ).toBe(expectedKey);
+    },
+  );
+
+  it.each(Object.entries(EXPECTED_BREAKER_KEYS))(
+    "the LEAF's 503 verdict for %s names the same key the core builds",
+    (dependency, expectedKey) => {
+      const verdict = seamBreakerVerdict(503, {
+        detail: {
+          code: "X",
+          dependency,
+          retryable: true,
+          detail: "a transient service fault",
+        },
+      });
+      expect(verdict.counts).toBe(true);
+      expect(
+        verdict.breakerKey,
+        `The discriminator and the core disagree about "${dependency}"'s breaker ` +
+          `key. The core would CHECK one key while the wire path RECORDS against ` +
+          `another, so that dependency's circuit could count to the threshold and ` +
+          `still never gate anything — a breaker that can trip but cannot block.`,
+      ).toBe(expectedKey);
+      expect(verdict.breakerKey).toBe(
+        breakerKeyFor(dependency as Parameters<typeof breakerKeyFor>[0]),
+      );
+    },
+  );
+
+  it("no value outside the closed set can ever become a key", () => {
+    // The venue vocabulary and a hostile value, all hand-typed. STATUS_CONTRACT
+    // §4: a 424's dependency is the CALLER'S VENUE, and error_contract._validate
+    // refuses a 424 naming one of ours — so these two vocabularies are disjoint
+    // by construction upstream, and this is the downstream half of that fence.
+    const NOT_OURS = ["binance", "deribit", "bybit", "okx", "../../etc/passwd"];
+    // The leaf logs loudly on an unrecognised dependency, which is correct and
+    // is asserted in `seam-discriminator.test.ts`. Silenced here by swapping the
+    // function directly rather than through vitest's spy API: this file takes no
+    // doubles of any kind, and that absence is grep-asserted.
+    const realWarn = console.warn;
+    console.warn = () => {};
+    try {
+      for (const value of NOT_OURS) {
+        expect(EXPECTED_SERVICE_DEPENDENCIES).not.toContain(value);
+        const verdict = seamBreakerVerdict(503, {
+          detail: { code: "X", dependency: value, retryable: true, detail: "x" },
+        });
+        expect(
+          verdict.breakerKey,
+          `A 503 naming "${value}" produced a key built from it. A breaker key ` +
+            `influenced by the wire is a trivial cross-tenant denial of service.`,
+        ).toBe("breaker:railway");
+      }
+    } finally {
+      console.warn = realWarn;
+    }
+  });
+
+  it("the residual global key is the same literal on both sides", () => {
+    // A transport failure names no dependency, and both sides must agree that
+    // this is where it lands — otherwise the core would seed one key and check
+    // another.
+    expect(BREAKER_KEY).toBe("breaker:railway");
+    expect(seamBreakerVerdict(null).breakerKey).toBe("breaker:railway");
+    expect(seamBreakerVerdict(null).counts).toBe(true);
   });
 });
 

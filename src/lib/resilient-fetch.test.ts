@@ -50,7 +50,16 @@ const shared = vi.hoisted(() => {
   const mode = {
     /** false → every module context gets its OWN store (negative control). */
     sharedStore: true,
-    /** true → redis.get rejects, exercising the fail-OPEN catch arm. */
+    /**
+     * true → the breaker's READ path rejects, exercising the fail-OPEN catch arm.
+     *
+     * ⚠️ It must cover BOTH `get` and `mget`. Plan 140.2-06 moved the open-check
+     * from a single `get` to one `mget` over the row's declared keys; a flag
+     * still wired only to `get` would leave `isBreakerOpen` resolving normally,
+     * so "fails OPEN when Redis errors" would pass because nothing was open
+     * rather than because the store threw — a false green in the one test whose
+     * whole subject is the catch arm.
+     */
     throwOnGet: false,
     /** true → the failure counter rejects, exercising the swallow-and-log arm. */
     throwOnLimit: false,
@@ -109,6 +118,12 @@ vi.mock("@upstash/redis", async () => {
               throw new Error("upstash: connection reset");
             }
             return base.get(key);
+          },
+          mget: async (...keys: string[]) => {
+            if (shared.mode.throwOnGet) {
+              throw new Error("upstash: connection reset");
+            }
+            return base.mget(...keys);
           },
         };
       },
@@ -188,6 +203,48 @@ function bodyRejectingFetch(rejection: unknown, status = 200): FetchMock {
   return mock;
 }
 
+/**
+ * Install a fetch mock resolving a REAL `Response` carrying a JSON body.
+ *
+ * `mockImplementation`, not `mockResolvedValue`: a `Response` body is one-shot,
+ * so a single shared instance would make every call after the first read from a
+ * consumed stream. A real `Response` (rather than the bare stub `okFetch`
+ * returns) is required wherever the core's 503 dependency peek must actually
+ * run — the peek goes through `res.clone()`, which a bare object does not have.
+ */
+function jsonFetch(status: number, body: unknown): FetchMock {
+  const mock = installFetchMock();
+  mock.mockImplementation(() =>
+    Promise.resolve(
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      }),
+    ),
+  );
+  return mock;
+}
+
+/**
+ * Install a fetch mock resolving a REAL `Response` carrying a `text/plain` body.
+ *
+ * This is TRAP-2's shape: Starlette's `ServerErrorMiddleware` answers an
+ * unhandled exception with `PlainTextResponse("Internal Server Error", 500)`,
+ * which is the single most common 5xx and carries no JSON at all.
+ */
+function textFetch(status: number, text: string): FetchMock {
+  const mock = installFetchMock();
+  mock.mockImplementation(() =>
+    Promise.resolve(
+      new Response(text, {
+        status,
+        headers: { "content-type": "text/plain" },
+      }),
+    ),
+  );
+  return mock;
+}
+
 /** Configure Upstash as PRESENT (the default for most tests). */
 function configureUpstash(): void {
   process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
@@ -243,25 +300,37 @@ describe("resilient-fetch breaker key", () => {
 describe("isBreakerOpen", () => {
   it("reports closed when no open-lock exists", async () => {
     const mod = await import("./resilient-fetch");
-    await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({ open: false });
   });
 
   it("reports open with the lock's remaining TTL as retryAfterS", async () => {
-    seedBreakerOpen(shared.store, 17);
+    // 140.2-06 per-site decision: THE GLOBAL KEY. `bridge` declares no
+    // dependencies, so the global key is the whole of its check set — which is
+    // what makes this ALSO the assertion that a row with an EMPTY declared set
+    // still consults the residual global key at all.
+    seedBreakerOpen(shared.store, "breaker:railway", 17);
     const mod = await import("./resilient-fetch");
-    await expect(mod.isBreakerOpen()).resolves.toEqual({
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({
       open: true,
       retryAfterS: 17,
     });
   });
 
   it("falls back to DEFAULT_RETRY_AFTER_S when the lock carries no TTL", async () => {
+    // 140.2-06 per-site decision: THE GLOBAL KEY, written DIRECTLY rather than
+    // through the helper — deliberately, and kept that way. `seedBreakerOpen`
+    // cannot express "no TTL at all": it takes a `ttlS` and always computes an
+    // absolute expiry, whereas this case needs `Infinity`, which is the shape a
+    // real key whose `EXPIRE` was lost would have. Routing it through the helper
+    // would mean widening the helper to model a state no production path
+    // produces on purpose, so the direct write stays and states its key with the
+    // same literal the helper defaults to.
     shared.store.set(FAKE_BREAKER_KEY, {
       value: "open",
       expiresAt: Number.POSITIVE_INFINITY,
     } satisfies FakeUpstashEntry);
     const mod = await import("./resilient-fetch");
-    await expect(mod.isBreakerOpen()).resolves.toEqual({
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({
       open: true,
       retryAfterS: mod.DEFAULT_RETRY_AFTER_S,
     });
@@ -275,11 +344,17 @@ describe("isBreakerOpen", () => {
     const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
 
-    await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({ open: false });
     expect(errorSpy).toHaveBeenCalled();
 
     // Even with the breaker ALREADY tripped in the store, an unreadable store
     // must not deny traffic — the real request is still attempted.
+    //
+    // 140.2-06 per-site decision: THE GLOBAL KEY (the helper's default, stated
+    // by omission). The claim is about the store being unreadable, so the key
+    // seeded is immaterial EXCEPT that it must be one the row would otherwise
+    // honour — otherwise "traffic still went out" could mean "the store threw"
+    // or merely "nothing was open".
     seedBreakerOpen(shared.store);
     await expect(
       mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
@@ -301,7 +376,7 @@ describe("isBreakerOpen", () => {
     const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
 
-    await expect(mod.isBreakerOpen()).resolves.toEqual({ open: false });
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({ open: false });
     // Exactly one unconfigured notice, at module load — not per request.
     expect(warnSpy).toHaveBeenCalledTimes(1);
 
@@ -344,12 +419,38 @@ describe("recordSeamFailure", () => {
     const mod = await import("./resilient-fetch");
 
     for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD - 1; i++) {
-      await mod.recordSeamFailure();
+      await mod.recordSeamFailure("breaker:railway");
     }
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
 
-    await mod.recordSeamFailure();
+    await mod.recordSeamFailure("breaker:railway");
     expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+  });
+
+  it("counts PER KEY — one dependency's failures never trip another's circuit", async () => {
+    // OB-8 at the counter level, and the thing that makes per-dependency keying
+    // real rather than cosmetic. If the counter identifier lost its
+    // per-dependency component, the loop below would trip `breaker:supabase`
+    // too — one MT5 gateway restart denying every Supabase-backed call site,
+    // which is A-01 wearing a new name. Ledger row M20R.
+    const mod = await import("./resilient-fetch");
+
+    // A hand-typed 5 — production's threshold is NOT read here; it is the fake's
+    // FAKE_THRESHOLD that decides when the counter denies, and the two are
+    // pinned equal in seam-constants.pin.test.ts rather than shared.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:mt5-gateway");
+    }
+    expect(shared.store.get("breaker:mt5-gateway")?.value).toBe("open");
+
+    // Neither the sibling dependency nor the residual global key moved.
+    expect(
+      shared.store.get("breaker:supabase"),
+      "Recording five mt5-gateway failures opened the SUPABASE circuit. The " +
+        "counter identifier has lost its per-dependency component, so every " +
+        "dependency shares one counter and the per-dependency keys are decorative.",
+    ).toBeUndefined();
+    expect(shared.store.get("breaker:railway")).toBeUndefined();
   });
 
   it("does not extend the cooldown when a second instance trips concurrently", async () => {
@@ -358,13 +459,13 @@ describe("recordSeamFailure", () => {
     // window open indefinitely.
     const mod = await import("./resilient-fetch");
     for (let i = 0; i < mod.BREAKER_FAILURE_THRESHOLD; i++) {
-      await mod.recordSeamFailure();
+      await mod.recordSeamFailure("breaker:railway");
     }
     const firstExpiry = shared.store.get(mod.BREAKER_KEY)?.expiresAt;
     expect(firstExpiry).toBeDefined();
 
-    await mod.recordSeamFailure();
-    await mod.recordSeamFailure();
+    await mod.recordSeamFailure("breaker:railway");
+    await mod.recordSeamFailure("breaker:railway");
 
     expect(shared.store.get(mod.BREAKER_KEY)?.expiresAt).toBe(firstExpiry);
   });
@@ -376,7 +477,9 @@ describe("recordSeamFailure", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const mod = await import("./resilient-fetch");
 
-    await expect(mod.recordSeamFailure()).resolves.toBeUndefined();
+    await expect(
+      mod.recordSeamFailure("breaker:railway"),
+    ).resolves.toBeUndefined();
     expect(shared.store.size).toBe(0);
   });
 
@@ -388,7 +491,9 @@ describe("recordSeamFailure", () => {
     shared.mode.throwOnLimit = true;
     const mod = await import("./resilient-fetch");
 
-    await expect(mod.recordSeamFailure()).resolves.toBeUndefined();
+    await expect(
+      mod.recordSeamFailure("breaker:railway"),
+    ).resolves.toBeUndefined();
     expect(errorSpy).toHaveBeenCalled();
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
   });
@@ -432,7 +537,7 @@ describe("resilientFetch breaker short-circuit", () => {
   });
 
   it("cross-context: the CircuitOpenError carries the lock TTL as retryAfterS", async () => {
-    seedBreakerOpen(shared.store, 12);
+    seedBreakerOpen(shared.store, "breaker:railway", 12);
     const fetchMock = okFetch();
     const mod = await import("./resilient-fetch");
 
@@ -708,7 +813,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
     await expect(res.text()).resolves.toBe("nope");
   });
 
-  it("a >= 500 status records exactly one failure; a 4xx records zero", async () => {
+  it("a 503 records exactly one failure; a 4xx and a 500 each record zero", async () => {
     const mod = await import("./resilient-fetch");
 
     okFetch(503);
@@ -723,6 +828,362 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
       method: "POST",
     });
     expect(shared.counters.limitCalls).toBe(1);
+
+    // Added by 140.2-06. Under the pre-phase `>= 500` branch this arm recorded,
+    // which is the A-02 defect: a deterministic fault can only be cleared by an
+    // operator, so counting it guarantees a self-sustaining outage.
+    vi.unstubAllGlobals();
+    okFetch(500);
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () => {
+  /**
+   * Every expectation below is a hand-typed integer or a hand-typed key string.
+   * Nothing is read out of `SEAM_BUDGETS`, out of the discriminator, or out of
+   * the fake — the counter is observed at the boundary the core crosses.
+   */
+  const CALLER_STATUSES = [400, 401, 403, 404, 422];
+
+  it.each(CALLER_STATUSES)(
+    "CALLER: a %i records ZERO, whatever its body says",
+    async (status) => {
+      const mod = await import("./resilient-fetch");
+      jsonFetch(status, {
+        detail: "Your API key was rejected",
+        code: "EXCHANGE_PROBE_FAILED",
+        recoverable: false,
+      });
+
+      const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+      expect(res.status).toBe(status);
+      expect(
+        shared.counters.limitCalls,
+        `A ${status} recorded a breaker failure. A user's bad API key is Railway ` +
+          `working CORRECTLY; counting 4xx lets a handful of users fat-fingering ` +
+          `credentials take key-connect down for everyone.`,
+      ).toBe(0);
+      expect(shared.store.size).toBe(0);
+    },
+  );
+
+  it("CALLER, THROTTLED: a 429 records ZERO in all three wire shapes", async () => {
+    const mod = await import("./resilient-fetch");
+    // TS-23. Three shapes coexist at HEAD and the core must tolerate all three
+    // without knowing which route answered.
+    const SHAPES: unknown[] = [
+      // (a) the flat app-global RateLimitExceeded handler
+      {
+        ok: false,
+        code: "RATE_LIMITED",
+        human_message: "Too many requests",
+        detail: "Too many requests",
+        correlation_id: "corr-1",
+        recoverable: true,
+        retry_after_seconds: 60,
+      },
+      // (b) the nested service_error envelope (routers/internal.py:246)
+      {
+        detail: {
+          code: "RATE_LIMITED",
+          dependency: null,
+          retryable: true,
+          detail: "This key is being probed too often",
+        },
+      },
+      // (c) the bare scalar still at match.py / simulator.py / portfolio.py,
+      //     which carries NO code and (at four of five sites, pre-140.1.2) no
+      //     Retry-After either. A wait is never derived by parsing prose.
+      { detail: "Rate limit exceeded" },
+    ];
+
+    for (const body of SHAPES) {
+      vi.unstubAllGlobals();
+      jsonFetch(429, body);
+      await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+    }
+    expect(shared.counters.limitCalls).toBe(0);
+    expect(shared.store.size).toBe(0);
+  });
+
+  it("CALLER'S EXCHANGE: a 424 records ZERO and its venue NEVER becomes a key", async () => {
+    const mod = await import("./resilient-fetch");
+
+    for (const venue of ["binance", "deribit", "bybit"]) {
+      vi.unstubAllGlobals();
+      jsonFetch(424, {
+        detail: {
+          code: "EXCHANGE_PROBE_FAILED",
+          dependency: venue,
+          retryable: true,
+          detail: `${venue} is not responding right now`,
+        },
+      });
+      await mod.resilientFetch("validate-key", "/api/validate-key", {
+        method: "POST",
+      });
+    }
+
+    expect(
+      shared.counters.limitCalls,
+      "A 424 recorded a breaker failure. C-12: one dashboard render with five " +
+        "keys during a Binance outage would be five recordings and a platform-" +
+        "wide trip that denies Deribit users, the optimizer and CSV finalize.",
+    ).toBe(0);
+    // The load-bearing negative: not merely "nothing tripped" but "no key named
+    // after a venue exists at all", which a count assertion alone cannot see.
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("SERVICE-PERMANENT: a 500 records ZERO, including the bodyless text/plain shape", async () => {
+    const mod = await import("./resilient-fetch");
+
+    // (a) a deliberate 500 carrying retryable:false
+    jsonFetch(500, {
+      detail: {
+        code: "KEK_NOT_CONFIGURED",
+        dependency: "kek",
+        retryable: false,
+        detail: "Encryption is misconfigured",
+      },
+    });
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(shared.counters.limitCalls).toBe(0);
+
+    // (b) TRAP-2 — Starlette's unhandled-exception reply. No JSON at all, and
+    //     the verdict must still be terminal and non-counting.
+    vi.unstubAllGlobals();
+    textFetch(500, "Internal Server Error");
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(res.status).toBe(500);
+    await expect(res.text()).resolves.toBe("Internal Server Error");
+    expect(
+      shared.counters.limitCalls,
+      "A bodyless text/plain 500 recorded a breaker failure. That is the single " +
+        "most common 5xx and it is SERVICE-PERMANENT: an identical retry cannot " +
+        "fix it, so counting it re-trips the breaker forever with no operator " +
+        "signal, and the breaker then blocks its own recovery probe.",
+    ).toBe(0);
+    // Nothing named `kek` was ever written, even though a body named it.
+    expect([...shared.store.keys()]).toEqual([]);
+  });
+
+  it("SERVICE-TRANSIENT: a 503 records ONE, keyed on the NAMED dependency", async () => {
+    const mod = await import("./resilient-fetch");
+    jsonFetch(503, {
+      detail: {
+        code: "DB_UNAVAILABLE",
+        dependency: "supabase",
+        retryable: true,
+        detail: "The database blipped",
+      },
+    });
+
+    // A hand-typed 5 — production's threshold is not read here.
+    for (let i = 0; i < 5; i++) {
+      await mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        method: "POST",
+      });
+    }
+
+    expect(shared.counters.limitCalls).toBe(5);
+    expect(shared.store.get("breaker:supabase")?.value).toBe("open");
+    expect(
+      shared.store.get("breaker:railway"),
+      "Five supabase 503s opened the GLOBAL breaker. That is obligation O-2 " +
+        "unmet — a 503 naming a dependency may only gate that dependency's " +
+        "traffic (A-01).",
+    ).toBeUndefined();
+    expect(shared.store.get("breaker:mt5-gateway")).toBeUndefined();
+  });
+
+  it("SERVICE-TRANSIENT: a text/plain 503 still counts, on the residual global key", async () => {
+    // The other half of TRAP-2, and the reason the dependency peek may only ever
+    // REFINE a key: an unreadable body must never turn a counting verdict into a
+    // non-counting one.
+    const mod = await import("./resilient-fetch");
+    textFetch(503, "Service Unavailable");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    expect(res.status).toBe(503);
+    await expect(res.text()).resolves.toBe("Service Unavailable");
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+
+  it("a 503 naming an UNRECOGNISED dependency keys globally, never on the value", async () => {
+    // T-140-01. The value arrives over the wire, so a key built from it is
+    // attacker-influenceable: mint one and you trip the breaker for a cohort,
+    // mint many and you shard it so it never trips at all.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+    jsonFetch(503, {
+      detail: {
+        code: "WAT",
+        dependency: "attacker-controlled-value",
+        retryable: true,
+        detail: "nope",
+      },
+    });
+
+    for (let i = 0; i < 5; i++) {
+      await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+    }
+
+    expect([...shared.store.keys()].sort()).toEqual([
+      "__fake_breaker_count__:breaker:railway:failures",
+      "breaker:railway",
+    ]);
+  });
+
+  it("TRANSPORT: a throw records ONE on the residual global key", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        method: "POST",
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    expect(shared.counters.limitCalls).toBe(1);
+    // Even from a call site that DECLARES supabase: a connection that never
+    // completed names no dependency, and that is genuine Railway degradation.
+    expect([...shared.store.keys()]).toEqual([
+      "__fake_breaker_count__:breaker:railway:failures",
+    ]);
+  });
+
+  it("a counting status whose body then aborts records EXACTLY ONE, not two", async () => {
+    // The interaction wave 5 deliberately deferred to this plan. The `>= 500`
+    // arm and the body-read arm are two arms observing ONE degraded request; if
+    // both record, five genuinely-distinct incidents' worth of protection fires
+    // after two or three, and a breaker that opens early is an outage it created
+    // itself.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const rejection = new DOMException("aborted", "TimeoutError");
+    const mock = installFetchMock();
+    mock.mockImplementation(() =>
+      Promise.resolve({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+        headers: new Headers({ "content-type": "application/json" }),
+        // The dependency peek clones and reads; that read aborts too, which is
+        // why this request ends up on the global key rather than a named one.
+        clone: () => ({ json: () => Promise.reject(rejection) }),
+        json: () => Promise.reject(rejection),
+        text: () => Promise.reject(rejection),
+      } as unknown as Response),
+    );
+    const mod = await import("./resilient-fetch");
+
+    const res = await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    // The status arm has already recorded once.
+    expect(shared.counters.limitCalls).toBe(1);
+
+    await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
+
+    expect(
+      shared.counters.limitCalls,
+      "ONE request recorded TWO breaker failures. The status arm and the body-" +
+        "read arm both fired for the same degraded request, so the breaker now " +
+        "trips at half the declared threshold.",
+    ).toBe(1);
+  });
+});
+
+describe("[OB-8] one dependency's open circuit does not suppress unrelated calls", () => {
+  it("with breaker:mt5-gateway open, a call declaring only supabase still reaches Railway", async () => {
+    // THE acceptance criterion inherited from 140.1.2, and the falsifier for
+    // ledger row M35 (replace the per-dependency check with a single global-key
+    // check — option C, rejected by name). Driven from literal key names.
+    seedBreakerOpen(shared.store, "breaker:mt5-gateway", 30);
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        method: "POST",
+      }),
+    ).resolves.toBeDefined();
+    expect(
+      fetchMock,
+      "An open mt5-gateway circuit blocked /api/match/recompute, whose budget " +
+        "row declares only supabase. That is A-01: one MT5 gateway restart " +
+        "denying every unrelated call site.",
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it("NEGATIVE CONTROL: the SAME seeded key DOES block a call site that declares it", async () => {
+    // Without this, the green above is indistinguishable from "the seed never
+    // opened anything at all" — the seeded-key-nobody-reads failure (TRAP-9)
+    // that this plan's whole casualty list exists to prevent.
+    seedBreakerOpen(shared.store, "breaker:mt5-gateway", 30);
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("validate-key", "/api/validate-key", {
+        method: "POST",
+      }),
+    ).rejects.toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE CONTROL: the declared dependency's own key DOES block the call", async () => {
+    seedBreakerOpen(shared.store, "breaker:supabase", 21);
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        method: "POST",
+      }),
+    ).rejects.toMatchObject({
+      name: "CircuitOpenError",
+      // The TTL of the key that MATCHED, not the default and not the global
+      // key's — this is what proves the index-to-key mapping is right.
+      retryAfterS: 21,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("the residual global key still blocks EVERY call site, declared set or not", async () => {
+    // Per-dependency keying narrows the blast radius; it must not remove the
+    // Railway-wide stop. A row with an EMPTY declared set is the strictest case.
+    seedBreakerOpen(shared.store, "breaker:railway", 30);
+    const fetchMock = okFetch();
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
+    ).rejects.toBeInstanceOf(mod.CircuitOpenError);
+    await expect(
+      mod.resilientFetch("match-recompute", "/api/match/recompute", {
+        method: "POST",
+      }),
+    ).rejects.toBeInstanceOf(mod.CircuitOpenError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 

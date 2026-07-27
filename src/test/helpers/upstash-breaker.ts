@@ -88,12 +88,21 @@ export interface FakeUpstashEntry {
 export type FakeUpstashStore = Map<string, FakeUpstashEntry>;
 
 /**
- * The literal breaker key, duplicated from `BREAKER_KEY` in
+ * The literal RESIDUAL GLOBAL breaker key, duplicated from `BREAKER_KEY` in
  * `src/lib/resilient-fetch.ts` on purpose: importing the core here would
  * execute its module-load side effects (the `Redis.fromEnv()` singleton and its
  * unconfigured notice) from inside a `vi.mock` factory, i.e. before the mock it
  * is defining exists. `resilient-fetch.test.ts` asserts the two strings are
  * equal so the duplication cannot drift silently.
+ *
+ * ⚠️ SINCE 140.2-06 THIS IS NO LONGER "THE" BREAKER KEY. The core keys a
+ * counting `503` on `breaker:<dependency>` and reserves this key for failures
+ * that name no dependency (a transport throw, a deadline, a body-read abort).
+ * The constant, its export and its literal↔literal pin all survive that change
+ * and are all still wanted — but a test that seeds it is now asserting "the
+ * GLOBAL breaker is open", which is a narrower claim than it used to be. Seed a
+ * per-dependency key explicitly when that is what the case means; see
+ * `seedBreakerOpen`.
  */
 const BREAKER_KEY_LITERAL = "breaker:railway";
 
@@ -151,6 +160,7 @@ function readLive(
 /** The subset of the `@upstash/redis` client surface the breaker actually uses. */
 export interface FakeRedis {
   get<T = string>(key: string): Promise<T | null>;
+  mget<T = (string | null)[]>(...keys: string[]): Promise<T>;
   set(
     key: string,
     value: string,
@@ -167,12 +177,22 @@ export interface FakeRedis {
  *   exists (this is what makes concurrent trips idempotent — first writer's TTL
  *   stands).
  * - `ttl` returns `-2` for an absent/expired key and `-1` for a key with no TTL.
+ * - `mget` returns one slot PER REQUESTED KEY, in request order, `null` where
+ *   the key is absent or expired. Order and arity are load-bearing: the core
+ *   reads the FIRST `"open"` slot and maps its index back to a key to read the
+ *   TTL, so a fake that compacted out the misses would hand back the wrong key.
  */
 export function fakeRedisFor(store: FakeUpstashStore): FakeRedis {
   return {
     async get<T = string>(key: string): Promise<T | null> {
       const entry = readLive(store, key);
       return (entry ? (entry.value as unknown as T) : null);
+    },
+    async mget<T = (string | null)[]>(...keys: string[]): Promise<T> {
+      return keys.map((key) => {
+        const entry = readLive(store, key);
+        return entry ? entry.value : null;
+      }) as unknown as T;
     },
     async set(key, value, opts) {
       const existing = readLive(store, key);
@@ -248,15 +268,44 @@ export function fakeRatelimitFor(
 }
 
 /**
- * Seed the breaker as already OPEN, for tests that want the short-circuit
+ * Seed a breaker as already OPEN, for tests that want the short-circuit
  * behaviour without driving `threshold` failures through the engine first.
+ *
+ * ⚠️ `breakerKey` IS EXPLICIT AND POSITIONALLY SECOND ON PURPOSE (plan 140.2-06).
+ * Before per-dependency keying this helper hardcoded the single global key, and
+ * every caller wrote `seedBreakerOpen(store, 30)`. Adding the key as a THIRD
+ * parameter would have left all nine existing call sites compiling unchanged
+ * while the core moved underneath them — and a seed written to a key nobody
+ * reads is a test that PASSES while asserting nothing (TRAP-9). Putting it
+ * second makes the old shape a type error, so every site had to state, in
+ * source, whether it means "the GLOBAL breaker is open" or "THIS dependency's
+ * breaker is open".
+ *
+ * It defaults to the global key so `seedBreakerOpen(store)` still reads as the
+ * former, which is genuinely what several cases mean.
+ *
+ * The key is typed `string` rather than a union: this helper cannot import the
+ * core's `SeamServiceDependency` (see `BREAKER_KEY_LITERAL` for why importing
+ * the core here is impossible), and a hand-typed literal at the call site is the
+ * point. `seam-constants.pin.test.ts` pins the literals both sides use.
  */
-export function seedBreakerOpen(store: FakeUpstashStore, ttlS = 30): void {
-  store.set(BREAKER_KEY_LITERAL, {
+export function seedBreakerOpen(
+  store: FakeUpstashStore,
+  breakerKey: string = BREAKER_KEY_LITERAL,
+  ttlS = 30,
+): void {
+  store.set(breakerKey, {
     value: "open",
     expiresAt: Date.now() + ttlS * 1000,
   });
 }
 
-/** The breaker key these doubles seed. Exported so tests can pin it against `BREAKER_KEY`. */
+/**
+ * The RESIDUAL GLOBAL breaker key these doubles default to. Exported so tests
+ * can pin it against `BREAKER_KEY`.
+ *
+ * The pin survives per-dependency keying untouched: the global key still exists
+ * and is still a module constant, so `expect(mod.BREAKER_KEY).toBe(FAKE_BREAKER_KEY)`
+ * remains exactly as load-bearing as it was.
+ */
 export const FAKE_BREAKER_KEY = BREAKER_KEY_LITERAL;

@@ -108,6 +108,17 @@ vi.mock("@upstash/redis", async () => {
             shared.reads += 1;
             return real.get<T>(key);
           },
+          // ⚠️ `mget` MUST be counted too (plan 140.2-06). The open-check is now
+          // ONE `mget` over the row's declared keys plus the global one, so a
+          // counter wired only to `get` records zero breaker reads on a cache
+          // MISS — which would make "a cache HIT consults no breaker key" pass
+          // because NOTHING ever consults one, in either branch. That is the
+          // seeded-key-nobody-reads failure in its other form: a counter nobody
+          // increments.
+          mget: async <T = (string | null)[]>(...keys: string[]) => {
+            shared.reads += 1;
+            return real.mget<T>(...keys);
+          },
         };
       },
     },
@@ -255,7 +266,15 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
   });
 
   it("cache MISS + breaker open → 503 CIRCUIT_OPEN through the real boundary, and NOTHING is cached", async () => {
-    seedBreakerOpen(shared.store, 19);
+    // 140.2-06 per-site decision: THE GLOBAL KEY, and the TTL of 19 is
+    // load-bearing and unchanged. This case exists to prove `retryAfterS`
+    // forwards the OBSERVED lock TTL rather than DEFAULT_RETRY_AFTER_S, so it
+    // must seed a key this route actually reads. `keys-permissions` declares NO
+    // dependencies — `internal.py:303,319` are 500s naming `kek` (never count)
+    // and `internal.py:498` is a 424 naming a VENUE — so the global key is the
+    // ONLY key in this row's check set, and seeding any per-dependency key here
+    // would make the case pass vacuously by never opening anything at all.
+    seedBreakerOpen(shared.store, "breaker:railway", 19);
     const { GET } = await import("./route");
 
     const res = await GET(makeRequest());
@@ -338,7 +357,12 @@ describe("GET /api/keys/[id]/permissions — REAL unstable_cache boundary (SEAM-
     expect(readsAfterMiss).toBeGreaterThan(0);
 
     // Open the breaker. A hit must be completely indifferent to it.
-    seedBreakerOpen(shared.store, 30);
+    //
+    // 140.2-06 per-site decision: THE GLOBAL KEY — the only key this row's
+    // check set contains (see the TTL-19 case above for why). The claim is
+    // "a cache hit consults NO breaker key", and seeding the one key that would
+    // otherwise be read is the strongest available form of it.
+    seedBreakerOpen(shared.store, "breaker:railway", 30);
 
     const second = await GET(makeRequest());
     expect(second.status).toBe(200);

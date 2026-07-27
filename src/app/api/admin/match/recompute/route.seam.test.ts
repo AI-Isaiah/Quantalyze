@@ -216,7 +216,16 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
   });
 
   it("breaker OPEN → typed 503 + Retry-After, and fetch is NEVER called", async () => {
-    seedBreakerOpen(shared.store, 30);
+    // 140.2-06 per-site decision: this case means "THIS ROUTE'S DECLARED
+    // DEPENDENCY is down", and the literal is the key `match-recompute`'s
+    // SEAM_BUDGETS row declares. Deliberately NOT the global key: the property
+    // asserted below (open ⇒ typed 503 + observed TTL + no seam crossing) is
+    // unchanged, and seeding the per-dependency key additionally proves the
+    // declared set is genuinely consulted at a REAL route rather than only in
+    // the core's own unit test. `match.py:1657,1691` raise
+    // service_error(503, dependency="supabase") on exactly this endpoint, so
+    // this is the key that can actually open in production.
+    seedBreakerOpen(shared.store, "breaker:supabase", 30);
 
     const res = await postAsAdmin();
 
@@ -233,7 +242,12 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
   });
 
   it("T-140-12: UNAUTHENTICATED + breaker open → 401, never a breaker-state oracle", async () => {
-    seedBreakerOpen(shared.store, 30);
+    // 140.2-06 per-site decision: THE GLOBAL KEY. This case is about ORDERING —
+    // the auth gate must short-circuit before the breaker is consulted at all —
+    // so the seed must be the key that is checked on EVERY row, or a green here
+    // could mean "the gate ran first" or merely "this route never reads that
+    // key". The global key removes the second reading.
+    seedBreakerOpen(shared.store, "breaker:railway", 30);
     userState.current = null;
     adminFlag.isAdmin = false;
 
