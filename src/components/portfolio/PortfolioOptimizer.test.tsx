@@ -12,8 +12,8 @@
  * Because this is the shared component, the corrected formatting applies
  * identically on /portfolios/[id].
  */
-import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import PortfolioOptimizer, {
   type OptimizerSuggestion,
 } from "./PortfolioOptimizer";
@@ -76,5 +76,227 @@ describe("PortfolioOptimizer metric formatting (F-2 honesty)", () => {
     const { container } = renderOptimizer();
     expect(container.textContent).not.toContain("+45.00%");
     expect(container.textContent).not.toContain("+15.00%");
+  });
+});
+
+/**
+ * [140.3-07 / SEAMUX-09 / B-26 live member 1] — the phase's money-bearing item.
+ *
+ * A failed recompute used to leave the PREVIOUS ranked allocation on screen with
+ * live, clickable "Add to portfolio" links under one small red line. An allocator
+ * reads that as a current answer and acts on it.
+ *
+ * Two independent faults produced it:
+ *   1. `runOptimizer`'s catch set `error` but never discarded `suggestions`, so
+ *      execution fell through to the SUCCESS branch.
+ *   2. the error card was gated on `computationStatus === "failed"`, a
+ *      SERVER-RENDERED prop that a client-side re-run failure never updates —
+ *      so the card was unreachable twice over.
+ *
+ * The assertions below deliberately query for the ACTION CONTROL, not only for
+ * the error text. A red line beside a live "Add to portfolio" link is the hazard;
+ * the presence of a message proves nothing about the absence of the control.
+ */
+describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated ranking", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // Hand-typed, NOT imported from src/lib/seam-copy.ts. An oracle that reads the
+  // module under test cannot fail when that module changes (lesson C-1).
+  const BREAKER_SENTENCE =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+  /**
+   * `computedAt` is pinned far in the past so `isStale` is true deterministically
+   * and the "Re-run" control in the stale banner is present. A `computedAt` near
+   * today would make the re-run affordance appear or vanish with the wall clock.
+   */
+  function renderLoaded(suggestions: OptimizerSuggestion[] = [SUGGESTION]) {
+    return render(
+      <PortfolioOptimizer
+        portfolioId="p1"
+        initialSuggestions={suggestions}
+        computedAt="2020-01-01T00:00:00Z"
+        computationStatus="complete"
+      />,
+    );
+  }
+
+  function clickReRun() {
+    fireEvent.click(screen.getByRole("button", { name: "Re-run" }));
+  }
+
+  /** Every live control that would let a user act on the invalidated ranking. */
+  function addToPortfolioControls() {
+    return screen.queryAllByRole("link", { name: "Add to portfolio" });
+  }
+
+  it("removes every 'Add to portfolio' control when the re-run hits a breaker 503", async () => {
+    // The ranking is on screen and actionable before the failure.
+    renderLoaded();
+    expect(addToPortfolioControls()).toHaveLength(1);
+    expect(screen.getByText("Uncorrelated Vol")).toBeInTheDocument();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({
+          status: "failed",
+          suggestions: null,
+          error: BREAKER_SENTENCE,
+        }),
+      }),
+    );
+
+    clickReRun();
+
+    await waitFor(() =>
+      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument(),
+    );
+
+    // THE assertion: the action control is gone, not merely accompanied by a
+    // red line. `suggestions` must have been discarded, not annotated.
+    expect(addToPortfolioControls()).toHaveLength(0);
+    expect(screen.queryByText("Uncorrelated Vol")).toBeNull();
+    expect(screen.queryByText("View strategy")).toBeNull();
+  });
+
+  it("reaches the client-side error state, which the server-rendered prop cannot express", async () => {
+    renderLoaded();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({ status: "failed", suggestions: null, error: BREAKER_SENTENCE }),
+      }),
+    );
+
+    clickReRun();
+
+    // `computationStatus` is still "complete" — the prop never changes on a
+    // client-side failure. The error card must be reachable anyway, otherwise
+    // the user gets an empty panel and a red line instead of an error state.
+    await waitFor(() =>
+      expect(screen.getByText("Optimizer failed")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("renders the route's breaker sentence rather than swallowing it (B-27 must not over-fire)", async () => {
+    renderLoaded();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({ status: "failed", suggestions: null, error: BREAKER_SENTENCE }),
+      }),
+    );
+
+    clickReRun();
+
+    // The route's `error` field is reviewed, scrubbed copy — on a breaker trip
+    // it IS the single-source sentence from src/lib/seam-copy.ts. A B-27 fix
+    // that replaced every caught message with a component fallback would delete
+    // the breaker surface at a seam consumer.
+    await waitFor(() =>
+      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument(),
+    );
+  });
+
+  it("does NOT render a raw caught message when the fetch itself rejects (B-27)", async () => {
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderLoaded();
+
+    // The shape a real network failure arrives as. Its message can carry an
+    // internal URL or header name via undici.
+    const raw = new TypeError(
+      "NetworkError: connect ECONNREFUSED http://localhost:8002/optimize",
+    );
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(raw));
+
+    clickReRun();
+
+    await waitFor(() =>
+      expect(screen.getByText("Optimizer failed")).toBeInTheDocument(),
+    );
+
+    // The raw value never reaches the DOM …
+    expect(screen.queryByText(/ECONNREFUSED/)).toBeNull();
+    expect(screen.queryByText(/localhost:8002/)).toBeNull();
+    expect(document.body.textContent).not.toContain("ECONNREFUSED");
+    // … but it DOES reach the console, so debuggability was not traded away.
+    const logged = consoleSpy.mock.calls.find((call) =>
+      call.some((arg) => arg === raw),
+    );
+    expect(logged).toBeDefined();
+    // And the ranking is still discarded on this path too.
+    expect(addToPortfolioControls()).toHaveLength(0);
+  });
+
+  it("PIN (pre-satisfied): the stale ranking is already gone while the re-run is in flight", async () => {
+    // ⚠️ Recorded as a PIN, not as evidence of this plan's work. `runOptimizer`
+    // sets `loading` first and the `loading` branch returns the shimmer BEFORE
+    // any success branch, so no ranking rendered during the in-flight window
+    // even on the untouched tree. Measured, not assumed. It is kept because a
+    // future edit that reorders the loading branch below the success branch
+    // would re-open the in-flight half of the hazard.
+    renderLoaded();
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+
+    clickReRun();
+
+    await waitFor(() => expect(addToPortfolioControls()).toHaveLength(0));
+    expect(screen.queryByText("Uncorrelated Vol")).toBeNull();
+  });
+
+  it("ANTI-REGRESSION: a successful re-run renders the new ranking", async () => {
+    renderLoaded();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "complete",
+          suggestions: [
+            { ...SUGGESTION, strategy_id: "s-2", strategy_name: "Fresh Carry" },
+          ],
+        }),
+      }),
+    );
+
+    clickReRun();
+
+    await waitFor(() =>
+      expect(screen.getByText("Fresh Carry")).toBeInTheDocument(),
+    );
+    expect(addToPortfolioControls()).toHaveLength(1);
+    expect(screen.queryByText("Uncorrelated Vol")).toBeNull();
+  });
+
+  it("ANTI-REGRESSION: the server-rendered computationStatus='failed' card still renders", () => {
+    render(
+      <PortfolioOptimizer
+        portfolioId="p1"
+        initialSuggestions={null}
+        computedAt={null}
+        computationStatus="failed"
+      />,
+    );
+
+    expect(screen.getByText("Optimizer failed")).toBeInTheDocument();
+    expect(
+      screen.getByText("We couldn't compute suggestions for this portfolio."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 });
