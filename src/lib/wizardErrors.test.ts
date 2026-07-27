@@ -1223,3 +1223,137 @@ describe("[140.3-05 / TS-35] the wire code decides before the substring cascade 
     });
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.3-10 / TRAP-4 — no error state offers a destructive control as its
+// only way forward.
+//
+// ⚠️ WRITTEN OVER THE TABLE, NOT OVER A LIST, and that is the whole point.
+// `140.3-RESEARCH.md` Q5 gives the `start_fresh` class as "3 of 3". The table
+// carries FOUR: `DRAFT_ALREADY_EXISTS`, `GATE_NO_DATA_SOURCE`,
+// `GATE_DRAFT_GONE` and — missing from the research table — `GUARD_BLOCKED`.
+// A guard enumerated from a document's list would have shipped covering three
+// of four and would never catch the fifth member a future plan adds. That is
+// the "3 of 5 log sites" defect class this programme exists to close, applied
+// to its own guards.
+//
+// M66 is the falsifier: give the code the `keys/sync` denial maps to an
+// `actions: ["start_fresh"]` array alone and this must redden. If it stays
+// green the guard is a hand-listed set rather than a table scan.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only error states", () => {
+  /**
+   * HAND-TYPED. Never derived from the module under test — deriving either set
+   * from `wizardErrors.ts` would make this a self-referential oracle that
+   * cannot fail when the module changes, which is the exact defect the phase's
+   * economic-invariant rule names.
+   *
+   * `start_fresh` is destructive because WizardClient's handler DELETEs the
+   * draft row, cascading away every `strategy_keys` member under it. It is the
+   * only member of `WizardErrorAction` that destroys server-side user data
+   * from the error surface itself.
+   *
+   * ⚠️ `try_another_key` ALSO reaches a delete at the wizard (`onTryAnotherKey`
+   * fires `handleDeleteDraft()`), and it is deliberately NOT listed here. That
+   * path discards a draft holding a key the exchange just REJECTED — the whole
+   * point of the affordance, documented in-file, and pinned by its own
+   * anti-regression case. Listing it would redden every `KEY_*` entry and turn
+   * this guard into noise. The asymmetry is recorded rather than smoothed over.
+   */
+  const DESTRUCTIVE_ACTIONS: readonly string[] = ["start_fresh"];
+
+  /**
+   * HAND-TYPED. The actions that constitute a CONTROL a user can act on.
+   *
+   * `expand_log` is excluded: it toggles a disclosure and moves nobody
+   * anywhere. Everything else — including `request_call`, which opens the
+   * contact modal — is a control the user can press that does not destroy
+   * their draft, and "does not destroy their draft" is the property this guard
+   * defends.
+   */
+  const ACTIONABLE_ACTIONS: readonly string[] = [
+    "try_another_key",
+    "clear_and_retry",
+    "resume_draft",
+    "start_fresh",
+    "request_call",
+    "leave_and_return",
+  ];
+
+  /**
+   * HAND-TYPED SIZE GUARD. 53 entries at 140.3-10.
+   *
+   * Without it a table that SHRANK — an entry deleted, or the export replaced
+   * by an empty object — would satisfy every assertion below vacuously. A scan
+   * over nothing passes.
+   *
+   * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
+   * subject to build the expectation is how a guard stops being able to fail.
+   */
+  const EXPECTED_TABLE_SIZE = 53;
+
+  it("the scan actually covers the table — hand-typed size guard", () => {
+    expect(
+      Object.keys(WIZARD_ERROR_COPY).length,
+      "If the table grew, re-run this guard's reasoning over the new entries " +
+        "and then update the number. If it SHRANK, an entry was deleted and " +
+        "every assertion below just became vacuous.",
+    ).toBe(EXPECTED_TABLE_SIZE);
+  });
+
+  it("EVERY entry carrying a destructive action also offers a non-destructive control", () => {
+    const offenders: string[] = [];
+
+    for (const [code, copy] of Object.entries(WIZARD_ERROR_COPY)) {
+      const actions = copy.actions as readonly string[];
+      const carriesDestructive = actions.some((a) =>
+        DESTRUCTIVE_ACTIONS.includes(a),
+      );
+      if (!carriesDestructive) continue;
+
+      const nonDestructiveWaysOut = actions.filter(
+        (a) => ACTIONABLE_ACTIONS.includes(a) && !DESTRUCTIVE_ACTIONS.includes(a),
+      );
+      if (nonDestructiveWaysOut.length === 0) offenders.push(code);
+    }
+
+    expect(
+      offenders,
+      "An error state whose ONLY actionable control destroys the user's draft " +
+        "turns our own error copy into the route to data loss — and the user " +
+        "arrives there because something already went wrong, so they are " +
+        "primed to click whatever is offered. TRAP-4.",
+    ).toEqual([]);
+  });
+
+  it("the destructive class really is FOUR entries, GUARD_BLOCKED included", () => {
+    // A receipt, not a duplicate of the guard above. The research table said
+    // three; naming the fourth here means the next reader inherits the
+    // correction rather than re-deriving it — and if a fifth appears, this
+    // reddens and forces someone to look at it.
+    const carriers = Object.entries(WIZARD_ERROR_COPY)
+      .filter(([, copy]) =>
+        (copy.actions as readonly string[]).some((a) =>
+          DESTRUCTIVE_ACTIONS.includes(a),
+        ),
+      )
+      .map(([code]) => code)
+      .sort();
+
+    expect(carriers).toEqual([
+      "DRAFT_ALREADY_EXISTS",
+      "GATE_DRAFT_GONE",
+      "GATE_NO_DATA_SOURCE",
+      "GUARD_BLOCKED",
+    ]);
+  });
+
+  it("the two codes /api/keys/sync's denial arms map to are BOTH in the table", () => {
+    // 140.3-10 gave the route's arms codes. `GATE_DRAFT_GONE` (404) and
+    // `RATE_LIMITED` (both 429 sites) are the two that reach a wizard state, so
+    // a rename on either side has to be a deliberate, two-sided act.
+    const codes = Object.keys(WIZARD_ERROR_COPY);
+    expect(codes).toContain("GATE_DRAFT_GONE");
+    expect(codes).toContain("RATE_LIMITED");
+  });
+});
