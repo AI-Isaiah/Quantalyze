@@ -23,6 +23,7 @@ import {
   cpSync,
   mkdirSync,
   readdirSync,
+  existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -43,6 +44,30 @@ const MANIFEST_REL = join("src", "lib", "gdpr-export-manifest.ts");
 const MANIFEST_ABS = join(REPO_ROOT, MANIFEST_REL);
 const SENTRY_CAPTURE_REL = join("src", "lib", "sentry-capture.ts");
 const MIGRATIONS_REL = join("supabase", "migrations");
+
+/**
+ * The sandbox needs `sentry-capture.ts` AND everything it relatively imports.
+ *
+ * ⚠️ DISCOVERED, NOT LISTED, AND THAT IS THE POINT. This used to copy exactly
+ * one file, on the premise that `sentry-capture` was "self-contained". Phase
+ * 140.2 / SEAMCORE-06 folded secret scrubbing into it — one new
+ * `import "./seam-redaction"` — and every mutation case in this file started
+ * failing with `Cannot find module './seam-redaction'`, i.e. for a reason that
+ * had nothing to do with what they assert. Re-listing the deps by hand would
+ * leave the same trap armed for the next edit, so they are read out of the
+ * module's own source and the copy fails LOUD if one cannot be resolved.
+ */
+function sentryCaptureDeps(): string[] {
+  const src = readFileSync(join(REPO_ROOT, SENTRY_CAPTURE_REL), "utf8");
+  const deps: string[] = [];
+  const pattern = /^\s*import\s[^\n]*?from\s+["'](\.[^"']+)["']/gm;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(src)) !== null) {
+    const rel = match[1].replace(/^\.\//, "");
+    deps.push(join("src", "lib", `${rel}.ts`));
+  }
+  return deps;
+}
 
 /**
  * Build a scratch sandbox the copied hook can run inside.
@@ -87,10 +112,17 @@ function setupScratchRepo(
   } else {
     cpSync(MANIFEST_ABS, join(scratch, MANIFEST_REL));
   }
-  cpSync(
-    join(REPO_ROOT, SENTRY_CAPTURE_REL),
-    join(scratch, SENTRY_CAPTURE_REL),
-  );
+  for (const rel of [SENTRY_CAPTURE_REL, ...sentryCaptureDeps()]) {
+    const from = join(REPO_ROOT, rel);
+    if (!existsSync(from)) {
+      throw new Error(
+        `Sandbox dependency ${rel} does not exist. sentry-capture.ts imports a ` +
+          `module this sandbox cannot resolve, so every case in this file would ` +
+          `fail for the wrong reason — see sentryCaptureDeps().`,
+      );
+    }
+    cpSync(from, join(scratch, rel));
+  }
 
   writeFileSync(
     join(scratch, "tsconfig.json"),
