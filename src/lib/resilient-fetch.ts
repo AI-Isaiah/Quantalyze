@@ -522,12 +522,27 @@ export const SEAM_BUDGETS: Record<
  * The invariant test SUMS `timeoutMs × calls` across the array. A per-call
  * assertion would pass while the route's real worst case is double, which is
  * wrong for a third of the analyticsRequest surface (research §6.3).
+ *
+ * `branch` (optional, plan 140.2-10 / A-29) names a MUTUALLY EXCLUSIVE path
+ * through the route. The invariant sums within a branch and takes the MAXIMUM
+ * across branches; a leg with no `branch` is spent whichever way the request
+ * goes, so an unlabelled row is one implicit branch — the plain sum, which is
+ * what fourteen of these fifteen rows are.
+ *
+ * It exists because summing legs from different branches describes a path no
+ * request takes. `finalize-wizard` is the case: its composite branch re-probes
+ * every member key and then returns through `runLegacyFinalize`, whose enqueue
+ * is a Supabase RPC and NOT a seam call, so it spends ZERO
+ * `process-key-enqueue`; its single-key branch probes once and then spends the
+ * enqueue. Before this labelling the row silently described the single-key path
+ * only, and the composite fan-out — the branch that can actually reach the
+ * function ceiling — was not modelled at all.
  */
 export const SEAM_ROUTE_BUDGETS: Record<
   string,
   {
     expectedMaxDurationS: number;
-    budgets: Array<{ key: SeamBudgetKey; calls: number }>;
+    budgets: Array<{ key: SeamBudgetKey; calls: number; branch?: string }>;
   }
 > = {
   "src/app/api/keys/validate-and-encrypt/route.ts": {
@@ -580,11 +595,27 @@ export const SEAM_ROUTE_BUDGETS: Record<
     expectedMaxDurationS: 300,
     budgets: [{ key: "process-key-enqueue", calls: 1 }],
   },
+  // TWO EXCLUSIVE BRANCHES, and the row must not be read as their sum.
+  //
+  //   composite  (strategies.api_key_id IS NULL and >=1 strategy_keys member):
+  //              one cache-bypassing scope-broadening probe PER MEMBER, in
+  //              sequence, then `runLegacyFinalize`. Its stitch_composite
+  //              enqueue is a Supabase RPC, so this branch never spends
+  //              `process-key-enqueue`. The `calls` below is the route's
+  //              `MAX_COMPOSITE_MEMBERS` cap — the two numbers are bound to
+  //              each other by `seam-budgets.invariant.test.ts`, which reads
+  //              the constant from the route file on disk.
+  //   single-key (strategies.api_key_id IS NOT NULL): ONE probe for that key,
+  //              then the unified arm's `/process-key` enqueue.
+  //
+  // A strategy cannot be both: a composite's api_key_id is NULL by
+  // construction and the hoist that fans out is scoped to exactly that.
   "src/app/api/strategies/finalize-wizard/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "keys-permissions", calls: 1 },
-      { key: "process-key-enqueue", calls: 1 },
+      { key: "keys-permissions", calls: 10, branch: "composite" },
+      { key: "keys-permissions", calls: 1, branch: "single-key" },
+      { key: "process-key-enqueue", calls: 1, branch: "single-key" },
     ],
   },
   "src/app/api/verify-strategy/route.ts": {

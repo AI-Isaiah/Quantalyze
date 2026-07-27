@@ -388,9 +388,9 @@ function readCompositeCapFromDisk(): number {
  * branch, because "spent whichever way the request goes" is what no label
  * means.
  */
-function branchesOf(
-  budgets: ReadonlyArray<{ key: string; calls: number; branch?: string }>,
-): Array<{ label: string; legs: Array<{ key: string; calls: number }> }> {
+function branchesOf<T extends { calls: number; branch?: string }>(
+  budgets: readonly T[],
+): Array<{ label: string; legs: T[] }> {
   const shared = budgets.filter((b) => b.branch === undefined);
   const labels = [
     ...new Set(

@@ -61,10 +61,19 @@ const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
  * Vercel function ceiling for this route. Declared rather than inherited so the
  * SC-4 headroom invariant has an in-repo source of truth: the seam-budget
  * invariant test reads this export from disk and fails if it drifts from
- * `SEAM_ROUTE_BUDGETS` (this route spends TWO budgets — the keys-permissions
- * probe, then the process-key enqueue). The value matches the platform default
- * verified against the live project settings in 140-01, so pinning it raises
- * nothing.
+ * `SEAM_ROUTE_BUDGETS`.
+ *
+ * ⚠️ WHICH BUDGETS THIS ROUTE SPENDS DEPENDS ON THE BRANCH, and this comment
+ * used to name only one of them ("TWO budgets — the keys-permissions probe,
+ * then the process-key enqueue"), which is the SINGLE-KEY path. The composite
+ * path spends `keys-permissions` once PER MEMBER, up to
+ * `MAX_COMPOSITE_MEMBERS`, and no enqueue at all — it returns through
+ * `runLegacyFinalize`, whose stitch_composite enqueue is a Supabase RPC. That
+ * branch is the one that can reach this ceiling, and the budget row now models
+ * both (plan 140.2-10 / A-29).
+ *
+ * The value matches the platform default verified against the live project
+ * settings in 140-01, so pinning it raises nothing.
  */
 export const maxDuration = 300;
 
