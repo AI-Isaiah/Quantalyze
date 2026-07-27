@@ -6,6 +6,7 @@ import { UI_EXCHANGE_CODES } from "@/lib/utils";
 import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
+import { createClient } from "@/lib/supabase/server";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -176,6 +177,43 @@ async function unifiedVerifyStrategyHandler(
   if (body.passphrase !== undefined) {
     teaserContext.passphrase = body.passphrase;
   }
+
+  /**
+   * Phase 140.3-02 / TS-15 — forward the end user's Supabase access token WHEN,
+   * AND ONLY WHEN, one exists.
+   *
+   * ⚠️ THIS ROUTE IS PUBLIC, AND THAT IS THE WHOLE REASON THE READ IS SHAPED
+   * THIS WAY. The landing-page teaser is unauthenticated by design (CSRF +
+   * per-IP limit + payload validation are its only gates), but nothing stops an
+   * ALREADY SIGNED-IN visitor from submitting it. Those two cases must diverge:
+   *   · a session exists  → forward it, so the unified router can build a
+   *     user-scoped, RLS-enforcing client for this caller.
+   *   · no session        → forward NOTHING. The header is optional by
+   *     construction and a fabricated one would be an elevation-of-privilege
+   *     bug, not a compatibility shim. There is no fallback value here, and
+   *     there must never be one.
+   *
+   * The read is best-effort and TOTAL: `createClient()` reads request cookies,
+   * and a public endpoint must not 500 because a cookie jar was unreadable. A
+   * failure degrades to the anonymous case, which is this route's normal case.
+   *
+   * ⚠️ The value is handed to `postProcessKey` as a VALUE, never assembled into
+   * a header here, so it reaches `scrubSeamError(message, [userAccessToken])` at
+   * the client's transport log site — undici embeds outgoing headers in
+   * `err.message`, and this one is a live user JWT.
+   */
+  let userAccessToken: string | undefined;
+  try {
+    const authClient = await createClient();
+    const {
+      data: { session },
+    } = await authClient.auth.getSession();
+    userAccessToken = session?.access_token;
+  } catch {
+    // Anonymous is the expected case on this route — not worth a log line.
+    userAccessToken = undefined;
+  }
+
   const result = await postProcessKey({
     flow_type: "teaser",
     source: exchange,
@@ -190,6 +228,8 @@ async function unifiedVerifyStrategyHandler(
     // so the upstream rate limiter buckets all anonymous landing-page
     // traffic to a shared key, isolated from authenticated tenants.
     userId: "public",
+    // TS-15 — present ONLY when a session was readable; see the block above.
+    userAccessToken,
   });
   if (!result.ok) return result.response;
 

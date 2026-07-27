@@ -274,10 +274,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
+  // Phase 140.3-02 / TS-15 — forward the END USER's Supabase access token so the
+  // unified router can build a USER-SCOPED (RLS-enforcing) client. Only the CSV
+  // finalize flow forwarded it before, which is why PYAPI-01's second defence
+  // layer had to be an explicit Python `strategies` id+user_id filter rather
+  // than letting RLS do it. With the token forwarded, that filter becomes
+  // belt-and-braces rather than the only belt.
+  //
+  // BEST-EFFORT ON PURPOSE, and the direction is deliberate. `csv-finalize`
+  // fails CLOSED (401) on a missing session because its RPC is SECURITY DEFINER
+  // and CANNOT run without `auth.uid()`. Here the token is an ENHANCEMENT: the
+  // caller is already authenticated (withAuth ran `getUser` above) and ownership
+  // is already proven by the user-scoped select above, so a session read that
+  // hiccups must not fail a resync on the money-onboarding chokepoint. The
+  // header is optional by construction — an absent token simply sends no header.
+  //
+  // ⚠️ This token is a LIVE user JWT and undici embeds outgoing headers in
+  // `err.message`. It is passed to `postProcessKey` as a VALUE (never assembled
+  // into a header here) so it reaches `scrubSeamError(message, [userAccessToken])`
+  // at the client's transport log site. Do not hand-roll a second path.
+  let userAccessToken: string | undefined;
+  try {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession();
+    userAccessToken = session?.access_token;
+  } catch (sessionErr) {
+    console.warn(
+      `[keys/sync] could not read the session to forward X-User-Access-Token (non-blocking) for ${strategy_id}:`,
+      sessionErr instanceof Error ? sessionErr.message : String(sessionErr),
+    );
+  }
+
   return await unifiedKeysSyncHandler({
     strategy_id,
     userId: user.id,
     source: resolvedSource,
+    userAccessToken,
   });
 });
 
@@ -408,6 +441,12 @@ async function unifiedKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
   source: string;
+  /**
+   * TS-15 — the end user's Supabase JWT, when a session was readable. OPTIONAL
+   * by construction: the client emits `X-User-Access-Token` only when this is
+   * present, so an absent value fabricates nothing.
+   */
+  userAccessToken?: string;
 }): Promise<NextResponse> {
   const result = await postProcessKey({
     flow_type: "resync",
@@ -419,6 +458,9 @@ async function unifiedKeysSyncHandler(args: {
     routeTag: "keys/sync",
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
+    // TS-15 — see the block at the call site for why this is best-effort here
+    // and fail-CLOSED at csv-finalize.
+    userAccessToken: args.userAccessToken,
   });
   if (!result.ok) return result.response;
 

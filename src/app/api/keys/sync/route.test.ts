@@ -40,6 +40,8 @@ const {
   // H-0306: the auth boundary. Flipped to null in the unauthed test so the
   // REAL withAuth (this route does NOT mock it) hits its 401 branch.
   authState,
+  // 140.3-02 / TS-15: drives the session read that produces X-User-Access-Token.
+  sessionState,
   // F6 (M-0327/H-0279): capture the limiter bucket key so a regression that
   // drops the per-strategy namespacing fails loudly.
   checkLimitMock,
@@ -95,6 +97,12 @@ const {
     capturing: false as boolean,
   },
   authState: { user: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as { id: string } | null },
+  // 140.3-02 / TS-15: the session whose access_token is forwarded as
+  // `X-User-Access-Token`. Nulled by the negative case, which asserts that an
+  // absent session forwards NOTHING rather than a fabricated value.
+  sessionState: {
+    session: { access_token: "test-user-jwt" } as { access_token: string } | null,
+  },
   checkLimitMock: vi.fn(),
 }));
 
@@ -107,6 +115,14 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
     auth: {
       getUser: async () => ({ data: { user: authState.user }, error: null }),
+      // 140.3-02 / TS-15: the route reads the session to forward
+      // `X-User-Access-Token`. `sessionState` is hoisted so a test can drive the
+      // no-session case, which must forward NOTHING rather than fabricate a
+      // value.
+      getSession: async () => ({
+        data: { session: sessionState.session },
+        error: null,
+      }),
     },
     // H-0275: the mock introspects the table name + select columns + every
     // .eq() filter for the OWNERSHIP query (the one that selects user_id).
@@ -963,5 +979,84 @@ describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys o
     expect(body.idempotent).toBeUndefined();
     expect(body.status).toBe("syncing");
     expect(body.queued).toBe(true);
+  });
+});
+
+/**
+ * Phase 140.3-02 / TS-15 — the resync flow forwards the end user's Supabase
+ * access token to the choke point.
+ *
+ * WHY IT MATTERS: only the CSV finalize flow forwarded it before, so a
+ * user-scoped (RLS-enforcing) Supabase client was unavailable on onboard/resync.
+ * That is exactly why PYAPI-01's second defence layer had to be an explicit
+ * Python `strategies` id+user_id filter rather than letting RLS do it. With the
+ * token forwarded, that filter becomes belt-and-braces rather than the only belt.
+ *
+ * The header itself is emitted by the client, conditionally, from this VALUE —
+ * these cases pin the value reaching the choke point, which is the whole of this
+ * route's half of the contract. The redaction proof lives in
+ * `route.seam.test.ts`, where the REAL client and the REAL transport run.
+ */
+describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Token, and fabricates nothing without a session", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    ownershipResult.data = {
+      id: TEST_STRATEGY_ID,
+      user_id: TEST_USER.id,
+      api_key_id: "33333333-3333-3333-3333-333333333333",
+    };
+    ownershipQuery.table = null;
+    ownershipQuery.selectCols = null;
+    ownershipQuery.filters = [];
+    ownershipQuery.capturing = false;
+    authState.user = { id: TEST_USER.id };
+    sessionState.session = { access_token: "test-user-jwt" };
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockUpsert.mockReturnValue({ error: null });
+    mockPostProcessKey.mockResolvedValue({
+      ok: true,
+      status: 202,
+      body: { ok: true, queued: true },
+    });
+  });
+
+  it("threads the session access token into the choke point", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    expect(res.status).toBe(202);
+    expect(
+      mockPostProcessKey.mock.calls[0]?.[0]?.userAccessToken,
+      "Without the token the analytics service cannot build a user-scoped, " +
+        "RLS-enforcing client, and PYAPI-01's explicit Python ownership filter " +
+        "is the ONLY belt rather than the second one — TS-15.",
+    ).toBe("test-user-jwt");
+    // The pre-existing tenant identity must survive alongside it: dropping
+    // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
+    expect(mockPostProcessKey).toHaveBeenCalledWith(
+      expect.objectContaining({ flow_type: "resync", userId: TEST_USER.id }),
+    );
+  });
+
+  it("NEGATIVE — no readable session forwards NOTHING, and the resync still runs", async () => {
+    sessionState.session = null;
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+    // Fabricating a value would be an elevation-of-privilege bug, not a shim.
+    expect(mockPostProcessKey.mock.calls[0]?.[0]?.userAccessToken).toBeUndefined();
+    // And the forwarding is an ENHANCEMENT, not a gate: the caller is already
+    // authenticated and ownership is already proven, so an unreadable session
+    // must not fail a resync on the money-onboarding chokepoint. (csv-finalize
+    // fails CLOSED instead, because its SECURITY DEFINER RPC cannot run without
+    // auth.uid() — the two directions are deliberate and different.)
+    expect(res.status).toBe(202);
   });
 });
