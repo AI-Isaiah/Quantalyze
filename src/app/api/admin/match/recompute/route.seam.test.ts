@@ -318,6 +318,98 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     expect(body.error).not.toBe("Match recompute failed. Please try again.");
   });
 
+  /**
+   * 140.3-11 / TS-18 — the VENUE NAME survives the whole chain. Added because
+   * mutation **M77c returned GREEN**.
+   *
+   * M77c dropped `seamDependencyName(error)` from the throw site in
+   * `src/lib/analytics-client.ts` — the one line at which the venue is read off
+   * the wire — and the ENTIRE suite stayed green (3 163 passed, 0 failed). The
+   * asymmetry is structural, not accidental:
+   *
+   *   - both route test files CONSTRUCT an `AnalyticsUpstreamError` by hand, so
+   *     they can only see the route's mapping of a field, never whether the
+   *     client ever populated it;
+   *   - both component test files mock `fetch` at the BROWSER boundary, so they
+   *     see the route's body shape, never the client that produces it.
+   *
+   * So the carry could have been deleted and TS-18 would still have been
+   * certified — the venue would silently have become `null` on every response
+   * and both consumers would have degraded to "An exchange" forever, which is
+   * the un-named state they are supposed to fall back to and therefore looks
+   * exactly like correct behaviour. This case is the only oracle in the repo
+   * that can tell the two apart, because it is the only one that runs the REAL
+   * client over REAL wire bytes.
+   */
+  it("TS-18: the venue name on the wire survives client → route (falsifies M77c)", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "EXCHANGE_UNAVAILABLE",
+            dependency: "bybit",
+            retryable: true,
+            detail: "The venue is not responding.",
+          },
+        }),
+        { status: 424, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const res = await postAsAdmin();
+
+    expect(res.status).toBe(424);
+    const body = JSON.parse(await res.text());
+    // The name the WIRE carried, through the real client, out of the real route.
+    expect(body.dependency).toBe("bybit");
+  });
+
+  it("TS-18: a wire body naming one of OUR services yields NO venue (T-140.3-11-02)", async () => {
+    // `error_contract._validate` refuses this on the emit side; the consume side
+    // refuses it again, because the value reaches an admin as an ATTRIBUTION and
+    // rendering `supabase` as "the venue that failed" would say the caller's
+    // exchange broke when OUR datastore did.
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "EXCHANGE_UNAVAILABLE",
+            dependency: "supabase",
+            retryable: true,
+            detail: "Something failed.",
+          },
+        }),
+        { status: 424, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const res = await postAsAdmin();
+    expect(res.status).toBe(424);
+    expect(JSON.parse(await res.text()).dependency).toBeNull();
+  });
+
+  it("TS-18: the FLAT 424 shape carries no venue, and none is invented", async () => {
+    // The shape `140.3-06` actually put on the wire: `VenueTransientHTTPException`
+    // emits `{detail, code, recoverable}` and no `dependency` key at all.
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "The venue is not responding.",
+          code: "EXCHANGE_UNAVAILABLE",
+          recoverable: true,
+        }),
+        { status: 424, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const res = await postAsAdmin();
+    expect(res.status).toBe(424);
+    const body = JSON.parse(await res.text());
+    expect(body.dependency).toBeNull();
+    // …and the human half still survives, so the flat shape is not a dead end.
+    expect(body.error).toBe("The venue is not responding.");
+  });
+
   it("TS-19: a REAL 502 on the wire still leaves this route as the STATIC 500 (T-140-11)", async () => {
     // The bodyless `text/plain` shape an unhandled Python exception produces.
     fetchMock.mockResolvedValue(
