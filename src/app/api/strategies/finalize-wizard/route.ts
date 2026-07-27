@@ -84,7 +84,6 @@ const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
  */
 export const maxDuration = 300;
 
-
 /**
  * SEAMCORE-10 (A-06 / A-29) — the hard bound on the composite member fan-out.
  *

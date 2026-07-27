@@ -58,7 +58,6 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  */
 export const maxDuration = 300;
 
-
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;

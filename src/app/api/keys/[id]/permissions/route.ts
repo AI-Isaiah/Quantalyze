@@ -55,7 +55,6 @@ import type { User } from "@supabase/supabase-js";
  */
 export const maxDuration = 300;
 
-
 /**
  * 140.3-03 / SEAMUX-07 — the payload shape is no longer declared here.
  *
