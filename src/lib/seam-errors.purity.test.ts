@@ -188,6 +188,83 @@ describe("[SEAMCORE-08 / T-140-05] CircuitOpenError leaks nothing", () => {
   });
 });
 
+/**
+ * Phase 140.2-11 / SEAMCORE-11 (A-15) — `retryAfterS` is REFUSED at construction.
+ *
+ * The asymmetry this closes: `AnalyticsUpstreamError`, sixty lines away in
+ * `analytics-client.ts`, `RangeError`s on a malformed HTTP status because that
+ * value is forwarded as a response code. `CircuitOpenError`'s value is forwarded
+ * as a `Retry-After` HEADER — to callers including the anonymous
+ * verify-strategy teaser — and accepted anything. `new CircuitOpenError(NaN)`
+ * put the literal bytes `Retry-After: NaN` on the wire.
+ *
+ * WHY REFUSE RATHER THAN CLAMP. The value comes from a store read
+ * (`isBreakerOpen` → `Math.ceil((lock.expiresAtMs - now) / 1000)`, an encoded
+ * expiry since plan 140.2-07). A clamp to 0 or to `DEFAULT_RETRY_AFTER_S` would
+ * publish a plausible header and leave the broken expiry read looking like a
+ * working one — permanently invisible, because nothing downstream can tell a
+ * clamped value from a real one.
+ *
+ * ORACLE INDEPENDENCE: every invalid shape below is hand-typed, and the
+ * assertion is the THROW, not merely that a valid value still works. A test that
+ * only exercised the happy path would stay green with the validation deleted,
+ * which is exactly the asserted-not-observed shape row M58 exists to falsify.
+ */
+describe("[SEAMCORE-11 / A-15] CircuitOpenError refuses a malformed retryAfterS", () => {
+  it.each([
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["-Infinity", -Infinity],
+    ["a negative number", -1],
+    ["a fractional number", 12.5],
+    ["a numeric string", "30"],
+    ["undefined", undefined],
+    ["null", null],
+  ] as [string, unknown][])(
+    "refuses %s at construction rather than publishing it as Retry-After",
+    (_label, value) => {
+      expect(
+        () => new CircuitOpenError(value as number),
+        "CircuitOpenError accepted a retryAfterS it cannot honestly publish. " +
+          "The value is stringified straight into a Retry-After header by both " +
+          "seam clients, so a malformed one reaches the wire — including an " +
+          "anonymous teaser caller — and the broken store read that produced it " +
+          "stays invisible.",
+      ).toThrow(RangeError);
+    },
+  );
+
+  it("names the offending value so the broken caller is findable", () => {
+    expect(() => new CircuitOpenError(NaN)).toThrow(/invalid retryAfterS/i);
+  });
+
+  it("does NOT clamp — a broken expiry read must not look like a working one", () => {
+    // The falsifier for the tempting alternative fix. If the constructor
+    // silently substituted 0 or DEFAULT_RETRY_AFTER_S, `constructed` would be a
+    // usable instance and nothing anywhere would ever report the fault.
+    let constructed: CircuitOpenError | null = null;
+    try {
+      constructed = new CircuitOpenError(NaN);
+    } catch {
+      /* expected — see the assertion below */
+    }
+    expect(constructed).toBeNull();
+  });
+
+  it("constructs every valid value unchanged, message and name untouched", () => {
+    // 0 is legal delta-seconds ("retry now"); 86_400 is far above any cooldown
+    // this seam sets. Production only ever passes a positive integer
+    // (`Math.ceil` over a strictly-future expiry, or DEFAULT_RETRY_AFTER_S).
+    for (const valid of [0, 1, 30, 86_400]) {
+      const err = new CircuitOpenError(valid);
+      expect(err.retryAfterS).toBe(valid);
+      expect(err.message).toBe(EXPECTED_CIRCUIT_OPEN_MESSAGE);
+      expect(err.name).toBe("CircuitOpenError");
+      expect(err).toBeInstanceOf(Error);
+    }
+  });
+});
+
 describe("[SEAMCORE-02 / T-140-05] SeamBodyReadError leaks nothing", () => {
   it("carries the static message, byte-for-byte, whatever the cause said", () => {
     // Two DIFFERENT causes, one expected string. A message that interpolated
