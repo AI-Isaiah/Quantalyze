@@ -1899,3 +1899,199 @@ describe("resilientFetch budget wiring", () => {
     );
   });
 });
+
+/**
+ * Phase 140.2 / SEAMCORE-06 — the breaker's OPEN and CLOSE transitions are
+ * observable, per dependency.
+ *
+ * The breaker has never emitted a transition event. Store state answered "is it
+ * open right now"; nothing answered "when did it open, which dependency, and how
+ * many failures caused it" — which is the whole of an operator's question during
+ * an incident, and the reason A-01 took months to attribute.
+ *
+ * ⚠️ THE EVENT'S FIELD SET IS AN UPPER BOUND, NOT A MINIMUM. `recordSeamFailure`'s
+ * docblock constraint stays in force verbatim: never log a request body or a
+ * header value from this module, because the seam carries raw exchange API
+ * secrets and `INTERNAL_API_TOKEN`. So the payload is asserted as an EXACT key
+ * set — a future field carrying the path or a correlation header would redden
+ * here rather than ship.
+ *
+ * ⚠️ NO HALF-OPEN STATE MACHINE, AND THAT IS LOCKED DECISION 3, NOT A GAP. TTL
+ * expiry IS the half-open transition. The close is therefore emitted on the
+ * first OBSERVED closed-after-open read rather than by a scheduler that would
+ * have to exist solely to fire it.
+ */
+describe("[SEAMCORE-06] the breaker emits a structured transition event", () => {
+  /** The ONLY four fields the event may carry, hand-typed. */
+  const PERMITTED_FIELDS = [
+    "breakerKey",
+    "failures",
+    "cooldownS",
+    "correlationId",
+  ];
+
+  type Emitted = { event: string; payload: Record<string, unknown> };
+
+  /** Collect transition events off a console.warn spy. */
+  function transitionsFrom(
+    spy: ReturnType<typeof vi.spyOn<Console, "warn">>,
+  ): Emitted[] {
+    return spy.mock.calls
+      .filter((call) => String(call[0]).includes("seam.breaker."))
+      .map((call) => ({
+        event: String(call[0]),
+        payload: call[1] as Record<string, unknown>,
+      }));
+  }
+
+  it("emits ONE open event at the trip, carrying exactly the four permitted fields", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    // A hand-typed 5 — the fake's threshold, pinned literal-against-literal to
+    // production's in seam-constants.pin.test.ts rather than read from it.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    const events = transitionsFrom(warnSpy);
+    expect(
+      events.length,
+      "The trip emitted no transition event (or emitted more than one). " +
+        "Opening the circuit is the single most operationally significant " +
+        "thing this module does and it was invisible in the logs.",
+    ).toBe(1);
+    expect(events[0].event).toContain("seam.breaker.open");
+    expect(Object.keys(events[0].payload).sort()).toEqual(
+      [...PERMITTED_FIELDS].sort(),
+    );
+    expect(events[0].payload.breakerKey).toBe("breaker:railway");
+    expect(events[0].payload.failures).toBe(5);
+    expect(events[0].payload.cooldownS).toBe(30);
+    expect(String(events[0].payload.correlationId)).toMatch(
+      /^breaker:railway@\d+$/,
+    );
+  });
+
+  it("takes the dependency key from the VERDICT, not from a module constant", async () => {
+    // The field is meaningful only because plan 140.2-06 made breaker keys
+    // per-dependency. An event that reported the global key for every trip
+    // would be decorative — and indistinguishable from a correct one on the
+    // global-key path, which is why this case drives a NAMED dependency.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:supabase");
+    }
+
+    const events = transitionsFrom(warnSpy);
+    expect(events).toHaveLength(1);
+    expect(
+      events[0].payload.breakerKey,
+      "The transition event named the residual global key for a trip that " +
+        "belongs to `supabase`. The field has to come from the verdict, or an " +
+        "operator reading it learns nothing the pre-140.2-06 breaker did not " +
+        "already tell them.",
+    ).toBe("breaker:supabase");
+    expect(String(events[0].payload.correlationId)).toMatch(
+      /^breaker:supabase@\d+$/,
+    );
+  });
+
+  it("emits NOTHING when a concurrent instance already armed the lock", async () => {
+    // `nx: true` refuses the write. No transition happened here, so claiming one
+    // would double-count every trip across instances.
+    const mod = await import("./resilient-fetch");
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await mod.recordSeamFailure("breaker:railway");
+    await mod.recordSeamFailure("breaker:railway");
+
+    expect(transitionsFrom(warnSpy)).toHaveLength(0);
+  });
+
+  it("emits a close event on the first observed closed-after-open read, sharing the open event's correlation id", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+    const openEvent = transitionsFrom(warnSpy)[0];
+    expect(openEvent.event).toContain("seam.breaker.open");
+
+    // Age the lock past its ENCODED expiry while leaving the key in the store —
+    // exactly the tombstone window `BREAKER_LOCK_TOMBSTONE_S` exists to create.
+    // The armedAt is preserved, which is what makes the two events correlatable.
+    const armedAtMs = Number(
+      String(openEvent.payload.correlationId).split("@")[1],
+    );
+    shared.store.set("breaker:railway", {
+      value: encodeFakeBreakerLock(armedAtMs, Date.now() - 1),
+      expiresAt: Date.now() + 30_000,
+    });
+
+    const state = await mod.isBreakerOpen("bridge");
+    expect(state.open).toBe(false);
+
+    const closeEvents = transitionsFrom(warnSpy).filter((e) =>
+      e.event.includes("seam.breaker.close"),
+    );
+    expect(
+      closeEvents,
+      "The circuit healed and nothing said so. TTL expiry IS the half-open " +
+        "transition (locked decision 3), so the first read that observes the " +
+        "tombstone is the only moment the close is observable at all.",
+    ).toHaveLength(1);
+    expect(Object.keys(closeEvents[0].payload).sort()).toEqual(
+      [...PERMITTED_FIELDS].sort(),
+    );
+    expect(closeEvents[0].payload.correlationId).toBe(
+      openEvent.payload.correlationId,
+    );
+    expect(closeEvents[0].payload.cooldownS).toBe(30);
+  });
+
+  it("emits the close ONCE, not once per read through the tombstone window", async () => {
+    const mod = await import("./resilient-fetch");
+    const armedAtMs = Date.now() - 40_000;
+    shared.store.set("breaker:railway", {
+      value: encodeFakeBreakerLock(armedAtMs, Date.now() - 1),
+      expiresAt: Date.now() + 30_000,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await mod.isBreakerOpen("bridge");
+    await mod.isBreakerOpen("bridge");
+    await mod.isBreakerOpen("bridge");
+
+    expect(
+      transitionsFrom(warnSpy).filter((e) =>
+        e.event.includes("seam.breaker.close"),
+      ),
+      "The close fired on every read. A 60s tombstone window on a busy route " +
+        "turns one recovery into thousands of identical lines, which is how an " +
+        "operational signal becomes noise nobody alerts on.",
+    ).toHaveLength(1);
+  });
+
+  it("carries no path, no body and no header value", async () => {
+    // The constraint `recordSeamFailure`'s docblock states, asserted rather than
+    // trusted: this seam carries raw exchange API secrets and INTERNAL_API_TOKEN.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.INTERNAL_API_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c4";
+    const mod = await import("./resilient-fetch");
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    const serialized = JSON.stringify(transitionsFrom(warnSpy)[0].payload);
+    expect(serialized).not.toContain("int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c4");
+    expect(serialized).not.toContain("/api/");
+    expect(serialized.toLowerCase()).not.toContain("authorization");
+    expect(serialized.toLowerCase()).not.toContain("bearer");
+  });
+});
