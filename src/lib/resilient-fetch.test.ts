@@ -828,7 +828,15 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     process.env.ANALYTICS_SERVICE_URL = "notaurl";
     vi.resetModules();
-    const fetchMock = okFetch();
+    // The transport REJECTS exactly as Node does for an unparseable URL
+    // (measured: `TypeError: Failed to parse URL from notaurl/x`). Without
+    // this, removing the eager guard would simply resolve under the mock and
+    // the zero-recording and log assertions below could not fail — the guard
+    // would be pinned by its own existence rather than by its effect.
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(
+      new TypeError("Failed to parse URL from notaurl/api/portfolio-bridge"),
+    );
     const mod = await import("./resilient-fetch");
 
     const thrown = await mod
@@ -858,7 +866,10 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
     vi.spyOn(console, "error").mockImplementation(() => {});
     process.env.ANALYTICS_SERVICE_URL = "localhost:8002";
     vi.resetModules();
-    const fetchMock = okFetch();
+    // Same reasoning as above: the platform rejects an unsupported protocol, so
+    // the mock does too, and the zero-recording clause below is falsifiable.
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(new TypeError("fetch failed"));
     const mod = await import("./resilient-fetch");
 
     await expect(
