@@ -10,13 +10,18 @@ import {
   BREAKER_STORE_TIMEOUT_MS,
   BREAKER_STORE_RETRIES,
   BREAKER_STORE_BACKOFF_MS,
+  BREAKER_LOCK_TOMBSTONE_S,
   breakerKeyFor,
+  encodeBreakerLock,
+  decodeBreakerLock,
 } from "./resilient-fetch";
 import { seamBreakerVerdict } from "./seam-discriminator";
 import {
   FAKE_BREAKER_KEY,
   FAKE_THRESHOLD,
   FAKE_WINDOW_MS,
+  FAKE_LOCK_TOMBSTONE_MS,
+  encodeFakeBreakerLock,
 } from "@/test/helpers/upstash-breaker";
 
 /**
@@ -344,6 +349,33 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
     ).toBe(0);
   });
 
+  it("BREAKER_LOCK_TOMBSTONE_S is the literal 60", () => {
+    // How much longer the KEY lives than the LOCK it carries. The lock is open
+    // until the expiry encoded in its VALUE; the key lingers past that so
+    // `recordSeamFailure` can still read WHEN the last lock was armed, which is
+    // the whole of the A-25 no-re-arm guard.
+    expect(
+      BREAKER_LOCK_TOMBSTONE_S,
+      "The lock tombstone changed. Shortening it below (longest seam budget − " +
+        "cooldown) re-opens A-25: a request admitted before a lock was armed " +
+        "finds no trace of it and re-arms a fresh cooldown on stale evidence.",
+    ).toBe(60);
+  });
+
+  it("A-25: the tombstone outlives the longest seam budget", () => {
+    // Both sides literal. The worst case the guard must span is a request
+    // admitted the instant before a lock is armed and failing at the end of the
+    // longest budget in the table — `process-key-sync` / the dormant handler, at
+    // 60 000 ms. The tombstone therefore has to cover (60 000 − cooldown).
+    expect(
+      BREAKER_LOCK_TOMBSTONE_S * 1_000,
+      "The lock tombstone no longer spans the longest seam budget, so a " +
+        "60s-budget request that failed after a full cooldown can no longer see " +
+        "the lock it overlapped — and re-arms the circuit on evidence it " +
+        "gathered before the previous trip.",
+    ).toBeGreaterThanOrEqual(60_000 - 30_000);
+  });
+
   it("A-14: the cooldown is at least as long as the failure window", () => {
     // Both sides literal. If the cooldown were SHORTER than the window, the
     // failure counter would not yet have decayed when the open-lock expires, so
@@ -525,6 +557,48 @@ describe("fake ↔ production — the breaker double's tuning cannot drift silen
     expect(FAKE_THRESHOLD, DRIFT("failure threshold")).toBe(
       BREAKER_FAILURE_THRESHOLD,
     );
+  });
+
+  it("FAKE_LOCK_TOMBSTONE_MS equals the millisecond form of BREAKER_LOCK_TOMBSTONE_S", () => {
+    expect(FAKE_LOCK_TOMBSTONE_MS).toBe(60_000);
+    expect(FAKE_LOCK_TOMBSTONE_MS, DRIFT("lock tombstone")).toBe(
+      BREAKER_LOCK_TOMBSTONE_S * 1_000,
+    );
+  });
+
+  it("the harness writes the lock VALUE format the core parses, and vice versa", () => {
+    // ⚠️ THE FENCE FOR TRAP-9, AND THE REASON THE NINE `seedBreakerOpen` CALL
+    // SITES DID NOT HAVE TO CHANGE IN PLAN 140.2-07. The stored value stopped
+    // being the bare string "open" and became `open:<armedAt>:<expiresAt>`; the
+    // helper absorbed that, so no test hand-builds the format. What that buys in
+    // ergonomics it owes in risk: two encoders that silently disagree would make
+    // every seeded-open case pass while opening nothing. This is where they are
+    // made to agree.
+    //
+    // Both timestamps are hand-typed, and the expected STRING is written out in
+    // full rather than composed — a template literal built from the same two
+    // numbers would be the assertion restating the implementation.
+    const ARMED_AT = 1_700_000_000_000;
+    const EXPIRES_AT = 1_700_000_030_000;
+
+    expect(encodeFakeBreakerLock(ARMED_AT, EXPIRES_AT)).toBe(
+      "open:1700000000000:1700000030000",
+    );
+    expect(encodeBreakerLock(ARMED_AT, EXPIRES_AT)).toBe(
+      "open:1700000000000:1700000030000",
+    );
+
+    // The core PARSES what the harness writes…
+    expect(
+      decodeBreakerLock(encodeFakeBreakerLock(ARMED_AT, EXPIRES_AT)),
+      DRIFT("lock value encoding"),
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: EXPIRES_AT });
+
+    // …and rejects the shapes it must, including the PRE-140.2-07 bare string,
+    // which now reads CLOSED (the fail-forward direction of LOCKED DECISION 4).
+    for (const bad of ["open", "open:1700000000000", "open:1:x", "", "yes", null]) {
+      expect(decodeBreakerLock(bad)).toBeNull();
+    }
   });
 
   it("FAKE_WINDOW_MS equals the millisecond form of BREAKER_WINDOW", () => {

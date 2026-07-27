@@ -135,6 +135,19 @@ export const FAKE_THRESHOLD = 5;
  */
 export const FAKE_WINDOW_MS = 30_000;
 
+/**
+ * How much longer than its encoded cooldown a breaker lock stays IN the store —
+ * the TOMBSTONE — in milliseconds. The second form of
+ * `BREAKER_LOCK_TOMBSTONE_S` in `src/lib/resilient-fetch.ts`, hand-typed here
+ * for the same two reasons as `FAKE_THRESHOLD`, and pinned literal-against-
+ * literal in `src/lib/seam-constants.pin.test.ts`.
+ *
+ * A lock is OPEN until the expiry encoded in its VALUE; the key itself outlives
+ * that so `recordSeamFailure` can still see WHEN the last lock was armed, which
+ * is the whole of the A-25 no-re-arm guard.
+ */
+export const FAKE_LOCK_TOMBSTONE_MS = 60_000;
+
 /** Prefix for the fake limiter's per-identifier counters inside the same store. */
 const COUNTER_PREFIX = "__fake_breaker_count__:";
 
@@ -178,9 +191,13 @@ export interface FakeRedis {
  *   stands).
  * - `ttl` returns `-2` for an absent/expired key and `-1` for a key with no TTL.
  * - `mget` returns one slot PER REQUESTED KEY, in request order, `null` where
- *   the key is absent or expired. Order and arity are load-bearing: the core
- *   reads the FIRST `"open"` slot and maps its index back to a key to read the
- *   TTL, so a fake that compacted out the misses would hand back the wrong key.
+ *   the key is absent or expired. Order is load-bearing: the core returns the
+ *   FIRST slot holding a still-live lock, and the row's declared dependency keys
+ *   come before the global one so the more specific cooldown wins the
+ *   `retryAfterS` tie-break. Arity no longer is, since plan 140.2-07 stopped
+ *   mapping an index back to a key — the expiry now travels inside the value —
+ *   but a fake that compacted out the misses would still misreport which key
+ *   matched, so both are kept.
  */
 export function fakeRedisFor(store: FakeUpstashStore): FakeRedis {
   return {
@@ -294,10 +311,46 @@ export function seedBreakerOpen(
   breakerKey: string = BREAKER_KEY_LITERAL,
   ttlS = 30,
 ): void {
+  const armedAtMs = Date.now();
+  const expiresAtMs = armedAtMs + ttlS * 1000;
   store.set(breakerKey, {
-    value: "open",
-    expiresAt: Date.now() + ttlS * 1000,
+    value: encodeFakeBreakerLock(armedAtMs, expiresAtMs),
+    // The KEY outlives the LOCK, deliberately — see `encodeFakeBreakerLock`.
+    expiresAt: expiresAtMs + FAKE_LOCK_TOMBSTONE_MS,
   });
+}
+
+/**
+ * Encode a breaker lock exactly as the core does — `open:<armedAt>:<expiresAt>`,
+ * both in epoch milliseconds.
+ *
+ * ⚠️ ONE ENCODER, USED BY THIS HELPER AND BY THE CORE'S OWN TESTS. Plan
+ * 140.2-07 moved the lock's expiry INTO its value so that `isBreakerOpen` can
+ * decide OPEN/CLOSED and derive `retryAfterS` from a SINGLE read (A-24: two
+ * sequential reads are two facts that can disagree, and a rejection on the
+ * second discarded a known-open state). The format therefore has to be produced
+ * identically on both sides, and a test that hand-built it at the call site
+ * would be the harness and production drifting into two encodings — a green
+ * suite testing nothing, which is TRAP-9 exactly.
+ *
+ * The format is hand-typed HERE and NOT imported from the core, for the same two
+ * reasons `FAKE_THRESHOLD` is: this file cannot import the core (that would run
+ * its module-load side effects from inside a `vi.mock` factory), and a double
+ * that reads its format out of production cannot ever contradict production.
+ * `src/lib/seam-constants.pin.test.ts` asserts the core's decoder parses what
+ * this function writes, and that this function writes what the core's encoder
+ * does — two independently typed formats, asserted equal.
+ *
+ * ⚠️ `armedAt` IS STORED, NOT DERIVED from `expiresAt - cooldown`. It is what the
+ * A-25 guard compares a failing request's admission instant against, and
+ * deriving it would silently re-point that guard the moment the cooldown were
+ * retuned between the write and the read.
+ */
+export function encodeFakeBreakerLock(
+  armedAtMs: number,
+  expiresAtMs: number,
+): string {
+  return `open:${armedAtMs}:${expiresAtMs}`;
 }
 
 /**

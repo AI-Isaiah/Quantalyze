@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
 import {
   FAKE_BREAKER_KEY,
+  encodeFakeBreakerLock,
   seedBreakerOpen,
   type FakeUpstashEntry,
 } from "@/test/helpers/upstash-breaker";
@@ -96,7 +97,20 @@ const shared = vi.hoisted(() => {
    * it observes production's call into the double and asserts against
    * hand-typed integers.
    */
-  const counters = { limitCalls: 0 };
+  const counters = {
+    limitCalls: 0,
+    /**
+     * Every command the core issued to the store, counted at the fake client's
+     * entry.
+     *
+     * This is the ONLY oracle for "one round trip per open-check" (A-24). The
+     * store's contents cannot answer it — a two-read implementation and a
+     * one-read implementation leave identical state behind — and the whole point
+     * of encoding the expiry in the value is that there is no second call left
+     * to disagree with, or to throw after, the first.
+     */
+    storeCommands: 0,
+  };
   /**
    * What the core passed to `Redis.fromEnv(...)`, OBSERVED and never CONSUMED.
    *
@@ -136,19 +150,35 @@ vi.mock("@upstash/redis", async () => {
       fromEnv: (config?: Record<string, unknown>) => {
         shared.redisConfigs.push(config);
         const base = fakeRedisFor(shared.beginContext());
+        // EVERY command is counted, not just the read ones: the round-trip
+        // assertions are about how much wall clock the store can consume, and a
+        // `ttl` or a `set` costs exactly what an `mget` does.
         return {
-          ...base,
           get: async (key: string) => {
+            shared.counters.storeCommands += 1;
             if (shared.mode.throwOnGet) {
               throw new Error("upstash: connection reset");
             }
             return base.get(key);
           },
           mget: async (...keys: string[]) => {
+            shared.counters.storeCommands += 1;
             if (shared.mode.throwOnGet) {
               throw new Error("upstash: connection reset");
             }
             return base.mget(...keys);
+          },
+          ttl: async (key: string) => {
+            shared.counters.storeCommands += 1;
+            return base.ttl(key);
+          },
+          set: async (
+            key: string,
+            value: string,
+            opts?: { ex?: number; nx?: boolean },
+          ) => {
+            shared.counters.storeCommands += 1;
+            return base.set(key, value, opts);
           },
         };
       },
@@ -281,6 +311,57 @@ function textFetch(status: number, text: string): FetchMock {
   return mock;
 }
 
+/**
+ * Read a stored breaker lock with a parser typed HERE, by hand.
+ *
+ * ⚠️ THE VALUE FORMAT CHANGED IN PLAN 140.2-07 AND THIS IS THE RE-EXPRESSION,
+ * NOT A RELAXATION. The stored value used to be the bare string `"open"`, so
+ * eight assertions in this file read `entry.value === "open"`. The expiry is now
+ * encoded IN the value — `open:<armedAtMs>:<expiresAtMs>` — so that
+ * `isBreakerOpen` can decide OPEN/CLOSED *and* derive `retryAfterS` from ONE
+ * read, which is what removes the A-24 race structurally.
+ *
+ * Every one of those eight sites became `expectLockArmed`, which asserts
+ * STRICTLY MORE than `=== "open"` did: the value parses, its cooldown span is
+ * the hand-typed 30 000 ms, and its expiry is in the future. A regression that
+ * wrote a lock with the wrong cooldown was invisible to the old assertion.
+ *
+ * The regex is written out here rather than imported from the core or the
+ * harness: a reader that took its shape from the writer could not disagree with
+ * it, which is the Layer-1 defect this whole phase exists to invert.
+ */
+function storedLock(
+  entry: FakeUpstashEntry | undefined,
+): { armedAtMs: number; expiresAtMs: number } | null {
+  if (!entry) return null;
+  const m = /^open:(\d+):(\d+)$/.exec(entry.value);
+  return m
+    ? { armedAtMs: Number(m[1]), expiresAtMs: Number(m[2]) }
+    : null;
+}
+
+/** Assert the key holds a LIVE lock whose cooldown span is the hand-typed 30 s. */
+function expectLockArmed(entry: FakeUpstashEntry | undefined): {
+  armedAtMs: number;
+  expiresAtMs: number;
+} {
+  const lock = storedLock(entry);
+  expect(
+    lock,
+    "The breaker key does not hold a parseable lock. Either the circuit did " +
+      "not trip, or the core wrote a value shape this reader does not " +
+      "recognise — and a value the core's own decoder cannot parse reads " +
+      "CLOSED, so the breaker would be armed in the store and invisible in use.",
+  ).not.toBeNull();
+  const live = lock as { armedAtMs: number; expiresAtMs: number };
+  // A hand-typed 30 000 ms, never BREAKER_COOLDOWN_S: the cooldown the lock
+  // ACTUALLY carries is now a property of the stored value, so it is assertable
+  // here for the first time.
+  expect(live.expiresAtMs - live.armedAtMs).toBe(30_000);
+  expect(live.expiresAtMs).toBeGreaterThan(Date.now());
+  return live;
+}
+
 /** Configure Upstash as PRESENT (the default for most tests). */
 function configureUpstash(): void {
   process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
@@ -301,6 +382,7 @@ beforeEach(() => {
   shared.constructed.length = 0;
   shared.redisConfigs.length = 0;
   shared.counters.limitCalls = 0;
+  shared.counters.storeCommands = 0;
   configureUpstash();
 });
 
@@ -354,25 +436,55 @@ describe("isBreakerOpen", () => {
     });
   });
 
-  it("falls back to DEFAULT_RETRY_AFTER_S when the lock carries no TTL", async () => {
-    // 140.2-06 per-site decision: THE GLOBAL KEY, written DIRECTLY rather than
-    // through the helper — deliberately, and kept that way. `seedBreakerOpen`
-    // cannot express "no TTL at all": it takes a `ttlS` and always computes an
-    // absolute expiry, whereas this case needs `Infinity`, which is the shape a
-    // real key whose `EXPIRE` was lost would have. Routing it through the helper
-    // would mean widening the helper to model a state no production path
-    // produces on purpose, so the direct write stays and states its key with the
-    // same literal the helper defaults to.
-    shared.store.set(FAKE_BREAKER_KEY, {
-      value: "open",
-      expiresAt: Number.POSITIVE_INFINITY,
-    } satisfies FakeUpstashEntry);
-    const mod = await import("./resilient-fetch");
-    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({
-      open: true,
-      retryAfterS: mod.DEFAULT_RETRY_AFTER_S,
-    });
-  });
+  it.each([
+    ["the PRE-140.2-07 bare string", "open"],
+    ["a truncated encoding", "open:1700000000000"],
+    ["a non-numeric expiry", "open:1700000000000:soon"],
+    ["an unrelated value", "yes"],
+    ["an empty value", ""],
+  ])(
+    "a lock value the encoding cannot parse (%s) reads CLOSED",
+    async (_label, value) => {
+      // ⚠️ THIS CASE MOVED MECHANISM IN PLAN 140.2-07 AND THE MOVE IS RECORDED
+      // RATHER THAN SMOOTHED. It used to seed `value: "open"` with an INFINITE
+      // store TTL and assert `isBreakerOpen` reported OPEN with
+      // `DEFAULT_RETRY_AFTER_S` — the shape of a real key whose `EXPIRE` was
+      // lost, where the value said open and the TTL read could not say when.
+      //
+      // Under the value encoding that state is UNREACHABLE: the expiry travels
+      // inside the value, so a value that does not carry one is not a lock at
+      // all. The honest replacement is the fail-forward direction LOCKED
+      // DECISION 4 already mandates — an unparseable value reads CLOSED, and the
+      // seam call proceeds.
+      //
+      // THE COST, STATED. During a rolling deploy an OLD instance can still
+      // write the bare `"open"`, and a new instance now ignores it. That is one
+      // cooldown of under-protection at a deploy boundary, in the fail-OPEN
+      // direction. The alternative — treating an unparseable value as OPEN —
+      // would let a single corrupt byte in the shared store deny the whole seam,
+      // which is the breaker becoming the outage.
+      //
+      // Written DIRECTLY rather than through `seedBreakerOpen`, deliberately:
+      // the helper's whole job is to produce a value the core CAN parse, so a
+      // case about unparseable values must bypass it.
+      shared.store.set(FAKE_BREAKER_KEY, {
+        value,
+        expiresAt: Date.now() + 30_000,
+      } satisfies FakeUpstashEntry);
+      const fetchMock = okFetch();
+      const mod = await import("./resilient-fetch");
+
+      await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({
+        open: false,
+      });
+      await expect(
+        mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+          method: "POST",
+        }),
+      ).resolves.toBeDefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it("fails OPEN when Redis errors", async () => {
     // SC-3a. A store outage must never become the outage: every exit path out
@@ -423,6 +535,211 @@ describe("isBreakerOpen", () => {
       mod.resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" }),
     ).resolves.toBeDefined();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("[SEAMCORE-05 / A-24] the breaker state is read ONCE and is self-consistent", () => {
+  it("performs exactly ONE store command per open-check, open or closed", async () => {
+    // THE structural proof, and the reason both A-24 defects disappear without
+    // any extra branching. Before this plan the check was an `mget` for the
+    // value followed by a `ttl` for the hint — two facts that could disagree:
+    //   · the lock could expire BETWEEN them, so a recovered Railway was denied
+    //     for another cooldown with the DEFAULT hint; and
+    //   · the SECOND call could throw after the first returned open, and the
+    //     catch arm then reported CLOSED — discarding a KNOWN-open state.
+    // With the expiry encoded in the value there is no second call to race and
+    // none to throw. That is not assertable from the store's contents — a
+    // one-read and a two-read implementation leave identical state — so it is
+    // asserted at the command boundary.
+    seedBreakerOpen(shared.store, "breaker:supabase", 21);
+    const mod = await import("./resilient-fetch");
+
+    shared.counters.storeCommands = 0;
+    await expect(mod.isBreakerOpen("match-recompute")).resolves.toEqual({
+      open: true,
+      retryAfterS: 21,
+    });
+    expect(
+      shared.counters.storeCommands,
+      "The open-check issued more than one store command. A second call is a " +
+        "second fact that can disagree with the first (A-24): the lock can " +
+        "expire between them, and a rejection on the second discards a " +
+        "KNOWN-open state and reports CLOSED.",
+    ).toBe(1);
+
+    // …and the closed path is one command too, over the SAME declared key set.
+    shared.store.clear();
+    shared.counters.storeCommands = 0;
+    await expect(mod.isBreakerOpen("match-recompute")).resolves.toEqual({
+      open: false,
+    });
+    expect(shared.counters.storeCommands).toBe(1);
+  });
+
+  it("a HEALED circuit is reported CLOSED even while its tombstone is still stored", async () => {
+    // Ledger row M30's falsifier. The key's store TTL deliberately OUTLIVES the
+    // cooldown encoded in its value (that lingering tombstone is what makes the
+    // A-25 guard possible at all), so "the key exists" and "the circuit is open"
+    // are now DIFFERENT questions. A reader that answered the first would deny a
+    // recovered Railway for another full minute.
+    const now = Date.now();
+    const mod = await import("./resilient-fetch");
+    // Armed 40 s ago with a 30 s cooldown: expired 10 s ago, tombstone still
+    // present. Every number hand-typed.
+    shared.store.set("breaker:railway", {
+      value: encodeFakeBreakerLock(now - 40_000, now - 10_000),
+      expiresAt: now + 50_000,
+    } satisfies FakeUpstashEntry);
+
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({ open: false });
+
+    // NEGATIVE CONTROL: the same tombstone shape with an expiry still ahead of
+    // us DOES report open, so the green above cannot mean "the reader ignores
+    // this value shape entirely".
+    shared.store.set("breaker:railway", {
+      value: encodeFakeBreakerLock(now - 5_000, now + 25_000),
+      expiresAt: now + 85_000,
+    } satisfies FakeUpstashEntry);
+    await expect(mod.isBreakerOpen("bridge")).resolves.toMatchObject({
+      open: true,
+    });
+  });
+});
+
+describe("[SEAMCORE-05 / A-25] a doomed in-flight failure cannot re-arm an expired lock", () => {
+  /**
+   * THE FAILURE THIS CLOSES, stated once. A call admitted at t=0 under the 60 s
+   * `process-key-sync` budget fails at t≈60. The lock armed at t≈0 expired at
+   * t=30, so the write succeeded and armed a FRESH 30 s window — for a request
+   * that was already doomed before the first trip, and that never had a chance
+   * to observe the recovery. One wave of long-budget calls therefore held the
+   * breaker open 90 s+ with no new traffic attempted at all.
+   *
+   * The guard needs to know WHEN the failing request was admitted, and whether a
+   * lock was armed after that. The second half is why the lock's store TTL
+   * outlives its encoded cooldown: without that tombstone the expired lock is
+   * simply gone at t=60 and the question is unanswerable.
+   */
+  async function exhaustCounter(
+    mod: typeof import("./resilient-fetch"),
+    key: string,
+    admittedAtMs: number,
+  ): Promise<void> {
+    // A hand-typed 5 — the fake's own threshold, never production's.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure(key, admittedAtMs);
+    }
+  }
+
+  it("a failure admitted BEFORE the last lock was armed does NOT re-arm it", async () => {
+    // ⚠️ HONEST NOTE ON THIS CASE'S RED. It is GREEN at the pre-plan tree, for a
+    // coincidental reason: with no tombstone concept there, the seed simply
+    // looks like a LIVE key to the fake store's `nx`, so the write is refused
+    // anyway. Its falsifier is therefore ledger row M40 (delete the guard), not
+    // the pre-plan tree — and the NEGATIVE CONTROL below is what proves the seed
+    // is not merely frozen, since that one DOES redden both before the change
+    // and under M40.
+    const now = Date.now();
+    const mod = await import("./resilient-fetch");
+    // The tombstone of a lock armed 40 s ago, expired 10 s ago.
+    const ARMED_AT = now - 40_000;
+    const tombstone = encodeFakeBreakerLock(ARMED_AT, now - 10_000);
+    shared.store.set("breaker:railway", {
+      value: tombstone,
+      expiresAt: now + 50_000,
+    } satisfies FakeUpstashEntry);
+
+    // Admitted 45 s ago — i.e. BEFORE that lock was armed, so this request was
+    // in flight for the whole of the cooldown and learned nothing new.
+    await exhaustCounter(mod, "breaker:railway", now - 45_000);
+
+    expect(
+      shared.store.get("breaker:railway")?.value,
+      "A request that was already in flight when the previous lock was armed " +
+        "re-armed the circuit. One wave of 60s-budget calls then holds the " +
+        "breaker open 90s+ without a single new request ever being attempted.",
+    ).toBe(tombstone);
+  });
+
+  it("NEGATIVE CONTROL: a failure admitted AFTER that lock was armed DOES re-arm it", async () => {
+    // Without this the case above is indistinguishable from "the guard refuses
+    // every write", which would disable the breaker entirely.
+    const now = Date.now();
+    const mod = await import("./resilient-fetch");
+    const tombstone = encodeFakeBreakerLock(now - 40_000, now - 10_000);
+    shared.store.set("breaker:railway", {
+      value: tombstone,
+      expiresAt: now + 50_000,
+    } satisfies FakeUpstashEntry);
+
+    // Admitted 5 s ago — after the lock expired, so this request DID get to try
+    // a recovered Railway and its failure is genuinely new evidence.
+    await exhaustCounter(mod, "breaker:railway", now - 5_000);
+
+    const armed = expectLockArmed(shared.store.get("breaker:railway"));
+    expect(armed.armedAtMs).toBeGreaterThan(now - 1_000);
+  });
+
+  it("resilientFetch supplies the ADMISSION instant, not the recording instant", async () => {
+    // The unit cases above prove the guard; this proves the ONE production path
+    // reaches it, and that it reaches it with the right NUMBER.
+    //
+    // ⚠️ THE TWO INSTANTS HAVE TO BE PULLED APART OR THIS PROVES NOTHING. If the
+    // request completes instantly, "admitted at" and "recorded at" are the same
+    // millisecond, so a `recordSeamFailure` that simply defaulted to `Date.now()`
+    // would satisfy every assertion here — the false-green shape this phase
+    // exists to kill. So the failing request is made to take a real 500 ms, and
+    // the tombstone's armedAt is placed 250 ms into that window: BEFORE the
+    // recording instant and AFTER the admission instant. Only the admission
+    // instant refuses.
+    //
+    // ⚠️ Like the doomed case above, this is GREEN at the pre-plan tree for a
+    // coincidental reason (no tombstone exists there, so the seeded key simply
+    // looks live to `nx`). Its falsifier is the mutation "pass `Date.now()`
+    // instead of the admission instant", observed and recorded in this plan's
+    // summary alongside M40.
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    // Four fast 503s load the counter to one below the fake's hand-typed 5.
+    okFetch(503);
+    for (let i = 0; i < 4; i++) {
+      await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+      });
+    }
+    expect(storedLock(shared.store.get("breaker:railway"))).toBeNull();
+
+    // The 5th is the one that would trip, and it is SLOW.
+    vi.unstubAllGlobals();
+    const slow = installFetchMock();
+    slow.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ ok: false, status: 503 } as Response), 500),
+        ),
+    );
+
+    const admittedAt = Date.now();
+    const tombstone = encodeFakeBreakerLock(admittedAt + 250, admittedAt - 1_000);
+    shared.store.set("breaker:railway", {
+      value: tombstone,
+      expiresAt: admittedAt + 85_000,
+    } satisfies FakeUpstashEntry);
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+    });
+    // The request really did straddle the tombstone's armedAt.
+    expect(Date.now()).toBeGreaterThan(admittedAt + 250);
+
+    expect(
+      shared.store.get("breaker:railway")?.value,
+      "resilientFetch recorded its failure with the RECORDING instant rather " +
+        "than the ADMISSION instant, so the A-25 guard can never fire in " +
+        "production: by construction a request records after it was admitted, " +
+        "and the guard is precisely about the gap between the two.",
+    ).toBe(tombstone);
   });
 });
 
@@ -540,7 +857,7 @@ describe("recordSeamFailure", () => {
     expect(shared.store.get(mod.BREAKER_KEY)).toBeUndefined();
 
     await mod.recordSeamFailure("breaker:railway");
-    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+    expectLockArmed(shared.store.get(mod.BREAKER_KEY));
   });
 
   it("counts PER KEY — one dependency's failures never trip another's circuit", async () => {
@@ -557,7 +874,7 @@ describe("recordSeamFailure", () => {
     for (let i = 0; i < 5; i++) {
       await mod.recordSeamFailure("breaker:mt5-gateway");
     }
-    expect(shared.store.get("breaker:mt5-gateway")?.value).toBe("open");
+    expectLockArmed(shared.store.get("breaker:mt5-gateway"));
 
     // Neither the sibling dependency nor the residual global key moved.
     expect(
@@ -683,7 +1000,7 @@ describe("resilientFetch breaker short-circuit", () => {
     const fetchA = okFetch(503);
     const a = await import("./resilient-fetch");
     await driveFailures(a, a.BREAKER_FAILURE_THRESHOLD);
-    expect(shared.store.get(a.BREAKER_KEY)?.value).toBe("open");
+    expectLockArmed(shared.store.get(a.BREAKER_KEY));
 
     // A different Fluid Compute instance: fresh module registry, same Upstash.
     vi.resetModules();
@@ -776,7 +1093,7 @@ describe("resilientFetch failure classification", () => {
     okFetch(503);
     const mod = await import("./resilient-fetch");
     await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, false);
-    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+    expectLockArmed(shared.store.get(mod.BREAKER_KEY));
   });
 
   it("trips on deadline (TimeoutError) rejections", async () => {
@@ -787,7 +1104,7 @@ describe("resilientFetch failure classification", () => {
     fetchMock.mockRejectedValue(new DOMException("aborted", "TimeoutError"));
     const mod = await import("./resilient-fetch");
     await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, true);
-    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+    expectLockArmed(shared.store.get(mod.BREAKER_KEY));
   });
 
   it("trips on network TypeError throws", async () => {
@@ -796,7 +1113,7 @@ describe("resilientFetch failure classification", () => {
     fetchMock.mockRejectedValue(new TypeError("fetch failed"));
     const mod = await import("./resilient-fetch");
     await drive(mod, mod.BREAKER_FAILURE_THRESHOLD, true);
-    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+    expectLockArmed(shared.store.get(mod.BREAKER_KEY));
   });
 
   it("rethrows the ORIGINAL error unwrapped", async () => {
@@ -874,7 +1191,7 @@ describe("[SC1 / SEAMCORE-02] the classification window covers the body read", (
       await expect(res.json()).rejects.toBeInstanceOf(mod.SeamBodyReadError);
     }
 
-    expect(shared.store.get(mod.BREAKER_KEY)?.value).toBe("open");
+    expectLockArmed(shared.store.get(mod.BREAKER_KEY));
   });
 
   it("a non-deadline body failure is recorded too, with deadlineExceeded false", async () => {
@@ -1163,7 +1480,7 @@ describe("[SEAMCORE-01 / ROADMAP SC2] attributability decides what counts", () =
     }
 
     expect(shared.counters.limitCalls).toBe(5);
-    expect(shared.store.get("breaker:supabase")?.value).toBe("open");
+    expectLockArmed(shared.store.get("breaker:supabase"));
     expect(
       shared.store.get("breaker:railway"),
       "Five supabase 503s opened the GLOBAL breaker. That is obligation O-2 " +

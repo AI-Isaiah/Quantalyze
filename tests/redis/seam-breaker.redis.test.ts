@@ -64,8 +64,23 @@ import { isBreakerOpen, recordSeamFailure } from "@/lib/resilient-fetch";
 // ---------------------------------------------------------------------------
 // The oracle. Hand-typed literals.
 //
-// ⚠️ Plan 140.2-07 deliberately CHANGES this shape again (it encodes the expiry
-// in the lock's value) and owns the re-expression of the constants below.
+// ⚠️ RE-EXPRESSED AGAIN BY PLAN 140.2-07, AND AGAIN IT IS A RE-EXPRESSION.
+// The lock's VALUE stopped being the bare string "open" and became
+// `open:<armedAtMs>:<expiresAtMs>`, so that `isBreakerOpen` decides OPEN/CLOSED
+// and derives `retryAfterS` from ONE read instead of a `get` racing a `ttl`.
+// Two consequences reach this file, and both make the assertions STRONGER:
+//
+//   · R-2 and R-7 read the value back. They now decode it with the hand-typed
+//     parser below, which additionally pins the COOLDOWN SPAN the lock carries —
+//     a wrong cooldown was completely invisible to `=== "open"`.
+//   · R-3 and R-4 read the key's TTL. That TTL is no longer the cooldown: the
+//     key deliberately OUTLIVES its lock by `BREAKER_LOCK_TOMBSTONE_S`, because
+//     the A-25 no-re-arm guard has to be able to see WHEN the last lock was
+//     armed after it expired. So both cases now pin BOTH numbers — the cooldown
+//     from the value, the tombstone from the key — where before they pinned one.
+//
+// The properties being asserted are unchanged: the first writer's expiry
+// survives a second trip (R-3), and the cooldown sits in the literal band (R-4).
 //
 // ⚠️ RE-EXPRESSED BY PLAN 140.2-06, AND IT IS A RE-EXPRESSION, NOT A RELAXATION.
 // Before per-dependency keying there was ONE counter identifier and R-1 pinned
@@ -132,6 +147,49 @@ const THRESHOLD = 5;
 
 /** The production cooldown, in seconds. */
 const COOLDOWN_S = 30;
+
+/** How much longer than its cooldown the lock KEY survives, in seconds. */
+const LOCK_TOMBSTONE_S = 60;
+
+/**
+ * Decode a lock value with a parser typed HERE, by hand.
+ *
+ * Nothing in this lane imports the core's decoder — a reader that took its shape
+ * from the writer could not disagree with it, which is the exact self-referential
+ * defect this whole file exists to avoid.
+ */
+function decodeLock(
+  value: unknown,
+): { armedAtMs: number; expiresAtMs: number } | null {
+  if (typeof value !== "string") return null;
+  const m = /^open:(\d+):(\d+)$/.exec(value);
+  return m ? { armedAtMs: Number(m[1]), expiresAtMs: Number(m[2]) } : null;
+}
+
+/**
+ * Assert the key holds a LIVE lock and return it.
+ *
+ * Strictly stronger than the `=== "open"` this replaced: it additionally pins
+ * that the cooldown the lock CARRIES is the hand-typed 30 000 ms, which the bare
+ * string could not express at all.
+ */
+async function expectLockOpen(
+  key: string,
+): Promise<{ armedAtMs: number; expiresAtMs: number }> {
+  const raw = await probe.get<string>(key);
+  const lock = decodeLock(raw);
+  expect(
+    lock,
+    `"${key}" does not hold a parseable lock (raw: ${JSON.stringify(raw)}). ` +
+      `Either the circuit did not trip, or the core wrote a value shape nothing ` +
+      `can decode — and an undecodable value reads CLOSED, so the lock would be ` +
+      `in the store and invisible in use.`,
+  ).not.toBeNull();
+  const live = lock as { armedAtMs: number; expiresAtMs: number };
+  expect(live.expiresAtMs - live.armedAtMs).toBe(30000);
+  expect(live.expiresAtMs).toBeGreaterThan(Date.now());
+  return live;
+}
 
 // ---------------------------------------------------------------------------
 // Store access — a probe client SEPARATE from the core's own client, so what we
@@ -364,49 +422,78 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
 
     // The 5th.
     await recordSeamFailure(LOCK_KEY);
-    expect(await probe.get<string>(LOCK_KEY)).toBe("open");
+    await expectLockOpen(LOCK_KEY);
 
     casesExecuted++;
   });
 
-  it("R-3 nx trip idempotency — a later trip does NOT ratchet the first writer's expiry", async () => {
+  it("R-3 trip idempotency — a later trip does NOT ratchet the first writer's expiry", async () => {
     await ensureWindowHeadroom(WINDOW_MS, 12000);
 
     for (let i = 0; i < THRESHOLD; i++) {
       await recordSeamFailure(LOCK_KEY);
     }
+    // THE VALUE, byte for byte — the strongest available statement of "the first
+    // writer's expiry stands", and stronger than the TTL band this replaced: a
+    // TTL band tolerates any rewrite landing inside it, whereas an identical
+    // string tolerates none at all.
+    const raw = await probe.get<string>(LOCK_KEY);
+    const lock = await expectLockOpen(LOCK_KEY);
+
+    // The KEY outlives the LOCK by the tombstone, so the store TTL is
+    // cooldown + tombstone = 90 s, all three hand-typed. This is the number the
+    // A-25 guard depends on: without the tombstone an expired lock is simply
+    // gone, and a request that overlapped it can re-arm the circuit on evidence
+    // gathered before the previous trip.
     const ttlAtTrip = await probe.ttl(LOCK_KEY);
-    expect(ttlAtTrip).toBeGreaterThanOrEqual(29);
-    expect(ttlAtTrip).toBeLessThanOrEqual(30);
+    expect(ttlAtTrip).toBeGreaterThanOrEqual(89);
+    expect(ttlAtTrip).toBeLessThanOrEqual(90);
+    expect(COOLDOWN_S + LOCK_TOMBSTONE_S).toBe(90);
 
     // Let a hand-typed 4 seconds of the cooldown burn down, then force a second
-    // trip: the counter is exhausted, so the limiter denies and the core
-    // re-issues its SET. Arm the drain BEFORE the denial, not after the
+    // trip: the counter is exhausted, so the limiter denies and the core reaches
+    // its trip path again. Arm the drain BEFORE the denial, not after the
     // assertions — those may not be reached.
     await sleep(4000);
     expectsDenial = true;
     await recordSeamFailure(LOCK_KEY);
 
-    const ttlAfter = await probe.ttl(LOCK_KEY);
-    // With `nx: true` the FIRST writer's expiry stands, so ~4 s has elapsed off
-    // a 30 s cooldown => [25, 27]. With `nx: false` the SET overwrites and the
-    // TTL snaps back to the full 30, landing outside this band.
-    expect(ttlAfter).toBeGreaterThanOrEqual(25);
-    expect(ttlAfter).toBeLessThanOrEqual(27);
+    expect(
+      await probe.get<string>(LOCK_KEY),
+      "A second trip rewrote a still-live lock. The first writer's expiry must " +
+        "stand, or a second instance tripping moments later ratchets the outage " +
+        "window open indefinitely.",
+    ).toBe(raw);
+    // …stated once more as the derived fact, so the failure message names the
+    // consequence rather than a string diff: ~4 s off a 30 s cooldown => [25,27].
+    const remainingS = Math.ceil((lock.expiresAtMs - Date.now()) / 1000);
+    expect(remainingS).toBeGreaterThanOrEqual(25);
+    expect(remainingS).toBeLessThanOrEqual(27);
 
     casesExecuted++;
   });
 
-  it("R-4 the lock TTL is the cooldown, and the caller-visible Retry-After hint agrees with it", async () => {
+  it("R-4 the ENCODED cooldown is the lock's life, the key outlives it, and Retry-After agrees", async () => {
     await ensureWindowHeadroom(WINDOW_MS, 5000);
 
     for (let i = 0; i < THRESHOLD; i++) {
       await recordSeamFailure(LOCK_KEY);
     }
 
+    // The cooldown now lives in the VALUE. `expectLockOpen` already pins its
+    // span at the literal 30 000 ms; this pins that the lock was armed NOW
+    // rather than carrying some stale expiry forward.
+    const lock = await expectLockOpen(LOCK_KEY);
+    const remainingS = Math.ceil((lock.expiresAtMs - Date.now()) / 1000);
+    expect(remainingS).toBeGreaterThanOrEqual(29);
+    expect(remainingS).toBeLessThanOrEqual(30);
+
+    // The KEY's own TTL is the cooldown PLUS the tombstone, and pinning it is
+    // what stops the tombstone being quietly dropped back to the cooldown —
+    // which would leave R-3/R-4 green and silently re-open A-25.
     const ttl = await probe.ttl(LOCK_KEY);
-    expect(ttl).toBeGreaterThanOrEqual(29);
-    expect(ttl).toBeLessThanOrEqual(30);
+    expect(ttl).toBeGreaterThanOrEqual(89);
+    expect(ttl).toBeLessThanOrEqual(90);
 
     const state = await isBreakerOpen(LANE_BUDGET_KEY);
     expect(state.open).toBe(true);
@@ -511,18 +598,24 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     for (let i = 0; i < THRESHOLD; i++) {
       await recordSeamFailure(LOCK_KEY);
     }
-    expect(await probe.get<string>(LOCK_KEY)).toBe("open");
+    await expectLockOpen(LOCK_KEY);
 
     // Hand-typed 25 s — comfortably INSIDE a 30 s cooldown.
     await sleepUntil(trippedAtA + 25000);
     expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(true);
 
-    // Hand-typed 32 s — comfortably PAST it.
+    // Hand-typed 32 s — comfortably PAST it. The KEY is still there (its
+    // tombstone runs to 90 s) and the circuit must nonetheless read CLOSED,
+    // because the expiry that decides that lives in the VALUE. This is the
+    // healed-circuit property against real Redis.
     await sleepUntil(trippedAtA + 32000);
+    expect(await probe.get<string>(LOCK_KEY)).not.toBeNull();
     expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(false);
 
     await recordSeamFailure(LOCK_KEY);
-    expect(await probe.get<string>(LOCK_KEY)).toBe("open");
+    const reArmed = await expectLockOpen(LOCK_KEY);
+    // A FRESH lock, not the tombstone read back: armed within the last second.
+    expect(reArmed.armedAtMs).toBeGreaterThan(Date.now() - 1000);
 
     // --- Scenario B: identical 32 s wait, DIFFERENT alignment. Trip at
     //     p = 0.5; 32 s later we sit at p ~= 0.567, carrying only
@@ -534,7 +627,8 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     for (let i = 0; i < THRESHOLD; i++) {
       await recordSeamFailure(LOCK_KEY);
     }
-    expect(await probe.get<string>(LOCK_KEY)).toBe("open");
+    const lockB = await expectLockOpen(LOCK_KEY);
+    const rawB = await probe.get<string>(LOCK_KEY);
 
     await sleepUntil(trippedAtB + 25000);
     expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(true);
@@ -543,7 +637,23 @@ describe("seam breaker against a REAL Redis (SEAMCORE-09)", () => {
     expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(false);
 
     await recordSeamFailure(LOCK_KEY);
-    expect(await probe.get(LOCK_KEY)).toBeNull();
+    // ⚠️ RE-EXPRESSED, NOT RELAXED. This used to assert the key was NULL — the
+    // only way the pre-140.2-07 shape could say "no fresh lock was armed". The
+    // key is no longer deleted at the cooldown: it lingers as a tombstone until
+    // 90 s. So the same claim is now made two ways, and both are STRICTER than
+    // the null check, which could not distinguish "not re-armed" from "the whole
+    // key vanished for some unrelated reason":
+    //   · the stored value is byte-identical to the one written at the trip, so
+    //     nothing was written on top of it; and
+    //   · the circuit still reads CLOSED.
+    expect(
+      await probe.get<string>(LOCK_KEY),
+      "A single failure re-armed the circuit 32 s after a trip at p = 0.5. The " +
+        "weighted carry-over there is 2, leaving remaining = 2 > 0, so this " +
+        "failure must NOT trip — that contrast with scenario A is the finding.",
+    ).toBe(rawB);
+    expect((await isBreakerOpen(LANE_BUDGET_KEY)).open).toBe(false);
+    expect(lockB.expiresAtMs).toBeLessThan(Date.now());
 
     // Recorded so the numbers are not re-derived downstream: the lock itself is
     // COOLDOWN_S, but the observed time until the seam actually stays usable is
