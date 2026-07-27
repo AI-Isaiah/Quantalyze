@@ -591,3 +591,219 @@ describe("postProcessKey — a body-read failure never escapes the choke point",
     expect(result).toEqual({ ok: true, status: 200, body: {} });
   });
 });
+
+/**
+ * Phase 140.2-11 / SEAMCORE-11 (A-27) — ONE defined outcome for an ambiguous
+ * transport, and the SAME one `analytics-client.test.ts` pins.
+ *
+ * THE CRASH. `Response.json(body, { status: 204 | 205 | 304 })` throws
+ * `TypeError: Response constructor: Invalid response status code` — verified by
+ * execution on Node v25.8.1, and WHATWG-spec behaviour rather than a runtime
+ * quirk, so CI's Node 22 agrees. This client's status pass-through
+ * (`NextResponse.json(body, { status: res.status })`) sits OUTSIDE the transport
+ * `try` — plan 140.2-05 kept it there deliberately so this plan could still
+ * observe the fault — so a 304 pass-through threw straight out of
+ * `postProcessKey`, a function declared `Promise<PostProcessKeyResult>` whose
+ * five caller routes (keys/sync, verify-strategy, finalize-wizard, csv-validate,
+ * csv-finalize) have no catch for it.
+ *
+ * THE DIVERGENCE. 204 and 205 are `ok`, so they took the SUCCESS arm and
+ * returned `{ ok: true, status: 204, body: {} }` — a success envelope with an
+ * empty body, i.e. this client reported "the service replied" for a reply that
+ * contained nothing, while `analytics-client` threw on the very same response.
+ * A `200 text/html` maintenance page did the same thing: `res.json()` rejected,
+ * the `{}` fallback swallowed it, and a Railway edge page was reported upstream
+ * as a well-formed success.
+ *
+ * THE OUTCOME IS A RETURNED ENVELOPE, NOT A THROW. Plan 140.2-05 widened this
+ * function's `try` specifically to keep it non-throwing for those five routes;
+ * closing A-27 with a throw would undo that in the same file.
+ *
+ * ORACLE DISCIPLINE: the operator message is typed out here in full, per case,
+ * byte-identical to the literals in `analytics-client.test.ts`. That equality is
+ * what "ONE defined outcome across both clients" actually means.
+ */
+describe("[SEAMCORE-11 / A-27] postProcessKey: ONE defined outcome for an ambiguous transport", () => {
+  const realFetch = global.fetch;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+    // A leaked fetch stub is this repo's known CI-only (Node 22) failure cause.
+    vi.unstubAllGlobals();
+  });
+
+  function respondWith(response: Response) {
+    const fetchMock = vi.fn(async () => response);
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  async function call() {
+    return postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: { key_id: "k1" },
+      userId: "u1",
+      correlationId: "ambiguous-corr",
+      routeTag: "keys/sync",
+    });
+  }
+
+  /** The envelope every case below must produce, asserted the same way. */
+  async function expectDefinedOutcome(
+    result: Awaited<ReturnType<typeof postProcessKey>>,
+    expectedOperatorMessage: string,
+  ) {
+    expect(result.ok).toBe(false);
+    const response = failureResponse(result);
+    expect(response.status).toBe(502);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body).toEqual({
+      ok: false,
+      code: "UPSTREAM_NETWORK_ERROR",
+      // No new user-facing copy: byte-identical to the arm that already exists
+      // for "we never reached the ingestion service", because a maintenance
+      // page IS not reaching it. 140.3 owns the client-facing surface.
+      human_message: "Could not reach the ingestion service.",
+      correlation_id: "ambiguous-corr",
+      recoverable: true,
+    });
+    // The operator half. Equality against the hand-typed literal, which is the
+    // SAME string analytics-client throws for the same response.
+    expect(
+      errorSpy.mock.calls.map((args) => String(args[0])),
+      "The operator log for an ambiguous transport drifted, or is missing. " +
+        "The user-facing envelope is deliberately generic, so this line is " +
+        "the ONLY place the observed status and content-type are recorded — " +
+        "and it must stay byte-identical to what analytics-client throws.",
+    ).toContain(`[keys/sync] ${expectedOperatorMessage}`);
+  }
+
+  it("a 200 text/html maintenance page is NOT reported as a successful reply", async () => {
+    respondWith(
+      new Response("<html><body>Application failed to respond</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const result = await call();
+
+    await expectDefinedOutcome(
+      result,
+      "Analytics seam returned an unusable response (HTTP 200, content-type text/html). The upstream did not answer with the JSON contract.",
+    );
+  });
+
+  it("a 204 resolves to that same outcome, not a success envelope with an empty body", async () => {
+    respondWith(new Response(null, { status: 204 }));
+
+    const result = await call();
+
+    await expectDefinedOutcome(
+      result,
+      "Analytics seam returned an unusable response (HTTP 204, content-type absent). The upstream did not answer with the JSON contract.",
+    );
+  });
+
+  it("a 205 resolves to that same outcome", async () => {
+    respondWith(new Response(null, { status: 205 }));
+
+    const result = await call();
+
+    await expectDefinedOutcome(
+      result,
+      "Analytics seam returned an unusable response (HTTP 205, content-type absent). The upstream did not answer with the JSON contract.",
+    );
+  });
+
+  it("a 304 resolves to that same outcome instead of crashing the route", async () => {
+    respondWith(new Response(null, { status: 304 }));
+
+    const result = await call();
+
+    await expectDefinedOutcome(
+      result,
+      "Analytics seam returned an unusable response (HTTP 304, content-type absent). The upstream did not answer with the JSON contract.",
+    );
+  });
+
+  it("NEVER passes a null-body status to a JSON response constructor", async () => {
+    // The crash, reproduced here so the guard above is anchored to the real
+    // platform behaviour rather than to a belief about it. This is precisely
+    // what `NextResponse.json(body, { status: res.status })` did on a 304.
+    for (const status of [204, 205, 304]) {
+      expect(() => Response.json({ ok: false }, { status })).toThrow(TypeError);
+    }
+
+    // And the envelope this client actually returns is constructible and
+    // readable — which is what "the route responds rather than crashing" means
+    // at the five call sites that do `if (!result.ok) return result.response`.
+    for (const status of [204, 205, 304]) {
+      respondWith(new Response(null, { status }));
+      const result = await call();
+      expect(result.ok).toBe(false);
+      const passedThrough = failureResponse(result);
+      expect(passedThrough.status).toBe(502);
+      await expect(passedThrough.json()).resolves.toMatchObject({
+        code: "UPSTREAM_NETWORK_ERROR",
+      });
+    }
+  });
+
+  it("STILL never throws — the declared contract of all five caller routes", async () => {
+    for (const response of [
+      new Response(null, { status: 204 }),
+      new Response(null, { status: 205 }),
+      new Response(null, { status: 304 }),
+      new Response("<html></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+    ]) {
+      respondWith(response);
+      // `.resolves` IS the assertion: a throw here is the five-unhandled-paths
+      // regression, and it surfaces as a rejected promise, not a bad code.
+      await expect(call()).resolves.toMatchObject({ ok: false });
+    }
+  });
+
+  it("NEGATIVE CONTROL: a JSON 2xx is byte-unchanged", async () => {
+    respondWith(
+      new Response(JSON.stringify({ ok: true, strategy_id: "s1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(call()).resolves.toEqual({
+      ok: true,
+      status: 200,
+      body: { ok: true, strategy_id: "s1" },
+    });
+  });
+
+  it("NEGATIVE CONTROL: a JSON non-2xx still forwards its own status and body", async () => {
+    // A 500 with a body has a status that is safe to pass through, so it is not
+    // ambiguous and this plan must not touch it.
+    respondWith(
+      new Response(JSON.stringify({ error: "boom" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    const result = await call();
+    const response = failureResponse(result);
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ error: "boom" });
+  });
+});

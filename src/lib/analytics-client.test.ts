@@ -1334,3 +1334,236 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
     );
   });
 });
+
+/**
+ * Phase 140.2-11 / SEAMCORE-11 (A-27) — ONE defined outcome for an ambiguous
+ * transport, and the SAME one `process-key-client.test.ts` pins.
+ *
+ * THE DEFECT THIS CLOSES, in two halves.
+ *
+ *   1. NON-JSON 2xx. A Railway edge or maintenance page served as
+ *      `200 text/html` produced the string "Analytics service returned an
+ *      unexpected response. Is it running on the correct port?" — a local-dev
+ *      message, sent to an operator during a production incident, telling them
+ *      to go and check a port on their laptop.
+ *
+ *   2. NULL-BODY STATUSES. 204, 205 and 304 carry no body at all. Verified by
+ *      execution on Node v25.8.1: `Response.json(body, { status: 204|205|304 })`
+ *      throws `TypeError: Response constructor: Invalid response status code`.
+ *      That is WHATWG-spec behaviour, not a runtime quirk, so CI's Node 22
+ *      agrees. Before this plan the three statuses got THREE different answers
+ *      inside this one file — 204 and 205 are `ok` and fell through to the
+ *      local-dev message, while 304 is not `ok` and became an
+ *      `AnalyticsUpstreamError` carrying status 304, which every route that
+ *      forwards an upstream status verbatim would then have handed to its own
+ *      `NextResponse.json(...)` and crashed on.
+ *
+ * ORACLE DISCIPLINE. The expected message is typed out HERE, in full, per case.
+ * A `not.toContain("port")` assertion would redden under mutation M50 too, and
+ * would still let a third, different message ship green — which is the whole
+ * failure mode "one defined outcome" names. Equality is the point.
+ */
+describe("[SEAMCORE-11 / A-27] analytics-client: ONE defined outcome for an ambiguous transport", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  async function callInternal(fetchMock: ReturnType<typeof vi.fn>) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+        options: { budgetKey: string; tenantId: string },
+      ) => Promise<unknown>;
+    };
+    return {
+      mod,
+      call: () =>
+        (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+          "/test",
+          { ping: 1 },
+          { budgetKey: "validate-key", tenantId: TENANT.userId },
+        ),
+    };
+  }
+
+  async function caughtFrom(fetchMock: ReturnType<typeof vi.fn>) {
+    const { mod, call } = await callInternal(fetchMock);
+    let caught: unknown;
+    try {
+      await call();
+    } catch (e) {
+      caught = e;
+    }
+    return { mod, caught };
+  }
+
+  it("a 200 text/html maintenance page names the SEAM, not a local dev port", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("<html><body>Application failed to respond</body></html>", {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+    );
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect(
+      (caught as Error).message,
+      "The non-JSON-2xx message drifted. It is the one an operator reads " +
+        "during a Railway edge incident, and its predecessor sent them to " +
+        "check a port on their laptop. It must also stay byte-identical to " +
+        "the one process-key-client logs, or 'one defined outcome' is two.",
+    ).toBe(
+      "Analytics seam returned an unusable response (HTTP 200, content-type text/html). The upstream did not answer with the JSON contract.",
+    );
+    // The routable status is 502, NOT the observed 200: `.status` is
+    // contractually the code route handlers forward, and forwarding 200 would
+    // ship an error payload under a success code.
+    expect(
+      (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).status,
+    ).toBe(502);
+  });
+
+  it("a 204 resolves to that same outcome (it is `ok`, and it has no body)", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 204 }));
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toBe(
+      "Analytics seam returned an unusable response (HTTP 204, content-type absent). The upstream did not answer with the JSON contract.",
+    );
+    expect(
+      (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).status,
+    ).toBe(502);
+  });
+
+  it("a 205 resolves to that same outcome", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 205 }));
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toBe(
+      "Analytics seam returned an unusable response (HTTP 205, content-type absent). The upstream did not answer with the JSON contract.",
+    );
+    expect(
+      (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).status,
+    ).toBe(502);
+  });
+
+  it("a 304 resolves to that same outcome, and never carries 304 as a forwardable status", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(null, { status: 304 }));
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toBe(
+      "Analytics seam returned an unusable response (HTTP 304, content-type absent). The upstream did not answer with the JSON contract.",
+    );
+    // THE crash prevention. 304 is not `ok`, so before this plan it became an
+    // AnalyticsUpstreamError carrying status 304 — and every route that
+    // forwards `err.status` into its own JSON response constructor throws on
+    // it, verified on Node this session.
+    const status = (caught as InstanceType<typeof mod.AnalyticsUpstreamError>)
+      .status;
+    expect(status).toBe(502);
+    expect(() => Response.json({ error: "x" }, { status })).not.toThrow();
+  });
+
+  it("NEGATIVE CONTROL: a JSON 2xx is byte-unchanged", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ valid: true, detail: "fine" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const { call } = await callInternal(fetchMock);
+    await expect(call()).resolves.toEqual({ valid: true, detail: "fine" });
+  });
+
+  it("NEGATIVE CONTROL: a non-JSON NON-2xx still forwards its own status and body", async () => {
+    // The `!ok` text/plain fork is untouched by this plan: a 500 has a body and
+    // a status that is safe to forward, so it is not ambiguous.
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("Internal Server Error trace...", {
+        status: 500,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+    const { mod, caught } = await caughtFrom(fetchMock);
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect((caught as Error).message).toBe("Internal Server Error trace...");
+    expect(
+      (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).status,
+    ).toBe(500);
+  });
+
+  /**
+   * The anti-drift guard for "ONE defined outcome ... identical across both
+   * clients".
+   *
+   * The two clients cannot import the builder from each other: sixteen route
+   * test files replace one or the other wholesale with a full factory, so a
+   * cross-client import evaluates to `undefined` under those mocks (the same
+   * argument that homes `CircuitOpenError` in the dependency-free leaf). And it
+   * cannot live in that leaf either — the leaf's exported surface is pinned to
+   * a two-member hand-typed set in `seam-errors.purity.test.ts`, and this plan
+   * adds no member to it. So the builder is duplicated, and the duplication is
+   * guarded HERE rather than trusted.
+   *
+   * GREP-GATE HYGIENE: comments are stripped BEFORE matching. Both files
+   * necessarily discuss this message in prose, and prose satisfying the guard
+   * is a failure mode this phase has now hit seven times, once inside a
+   * self-check.
+   */
+  it("the message builder is byte-identical in BOTH clients (drift guard)", () => {
+    function stripComments(src: string): string {
+      return src
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n");
+    }
+
+    // Hand-typed here, never read back out of either module it guards.
+    const EXPECTED_RETURN_LINE =
+      "return `Analytics seam returned an unusable response (HTTP ${status}, content-type ${mediaType}). The upstream did not answer with the JSON contract.`;";
+
+    for (const file of [
+      "src/lib/analytics-client.ts",
+      "src/lib/process-key-client.ts",
+    ]) {
+      const code = stripComments(
+        readFileSync(join(process.cwd(), file), "utf8"),
+      );
+      expect(
+        code.split("\n").some((line) => line.trim() === EXPECTED_RETURN_LINE),
+        `${file} no longer builds the SEAMCORE-11 outcome message from the ` +
+          `agreed template. The two clients duplicate this builder because ` +
+          `neither may import from the other (wholesale route mocks) and the ` +
+          `error leaf's export set is pinned — so the duplication is guarded ` +
+          `here. If the message must change, it changes in BOTH files and in ` +
+          `the hand-typed expectations in BOTH client test files, in one commit.`,
+      ).toBe(true);
+    }
+  });
+});

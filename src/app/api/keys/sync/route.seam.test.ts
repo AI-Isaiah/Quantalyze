@@ -327,4 +327,41 @@ describe("POST /api/keys/sync — REAL client through the seam (SC-1a)", () => {
     // And the gate short-circuits before the seam is even consulted.
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  /**
+   * Phase 140.2-11 / SEAMCORE-11 (A-27) — the null-body status, END TO END.
+   *
+   * `src/lib/process-key-client.test.ts` pins the envelope at the client. This
+   * case pins the thing the envelope exists for: that the ROUTE responds at
+   * all. Before the fix, `postProcessKey`'s status pass-through called
+   * `NextResponse.json(body, { status: 304 })`, which throws
+   * `TypeError: Response constructor: Invalid response status code` (verified
+   * by execution on Node; WHATWG-spec, so CI's Node 22 agrees) — and that throw
+   * left a function declared `Promise<PostProcessKeyResult>` whose five caller
+   * routes, this one included, have no catch for it. The client-level assertion
+   * alone could not see that, because the crash was in what the CALLER then did
+   * with the result.
+   */
+  it("SEAMCORE-11 / A-27: a 304 upstream → typed 502 envelope, the route RESPONDS rather than crashing", async () => {
+    // A real null-body response: `new Response(null, { status: 304 })` is
+    // constructible, `Response.json(x, { status: 304 })` is not. That asymmetry
+    // is the whole defect.
+    fetchMock.mockResolvedValue(new Response(null, { status: 304 }));
+
+    const res = await postAsUser();
+
+    expect(res.status).toBe(502);
+    const raw = await res.text();
+    const body = JSON.parse(raw);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("UPSTREAM_NETWORK_ERROR");
+    expect(body.recoverable).toBe(true);
+    expect(body.correlation_id).toBe(TEST_CORRELATION_ID);
+    // No new user-facing copy — the existing "never reached it" envelope.
+    expect(body.human_message).toBe("Could not reach the ingestion service.");
+    // The seam WAS crossed: this is an upstream answer, not a short-circuit.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The observed status is an operator fact, not a user-facing one.
+    expect(raw).not.toContain("304");
+  });
 });
