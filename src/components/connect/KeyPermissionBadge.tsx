@@ -2,6 +2,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatRelativeTime } from "@/lib/utils";
+import { RouteResponseError } from "@/lib/route-response-error";
+
+/**
+ * The one sentence shown when the failure did NOT come from a route response.
+ * DESIGN.md §Voice: declarative, sentence-case, active voice, no adjectives.
+ * It names "Re-check", the control actually rendered above it, rather than
+ * telling the user to do something this surface does not offer.
+ */
+const PROBE_UNAVAILABLE_COPY =
+  "We could not check this key's scopes. Use Re-check to try again.";
 
 /**
  * KeyPermissionBadge — live "Read / Trade / Withdraw" scope viewer.
@@ -76,6 +86,15 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // 140.3-07 / SEAMUX-09 / B-26 member 2 — invalidate BEFORE the refetch.
+    // Identical shape to `PortfolioOptimizer`'s `setSuggestions(null)`, itself
+    // copied from `WeightOptimizerSection.tsx`'s `setResult(null)`: ONE pattern
+    // for the whole class. A guard-order fix would have worked here and been
+    // smaller, but a class fixed two different ways is a class a reviewer
+    // cannot audit. Without this, "Re-check" during an outage left the previous
+    // Read/Trade/Withdraw verdict rendered beside the error — a stale SECURITY
+    // claim about a money-bearing key, read as a current fact about its scope.
+    setPerms(null);
     try {
       const res = await fetch(
         `/api/keys/${encodeURIComponent(apiKeyId)}/permissions`,
@@ -91,14 +110,17 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
         if (err === PARSE_FAILED) {
           // Surface HTTP status + statusText so support has something to
           // correlate against the proxy/CDN logs when no JSON body comes back.
-          throw new Error(
+          // Both values are the response's own metadata, not upstream detail.
+          throw new RouteResponseError(
             `HTTP ${res.status} (${res.statusText || "no body"})`,
           );
         }
         const message = err.error ?? `HTTP ${res.status}`;
         // Prepend the route's structured `code` (e.g. PROBE_BACKEND_UNAVAILABLE)
         // so the displayed text is greppable in support tickets.
-        throw new Error(err.code ? `${err.code}: ${message}` : message);
+        throw new RouteResponseError(
+          err.code ? `${err.code}: ${message}` : message,
+        );
       }
       const data = (await res.json()) as Permissions;
       if (mountedRef.current) setPerms(data);
@@ -109,7 +131,15 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
       // probe failure from a user-submitted screenshot is much harder.
       console.error("[KeyPermissionBadge] probe failed:", e);
       if (mountedRef.current) {
-        setError(e instanceof Error ? e.message : "Could not check permissions.");
+        // 140.3-07 / B-27 — only a message this component built from the route
+        // RESPONSE is rendered. A rejected fetch arrives as a TypeError whose
+        // message can embed an internal host, and res.json() on a proxy's HTML
+        // error page arrives as a SyntaxError; neither is copy. The route's own
+        // { error, code } body IS reviewed copy, so it still reaches the user
+        // and stays greppable in support tickets.
+        setError(
+          e instanceof RouteResponseError ? e.message : PROBE_UNAVAILABLE_COPY,
+        );
       }
     } finally {
       if (mountedRef.current) setLoading(false);
