@@ -3,6 +3,7 @@ import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { AnalyticsTimeoutError, evalMatch } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { assertSameOrigin } from "@/lib/csrf";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
@@ -31,12 +32,13 @@ export const maxDuration = 300;
  * these two admin/match routes were simply never included in those passes.
  * The diagnosable half stays in `console.error`, server-side only.
  *
- * `CIRCUIT_OPEN_COPY` deliberately matches `process-key-client`'s
- * `CIRCUIT_OPEN_HUMAN_MESSAGE` so a breaker trip reads identically to a user
- * whichever seam mechanism they happen to hit.
+ * The breaker body is NOT declared here. `CIRCUIT_OPEN_COPY` is imported from
+ * `@/lib/seam-copy` — the ONE declaration all ten seam emitters read — so a
+ * breaker trip reads identically to a user whichever seam mechanism they happen
+ * to hit, and no single route can be reworded out of step with the other nine
+ * (SEAMUX-01). It still matches `process-key-client`'s
+ * `CIRCUIT_OPEN_HUMAN_MESSAGE` because both are now aliases of that one leaf.
  */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 const TIMEOUT_COPY = "Match evaluation timed out. Please try again.";
 const GENERIC_COPY = "Match evaluation failed. Please try again.";
 

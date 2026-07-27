@@ -8,6 +8,7 @@ import {
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
 import {
   simulatorLimiter,
@@ -57,14 +58,6 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  */
 export const maxDuration = 300;
 
-/**
- * Phase 140 / SEAM-04 — the static body the breaker arm emits. Byte-identical
- * to `process-key-client`'s `CIRCUIT_OPEN_HUMAN_MESSAGE` and to the sibling
- * seam routes, so a breaker trip reads the same to a user whichever seam they
- * hit, and it names no infrastructure (threat T-140-17).
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);

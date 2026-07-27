@@ -11,6 +11,7 @@ import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
@@ -83,13 +84,6 @@ const STRATEGY_NAME_SET = new Set(STRATEGY_NAMES as readonly string[]);
  */
 export const maxDuration = 300;
 
-/**
- * User-facing copy for the breaker's 503. STATIC by design (threat T-140-05)
- * and byte-identical to the other seam routes' copy, so a breaker trip reads
- * the same wherever a user meets it.
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 /**
  * SEAMCORE-10 (A-06 / A-29) — the hard bound on the composite member fan-out.

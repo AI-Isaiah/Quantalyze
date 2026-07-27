@@ -8,6 +8,7 @@ import {
   type SeamResponse,
 } from "@/lib/resilient-fetch";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY as CIRCUIT_OPEN_HUMAN_MESSAGE } from "@/lib/seam-copy";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { mintTenantClaim } from "@/lib/tenant-claim";
 
@@ -66,15 +67,13 @@ function budgetKeyFor(flowType: FlowType): SeamBudgetKey {
     : "process-key-enqueue";
 }
 
-/**
- * User-facing copy for the SEAM-04 503. STATIC by design (threat T-140-08):
- * a breaker trip is an infrastructure fact, and the unauthenticated teaser
- * path renders this string directly. It carries no upstream URL, no status,
- * and no error detail — the diagnosable half goes to the server log with the
- * routeTag and correlation_id.
- */
-const CIRCUIT_OPEN_HUMAN_MESSAGE =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
+// User-facing copy for the SEAM-04 503, bound above as an alias of the ONE
+// declaration in `@/lib/seam-copy`. STATIC by design (threat T-140-08): a
+// breaker trip is an infrastructure fact, and the UNAUTHENTICATED teaser path
+// renders this string directly. It carries no upstream URL, no status and no
+// error detail — the diagnosable half goes to the server log with the routeTag
+// and correlation_id. That teaser reachability is also why the leaf must stay
+// dependency-free; `seam-copy.purity.test.ts` guards it.
 
 /**
  * User-facing copy for "we never reached the ingestion service", shared by the

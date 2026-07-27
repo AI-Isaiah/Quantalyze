@@ -15,6 +15,7 @@ import {
   type KeyPermissionsPayload,
 } from "@/lib/analytics-schemas";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
 
@@ -54,14 +55,6 @@ import type { User } from "@supabase/supabase-js";
  */
 export const maxDuration = 300;
 
-/**
- * User-facing copy for the breaker's 503. STATIC by design (threat T-140-05):
- * a trip is an infrastructure fact, so the body carries no upstream URL, no
- * status and no error detail. Byte-identical to the other seam routes' copy —
- * a breaker trip should read the same wherever a user meets it.
- */
-const CIRCUIT_OPEN_COPY =
-  "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 /**
  * 140.3-03 / SEAMUX-07 — the payload shape is no longer declared here.
