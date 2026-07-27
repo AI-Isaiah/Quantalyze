@@ -177,8 +177,8 @@ export interface FakeRedis {
   set(
     key: string,
     value: string,
-    opts?: { ex?: number; nx?: boolean },
-  ): Promise<"OK" | null>;
+    opts?: { ex?: number; nx?: boolean; get?: boolean },
+  ): Promise<"OK" | string | null>;
   ttl(key: string): Promise<number>;
 }
 
@@ -221,6 +221,15 @@ export function fakeRedisFor(store: FakeUpstashStore): FakeRedis {
             ? Number.POSITIVE_INFINITY
             : Date.now() + opts.ex * 1000,
       });
+      // `SET … GET` answers what it DISPLACED, not "OK" — real Redis semantics
+      // (6.2+), serialised by `@upstash/redis` as `["set", key, value, "get",
+      // "ex", n]`. Modelled here because HI-01's trip write depends on it: the
+      // instance that displaced something OTHER than a live lock is the one that
+      // armed the circuit. This is a PRIMITIVE, deliberately: the fake answers
+      // "what was there before", it does not re-implement the core's ownership
+      // rule. A double that encoded that rule could not disagree with
+      // production, which is the defect this file's header exists to forbid.
+      if (opts?.get) return existing ? existing.value : null;
       return "OK";
     },
     async ttl(key) {

@@ -1130,14 +1130,65 @@ export async function recordSeamFailure(
     let written: unknown;
     if (existing === null) {
       // `nx: true` makes CONCURRENT trips idempotent — two instances tripping
-      // milliseconds apart, neither of which saw the other's write. Benign race,
-      // deliberately not serialised with Lua.
+      // milliseconds apart, neither of which saw the other's write.
+      //
+      // ⚠️ THIS IS NOT REDUNDANT WITH THE STILL-LIVE-LOCK GUARD ABOVE, and the
+      // ROADMAP said it was. The guard requires the read to have SEEN a live
+      // lock; `nx` covers the case the guard structurally cannot reach — two
+      // instances that both read `null` and both write. Orthogonal, not
+      // layered. Falsified by "a stale-reading concurrent instance cannot
+      // RATCHET a live lock", which reddens under `nx: false`.
       written = await redis.set(breakerKey, value, { ex: ttlS, nx: true });
     } else {
-      // Overwriting a TOMBSTONE, which `nx` would refuse. Reaching here means
-      // the previous lock has expired AND this failure is new evidence gathered
-      // after it was armed, so a fresh cooldown is exactly right.
-      written = await redis.set(breakerKey, value, { ex: ttlS });
+      // ── OVERWRITING A TOMBSTONE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
+      //
+      // Reaching here means the previous lock has expired AND this failure is
+      // new evidence gathered after it was armed, so a fresh cooldown is right.
+      // `nx` cannot express that: the key still EXISTS as a tombstone, so `nx`
+      // would refuse every re-arm for the whole tombstone window.
+      //
+      // This used to be a BLIND write returning a truthy `"OK"` unconditionally,
+      // and that made it the one door the idempotency story above does not
+      // cover. A lock armed at t=0 expires at t=30 and the key survives to t=90.
+      // At t=31, with Railway still degraded, N Fluid Compute instances hit this
+      // path within a few milliseconds: each reads the tombstone (so the
+      // still-live-lock guard does not fire), each passes the A-25 admission
+      // guard, and each wrote. Every one got `"OK"`, so every one emitted
+      // `seam.breaker.open` for ONE trip — the exact double-count the comment
+      // below claims is prevented.
+      //
+      // `get: true` closes it in ONE command. `SET key value GET EX ttl` returns
+      // what it DISPLACED, atomically, so the write and the read of the prior
+      // state cannot be interleaved by a racer the way a separate `get` + `set`
+      // can. The ownership rule is then exact: you armed this circuit iff what
+      // you displaced was NOT a live lock. In the N-instance race exactly one
+      // instance displaces the tombstone; every other displaces the lock a racer
+      // armed microseconds earlier, and returns without claiming the event.
+      //
+      // ⚠️ ONE COMMAND IS NOT A MICRO-OPTIMISATION, IT IS THE CONSTRAINT. The
+      // obvious alternative — claim a per-generation key with `SET NX`, then
+      // write — costs a SECOND store round trip on the failing path, and
+      // `seam-budgets.invariant.test.ts` SC-4b proves that breaches the Vercel
+      // ceiling: finalize-wizard's composite branch goes to 320 000 ms against a
+      // 300 000 ms function limit. Trading a rare double-count for a lambda
+      // killed mid-request during an outage is strictly the wrong direction. A
+      // Lua compare-and-set is also one command, and was rejected for a
+      // different reason: the test double would have to re-implement the script,
+      // i.e. a fake that cannot disagree with production, which is the exact
+      // defect this phase exists to remove.
+      //
+      // RESIDUAL, NAMED RATHER THAN HIDDEN. The losing racers still overwrote
+      // the winner's lock before they could know they had lost, so `expiresAtMs`
+      // moves by the spread of the burst's write times — milliseconds against a
+      // 30 s cooldown. It is BOUNDED, not compounding: once the lock is live,
+      // every later read returns at the still-live-lock guard above. Closing it
+      // completely needs a write this module can condition on the value it read,
+      // which is the Lua/round-trip trade above. Handed to Phase 141 with the
+      // rest of the breaker's timing behaviour.
+      const displaced = decodeBreakerLock(
+        await redis.set(breakerKey, value, { ex: ttlS, get: true }),
+      );
+      written = displaced === null || displaced.expiresAtMs <= now;
     }
     // SEAMCORE-06 — announce the OPEN, and only when this call is the one that
     // armed it. `nx` answers `null` when a concurrent instance won the race, and

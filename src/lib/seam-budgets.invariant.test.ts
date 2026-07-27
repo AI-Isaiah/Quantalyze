@@ -166,9 +166,18 @@ const STORE_COMMAND_WORST_CASE_MS =
  *   failing — that `mget`, plus the trip path's `get` (the A-25 guard reading
  *             when the last lock was armed) and its `set`.
  *
- * The FAILING figure is deliberately pessimistic in one respect: the trip path
- * runs once per `BREAKER_FAILURE_THRESHOLD` failures, not on every failure, and
- * the limiter's default in-memory `ephemeralCache` can short-circuit some
+ * ⚠️ THREE IS A CEILING THIS ARITHMETIC ENFORCES, NOT AN OBSERVATION. HI-01
+ * closed the tombstone-branch race, and the FIRST shape of that fix — claim a
+ * per-generation key with `SET NX`, then write — added a fourth command. Raising
+ * this number to 4 made SC-4b RED: finalize-wizard's composite branch went to
+ * 320 000 ms against a 300 000 ms function ceiling. That is what sent the fix to
+ * `SET ... GET`, which is ONE command. So a future edit that adds a store round
+ * trip to the failing path has to come back here, and will discover the same
+ * wall rather than silently spending headroom this file certifies.
+ *
+ * The FAILING figure stays deliberately pessimistic in one respect: the trip
+ * path runs once per `BREAKER_FAILURE_THRESHOLD` failures, not on every failure,
+ * and the limiter's default in-memory `ephemeralCache` can short-circuit some
  * recordings without reaching Redis at all. Charging every seam call the full
  * three is the safe direction.
  */

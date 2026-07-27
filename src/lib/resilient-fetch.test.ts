@@ -80,19 +80,27 @@ const shared = vi.hoisted(() => {
      * HI-01 / W-2 — simulate the CONCURRENT read the breaker's trip path races
      * on, deterministically.
      *
-     * When true, the NEXT `get` of a key beginning `breaker:` answers `null`
-     * whatever the store holds, and the flag disarms itself. That is exactly
-     * the observation a second Fluid Compute instance makes when its read lands
-     * before the first instance's write: it sees no lock and proceeds to the
-     * trip write. Nothing else in the repo can produce that interleaving — every
-     * existing "concurrency" case returns at the still-live-lock guard BEFORE
-     * any `set`, which is why `nx: true` was provably untested.
+     * When set, the NEXT `get` of a key beginning `breaker:` answers
+     * `staleReadOnce.value` whatever the store holds, and the hook disarms
+     * itself. That is exactly the observation a second Fluid Compute instance
+     * makes when its read lands before the first instance's write, and BOTH
+     * shapes of the race need it:
+     *   · `{ value: null }` — B sees no lock at all and takes the COLD branch,
+     *     where `nx: true` is what stops it overwriting A's live lock.
+     *   · `{ value: "open:a:e" }` — B sees the same expired TOMBSTONE A saw and
+     *     takes the re-arm branch, where the ownership rule decides which of
+     *     them may claim the transition.
+     *
+     * Nothing else in the repo can produce either interleaving — every existing
+     * "concurrency" case returns at the still-live-lock guard BEFORE any `set`,
+     * which is why `nx: true` was provably untested and why the tombstone branch
+     * had no `nx` at all.
      *
      * A deterministic one-shot rather than a real race: two `Promise.all`
      * drivers would interleave at whichever await happened to be reached first,
      * which is a flake, not a falsifier.
      */
-    staleReadOnce: false,
+    staleReadOnce: null as { value: string | null } | null,
     /**
      * W-2 — force the store's `set` to answer `null` on a `breaker:` key.
      *
@@ -189,8 +197,9 @@ vi.mock("@upstash/redis", async () => {
             if (shared.mode.staleReadOnce && key.startsWith("breaker:")) {
               // One-shot: the racing instance makes exactly ONE stale
               // observation, then behaves normally.
-              shared.mode.staleReadOnce = false;
-              return null;
+              const stale = shared.mode.staleReadOnce.value;
+              shared.mode.staleReadOnce = null;
+              return stale;
             }
             return base.get(key);
           },
@@ -420,7 +429,7 @@ beforeEach(() => {
   // A leaked `staleReadOnce` would make the NEXT test's first breaker read
   // answer null, and a leaked `nullOnBreakerSet` would silently disable every
   // later trip — both produce "the breaker did not open" for the wrong reason.
-  shared.mode.staleReadOnce = false;
+  shared.mode.staleReadOnce = null;
   shared.mode.nullOnBreakerSet = false;
   shared.constructed.length = 0;
   shared.redisConfigs.length = 0;
@@ -2095,7 +2104,7 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
     expect(firstLock).toBeDefined();
     expect(transitionsFrom(warnSpy)).toHaveLength(1);
 
-    shared.mode.staleReadOnce = true;
+    shared.mode.staleReadOnce = { value: null };
     await mod.recordSeamFailure("breaker:railway");
 
     // The FIRST writer's lock stands, byte for byte. A blind write here re-arms
@@ -2131,53 +2140,57 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
   });
 
   it("HI-01: only ONE of N instances re-arming from the SAME tombstone claims the trip", async () => {
-    // ⚠️ THE BRANCH THAT ACTUALLY RACES, AND IT HAD NO `nx` AT ALL.
+    // ⚠️ THE BRANCH THAT ACTUALLY RACES, AND IT HAD NO EXCLUSION AT ALL.
     //
     // A lock armed at t=0 expires at t=30; the key survives to t=90 as a
     // tombstone. At t=31 Railway is still degraded, so N instances each hit the
     // trip path within a few milliseconds. Each reads the tombstone (so the
     // still-live-lock guard does not fire), each passes the A-25 admission
-    // guard, and each took the `else` branch — a BLIND write. Every one of them
-    // got a truthy reply, so every one of them emitted `seam.breaker.open` for
-    // ONE trip, and each write extended the expiry by its own write-time delta.
+    // guard, and each took the `else` branch — a BLIND write returning `"OK"`
+    // unconditionally. So every one of them emitted `seam.breaker.open` for ONE
+    // trip: the exact double-count the code's own comment says is prevented.
     //
-    // The claim key is what serialises them: every instance racing off the same
-    // observation computes the same key from the tombstone it read, and exactly
-    // one `SET NX` wins. Seeding it here is the deterministic stand-in for
-    // "another instance got there first".
+    // The ownership rule is "you armed this circuit iff what you DISPLACED was
+    // not a live lock", answered atomically by `SET ... GET`. Here instance A
+    // trips normally off the tombstone; instance B is then given the SAME stale
+    // observation, so it reaches the same branch — but by the time it writes,
+    // A's lock is live, so B displaces a live lock and must not claim anything.
     const mod = await import("./resilient-fetch");
     const armedAtMs = Date.now() - 60_000;
     const expiresAtMs = Date.now() - 30_000;
+    const tombstone = `open:${armedAtMs}:${expiresAtMs}`;
     shared.store.set("breaker:railway", {
-      value: `open:${armedAtMs}:${expiresAtMs}`,
+      value: tombstone,
       expiresAt: Date.now() + 30_000,
-    });
-    // Hand-typed against the core's template — literal against literal, never
-    // imported, so neither side can change silently.
-    shared.store.set(`breaker:railway:claim:${expiresAtMs}`, {
-      value: "1",
-      expiresAt: Date.now() + 90_000,
     });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    // Instance A: reads the tombstone, re-arms, owns the transition.
     for (let i = 0; i < 5; i++) {
       await mod.recordSeamFailure("breaker:railway");
     }
+    expect(transitionsFrom(warnSpy)).toHaveLength(1);
+
+    // Instance B: its read raced and still sees the tombstone, so it takes the
+    // same re-arm branch — but A's lock is already live underneath it.
+    shared.mode.staleReadOnce = { value: tombstone };
+    await mod.recordSeamFailure("breaker:railway");
 
     expect(
-      shared.store.get("breaker:railway")?.value,
-      "A second instance re-armed from a tombstone another instance had " +
-        "already claimed. The tombstone branch is a BLIND write, so every " +
-        "racing instance wins it — N open events for one trip, and a cooldown " +
-        "that ratchets by each write's delta.",
-    ).toBe(`open:${armedAtMs}:${expiresAtMs}`);
-    expect(transitionsFrom(warnSpy)).toHaveLength(0);
+      transitionsFrom(warnSpy),
+      "A second instance re-arming from a tombstone another instance had " +
+        "already displaced ALSO claimed the transition. The tombstone branch " +
+        "was a blind write whose reply is always truthy, so every racing " +
+        "instance emits `seam.breaker.open` for one trip — which is precisely " +
+        "what this call site's own comment says must not happen.",
+    ).toHaveLength(1);
   });
 
-  it("HI-01: an UNCLAIMED tombstone still re-arms — the guard is exclusion, not a freeze", async () => {
+  it("HI-01: an UNCONTESTED tombstone still re-arms — the rule is ownership, not a freeze", async () => {
     // The negative control. Without it the case above passes on an
     // implementation that simply never re-arms after a tombstone, which would
-    // disable the breaker for the whole 60s tombstone window.
+    // disable the breaker for the whole 60s tombstone window — a far worse bug
+    // than the one being fixed, and invisible from the assertion above alone.
     const mod = await import("./resilient-fetch");
     const armedAtMs = Date.now() - 60_000;
     const expiresAtMs = Date.now() - 30_000;
