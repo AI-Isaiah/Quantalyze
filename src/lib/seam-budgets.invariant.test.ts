@@ -11,6 +11,9 @@ import {
   SEAM_BUDGETS,
   SEAM_ROUTE_BUDGETS,
   SEAM_EXCLUSIONS,
+  BREAKER_STORE_TIMEOUT_MS,
+  BREAKER_STORE_RETRIES,
+  BREAKER_STORE_BACKOFF_MS,
 } from "./resilient-fetch";
 
 /**
@@ -38,16 +41,41 @@ import {
  * the very dashboard-changeable assumption the pins exist to convert into a
  * checked in-repo fact.
  *
- * HONEST READING OF THE HEADROOM ASSERTION. With every row at `retries: 0` the
- * headroom is generous — the worst route (`keys/validate-and-encrypt`, three
- * sequential live-exchange probes) spends 120 000 ms against a 300 000 ms
- * ceiling, and most spend 15 000-60 000 ms. So the arithmetic in SC-4b is not,
- * today, near its limit, and a reader should NOT mistake it for a tight guard.
- * Its two real jobs are (a) to hold automatically when Phase 141 raises a row's
- * retries — at retries=1 the worst route is already at 240 000 ms and at
- * retries=2 it BREACHES — and (b) to fail if a future budget is raised without
- * the ceiling moving with it. The teeth in the meantime come from the on-disk
- * read in SC-4a, which was mutation-checked (see the plan summary).
+ * HONEST READING OF THE HEADROOM ASSERTION, RESTATED FOR THE STORE TERMS
+ * (plan 140.2-07).
+ *
+ * The arithmetic is no longer request time alone. The breaker's OWN store is
+ * wall clock the route spends too, and leaving it out is what let a `Redis`
+ * client with SIX unbounded attempts sit inside a "bounded" route without
+ * appearing anywhere in this file. SC-4b now computes, per route:
+ *
+ *   worstCaseMs(state) = Σ over the row's budgets of
+ *                          ( timeoutMs × calls × (1 + row.retries) )
+ *                      + storeCommands(state) × STORE_COMMAND_WORST_CASE_MS
+ *                          × (total seam calls on the route)
+ *
+ * asserted separately in the CLOSED, OPEN and FAILING states, each against the
+ * route's own on-disk `maxDuration`. Where that leaves the numbers today, with
+ * every row at `retries: 0` and one store command costing 4 250 ms:
+ *
+ *   | state   | worst route (validate-and-encrypt, 3 calls) | 2-call route |
+ *   |---------|---------------------------------------------|--------------|
+ *   | closed  | 120 000 + 12 750 = 132 750 ms               |  38 500 ms   |
+ *   | open    |               0 + 12 750 =  12 750 ms       |   8 500 ms   |
+ *   | failing | 120 000 + 38 250 = 158 250 ms               |  55 500 ms   |
+ *
+ * against a 300 000 ms ceiling — so the OPEN state on a two-seam-call route
+ * (`finalize-wizard`, `create-with-key`) has **291 500 ms of headroom**, and the
+ * tightest case in the table, the worst route FAILING, still has 141 750 ms.
+ *
+ * So this is STILL not, today, a tight guard, and a reader should not mistake it
+ * for one. Its three real jobs are (a) to hold automatically when Phase 141
+ * raises a row's retries — at retries=1 the worst route's closed state is
+ * already 252 750 ms and at retries=2 it BREACHES; (b) to fail if a future
+ * budget is raised without the ceiling moving with it; and (c) — new here — to
+ * fail if the store's own bounding is loosened, which previously changed a
+ * route's real worst case while changing nothing this file could see. The teeth
+ * in the meantime still come from the on-disk read in SC-4a.
  *
  * ⚠️ THE ARITHMETIC READS THE ROW, NOT THE MODULE CONSTANT (plan 140.2-06).
  * `SEAM_RETRIES` survives as the value every row is SEEDED from and as the
@@ -84,6 +112,60 @@ const MAX_DURATION_EXPORT = /^export const maxDuration = (\d+)/m;
 const ROUTE_ENTRIES = Object.entries(SEAM_ROUTE_BUDGETS);
 
 /**
+ * The worst-case wall clock ONE breaker-store command can consume.
+ *
+ * `(1 + retries)` attempts each bounded by the per-attempt deadline, plus
+ * `retries` fixed backoffs between them. Derived from the store constants the
+ * CORE exports, deliberately — pinning them to literals is
+ * `seam-constants.pin.test.ts`'s job, and if this file hand-typed them too then
+ * loosening the store's bounding would move the real worst case while leaving
+ * this assertion computing the old one. The independence that keeps this file
+ * honest is the CEILING side, read from disk.
+ *
+ * ⚠️ THIS OVER-STATES THE COST, ON PURPOSE. The SDK evaluates the signal factory
+ * once per COMMAND, not once per attempt, so all of a command's attempts share
+ * one deadline and the true worst case is nearer `TIMEOUT + one backoff`.
+ * Charging `attempts × TIMEOUT` is the safe direction for a headroom assertion,
+ * and it is stated rather than implied.
+ */
+const STORE_COMMAND_WORST_CASE_MS =
+  (1 + BREAKER_STORE_RETRIES) * BREAKER_STORE_TIMEOUT_MS +
+  BREAKER_STORE_RETRIES * BREAKER_STORE_BACKOFF_MS;
+
+/**
+ * Store commands ONE seam call issues, per breaker state. Hand-counted from
+ * `resilient-fetch.ts`, and each number is a claim about a specific code path:
+ *
+ *   closed  — the pre-fetch `mget` in `isBreakerOpen`, and nothing else. ONE
+ *             since plan 140.2-07 collapsed the `ttl` follow-up into the value.
+ *   open    — the same single `mget`; the call then throws `CircuitOpenError`
+ *             and never reaches `fetch`, so no REQUEST budget is spent at all.
+ *   failing — that `mget`, plus the trip path's `get` (the A-25 guard reading
+ *             when the last lock was armed) and its `set`.
+ *
+ * The FAILING figure is deliberately pessimistic in one respect: the trip path
+ * runs once per `BREAKER_FAILURE_THRESHOLD` failures, not on every failure, and
+ * the limiter's default in-memory `ephemeralCache` can short-circuit some
+ * recordings without reaching Redis at all. Charging every seam call the full
+ * three is the safe direction.
+ */
+const STORE_COMMANDS_PER_SEAM_CALL: Record<string, number> = {
+  closed: 1,
+  open: 1,
+  failing: 3,
+};
+
+/** Does this state spend the REQUEST budget, or short-circuit before `fetch`? */
+const STATE_SPENDS_REQUEST_BUDGET: Record<string, boolean> = {
+  closed: true,
+  // `CircuitOpenError` is thrown before the deadline is even constructed.
+  open: false,
+  failing: true,
+};
+
+const BREAKER_STATES = ["closed", "open", "failing"] as const;
+
+/**
  * The 15 route rows, with their FULL `budgets` arrays, typed HERE as literals.
  *
  * Following `tests/lib/process-key-onboard-contract-parity.test.ts`'s
@@ -97,11 +179,11 @@ const ROUTE_ENTRIES = Object.entries(SEAM_ROUTE_BUDGETS);
  * still passes, more comfortably than before. The deep compare below is what
  * makes that mutation falsifiable.
  *
- * ⚠️ FORWARD NOTE, so a later reader does not mistake the honesty note in the
- * file header for a permanent state: plan 140.2-07 adds Upstash store round
- * trips to the SC-4b arithmetic (the breaker's own `get`/`ttl`/`set` are wall
- * clock this route spends too). The "not, today, near its limit" reading is
- * true of the CURRENT arithmetic only.
+ * (The forward note that used to sit here — "plan 140.2-07 will add Upstash
+ * store round trips to the SC-4b arithmetic" — has been DISCHARGED. It did; the
+ * header's headroom table is the post-store reading, and this roster is
+ * unchanged by it because the store cost is a function of the `calls` already
+ * declared here.)
  */
 const EXPECTED_ROUTE_BUDGETS: Record<
   string,
@@ -298,13 +380,20 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
     );
   });
 
-  describe("SC-4b — summed budget fits inside the on-disk ceiling", () => {
-    it.each(ROUTE_ENTRIES)(
-      "%s: sum(timeoutMs x calls x (1 + row.retries)) < maxDuration x 1000",
-      (routePath, entry) => {
+  describe("SC-4b — summed budget PLUS store round trips fits inside the on-disk ceiling", () => {
+    it.each(
+      ROUTE_ENTRIES.flatMap(([routePath, entry]) =>
+        BREAKER_STATES.map(
+          (state) => [routePath, entry, state] as const,
+        ),
+      ),
+    )(
+      "%s in the %3$s state: request budget + store round trips < maxDuration x 1000",
+      (routePath, entry, state) => {
         // The ceiling is re-read from DISK rather than taken from the table,
         // so this assertion never compares the table against itself even if
-        // SC-4a were removed.
+        // SC-4a were removed. It is also the ONLY independent side now that the
+        // store terms are read from the core alongside the budgets.
         const ceilingMs = readMaxDurationFromDisk(routePath) * 1000;
 
         // SUMMED, not per-call. Three routes make two sequential seam calls
@@ -312,14 +401,27 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         // pair) and validate-and-encrypt nominally reaches three. A per-entry
         // assertion would pass while the route's real worst case is double or
         // triple — wrong for a third of the surface (140-RESEARCH §6.3).
-        const worstCaseMs = entry.budgets.reduce(
-          (acc, b) =>
-            acc +
-            SEAM_BUDGETS[b.key].timeoutMs *
-              b.calls *
-              (1 + SEAM_BUDGETS[b.key].retries),
-          0,
-        );
+        const requestMs = STATE_SPENDS_REQUEST_BUDGET[state]
+          ? entry.budgets.reduce(
+              (acc, b) =>
+                acc +
+                SEAM_BUDGETS[b.key].timeoutMs *
+                  b.calls *
+                  (1 + SEAM_BUDGETS[b.key].retries),
+              0,
+            )
+          : 0;
+
+        // The breaker is consulted once per SEAM CALL, so the store cost scales
+        // with the number of calls the route makes and not with the number of
+        // distinct budget rows it spends.
+        const seamCalls = entry.budgets.reduce((acc, b) => acc + b.calls, 0);
+        const storeMs =
+          STORE_COMMANDS_PER_SEAM_CALL[state] *
+          STORE_COMMAND_WORST_CASE_MS *
+          seamCalls;
+
+        const worstCaseMs = requestMs + storeMs;
 
         const spent = entry.budgets
           .map(
@@ -331,13 +433,39 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
 
         expect(
           worstCaseMs,
-          `"${routePath}" can spend ${worstCaseMs}ms (${spent}) ` +
+          `"${routePath}" can spend ${worstCaseMs}ms in the ${state} state ` +
+            `(request: ${requestMs}ms = ${spent}; store: ${storeMs}ms = ` +
+            `${STORE_COMMANDS_PER_SEAM_CALL[state]} command(s) x ` +
+            `${STORE_COMMAND_WORST_CASE_MS}ms x ${seamCalls} seam call(s)) ` +
             `against a ${ceilingMs}ms function ceiling. The lambda would be killed ` +
-            `mid-request with no typed envelope. Lower a budget in SEAM_BUDGETS, or ` +
-            `raise this route's maxDuration AND expectedMaxDurationS together.`,
+            `mid-request with no typed envelope. Lower a budget in SEAM_BUDGETS, ` +
+            `TIGHTEN THE BREAKER STORE CONSTANTS, or raise this route's ` +
+            `maxDuration AND expectedMaxDurationS together.`,
         ).toBeLessThan(ceilingMs);
       },
     );
+
+    it("charges the store SOMETHING in every state — a zeroed term would assert nothing", () => {
+      // The anti-vacuity fence for the three numbers above. If
+      // `STORE_COMMANDS_PER_SEAM_CALL` were ever emptied or zeroed, every
+      // assertion in this block would silently collapse back to the pre-plan
+      // request-only arithmetic and stay green — the store cost excluded again,
+      // exactly as it was when a six-attempt unbounded client sat inside a
+      // "bounded" route. Both sides hand-typed.
+      expect(STORE_COMMAND_WORST_CASE_MS).toBe(4_250);
+      for (const state of BREAKER_STATES) {
+        expect(
+          STORE_COMMANDS_PER_SEAM_CALL[state],
+          `The ${state} state charges no store round trips, so SC-4b no longer ` +
+            `accounts for the breaker's own store in that state.`,
+        ).toBeGreaterThanOrEqual(1);
+      }
+      // …and the FAILING state must cost strictly more than the closed one: it
+      // is the state that adds the trip path's read and write.
+      expect(STORE_COMMANDS_PER_SEAM_CALL.failing).toBeGreaterThan(
+        STORE_COMMANDS_PER_SEAM_CALL.closed,
+      );
+    });
   });
 
   describe("structural completeness", () => {
