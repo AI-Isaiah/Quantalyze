@@ -661,3 +661,156 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     expect(body.code).toBe("PROBE_BACKEND_UNAVAILABLE");
   });
 });
+
+/**
+ * [140.3-03 / SEAMUX-07] Member 2 of 2 of the unchecked-cast class — and the
+ * one that CACHES its verdict.
+ *
+ * THE DEFECT, and why it is strictly worse here than at `finalize-wizard`. The
+ * cached callback did `return (await res.json()) as PermissionPayload;` over the
+ * SAME upstream endpoint the wizard's publish gate probes. A cast checks
+ * nothing at runtime, so a 2xx `{}` produced `{read: undefined, trade:
+ * undefined, withdraw: undefined}` — which `KeyPermissionBadge` renders as a
+ * live security claim about a money-bearing key ("Trade ✗", struck through,
+ * because `undefined` is falsy). And because the fork memoizes whatever the
+ * callback RESOLVES to, that unvalidated verdict was then replayed for 60
+ * seconds to callers that never saw the body: it survives the request that
+ * produced it.
+ *
+ * So the no-cache property is asserted BEHAVIOURALLY, against the faithful
+ * memoizing branch of the `next/cache` double (a rejection leaves NO entry, as
+ * the real fork does): a second call after a rejected first must RE-HIT the
+ * upstream, not replay a memoized rejection-as-success.
+ *
+ * The fix is the same schema and the same fail-closed posture as member 1 —
+ * ONE pattern for the class. It fails closed by THROWING out of the cached
+ * callback, which is the mechanism this file already relies on for the breaker
+ * (T-140-32) and for a body-read abort.
+ *
+ * ⚠️ Deliberately NOT touched here: the `!res.ok` arm and its substring cascade
+ * (TS-34 / plan 140.3-09) and `CIRCUIT_OPEN_COPY` (plan 140.3-04).
+ */
+describe("[140.3-03 / SEAMUX-07] the permissions proxy fails CLOSED on an unreadable 2xx", () => {
+  // Hand-typed from the route's existing probe-failure arm — not imported.
+  const PROBE_FAILED_ENVELOPE = {
+    error: "Could not check key scopes. Try again.",
+    code: "PROBE_FAILED",
+  };
+
+  it("a 2xx `{}` does not render a scope verdict", async () => {
+    STATE.upstreamStatus = 200;
+    STATE.upstreamPayload = {};
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    consoleErr.mockRestore();
+
+    expect(
+      res.status,
+      "An empty 2xx used to reach the badge as {read: undefined, trade: " +
+        "undefined, withdraw: undefined}, which renders as a confident " +
+        "read-only verdict about a key whose scopes are unknown.",
+    ).toBe(502);
+    const body = await res.json();
+    expect(body).toEqual(PROBE_FAILED_ENVELOPE);
+    // No scope verdict of ANY kind reaches the caller.
+    expect(body.read).toBeUndefined();
+    expect(body.trade).toBeUndefined();
+    expect(body.withdraw).toBeUndefined();
+  });
+
+  it("a 2xx with `trade` RENAMED does not render a scope verdict", async () => {
+    STATE.upstreamStatus = 200;
+    STATE.upstreamPayload = {
+      read: true,
+      can_trade: true,
+      withdraw: false,
+      detected_at: "2026-07-27T00:00:00Z",
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).toEqual(PROBE_FAILED_ENVELOPE);
+    expect(body.trade).toBeUndefined();
+  });
+
+  it("NO-CACHE: a rejected body never populates the 60-second cache — the next call re-hits the upstream", async () => {
+    // The property that makes this member worse than its sibling. A verdict
+    // accepted once is replayed for 60s to callers that never saw the body, so
+    // an unvalidated one must not be written at all. Asserted behaviourally
+    // against the memoizing double, which (like the real fork) writes the entry
+    // only AFTER the callback RESOLVES.
+    STATE.memoize = true;
+    STATE.upstreamStatus = 200;
+    STATE.upstreamPayload = {};
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+
+    expect(
+      STATE.memoStore.size,
+      "A rejected body must leave NO cache entry. If it is memoized, every " +
+        "caller for the next 60 seconds is served an unvalidated scope " +
+        "verdict for a key none of them probed.",
+    ).toBe(0);
+
+    // The upstream recovers; the very next call must genuinely re-attempt.
+    STATE.upstreamPayload = {
+      read: true,
+      trade: false,
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-07-27T00:00:00Z",
+    };
+    const res2 = await GET(makeRequest(KEY_ID));
+    consoleErr.mockRestore();
+
+    expect(res2.status).toBe(200);
+    expect((await res2.json()).read).toBe(true);
+    expect(RF.calls).toBe(2);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("ANTI-REGRESSION: a well-formed 2xx still renders a verdict AND is still cached", async () => {
+    // A gate that refuses everything is an outage, and a fix that disables the
+    // 60s window would flood the internal endpoint on every badge render.
+    STATE.memoize = true;
+    STATE.upstreamStatus = 200;
+    STATE.upstreamPayload = {
+      read: true,
+      trade: false,
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-07-27T00:00:00Z",
+    };
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.read).toBe(true);
+    expect(body.trade).toBe(false);
+    expect(body.withdraw).toBe(false);
+    expect(body.probe_error).toBe(false);
+    // The badge renders this — it must survive the parse, not be stripped.
+    expect(body.detected_at).toBe("2026-07-27T00:00:00Z");
+
+    expect(STATE.memoStore.size).toBe(1);
+    const res2 = await GET(makeRequest(KEY_ID));
+    expect(res2.status).toBe(200);
+    expect((await res2.json()).read).toBe(true);
+    // Replayed from the cache: the seam was crossed exactly once.
+    expect(RF.calls).toBe(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
