@@ -590,3 +590,166 @@ describe("<AllocatorMatchQueue> — SEAMUX-05: handleRecompute observes the outc
     expect(countCalls(fetchMock, RECOMPUTE_URL)).toBe(1);
   });
 });
+
+/**
+ * 140.3-11 / TS-18 + SEAMUX-04 — a 424 renders as the CALLER'S venue failing.
+ *
+ * `STATUS_CONTRACT.md` §1/§6 O-1: a 424 is CALLER'S EXCHANGE — the third party
+ * the caller named is at fault, it is recoverable, and it never counts against
+ * our own health. Reported to an admin as OUR failure it is the theme-2 lie
+ * (copy that asserts something false); reported as an un-retryable dead end it
+ * is the B-01/B-22 shape O-1 exists to forbid.
+ *
+ * A SEPARATE describe from the SEAMUX-05 block above, with its own mount
+ * helper, on purpose. That block asserts the OUTCOME IS OBSERVED; this one
+ * asserts WHICH outcome it is. Sharing a helper across two obligations is how a
+ * green run stops telling you which one it was green for.
+ *
+ * Every expected string is hand-typed. Nothing is imported from
+ * `venueOutageCopy.ts` — a test that read the sentence out of the module that
+ * declares it could not detect the sentence changing (C-1).
+ */
+describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", () => {
+  const QUEUE_URL = `/api/admin/match/${ALLOCATOR_ID}`;
+  const RECOMPUTE_URL = "/api/admin/match/recompute";
+
+  /** The pre-424 answers, hand-typed so a change to either reddens here. */
+  const BREAKER_SENTENCE =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+  const GENERIC_500 = "Match recompute failed. Please try again.";
+
+  async function mountLoaded(recomputeResponse: () => Promise<Response>) {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === RECOMPUTE_URL) return recomputeResponse();
+      return Promise.resolve(
+        new Response(JSON.stringify(buildPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    return fetchMock;
+  }
+
+  /** The body shape `/api/admin/match/recompute` forwards on a typed 4xx. */
+  function routeBody(error: string, dependency: string | null) {
+    return new Response(JSON.stringify({ error, dependency }), {
+      status: 424,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("alert", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a 424 naming a venue renders THAT venue and a retry control", async () => {
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(routeBody("Binance is not responding.", "binance")),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    // The venue the WIRE named, not one this component knows about.
+    expect(document.body.textContent).toContain("Binance isn't responding");
+    // A 424 is recoverable and non-counting, so a retry is honest here.
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    // The stale queue is gone — the error-first guard still holds.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+  });
+
+  it("a SECOND venue renders too — no exchange is special-cased", async () => {
+    // A component that recognised one venue and not another would render a real
+    // outage as no outage for every exchange its author did not think of.
+    await mountLoaded(() =>
+      Promise.resolve(routeBody("Bybit is not responding.", "bybit")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Bybit isn't responding");
+    });
+  });
+
+  it("a 424 with a MISSING dependency degrades truthfully and renders no `undefined`", async () => {
+    // This is the COMMON case, not the corner: the flat
+    // `VenueTransientHTTPException` 424 that 140.3-06 put on the wire carries no
+    // `dependency` key at all.
+    await mountLoaded(() =>
+      Promise.resolve(routeBody("A venue is not responding.", null)),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    expect(document.body.textContent).toContain("An exchange isn't responding");
+    // The literal, which is what an interpolated absent value renders as.
+    expect(document.body.textContent).not.toContain("undefined");
+    expect(document.body.textContent).not.toContain("null");
+  });
+
+  it("the 424 copy never says OUR service is degraded (SEAMUX-04)", async () => {
+    await mountLoaded(() =>
+      Promise.resolve(routeBody("Binance is not responding.", "binance")),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Binance isn't responding");
+    });
+    // The two sentences this surface answers with when the fault IS ours.
+    expect(document.body.textContent).not.toContain(BREAKER_SENTENCE);
+    expect(document.body.textContent).not.toContain(GENERIC_500);
+    expect(document.body.textContent).not.toMatch(
+      /analytics service is (temporarily )?(unavailable|degraded|down)/i,
+    );
+  });
+
+  it("ANTI-REGRESSION: a 500 still renders the route's own generic copy, unchanged", async () => {
+    await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: GENERIC_500 }), {
+          status: 500,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(GENERIC_500)).toBeInTheDocument();
+    });
+    // The 424 arm did not swallow every failure into a venue state.
+    expect(document.body.textContent).not.toContain("isn't responding");
+  });
+
+  it("ANTI-REGRESSION: a breaker 503 still renders the breaker sentence", async () => {
+    await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: BREAKER_SENTENCE }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+    await waitFor(() => {
+      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+    });
+  });
+
+  function countCalls(mock: ReturnType<typeof vi.fn>, url: string) {
+    return mock.mock.calls.filter((c) => c[0] === url).length;
+  }
+});
