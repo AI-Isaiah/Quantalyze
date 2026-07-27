@@ -746,3 +746,298 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
     expect((caught as Error).message).toMatch(/not reachable/i);
   });
 });
+
+/**
+ * Phase 140.2-09 / TS-04 / ROADMAP SC7 — `analytics-client` mints
+ * `X-Tenant-Claim`.
+ *
+ * WHAT ACTUALLY CHANGES IN PRODUCTION. `tenant_or_platform_key` in
+ * `analytics-service/services/rate_limit.py` returns `<scope>:t:<payload>` the
+ * instant an HMAC-verified claim appears and `platform:<path>` when it does not.
+ * Until this landed, every route this client reaches sat in a platform-wide
+ * bucket — the sharpest being `/api/optimize-weights` at 20/minute FOR THE WHOLE
+ * PLATFORM, so two allocators running Scenario Composer could 429 each other.
+ *
+ * ⚠️ SIX of the nine rekeyed Python routes are reachable from this client, not
+ * nine (five live + one dead wrapper); `/api/fetch-trades`, `/api/csv/validate`
+ * and `/api/verify-strategy` are unreachable from here by construction. All NINE
+ * wrappers mint regardless — three of them reach routes with no limiter or an
+ * IP-keyed one, where the claim is inert, harmless and forward-compatible.
+ * Minting from eight of nine is the instance-not-class defect this programme
+ * exists to close.
+ *
+ * ORACLE DISCIPLINE. `expect(headers["X-Tenant-Claim"]).toBeDefined()` is
+ * self-referential-adjacent and would ship green against a mint that returns a
+ * constant, or one keyed on the wrong secret. Every MAC below is recomputed HERE
+ * with `node:crypto`.
+ */
+describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () => {
+  const SERVICE_KEY = "svc-key-under-test";
+  const INTERNAL_TOKEN = "internal-token-under-test";
+  const ORIGINAL_ENV = { ...process.env };
+
+  /** The independent oracle — same algorithm, written out by hand. */
+  async function hmacHex(secret: string, message: string): Promise<string> {
+    const { createHmac } = await import("node:crypto");
+    return createHmac("sha256", secret).update(message).digest("hex");
+  }
+
+  beforeEach(() => {
+    // ⚠️ ORDERING. `SERVICE_KEY` is captured at MODULE SCOPE in
+    // `analytics-client.ts`, so the env must be set BEFORE the dynamic import
+    // below or `X-Service-Key` silently vanishes and the "still emitted"
+    // assertion becomes a tautology. `INTERNAL_API_TOKEN` is deliberately NOT
+    // captured at module scope — it is read at CALL time, precisely so this
+    // hazard cannot repeat for the secret that selects the rate-limit bucket.
+    vi.resetModules();
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY;
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN;
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Drive one wrapper and hand back the headers the transport received.
+   *
+   * The wrapper's RESPONSE handling is out of scope: one stub body satisfies no
+   * Zod response schema, so most wrappers reject in `parseResponse` — strictly
+   * AFTER the header assembly this block pins. Absorbing that rejection is not a
+   * silent skip; the caller asserts on headers that only exist if `fetch` was
+   * actually reached.
+   */
+  async function sentHeaders(
+    invoke: (m: typeof import("./analytics-client")) => Promise<unknown>,
+  ): Promise<Record<string, string>> {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await import("./analytics-client");
+    await invoke(mod).then(
+      () => undefined,
+      () => undefined,
+    );
+    expect(
+      fetchMock,
+      "the wrapper never reached the transport — it threw before the fetch",
+    ).toHaveBeenCalledTimes(1);
+    return (fetchMock.mock.calls[0][1] as RequestInit).headers as Record<
+      string,
+      string
+    >;
+  }
+
+  type AnalyticsClient = typeof import("./analytics-client");
+
+  /**
+   * The roster. HAND-TYPED, not derived from the module's exports — a roster
+   * built by reflecting over `Object.keys(mod)` grows silently and can never
+   * notice a wrapper that was added without an identity.
+   *
+   * `reaches` records what the claim actually BUYS on each route, so a later
+   * reader does not "optimise away" the three inert ones.
+   */
+  const MINT_ROSTER: ReadonlyArray<{
+    wrapper: string;
+    payload: string;
+    reaches: string;
+    invoke: (m: AnalyticsClient) => Promise<unknown>;
+  }> = [
+    {
+      wrapper: "validateKey",
+      payload: "user-alpha",
+      reaches: "L-1 /api/validate-key — LIVE, flips (key-connect spends two tokens per attempt)",
+      invoke: (m) =>
+        m.validateKey("deribit", "k", "s", undefined, { userId: "user-alpha" }),
+    },
+    {
+      wrapper: "encryptKey",
+      payload: "user-alpha",
+      reaches: "L-2 /api/encrypt-key — LIVE, flips (the second of the two)",
+      invoke: (m) =>
+        m.encryptKey("deribit", "k", "s", undefined, { userId: "user-alpha" }),
+    },
+    {
+      wrapper: "optimizeScenarioWeights",
+      payload: "user-beta",
+      reaches: "L-4 /api/optimize-weights — LIVE, flips; the SHARPEST at 20/minute",
+      invoke: (m) =>
+        m.optimizeScenarioWeights({}, "min_vol", { userId: "user-beta" }),
+    },
+    {
+      wrapper: "computePortfolioAnalytics",
+      payload: "actor-1",
+      reaches: "L-6 /api/portfolio-analytics — reachable but ZERO production callers; flips a dead path",
+      invoke: (m) => m.computePortfolioAnalytics("portfolio-1", "actor-1"),
+    },
+    {
+      wrapper: "runPortfolioOptimizer",
+      payload: "actor-1",
+      reaches: "L-7 /api/portfolio-optimizer — LIVE, flips",
+      invoke: (m) => m.runPortfolioOptimizer("portfolio-1", "actor-1"),
+    },
+    {
+      wrapper: "findReplacementCandidates",
+      payload: "user-1",
+      reaches: "L-8 /api/portfolio-bridge — LIVE, flips",
+      invoke: (m) =>
+        m.findReplacementCandidates("portfolio-1", "strategy-1", "user-1"),
+    },
+    {
+      wrapper: "simulateAddCandidate",
+      payload: "user-1",
+      reaches: "/api/simulator — the TENTH, still IP-keyed (TS-30, quarantined). INERT but harmless",
+      invoke: (m) =>
+        m.simulateAddCandidate("portfolio-1", "candidate-1", "user-1"),
+    },
+    {
+      wrapper: "recomputeMatch",
+      payload: "actor-1",
+      reaches: "/api/match/recompute — NO Python limiter at all (TS-21, owned by 146). INERT but harmless",
+      invoke: (m) => m.recomputeMatch("allocator-1", false, "actor-1"),
+    },
+    {
+      wrapper: "evalMatch",
+      payload: "admin-1",
+      reaches: "/api/match/eval — NO Python limiter at all (TS-21). INERT but harmless",
+      invoke: (m) =>
+        m.evalMatch({ lookback_days: "30" }, { userId: "admin-1" }),
+    },
+  ];
+
+  it("the roster covers every wrapper, so a new one cannot be added without an identity", () => {
+    // 9 is hand-typed. If a tenth wrapper appears, this reddens and the author
+    // has to decide what its tenant payload is rather than defaulting to none.
+    expect(MINT_ROSTER).toHaveLength(9);
+  });
+
+  it.each(MINT_ROSTER)(
+    "$wrapper mints a claim over $payload — $reaches",
+    async ({ payload, invoke }) => {
+      const headers = await sentHeaders(invoke);
+      const claim = headers["X-Tenant-Claim"];
+      expect(claim).toBeDefined();
+
+      // rsplit-compatible: the Python verifier splits on the LAST two dots.
+      const parts = claim.split(".");
+      expect(parts).toHaveLength(3);
+      const [sentPayload, exp, mac] = parts;
+
+      expect(sentPayload).toBe(payload);
+      // The MAC, recomputed here. This is what makes the assertion mean
+      // "the Python verifier will accept this" rather than "a string is set".
+      expect(mac).toBe(await hmacHex(INTERNAL_TOKEN, `${sentPayload}.${exp}`));
+      // The secret keys the MAC; it never rides the wire.
+      expect(claim).not.toContain(INTERNAL_TOKEN);
+      // 512 is `_CLAIM_MAX_CHARS` — a longer claim is dropped WHOLESALE and the
+      // caller falls back to the platform bucket with no signal.
+      expect(claim.length).toBeLessThanOrEqual(512);
+    },
+  );
+
+  it("the MAC key is INTERNAL_API_TOKEN, NOT ANALYTICS_SERVICE_KEY", async () => {
+    // The mistake the obligation ledger's one-line description invites. Both
+    // secrets are in scope in this module and both produce a syntactically
+    // perfect claim; only the MAC tells them apart, and the wrong one fails
+    // `compare_digest` SILENTLY — every route stays on `platform:<path>`.
+    const headers = await sentHeaders((m) =>
+      m.runPortfolioOptimizer("portfolio-1", "actor-1"),
+    );
+    const [payload, exp, mac] = headers["X-Tenant-Claim"].split(".");
+
+    expect(mac).toBe(await hmacHex(INTERNAL_TOKEN, `${payload}.${exp}`));
+    expect(mac).not.toBe(await hmacHex(SERVICE_KEY, `${payload}.${exp}`));
+  });
+
+  it("every pre-existing header still rides — a dropped X-Service-Key is a total outage", async () => {
+    const headers = await sentHeaders((m) =>
+      m.runPortfolioOptimizer("portfolio-1", "actor-1"),
+    );
+
+    expect(headers["Content-Type"]).toBe("application/json");
+    expect(headers["X-Api-Version"]).toBe("1");
+    expect(headers["X-Correlation-Id"]).toBeDefined();
+    expect(headers["X-Service-Key"]).toBe(SERVICE_KEY);
+  });
+
+  it("does NOT add X-User-Id — unsigned client input must never select a bucket", async () => {
+    // `verify_tenant_claim` exists precisely because `X-User-Id` is forgeable.
+    // Adding it here would invite a future reader to bucket on it.
+    const headers = await sentHeaders((m) =>
+      m.runPortfolioOptimizer("portfolio-1", "actor-1"),
+    );
+    expect(headers["X-User-Id"]).toBeUndefined();
+  });
+
+  it("FAILS LOUD when INTERNAL_API_TOKEN is absent — never a silent platform bucket", async () => {
+    // RESEARCH assumption A3: it could NOT be confirmed that
+    // INTERNAL_API_TOKEN is present in the Vercel production env. An empty
+    // secret still produces a syntactically valid claim that fails
+    // `compare_digest`, so silence here means SC7 no-ops in production while
+    // every test stays green. The failure must be visible.
+    delete process.env.INTERNAL_API_TOKEN;
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const mod = await import("./analytics-client");
+
+    let caught: unknown;
+    try {
+      await mod.runPortfolioOptimizer("portfolio-1", "actor-1");
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).name).toBe("TenantClaimError");
+    expect((caught as Error).message).toContain("INTERNAL_API_TOKEN");
+    // No request may leave. Spending upstream capacity on a call we cannot
+    // honestly attribute is the platform-bucket regression itself.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not misreport a mint refusal as a dead upstream", async () => {
+    // The mint sits OUTSIDE the transport `try`. Inline in the headers object it
+    // would land in the classification window and surface as "Analytics service
+    // is not reachable" / AnalyticsTimeoutError — a configuration fault wearing
+    // a dying-Railway costume, which is exactly the silent degradation the
+    // fail-loud guard exists to prevent.
+    delete process.env.INTERNAL_API_TOKEN;
+    vi.stubGlobal("fetch", vi.fn());
+    const mod = await import("./analytics-client");
+
+    let caught: unknown;
+    try {
+      await mod.runPortfolioOptimizer("portfolio-1", "actor-1");
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsTimeoutError);
+    expect((caught as Error).message).not.toMatch(/not reachable/i);
+  });
+
+  it("REFUSES an empty tenant payload rather than bucketing every caller together", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    const mod = await import("./analytics-client");
+
+    let caught: unknown;
+    try {
+      await mod.validateKey("deribit", "k", "s", undefined, { userId: "" });
+    } catch (e) {
+      caught = e;
+    }
+    expect((caught as Error).name).toBe("TenantClaimError");
+  });
+});
