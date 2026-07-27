@@ -1406,6 +1406,68 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     ).toBeInTheDocument();
   });
 
+  // ════════════════════════════════════════════════════════════════════
+  // Phase 140.3-12 — the two 400 arms 140.3-10 left without wizard copy.
+  // ════════════════════════════════════════════════════════════════════
+
+  it.each([
+    ["MISSING_STRATEGY_ID", "Missing strategy_id"],
+    ["INVALID_STRATEGY_ID", "Invalid strategy_id"],
+  ])(
+    "a 400 %s renders VALIDATION_FAILED, not the generic SYNC_FAILED",
+    async (code, error) => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ error, code }), { status: 400 }),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+      const envelope = await screen.findByTestId("error-envelope");
+
+      // BOTH 400 arms are asserted separately rather than in one case: they are
+      // two distinct wire codes on the same route, and the "5 of 8" signature
+      // this programme keeps finding is exactly one of a pair being wired.
+      expect(envelope).toHaveAttribute("data-error-code", "VALIDATION_FAILED");
+      // The copy must NOT blame the analytics service — this rejection is made
+      // by our own route before that service is ever called.
+      expect(screen.queryByText(/analytics service rejected/i)).toBeNull();
+      errSpy.mockRestore();
+    },
+  );
+
+  it("TRAP-4 — the request-shape state does NOT render the destructive control", async () => {
+    // ⚠️ THE GUARD THE 400 WIRING FORCED. VALIDATION_FAILED is non-recoverable,
+    // so no Retry renders; without widening the destructive-control set the
+    // SOLE button on screen would be "Try another key", which fires
+    // handleDeleteDraft(). Telling a user our software sent an unreadable
+    // request and offering them one button that destroys their draft is the
+    // trap 140.3-10 closed for GATE_DRAFT_GONE, re-created one code over.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: "Invalid strategy_id",
+          code: "INVALID_STRATEGY_ID",
+        }),
+        { status: 400 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "Swapping the user's key cannot fix a bug in our own page, and this " +
+        "control deletes the draft on its way.",
+    ).toBeNull();
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+      "A state with no way out at all is worse than a destructive one.",
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
   it("ANTI-REGRESSION — every OTHER error state keeps 'Try another key'", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

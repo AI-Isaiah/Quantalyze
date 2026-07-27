@@ -144,6 +144,23 @@ const KNOWN_KICKOFF_CODES: Readonly<Record<string, WizardErrorCode>> = {
   RATE_LIMITED: "RATE_LIMITED",
   GATE_DRAFT_GONE: "GATE_DRAFT_GONE",
   COMPOSITE_MEMBERSHIP_UNKNOWN: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+  // 140.3-12 — the two 400 arms 140.3-10 gave wire codes but deliberately left
+  // without wizard copy, closing the residual it recorded for this plan.
+  //
+  // 140.3-10's reason for holding off was correct AT THE TIME: the nearest
+  // member, `VALIDATION_FAILED`, asserted "The analytics service rejected the
+  // shape of the request", which is FALSE for a rejection this app's own route
+  // makes before the analytics service is ever called. Routing them there would
+  // have turned a vague error into a specific lie — TRAP-3, authored to satisfy
+  // an acceptance criterion. 140.3-12 owns that sentence and removed the
+  // producer attribution from it, so the member now states only the fact both
+  // producers share: a request was refused on its shape before any work ran.
+  //
+  // No new union member was minted for this. A second code meaning the same
+  // thing is how a vocabulary starts lying (140.3-05's CIRCUIT_OPEN reasoning),
+  // and the copy table's hand-typed size guard stays at 53.
+  MISSING_STRATEGY_ID: "VALIDATION_FAILED",
+  INVALID_STRATEGY_ID: "VALIDATION_FAILED",
 };
 
 /**
@@ -1266,8 +1283,34 @@ export function SyncPreviewStep({
    * path this plan exists to prevent.
    *
    * Deleting this flag is the mutation that must redden a test.
+   *
+   * ⚠️ 140.3-12 WIDENED THIS FROM ONE CODE TO A HAND-TYPED SET, and the widening
+   * was FORCED by routing the two 400 arms to a wizard state. Wiring them
+   * without it would have created a fresh TRAP-4 at the site 140.3-10 had just
+   * guarded: `VALIDATION_FAILED` is non-recoverable (its only action is
+   * `request_call`), so no Retry renders, and the SOLE remaining control would
+   * have been "Try another key" — which fires `handleDeleteDraft()`. That means
+   * telling a user "our software sent a request we could not read" and offering
+   * them exactly one button, which DESTROYS their draft. Swapping the user's
+   * key cannot fix a bug in our own page.
+   *
+   * The set is HAND-TYPED and the flag is now about the PROPERTY (states where
+   * a destructive control is the wrong and only way out), not about one code —
+   * an `===` against a single member is the instance-check this programme keeps
+   * finding. Formerly `errorStateIsDraftGone`; the ledger's M66c mutation
+   * applies unchanged to the flag under its new name.
    */
-  const errorStateIsDraftGone = errorCode === "GATE_DRAFT_GONE";
+  const DESTRUCTIVE_CONTROL_IS_WRONG_FOR: readonly WizardErrorCode[] = [
+    // The draft may be perfectly intact — the 404 is uniform across "no such
+    // draft" and "not yours" (P458).
+    "GATE_DRAFT_GONE",
+    // A fault in our own request shape. Deleting the draft cannot fix it, and
+    // retrying cannot either, so neither control belongs here.
+    "VALIDATION_FAILED",
+  ];
+  const errorStateHidesDestructiveControl =
+    errorCode !== null &&
+    DESTRUCTIVE_CONTROL_IS_WRONG_FOR.includes(errorCode as WizardErrorCode);
 
   // --- Rendering --------------------------------------------------------
 
@@ -1295,7 +1338,7 @@ export function SyncPreviewStep({
           />
         </div>
         <div className="mt-6 flex gap-3">
-          {errorStateIsDraftGone ? (
+          {errorStateHidesDestructiveControl ? (
             // Non-destructive, and it is the state's OWN fix line: "Start a new
             // strategy from the strategies page." Navigating away destroys
             // nothing, which is the property that matters when the draft may
