@@ -316,3 +316,75 @@ export const CsvFinalizeResponseSchema = z.object({
 }).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only strategy_id/status are read, never spread into a write
 
 export type CsvFinalizeResponse = z.infer<typeof CsvFinalizeResponseSchema>;
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 140.3 / SEAMUX-07 — the live key-scope probe
+//
+// This one guards a PUBLISH GATE, not a rendered number, so its
+// required/optional split is a security decision rather than a
+// convenience. Read the docblock below before widening anything here.
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * --- POST /internal/keys/{key_id}/permissions — the live `{read, trade,
+ * withdraw}` scope triple (analytics-service `routers/internal.py`) ---
+ *
+ * WHAT THIS SCHEMA GUARDS. Two Next-layer callers read this body, and one of
+ * them turns it into a PUBLISH DECISION:
+ *
+ *   1. `strategies/finalize-wizard` force-refreshes the probe immediately
+ *      before promoting a wizard draft to `pending_review`, and REFUSES the
+ *      publish if the key has been broadened to trade/withdraw on the
+ *      exchange dashboard since it was connected.
+ *   2. `keys/[id]/permissions` proxies the same body to `KeyPermissionBadge`,
+ *      which renders it as a live security claim about a money-bearing key —
+ *      and memoizes it for 60 seconds.
+ *
+ * WHY `read` / `trade` / `withdraw` ARE REQUIRED. Both call sites used to read
+ * this body through an unchecked `as` cast and then reject only on an explicit
+ * `=== true`. A 2xx `{}`, or one renamed field, therefore left every scope
+ * `undefined`, every gate passed, and a key holding trade/withdraw scope was
+ * published as read-only-verified. **Absence IS the drift that publishes a
+ * write-capable key**, so absence must be unparseable — not defaulted, not
+ * coerced, and never degraded to `{}` the way `src/lib/api/errorSchema.ts`
+ * degrades an error body (there the fallback direction is right, because it
+ * governs error COPY; here it would be the vulnerability). A parse miss must
+ * fail CLOSED, identically to a probe that did not run.
+ *
+ * WHY `probe_error` STAYS OPTIONAL. Its absence already carries a safe
+ * meaning — "no probe error" — and the field is the service's own fail-CLOSED
+ * signal (`services/key_permissions.py::_FAIL_CLOSED`), not part of the
+ * scope verdict. Requiring it would fail closed on nothing that matters.
+ *
+ * Unknown extra fields are STRIPPED (zod's default), not passed through: this
+ * body is consumed by a decision and forwarded to a client, and the
+ * NEW-C40-01 rationale on `EncryptKeyResponseSchema` applies unchanged.
+ */
+export const LivePermissionsSchema = z.object({
+  read: z.boolean(),
+  trade: z.boolean(),
+  withdraw: z.boolean(),
+  probe_error: z.boolean().optional(),
+});
+export type LivePermissions = z.infer<typeof LivePermissionsSchema>;
+
+/**
+ * The same body as seen by `GET /api/keys/[id]/permissions`, which additionally
+ * FORWARDS the probe timestamp to `KeyPermissionBadge` (it renders it as
+ * "checked N minutes ago").
+ *
+ * DERIVED with `.extend()` rather than declared as a rival object, so the three
+ * boolean scopes have exactly ONE definition across both call sites — two
+ * enumerations of one concept is the class-not-instance defect this programme
+ * exists to close.
+ *
+ * `detected_at` is REQUIRED because every one of the emitter's six return arms
+ * sets it (verified at source in `routers/internal.py`: the sfox empty-key,
+ * sfox success, sfox auth-rejection, sfox transient, sfox ctor-failure and the
+ * ccxt success arms). A body without it is contract drift, and the badge would
+ * render a broken relative time from it.
+ */
+export const KeyPermissionsPayloadSchema = LivePermissionsSchema.extend({
+  detected_at: z.string(),
+});
+export type KeyPermissionsPayload = z.infer<typeof KeyPermissionsPayloadSchema>;
