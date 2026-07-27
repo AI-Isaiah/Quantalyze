@@ -32,6 +32,7 @@ const {
   mockUpsert,
   mockLogAuditEvent,
   rateLimitResult,
+  rateLimitByBucket,
   ownershipResult,
   // H-0275: capture what the user-scoped ownership query actually touched
   // so the mock can FAIL when a regression points it at the wrong table or
@@ -65,11 +66,24 @@ const {
   // C-0101: hoisted spy so we can assert action + metadata.path on each branch.
   mockLogAuditEvent: vi.fn(),
   rateLimitResult: { success: true as boolean, retryAfter: 0 },
+  // 140.3-10 / SEAMUX-03: the two throttle arms are TWO DISTINCT SITES. The
+  // shared `rateLimitResult` above can only ever exercise the FIRST one (the
+  // per-user ceiling short-circuits before the per-strategy bucket is read),
+  // so a per-bucket override is what lets each site be driven — and reddened —
+  // on its own.
+  rateLimitByBucket: {} as Record<
+    string,
+    { success: boolean; retryAfter: number }
+  >,
   ownershipResult: {
     // 89-02: api_key_id joins the ownership row — null identifies a POSSIBLE
     // composite (members live in strategy_keys); a UUID is definitively
     // single-key. Undefined (the default fixtures) leaves the branch dormant.
     data: null as Record<string, string | null> | null,
+    // 140.3-10 / TRAP-3: the ownership read is `.maybeSingle()` and its `error`
+    // is now READ. A transport fault must become a 500 about us, never
+    // "Strategy not found".
+    error: null as { message: string; code?: string } | null,
   },
   strategyKeysProbe: {
     count: 0 as number | null,
@@ -146,6 +160,11 @@ vi.mock("@/lib/supabase/server", () => ({
           return builder;
         },
         single: async () => ownershipResult,
+        // 140.3-10 / TRAP-3: the OWNERSHIP read moved to `.maybeSingle()` and
+        // now reads `error`. The unified exchange resolver's later
+        // `select("api_key_id")` on the same table still uses `.single()`, so
+        // both terminals live on this one builder.
+        maybeSingle: async () => ownershipResult,
       };
       return builder;
     },
@@ -240,7 +259,13 @@ vi.mock("@/lib/ratelimit", () => ({
   keysSyncUserLimiter: null,
   checkLimit: (...args: unknown[]) => {
     checkLimitMock(...args);
-    return Promise.resolve(rateLimitResult);
+    // 140.3-10: a per-bucket override wins over the shared default, so a test
+    // can let the per-user ceiling PASS and deny only the per-strategy bucket
+    // — the only way to reach the second throttle site at all. With no
+    // override registered the behaviour is byte-identical to before.
+    const bucket = typeof args[1] === "string" ? args[1] : "";
+    const override = rateLimitByBucket[bucket];
+    return Promise.resolve(override ?? rateLimitResult);
   },
 }));
 
@@ -286,7 +311,9 @@ describe("POST /api/keys/sync", () => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
+    for (const k of Object.keys(rateLimitByBucket)) delete rateLimitByBucket[k];
     ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER.id };
+    ownershipResult.error = null;
     ownershipQuery.table = null;
     ownershipQuery.selectCols = null;
     ownershipQuery.filters = [];
@@ -1058,5 +1085,297 @@ describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Toke
     // fails CLOSED instead, because its SECURITY DEFINER RPC cannot run without
     // auth.uid() — the two directions are deliberate and different.)
     expect(res.status).toBe(202);
+  });
+});
+
+describe("[140.3-10] POST /api/keys/sync — a code on every arm, and the TRAP-3 split", () => {
+  // Own fixture rather than inheriting a sibling suite's: the arms under test
+  // are reached BEFORE the ownership row matters, and a shared fixture that
+  // pre-sets a limiter override or an api_key_id would silently change which
+  // arm a case lands on.
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    for (const k of Object.keys(rateLimitByBucket)) delete rateLimitByBucket[k];
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER.id };
+    ownershipResult.error = null;
+    authState.user = { id: TEST_USER.id };
+    sessionState.session = { access_token: "test-user-jwt" };
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
+    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockUpsert.mockReturnValue({ error: null });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // Phase 140.3-10 / SEAMUX-03 + TRAP-3 + TRAP-4 — the C-8 unit.
+  //
+  // ⚠️ EACH ARM GETS ITS OWN CASE, WRITTEN OUT. Not a loop, not a
+  // table-driven `it.each`. A parameterised verify that exercises one arm
+  // certifies the others without ever touching them — which is exactly how
+  // "5 of 7 routes" and "3 of 5 log sites" happened in this programme. The
+  // two `"Too many requests"` arms in particular are TWO DISTINCT SITES
+  // emitting the same sentence, and a single grep-shaped assertion cannot
+  // tell them apart.
+  // ══════════════════════════════════════════════════════════════════
+  describe("[140.3-10 / SEAMUX-03] a machine code on every arm", () => {
+    it("ARM 1 — the MISSING strategy_id 400 carries code MISSING_STRATEGY_ID", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({}));
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(
+        body.code,
+        "A consumer must be able to tell a missing id from a malformed one " +
+          "without matching on the prose, which 140.3-12 is about to reword.",
+      ).toBe("MISSING_STRATEGY_ID");
+      expect(body.error).toBe("Missing strategy_id");
+    });
+
+    it("ARM 2 — the INVALID strategy_id 400 carries code INVALID_STRATEGY_ID", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: "not-a-uuid" }));
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(
+        body.code,
+        "A malformed id is a DIFFERENT fact from an absent one — the caller " +
+          "sent something, it just was not a uuid. Collapsing the two onto " +
+          "one token leaves the consumer sniffing prose again.",
+      ).toBe("INVALID_STRATEGY_ID");
+      expect(body.error).toBe("Invalid strategy_id");
+    });
+
+    it("ARM 3 — the PER-USER ceiling 429 carries code RATE_LIMITED and its own wait", async () => {
+      // Deny the aggregate ceiling ONLY. The per-strategy bucket is left
+      // passing, so this case can only be satisfied by the first site.
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: false,
+        retryAfter: 42,
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("42");
+      const body = await res.json();
+      expect(body.code).toBe("RATE_LIMITED");
+      // The per-strategy bucket was never consulted — the ceiling short-
+      // circuits first, which is what makes this site independently reachable.
+      expect(checkLimitMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("ARM 4 — the PER-(user, strategy) bucket 429 carries code RATE_LIMITED and its own wait", async () => {
+      // Let the ceiling PASS and deny only the per-strategy bucket. This is
+      // the arm the shared `rateLimitResult` can never reach, and the one a
+      // "fix the 429 arm" reading leaves codeless.
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: false,
+        retryAfter: 9,
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(429);
+      // A DIFFERENT wait from ARM 3, so this assertion cannot be satisfied by
+      // the first site accidentally answering.
+      expect(res.headers.get("Retry-After")).toBe("9");
+      const body = await res.json();
+      expect(
+        body.code,
+        "Two distinct sites emit this sentence. Both must carry the code — " +
+          "a grep of the string finds two hits but reads as one arm.",
+      ).toBe("RATE_LIMITED");
+      expect(checkLimitMock).toHaveBeenCalledTimes(2);
+      // Nothing downstream ran.
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+    });
+
+    it("ARM 5 — the absent-draft 404 carries code GATE_DRAFT_GONE", async () => {
+      ownershipResult.data = null;
+      ownershipResult.error = null;
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(404);
+      const body = await res.json();
+      expect(
+        body.code,
+        "The SAME token finalize-wizard already emits for the same fact. One " +
+          "fact, one token, across both routes.",
+      ).toBe("GATE_DRAFT_GONE");
+      expect(body.error).toBe("Strategy not found");
+    });
+  });
+
+  describe("[140.3-10 / TRAP-3] a Supabase transport fault is a 500 about US", () => {
+    it("a query error becomes 500 DRAFT_LOOKUP_FAILED — never 'Strategy not found'", async () => {
+      // The blip. `.single()` answered `data: null` here too, and the old code
+      // discarded `error` — so this rendered "your draft is gone" over an
+      // INTACT draft, during OUR outage, with start_fresh as the way forward.
+      ownershipResult.data = null;
+      ownershipResult.error = {
+        message: "TypeError: fetch failed — ECONNRESET reaching db.supabase.co",
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(
+        res.status,
+        "A transport failure is a statement about US. Answering 404 makes it " +
+          "a statement about the user's data, and that statement is false.",
+      ).toBe(500);
+      const body = await res.json();
+      expect(body.code).toBe("DRAFT_LOOKUP_FAILED");
+      expect(body.error).toBe("Could not load draft");
+      // The lie is named explicitly so a regression cannot pass by returning
+      // some other 4xx that still claims the draft is gone.
+      expect(body.error).not.toMatch(/not found/i);
+      expect(body.code).not.toBe("GATE_DRAFT_GONE");
+      // Nothing downstream ran.
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+      expect(mockRpc).not.toHaveBeenCalled();
+    });
+
+    it("the transport fault is LOGGED through scrubSeamError, not raw", async () => {
+      // The scrubber's own contract is proven in seam-redaction's suite; what
+      // this pins is that THIS log site routes through it. A hand-rolled scrub
+      // (or none) is the class SEAMCORE-06 closed everywhere else.
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      // A value the LEAF actually knows to be a credential: postgrest embeds
+      // the apikey it was handed in the error it throws, and that apikey is
+      // the service role key.
+      const SERVICE_KEY = "service-role-key-0123456789abcdef";
+      const priorServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      process.env.SUPABASE_SERVICE_ROLE_KEY = SERVICE_KEY;
+      ownershipResult.data = null;
+      ownershipResult.error = {
+        message: `connect ECONNREFUSED — apikey=${SERVICE_KEY}`,
+      };
+
+      try {
+        const { POST } = await import("./route");
+        await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+        const logged = errSpy.mock.calls
+          .map((c) => c.map((a) => String(a)).join(" "))
+          .join("\n");
+        expect(logged).toContain("[keys/sync] strategy lookup failed");
+        expect(
+          logged,
+          "undici and postgrest both embed credentials in the message they " +
+            "throw; a raw console.error is how one reaches a log sink.",
+        ).not.toContain(SERVICE_KEY);
+        // ...and the DIAGNOSIS survives. A scrub that also ate the syscall
+        // token would pass the assertion above while leaving the operator with
+        // an unusable line — that is the A-10 defect the preserve list exists
+        // for, and it has to be asserted here or the pin is half a pin.
+        expect(logged).toContain("ECONNREFUSED");
+      } finally {
+        if (priorServiceKey === undefined) {
+          delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+        } else {
+          process.env.SUPABASE_SERVICE_ROLE_KEY = priorServiceKey;
+        }
+        errSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("[140.3-10 / P458] the split must NOT make not-found distinguishable from not-owned", () => {
+    it("ANTI-REGRESSION — both produce a byte-identical response", async () => {
+      const { POST } = await import("./route");
+
+      // (a) No such strategy: the row simply is not there.
+      ownershipResult.data = null;
+      ownershipResult.error = null;
+      const notFound = await POST(
+        makeReq({ strategy_id: "33333333-3333-3333-3333-333333333333" }),
+      );
+      const notFoundBody = await notFound.text();
+
+      // (b) Exists, but owned by someone else. The route's ownership select is
+      // `.eq("user_id", user.id)`, so an unowned row is filtered out at the
+      // database and arrives here as the same empty result — which is the
+      // whole point of P458 and must stay true after the transport split.
+      ownershipResult.data = null;
+      ownershipResult.error = null;
+      const notOwned = await POST(
+        makeReq({ strategy_id: TEST_STRATEGY_ID }),
+      );
+      const notOwnedBody = await notOwned.text();
+
+      expect(notOwned.status).toBe(notFound.status);
+      expect(
+        notOwnedBody,
+        "Any asymmetry between these two lets an attacker enumerate which " +
+          "strategy ids exist by probing them (P458, audit-2026-05-07).",
+      ).toBe(notFoundBody);
+      // Header sets must match too — a Retry-After or a cache directive on one
+      // and not the other is an oracle just as usable as a body difference.
+      expect([...notOwned.headers.keys()].sort()).toEqual(
+        [...notFound.headers.keys()].sort(),
+      );
+    });
+  });
+
+  describe("[140.3-10 / SEAMUX-03] the two 503 arms are distinct facts", () => {
+    it("an unknowable composite membership carries COMPOSITE_MEMBERSHIP_UNKNOWN", async () => {
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = null;
+      strategyKeysProbe.error = { message: "strategy_keys unavailable" };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(
+        body.code,
+        "finalize-wizard already emits this code from its mirror of the same " +
+          "probe; this route was the straggler emitting it codeless.",
+      ).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+    });
+
+    it("a failed stitch enqueue carries SYNC_KICKOFF_FAILED — a DIFFERENT code", async () => {
+      ownershipResult.data = {
+        id: TEST_STRATEGY_ID,
+        user_id: TEST_USER.id,
+        api_key_id: null,
+      };
+      strategyKeysProbe.count = 2;
+      strategyKeysProbe.error = null;
+      mockRpc.mockResolvedValue({ data: null, error: { message: "rpc down" } });
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(
+        body.code,
+        "Membership was KNOWN here; the enqueue is what failed. Same sentence " +
+          "and same status as the arm above, different cause, different token.",
+      ).toBe("SYNC_KICKOFF_FAILED");
+      expect(body.code).not.toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+    });
   });
 });

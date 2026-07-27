@@ -139,6 +139,11 @@ vi.mock("@/lib/supabase/server", () => ({
         select: () => builder,
         eq: () => builder,
         single: async () => ownership,
+        // 140.3-10 / TRAP-3 — the ownership read is `.maybeSingle()` so the
+        // route can tell a Supabase transport fault (500 about us) apart from
+        // an absent row (404). The exchange resolver still ends in `.single()`,
+        // so both terminals are served from this one builder.
+        maybeSingle: async () => ownership,
       };
       return builder;
     },

@@ -627,6 +627,12 @@ export function WizardClient({
       setSyncSnapshot(null);
       setMetadataDraft(null);
       setConfirmDelete(false);
+      // 140.3-10 — the resume banner offers to resume a draft that no longer
+      // exists once this runs. `handleStartFresh` used to hide it up front;
+      // now that Start fresh only OPENS the confirm dialog, the banner has to
+      // be dismissed on the CONFIRMED delete instead, or a cancelled
+      // confirmation would leave the user with no way back to their draft.
+      setShowResumeBanner(false);
       return;
     }
 
@@ -652,6 +658,7 @@ export function WizardClient({
           // 109 manager-guarded /strategies route.
           clearWizardState();
           setConfirmDelete(false);
+          setShowResumeBanner(false);
           if (isContribution) onClose?.();
           else router.push("/strategies");
           return;
@@ -665,6 +672,7 @@ export function WizardClient({
         setSyncSnapshot(null);
         setMetadataDraft(null);
         setConfirmDelete(false);
+        setShowResumeBanner(false);
       } else {
         console.error("[wizard] delete draft failed:", res.status, await res.text().catch(() => ""));
         setConfirmDelete(false);
@@ -688,10 +696,38 @@ export function WizardClient({
     });
   }, [initialDraft, persistPointer, wizardSessionId]);
 
-  const handleStartFresh = useCallback(async () => {
-    setShowResumeBanner(false);
-    await handleDeleteDraft();
-  }, [handleDeleteDraft]);
+  /**
+   * ⚠️ Phase 140.3-10 / TRAP-4 — `start_fresh` DESTROYS THE DRAFT, so it goes
+   * through the same confirmation the chrome's Delete-draft button uses.
+   *
+   * This used to call `await handleDeleteDraft()` DIRECTLY, which made it
+   * strictly more dangerous than the chrome button one component away:
+   * `onDeleteDraft` opens the confirm dialog, this did not. One click on a
+   * control offered by an ERROR STATE deleted the draft and every
+   * strategy_keys member under it, with no way back.
+   *
+   * That mattered the moment `/api/keys/sync`'s 404 arm gained a name. Before
+   * the transport-error split above it, a Supabase blip during our own outage
+   * rendered "your draft is gone" — whose only actionable control is
+   * `start_fresh` — over an INTACT draft. Landing the code without both this
+   * confirmation and that split is the exact change that trips the trap, which
+   * is why they shipped as one commit.
+   *
+   * This opens the dialog and does nothing else. In particular it no longer
+   * hides the resume banner up front: if the user cancels, the draft is intact
+   * and "Resume draft" must still be there. The banner is dismissed by
+   * `handleDeleteDraft` on a CONFIRMED delete instead, so the banner's
+   * lifetime tracks the draft's.
+   *
+   * NOT touched, deliberately: the two paths whose comments state that a
+   * delete IS intended — `onTryAnotherKey`'s fire-and-forget
+   * `void handleDeleteDraft()` (discarding a draft holding a REJECTED key,
+   * with the idempotency token regenerated first) and the confirm dialog's own
+   * danger button.
+   */
+  const handleStartFresh = useCallback(() => {
+    setConfirmDelete(true);
+  }, []);
 
   const requestCallLocation: CtaLocation =
     `wizard_step_${STEP_INDEX[step]}` as CtaLocation;

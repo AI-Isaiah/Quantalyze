@@ -10,6 +10,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -58,8 +59,20 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
   const { strategy_id } = body;
 
+  // ── Phase 140.3-10 / SEAMUX-03 — a machine code on EVERY arm ──────────
+  // Every non-2xx this route emits now carries a `code`, so a consumer
+  // discriminates on a stable token instead of sniffing the prose. Prose is
+  // 140.3-12's to reword; a client branching on it breaks the day it does.
+  // The codes are chosen so each names the fact that is actually true of its
+  // own arm — a missing id, a malformed id, our own throttle, an unknowable
+  // composite membership, a failed enqueue, a Supabase transport fault and an
+  // absent draft are seven different facts, and collapsing them onto one token
+  // would leave the consumer exactly where it started.
   if (!strategy_id || typeof strategy_id !== "string") {
-    return NextResponse.json({ error: "Missing strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Missing strategy_id", code: "MISSING_STRATEGY_ID" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (code-review): reject a malformed strategy_id BEFORE it becomes the
@@ -68,7 +81,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // fresh allowance + an ownership SELECT) from arbitrary strings. A
   // valid-but-unowned id still gets the uniform 404 below (P458, no existence leak).
   if (!isUuid(strategy_id)) {
-    return NextResponse.json({ error: "Invalid strategy_id" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json(
+      { error: "Invalid strategy_id", code: "INVALID_STRATEGY_ID" },
+      { status: 400, headers: NO_STORE_HEADERS },
+    );
   }
 
   // F6 (M-0327/H-0279): two-tier rate limit.
@@ -83,10 +99,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // A per-user-ONLY bucket (the pre-F6 `keys-sync:${user.id}`) had the
   // starvation + cross-strategy-burn problem; a per-strategy-ONLY bucket
   // removed the per-user ceiling. Both together close both holes.
+  //
+  // ⚠️ 140.3-10 — THE TWO THROTTLE ARMS BELOW ARE TWO DISTINCT SITES emitting
+  // the same sentence. A grep of the string finds them both, but a "fix the
+  // arm" reading treats them as one and leaves the second codeless. They carry
+  // the SAME code deliberately: to the caller both are the one fact "our own
+  // limiter refused this request, here is how long to wait", and which BUCKET
+  // ran out is our internal accounting, not something the caller can act on
+  // differently. `RATE_LIMITED` is the app-global vocabulary's own name for
+  // exactly that fact (see WizardErrorCode's note: OUR limiter, as opposed to
+  // KEY_RATE_LIMIT which is an EXCHANGE throttle) — reusing it here keeps one
+  // token for one fact across the seam instead of minting a route-local
+  // synonym. Each site is pinned by its own case, driven through its own
+  // bucket key with its own wait, so a code dropped from one does not hide
+  // behind the other's assertion.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "RATE_LIMITED" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
     );
   }
@@ -96,7 +126,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   );
   if (!rl.success) {
     return NextResponse.json(
-      { error: "Too many requests" },
+      { error: "Too many requests", code: "RATE_LIMITED" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
@@ -104,7 +134,21 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Verify ownership via the user-scoped client so we get a clean
   // 403 before ever reaching the Railway pipeline.
   const supabase = await createClient();
-  const { data: strategy } = await supabase
+  // ⚠️ 140.3-10 / TRAP-3 (LIVE, not hypothetical) — this read used to be
+  // `.single()` destructured as `const { data: strategy } =`, DISCARDING
+  // `error`. `.single()` answers `data: null` for three different facts: no
+  // such row, a row this user does not own, AND a transport/query failure. The
+  // old code folded all three into "Strategy not found" — so a Supabase blip
+  // DURING OUR OWN OUTAGE told the user their draft was gone, and the state
+  // that names is the one whose way forward is to throw the draft away. Naming
+  // a vague error arm is what turns it into a specific lie.
+  //
+  // The split copies the in-tree template at
+  // `strategies/finalize-wizard/route.ts:624-646` verbatim in shape:
+  // `.maybeSingle()`, then the transport error first (a 500 ABOUT US, with the
+  // caught value scrubbed through the shipped `scrubSeamError` — never a
+  // hand-rolled scrub), then the genuinely-absent row.
+  const { data: strategy, error: strategyErr } = await supabase
     .from("strategies")
     // 89-02: api_key_id joins the ownership select so the composite-first
     // branch below can gate on api_key_id === null with ZERO extra queries for
@@ -112,7 +156,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .select("id, user_id, api_key_id")
     .eq("id", strategy_id)
     .eq("user_id", user.id)
-    .single();
+    .maybeSingle();
+
+  if (strategyErr) {
+    console.error(
+      `[keys/sync] strategy lookup failed for ${strategy_id}:`,
+      scrubSeamError(strategyErr),
+    );
+    return NextResponse.json(
+      { error: "Could not load draft", code: "DRAFT_LOOKUP_FAILED" },
+      { status: 500, headers: NO_STORE_HEADERS },
+    );
+  }
 
   if (!strategy) {
     // P458 (audit-2026-05-07): uniform 404 for both "no such strategy" AND
@@ -121,8 +176,18 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // 403-unowned from 404-not-found. Now there is no asymmetry: an
     // attacker probing a foreign strategy_id and an attacker probing a
     // random uuid both see the same response shape.
+    //
+    // ⚠️ 140.3-10 — THE SPLIT ABOVE MUST NOT WEAKEN THIS. Both facts still
+    // reach THIS line and produce a byte-identical body, status and header
+    // set; the only thing pulled out is the transport failure, which is a
+    // statement about US and was never a statement about the strategy. Adding
+    // any response difference between not-found and not-owned here re-opens
+    // the enumeration hole. Pinned by a dedicated byte-identity case.
+    //
+    // The code is `GATE_DRAFT_GONE`, the same token `finalize-wizard` already
+    // emits for the same fact — one fact, one token across both routes.
     return NextResponse.json(
-      { error: "Strategy not found" },
+      { error: "Strategy not found", code: "GATE_DRAFT_GONE" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -156,8 +221,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         `[keys/sync] composite membership probe failed for ${strategy_id}:`,
         err,
       );
+      // 140.3-10 — `COMPOSITE_MEMBERSHIP_UNKNOWN` is the EXISTING wizard code
+      // for precisely this fail-closed: finalize-wizard already emits it from
+      // its mirror of this probe. This route was the straggler emitting the
+      // same 503 codeless, so the identical fact carried a token on one route
+      // and nothing on the other.
       return NextResponse.json(
-        { error: "Could not start sync. Try again in a moment." },
+        {
+          error: "Could not start sync. Try again in a moment.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
         { status: 503, headers: NO_STORE_HEADERS },
       );
     }
@@ -218,8 +291,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           `[keys/sync] enqueue_compute_job (stitch_composite) RPC failed for ${strategy_id}:`,
           rpcError,
         );
+        // 140.3-10 — a DISTINCT fact from the membership fail-closed above:
+        // membership was known, the enqueue itself failed. Same sentence, same
+        // status, different cause, so a different token.
         return NextResponse.json(
-          { error: "Could not start sync. Try again in a moment." },
+          {
+            error: "Could not start sync. Try again in a moment.",
+            code: "SYNC_KICKOFF_FAILED",
+          },
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }

@@ -11,7 +11,14 @@
  *       silent "use loaded step"), and Resume fires wizard_resume;
  *   plus the wizard_start telemetry gating on `hydrated`.
  */
-import { render, screen, fireEvent, act, waitFor } from "@testing-library/react";
+import {
+  render,
+  screen,
+  fireEvent,
+  act,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // --- Navigation ---
@@ -817,5 +824,157 @@ describe("[110-03] WizardClient — contribution-mode terminal paths", () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(pushMock).not.toHaveBeenCalled();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.3-10 / TRAP-4 — a destructive control is never one click away
+// from an error state.
+//
+// `start_fresh` is the only actionable control on `GATE_DRAFT_GONE`, and
+// `/api/keys/sync`'s 404 arm has just been given that name. Before this plan
+// `handleStartFresh` called `handleDeleteDraft()` DIRECTLY — so the control an
+// error state offers was strictly more dangerous than the chrome's
+// Delete-draft button one component away, which has always gone through a
+// confirm dialog.
+//
+// ⚠️ THESE ARE THE FALSIFIERS FOR THE GUARD. Deleting the confirmation (i.e.
+// restoring `await handleDeleteDraft()` in `handleStartFresh`) must redden
+// them — a guard nobody can falsify is not a guard. Observed as M66b.
+//
+// jsdom implements neither HTMLDialogElement.showModal() nor .close(); the
+// stubs below are the repo's existing pattern (Modal.test.tsx:23-39). They
+// also make `dialog.open` the observable, which matters: the Modal renders its
+// title into the DOM whether or not it is open, so asserting on the TEXT would
+// pass with the dialog shut and is not an oracle.
+// ══════════════════════════════════════════════════════════════════════════
+if (typeof HTMLDialogElement !== "undefined") {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+      (this as unknown as { open: boolean }).open = true;
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+      (this as unknown as { open: boolean }).open = false;
+    };
+  }
+}
+
+describe("[140.3-10 / TRAP-4] Start fresh is confirmed before it destroys anything", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function draftDeletes(spy: ReturnType<typeof vi.spyOn>) {
+    return (spy.mock.calls as unknown[][]).filter(
+      (c) =>
+        String(c[0]).includes("/api/strategies/draft/draft-1") &&
+        (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+  }
+
+  /** The confirm dialog's OPEN state — not merely its presence in the DOM. */
+  function confirmDialogIsOpen(): boolean {
+    const dialog = screen
+      .getByText(/Delete this draft\?/i)
+      .closest("dialog") as HTMLDialogElement | null;
+    return Boolean(dialog?.hasAttribute("open"));
+  }
+
+  it("clicking Start fresh DELETES NOTHING — it opens the confirm dialog", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+    fireEvent.click(await screen.findByTestId("wizard-start-fresh"));
+
+    // The dialog the chrome's Delete-draft button already used.
+    await waitFor(() =>
+      expect(
+        confirmDialogIsOpen(),
+        "An error state's own control must not be able to destroy a draft in " +
+          "one click when the equivalent chrome button asks first.",
+      ).toBe(true),
+    );
+
+    expect(
+      draftDeletes(fetchSpy),
+      "Nothing may be destroyed before the user confirms.",
+    ).toHaveLength(0);
+    expect(clearWizardStateMock).not.toHaveBeenCalled();
+  });
+
+  it("cancelling leaves the draft AND the way back to it intact", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+    fireEvent.click(await screen.findByTestId("wizard-start-fresh"));
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
+
+    fireEvent.click(screen.getByText("Cancel"));
+
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(false));
+    expect(draftDeletes(fetchSpy)).toHaveLength(0);
+    // The old handler hid the resume banner UP FRONT, before the delete. With
+    // the confirmation added, doing that would strand a user who cancels: the
+    // draft still exists and Resume would be gone. The banner's lifetime now
+    // tracks the DRAFT's, not the button click's.
+    expect(
+      screen.getByTestId("wizard-resume"),
+      "Cancelling must leave the user exactly where they were.",
+    ).toBeInTheDocument();
+  });
+
+  it("confirming DOES delete — the affordance still works, it just asks first", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+    fireEvent.click(await screen.findByTestId("wizard-start-fresh"));
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
+
+    // Scoped to the DIALOG: the chrome's own "Delete draft" trigger carries
+    // the same label, and a bare getByText would be ambiguous — and would
+    // silently start clicking the wrong control the day one of them moves.
+    const dialog = screen
+      .getByText(/Delete this draft\?/i)
+      .closest("dialog") as HTMLDialogElement;
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete draft" }),
+    );
+
+    await waitFor(() => expect(draftDeletes(fetchSpy)).toHaveLength(1));
+    // And the resume banner is dismissed on the CONFIRMED delete, so it never
+    // offers to resume a draft that no longer exists.
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-resume")).toBeNull(),
+    );
+  });
+
+  it("ANTI-REGRESSION — the INTENTIONAL delete path is untouched and still deletes", async () => {
+    // `onTryAnotherKey` discards a draft holding a REJECTED key, and its
+    // in-file comment says so. Routing it through the dialog too would have
+    // been the over-correction; this pins that it was not.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+    fireEvent.click(await screen.findByTestId("sync-try-another"));
+
+    await waitFor(() => expect(draftDeletes(fetchSpy)).toHaveLength(1));
+    // No dialog was interposed on this path.
+    expect(confirmDialogIsOpen()).toBe(false);
   });
 });
