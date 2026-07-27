@@ -271,6 +271,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       api_key,
       apiSecretNormalized,
       passphraseOrNull ?? undefined,
+      // TS-04 / SC7 — the SERVER-derived identity from withAuth's session, so
+      // the Python limiter buckets this call to this tenant. Never a body field.
+      { userId: user.id },
     );
 
     if (!validation.read_only) {
@@ -306,6 +309,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       api_key,
       apiSecretNormalized,
       passphraseOrNull ?? undefined,
+      // TS-04 / SC7 — same server-derived identity. Key-connect spends TWO
+      // tokens per attempt, so both halves must land in the same tenant bucket.
+      { userId: user.id },
     );
 
     // Railway returns the encrypted payload using DB-native column

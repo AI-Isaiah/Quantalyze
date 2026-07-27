@@ -25,11 +25,25 @@ vi.mock("next/headers", () => ({
 const UUID_V4_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * Phase 140.2-09 / TS-04 — every call through the REAL client now needs a
+ * server-derived tenant identity AND an `INTERNAL_API_TOKEN`, because
+ * `analyticsRequest` mints an `X-Tenant-Claim` and REFUSES rather than silently
+ * emitting no header (which would leave the route on a platform-wide bucket).
+ * These two constants keep that plumbing out of the assertions in suites whose
+ * subject is something else entirely.
+ */
+const TENANT = { userId: "user-under-test" } as const;
+const INTERNAL_TOKEN_FOR_TESTS = "internal-token-under-test";
+
 describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
   beforeEach(() => {
     headersGetMock.mockReset();
     headersGetMock.mockImplementation(() => null);
     vi.resetModules();
+    // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
+    // REFUSES on absence, so every call through the real client needs one.
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -61,6 +75,9 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
           // site's row in SEAM_BUDGETS, which now owns every deadline.
           options: {
             budgetKey: string;
+            // 140.2-09 / TS-04: REQUIRED — every call site must name the
+            // server-derived tenant the X-Tenant-Claim is minted over.
+            tenantId: string;
             timeoutMs?: number;
             method?: string;
             correlationId?: string;
@@ -70,6 +87,7 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
       const internal = mod as unknown as Internal;
       return internal.__INTERNAL_analyticsRequest("/test", { ping: 1 }, {
         budgetKey: "validate-key",
+        tenantId: TENANT.userId,
         ...options,
       });
     }
@@ -216,6 +234,9 @@ describe("Phase 16 / OBSERV-01 correlation_id propagation", () => {
 describe("AnalyticsUpstreamError", () => {
   beforeEach(() => {
     vi.resetModules();
+    // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
+    // REFUSES on absence, so every call through the real client needs one.
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -233,13 +254,13 @@ describe("AnalyticsUpstreamError", () => {
       __INTERNAL_analyticsRequest: (
         path: string,
         body: Record<string, unknown> | null,
-        options: { budgetKey: string },
+        options: { budgetKey: string; tenantId: string },
       ) => Promise<unknown>;
     };
     return (mod as unknown as Internal).__INTERNAL_analyticsRequest(
       "/test",
       { ping: 1 },
-      { budgetKey: "validate-key" },
+      { budgetKey: "validate-key", tenantId: TENANT.userId },
     );
   }
 
@@ -419,6 +440,9 @@ describe("AnalyticsUpstreamError", () => {
 describe("[SEAMCORE-02] analytics-client maps a body-read failure onto its own taxonomy", () => {
   beforeEach(() => {
     vi.resetModules();
+    // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
+    // REFUSES on absence, so every call through the real client needs one.
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -452,13 +476,13 @@ describe("[SEAMCORE-02] analytics-client maps a body-read failure onto its own t
       __INTERNAL_analyticsRequest: (
         path: string,
         body: Record<string, unknown> | null,
-        options: { budgetKey: string },
+        options: { budgetKey: string; tenantId: string },
       ) => Promise<unknown>;
     };
     return (mod as unknown as Internal).__INTERNAL_analyticsRequest(
       "/test",
       { ping: 1 },
-      { budgetKey: "validate-key" },
+      { budgetKey: "validate-key", tenantId: TENANT.userId },
     );
   }
 
@@ -544,6 +568,11 @@ describe("[SEAMCORE-02] analytics-client maps a body-read failure onto its own t
 // the trimmed value is what actually hits the wire, so validate and encrypt
 // normalise identically (stored ciphertext == validated credential).
 describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whitespace", () => {
+  beforeEach(() => {
+    // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
+    // REFUSES on absence, so every call through the real client needs one.
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
   afterEach(() => vi.restoreAllMocks());
 
   async function okFetch(json: Record<string, unknown>) {
@@ -567,7 +596,7 @@ describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whites
   it("validateKey trims a trailing space+newline off key and secret before the wire", async () => {
     const fetchMock = await okFetch({ valid: true, read_only: true });
     const mod = await import("./analytics-client");
-    await mod.validateKey("deribit", "  GeSKFf5E ", "secret-value\n");
+    await mod.validateKey("deribit", "  GeSKFf5E ", "secret-value\n", undefined, TENANT);
     const body = sentBody(fetchMock);
     expect(body.api_key).toBe("GeSKFf5E");
     expect(body.api_secret).toBe("secret-value");
@@ -583,7 +612,7 @@ describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whites
       kek_version: 1,
     });
     const mod = await import("./analytics-client");
-    await mod.encryptKey("deribit", " GeSKFf5E\t", " secret-value ");
+    await mod.encryptKey("deribit", " GeSKFf5E\t", " secret-value ", undefined, TENANT);
     const body = sentBody(fetchMock);
     expect(body.api_key).toBe("GeSKFf5E");
     expect(body.api_secret).toBe("secret-value");
@@ -592,7 +621,7 @@ describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whites
   it("does NOT trim the OKX passphrase (user-chosen, whitespace may be significant)", async () => {
     const fetchMock = await okFetch({ valid: true, read_only: true });
     const mod = await import("./analytics-client");
-    await mod.validateKey("okx", " k ", " s ", " pass phrase ");
+    await mod.validateKey("okx", " k ", " s ", " pass phrase ", TENANT);
     const body = sentBody(fetchMock);
     expect(body.api_key).toBe("k");
     expect(body.passphrase).toBe(" pass phrase ");
@@ -630,6 +659,8 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
       body: Record<string, unknown> | null,
       options: {
         budgetKey: string;
+        // 140.2-09 / TS-04: REQUIRED — see analytics-client's options doc.
+        tenantId: string;
         timeoutMs?: number;
         method?: string;
         correlationId?: string;
@@ -639,6 +670,10 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
 
   beforeEach(() => {
     vi.resetModules();
+    // 140.2-09 / TS-04: the mint reads INTERNAL_API_TOKEN at CALL time and
+    // REFUSES on absence, so every call through the real client needs one. Set
+    // per-describe rather than globally, so the absence case stays observable.
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
   });
 
   afterEach(() => {
@@ -660,7 +695,7 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
       await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
         "/test",
         { ping: 1 },
-        { budgetKey: "bridge" },
+        { budgetKey: "bridge", tenantId: TENANT.userId },
       );
     } catch (e) {
       caught = e;
@@ -681,7 +716,7 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
       await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
         "/test",
         { ping: 1 },
-        { budgetKey: "bridge" },
+        { budgetKey: "bridge", tenantId: TENANT.userId },
       );
     } catch (e) {
       caught = e;
@@ -715,7 +750,7 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
       await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
         "/test",
         { ping: 1 },
-        { budgetKey: "validate-key" },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
       );
     } catch (e) {
       caught = e;
@@ -736,7 +771,7 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
       await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
         "/test",
         { ping: 1 },
-        { budgetKey: "validate-key" },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
       );
     } catch (e) {
       caught = e;

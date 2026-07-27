@@ -106,6 +106,14 @@ vi.mock("@/lib/resilient-fetch", async (importOriginal) => {
 
 const ORIGINAL_ENV = { ...process.env };
 
+/**
+ * Phase 140.2-09 / TS-04 — the three wrappers that gained a server-derived
+ * tenant identity need one here too. This file's subject is the budget-key
+ * binding, not the claim (`analytics-client.test.ts` owns that), so a single
+ * shared literal keeps the pins readable.
+ */
+const WIRING_TENANT = { userId: "wiring-tenant" } as const;
+
 const SERVICE_KEY = "svc-key-from-env";
 const INTERNAL_TOKEN = "internal-token-from-env";
 
@@ -176,7 +184,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
   it("validateKey delegates to the core once, with the validate-key budget", async () => {
     const { validateKey } = await import("@/lib/analytics-client");
 
-    await validateKey("deribit", "k", "s");
+    await validateKey("deribit", "k", "s", undefined, WIRING_TENANT);
 
     expect(coreSpy).toHaveBeenCalledTimes(1);
     const { budgetKey, path } = coreCall(0);
@@ -188,7 +196,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
   it("validateKey forwards X-Service-Key byte-for-byte through the core", async () => {
     const { validateKey } = await import("@/lib/analytics-client");
 
-    await validateKey("deribit", "k", "s");
+    await validateKey("deribit", "k", "s", undefined, WIRING_TENANT);
 
     const { headers } = coreCall(0);
     expect(headers["X-Service-Key"]).toBe(SERVICE_KEY);
@@ -235,7 +243,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
     const { validateKey } = await import("@/lib/analytics-client");
     const { postProcessKey } = await import("@/lib/process-key-client");
 
-    await validateKey("deribit", "k", "s");
+    await validateKey("deribit", "k", "s", undefined, WIRING_TENANT);
     await postProcessKey({
       flow_type: "resync",
       source: "test",
@@ -310,21 +318,21 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       wrapper: "validateKey",
       budgetKey: "validate-key",
       path: "/api/validate-key",
-      invoke: (m) => m.validateKey("deribit", "k", "s"),
+      invoke: (m) => m.validateKey("deribit", "k", "s", undefined, WIRING_TENANT),
     },
     {
       binding: "B-02",
       wrapper: "encryptKey",
       budgetKey: "encrypt-key",
       path: "/api/encrypt-key",
-      invoke: (m) => m.encryptKey("deribit", "k", "s"),
+      invoke: (m) => m.encryptKey("deribit", "k", "s", undefined, WIRING_TENANT),
     },
     {
       binding: "B-03",
       wrapper: "optimizeScenarioWeights",
       budgetKey: "optimize-weights",
       path: "/api/optimize-weights",
-      invoke: (m) => m.optimizeScenarioWeights({}, "min_vol"),
+      invoke: (m) => m.optimizeScenarioWeights({}, "min_vol", WIRING_TENANT),
     },
     {
       // ZERO production callers today (VALIDATION §7.5 / M-5: latent, not
@@ -375,7 +383,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       wrapper: "evalMatch",
       budgetKey: "match-eval",
       path: "/api/match/eval?lookback_days=30",
-      invoke: (m) => m.evalMatch({ lookback_days: "30" }),
+      invoke: (m) => m.evalMatch({ lookback_days: "30" }, WIRING_TENANT),
     },
   ];
 

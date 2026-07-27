@@ -66,6 +66,34 @@ const TENANT_CLAIM_TTL_SECONDS = 300;
  * degradation these guards exist to prevent. (Both call sites mint OUTSIDE their
  * transport `try` for the same reason.)
  */
+/**
+ * A SERVER-DERIVED tenant identity, threaded from a route handler to a seam
+ * wrapper so the wrapper can mint a claim over it.
+ *
+ * WHY AN OBJECT AND NOT A BARE `userId: string`. On `validateKey` / `encryptKey`
+ * the identity parameter sits directly beside `passphrase` — two adjacent
+ * `string`s where a transposition compiles cleanly and mints the claim over a
+ * USER-CHOSEN SECRET: a credential in an outbound header, and every caller
+ * silently sharing one bucket keyed on it. That is threat T-140.2-09-02 with the
+ * compiler unable to help. A one-field object cannot be confused with a
+ * credential, so the mistake becomes a type error instead of a leak.
+ *
+ * The three wrappers that already carried an identity before this phase
+ * (`runPortfolioOptimizer`, `findReplacementCandidates`,
+ * `computePortfolioAnalytics`, plus `recomputeMatch` / `simulateAddCandidate`)
+ * keep their existing `actorId` / `userId` string parameters — those are
+ * pre-existing signatures with no adjacent secret, and churning them would be
+ * scope creep.
+ */
+export interface TenantIdentity {
+  /**
+   * The authenticated `user.id` from the route's server session — never a
+   * value the caller supplied, and never `X-User-Id` (which is unsigned client
+   * input the Python limiter deliberately ignores).
+   */
+  readonly userId: string;
+}
+
 export class TenantClaimError extends Error {
   constructor(message: string) {
     super(message);

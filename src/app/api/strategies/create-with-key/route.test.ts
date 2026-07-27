@@ -478,8 +478,8 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     // Proves 119-01's SUPPORTED_EXCHANGES wiring (not just the constant): had the
     // :47 gate rejected sfox we'd see 400 "Unsupported exchange" here. The absent
     // secret is normalized to "" and passed through the SAME funnel the ccxt path uses.
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   it.each([
@@ -494,7 +494,7 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   // WR-01: mixed-case sfox is handled IDENTICALLY to the validate-and-encrypt
@@ -507,8 +507,8 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
       const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
 
       expect(res.status).toBe(200);
-      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
       const [, rpcArgs] = rpcMock.mock.calls[0];
       expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
     },
@@ -718,6 +718,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
       "500123456",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
     const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
     expect(rpcName).toBe("create_wizard_strategy");
@@ -772,6 +773,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
       "500123",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
   });
 

@@ -63,10 +63,16 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const partnerTag = url.searchParams.get("partner_tag") ?? undefined;
 
   try {
-    const data = await evalMatch({
-      lookback_days: lookback,
-      partner_tag: partnerTag,
-    });
+    const data = await evalMatch(
+      {
+        lookback_days: lookback,
+        partner_tag: partnerTag,
+      },
+      // TS-04 / SC7 — INERT today (/api/match/eval has no Python limiter at
+      // all, TS-21), but threaded anyway: leaving the one wrapper without an
+      // identity is what would have let `tenantId` stay optional.
+      { userId: user.id },
+    );
     return NextResponse.json(data, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Phase 140 / SEAM-04 — typed arms BEFORE the generic one.

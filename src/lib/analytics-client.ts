@@ -18,6 +18,7 @@ import {
 } from "./resilient-fetch";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { scrubSeamString } from "./seam-redaction";
+import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
 
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
@@ -120,6 +121,8 @@ function mapBodyReadFailure(err: unknown, path: string, timeoutMs: number): neve
  * @param body    - JSON body to POST
  * @param options - `budgetKey` is REQUIRED: it names this call site's row in
  *                  `SEAM_BUDGETS`, which is the single owner of its deadline.
+ *                  `tenantId` is REQUIRED: it is the server-derived identity the
+ *                  `X-Tenant-Claim` is minted over (see below).
  *                  `timeoutMs` overrides the table for one call — TESTS ONLY
  *                  since 140-05 removed the last production override (the
  *                  optimizer route's legacy constant). `method` defaults to
@@ -130,6 +133,20 @@ async function analyticsRequest(
   body: Record<string, unknown> | null,
   options: {
     budgetKey: SeamBudgetKey;
+    /**
+     * Phase 140.2-09 / TS-04 — REQUIRED, and required ON PURPOSE.
+     *
+     * Every one of the nine wrappers must decide what its tenant payload is.
+     * Making this optional would let a tenth wrapper be added with no identity
+     * and land silently in a platform-wide bucket — the instance-not-class
+     * defect this programme exists to close, and one that no test which only
+     * checks the wrappers it knows about could ever see.
+     *
+     * MUST be server-derived (`user.id` from the authenticated session). It
+     * reaches the Python limiter's key as `<scope>:t:<tenantId>` VERBATIM, so a
+     * caller who controls it controls which window they spend.
+     */
+    tenantId: string;
     timeoutMs?: number;
     method?: string;
     correlationId?: string;
@@ -146,6 +163,46 @@ async function analyticsRequest(
   // FastAPI side has a stable join key.
   const correlationId = options.correlationId ?? crypto.randomUUID();
 
+  /**
+   * Phase 140.2-09 / TS-04 / ROADMAP SC7 — the signed tenant identity the
+   * Python rate limiter buckets on.
+   *
+   * Until this landed, `tenant_or_platform_key` saw no claim on any call from
+   * this client and returned `platform:<path>` — a platform-WIDE window per
+   * route. The sharpest is `/api/optimize-weights` at 20/minute, where two
+   * allocators running Scenario Composer could 429 each other.
+   *
+   * ⚠️ READ AT CALL TIME, NOT AT MODULE SCOPE. `SERVICE_KEY` above is captured
+   * at module scope, which is the env-before-import ordering hazard
+   * `resilient-fetch.wiring.test.ts` documents in its header: a test that sets
+   * the env after a static import gets an empty string. Here the failure mode is
+   * strictly worse — an empty secret still produces a SYNTACTICALLY VALID claim
+   * that simply fails `compare_digest`, so every route silently falls back to
+   * `platform:<path>` with no error anywhere and SC7 no-ops in production while
+   * the whole suite stays green. `mintTenantClaim` refuses instead.
+   *
+   * ⚠️ MINTED BEFORE THE `try`, DELIBERATELY. Inside it, a `TenantClaimError`
+   * would be caught by the arms below and rewritten as "Analytics service is not
+   * reachable" — a configuration fault on our side reported as a dead upstream,
+   * which is the exact silent degradation the refusal exists to prevent.
+   *
+   * ⚠️ THE CLAIM IS INERT ON THREE PATHS AND THAT IS FINE. `/api/match/recompute`
+   * and `/api/match/eval` have NO Python limiter at all (TS-21, owned by Phase
+   * 146) and `/api/simulator` is the tenth, still-IP-keyed route (TS-30,
+   * quarantined). Sending a claim there is harmless and forward-compatible — the
+   * moment those routes gain a `tenant_or_platform_key` limiter they are
+   * per-tenant with zero TS work. Do NOT "optimise" it away by special-casing
+   * them: eight of nine is how this defect class comes back.
+   *
+   * No `X-User-Id` is added anywhere. It is unsigned client input, and
+   * `verify_tenant_claim` exists precisely because it cannot be trusted to
+   * select a bucket.
+   */
+  const tenantClaim = mintTenantClaim(
+    options.tenantId,
+    process.env.INTERNAL_API_TOKEN ?? "",
+  );
+
   // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
   // run inside its classification window. The surface is the closed set this
   // function already used (`ok`, `status`, `statusText`, `headers.get`, `json`,
@@ -161,6 +218,8 @@ async function analyticsRequest(
         "X-Api-Version": ANALYTICS_API_VERSION,
         "X-Correlation-Id": correlationId,
         ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
+        // TS-04 / SC7 — minted above; see the tenantClaim block.
+        "X-Tenant-Claim": tenantClaim,
       },
       ...(body !== null && { body: JSON.stringify(body) }),
       ...(options.timeoutMs !== undefined && {
@@ -307,7 +366,26 @@ function trimCredential(value: string): string {
   return value.trim();
 }
 
-export async function validateKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
+/**
+ * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED and must be server-derived.
+ *
+ * It is an object rather than a fifth bare `string` because a bare string would
+ * sit directly beside `passphrase`, and a transposition would compile cleanly
+ * while minting the tenant claim over a USER-CHOSEN SECRET — a credential in an
+ * outbound header, and every caller collapsed into one bucket keyed on it.
+ * Threat T-140.2-09-02, made a type error instead of a leak.
+ *
+ * All three callers (`strategies/create-with-key`, `strategies/composite/add-key`,
+ * `keys/validate-and-encrypt`) are `withAuth(async (req, user) => …)` and pass
+ * `user.id` from the authenticated server session.
+ */
+export async function validateKey(
+  exchange: string,
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string | undefined,
+  tenant: TenantIdentity,
+) {
   const data = await analyticsRequest(
     "/api/validate-key",
     {
@@ -316,12 +394,19 @@ export async function validateKey(exchange: string, apiKey: string, apiSecret: s
       api_secret: trimCredential(apiSecret),
       passphrase: passphrase ?? null,
     },
-    { budgetKey: "validate-key" },
+    { budgetKey: "validate-key", tenantId: tenant.userId },
   );
   return parseResponse(ValidateKeyResponseSchema, data, "/api/validate-key");
 }
 
-export async function encryptKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
+/** See `validateKey` for why `tenant` is an object and where it comes from. */
+export async function encryptKey(
+  exchange: string,
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string | undefined,
+  tenant: TenantIdentity,
+) {
   const data = await analyticsRequest(
     "/api/encrypt-key",
     {
@@ -330,7 +415,7 @@ export async function encryptKey(exchange: string, apiKey: string, apiSecret: st
       api_secret: trimCredential(apiSecret),
       passphrase: passphrase ?? null,
     },
-    { budgetKey: "encrypt-key" },
+    { budgetKey: "encrypt-key", tenantId: tenant.userId },
   );
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
 }
@@ -342,15 +427,24 @@ export async function encryptKey(exchange: string, apiKey: string, apiSecret: st
  * caller's own series. Returns `weights: null` on a degenerate / under-sampled
  * input (the UI renders the honest empty state) — never a fabricated vector.
  * The weights are fit IN-SAMPLE (`in_sample: true`); the UI discloses that.
+ *
+ * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED and server-derived
+ * (`scenario/optimize` passes `user.id`). This is the SHARPEST of the five live
+ * flips: `/api/optimize-weights` is limited at 20/minute, which was a PLATFORM
+ * ceiling until the claim appeared — two allocators running Scenario Composer
+ * concurrently could 429 each other. (The per-tenant VALUE may now be wrong in
+ * the other direction; auditing limits after the flip rather than before is
+ * TS-22, owned by Phase 146.)
  */
 export async function optimizeScenarioWeights(
   series: Record<string, Array<{ date: string; value: number }>>,
   objective: "min_vol" | "max_sharpe",
+  tenant: TenantIdentity,
 ): Promise<OptimizeWeightsResponse> {
   const data = await analyticsRequest(
     "/api/optimize-weights",
     { series, objective },
-    { budgetKey: "optimize-weights" },
+    { budgetKey: "optimize-weights", tenantId: tenant.userId },
   );
   return parseResponse(OptimizeWeightsResponseSchema, data, "/api/optimize-weights");
 }
@@ -381,7 +475,10 @@ export async function computePortfolioAnalytics(
       portfolio_id: portfolioId,
       user_id: actorId,
     },
-    { budgetKey: "portfolio-analytics" },
+    // TS-04: `actorId` is already the server-derived authenticated user id, so
+    // this wrapper needed no signature change — it just had to stop being the
+    // one member of the class that did not mint.
+    { budgetKey: "portfolio-analytics", tenantId: actorId },
   );
   return parseResponse(PortfolioAnalyticsResponseSchema, data, "/api/portfolio-analytics");
 }
@@ -395,7 +492,8 @@ export async function runPortfolioOptimizer(portfolioId: string, actorId: string
     // passing its legacy `OPTIMIZER_TIMEOUT_MS = 15_000`; 140-05 deleted that
     // route-local constant (the only caller), so the parameter went with it.
     // The deadline now has exactly ONE owner: the row below.
-    { budgetKey: "portfolio-optimizer" },
+    // TS-04: `actorId` already carries the server-derived identity.
+    { budgetKey: "portfolio-optimizer", tenantId: actorId },
   );
   return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");
 }
@@ -412,7 +510,8 @@ export async function findReplacementCandidates(
       underperformer_strategy_id: underperformerStrategyId,
       user_id: userId,
     },
-    { budgetKey: "bridge" },
+    // TS-04: `userId` already carries the server-derived identity.
+    { budgetKey: "bridge", tenantId: userId },
   );
   return parseResponse(BridgeResponseSchema, data, "/api/portfolio-bridge");
 }
@@ -437,7 +536,10 @@ export async function simulateAddCandidate(
       candidate_strategy_id: candidateStrategyId,
       user_id: userId,
     },
-    { budgetKey: "simulator" },
+    // TS-04: the claim is INERT here — /api/simulator is the tenth route and is
+    // still IP-keyed (TS-30, quarantined). Sent anyway: harmless, and the route
+    // becomes per-tenant for free the moment the quarantine lifts.
+    { budgetKey: "simulator", tenantId: userId },
   );
   return parseResponse(
     SimulatorResponseSchema,
@@ -473,15 +575,31 @@ export async function recomputeMatch(
       force,
       actor_id: actorId,
     },
-    { budgetKey: "match-recompute" },
+    // TS-04: INERT — /api/match/recompute has NO Python limiter at all (TS-21,
+    // owned by Phase 146). Sent anyway, for the same reason as the simulator.
+    { budgetKey: "match-recompute", tenantId: actorId },
   );
   return parseResponse(RecomputeMatchResponseSchema, data, "/api/match/recompute");
 }
 
-export async function evalMatch(params: {
-  lookback_days: string;
-  partner_tag?: string;
-}) {
+/**
+ * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED here even though the claim is
+ * INERT: `/api/match/eval` has no Python limiter at all (TS-21, owned by Phase
+ * 146).
+ *
+ * This is the ONE wrapper that had no identity of any kind, and it is exactly
+ * the member a "thread it into the three that need it" reading would have left
+ * behind — after which `analyticsRequest` could not have required `tenantId`,
+ * and a tenth wrapper could have been added with no identity at all. The caller
+ * (`/api/admin/match/eval`) is admin-gated and already holds `user.id`.
+ */
+export async function evalMatch(
+  params: {
+    lookback_days: string;
+    partner_tag?: string;
+  },
+  tenant: TenantIdentity,
+) {
   const qs = new URLSearchParams({ lookback_days: params.lookback_days });
   if (params.partner_tag) qs.set("partner_tag", params.partner_tag);
   // evalMatch has no fixed schema — it returns variable evaluation data.
@@ -489,6 +607,7 @@ export async function evalMatch(params: {
   return analyticsRequest(`/api/match/eval?${qs.toString()}`, null, {
     budgetKey: "match-eval",
     method: "GET",
+    tenantId: tenant.userId,
   });
 }
 

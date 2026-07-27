@@ -156,6 +156,12 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
     process.env.UPSTASH_REDIS_REST_TOKEN = "fake-token";
     process.env.ANALYTICS_SERVICE_URL = ANALYTICS_BASE;
+    // 140.2-09 / TS-04: this file drives the REAL analytics client, which now
+    // mints an X-Tenant-Claim and REFUSES on an absent INTERNAL_API_TOKEN
+    // rather than silently leaving the route on a platform-wide bucket. Without
+    // it every case below 500s at the mint and never reaches the seam arm it
+    // is actually about.
+    process.env.INTERNAL_API_TOKEN = "internal-token-under-test";
     vi.resetModules();
 
     shared.store.clear();

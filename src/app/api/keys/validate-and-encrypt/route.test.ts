@@ -312,8 +312,8 @@ describe("POST /api/keys/validate-and-encrypt", () => {
 
     // validate-then-encrypt ordering: validation runs before encryption
     // (TOCTOU-safe back-to-back) and both received the same credentials.
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
-    expect(mockEncryptKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
+    expect(mockEncryptKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -360,8 +360,8 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     expect(res.status).toBe(200);
     // The absent secret is normalized to "" and flows through the SAME funnel the
     // ccxt path uses — NOT a parallel branch. trimCredential("") === "".
-    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
+    expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
   });
 
   it.each([
@@ -376,7 +376,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
   });
 
   // ── WR-01: mixed-case sfox is handled IDENTICALLY to the sibling routes ──
@@ -392,8 +392,8 @@ describe("POST /api/keys/validate-and-encrypt — sfox api_secret carve-out (SFO
       // accepted it. The empty secret is admitted AND the value forwarded to the
       // worker + stored in the DB is the canonical lowercase 'sfox' (the DB CHECK
       // admits only lowercase 'sfox'), never the raw mixed-case string.
-      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(mockValidateKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
+      expect(mockEncryptKey).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: TEST_USER.id });
     },
   );
 
@@ -502,7 +502,7 @@ describe("POST /api/keys/validate-and-encrypt — sfox server gate (F2, SFOX_ENA
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -568,7 +568,7 @@ describe("POST /api/keys/validate-and-encrypt — mt5 server gate (MT5_ENABLED o
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(200);
-    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp");
+    expect(mockValidateKey).toHaveBeenCalledWith("okx", "okx-api-key", "okx-api-secret", "pp", { userId: TEST_USER.id });
   });
 });
 
@@ -626,12 +626,14 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       "5001234",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
     );
     expect(mockEncryptKey).toHaveBeenCalledWith(
       "mt5",
       "5001234",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
     );
   });
 
@@ -645,6 +647,7 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       "5001234",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: TEST_USER.id },
     );
   });
 });

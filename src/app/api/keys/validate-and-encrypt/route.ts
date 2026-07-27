@@ -160,7 +160,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // /process-key/encrypt endpoint that returns the same envelope shape as
   // legacy encryptKey), restore the flag-gated unified handler below and
   // route through it. Tracked under the unified-encrypt deferred work item.
-  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase });
+  // TS-04 / SC7 — `userId` is threaded into the legacy handler (rather than
+  // re-derived inside it) so the tenant identity provably comes from THIS
+  // route's withAuth session and cannot drift to a body field.
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id });
 });
 
 /**
@@ -249,11 +252,17 @@ async function legacyValidateAndEncryptHandler(args: {
   api_key: string;
   api_secret: string;
   passphrase?: string;
+  /**
+   * TS-04 / SC7 — the caller's authenticated `user.id`, taken from the POST
+   * handler's `withAuth` session. Required, so this dormant-but-live path
+   * cannot be the one member of the class that stays on a platform bucket.
+   */
+  userId: string;
 }): Promise<NextResponse> {
-  const { exchange, api_key, api_secret, passphrase } = args;
+  const { exchange, api_key, api_secret, passphrase, userId } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
-    const validation = await validateKey(exchange, api_key, api_secret, passphrase);
+    const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
     if (!validation.read_only) {
       // DOGFOOD-3: after the Task-1 Python fix, genuine scope rejections and
       // probe failures arrive as curated 4xx details via the F5b forward below
@@ -266,7 +275,7 @@ async function legacyValidateAndEncryptHandler(args: {
       }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
-    const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase);
+    const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase, { userId });
     return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
   } catch (err) {
     // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.

@@ -204,8 +204,12 @@ export async function postProcessKey(
       `[${tag}] refusing to call /process-key — could not mint X-Tenant-Claim`,
       {
         correlation_id: correlationId,
-        // The mint's messages name the variable, never its value.
-        reason: err instanceof Error ? err.message : "unknown",
+        // SEAMCORE-06 — through the redaction leaf, not raw. The mint's own
+        // messages name the env variable and never its value, so nothing is
+        // expected to be scrubbed here; the guard in `seam-log-coverage.test.ts`
+        // is a CLASS guard on this file's log sites, and carving out the one
+        // site whose thrown value "looks safe today" is how the class re-opens.
+        reason: scrubSeamError(err),
       },
     );
     return {
