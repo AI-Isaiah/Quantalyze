@@ -282,7 +282,12 @@ async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (STATUS_CONTRACT.md §5), remapped from 400 by
+    # 140.3-06 at all seven VenueTransientHTTPException sites (C4 here). This arm
+    # is an INFRA/concurrency fault the router's own comment calls "never the
+    # user's key" — so a 400, which accuses the caller's request, was exactly the
+    # mislabelling the `detail` assertion below already guards in the body.
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     assert ei.value.status_code != 500
     # PRE bracket fires right after the first account_info, before the probe.
@@ -343,7 +348,10 @@ async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_rou
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (C5; see the account-mismatch case for the full
+    # rationale). A transient bridge blip is neither the user's key nor a
+    # malformed request.
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     assert ei.value.status_code != 500
     assert "authentication failed" not in ei.value.detail.lower()
@@ -379,7 +387,9 @@ async def test_mt5_probe_timeout_maps_to_network_detail_and_closes(exchange_rout
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (C3; see the account-mismatch case for the full
+    # rationale). A hung upstream bridge is not a malformed caller request.
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     assert ei.value.status_code != 500
     client.close.assert_called_once()

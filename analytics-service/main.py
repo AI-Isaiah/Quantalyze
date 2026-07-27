@@ -561,8 +561,10 @@ app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
 # reach the wire; see services/error_contract.py's VenueTransientHTTPException
 # docstring for the full rationale and the TS-07 negative obligation.
 #
-# Status stays 400. The 400 -> 424 remap is user-invisible while the classifier
-# discards the status, and it is owed as ONE unit with TS-05 (ledger row TS-32).
+# Status is 424 (CALLER'S EXCHANGE, STATUS_CONTRACT.md §5), remapped from 400 by
+# 140.3-06 (ledger row TS-32). This handler is STATUS-AGNOSTIC — it echoes
+# `verdict.status_code` — which is exactly why the remap was body-neutral and
+# needed no change here. Do not reintroduce a hard-coded status.
 #
 # Starlette resolves handlers by walking `type(exc).__mro__`, so this subclass
 # handler wins over FastAPI's default HTTPException handler. That is NOT assumed:
