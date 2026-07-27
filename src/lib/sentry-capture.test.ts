@@ -123,6 +123,34 @@ describe("[SEAMCORE-06] captureToSentry scrubs before it dispatches", () => {
     expect((captured.err as Error).message).not.toContain(EXCHANGE_SECRET);
   });
 
+  it("HI-03: scrubs a SHORT per-request secret before it leaves for a third party", async () => {
+    // ⚠️ SENTRY IS THE SINK THAT MATTERS MOST HERE. The leaf's own docblock
+    // says anything captured LEAVES OUR INFRASTRUCTURE, so "the caller will
+    // remember" is not an acceptable control — and until HI-03 the leaf refused
+    // to redact anything below 12 characters, which is every MT5 login (8-digit
+    // account number) and every short user-chosen OKX passphrase.
+    //
+    // Both literals are hand-typed and both are below that floor.
+    const shortApiKey = "26547876";
+    const shortPassphrase = "hunter";
+    const err = new Error(
+      `upstream rejected api_key=${shortApiKey} passphrase=${shortPassphrase}`,
+    );
+
+    captureToSentry(err, {
+      tags: { route: "api/keys/validate-and-encrypt" },
+      extra: { attempted_key: shortApiKey },
+      secrets: [shortApiKey, shortPassphrase],
+    });
+
+    const captured = await nextCapture();
+    expect((captured.err as Error).message).not.toContain(shortApiKey);
+    expect((captured.err as Error).message).not.toContain(shortPassphrase);
+    // `extra` takes the same leaf, so a value copied into a context field must
+    // not survive either.
+    expect(JSON.stringify(captured.options.extra)).not.toContain(shortApiKey);
+  });
+
   it("scrubs the CAUSE chain rather than attaching it unscrubbed", async () => {
     vi.stubEnv("ANALYTICS_SERVICE_KEY", INTERNAL_TOKEN);
     const inner = new Error(`connect ETIMEDOUT x-service-key ${INTERNAL_TOKEN}`);

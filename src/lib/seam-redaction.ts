@@ -113,18 +113,41 @@ export const SEAM_PRESERVE_TOKENS: readonly string[] = [
 ];
 
 /**
- * The shortest value this leaf will substring-replace.
+ * The shortest ENV-DERIVED value this leaf will substring-replace.
  *
  * 12, and the number is derived rather than picked: the shortest members of the
  * preserve list (`ENOTFOUND`, `ETIMEDOUT`, `EAI_AGAIN`) are 9 characters, so any
  * candidate at or near that length is indistinguishable from prose and applying
- * it can eat a syscall token. Every real credential on this seam is far longer —
+ * it can eat a syscall token. Every env credential on this seam is far longer —
  * a Supabase JWT is ~200 characters, an Upstash REST token ~50, and the
  * internal token is a 32+ character hex string.
  *
+ * ⚠️ IT GOVERNS `SEAM_SECRET_ENV_NAMES` ONLY, AND THAT SCOPE IS THE POINT (HI-03).
+ *
+ * Applying it to a PER-REQUEST secret was a live credential leak. Those values
+ * are USER-OWNED and we do not length-control them:
+ *   · MT5's `api_key` is the account LOGIN NUMBER — 8 digits (`26547876`).
+ *   · OKX / Coinbase passphrases are user-chosen. `validate-and-encrypt`
+ *     validates only `passphrase.trim().length !== 0`, `create-with-key` only
+ *     non-empty and `<= 512`.
+ * Both were therefore refused, and went verbatim to `console.error` AND to
+ * `captureToSentry({ secrets })` — a third party — under a notice advising the
+ * operator to "lengthen the secret", which for a user's own passphrase is not a
+ * remedy anyone can apply.
+ *
+ * An explicitly-passed per-request secret is an ASSERTION by the call site that
+ * this exact byte string is a credential. It is honoured at any length. The
+ * residual is stated rather than hidden: a pathologically short one (a 1-3
+ * character passphrase) will substring-match prose and mangle the line. That is
+ * the deliberate direction — the credential wins over the diagnosis — and the
+ * destroyed-token check below ANNOUNCES the loss rather than shipping a silently
+ * mangled line.
+ *
  * ⚠️ LOWERING THIS IS LEDGER ROW M33. It is the exact mutation that makes a
- * short secret substring-match prose and destroy `ECONNREFUSED`, and the
- * preserve side of `seam-redaction.test.ts` is what reddens.
+ * short ENV secret substring-match prose and destroy `ECONNREFUSED`, and the
+ * preserve side of `seam-redaction.test.ts` is what reddens. Note that raising
+ * it is now the mutation for the OTHER half: per-request cases must stay green
+ * whatever this number is.
  */
 export const MIN_REDACTABLE_SECRET_LENGTH = 12;
 
@@ -176,6 +199,14 @@ interface SecretCandidate {
   /** An env var NAME, or a generic marker for a caller-supplied value. */
   label: string;
   value: string;
+  /**
+   * True when the CALL SITE supplied this value, false when it came from
+   * `SEAM_SECRET_ENV_NAMES`.
+   *
+   * This is the only field `MIN_REDACTABLE_SECRET_LENGTH` is consulted for, and
+   * the distinction is the whole of HI-03 — see the floor's own docblock.
+   */
+  perRequest: boolean;
 }
 
 /** The label used for a caller-supplied secret — never the value, never a name. */
@@ -194,12 +225,12 @@ function collectCandidates(
   for (const name of SEAM_SECRET_ENV_NAMES) {
     const value = process.env[name];
     if (typeof value === "string" && value.length > 0) {
-      candidates.push({ label: name, value });
+      candidates.push({ label: name, value, perRequest: false });
     }
   }
   for (const secret of extraSecrets) {
     if (typeof secret === "string" && secret.length > 0) {
-      candidates.push({ label: PER_REQUEST_LABEL, value: secret });
+      candidates.push({ label: PER_REQUEST_LABEL, value: secret, perRequest: true });
     }
   }
   return candidates;
@@ -247,10 +278,15 @@ export function scrubSeamString(
       // removed this candidate's occurrence, and a notice about a secret that is
       // no longer in the line is noise.
       if (!out.includes(candidate.value)) continue;
-      if (candidate.value.length < MIN_REDACTABLE_SECRET_LENGTH) {
-        // REFUSED. Applying it would substring-match prose. The line is left
-        // alone and the operator is told, because this line may be
-        // under-redacted and that has to be visible from the line itself.
+      if (
+        !candidate.perRequest &&
+        candidate.value.length < MIN_REDACTABLE_SECRET_LENGTH
+      ) {
+        // REFUSED — and ONLY for an ENV candidate (HI-03). Applying a short one
+        // would substring-match prose. The line is left alone and the operator
+        // is told, because this line may be under-redacted and that has to be
+        // visible from the line itself. The remedy the notice prints is one the
+        // operator can actually apply, because the value is ours.
         refused.push(candidate.label);
         continue;
       }
@@ -271,7 +307,7 @@ export function scrubSeamString(
 
     if (refused.length > 0) {
       out +=
-        ` [seam-redaction: refused to redact ${refused.length} value(s) shorter than ` +
+        ` [seam-redaction: refused to redact ${refused.length} env value(s) shorter than ` +
         `${MIN_REDACTABLE_SECRET_LENGTH} chars (${uniqueLabels(refused).join(", ")}) — ` +
         `this line may be under-redacted; lengthen the secret rather than the leaf]`;
     }
