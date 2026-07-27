@@ -154,16 +154,76 @@ export const BREAKER_WINDOW = "30 s" as const;
 /**
  * How long the circuit stays open. Also the `Retry-After` the 503 envelope
  * advertises. 30s is long enough for a Railway pod to finish restarting and
- * short enough that a recovered service is picked back up within one user
- * retry — and because TTL expiry IS the half-open transition, this value is
- * the entire recovery latency of the system.
+ * short enough that a recovered service is picked back up within one user retry.
+ *
+ * ⚠️ THIS IS **NOT** THE RECOVERY LATENCY OF THE SYSTEM, AND THIS DOCBLOCK USED
+ * TO SAY IT WAS. The claim was that because TTL expiry IS the half-open
+ * transition (locked decision 3), 30 s "is the entire recovery latency". That is
+ * false, and it was corrected against MEASUREMENT rather than the other way
+ * round (`140.2-VALIDATION.md` §5).
+ *
+ * The counter is never cleared on a trip — `recordSeamFailure` writes only the
+ * lock — so when the lock expires the previous epoch bucket is still carrying
+ * weight, and whether ONE failure immediately re-trips depends on WHERE in that
+ * bucket the original trip landed. Plan 140.2-01's R-7 case observed both
+ * outcomes against real Redis, from two runs that waited the IDENTICAL 32 s:
+ *
+ *   | trip at position p | carry-over floor((1−p′)·5) | one failure at +32 s |
+ *   |--------------------|---------------------------|----------------------|
+ *   | 0.05               | 4  ⇒ remaining 0          | RE-TRIPS instantly   |
+ *   | 0.50               | 2  ⇒ remaining 2          | does NOT re-trip     |
+ *
+ * **OBSERVED RECOVERY BAND: [30 s, 60 s], alignment-dependent** — that is
+ * `[BREAKER_COOLDOWN_S, BREAKER_COOLDOWN_S + BREAKER_WINDOW]`. The lock's own
+ * life is a flat 30 s (observed [29, 30]); the time until the seam actually
+ * STAYS usable is up to twice that.
+ *
+ * The band is ACCEPTED, not a defect to fix here. The obvious remedy — clearing
+ * the counter on trip via `resetUsedTokens` — is forbidden (TRAP-6): it is a
+ * full-keyspace Lua `SCAN` against the database shared with fifteen production
+ * limiters. R-7 pins the band so a future retune of either constant moves a
+ * measured number rather than a wish.
  */
 export const BREAKER_COOLDOWN_S = 30;
 
 /**
- * Fallback `Retry-After` when the open-lock's TTL cannot be read (the key
- * expired between the `get` and the `ttl`, or the store returned `-1`/`-2`).
- * Matches `BREAKER_COOLDOWN_S` so a client never sees a wildly wrong hint.
+ * How much longer the lock KEY survives than the lock it carries — the
+ * TOMBSTONE — in seconds.
+ *
+ * Since plan 140.2-07 the expiry lives inside the VALUE, so "the key exists" and
+ * "the circuit is open" are different questions: `isBreakerOpen` reports CLOSED
+ * the moment the ENCODED expiry passes, whatever the key's own TTL says. Letting
+ * the key outlive its lock is what makes the A-25 guard possible at all — it is
+ * the only way `recordSeamFailure` can still learn WHEN the last lock was armed
+ * after that lock has expired. With `ex: BREAKER_COOLDOWN_S` the expired lock is
+ * simply gone, the question is unanswerable, and the encoding would be
+ * decorative: the encoded expiry could never be in the past while the key still
+ * existed.
+ *
+ * 60 s, because the guard must span the longest budget in `SEAM_BUDGETS`
+ * (`process-key-sync`, 60 000 ms) measured from the instant a lock is armed:
+ * `BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S = 90 s ≥ 60 s`, with the
+ * cooldown itself absorbing the first 30. Pinned in
+ * `seam-constants.pin.test.ts`, both as a literal and as that inequality.
+ */
+export const BREAKER_LOCK_TOMBSTONE_S = 60;
+
+/**
+ * Fallback `Retry-After` for a caller that has an open circuit but no hint.
+ *
+ * ⚠️ ITS ORIGINAL REASON IS GONE, AND THAT IS RECORDED RATHER THAN QUIETLY
+ * REPURPOSED. This docblock used to name the A-24 race — "the key expired
+ * between the `get` and the `ttl`, or the store returned -1/-2". Plan 140.2-07
+ * removed that race structurally: there is no `ttl` call left, the expiry
+ * arrives inside the value, and `isBreakerOpen` never reports `open: true`
+ * without a positive `retryAfterS` derived from that same read.
+ *
+ * It is KEPT, not deleted, for one narrow and still-real job: `retryAfterS` is
+ * OPTIONAL on the returned shape, `CircuitOpenError` takes a required number,
+ * and `resilientFetch` must therefore have a total answer at that boundary.
+ * Deleting the constant would replace a documented 30 with an `undefined`
+ * flowing into a `Retry-After` header. Matching `BREAKER_COOLDOWN_S` keeps that
+ * answer honest if it is ever reached.
  */
 export const DEFAULT_RETRY_AFTER_S = 30;
 
@@ -688,6 +748,61 @@ function breakerKeysFor(budgetKey: SeamBudgetKey): string[] {
 }
 
 /**
+ * The stored form of a breaker lock: `open:<armedAtMs>:<expiresAtMs>`, both in
+ * epoch milliseconds.
+ *
+ * ⚠️ THE EXPIRY IS IN THE VALUE, AND THAT IS THE WHOLE OF THE A-24 FIX. Before
+ * plan 140.2-07 the value was the bare string `"open"` and the expiry came from
+ * a SECOND call (`ttl`) — two facts that could disagree in two different ways,
+ * both of them live:
+ *   · the lock could expire BETWEEN the two reads, so the hint fell back to the
+ *     default while the function still returned open, and a recovered Railway
+ *     was denied for another whole cooldown; and
+ *   · the second call could REJECT after the first had already returned open,
+ *     and the catch arm then reported CLOSED — discarding a KNOWN-open state,
+ *     precisely the case the fallback existed for.
+ * Neither is defended against with a branch. Both are gone because there is no
+ * second call: one read decides open/closed AND carries the hint.
+ *
+ * `armedAt` is STORED rather than derived from `expiresAt − BREAKER_COOLDOWN_S`.
+ * It is what the A-25 guard compares an admission instant against, and deriving
+ * it would silently re-point that guard the moment the cooldown were retuned
+ * between the write and the read.
+ *
+ * The format is deliberately not JSON. `@upstash/redis` deserialises
+ * automatically, so a JSON value would come back as an object through one code
+ * path and as a string through another depending on the command; a scalar that
+ * `JSON.parse` rejects always arrives as the string that was written.
+ */
+export function encodeBreakerLock(
+  armedAtMs: number,
+  expiresAtMs: number,
+): string {
+  return `open:${armedAtMs}:${expiresAtMs}`;
+}
+
+/**
+ * Parse a stored breaker lock, or `null` if the value is not one.
+ *
+ * ⚠️ AN UNPARSEABLE VALUE IS `null`, AND `null` READS CLOSED. That is the
+ * fail-FORWARD direction locked decision 4 mandates: a corrupt byte in a store
+ * shared with fifteen production limiters must not be able to deny the whole
+ * seam. It has one known cost, stated rather than discovered later — across a
+ * rolling deploy an instance still running the pre-140.2-07 code writes the bare
+ * `"open"`, which new instances ignore. That is at most one cooldown of
+ * under-protection at a deploy boundary, in the direction this module always
+ * errs.
+ */
+export function decodeBreakerLock(
+  value: unknown,
+): { armedAtMs: number; expiresAtMs: number } | null {
+  if (typeof value !== "string") return null;
+  const parsed = /^open:(\d+):(\d+)$/.exec(value);
+  if (!parsed) return null;
+  return { armedAtMs: Number(parsed[1]), expiresAtMs: Number(parsed[2]) };
+}
+
+/**
  * Is a circuit this call site depends on currently open?
  *
  * ⚠️ PER CALL SITE SINCE 140.2-06 (obligation OB-8 / O-2). The check reads
@@ -704,9 +819,11 @@ function breakerKeysFor(budgetKey: SeamBudgetKey): string[] {
  * proceeds to the real request. The breaker can only ever REMOVE protection
  * when it is unhealthy; it can never itself deny traffic for that reason.
  *
- * TWO round trips, not one: the `mget` decides OPEN/CLOSED, and a second `ttl`
- * reads the hint for whichever key matched. Plan 140.2-07 collapses that second
- * trip by encoding the expiry in the lock value; at this wave it is still two.
+ * ONE round trip since plan 140.2-07, for the whole check and its hint. The
+ * `mget` returns each key's lock VALUE, and the value carries its own expiry —
+ * see `encodeBreakerLock` for why that removes both halves of A-24 structurally
+ * rather than by branching. It also halves the open state's store cost, which is
+ * a term in the SC-4b headroom arithmetic.
  */
 export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
   open: boolean;
@@ -716,10 +833,24 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
   const keys = breakerKeysFor(budgetKey);
   try {
     const states = await redis.mget<(string | null)[]>(...keys);
-    const openIndex = states.findIndex((state) => state === "open");
-    if (openIndex === -1) return { open: false };
-    const ttl = await redis.ttl(keys[openIndex]);
-    return { open: true, retryAfterS: ttl > 0 ? ttl : DEFAULT_RETRY_AFTER_S };
+    const now = Date.now();
+    // FIRST live lock wins, and `keys` puts the declared dependencies before the
+    // global one — see `breakerKeysFor` for why the more specific cooldown is
+    // the right `retryAfterS` tie-break.
+    for (const state of states) {
+      const lock = decodeBreakerLock(state);
+      // A lock whose ENCODED expiry has passed is a tombstone, not an open
+      // circuit. The key deliberately outlives the lock (see
+      // `BREAKER_LOCK_TOMBSTONE_S`), so "present" and "open" are different
+      // questions and reading the first as the second would deny a HEALED
+      // circuit for another full minute.
+      if (!lock || lock.expiresAtMs <= now) continue;
+      return {
+        open: true,
+        retryAfterS: Math.ceil((lock.expiresAtMs - now) / 1000),
+      };
+    }
+    return { open: false };
   } catch (err) {
     console.error(
       "[resilient-fetch] breaker check failed — failing OPEN:",
@@ -763,7 +894,10 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
  * bookkeeping error. Never log request bodies or header values from this
  * module — the seam carries raw exchange API secrets and INTERNAL_API_TOKEN.
  */
-export async function recordSeamFailure(breakerKey: string): Promise<void> {
+export async function recordSeamFailure(
+  breakerKey: string,
+  admittedAtMs: number = Date.now(),
+): Promise<void> {
   if (!redis || !breakerLimiter) return;
   try {
     const verdict = await breakerLimiter.limit(`${breakerKey}:failures`);
@@ -796,13 +930,54 @@ export async function recordSeamFailure(breakerKey: string): Promise<void> {
     // not one failure later, so exhaustion counts as a trip signal alongside
     // outright denial.
     if (success && remaining > 0) return;
-    // `nx: true` makes concurrent trips idempotent: the first writer's TTL
-    // stands, so a second instance tripping 200ms later cannot ratchet the
-    // cooldown window open. Benign race, deliberately not serialised with Lua.
-    await redis.set(breakerKey, "open", {
-      ex: BREAKER_COOLDOWN_S,
-      nx: true,
-    });
+
+    // ── THE TRIP PATH ───────────────────────────────────────────────────────
+    // Reached once per `BREAKER_FAILURE_THRESHOLD` failures, so the extra read
+    // below costs one round trip on the rarest path rather than on every
+    // recorded failure. That distinction is deliberate: `ephemeralCache` is left
+    // at its default in-memory `Map`, so NOTHING here may assume the limiter
+    // above reached Redis at all, and adding a guaranteed round trip to every
+    // failure would change the deployed breaker's timing behaviour during
+    // precisely the correlated incident it exists for.
+    const now = Date.now();
+    const existing = decodeBreakerLock(await redis.get<string>(breakerKey));
+    if (existing) {
+      // Already open. Return without writing, so the FIRST writer's expiry
+      // stands and a second instance tripping 200ms later cannot ratchet the
+      // cooldown window open.
+      if (existing.expiresAtMs > now) return;
+
+      // ── A-25, and the failure it prevents ──────────────────────────────────
+      // A call admitted at t=0 under the 60 s `process-key-sync` budget fails at
+      // t≈60. The lock armed at t≈0 expired at t=30, so the write below used to
+      // succeed and arm a FRESH 30 s window — on behalf of a request that was
+      // already doomed before the first trip and never got to observe the
+      // recovery. One wave of long-budget calls therefore held the breaker open
+      // 90 s+ with NO new traffic attempted at all: the mitigation manufacturing
+      // the outage.
+      //
+      // The predicate is "was this request already in flight when that lock was
+      // armed", which is answerable only because the key outlives the lock (see
+      // `BREAKER_LOCK_TOMBSTONE_S`). The rejected alternative — "skip when the
+      // breaker is already open" — does NOT close A-25: at t=60 the lock is
+      // expired, so that test passes and `nx` succeeds, which is exactly today's
+      // behaviour.
+      if (admittedAtMs <= existing.armedAtMs) return;
+    }
+
+    const value = encodeBreakerLock(now, now + BREAKER_COOLDOWN_S * 1_000);
+    const ttlS = BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S;
+    if (existing === null) {
+      // `nx: true` makes CONCURRENT trips idempotent — two instances tripping
+      // milliseconds apart, neither of which saw the other's write. Benign race,
+      // deliberately not serialised with Lua.
+      await redis.set(breakerKey, value, { ex: ttlS, nx: true });
+    } else {
+      // Overwriting a TOMBSTONE, which `nx` would refuse. Reaching here means
+      // the previous lock has expired AND this failure is new evidence gathered
+      // after it was armed, so a fresh cooldown is exactly right.
+      await redis.set(breakerKey, value, { ex: ttlS });
+    }
   } catch (err) {
     console.error(
       "[resilient-fetch] failed to record seam failure — breaker state may be stale:",
@@ -1159,6 +1334,17 @@ export async function resilientFetch(
   }
 
   /**
+   * The instant this request was ADMITTED past a closed circuit.
+   *
+   * Carried into every recording arm below and compared, in `recordSeamFailure`,
+   * against when the last lock was armed (A-25). It has to be the ADMISSION
+   * instant and not `Date.now()` at recording time: by construction a request
+   * records after it was admitted, and the gap between the two is the entire
+   * subject of the guard.
+   */
+  const admittedAtMs = Date.now();
+
+  /**
    * ONE request records AT MOST ONE failure, whichever arm classifies it.
    *
    * Wave 5 moved the body read inside the classification window and left this
@@ -1175,7 +1361,7 @@ export async function resilientFetch(
   async function recordOnce(breakerKey: string): Promise<void> {
     if (recorded) return;
     recorded = true;
-    await recordSeamFailure(breakerKey);
+    await recordSeamFailure(breakerKey, admittedAtMs);
   }
 
   // Constructed after the breaker check so the budget covers the REQUEST, not
