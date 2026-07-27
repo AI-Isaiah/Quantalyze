@@ -268,3 +268,98 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     expect(evalState.lastArgs).toBeNull();
   });
 });
+
+/**
+ * 140.3-11 / TS-19 — an upstream status SURVIVES this route.
+ *
+ * The sibling of `recompute/route.test.ts`'s block of the same name, and it is
+ * a SEPARATE delivery rather than a shared helper on purpose: this programme's
+ * signature failure is closing one member of an identically-shaped pair and
+ * reporting the class done (5-of-7, 3-of-5). Measured on the untouched tree,
+ * `grep -c AnalyticsUpstreamError` was **0** in BOTH route files — neither had
+ * the arm — so a one-of-two delivery here would have been indistinguishable
+ * from a complete one without this file.
+ *
+ * The 4xx/5xx range split is the same load-bearing one: only 4xx forwards,
+ * because a 5xx `message` carries the FastAPI detail and the service base URL
+ * (T-140-11). Fixtures hand-typed; nothing imported from the module under test.
+ */
+describe("GET /api/admin/match/eval — upstream status survives (140.3-11 / TS-19)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    evalState.result = { rows: [] };
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("an upstream 424 answers 424 with its sentence intact — NOT a bodyless 500", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+
+    expect(res.status).toBe(424);
+    const body = JSON.parse(await res.text());
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.error).not.toBe(GENERIC_COPY);
+  });
+
+  it("an upstream 4xx that is NOT 424 also survives with its own status", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "lookback_days must be between 1 and 365",
+      422,
+      "VALIDATION_FAILED",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(422);
+    expect(JSON.parse(await res.text()).error).toBe(
+      "lookback_days must be between 1 and 365",
+    );
+  });
+
+  it("ANTI-REGRESSION: an upstream 5xx still answers the STATIC 500 and never echoes its message (T-140-11)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError(
+      'Traceback (most recent call last): File "/app/routers/match.py" http://localhost:8002',
+      502,
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(raw).not.toContain("Traceback");
+    expect(raw).not.toContain("localhost");
+    expect(raw).not.toContain("match.py");
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+    // The diagnosable half is still logged rather than dropped.
+    expect(errorSpy).toHaveBeenCalled();
+  });
+
+  it("ANTI-REGRESSION: the new arm stays BEHIND the admin gate (T-140-12)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError("venue down", 424);
+    userState.current = null;
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(401);
+    expect(evalState.lastArgs).toBeNull();
+  });
+});

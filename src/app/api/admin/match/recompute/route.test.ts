@@ -295,3 +295,114 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(recomputeCalls).toHaveLength(0);
   });
 });
+
+/**
+ * 140.3-11 / TS-19 — an upstream status SURVIVES this route.
+ *
+ * The flattening this closes is BROADER than the finding that named it. Before
+ * this plan the catch block branched on exactly two types, so every OTHER
+ * upstream status fell to the unconditional terminal arm and became a
+ * `500 {"error":"Match recompute failed. Please try again."}`. Measured on the
+ * untouched tree: `grep -c AnalyticsUpstreamError` was **0** in this route and
+ * **0** in its sibling `eval` — the arm did not exist at all, in either file.
+ *
+ * `analytics-service/routers/match.py` raises 400, 403, 422 and 429 on this
+ * very endpoint (`:1668`, `:1697`, `:1741`, `:1783`), so this was not
+ * hypothetical: a deliberate, immediate refusal from the service was reported
+ * to an admin as OUR server failing, with "Please try again" attached to a
+ * request that would be refused identically every time.
+ *
+ * THE RANGE SPLIT IS LOAD-BEARING, not a simplification. Only 4xx forwards.
+ * A 5xx keeps falling to the static arm, because `AnalyticsUpstreamError.message`
+ * on a 5xx carries the FastAPI `detail`, the `parseResponse()` contract-drift
+ * string and the service's base URL — the exact T-140-11 leak this file's
+ * existing case pins the absence of. The case below re-pins it THROUGH the new
+ * arm, so widening the range later reddens a test rather than shipping a leak.
+ *
+ * Fixtures are hand-typed here. Nothing is imported from the module under test.
+ */
+describe("POST /api/admin/match/recompute — upstream status survives (140.3-11 / TS-19)", () => {
+  async function postAsAdmin() {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest({ allocator_id: "alloc-1", force: false }));
+  }
+
+  it("an upstream 424 answers 424 with its sentence intact — NOT a bodyless 500", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+    );
+    const res = await postAsAdmin();
+
+    // The whole point: the status survives the hop. Without the new arm this
+    // is 500 and the sentence is replaced by GENERIC_COPY.
+    expect(res.status).toBe(424);
+    const body = JSON.parse(await res.text());
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.error).not.toBe(GENERIC_COPY);
+  });
+
+  it("an upstream 4xx that is NOT 424 also survives with its own status", async () => {
+    // 429 rather than 424: a second member of the class, so a fix that special-
+    // cased the one status this plan renders would not satisfy this file.
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Too many recomputes for this allocator.",
+      429,
+      "RATE_LIMITED",
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(429);
+    expect(JSON.parse(await res.text()).error).toBe(
+      "Too many recomputes for this allocator.",
+    );
+  });
+
+  it("a 403 refusal from the service is not reported as OUR 500", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "actor is not entitled to recompute this allocator",
+      403,
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(403);
+    expect(res.status).not.toBe(500);
+  });
+
+  it("ANTI-REGRESSION: an upstream 5xx still answers the STATIC 500 and never echoes its message (T-140-11)", async () => {
+    // Shaped like what a FastAPI unhandled exception actually puts in this
+    // field: a traceback fragment and the service's base URL.
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      'Traceback (most recent call last): File "/app/routers/match.py" http://localhost:8002',
+      502,
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(raw).not.toContain("Traceback");
+    expect(raw).not.toContain("localhost");
+    expect(raw).not.toContain("match.py");
+    expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
+  });
+
+  it("ANTI-REGRESSION: the new arm stays BEHIND the admin gate (T-140-12)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("venue down", 424);
+    userState.current = null;
+    const { POST } = await import("./route");
+    const res = await POST(
+      buildPostRequest({ allocator_id: "alloc-1", force: false }),
+    );
+    // An anonymous caller must not learn a venue's state from this endpoint
+    // either — the new arm is inside the same catch block, after the gate.
+    expect(res.status).toBe(401);
+    expect(recomputeCalls).toHaveLength(0);
+  });
+});

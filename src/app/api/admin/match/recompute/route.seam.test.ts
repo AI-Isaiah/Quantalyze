@@ -275,4 +275,65 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     // And the gate short-circuits before the seam is even consulted.
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  /**
+   * 140.3-11 / TS-19 — the status survives against REAL WIRE BYTES.
+   *
+   * The two mock-based cases in `route.test.ts` construct an
+   * `AnalyticsUpstreamError` by hand and prove only that the route maps a
+   * class to a status. That is a double: it cannot see the client throwing a
+   * DIFFERENT status than the wire carried, or discarding the body before the
+   * route is reached. This case hands the REAL `analyticsRequest` a REAL
+   * `Response` whose bytes are typed out below, and asserts what the handler
+   * returns — the full chain wire → client → route, with only `fetch` faked.
+   *
+   * The body is the NESTED `service_error` envelope of `STATUS_CONTRACT.md` §2,
+   * hand-typed here rather than imported from any module under test.
+   */
+  it("TS-19: a REAL 424 on the wire reaches the client and leaves this route as 424", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "EXCHANGE_UNAVAILABLE",
+            dependency: "binance",
+            retryable: true,
+            detail: "Binance is not responding right now. Try again shortly.",
+          },
+        }),
+        { status: 424, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const res = await postAsAdmin();
+
+    // The seam WAS crossed — this is not a short-circuit dressed as a forward.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(424);
+    const body = JSON.parse(await res.text());
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    // Not the flattened answer this route gave before the arm existed.
+    expect(body.error).not.toBe("Match recompute failed. Please try again.");
+  });
+
+  it("TS-19: a REAL 502 on the wire still leaves this route as the STATIC 500 (T-140-11)", async () => {
+    // The bodyless `text/plain` shape an unhandled Python exception produces.
+    fetchMock.mockResolvedValue(
+      new Response("Internal Server Error at http://analytics.invalid/api", {
+        status: 502,
+        headers: { "content-type": "text/plain" },
+      }),
+    );
+
+    const res = await postAsAdmin();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(res.status).toBe(500);
+    const raw = await res.text();
+    expect(raw).not.toContain("Internal Server Error");
+    expect(raw).not.toContain("analytics.invalid");
+    expect(JSON.parse(raw).error).toBe("Match recompute failed. Please try again.");
+  });
 });
