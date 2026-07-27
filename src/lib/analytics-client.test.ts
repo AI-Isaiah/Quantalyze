@@ -1489,6 +1489,44 @@ describe("[SEAMCORE-11 / A-27] analytics-client: ONE defined outcome for an ambi
     expect(() => Response.json({ error: "x" }, { status })).not.toThrow();
   });
 
+  /**
+   * ORACLE HARDENING, found by running mutation M49 against the sibling client
+   * (2026-07-27).
+   *
+   * Deleting the null-body-status clause left the 204/205 cases green there,
+   * because a null-body response carries no content-type and the non-JSON-2xx
+   * clause caught them by accident. The same redundancy exists here. A null-body
+   * status that DOES advertise `application/json` — a proxy or a hand-rolled
+   * handler will — has only the status clause standing between it and the old
+   * behaviour: for a 204 an unclassified `SyntaxError` out of the success arm,
+   * for a 304 an `AnalyticsUpstreamError` carrying 304 as a FORWARDABLE status,
+   * i.e. the route crash moved one hop downstream.
+   *
+   * These pin the load-bearing claim of the implementation comment: the three
+   * statuses are decided on the STATUS, not on the content-type.
+   */
+  it.each([204, 205, 304])(
+    "a %i is decided on the STATUS even when it advertises application/json",
+    async (status) => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(null, {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const { mod, caught } = await caughtFrom(fetchMock);
+
+      expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+      expect((caught as Error).message).toBe(
+        `Analytics seam returned an unusable response (HTTP ${status}, content-type application/json). The upstream did not answer with the JSON contract.`,
+      );
+      expect(
+        (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).status,
+      ).toBe(502);
+    },
+  );
+
   it("NEGATIVE CONTROL: a JSON 2xx is byte-unchanged", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ valid: true, detail: "fine" }), {

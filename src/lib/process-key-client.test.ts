@@ -736,6 +736,38 @@ describe("[SEAMCORE-11 / A-27] postProcessKey: ONE defined outcome for an ambigu
     );
   });
 
+  /**
+   * ORACLE HARDENING, found by running mutation M49 (2026-07-27).
+   *
+   * Deleting the null-body-status clause left the 204 and 205 cases above
+   * GREEN, because a null-body response carries no content-type and the
+   * non-JSON-2xx clause caught them by accident. Two independent guards is
+   * fine; an oracle that cannot tell WHICH one fired is not — a 204 that DOES
+   * advertise `application/json` (a proxy or a hand-rolled handler will) slips
+   * straight past the surviving clause and back into
+   * `{ ok: true, status: 204, body: {} }`, the exact divergence this plan
+   * closes.
+   *
+   * These cases pin the load-bearing claim of the implementation comment: the
+   * three statuses are decided on the STATUS, not on the content-type.
+   */
+  it.each([204, 205, 304])(
+    "a %i is decided on the STATUS even when it advertises application/json",
+    async (status) => {
+      respondWith(
+        new Response(null, {
+          status,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      await expectDefinedOutcome(
+        await call(),
+        `Analytics seam returned an unusable response (HTTP ${status}, content-type application/json). The upstream did not answer with the JSON contract.`,
+      );
+    },
+  );
+
   it("NEVER passes a null-body status to a JSON response constructor", async () => {
     // The crash, reproduced here so the guard above is anchored to the real
     // platform behaviour rather than to a belief about it. This is precisely
