@@ -2045,7 +2045,7 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
     }));
   }
 
-  it("bounds the member read AT THE QUERY — the read carries .limit(10)", async () => {
+  it("bounds the member read AT THE QUERY — the read carries .limit(11) = cap + 1", async () => {
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async () => readOnlyResponse());
@@ -2057,29 +2057,40 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
 
-    // 10, hand-typed. The route's own MAX_COMPOSITE_MEMBERS is deliberately NOT
-    // imported: an expectation read out of the module under test cannot
-    // disagree with it, which is the self-referential oracle this phase exists
-    // to eliminate.
+    // 11, hand-typed = MAX_COMPOSITE_MEMBERS + 1. The route's own constant is
+    // deliberately NOT imported: an expectation read out of the module under
+    // test cannot disagree with it, which is the self-referential oracle this
+    // phase exists to eliminate.
+    //
+    // ⚠️ WHY cap + 1 AND NOT cap (ME-02). `.limit(cap)` cannot distinguish
+    // "this composite has exactly cap members" from "it has more and you are
+    // holding the first cap of them", so the route had to refuse at `>= cap`
+    // and the usable maximum was cap - 1 — the constant was off by one from the
+    // thing it names. The extra row is a TRUNCATION DETECTOR, never probed: the
+    // route refuses before the loop whenever it arrives, so the fan-out this
+    // assertion bounds is still cap, and SEAM_ROUTE_BUDGETS' `calls: 10` and
+    // SC-4e stay exact.
     expect(
       STATE.strategyKeysListLimit,
       "The composite member read issued no .limit(). The fan-out is bounded " +
         "only by however many rows the database chooses to return, so the " +
         "declared keys-permissions call count in SEAM_ROUTE_BUDGETS is a " +
         "statement about nothing (ledger row M32).",
-    ).toBe(10);
+    ).toBe(11);
     fetchSpy.mockRestore();
   });
 
-  it("fails LOUD when the member list arrives AT the cap — no probe, no finalize, no enqueue", async () => {
+  it("fails LOUD when the member list OVERFLOWS the cap — no probe, no finalize, no enqueue", async () => {
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockImplementation(async () => readOnlyResponse());
     STATE.strategyRow = { api_key_id: null };
-    // The count probe and the list agree: this draft has at least 10 members.
-    STATE.strategyKeysCount = 10;
-    STATE.strategyKeysList = membersOfLength(10);
+    // 11 = MAX_COMPOSITE_MEMBERS + 1, hand-typed: the read asks for cap + 1
+    // rows, so cap + 1 coming back is PROOF the draft has more members than the
+    // route can probe. That is the only reading on which a refusal is correct.
+    STATE.strategyKeysCount = 11;
+    STATE.strategyKeysList = membersOfLength(11);
     STATE.runAfterCallback = true;
 
     const POST = await importPost();
@@ -2119,6 +2130,48 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
     ).toBeDefined();
 
     consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("ME-02: a GENUINE 10-member composite finalises — the cap is not off by one", async () => {
+    // ⚠️ THE DEAD END THIS CLOSES. `.limit(10)` plus a refusal at `>= 10` made
+    // the usable maximum NINE, so the constant named MAX_COMPOSITE_MEMBERS = 10
+    // was off by one from the thing it names. A user with a genuine 10-member
+    // draft got a 503 COMPOSITE_MEMBERSHIP_UNKNOWN whose copy says "please
+    // retry" — for a PERMANENT condition. Forever, with no path forward and no
+    // explanation, and every existing >= 10-member composite became
+    // un-finalizable the moment the cap shipped.
+    //
+    // Fetching cap + 1 separates "exactly at the cap" from "possibly
+    // truncated", which `.limit(cap)` structurally cannot.
+    //
+    // The COPY half — this arm still shares the transient membership-unknown
+    // envelope, and a permanent condition should not render a retry affordance
+    // — is 140.3's fence and is recorded in 140.1-TS-OBLIGATIONS.md, not
+    // authored here.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 10;
+    STATE.strategyKeysList = membersOfLength(10);
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // 10, hand-typed: EVERY member is probed. A cap fix that finalised without
+    // probing the tenth key would be the scope-broadening hole the O-1 loop
+    // exists to close, which is worse than the dead end it replaces.
+    expect(fetchSpy).toHaveBeenCalledTimes(10);
+
+    await flushAfter();
+    const enqueue = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueue).toBeDefined();
+    expect(enqueue!.args.p_kind).toBe("stitch_composite");
     fetchSpy.mockRestore();
   });
 

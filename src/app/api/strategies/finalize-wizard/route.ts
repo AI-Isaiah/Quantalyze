@@ -803,7 +803,17 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         .select("api_key_id")
         .eq("strategy_id", fields.strategy_id)
         .order("seq", { ascending: true })
-        .limit(MAX_COMPOSITE_MEMBERS);
+        // ⚠️ cap + 1, AND THE +1 IS THE WHOLE POINT (ME-02). `.limit(cap)`
+        // cannot distinguish "this composite has exactly cap members" from "it
+        // has more, and you are holding the first cap of them", so the refusal
+        // below had to fire at `>= cap` and the usable maximum was cap - 1 — the
+        // constant was off by one from the thing it names, and a user with a
+        // genuine 10-member draft got a permanent 503 rendered as "please
+        // retry". The extra row is a TRUNCATION DETECTOR and is never probed:
+        // its arrival IS the refusal, which happens before the loop. So the
+        // fan-out stays capped at `MAX_COMPOSITE_MEMBERS` and
+        // `SEAM_ROUTE_BUDGETS`'s `calls: 10` plus SC-4e stay exact.
+        .limit(MAX_COMPOSITE_MEMBERS + 1);
       if (membersErr) {
         // A member-list read error also fails CLOSED — never enqueue a
         // composite whose members we could not enumerate to re-probe.
@@ -825,24 +835,28 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
-      // SEAMCORE-10 — AT the cap is a REFUSAL, not a truncation.
+      // SEAMCORE-10 / ME-02 — OVERFLOWING the cap is a REFUSAL. Sitting AT it
+      // is not.
       //
-      // `.limit(MAX_COMPOSITE_MEMBERS)` cannot tell this route the difference
-      // between "this composite has exactly MAX_COMPOSITE_MEMBERS members" and
-      // "it has more, and you are holding the first MAX_COMPOSITE_MEMBERS of
-      // them". Proceeding on the second reading finalises a composite whose
-      // remaining member keys were never re-probed — the same
-      // connect→submit scope-broadening hole the O-1 loop exists to close,
-      // reintroduced by a silently short list. So the route refuses, which
-      // costs a genuine MAX_COMPOSITE_MEMBERS-member draft a submission and
-      // makes the usable maximum MAX_COMPOSITE_MEMBERS - 1. That trade is
-      // deliberate: refusing a draft is recoverable, publishing an unprobed
-      // key is not.
+      // The read above asks for `MAX_COMPOSITE_MEMBERS + 1` rows, so the two
+      // readings `.limit(MAX_COMPOSITE_MEMBERS)` could not tell apart are now
+      // distinguishable: exactly `MAX_COMPOSITE_MEMBERS` back means the list is
+      // PROVABLY complete, and `MAX_COMPOSITE_MEMBERS + 1` back is proof the
+      // draft has more members than this route can probe.
       //
-      // `>=` rather than `===` on purpose — if the `.limit()` above were ever
+      // Proceeding on a possibly-truncated list would finalise a composite whose
+      // remaining member keys were never re-probed — the connect→submit
+      // scope-broadening hole the O-1 loop exists to close, reintroduced by a
+      // silently short list. That is still refused. What is no longer refused is
+      // a legitimate MAX_COMPOSITE_MEMBERS-member draft, which used to get a
+      // PERMANENT 503 wearing transient "please retry" copy, with no path
+      // forward — and which made every existing composite at or above the cap
+      // un-finalizable the moment the cap shipped.
+      //
+      // `>` rather than `===` on purpose — if the `.limit()` above were ever
       // dropped, this arm still refuses an oversized list rather than fanning
       // out over it.
-      if ((members?.length ?? 0) >= MAX_COMPOSITE_MEMBERS) {
+      if ((members?.length ?? 0) > MAX_COMPOSITE_MEMBERS) {
         // No caught value reaches this line — every interpolated term is an
         // integer or an id this route generated. It goes through the shared
         // scrubber anyway because it is a seam-route log line and this file
@@ -851,14 +865,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // reintroducing a leak.
         console.error(
           scrubSeamString(
-            `[strategies/finalize-wizard] composite member list reached the ` +
+            `[strategies/finalize-wizard] composite member list EXCEEDED the ` +
               `${MAX_COMPOSITE_MEMBERS}-member cap for strategy ` +
-              `${fields.strategy_id}; refusing rather than finalizing a ` +
-              `possibly truncated member list with unprobed keys`,
+              `${fields.strategy_id} (the cap+1 probe row came back); refusing ` +
+              `rather than finalizing a truncated member list with unprobed keys`,
           ),
         );
         captureToSentry(
-          new Error("composite member list reached MAX_COMPOSITE_MEMBERS"),
+          new Error("composite member list EXCEEDED MAX_COMPOSITE_MEMBERS"),
           {
             tags: {
               surface: "finalize-wizard",
