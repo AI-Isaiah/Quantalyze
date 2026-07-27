@@ -2108,3 +2108,86 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
     expect(serialized.toLowerCase()).not.toContain("bearer");
   });
 });
+
+/**
+ * Phase 140.2 / SEAMCORE-06 (A-10) — the network-failure line CARRIES the
+ * diagnosis, scrubbed.
+ *
+ * Before this, `err` was DROPPED entirely on the transport arm. The line said
+ * "network failure reaching the analytics service" and nothing else, so TLS
+ * expiry, a DNS `EAI_AGAIN`, a refused connection and a header `TypeError` were
+ * one indistinguishable sentence — an operator could see THAT the seam failed
+ * and never WHY.
+ *
+ * ⚠️ THE TWO SIDES ARE ASSERTED ON THE SAME LOGGED LINE, for the same reason
+ * `seam-redaction.test.ts` does it: the naive fix for a leak is to drop `err`
+ * (which is the defect this closes) and the naive fix for A-10 is to log it raw
+ * (which is the leak). Only a case that fails in BOTH directions pins the
+ * behaviour that is actually wanted. Ledger row M43.
+ */
+describe("[SEAMCORE-06 / A-10] the network-failure line is diagnostic AND safe", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+
+  /** The undici shape for a refused connection, headers inlined by the runtime. */
+  function refusedConnection(): TypeError {
+    const err = new TypeError(
+      "fetch failed\n" +
+        "  [cause]: Error: connect ECONNREFUSED 10.0.0.1:8002\n" +
+        "  request: { headers: { authorization: 'Bearer " +
+        TOKEN +
+        "' } }",
+    );
+    return err;
+  }
+
+  async function loggedLines(rejection: unknown): Promise<string> {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchMock = installFetchMock();
+    fetchMock.mockRejectedValue(rejection);
+    const mod = await import("./resilient-fetch");
+    await mod
+      .resilientFetch("bridge", "/api/portfolio-bridge", { method: "POST" })
+      .catch(() => undefined);
+    return errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+  }
+
+  it("carries the syscall token AND drops the credential, on the same line", async () => {
+    process.env.INTERNAL_API_TOKEN = TOKEN;
+    vi.resetModules();
+
+    const logged = await loggedLines(refusedConnection());
+
+    expect(logged).toContain("network failure reaching the analytics service");
+    expect(
+      logged,
+      "The network-failure line does not carry the syscall token. That is " +
+        "A-10: TLS expiry, DNS failure and a refused connection become one " +
+        "indistinguishable sentence, and the operator has to reproduce the " +
+        "incident to learn what the log already knew.",
+    ).toContain("ECONNREFUSED");
+    expect(
+      logged,
+      "The network-failure line carries INTERNAL_API_TOKEN. undici inlines the " +
+        "outgoing headers into the message, so logging it raw is the leak this " +
+        "line's scrub exists to prevent — and dropping err instead is A-10.",
+    ).not.toContain(TOKEN);
+  });
+
+  it("distinguishes a TLS failure from a refused connection", async () => {
+    // The concrete thing A-10 costs: two different incidents, two different
+    // remediations, one identical log line.
+    vi.resetModules();
+    const tlsLine = await loggedLines(
+      new TypeError("fetch failed\n  [cause]: Error: CERT_HAS_EXPIRED"),
+    );
+    expect(tlsLine).toContain("CERT_HAS_EXPIRED");
+    expect(tlsLine).not.toContain("ECONNREFUSED");
+  });
+
+  it("still records exactly ONE breaker failure — the line changed, not the classification", async () => {
+    vi.resetModules();
+    await loggedLines(refusedConnection());
+    expect(shared.counters.limitCalls).toBe(1);
+  });
+});
