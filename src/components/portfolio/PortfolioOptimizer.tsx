@@ -7,6 +7,16 @@ import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
 import { cn, formatNumber, formatPercent } from "@/lib/utils";
+import { RouteResponseError } from "@/lib/route-response-error";
+
+/**
+ * The one sentence shown when the failure did NOT come from a route response —
+ * a rejected fetch, an unreadable body, anything whose own message is internal
+ * noise. DESIGN.md §Voice: declarative, sentence-case, active voice, no
+ * adjectives. "Retry" names the control that is rendered beside it.
+ */
+const OPTIMIZER_UNAVAILABLE_COPY =
+  "We could not complete the optimizer run. Retry in a moment.";
 
 export type OptimizerSuggestion = {
   strategy_id: string;
@@ -188,6 +198,17 @@ export default function PortfolioOptimizer({
   async function runOptimizer() {
     setLoading(true);
     setError(null);
+    // 140.3-07 / SEAMUX-09 / B-26 — invalidate BEFORE the refetch, not in the
+    // catch. This is the locked house pattern, copied rather than re-invented
+    // from `WeightOptimizerSection.tsx`'s `requestWeights` (`setResult(null)`)
+    // and used identically at `admin/partner-import/page.tsx`. Without it a
+    // failed re-run left the PREVIOUS ranked allocation mounted with live
+    // "Add to portfolio" links under one small red line, which an allocator
+    // reads as a current answer. Doing it here rather than in the catch also
+    // covers the path where `router.refresh()` throws AFTER a successful
+    // `setSuggestions` — the only way `error` could otherwise coexist with a
+    // rendered ranking.
+    setSuggestions(null);
     try {
       const res = await fetch("/api/portfolio-optimizer", {
         method: "POST",
@@ -196,13 +217,27 @@ export default function PortfolioOptimizer({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.status === "failed") {
-        throw new Error(data?.error ?? `Optimizer failed (${res.status})`);
+        // The route's `error` field is reviewed, scrubbed copy — on a breaker
+        // trip it IS the single-source sentence from `src/lib/seam-copy.ts`,
+        // and the route deliberately never puts `err.message` in it (M-0333).
+        // Marking it as route-authored is what lets the catch below refuse to
+        // render everything else without also deleting the breaker surface.
+        throw new RouteResponseError(
+          typeof data?.error === "string"
+            ? data.error
+            : `Optimizer failed (${res.status})`,
+        );
       }
       setSuggestions(Array.isArray(data.suggestions) ? data.suggestions : []);
       setLastComputedAt(new Date().toISOString());
       router.refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Optimizer failed");
+      // 140.3-07 / B-27 — the caught value goes to the console and never to the
+      // user. A `TypeError` from a rejected fetch, or an undici transport
+      // string, can carry an internal URL or header name; only a message this
+      // component built from a route RESPONSE is safe to render.
+      console.error("[PortfolioOptimizer] run failed:", e);
+      setError(e instanceof RouteResponseError ? e.message : OPTIMIZER_UNAVAILABLE_COPY);
     } finally {
       setLoading(false);
     }
@@ -229,8 +264,20 @@ export default function PortfolioOptimizer({
     );
   }
 
-  // 5. Failed
-  if (computationStatus === "failed" && !suggestions) {
+  // 5. Failed — reachable from BOTH entry points.
+  //
+  // `computationStatus` is a SERVER-RENDERED prop. A client-side re-run failure
+  // never updates it, so the original `computationStatus === "failed" &&
+  // !suggestions` guard was unreachable after a re-run failure: with the
+  // ranking now correctly discarded the user would have landed on the "never
+  // run" empty state, which says "Run the optimizer to see strategies…" — a
+  // false statement about what just happened.
+  //
+  // The `error` disjunct adds the client path; the original conjunct is left
+  // byte-intact so the server path keeps working (TRAP-9). Placing this ABOVE
+  // every other branch is also what guarantees no ranking can render while an
+  // error is set, whatever order the states below are later rearranged in.
+  if (error || (computationStatus === "failed" && !suggestions)) {
     return (
       <Card>
         {heading}
@@ -260,15 +307,15 @@ export default function PortfolioOptimizer({
           Run the optimizer to see strategies that could improve your
           portfolio&apos;s risk-adjusted return.
         </p>
+        {/* No inline `{error && …}` here: the failed branch above now returns
+            on ANY error, so this state is only ever reached with `error` null.
+            A second error surface that cannot render is how a reviewer loses
+            track of which sites were closed. The failed card carries the same
+            message plus a Retry control, so no affordance is lost. */}
         <div className="mt-4">
           <Button onClick={runOptimizer} disabled={loading}>
             {loading ? "Running..." : "Run Optimizer"}
           </Button>
-          {error && (
-            <p className="mt-2 text-caption text-negative" role="alert">
-              {error}
-            </p>
-          )}
         </div>
       </Card>
     );
@@ -282,15 +329,13 @@ export default function PortfolioOptimizer({
         <p className="text-small text-text-secondary">
           No candidates match your current mandate. Try relaxing filters.
         </p>
+        {/* Same reasoning as the empty state above — unreachable with `error`
+            set, so the inline duplicate is gone rather than left as a second
+            error surface that never renders. */}
         <div className="mt-4">
           <Button onClick={runOptimizer} disabled={loading}>
             {loading ? "Running..." : "Re-run Optimizer"}
           </Button>
-          {error && (
-            <p className="mt-2 text-caption text-negative" role="alert">
-              {error}
-            </p>
-          )}
         </div>
       </Card>
     );
@@ -321,6 +366,10 @@ export default function PortfolioOptimizer({
         </div>
       )}
 
+      {/* This is the branch the stale ranking used to fall through to. It is
+          now unreachable with `error` set — which is the whole point of
+          SEAMUX-09, so the red line that used to sit under the live
+          "Add to portfolio" links is gone with it. */}
       <div className="space-y-3">
         {top.map((s) => (
           <SuggestionRow
@@ -330,12 +379,6 @@ export default function PortfolioOptimizer({
           />
         ))}
       </div>
-
-      {error && (
-        <p className="mt-3 text-caption text-negative" role="alert">
-          {error}
-        </p>
-      )}
     </Card>
   );
 }
