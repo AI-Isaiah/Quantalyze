@@ -10,6 +10,16 @@ import { DELTA_UNITS } from "@/lib/api/simulatorSchema";
 import type { SimulatorResponseOk } from "@/lib/api/simulatorSchema";
 import { ErrorResponseSchema } from "@/lib/api/errorSchema";
 import { dateMapStrict } from "@/lib/keys";
+// 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06).
+//
+// ⚠️ LOAD-BEARING IMPORT PATH. This is a `"use client"` component, so whatever
+// it imports ships to the BROWSER. `@/lib/seam-discriminator` is the
+// dependency-free leaf — zero imports, zero env reads, zero module-load side
+// effects, enforced by `src/lib/seam-discriminator.purity.test.ts`. Do NOT
+// "simplify" this to `@/lib/analytics-client` or `@/lib/resilient-fetch`:
+// either re-export drags `@upstash/redis`, `@upstash/ratelimit` and a top-level
+// `Redis.fromEnv()` singleton into the bundle for every user.
+import { seamErrorCode, seamHumanMessage } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry";
 
 interface PortfolioImpactPanelProps {
@@ -63,6 +73,27 @@ export function PortfolioImpactPanel({
         const raw = await res
           .json()
           .catch(() => ({ error: "Simulation failed" }));
+        // 140.3-01 / TS-05 — READ THE RAW BODY FIRST, ABOVE THE SCHEMA.
+        //
+        // ⚠️ THIS ORDER IS THE WHOLE FIX, and it is why three documents were
+        // wrong to call this file the fix-shape template (correction C-3).
+        // `/api/simulator` is a seam route, so a deliberate 4xx/5xx arrives as
+        // the nested `service_error` envelope `{detail: {code, dependency,
+        // retryable, detail}}`. `ErrorResponseSchema` declares
+        // `detail: z.string().optional()`, so that body FAILS `safeParse`
+        // outright and the `{}` fallback below discards `error`, `retryAfter`
+        // and `detail` TOGETHER — the entire error body, two lines before the
+        // `typeof body.detail` cascade could ever look at it. The user got
+        // "HTTP 500".
+        //
+        // The schema is NOT widened to fix this. It has exactly one production
+        // consumer (this file), and widening an error-body schema for one
+        // consumer is the documented Pitfall-3 hazard — its `{}` fallback is
+        // correct for the `{error, retryAfter}` fields it was designed for.
+        // Reading the raw body through the leaf first closes the class without
+        // touching a shared schema.
+        const seamCode = seamErrorCode(raw);
+        const seamMessage = seamHumanMessage(raw);
         const parsedError = ErrorResponseSchema.safeParse(raw);
         const body = parsedError.success ? parsedError.data : {};
         // H-1127: error bodies do not always use `{ error }`. The Python
@@ -70,20 +101,33 @@ export function PortfolioImpactPanel({
         // `message`. Read all three common keys so the real, actionable backend
         // explanation reaches the user instead of an opaque "HTTP 500". Coerce
         // to string so a nested/object value can't render as "[object Object]".
+        //
+        // 140.3-01: the leaf's result takes PRECEDENCE when it is non-null; the
+        // three-key cascade stays as the fallback for non-seam bodies (this
+        // component's own `{error: "Simulation failed"}` catch value, a
+        // platform `{message}`, an edge 5xx).
         const serverMessage =
-          typeof body.error === "string"
+          seamMessage ??
+          (typeof body.error === "string"
             ? body.error
             : typeof body.detail === "string"
               ? body.detail
               : typeof body.message === "string"
                 ? body.message
-                : undefined;
+                : undefined);
         if (serverMessage === undefined) {
-          // Surface contract drift: the body parsed but matched none of the
-          // expected error-message keys, so we're falling back to "HTTP <code>".
+          // Surface contract drift: neither the seam discriminator NOR the
+          // three-key cascade could read a human string, so we're falling back
+          // to "HTTP <code>". Kept, not deleted (TRAP-9) — it is a live
+          // drift signal — but RE-POINTED: `serverMessage === undefined`
+          // now implies the LEAF also returned null, so a recognised seam
+          // envelope no longer trips it. `seamCode` is logged because a body
+          // that carried a machine code but no readable sentence is a
+          // DIFFERENT drift from a body that carried neither, and an operator
+          // cannot tell them apart from the status alone.
           console.error(
             "[PortfolioImpactPanel] unrecognized error body shape",
-            { status: res.status, body },
+            { status: res.status, seamCode, body },
           );
         }
         if (res.status === 429) {

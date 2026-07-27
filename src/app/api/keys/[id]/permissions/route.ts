@@ -6,6 +6,8 @@ import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
+// 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06).
+import { seamErrorCode, seamHumanMessage } from "@/lib/seam-discriminator";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
@@ -153,7 +155,33 @@ function makeCachedFetcher(keyId: string): {
             if (readErr instanceof SeamBodyReadError) throw readErr;
             return { detail: res.statusText };
           });
-          throw new Error(err.detail ?? `Upstream ${res.status}`);
+          // 140.3-01 / TS-05 — read BOTH halves through the ONE discriminator.
+          //
+          // This route's upstream nests the envelope at `body.detail` on every
+          // deliberate 4xx/5xx, so the previous `err.detail ??` read built
+          // `new Error(<object>)` and the message coerced to "[object Object]"
+          // — STATUS_CONTRACT.md §2.1 records that against this exact line, and
+          // PYAPIFIX2-03 added this route's own per-key 429 throttle to the
+          // object-detail set. The app-global 422/429 shapes carry a SCALAR
+          // `detail`, which the same leaf returns unchanged; TS-07 is a
+          // NEGATIVE obligation and that path is deliberately untouched.
+          //
+          // The `Upstream ${res.status}` fallback is LOAD-BEARING: the catch
+          // below keys `PROBE_BACKEND_UNAVAILABLE` on `startsWith("Upstream 5")`.
+          //
+          // ⚠️ SCOPE. This changes ONLY the extraction. Mapping `RATE_LIMITED`
+          // to a throttle state, answering 429 instead of 502 and forwarding
+          // `Retry-After` is TS-34 and belongs to 140.3's response-shape plan —
+          // two changes to one block in one pass is TRAP-8. The machine code is
+          // carried on `cause` so that plan reads it instead of re-extracting,
+          // and so the operator can see WHICH contract answered. It is omitted
+          // entirely when the body carried no code, leaving those log lines
+          // byte-identical to their pre-plan form.
+          const seamCode = seamErrorCode(err);
+          throw new Error(
+            seamHumanMessage(err) ?? `Upstream ${res.status}`,
+            seamCode === null ? undefined : { cause: { code: seamCode } },
+          );
         }
         throw new Error(`Upstream ${res.status}`);
       }

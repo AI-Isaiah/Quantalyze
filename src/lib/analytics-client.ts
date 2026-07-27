@@ -17,6 +17,10 @@ import {
   type SeamBudgetKey,
   type SeamResponse,
 } from "./resilient-fetch";
+// 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06). Never
+// hand-roll a second extractor: a second implementation of this predicate is
+// the drift class this programme exists to close.
+import { seamErrorCode, seamHumanMessage } from "@/lib/seam-discriminator";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { scrubSeamString } from "./seam-redaction";
 import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
@@ -56,7 +60,19 @@ export class AnalyticsTimeoutError extends Error {
  */
 export class AnalyticsUpstreamError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /**
+   * 140.3-01 / TS-05 — the stable MACHINE code from the seam envelope, or
+   * `null` when the body carried none (a transport-shaped failure, a bodyless
+   * 5xx, or a non-contract body).
+   *
+   * Additive and optional: every pre-existing construction site passes two
+   * arguments and keeps `null`. It exists because closing TS-05 with only the
+   * HUMAN half would leave the discriminator's other output unreachable at the
+   * seam chokepoint — and the code, not the sentence, is what the copy plan and
+   * TS-35 branch on. The sentence is for the user; the code is for us.
+   */
+  readonly seamCode: string | null;
+  constructor(message: string, status: number, seamCode: string | null = null) {
     super(message);
     this.name = "AnalyticsUpstreamError";
     // H-1144: the documented contract is "preserve the UPSTREAM status so route
@@ -72,6 +88,7 @@ export class AnalyticsUpstreamError extends Error {
       );
     }
     this.status = status;
+    this.seamCode = seamCode;
   }
 }
 
@@ -391,9 +408,26 @@ async function analyticsRequest(
         }
         return { detail: res.statusText };
       });
+      // 140.3-01 / TS-05 — read BOTH halves through the ONE discriminator.
+      //
+      // ONE LINE, TWO WIRE CONTRACTS (STATUS_CONTRACT.md §2 / §2.1). A
+      // deliberate 4xx/5xx from `service_error()` nests the whole envelope at
+      // `body.detail` — `{code, dependency, retryable, detail}` — so the
+      // previous `error.detail ??` read handed an OBJECT to the constructor and
+      // the message coerced to "[object Object]" (obligation O-5). The two
+      // APP-GLOBAL handlers (422, 429) emit a SCALAR `detail` with the code at
+      // the top level, and that path was already correct — TS-07 is an
+      // explicitly NEGATIVE obligation and it must not be "fixed". The leaf
+      // branches on the TYPE of `body.detail`, which is the only thing a
+      // consumer can decide without knowing which route answered.
+      //
+      // The `??` fallback stays: `seamHumanMessage` returns null for a body
+      // carrying no readable human string, and the static sentence is the
+      // pre-plan answer for that case.
       throw new AnalyticsUpstreamError(
-        error.detail ?? "Analytics service error",
+        seamHumanMessage(error) ?? "Analytics service error",
         res.status,
+        seamErrorCode(error),
       );
     }
     // Non-JSON error (FastAPI unhandled exception returns text/plain).
