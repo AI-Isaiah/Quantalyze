@@ -747,6 +747,167 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
 });
 
 /**
+ * [140.3-03 / SEAMUX-07] The publish gate must fail CLOSED on an UNREADABLE
+ * 2xx — member 1 of 2 of the unchecked-cast class.
+ *
+ * THE DEFECT. `fetchLivePermissions` did `return (await res.json()) as
+ * LivePermissions;` — a cast, which checks nothing at runtime — and the gate
+ * below it rejects only on `livePerms.trade === true || livePerms.withdraw ===
+ * true`. So a 2xx `{}`, or one renamed field, left BOTH scopes `undefined`;
+ * `undefined === true` is false at both gates; the probe returned `{ ok: true }`
+ * and the draft finalised to `pending_review` **with a key holding trade or
+ * withdraw scope published as read-only-verified.** That contradicts the
+ * fail-CLOSED doctrine this file states 40 lines above the probe.
+ *
+ * WHAT THE FIX MUST NOT DO. A parse miss must join the EXISTING probe-failure
+ * arm rather than open a second rejection path with new copy: a body that could
+ * not be read is a probe that did not run, which is the doctrine already
+ * written here. So the expected envelope below is hand-typed ONCE and asserted
+ * against BOTH the `probe_error` arm and every parse-miss case — byte-identity
+ * proven against a literal, never by comparing the two code paths to each other.
+ *
+ * The last case is the ANTI-REGRESSION CONTROL. A gate that refuses everything
+ * is not a fix, it is an outage, so a well-formed read-only 2xx must still
+ * publish. It is deliberately in this block rather than the one above.
+ */
+describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2xx", () => {
+  // Hand-typed, from reading the probe-failure arm — NOT imported from it.
+  const PROBE_FAILURE_ENVELOPE = {
+    error: "Exchange permission probe failed",
+    code: "KEY_NETWORK_TIMEOUT",
+  };
+
+  function mockProbeBody(body: unknown): ReturnType<typeof vi.spyOn> {
+    return vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+  }
+
+  it("a 2xx `{}` REFUSES the publish — it does not finalise as read-only-verified", async () => {
+    const fetchSpy = mockProbeBody({});
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(
+      res.status,
+      "An empty 2xx leaves `trade`/`withdraw` undefined, and `undefined === " +
+        "true` is false at BOTH gates — so pre-fix this body returned `{ok: " +
+        "true}` and the draft finalised with an unverified key.",
+    ).toBe(502);
+    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The finalize RPC must NOT have run: an unreadable probe is a probe " +
+        "that did not run, and a key whose live scopes could not be " +
+        "re-checked must never reach pending_review (T-140-22).",
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("a 2xx with `trade` RENAMED (can_trade) REFUSES the publish", async () => {
+    // The exact drift a cast cannot see: the body looks plausible, carries a
+    // truthful `can_trade: true`, and the gate reads the field that no longer
+    // exists.
+    const fetchSpy = mockProbeBody({
+      read: true,
+      can_trade: true,
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-07-27T00:00:00Z",
+    });
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("a 2xx with `trade` present but NON-BOOLEAN REFUSES the publish", async () => {
+    // `"false"` is a truthy string, and `"false" === true` is false — so a
+    // stringly-typed emitter would have published a key it had just described
+    // as trade-capable. No coercion at a security boundary.
+    const fetchSpy = mockProbeBody({
+      read: true,
+      trade: "false",
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-07-27T00:00:00Z",
+    });
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("the parse-miss envelope is BYTE-IDENTICAL to the `probe_error` arm's, asserted against the same literal", async () => {
+    // The doctrine under test: a body that could not be READ and a probe that
+    // reported its own failure are the same event to the user. Both are
+    // compared to the hand-typed literal above, never to each other.
+    const fetchSpy = mockProbeBody({
+      read: true,
+      trade: true,
+      withdraw: true,
+      probe_error: true,
+      detected_at: "2026-07-27T00:00:00Z",
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    fetchSpy.mockRestore();
+  });
+
+  it("ANTI-REGRESSION: a well-formed 2xx read-only body still PUBLISHES", async () => {
+    const fetchSpy = mockProbeBody({
+      read: true,
+      trade: false,
+      withdraw: false,
+      probe_error: false,
+      detected_at: "2026-07-27T00:00:00Z",
+    });
+    routeThroughLegacyFinalize();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "A gate that refuses everything is an outage, not a fix.",
+    ).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("pending_review");
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeDefined();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
  * Phase 140 / SEAM-01 + SEAM-03 — the third Railway seam on the WIZARD side.
  *
  * The force-refresh probe deliberately bypasses both cache layers, so unlike
