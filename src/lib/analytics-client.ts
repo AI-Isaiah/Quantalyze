@@ -17,6 +17,7 @@ import {
   type SeamResponse,
 } from "./resilient-fetch";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
+import { scrubSeamString } from "./seam-redaction";
 
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
@@ -274,9 +275,14 @@ function parseResponse<T>(
 ): T {
   const result = schema.safeParse(data);
   if (!result.success) {
+    // SEAMCORE-06 — a zod issue array is error-DERIVED and can echo
+    // request-derived values back into the line (a `received` field on a
+    // credential-shaped input, an unexpected key carrying a token). Rendered to
+    // a string first so the scrub can see it: passing the array straight to
+    // `console.error` hands the runtime an object the leaf never inspected.
     console.error(
       `[analytics-client] Contract validation failed for ${endpoint}:`,
-      result.error.issues,
+      scrubSeamString(JSON.stringify(result.error.issues)),
     );
     // Throw so callers get a clear error rather than silently wrong data.
     throw new Error(

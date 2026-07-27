@@ -7,6 +7,7 @@ import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -290,7 +291,18 @@ export const GET = withAuth(
         ? "Permissions probe timed out. Try again."
         : "Could not check key scopes. Try again.";
 
-      console.error(`[keys/permissions] proxy failed for ${keyId}:`, err);
+      // SEAMCORE-06 — this catch sees the seam's raw transport rejection, and
+      // the upstream request carried `X-Internal-Token: <INTERNAL_API_TOKEN>`,
+      // which undici inlines into the message. The token is on the leaf's env
+      // list, so no explicit secret is needed here: unlike the two key-connect
+      // paths, this route holds NO per-request credential — the exchange
+      // credentials are decrypted inside the Python service, never here, and
+      // `keyId` is an opaque row id that is deliberately kept in the line
+      // because it is what makes the failure triageable.
+      console.error(
+        `[keys/permissions] proxy failed for ${keyId}:`,
+        scrubSeamError(err),
+      );
       return NextResponse.json({ error: userMessage, code }, { status: 502, headers: NO_STORE_HEADERS });
     }
   },

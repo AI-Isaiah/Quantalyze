@@ -12,6 +12,7 @@ import { postProcessKey } from "@/lib/process-key-client";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
 // Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
 // dependency-free leaf so the cross-process parity test can exercise THIS
@@ -148,29 +149,27 @@ function validateStringArray(value: unknown): string[] {
 }
 
 /**
- * Phase B/C simplify — defense-in-depth token scrub. Replaces any literal
- * occurrence of the live INTERNAL_API_TOKEN inside a stringified value
- * with `<redacted>` before it lands in logs / Sentry. Originally added
- * for the H-0328 probe-error path; promoted to module scope so every
- * error-logging site (after()-block side-effect rejections, Sentry
- * `extra` payloads, etc.) gets the same coverage.
+ * ⚠️ THE ROUTE-LOCAL SCRUBBER IS GONE — see `@/lib/seam-redaction`.
+ *
+ * A private token-scrub pair used to live here (the names are deliberately not
+ * spelled out: the acceptance grep proving they are gone would otherwise match
+ * this very comment — the same trap the dormant handler's base-URL note in
+ * keys/validate-and-encrypt records). The IDEA was
+ * right: they were promoted to module scope precisely so every error-logging
+ * site in this route got them. Phase 140.2 / SEAMCORE-06 generalised them
+ * instead of discarding them, because the implementation was too narrow in
+ * three ways that each shipped silently — it knew exactly ONE env secret (so
+ * `X-Service-Key`, the Upstash token and a live user JWT went to the log
+ * verbatim), it was unreachable from the seam core and both clients where
+ * undici actually produces the leak, and it had no minimum-length refusal, so a
+ * short secret would substring-match prose and eat the `ECONNREFUSED` token —
+ * TRAP-1's explicit over-redaction warning.
+ *
+ * Do not re-introduce a local copy. Two enumerations of one concept is the
+ * class-not-instance defect this programme exists to close, and a comment is
+ * not a mechanism: `seam-log-coverage.test.ts` fails on a bare caught
+ * identifier reaching a `console.*` in this file.
  */
-function scrubInternalToken(value: string): string {
-  const token = process.env.INTERNAL_API_TOKEN;
-  if (!token || token.length === 0) return value;
-  return value.split(token).join("<redacted>");
-}
-
-function safeErrorString(err: unknown): string {
-  if (err instanceof Error) {
-    return `${scrubInternalToken(err.name)}: ${scrubInternalToken(err.message)}`;
-  }
-  try {
-    return scrubInternalToken(String(err));
-  } catch {
-    return "unknown";
-  }
-}
 
 /**
  * M-18 — payload validator. Returns either a `{ ok: true, fields }` tuple of
@@ -417,13 +416,14 @@ async function runScopeBroadeningProbe(
         ),
       };
     }
-    // audit-2026-05-07 H-0328 + Phase C simplify — log only the safe
-    // primitives (name + message) scrubbed of any literal INTERNAL_API_TOKEN
-    // occurrence. Some fetch / undici / retry-wrapper stack traces embed
+    // audit-2026-05-07 H-0328, generalised by SEAMCORE-06 — log only the safe
+    // primitives (name + message + cause chain), scrubbed of every secret the
+    // shared leaf knows. Some fetch / undici / retry-wrapper stack traces embed
     // the outgoing X-Internal-Token header in either the message or a
-    // wrapper-error name; both paths are covered by scrubInternalToken.
+    // wrapper-error NAME; the leaf covers both paths, and the syscall token
+    // survives so a refused connection is still distinguishable from a timeout.
     console.error(
-      `[strategies/finalize-wizard] live permissions probe failed: ${safeErrorString(probeErr)}`,
+      `[strategies/finalize-wizard] live permissions probe failed: ${scrubSeamError(probeErr)}`,
     );
     return {
       ok: false,
@@ -470,9 +470,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   try {
     body = await req.json();
   } catch (err) {
+    // SEAMCORE-06 — a class member the plan's enumeration did not list: the
+    // caught rejection was passed through raw. `req.json()` collapses transport
+    // read failures and parse errors into one rejection, and a transport
+    // failure's message is undici's, headers included.
     console.warn(
       "[finalize-wizard] body JSON parse failed:",
-      err instanceof Error ? err.message : err,
+      scrubSeamError(err),
     );
   }
 
@@ -540,9 +544,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     .maybeSingle();
 
   if (strategyErr) {
+    // SEAMCORE-06 — same class as the five Supabase `.message` reads this route
+    // already scrubbed, and it was the one that was not. Closing the class, not
+    // the instances, is the point.
     console.error(
       "[strategies/finalize-wizard] strategy lookup failed:",
-      strategyErr.message,
+      scrubSeamError(strategyErr),
     );
     return NextResponse.json(
       { error: "Could not load draft" },
@@ -615,7 +622,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .single();
     if (keyVenueErr) {
       console.warn(
-        `[strategies/finalize-wizard] asset_class venue resolve failed (non-blocking, defaults √252): ${scrubInternalToken(keyVenueErr.message)}`,
+        `[strategies/finalize-wizard] asset_class venue resolve failed (non-blocking, defaults √252): ${scrubSeamError(keyVenueErr)}`,
       );
       captureToSentry(keyVenueErr, {
         tags: { op: "finalize-wizard.asset_class_venue_resolve" },
@@ -658,7 +665,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .eq("user_id", user.id);
     if (assetClassErr) {
       console.warn(
-        `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubInternalToken(assetClassErr.message)}`,
+        `[strategies/finalize-wizard] asset_class persist failed (non-blocking): ${scrubSeamError(assetClassErr)}`,
       );
       captureToSentry(assetClassErr, {
         tags: { op: "finalize-wizard.asset_class_persist" },
@@ -710,7 +717,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // unified path's COMPOSITE_MEMBERSHIP_UNKNOWN code so the wizard client
       // maps the same retry copy off `code`.
       console.error(
-        `[strategies/finalize-wizard] composite membership probe failed: ${safeErrorString(err)}`,
+        `[strategies/finalize-wizard] composite membership probe failed: ${scrubSeamError(err)}`,
       );
       captureToSentry(err, {
         tags: {
@@ -747,7 +754,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // A member-list read error also fails CLOSED — never enqueue a
         // composite whose members we could not enumerate to re-probe.
         console.error(
-          `[strategies/finalize-wizard] composite member list read failed: ${scrubInternalToken(membersErr.message)}`,
+          `[strategies/finalize-wizard] composite member list read failed: ${scrubSeamError(membersErr)}`,
         );
         captureToSentry(membersErr, {
           tags: {
@@ -823,7 +830,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .single();
     if (keyRowErr) {
       console.warn(
-        `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubInternalToken(keyRowErr.message)}`,
+        `[strategies/finalize-wizard] api_keys.exchange lookup failed; falling back to default source: ${scrubSeamError(keyRowErr)}`,
       );
       // Mirror the H-0322 escalation pattern: console.warn on Vercel is
       // best-effort log capture, not alertable. Without Sentry a transient
@@ -919,9 +926,13 @@ async function runLegacyFinalize(args: {
   });
 
   if (error) {
+    // SEAMCORE-06 — the message is scrubbed; `error.code` is a five-character
+    // SQLSTATE from a closed set and is deliberately kept intact, because the
+    // branches immediately below key off it and an operator reading the line
+    // needs to see the same value the code did.
     console.error(
       "[strategies/finalize-wizard] RPC error:",
-      error.message,
+      scrubSeamError(error.message),
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
@@ -996,7 +1007,7 @@ async function runLegacyFinalize(args: {
         : fields.name;
     if (keyLinkErr) {
       console.warn(
-        `[strategies/finalize-wizard] api_key_id lookup failed in after(): ${scrubInternalToken(keyLinkErr.message)}`,
+        `[strategies/finalize-wizard] api_key_id lookup failed in after(): ${scrubSeamError(keyLinkErr)}`,
       );
       captureToSentry(keyLinkErr, {
         tags: {
@@ -1153,7 +1164,7 @@ async function runLegacyFinalize(args: {
         // in Vercel logs. Side-effect errors (notably enqueue_compute_job
         // wrappers) may stringify request init into .message.
         console.warn(
-          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking): ${safeErrorString(r.reason)}`,
+          `[strategies/finalize-wizard] side effect ${label} failed (non-blocking): ${scrubSeamError(r.reason)}`,
         );
         captureToSentry(r.reason, {
           tags: {

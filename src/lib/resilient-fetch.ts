@@ -2,6 +2,7 @@ import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { seamBreakerVerdict } from "./seam-discriminator";
+import { scrubSeamError } from "./seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -852,9 +853,14 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
     }
     return { open: false };
   } catch (err) {
+    // SCRUBBED (SEAMCORE-06 / TRAP-1). This arm logs the BREAKER STORE's
+    // rejection, and the store command carries `UPSTASH_REDIS_REST_TOKEN` in an
+    // Authorization header — which undici inlines into the error it produces.
+    // The syscall token survives, because a store that is refused and a store
+    // whose certificate expired are different incidents.
     console.error(
       "[resilient-fetch] breaker check failed — failing OPEN:",
-      err,
+      scrubSeamError(err),
     );
     return { open: false };
   }
@@ -979,9 +985,11 @@ export async function recordSeamFailure(
       await redis.set(breakerKey, value, { ex: ttlS });
     }
   } catch (err) {
+    // SCRUBBED, same reason as the read arm above: the store credential is in
+    // the outgoing header this rejection describes.
     console.error(
       "[resilient-fetch] failed to record seam failure — breaker state may be stale:",
-      err,
+      scrubSeamError(err),
     );
   }
 }
@@ -1140,10 +1148,15 @@ function instrumentBody(
       const deadlineExceeded = isDeadlineError(err);
       // The budget key is logged, never the path, body or header values — the
       // seam carries raw exchange credentials and INTERNAL_API_TOKEN.
+      // The non-deadline arm carries the scrubbed rendering for the same A-10
+      // reason as the transport arm: a body read that fails because the
+      // connection reset and one that fails because the stream was truncated
+      // are different incidents, and this site is a member of the SEAMCORE-06
+      // class that plan 140.2-05 added.
       console.error(
         deadlineExceeded
           ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms while reading the response body`
-          : `[resilient-fetch] ${budgetKey}: response body read failed`,
+          : `[resilient-fetch] ${budgetKey}: response body read failed: ${scrubSeamError(err)}`,
       );
       // AWAITED INLINE, exactly like the transport arm. A "record in the
       // background so we don't add latency" IIFE is orphaned by Fluid Compute
@@ -1401,10 +1414,23 @@ export async function resilientFetch(
     // line differs; the budget key is logged, never the path, body, or headers
     // (the seam carries raw exchange credentials and INTERNAL_API_TOKEN).
     const deadlineExceeded = isDeadlineError(err);
+    // ── A-10, AND THIS SITE GAINS INFORMATION RATHER THAN LOSING IT ─────────
+    // `err` used to be DROPPED here entirely. The result was that TLS expiry, a
+    // DNS `EAI_AGAIN`, a refused connection and a header `TypeError` were one
+    // indistinguishable sentence — the operator could see THAT the seam failed
+    // and never WHY. The scrubbed rendering restores the syscall token and the
+    // TLS code while removing every credential undici inlined into the message
+    // (SEAMCORE-06 / TRAP-1), so the line is both safe and diagnostic.
+    //
+    // ⚠️ DELIBERATELY SEPARATE FROM THE CONFIG SENTENCE plan 140.2-05 added
+    // above. That sentence exists so a malformed `ANALYTICS_SERVICE_URL` stops
+    // being reported as Railway degradation; merging the two would undo it.
+    //
+    // The budget key stays; the path, the body and every header value stay OUT.
     console.error(
       deadlineExceeded
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
-        : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service`,
+        : `[resilient-fetch] ${budgetKey}: network failure reaching the analytics service: ${scrubSeamError(err)}`,
     );
     // No status line at all, so the verdict is TRANSPORT and the key is the
     // residual global one. Asked of the discriminator rather than hardcoded here

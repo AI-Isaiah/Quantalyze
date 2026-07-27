@@ -8,6 +8,7 @@ import {
   type SeamResponse,
 } from "@/lib/resilient-fetch";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -328,7 +329,17 @@ export async function postProcessKey(
     // Non-timeout network errors surface as 502 so the caller can
     // distinguish "we never reached upstream" from "upstream rejected us".
     const message = err instanceof Error ? err.message : "Network error";
-    console.error(`[${tag}] /process-key upstream fetch threw:`, message);
+    // SEAMCORE-06 / TRAP-1 — THE undici site. This is the one that actually
+    // leaks: undici embeds the outgoing headers in `err.message`, and this
+    // request's headers are `Authorization: Bearer <INTERNAL_API_TOKEN>`,
+    // `X-Tenant-Claim`, and on the CSV finalize flow `X-User-Access-Token` — a
+    // LIVE end-user Supabase JWT. The token comes from the leaf's env list; the
+    // JWT cannot, so it is passed explicitly. The syscall token survives, which
+    // is the whole reason the raw message is not simply dropped.
+    console.error(
+      `[${tag}] /process-key upstream fetch threw:`,
+      scrubSeamError(message, [args.userAccessToken]),
+    );
     return {
       ok: false,
       response: NextResponse.json(

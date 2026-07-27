@@ -8,6 +8,7 @@ import {
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
@@ -323,8 +324,21 @@ async function legacyValidateAndEncryptHandler(args: {
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
-    console.error("[keys/validate-and-encrypt] validation failed:", err);
-    captureToSentry(err, { tags: { route: "api/keys/validate-and-encrypt" } });
+    // SEAMCORE-06 / T-140.2-08-03 — THE credential-bearing path. This route's
+    // request body carries the RAW exchange `api_key`, `api_secret` and
+    // `passphrase`; a wrapper that stringifies the request init into a message,
+    // or an undici error that inlines the outgoing headers, puts them straight
+    // into this line and into Sentry. No module-level env list can know them,
+    // so they are named explicitly at both sinks.
+    const perRequestSecrets = [api_key, api_secret, passphrase];
+    console.error(
+      "[keys/validate-and-encrypt] validation failed:",
+      scrubSeamError(err, perRequestSecrets),
+    );
+    captureToSentry(err, {
+      tags: { route: "api/keys/validate-and-encrypt" },
+      secrets: perRequestSecrets,
+    });
     return NextResponse.json(
       { error: "Key validation failed. Please try again." },
       { status: 500, headers: NO_STORE_HEADERS },
