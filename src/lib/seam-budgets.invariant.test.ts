@@ -384,12 +384,12 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
     it.each(
       ROUTE_ENTRIES.flatMap(([routePath, entry]) =>
         BREAKER_STATES.map(
-          (state) => [routePath, entry, state] as const,
+          (state) => [routePath, state, entry] as const,
         ),
       ),
     )(
-      "%s in the %3$s state: request budget + store round trips < maxDuration x 1000",
-      (routePath, entry, state) => {
+      "%s — %s state: request budget + store round trips < maxDuration x 1000",
+      (routePath, state, entry) => {
         // The ceiling is re-read from DISK rather than taken from the table,
         // so this assertion never compares the table against itself even if
         // SC-4a were removed. It is also the ONLY independent side now that the
