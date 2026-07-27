@@ -83,9 +83,22 @@ vi.mock("@/lib/supabase/client", () => ({
 // be treated as a terminal SUCCESS, clearing syncingKeyId + refreshing).
 let capturedOnStatusChange: ((s: string) => void) | null = null;
 vi.mock("./SyncProgress", () => ({
-  SyncProgress: (props: { onStatusChange?: (s: string) => void }) => {
+  SyncProgress: (props: {
+    syncStatus?: string;
+    syncError?: string | null;
+    onStatusChange?: (s: string) => void;
+  }) => {
     capturedOnStatusChange = props.onStatusChange ?? null;
-    return null;
+    // 140.3-08 / SEAMUX-05: render the two props ApiKeyManager drives on a sync
+    // failure. The real SyncProgress renders both (a status label and the
+    // syncError detail line), and without them in the DOM a test cannot tell
+    // "the failure reached THIS component's surface" from "the failure reached
+    // console.warn and nothing else" — which is exactly the B-06 defect.
+    return (
+      <div data-testid="sync-progress" data-sync-status={props.syncStatus}>
+        {props.syncError}
+      </div>
+    );
   },
 }));
 
@@ -586,5 +599,437 @@ describe("ApiKeyManager — F6 canonical-lowercase exchange at the add-key inser
     expect(apiKeyInsertMock).toHaveBeenCalledWith(
       expect.objectContaining({ exchange: "binance" }),
     );
+  });
+});
+
+/**
+ * Phase 140.3 plan 08 / SEAMUX-05 (+ SEAMUX-04's C-9 sub-finding) — both
+ * `/api/keys/sync` call sites in this component must observe the HTTP OUTCOME,
+ * not merely a transport rejection.
+ *
+ * Three defects, all live before this plan:
+ *
+ *  1. **B-06, the background sync.** `handleAddKey` fired
+ *     `fetch("/api/keys/sync", …).catch(…)` with a comment claiming it handled
+ *     failure. `.catch()` fires ONLY when the request never completed, so a 401,
+ *     403, 500 or a breaker 503 was completely invisible — the user was told the
+ *     key was added and nothing ever said the sync had not started.
+ *  2. **B-15, the explicit sync.** `handleSyncTrades` checked `res.ok` but never
+ *     read the body, so ANY 2xx set `syncStatus("computing")` and started the
+ *     poll. `/api/keys/sync` deliberately answers an unrecognised upstream shape
+ *     with an UN-stamped passthrough (route.ts: "marking an unrecognized shape
+ *     ok:true would falsely signal success"), so the one response that means
+ *     "no job was enqueued" was the one that started a 15-minute poll for it.
+ *  3. **C-9, the copy.** The non-JSON `!res.ok` arm threw
+ *     *"Analytics service unavailable. Ensure SUPABASE_SERVICE_ROLE_KEY is
+ *     configured."* — user-facing copy naming an internal environment variable.
+ *
+ * Plus one found while rewriting that arm and fixed here rather than left for a
+ * second pass: the JSON branch read `err.error` ALONE, and every failure envelope
+ * `postProcessKey` builds carries its copy under `human_message`, not `error`
+ * (`process-key-client.ts`, the `CircuitOpenError` arm). So a breaker 503 —
+ * whose sentence `140.3-04` consolidated onto ONE production source precisely so
+ * it reaches users — rendered as the generic "Trade sync failed" at this seam
+ * consumer. Same class as `140.3-07`'s B-27 finding: a failure path that
+ * swallows copy a route deliberately wrote.
+ *
+ * Every literal below is HAND-TYPED, never imported from the module under test
+ * or from `src/lib/seam-copy.ts` (lesson C-1: an oracle that reads its subject
+ * cannot detect its subject changing).
+ */
+describe("ApiKeyManager — SEAMUX-05: both sync call sites observe the HTTP outcome", () => {
+  // Hand-typed. `src/lib/seam-copy.ts` holds the production declaration; a test
+  // that imported it could not detect it changing.
+  const BREAKER_SENTENCE =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+  // Hand-typed. The component-owned sentence that REPLACED the env-var lie.
+  const SYNC_UNAVAILABLE_SENTENCE =
+    "We couldn't start the sync. Your key is saved — retry in a moment, and contact support if it keeps failing.";
+
+  function keyRow() {
+    return {
+      id: "key-1",
+      user_id: "user-a",
+      exchange: "binance",
+      label: "My Binance",
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+    };
+  }
+
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+    apiKeyInsertMock.mockReset();
+    capturedOnStatusChange = null;
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Render with one existing, currently-linked key and click "Resync". */
+  async function clickResync() {
+    selectResultMock.mockReturnValue({ data: [keyRow()], error: null });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-1" />);
+    });
+    await waitFor(() =>
+      expect(screen.getByText("My Binance")).toBeInTheDocument(),
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Resync/i }));
+    });
+  }
+
+  // ── B-15: the unrecognised 200 ─────────────────────────────────────────────
+
+  it("does NOT enter 'computing' on a 200 that carries no enqueue evidence (B-15)", async () => {
+    // The route's DRIFT fallback: a 2xx whose body it deliberately did NOT stamp
+    // `ok: true` because the upstream shape was unrecognised. No job exists.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ verification_id: "v-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    await clickResync();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-progress")).toBeInTheDocument();
+    });
+    // THE assertion: the poll never starts for a job that was never enqueued.
+    expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+      "data-sync-status",
+      "error",
+    );
+    expect(
+      screen.getByTestId("sync-progress").getAttribute("data-sync-status"),
+    ).not.toBe("computing");
+    expect(screen.getByText(SYNC_UNAVAILABLE_SENTENCE)).toBeInTheDocument();
+  });
+
+  it("ANTI-REGRESSION: a well-formed 202 DOES enter 'computing'", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            accepted: true,
+            strategy_id: "strat-1",
+            status: "syncing",
+            queued: true,
+            composite: false,
+          }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    await clickResync();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "computing",
+      );
+    });
+  });
+
+  // ── C-9: the env-var lie, and the non-JSON failure path ────────────────────
+
+  it("renders no SUPABASE-naming copy and throws no parse error on a non-JSON !res.ok (C-9)", async () => {
+    // A proxy or gateway answers the outage with an HTML error page. A JSON read
+    // here throws a SyntaxError INSIDE the failure path, replacing the real
+    // failure with a parse error — which is why the content-type branch exists.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<html><body>502 Bad Gateway</body></html>", {
+          status: 502,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        }),
+      ),
+    );
+
+    await clickResync();
+
+    await waitFor(() => {
+      expect(screen.getByText(SYNC_UNAVAILABLE_SENTENCE)).toBeInTheDocument();
+    });
+    // The env-var lie is gone from the rendered surface …
+    expect(document.body.textContent).not.toMatch(/SUPABASE/);
+    // … and no SyntaxError text leaked into the DOM in its place.
+    expect(document.body.textContent).not.toMatch(/JSON|SyntaxError|Unexpected token/);
+  });
+
+  it("renders the route's breaker sentence rather than a generic fallback (human_message, not error)", async () => {
+    // What `postProcessKey` actually builds on a CircuitOpenError: the copy is
+    // under `human_message`. Reading `err.error` alone swallowed it.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            code: "CIRCUIT_OPEN",
+            human_message: BREAKER_SENTENCE,
+            correlation_id: "cid-1",
+            recoverable: true,
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    await clickResync();
+
+    await waitFor(() => {
+      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+      "data-sync-status",
+      "error",
+    );
+  });
+
+  it("ANTI-REGRESSION: a JSON failure carrying `error` still renders that message", async () => {
+    // The route's OWN arms use `{ error }` (400 / 404 / 429 / the 503 composite
+    // probe). Reading `human_message` must not displace them.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: "Too many requests" }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    await clickResync();
+
+    await waitFor(() => {
+      expect(screen.getByText("Too many requests")).toBeInTheDocument();
+    });
+  });
+
+  // ── B-06: the background sync ──────────────────────────────────────────────
+
+  it("observes a 503 on the BACKGROUND sync after an add (B-06)", async () => {
+    selectResultMock.mockReturnValue({ data: [], error: null });
+    apiKeyInsertMock.mockReturnValue({ data: { id: "new-key" }, error: null });
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              api_key_encrypted: "enc",
+              api_secret_encrypted: "sec",
+              passphrase_encrypted: null,
+              dek_encrypted: "dek",
+              nonce: "nonce",
+              kek_version: 1,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      // The background sync answers a breaker trip. `.catch()` alone NEVER sees
+      // this — the promise RESOLVES.
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            ok: false,
+            code: "CIRCUIT_OPEN",
+            human_message: BREAKER_SENTENCE,
+            correlation_id: "cid-2",
+            recoverable: true,
+          }),
+          { status: 503, headers: { "content-type": "application/json" } },
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => {
+      render(
+        <ApiKeyManager
+          strategyId="strat-1"
+          currentKeyId={null}
+          defaultExchange="binance"
+        />,
+      );
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+    });
+    const labelInput = screen.getByLabelText(/Label/i);
+    fireEvent.change(labelInput, { target: { value: "Test Key" } });
+    fireEvent.change(screen.getByLabelText(/API Key$/i), {
+      target: { value: "test-key" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "test-secret" },
+    });
+    await act(async () => {
+      fireEvent.submit(labelInput.closest("form")!);
+    });
+
+    // The sync POST did fire …
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync"),
+      ).toBe(true);
+    });
+    // … and THE assertion: its failure reached this component's own surface.
+    // Before the fix nothing but `console.warn` observed it.
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "error",
+      );
+    });
+    expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+  });
+
+  it("observes an unrecognised 200 on the BACKGROUND sync too (same shape, both members)", async () => {
+    selectResultMock.mockReturnValue({ data: [], error: null });
+    apiKeyInsertMock.mockReturnValue({ data: { id: "new-key" }, error: null });
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              api_key_encrypted: "enc",
+              api_secret_encrypted: "sec",
+              passphrase_encrypted: null,
+              dek_encrypted: "dek",
+              nonce: "nonce",
+              kek_version: 1,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ verification_id: "v-2" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => {
+      render(
+        <ApiKeyManager
+          strategyId="strat-1"
+          currentKeyId={null}
+          defaultExchange="binance"
+        />,
+      );
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+    });
+    const labelInput = screen.getByLabelText(/Label/i);
+    fireEvent.change(labelInput, { target: { value: "Test Key" } });
+    fireEvent.change(screen.getByLabelText(/API Key$/i), {
+      target: { value: "test-key" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "test-secret" },
+    });
+    await act(async () => {
+      fireEvent.submit(labelInput.closest("form")!);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("sync-progress")).toHaveAttribute(
+        "data-sync-status",
+        "error",
+      );
+    });
+    expect(screen.getByText(SYNC_UNAVAILABLE_SENTENCE)).toBeInTheDocument();
+  });
+
+  it("ANTI-REGRESSION: a well-formed background sync leaves the panel idle", async () => {
+    selectResultMock.mockReturnValue({ data: [], error: null });
+    apiKeyInsertMock.mockReturnValue({ data: { id: "new-key" }, error: null });
+
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === "/api/keys/validate-and-encrypt") {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              api_key_encrypted: "enc",
+              api_secret_encrypted: "sec",
+              passphrase_encrypted: null,
+              dek_encrypted: "dek",
+              nonce: "nonce",
+              kek_version: 1,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ ok: true, accepted: true, status: "syncing" }),
+          { status: 202, headers: { "content-type": "application/json" } },
+        ),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => {
+      render(
+        <ApiKeyManager
+          strategyId="strat-1"
+          currentKeyId={null}
+          defaultExchange="binance"
+        />,
+      );
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Add Key/i }));
+    });
+    const labelInput = screen.getByLabelText(/Label/i);
+    fireEvent.change(labelInput, { target: { value: "Test Key" } });
+    fireEvent.change(screen.getByLabelText(/API Key$/i), {
+      target: { value: "test-key" },
+    });
+    fireEvent.change(screen.getByLabelText("API Secret"), {
+      target: { value: "test-secret" },
+    });
+    await act(async () => {
+      fireEvent.submit(labelInput.closest("form")!);
+    });
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) => c[0] === "/api/keys/sync"),
+      ).toBe(true);
+    });
+    // A background sync that SUCCEEDED must not manufacture an error surface.
+    // The panel only renders once syncStatus leaves "idle".
+    expect(screen.queryByTestId("sync-progress")).not.toBeInTheDocument();
   });
 });
