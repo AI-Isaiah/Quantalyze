@@ -136,6 +136,21 @@ export type WizardErrorCode =
   // ("something went wrong, our team has been notified"), which is both untrue
   // and un-actionable during an infra outage.
   | "SERVICE_UNAVAILABLE_RETRY"
+  // Phase 140.3-01 / TS-09 — the two machine codes the APP-GLOBAL handlers in
+  // `analytics-service/main.py` emit (STATUS_CONTRACT.md §2.1). Both arrive on
+  // the FLAT wire shape, with the code at the TOP level of the body.
+  //
+  // ⚠️ NEITHER IS A DUPLICATE OF A MEMBER ABOVE, and the near-misses matter:
+  //   · `RATE_LIMITED` is OUR limiter refusing the request (`RateLimitExceeded`,
+  //     429). `KEY_RATE_LIMIT` above is the wizard's classification of an
+  //     EXCHANGE throttle, reached through the substring cascade. Rendering one
+  //     for the other blames a venue for our own limit, or vice versa.
+  //   · `VALIDATION_FAILED` is a request-shape rejection (`RequestValidationError`,
+  //     422) on the API path. `CSV_VALIDATION_FAILED` above is the CSV branch's
+  //     row-level rule failure. Rendering one for the other tells an API user
+  //     about their file.
+  | "VALIDATION_FAILED"
+  | "RATE_LIMITED"
   // Fallback
   | "UNKNOWN";
 
@@ -782,6 +797,43 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // TODO-COPY-140.3-12 — NON-FINAL. This entry exists so the
+  // `Record<WizardErrorCode, …>` type-checks now that `VALIDATION_FAILED` is a
+  // union member; it is NOT a copy decision. The final sentence is 140.3's copy
+  // plan's to author alongside TS-35, against the whole surface at once rather
+  // than one site at a time. Treat this as unwritten copy, not a shipped
+  // string. 140.3-12 closes it by grepping this token to 0.
+  VALIDATION_FAILED: {
+    title: "We could not read that request.",
+    cause:
+      "The analytics service rejected the shape of the request before it ran. Nothing was submitted and nothing was changed.",
+    fix: [
+      "Contact security@quantalyze.com with your draft ID — a request-shape fault is on our side and retrying the same action will not clear it.",
+    ],
+    docsHref: "/security",
+    // Deliberately NO retry affordance: the request is malformed, so a retry
+    // re-fails identically. DESIGN.md's Error Envelope renders the Retry CTA
+    // iff `recoverable && onRetry`, and this is not recoverable.
+    actions: ["request_call"],
+  },
+
+  // TODO-COPY-140.3-12 — NON-FINAL, same rule as the entry above.
+  //
+  // ⚠️ A NOTE THE COPY PLAN NEEDS. DESIGN.md's voice section requires stating a
+  // limitation WITH THE THRESHOLD ATTACHED, and the honest threshold here is
+  // the server's `Retry-After` / `retry_after_seconds`. Neither
+  // `WizardErrorContext` nor `ErrorEnvelope` carries a wait field today, so
+  // naming the real wait is currently UNREPRESENTABLE, not merely unwritten —
+  // that plumbing is part of what 140.3-12 has to budget for.
+  RATE_LIMITED: {
+    title: "You have reached our request limit.",
+    cause:
+      "We limit how often this action can run. Nothing was submitted and nothing was changed — this is our limit, not your exchange's.",
+    fix: ["Wait a moment, then try the same action again."],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
@@ -1032,6 +1084,45 @@ export function classifyKeyValidationError(error: unknown): {
     return { code: "KEY_HAS_TRADING_PERMS", status: 400 };
   }
   return { code: "UNKNOWN", status: 500 };
+}
+
+/**
+ * Phase 140.3-01 / TS-09 — the RECOGNITION BRANCH for a seam machine code.
+ *
+ * Maps a stable `code` read off a seam error body (via
+ * `seamErrorCode` in the dependency-free `@/lib/seam-discriminator` leaf — never
+ * a second, hand-rolled extractor) onto the wizard code that renders it.
+ *
+ * WHY A `Map` AND NOT A `Record`. The code arrives OVER THE WIRE. A plain-object
+ * index would resolve `"constructor"`, `"toString"` and `"__proto__"` to
+ * inherited members, and `lookup[code] ?? "UNKNOWN"` would then return a
+ * Function typed as a `WizardErrorCode`. A `Map` has no such inherited keys.
+ *
+ * WHY THE TABLE IS EXPLICIT RATHER THAN AN IDENTITY. A seam code and a wizard
+ * code are different vocabularies that happen to agree on these two names
+ * today. `SEAM_DEGRADED`, `MT5_GATEWAY_UNREACHABLE` and the venue codes have no
+ * wizard member and correctly answer `UNKNOWN`; writing the mapping as
+ * `code as WizardErrorCode` would silently admit every one of them.
+ *
+ * ⚠️ SCOPE. This lands the TYPE half of TS-09. Wiring it into the emitters that
+ * currently derive a code from a substring cascade is TS-35, and it belongs to
+ * 140.3's copy plan — `classifyKeyValidationError`'s cascade above must NOT be
+ * deleted until every emitter carries a code, or the class re-opens from the
+ * other side.
+ */
+const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<
+  string,
+  WizardErrorCode
+>([
+  ["VALIDATION_FAILED", "VALIDATION_FAILED"],
+  ["RATE_LIMITED", "RATE_LIMITED"],
+]);
+
+export function recogniseSeamErrorCode(
+  seamCode: string | null | undefined,
+): WizardErrorCode {
+  if (typeof seamCode !== "string") return "UNKNOWN";
+  return SEAM_CODE_TO_WIZARD_CODE.get(seamCode) ?? "UNKNOWN";
 }
 
 /**
