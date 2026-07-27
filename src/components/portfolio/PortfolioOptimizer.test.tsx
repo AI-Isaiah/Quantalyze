@@ -14,6 +14,8 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import PortfolioOptimizer, {
   type OptimizerSuggestion,
 } from "./PortfolioOptimizer";
@@ -281,6 +283,54 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
     );
     expect(addToPortfolioControls()).toHaveLength(1);
     expect(screen.queryByText("Uncorrelated Vol")).toBeNull();
+  });
+
+  /**
+   * ⚠️ Added in response to a GREEN mutation, and recorded as such.
+   *
+   * M72 (delete `setSuggestions(null)` from the top of `runOptimizer`) left all
+   * eleven cases above GREEN. That is a real finding, not a pass: this member
+   * needed TWO fixes — the invalidation AND making the error card reachable —
+   * and the render guard alone already keeps every ranking off screen while an
+   * error is set, so the invalidation is behaviourally redundant on every
+   * reachable path. (M72b, deleting the guard's `error` disjunct, reddens 4
+   * cases, so the behavioural oracle above is not vacuous — it binds to the
+   * other half.)
+   *
+   * Redundant is not worthless: the invalidation is the LOCKED house pattern,
+   * it keeps the component from holding a result it has already invalidated,
+   * and it is the only thing covering a `router.refresh()` throw that lands
+   * AFTER a successful `setSuggestions`. Left unpinned it could be deleted
+   * tomorrow with a green suite. So it is pinned structurally, which is the
+   * honest instrument for a structural property — and it is labelled as
+   * structural rather than dressed up as behaviour.
+   *
+   * Member 2 needs no such pin: `setPerms(null)` is its ONLY fix, so M73
+   * reddens its behavioural cases directly.
+   */
+  describe("STRUCTURAL PIN: the locked invalidate-before-refetch idiom, at both live members", () => {
+    const read = (rel: string) =>
+      readFileSync(join(process.cwd(), "src", rel), "utf8");
+
+    it.each([
+      ["components/portfolio/PortfolioOptimizer.tsx", "setSuggestions(null)"],
+      ["components/connect/KeyPermissionBadge.tsx", "setPerms(null)"],
+    ])("%s invalidates before its fetch", (file, call) => {
+      const lines = read(file).split("\n");
+      const invalidateAt = lines.findIndex((l) => l.trim() === `${call};`);
+      const fetchAt = lines.findIndex((l) => l.includes("await fetch("));
+
+      expect(
+        invalidateAt,
+        `${file} must call ${call} — the locked shape from WeightOptimizerSection.tsx`,
+      ).toBeGreaterThan(-1);
+      expect(
+        invalidateAt,
+        `${file} must invalidate BEFORE the request, not in the catch: a catch-side ` +
+          `discard leaves the stale result rendered for the whole in-flight window ` +
+          `on any surface whose loading branch does not mask it.`,
+      ).toBeLessThan(fetchAt);
+    });
   });
 
   it("ANTI-REGRESSION: the server-rendered computationStatus='failed' card still renders", () => {
