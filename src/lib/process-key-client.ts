@@ -76,6 +76,92 @@ const CIRCUIT_OPEN_HUMAN_MESSAGE =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 /**
+ * User-facing copy for "we never reached the ingestion service", shared by the
+ * transport arm and by the SEAMCORE-11 ambiguous-transport arm below.
+ *
+ * Extracted to a constant when the second user appeared: this plan authors NO
+ * new user-facing copy (140.3 owns the client-facing surface), and a second
+ * hand-copied literal is how "no new copy" quietly becomes two copies that
+ * drift.
+ */
+const UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE =
+  "Could not reach the ingestion service.";
+
+/**
+ * Phase 140.2-11 / SEAMCORE-11 (A-27) — THE ONE DEFINED OUTCOME for an
+ * ambiguous transport. Stated identically here and in
+ * `src/lib/analytics-client.ts` so the next reader does not have to diff the two
+ * files to find out what the seam does with a 204.
+ *
+ * WHAT IS AMBIGUOUS
+ *   1. A 2xx whose content-type is not JSON. The modal case is a Railway edge
+ *      or maintenance page served as `200 text/html`: the transport succeeded,
+ *      the breaker (correctly) counts nothing, and what came back is not the
+ *      service. This client used to swallow it — `res.json()` rejected, the
+ *      `{}` fallback caught it, and the edge page was reported to the caller as
+ *      a well-formed success.
+ *   2. The three NULL-BODY statuses 204 / 205 / 304, which carry no body at all.
+ *      204 and 205 are `ok`, so they returned `{ ok: true, status, body: {} }`
+ *      while `analytics-client` threw on the identical response; 304 is not
+ *      `ok`, so it reached the status pass-through and CRASHED.
+ *
+ * THE OUTCOME, in both clients
+ *   A typed upstream error carrying the OBSERVED status and content-type, in a
+ *   static operator-facing message that names the SEAM. `analytics-client`
+ *   THROWS it as `AnalyticsUpstreamError`; here the identical message goes to
+ *   the operator log and the outcome is RETURNED as an `{ ok: false, response }`
+ *   502 envelope — never thrown. Plan 140.2-05 widened this function's `try`
+ *   specifically to keep it non-throwing for its five caller routes
+ *   (strategies/csv-validate, strategies/csv-finalize, strategies/finalize-wizard,
+ *   keys/sync, verify-strategy), none of which has a catch for it; closing A-27
+ *   with a throw would undo that in the same file.
+ *
+ * WHY THE THREE STATUSES ARE DECIDED ON THE STATUS, BEFORE ANY RESPONSE IS
+ * CONSTRUCTED. Verified by execution on Node v25.8.1:
+ * `Response.json(body, { status: 204 | 205 | 304 })` throws
+ * `TypeError: Response constructor: Invalid response status code`. That is
+ * WHATWG-spec behaviour, not a runtime quirk, so CI's Node 22 and local Node 25
+ * agree. The construction ITSELF is the fault, so no arm may reach it — which
+ * is why the check sits ABOVE the `!res.ok` pass-through rather than inside it.
+ *
+ * The 502 is the routable status: the gateway answered, unusably. The user-facing
+ * envelope is the one that ALREADY exists for "we never reached it", because a
+ * maintenance page is not reaching it. Zero new codes, zero new copy.
+ *
+ * The BREAKER VERDICT IS UNCHANGED by all of this (SEAMCORE-01): a 2xx is not a
+ * service fault and a 304 is not either. This is what the CLIENT does with the
+ * response, not what the core counts.
+ */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([204, 205, 304]);
+
+/** The routable status for the outcome above: the gateway answered, unusably. */
+const UNUSABLE_RESPONSE_STATUS = 502;
+
+/**
+ * The operator-facing message for the outcome above.
+ *
+ * DUPLICATED, byte-for-byte, in `src/lib/analytics-client.ts`, and guarded by a
+ * comment-stripped drift check in `analytics-client.test.ts`. It is duplicated
+ * rather than shared because neither client may import from the other (sixteen
+ * route test files replace one or the other wholesale with a full factory, under
+ * which a cross-client import evaluates to `undefined`), and it cannot move to
+ * the dependency-free error leaf either — that leaf's exported surface is pinned
+ * to a two-member hand-typed set.
+ *
+ * Only the MEDIA TYPE is echoed, lower-cased and length-capped: the raw header
+ * is upstream-controlled and its parameters carry nothing an operator needs.
+ */
+function unusableSeamResponseMessage(
+  status: number,
+  contentType: string | null,
+): string {
+  const mediaType =
+    ((contentType ?? "").split(";")[0] ?? "").trim().toLowerCase().slice(0, 64) ||
+    "absent";
+  return `Analytics seam returned an unusable response (HTTP ${status}, content-type ${mediaType}). The upstream did not answer with the JSON contract.`;
+}
+
+/**
  * Phase 140.1 / PYAPI-02 — the `X-Tenant-Claim` mint used to live HERE, as a
  * module-private `mintTenantClaim` + `TENANT_CLAIM_TTL_SECONDS` pair.
  *
@@ -363,7 +449,7 @@ export async function postProcessKey(
         {
           ok: false,
           code: "UPSTREAM_NETWORK_ERROR",
-          human_message: "Could not reach the ingestion service.",
+          human_message: UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE,
           correlation_id: correlationId,
           recoverable: true,
         },
@@ -375,7 +461,42 @@ export async function postProcessKey(
   // The NextResponse construction stays OUTSIDE the try. Only the fetch and the
   // body read belong in the classification window; widening it further would
   // swallow the A-27 null-body-status crash (`NextResponse.json(body, {status:
-  // 304})` throws), which plan 140.2-11 owns and must still be able to observe.
+  // 304})` throws) rather than fix it — the arm immediately below is the fix,
+  // and it works by never letting that construction be reached.
+
+  // SEAMCORE-11 / A-27 — the ambiguous transports, decided BEFORE any response
+  // is constructed and BEFORE the `!res.ok` fork. Both halves land here so the
+  // three null-body statuses and the non-JSON 2xx get ONE answer: split across
+  // the `ok` fork they would get two, which is the divergence being closed.
+  // See the NULL_BODY_STATUSES block above for the full statement.
+  const contentType = res.headers.get("content-type");
+  const isJsonBody = (contentType ?? "").includes("application/json");
+  if (NULL_BODY_STATUSES.has(res.status) || (res.ok && !isJsonBody)) {
+    const tag = args.routeTag ?? "process-key-client";
+    // The ONLY place the observed status and content-type are recorded: the
+    // envelope below is deliberately generic (140.3's fence). Nothing
+    // error-derived is logged here — the values are this client's own
+    // observations of the response line, so there is nothing for the
+    // SEAMCORE-06 scrub leaf to do.
+    console.error(
+      `[${tag}] ${unusableSeamResponseMessage(res.status, contentType)}`,
+      { correlation_id: correlationId },
+    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "UPSTREAM_NETWORK_ERROR",
+          human_message: UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE,
+          correlation_id: correlationId,
+          recoverable: true,
+        },
+        { status: UNUSABLE_RESPONSE_STATUS },
+      ),
+    };
+  }
+
   if (!res.ok) {
     return {
       ok: false,

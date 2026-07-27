@@ -679,7 +679,7 @@ describe("[SEAMCORE-11 / A-27] postProcessKey: ONE defined outcome for an ambigu
     // The operator half. Equality against the hand-typed literal, which is the
     // SAME string analytics-client throws for the same response.
     expect(
-      errorSpy.mock.calls.map((args) => String(args[0])),
+      errorSpy.mock.calls.map((args: unknown[]) => String(args[0])),
       "The operator log for an ambiguous transport drifted, or is missing. " +
         "The user-facing envelope is deliberately generic, so this line is " +
         "the ONLY place the observed status and content-type are recorded — " +

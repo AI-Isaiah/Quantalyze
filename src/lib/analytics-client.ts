@@ -84,6 +84,76 @@ const NOT_REACHABLE_MESSAGE =
   "Analytics service is not reachable. Please ensure it is running.";
 
 /**
+ * Phase 140.2-11 / SEAMCORE-11 (A-27) — THE ONE DEFINED OUTCOME for an
+ * ambiguous transport. Stated identically here and in
+ * `src/lib/process-key-client.ts` so the next reader does not have to diff the
+ * two files to find out what the seam does with a 204.
+ *
+ * WHAT IS AMBIGUOUS
+ *   1. A 2xx whose content-type is not JSON. The modal case is a Railway edge
+ *      or maintenance page served as `200 text/html`: the transport succeeded,
+ *      the breaker (correctly) counts nothing, and what came back is not the
+ *      service.
+ *   2. The three NULL-BODY statuses 204 / 205 / 304, which carry no body at
+ *      all and cannot carry one.
+ *
+ * THE OUTCOME, in both clients
+ *   A typed upstream error carrying the OBSERVED status and content-type, in a
+ *   static operator-facing message that names the SEAM. Here it is THROWN as
+ *   `AnalyticsUpstreamError`; in `process-key-client` the identical message is
+ *   logged and the outcome is RETURNED as an `{ ok: false, response }` 502
+ *   envelope, because that function is declared never to throw at its five
+ *   caller routes.
+ *
+ * WHY THE THREE STATUSES ARE DECIDED ON THE STATUS, BEFORE ANY RESPONSE IS
+ * CONSTRUCTED. Verified by execution on Node v25.8.1:
+ * `Response.json(body, { status: 204 | 205 | 304 })` throws
+ * `TypeError: Response constructor: Invalid response status code`. That is
+ * WHATWG-spec behaviour, not a runtime quirk, so CI's Node 22 and local Node 25
+ * agree. The construction ITSELF is the fault, so no arm may reach it.
+ *
+ * WHY THE MESSAGE — AND NOT THE `status` FIELD — CARRIES THE OBSERVED STATUS.
+ * `AnalyticsUpstreamError.status` is contractually the code route handlers
+ * FORWARD (`simulator/route.ts` forwards 4xx verbatim). Forwarding 204 or 304
+ * would move this exact crash into the route's own `NextResponse.json`, and
+ * forwarding 200 would ship an error payload under a success code. So the
+ * routable status is 502 — the gateway answered, unusably — and the observed
+ * status lives in the message, where an operator reads it.
+ *
+ * The BREAKER VERDICT IS UNCHANGED by all of this (SEAMCORE-01): a 2xx is not a
+ * service fault and a 304 is not either. This is what the CLIENTS do with the
+ * response, not what the core counts.
+ */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([204, 205, 304]);
+
+/** The routable status for the outcome above: the gateway answered, unusably. */
+const UNUSABLE_RESPONSE_STATUS = 502;
+
+/**
+ * The operator-facing message for the outcome above.
+ *
+ * DUPLICATED, byte-for-byte, in `src/lib/process-key-client.ts`, and guarded by
+ * a comment-stripped drift check in `analytics-client.test.ts`. It is duplicated
+ * rather than shared because neither client may import from the other (sixteen
+ * route test files replace one or the other wholesale with a full factory, under
+ * which a cross-client import evaluates to `undefined`), and it cannot move to
+ * the dependency-free error leaf either — that leaf's exported surface is pinned
+ * to a two-member hand-typed set.
+ *
+ * Only the MEDIA TYPE is echoed, lower-cased and length-capped: the raw header
+ * is upstream-controlled and its parameters carry nothing an operator needs.
+ */
+function unusableSeamResponseMessage(
+  status: number,
+  contentType: string | null,
+): string {
+  const mediaType =
+    ((contentType ?? "").split(";")[0] ?? "").trim().toLowerCase().slice(0, 64) ||
+    "absent";
+  return `Analytics seam returned an unusable response (HTTP ${status}, content-type ${mediaType}). The upstream did not answer with the JSON contract.`;
+}
+
+/**
  * Map a `SeamBodyReadError` onto the taxonomy this module ALREADY has.
  *
  * The core records the breaker failure and throws this class from inside its
@@ -269,6 +339,19 @@ async function analyticsRequest(
     );
   }
 
+  // SEAMCORE-11 / A-27 — decided on the STATUS, and decided BEFORE the `!ok`
+  // fork. 204 and 205 are `ok` while 304 is not, so a check placed inside
+  // either arm would give the three null-body statuses two different answers —
+  // the very divergence this closes, reproduced inside one file. Before this,
+  // 204/205 fell through to the local-dev port message below and 304 became an
+  // AnalyticsUpstreamError carrying 304 as a forwardable status.
+  if (NULL_BODY_STATUSES.has(res.status)) {
+    throw new AnalyticsUpstreamError(
+      unusableSeamResponseMessage(res.status, res.headers.get("content-type")),
+      UNUSABLE_RESPONSE_STATUS,
+    );
+  }
+
   if (!res.ok) {
     const contentType = res.headers.get("content-type") ?? "";
     if (contentType.includes("application/json")) {
@@ -304,9 +387,17 @@ async function analyticsRequest(
     );
   }
 
-  const contentType = res.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    throw new Error("Analytics service returned an unexpected response. Is it running on the correct port?");
+  // SEAMCORE-11 / A-27, second half. This threw a GENERIC, untyped Error whose
+  // message asked whether the service was "running on the correct port" — a
+  // local-dev question, put to an operator mid-incident while a Railway edge
+  // page was being served as `200 text/html`. It is now the same typed outcome
+  // the null-body statuses take above.
+  const contentType = res.headers.get("content-type");
+  if (!(contentType ?? "").includes("application/json")) {
+    throw new AnalyticsUpstreamError(
+      unusableSeamResponseMessage(res.status, contentType),
+      UNUSABLE_RESPONSE_STATUS,
+    );
   }
 
   // THE SUCCESS ARM HAD NO CATCH AT ALL. This is SC1's downstream half: the
