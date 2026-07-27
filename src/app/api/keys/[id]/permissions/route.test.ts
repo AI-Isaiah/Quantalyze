@@ -535,3 +535,129 @@ describe("GET /api/keys/[id]/permissions — breaker across the unstable_cache b
     expect(RF.lastCall!.init.signal).toBeUndefined();
   });
 });
+
+/**
+ * [140.3-01 / TS-05 + TS-08] Class-5 member 2 of 3 — `keys/[id]/permissions`.
+ *
+ * WHAT CHANGES AND WHAT DELIBERATELY DOES NOT. The `!res.ok` JSON arm inside
+ * the cached callback threw `new Error(err.detail ?? \`Upstream ${res.status}\`)`.
+ * On a nested `service_error` envelope `err.detail` is an OBJECT, so the Error
+ * message coerced to `"[object Object]"` — `STATUS_CONTRACT.md` §2.1 records
+ * this against this exact file.
+ *
+ * The RESPONSE is unchanged by design: the handler's downstream classifier keys
+ * on message substrings (`INTERNAL_API_TOKEN`, `Upstream 5`, `ECONNREFUSED`,
+ * `not configured`, `aborted`, `timeout`) and neither the old `"[object
+ * Object]"` nor the new human sentence matches any of them, so both answer
+ * `PROBE_FAILED` / 502. That is stated in §2.1 as "diagnostics only". Mapping
+ * `RATE_LIMITED` to a throttle state, answering 429 instead of 502 and
+ * forwarding `Retry-After` is **TS-34**, and it belongs to this phase's
+ * response-shape plan — two changes to one block in one pass is TRAP-8.
+ *
+ * So the observable this plan moves is the OPERATOR LOG, and that is what is
+ * asserted. Both wire contracts are driven, because a verify exercising one
+ * certifies the wrong half (TS-08).
+ */
+describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body through the ONE discriminator", () => {
+  it("CONTRACT A — a `service_error` 500 (OBJECT detail): the operator log carries `body.detail.detail`, never '[object Object]'", async () => {
+    // Hand-typed §2 envelope.
+    STATE.upstreamStatus = 500;
+    STATE.upstreamPayload = {
+      detail: {
+        code: "SEAM_DEGRADED",
+        dependency: "supabase",
+        retryable: true,
+        detail: "The analytics store is not responding. Try again shortly.",
+      },
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    // Unchanged by design — TS-34 owns the status, not this plan.
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("PROBE_FAILED");
+
+    const logged = consoleErr.mock.calls
+      .map((call) => call.map((arg) => String(arg)).join(" "))
+      .join("\n");
+    consoleErr.mockRestore();
+
+    expect(
+      logged,
+      "The nested envelope must be read through `seamHumanMessage`. A bare " +
+        "`err.detail ??` read builds `new Error(<object>)`, whose message " +
+        "coerces to '[object Object]' — so the operator sees THAT the probe " +
+        "failed and never WHY (STATUS_CONTRACT §2.1, obligation O-5).",
+    ).toContain("The analytics store is not responding. Try again shortly.");
+    expect(logged).not.toContain("[object Object]");
+    // The machine code survives on the thrown error's `cause`, so the TS-34
+    // plan can branch on it without re-extracting (and so the operator can see
+    // which contract answered).
+    expect(logged).toContain("SEAM_DEGRADED");
+  });
+
+  it("CONTRACT B — an app-global 429 (SCALAR detail): the logged human string is BYTE-IDENTICAL to its pre-plan value (TS-07 is negative)", async () => {
+    // The app-global `RateLimitExceeded` shape (STATUS_CONTRACT §2.1): scalar
+    // `detail`, machine code at the TOP level. This path needed no TypeScript
+    // change and must not have received one.
+    //
+    // ⚠️ Note for the TS-34 plan: this route's OWN per-key throttle
+    // (`routers/internal.py` — the `service_error(429, "RATE_LIMITED", …)`
+    // added by PYAPIFIX2-03) is the NESTED shape at a 429 status. Contract A
+    // above is what covers that body structurally.
+    STATE.upstreamStatus = 429;
+    STATE.upstreamPayload = {
+      ok: false,
+      code: "RATE_LIMITED",
+      human_message: "Too many requests.",
+      detail: "Too many probes for this key. Try again in 60 seconds.",
+      correlation_id: "cid-429-permissions",
+      recoverable: true,
+      retry_after_seconds: 60,
+    };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("PROBE_FAILED");
+
+    const logged = consoleErr.mock.calls
+      .map((call) => call.map((arg) => String(arg)).join(" "))
+      .join("\n");
+    consoleErr.mockRestore();
+
+    expect(
+      logged,
+      "The flat app-global shape was already correct here. If this literal " +
+        "moved, the 429 path was 'fixed' and TS-07's NEGATIVE obligation was " +
+        "violated.",
+    ).toContain("Too many probes for this key. Try again in 60 seconds.");
+    expect(logged).not.toContain("[object Object]");
+  });
+
+  it("a body with no readable `detail` still throws the pre-plan `Upstream <status>` message", async () => {
+    // Load-bearing: `Upstream 5…` is exactly what the downstream classifier
+    // keys `PROBE_BACKEND_UNAVAILABLE` on. Losing the fallback would silently
+    // re-class every unrecognised upstream body.
+    STATE.upstreamStatus = 503;
+    STATE.upstreamPayload = { unexpected: "shape" };
+
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    const body = await res.json();
+
+    const logged = consoleErr.mock.calls
+      .map((call) => call.map((arg) => String(arg)).join(" "))
+      .join("\n");
+    consoleErr.mockRestore();
+
+    expect(logged).toContain("Upstream 503");
+    expect(res.status).toBe(502);
+    expect(body.code).toBe("PROBE_BACKEND_UNAVAILABLE");
+  });
+});

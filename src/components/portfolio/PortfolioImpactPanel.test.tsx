@@ -1258,3 +1258,161 @@ describe("<PortfolioImpactPanel>", () => {
     );
   });
 });
+
+/**
+ * [140.3-01 / TS-05 + TS-08] Class-5 member 3 of 3 — `PortfolioImpactPanel`.
+ *
+ * ⚠️ THIS FILE WAS CITED AS THE FIX-SHAPE TEMPLATE IN THREE DOCUMENTS. It is
+ * the DEFECT (correction C-3, verified first-hand at the 140.3 planning gate).
+ * `ErrorResponseSchema.safeParse(raw)` ran two lines above the panel's `typeof
+ * body.detail === "string"` check, and `src/lib/api/errorSchema.ts` declares
+ * `detail: z.string().optional()` — so a nested `service_error` body FAILED the
+ * parse outright, collapsed to `{}` through `parsedError.success ?
+ * parsedError.data : {}`, and `error`, `retryAfter` and `detail` were all
+ * discarded before the `typeof` check was ever reached. On the exact envelope
+ * this plan exists to render, the named template threw the whole error body
+ * away and rendered `"HTTP 500"`.
+ *
+ * The fix is the leaf applied to the RAW parsed body, ABOVE the narrowing
+ * schema. `src/lib/api/errorSchema.ts` is deliberately NOT widened: narrowing
+ * (or widening) an error-body schema for one consumer is the documented
+ * Pitfall-3 hazard, and its `{}` fallback is correct for the `{error,
+ * retryAfter}` fields it was designed for.
+ *
+ * ⚠️ Out of scope here, deliberately (TRAP-8): the `if (res.status === 429)`
+ * gate that hides `Retry-After` from the breaker's 503 is B-23 / SEAMUX-06.
+ */
+describe("[140.3-01 / TS-05] <PortfolioImpactPanel> reads the seam error body through the ONE discriminator", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("CONTRACT A — a `service_error` 500 (OBJECT detail): renders `body.detail.detail`, not 'HTTP 500'", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    // Hand-typed §2 envelope. /api/simulator is a seam route, so this is the
+    // body this component actually receives from a deliberate 5xx.
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "SEAM_DEGRADED",
+            dependency: "supabase",
+            retryable: true,
+            detail: "The analytics store is not responding. Try again shortly.",
+          },
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Nested seam envelope"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "The analytics store is not responding. Try again shortly.",
+        ),
+      ).toBeInTheDocument(),
+    );
+    // The pre-plan render. `ErrorResponseSchema` rejected the nested body, the
+    // cascade saw `{}`, and the user got a bare status code.
+    expect(screen.queryByText("HTTP 500")).toBeNull();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+    // The drift signal must NOT fire: the leaf read the body successfully, so
+    // reporting "unrecognized error body shape" would be a false alarm on the
+    // one shape the seam is contractually guaranteed to send.
+    expect(
+      errorSpy.mock.calls.some(
+        (call) => call[0] === "[PortfolioImpactPanel] unrecognized error body shape",
+      ),
+      "The drift log fires only when the LEAF also returned null. A nested " +
+        "service_error envelope is a recognised shape, not drift.",
+    ).toBe(false);
+    errorSpy.mockRestore();
+  });
+
+  it("CONTRACT B — an app-global 429 (SCALAR detail): the rendered string is BYTE-IDENTICAL to its pre-plan value (TS-07 is negative)", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "RATE_LIMITED",
+          human_message: "Too many requests.",
+          detail: "Too many simulations. Try again in 60 seconds.",
+          correlation_id: "cid-429-simulator",
+          recoverable: true,
+          retry_after_seconds: 60,
+        }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "60",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Flat app-global 429"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Too many simulations. Try again in 60 seconds."),
+      ).toBeInTheDocument(),
+    );
+    // The flat shape parsed cleanly through the schema BEFORE this plan and
+    // rendered exactly this sentence. If the literal moved, the 429 path was
+    // "fixed" and TS-07's NEGATIVE obligation was violated.
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+  });
+
+  it("a body matching neither the seam nor the three-key cascade still logs drift and falls back to `HTTP <status>`", async () => {
+    // The drift signal is a live contract-drift detector (TRAP-9) — it is
+    // re-pointed by this plan, never deleted.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockFetch(async () =>
+      new Response(JSON.stringify({ errors: ["nested", "array"] }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Neither shape"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("HTTP 500")).toBeInTheDocument(),
+    );
+    expect(
+      errorSpy.mock.calls.some(
+        (call) => call[0] === "[PortfolioImpactPanel] unrecognized error body shape",
+      ),
+    ).toBe(true);
+    errorSpy.mockRestore();
+  });
+});
