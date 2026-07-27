@@ -408,3 +408,185 @@ describe("<AllocatorMatchQueue> — @container parent/child structural guard", (
     expect(tabular.length).toBeGreaterThan(0);
   });
 });
+
+/**
+ * Phase 140.3 plan 08 / SEAMUX-05 (B-05 / B-17) — `handleRecompute` must observe
+ * the HTTP outcome before it does anything with the body.
+ *
+ * The defect: `const body = await res.json();` with **no `res.ok` and no
+ * `res.status`**. `/api/admin/match/recompute` answers a breaker trip with
+ * `{ error: <the breaker sentence> }` and a 503; that body has no `disabled`
+ * field, so it fell to the `else` branch and called `load()`. The queue
+ * refetched, re-rendered the SAME batch it already had, and the founder read a
+ * tripped breaker as a COMPLETED recompute — with the batch's own "Computed Nh
+ * ago" stamp beside it as apparent corroboration.
+ *
+ * The fix shape was already in this file, twenty lines below the defect:
+ * `handleDecision` does `if (!res.ok) throw new Error(await res.text());`.
+ *
+ * ⚠️ This is the SECOND member of the observe-the-outcome class (ledger row
+ * M63). `ApiKeyManager` is the first. Mutating this one is the class test — a
+ * green M63 would mean the class had been fixed at the instance.
+ *
+ * Also pinned here: the `r` shortcut's in-flight guard. `recomputing` is React
+ * state, so two presses inside one frame both observe `false` and both POST —
+ * duplicate recomputes against a service that is already struggling is exactly
+ * the shape an outage produces.
+ */
+describe("<AllocatorMatchQueue> — SEAMUX-05: handleRecompute observes the outcome", () => {
+  // Hand-typed, never imported: `src/lib/seam-copy.ts` holds the production
+  // declaration and a test that read it could not detect it changing (C-1).
+  const BREAKER_SENTENCE =
+    "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+  const QUEUE_URL = `/api/admin/match/${ALLOCATOR_ID}`;
+  const RECOMPUTE_URL = "/api/admin/match/recompute";
+
+  function countCalls(mock: ReturnType<typeof vi.fn>, url: string) {
+    return mock.mock.calls.filter((c) => c[0] === url).length;
+  }
+
+  /**
+   * Mount the WRITE surface (not the demo lane) with the queue loaded, and route
+   * the recompute POST to `recomputeResponse`.
+   */
+  async function mountLoaded(recomputeResponse: () => Promise<Response>) {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === RECOMPUTE_URL) return recomputeResponse();
+      return Promise.resolve(
+        new Response(JSON.stringify(buildPayload()), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+    // On the WRITE surface the name renders twice (breadcrumb + header h1), so
+    // anchor on the heading rather than the ambiguous text.
+    await screen.findByRole("heading", { name: /Demo Allocator/i });
+    return fetchMock;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal("alert", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("a breaker 503 does NOT call load() and DOES render the error state (B-05/B-17)", async () => {
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ error: BREAKER_SENTENCE }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    // One GET so far: the mount load.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    // The failure surfaces on the component's own error-first card …
+    await waitFor(() => {
+      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+    });
+    // … and the queue it invalidates nothing about is NOT refetched. A refetch
+    // is what made a trip read as a completed recompute.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+    // The error card replaces the queue (`if (error || !data) return`), so the
+    // founder cannot mistake the pre-existing batch for a fresh one.
+    expect(
+      screen.queryByRole("heading", { name: /Demo Allocator/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it("a 500 with no JSON body still reaches the error state, not load()", async () => {
+    // A gateway HTML page: `res.json()` on it throws. Before the fix that
+    // SyntaxError was the caught value and `alert`ed as "Recompute failed:
+    // Unexpected token" — a parse error standing in for the real failure.
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response("<html>502</html>", {
+          status: 502,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+    });
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+    // No parse-error text reached the DOM in place of the failure.
+    expect(document.body.textContent).not.toMatch(/SyntaxError|Unexpected token/);
+  });
+
+  it("ANTI-REGRESSION: a 200 with disabled:true still renders the disabled path", async () => {
+    const alertMock = vi.fn();
+    vi.stubGlobal("alert", alertMock);
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ disabled: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(alertMock).toHaveBeenCalledWith(
+        expect.stringContaining("Engine is disabled"),
+      );
+    });
+    // The disabled reply is a SUCCESS, not a failure — no refetch, no error card.
+    expect(countCalls(fetchMock, QUEUE_URL)).toBe(1);
+    expect(
+      screen.getByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("ANTI-REGRESSION: a plain 200 still calls load()", async () => {
+    const fetchMock = await mountLoaded(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
+
+    await waitFor(() => {
+      expect(countCalls(fetchMock, QUEUE_URL)).toBe(2);
+    });
+    expect(
+      screen.getByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("the `r` shortcut pressed twice in flight issues ONE request", async () => {
+    // A recompute that never settles, so both presses land inside the in-flight
+    // window. `recomputing` is state and does not update between two synchronous
+    // keydowns — only a synchronously-written ref can hold here.
+    const fetchMock = await mountLoaded(() => new Promise<Response>(() => {}));
+
+    (document.body as HTMLElement).focus();
+    fireEvent.keyDown(window, { key: "r" });
+    fireEvent.keyDown(window, { key: "r" });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(countCalls(fetchMock, RECOMPUTE_URL)).toBe(1);
+  });
+});
