@@ -16,6 +16,10 @@ import {
 } from "@/lib/analytics-schemas";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
+// 140.3-09 / TS-34 — the ONE `Retry-After` parser. It handles the RFC 9110
+// HTTP-date form and never returns NaN/0/<0, so a hostile or proxy-rewritten
+// header cannot manufacture a bogus wait. Never add a second parser here.
+import { parseRetryAfterSeconds } from "@/lib/retry";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
 
@@ -77,6 +81,78 @@ export const maxDuration = 300;
  * below rather than re-aliased to a route-local name — a second name for one
  * concept is how the two members of this class drifted in the first place.
  */
+
+/**
+ * 140.3-09 / TS-34 — the throttle evidence carried out of the cached callback.
+ *
+ * `makeCachedFetcher`'s failure path can only communicate with the handler's
+ * catch by THROWING (see the notes on the callback below — an error returned as
+ * a value would be memoized for 60s). So the two facts the handler needs to
+ * answer a throttle correctly, and which a stringified `Error.message` destroys,
+ * ride on the thrown error's `cause`:
+ *
+ *   - `status` — the UPSTREAM status. This is what disambiguates the two
+ *     vocabularies `140.3-05` recorded as an open residual: the wire code
+ *     `RATE_LIMITED` means OUR limiter in the app-global contract (429) and
+ *     means the VENUE throttling us in the venue-transient contract (400).
+ *     Reading the status settles it without guessing.
+ *   - `retryAfterSeconds` — the wait the upstream advertised, in SECONDS,
+ *     through the ONE parser. `null` when the upstream advertised none, and
+ *     that stays `undefined` here: absence must never become a fabricated wait.
+ *
+ * `code` is what `140.3-01` already put here and is preserved unchanged.
+ */
+interface SeamFailureCause {
+  code?: string;
+  status: number;
+  retryAfterSeconds?: number;
+}
+
+/**
+ * Build the `cause` for a seam failure, or `undefined` when there is nothing
+ * worth carrying.
+ *
+ * The `undefined` case is LOAD-BEARING and inherited from `140.3-01`: attaching
+ * a cause changes what `console.error` prints for the failure, so a body that
+ * carried no machine code, no advertised wait and no throttle status must leave
+ * those operator log lines byte-identical to their pre-plan form. `140.3-09`
+ * widens the condition from "a code arrived" to "a code, a wait, or a throttle
+ * status arrived" — each of those is real new evidence about the failure.
+ */
+function buildSeamFailureCause(
+  status: number,
+  code: string | null,
+  retryAfterSeconds: number | null,
+): { cause: SeamFailureCause } | undefined {
+  if (code === null && retryAfterSeconds === null && status !== 429) {
+    return undefined;
+  }
+  return {
+    cause: {
+      ...(code === null ? {} : { code }),
+      status,
+      ...(retryAfterSeconds === null ? {} : { retryAfterSeconds }),
+    },
+  };
+}
+
+/**
+ * Read the throttle evidence back off a caught value. Defensive on every hop —
+ * this runs inside a catch block, where a second throw would surface as an
+ * unhandled 500 rather than a classified response.
+ */
+function readSeamFailureCause(err: unknown): SeamFailureCause | null {
+  const cause = (err as { cause?: unknown } | null | undefined)?.cause;
+  if (typeof cause !== "object" || cause === null) return null;
+  const { status, code, retryAfterSeconds } = cause as Record<string, unknown>;
+  if (typeof status !== "number") return null;
+  return {
+    status,
+    code: typeof code === "string" ? code : undefined,
+    retryAfterSeconds:
+      typeof retryAfterSeconds === "number" ? retryAfterSeconds : undefined,
+  };
+}
 
 /**
  * Fetch the live permission triple from the Python service. Wrapped in
@@ -172,21 +248,39 @@ function makeCachedFetcher(keyId: string): {
           // The `Upstream ${res.status}` fallback is LOAD-BEARING: the catch
           // below keys `PROBE_BACKEND_UNAVAILABLE` on `startsWith("Upstream 5")`.
           //
-          // ⚠️ SCOPE. This changes ONLY the extraction. Mapping `RATE_LIMITED`
-          // to a throttle state, answering 429 instead of 502 and forwarding
-          // `Retry-After` is TS-34 and belongs to 140.3's response-shape plan —
-          // two changes to one block in one pass is TRAP-8. The machine code is
-          // carried on `cause` so that plan reads it instead of re-extracting,
-          // and so the operator can see WHICH contract answered. It is omitted
-          // entirely when the body carried no code, leaving those log lines
-          // byte-identical to their pre-plan form.
+          // The machine code is carried on `cause` so the handler reads it
+          // instead of re-extracting, and so the operator can see WHICH
+          // contract answered.
+          //
+          // 140.3-09 / TS-34 — TWO MORE FACTS RIDE ALONGSIDE IT. The upstream
+          // STATUS and the upstream `Retry-After` are both destroyed by the
+          // stringify-to-message hop, and both are exactly what a throttle
+          // needs: the status tells our own vocabularies apart (140.3-05's
+          // recorded residual), and the wait is the value the whole of
+          // SEAMUX-06 is about. Read through the ONE parser — never
+          // `Number(header)`, which is NaN for the HTTP-date form.
           const seamCode = seamErrorCode(err);
           throw new Error(
             seamHumanMessage(err) ?? `Upstream ${res.status}`,
-            seamCode === null ? undefined : { cause: { code: seamCode } },
+            buildSeamFailureCause(
+              res.status,
+              seamCode,
+              parseRetryAfterSeconds(res.headers),
+            ),
           );
         }
-        throw new Error(`Upstream ${res.status}`);
+        // A non-JSON failure body — an edge/WAF/proxy page rather than our own
+        // service. It carries no machine code, but a 429 from that layer is
+        // still a real throttle and its `Retry-After` is still real, so the
+        // same evidence is carried here rather than only on the JSON path.
+        throw new Error(
+          `Upstream ${res.status}`,
+          buildSeamFailureCause(
+            res.status,
+            null,
+            parseRetryAfterSeconds(res.headers),
+          ),
+        );
       }
 
       // 3. A body-read failure PROPAGATES out of this callback, deliberately.
@@ -333,12 +427,93 @@ export const GET = withAuth(
         );
       }
 
+      // ─────────────────────────────────────────────────────────────────────
+      // 140.3-09 / TS-34 / SEAMUX-06 — THE THROTTLE ARM.
+      //
+      // Position is load-bearing in both directions, for the same reasons the
+      // shared `classifyKeyValidationError` gives for its own middle branch:
+      //   - BELOW the `CircuitOpenError` type check above. A breaker trip
+      //     carries no upstream body, and the breaker verdict must never be
+      //     decided by anything an upstream can set.
+      //   - ABOVE the substring cascade below. A `429` upstream body whose
+      //     human sentence happens to contain "timeout" would otherwise be
+      //     reported as OUR probe timing out.
+      //
+      // WHAT WAS WRONG. The upstream's own per-key 429 throttle (PYAPIFIX2-03)
+      // was flattened into an `Error.message`, matched NONE of the cascade's
+      // six substrings, and came out as `PROBE_FAILED` + a hardcoded 502 with
+      // the upstream's `Retry-After` discarded. A one-minute throttle read to
+      // the user as an indefinite fault on OUR side, with no wait and nothing
+      // to act on. The status is the repudiation: 502 says "the upstream is
+      // broken", 429 says "you are being throttled and here is for how long".
+      //
+      // THE GATE IS THE UPSTREAM STATUS, NOT THE WIRE CODE. `140.3-05` recorded
+      // the reason as an open residual: the code `RATE_LIMITED` lives in TWO
+      // vocabularies and means different things in each, and telling them apart
+      // needs the status the classifier discards. 429 is unambiguous, it needs
+      // no lookup table, and it is also the only evidence available when the
+      // 429 came from an edge/WAF layer with no JSON body at all.
+      //
+      // THE WAIT IS FORWARDED, NEVER FABRICATED. When the upstream advertised
+      // one it is re-published verbatim, in seconds, so the caller waits exactly
+      // as long as the upstream asked. When it advertised none, NO `Retry-After`
+      // is attached and the copy names no duration — inventing a wait here would
+      // turn a vague error into a specific lie (TRAP-3).
+      // ─────────────────────────────────────────────────────────────────────
+      const seamFailure = readSeamFailureCause(err);
+      if (seamFailure?.status === 429) {
+        // ⚠️ The scrubbed error is logged HERE as well as on the generic arm
+        // below. This arm RETURNS, so it never reaches that line — and TS-07's
+        // NEGATIVE obligation is that the operator sees the upstream's own
+        // human sentence (the thing `seamHumanMessage` was added to preserve),
+        // not merely THAT a failure happened. Dropping it here would have
+        // silently re-opened that obligation at exactly the status the seam
+        // documents best. Same scrubber, same reasoning as the generic arm.
+        console.error(
+          `[keys/permissions] upstream throttled the probe for ${keyId} ` +
+            `(code=${seamFailure.code ?? "none"}, retry_after_s=${
+              seamFailure.retryAfterSeconds ?? "none"
+            }):`,
+          scrubSeamError(err),
+        );
+        return NextResponse.json(
+          // The route's OWN existing 429 sentence, reused verbatim rather than
+          // authored fresh — 140.3-12 owns every new sentence in this phase.
+          // The private `PROBE_*` code is what distinguishes an upstream
+          // throttle from this route's own limiter arm above, which returns the
+          // same sentence with no code.
+          { error: "Too many requests", code: "PROBE_RATE_LIMITED" },
+          {
+            status: 429,
+            headers:
+              seamFailure.retryAfterSeconds === undefined
+                ? NO_STORE_HEADERS
+                : {
+                    ...NO_STORE_HEADERS,
+                    "Retry-After": String(seamFailure.retryAfterSeconds),
+                  },
+          },
+        );
+      }
+
       // The raw Error.message used to bubble straight into the response
       // body (e.g. "INTERNAL_API_TOKEN is not configured on the Next
       // layer."). That leaks infra detail to any authenticated client
       // and confuses the wizard alert with internal jargon. Classify
       // into a stable code + generic copy here; keep the raw message
       // server-side for debugging only.
+      //
+      // ⚠️ 140.3-09 — THIS CASCADE IS DELIBERATELY KEPT, and this route's
+      // `PROBE_*` vocabulary is deliberately NOT replaced by the shared
+      // `classifyKeyValidationError`. Measured, not assumed: routed through
+      // that classifier, FIVE of this route's six real thrown messages fall to
+      // `{code:"UNKNOWN", status:500}` — the terminal "our team has been
+      // notified" dead end — because it classifies KEY-VALIDATION faults
+      // (signature / credentials / venue scopes) and every fault reachable here
+      // is a PROXY-INFRASTRUCTURE fault. See the SUMMARY for the measured
+      // table. The sharing that matters is already in place above: the breaker
+      // verdict comes from the shared typed `CircuitOpenError` and the ONE
+      // `CIRCUIT_OPEN_COPY`.
       const rawMessage = err instanceof Error ? err.message : String(err);
       const isConfigError =
         rawMessage.includes("INTERNAL_API_TOKEN") ||

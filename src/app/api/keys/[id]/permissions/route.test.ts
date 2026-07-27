@@ -47,6 +47,11 @@ const STATE = vi.hoisted(() => ({
   upstreamPayload: {} as Record<string, unknown>,
   upstreamStatus: 200 as number,
   upstreamThrow: false as boolean,
+  // 140.3-09 / TS-34 — extra response headers the stubbed upstream returns,
+  // keyed LOWERCASE. Empty by default so every case written before this plan
+  // keeps seeing `null` for everything but content-type.
+  upstreamHeaders: {} as Record<string, string>,
+  upstreamContentType: "application/json" as string | null,
   // Phase 140 / T-140-32: a FAITHFUL memoizing cache. When true the mock stores
   // the RESOLVED value under the keyParts and replays it on the next call —
   // and, exactly as the fork does, writes NOTHING when the body throws. This is
@@ -196,6 +201,8 @@ beforeEach(() => {
   };
   STATE.upstreamStatus = 200;
   STATE.upstreamThrow = false;
+  STATE.upstreamHeaders = {};
+  STATE.upstreamContentType = "application/json";
   STATE.memoize = false;
   STATE.memoStore.clear();
   RF.breakerOpen = false;
@@ -213,8 +220,16 @@ beforeEach(() => {
         status: STATE.upstreamStatus,
         statusText: "stub",
         headers: {
-          get: (h: string) =>
-            h.toLowerCase() === "content-type" ? "application/json" : null,
+          get: (h: string) => {
+            const name = h.toLowerCase();
+            if (name === "content-type") {
+              return STATE.upstreamContentType;
+            }
+            // 140.3-09 / TS-34 — the upstream's own response headers. Defaults
+            // to `{}`, so every pre-existing case sees exactly what it saw
+            // before: `null` for everything but content-type.
+            return STATE.upstreamHeaders[name] ?? null;
+          },
         },
         json: async () => STATE.upstreamPayload,
       };
@@ -622,8 +637,15 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
     const { GET } = await import("./route");
     const res = await GET(makeRequest(KEY_ID));
 
-    expect(res.status).toBe(502);
-    expect((await res.json()).code).toBe("PROBE_FAILED");
+    // 140.3-09 / TS-34 — UPDATED FROM 502 BY THE PLAN THAT OWNS THIS STATUS.
+    // The sibling contract-A case carries the note "Unchanged by design — TS-34
+    // owns the status, not this plan"; this is that plan. A one-minute throttle
+    // used to answer 502 `PROBE_FAILED`, i.e. "the upstream is broken", with
+    // the upstream's wait discarded. It now answers 429 — "you are being
+    // throttled" — which is a different and truthful claim about whose fault it
+    // is. The assertion below was NOT weakened: it moved to the new value.
+    expect(res.status).toBe(429);
+    expect((await res.json()).code).toBe("PROBE_RATE_LIMITED");
 
     const logged = consoleErr.mock.calls
       .map((call) => call.map((arg) => String(arg)).join(" "))
@@ -637,6 +659,246 @@ describe("[140.3-01 / TS-05] the permissions proxy reads the seam error body thr
         "violated.",
     ).toContain("Too many probes for this key. Try again in 60 seconds.");
     expect(logged).not.toContain("[object Object]");
+  });
+
+  // ===========================================================================
+  // 140.3-09 / TS-34 / SEAMUX-06 — a throttle answers 429 with the UPSTREAM
+  // wait forwarded, instead of a hardcoded 502 with the wait discarded.
+  //
+  // Both production 429 producers were read at source before these fixtures
+  // were written: `analytics-service/main.py`'s app-global RateLimitExceeded
+  // handler (`headers={"Retry-After": str(retry_after)}`) and this route's own
+  // per-key throttle at `routers/internal.py` (PYAPIFIX2-03), whose
+  // `service_error(..., retry_after=...)` sets the same header. So the header
+  // this route now forwards is on the wire at BOTH shapes, not a hypothetical.
+  // ===========================================================================
+  describe("[140.3-09 / TS-34] an upstream throttle answers 429 with the wait forwarded", () => {
+    it("a /internal 429 carrying `Retry-After: 60` answers 429 with that value — not 502", async () => {
+      // THE criterion. Deleting the forward, or restoring the hardcoded 502,
+      // must fail this case.
+      STATE.upstreamStatus = 429;
+      STATE.upstreamHeaders = { "retry-after": "60" };
+      STATE.upstreamPayload = {
+        ok: false,
+        code: "RATE_LIMITED",
+        human_message: "Too many requests.",
+        detail: "Too many probes for this key. Try again in 60 seconds.",
+        correlation_id: "cid-throttle",
+        recoverable: true,
+      };
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(
+        res.status,
+        "A throttle answering 502 tells the user our service is broken and " +
+          "offers no wait. 429 says 'you are being throttled', which is both " +
+          "true and actionable.",
+      ).toBe(429);
+      expect(
+        res.headers.get("Retry-After"),
+        "The UPSTREAM's own wait must be re-published verbatim, in seconds, " +
+          "so the caller waits exactly as long as the upstream asked.",
+      ).toBe("60");
+      expect((await res.json()).code).toBe("PROBE_RATE_LIMITED");
+      // Still no-store — the throttle arm must not lose the cache posture.
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("forwards an HTTP-DATE form `Retry-After` as a finite second count", async () => {
+      // A proxy or CDN between us and Railway may legitimately rewrite the
+      // header into the RFC 9110 date form. `Number(header)` is NaN for it; the
+      // ONE parser resolves it against the response's own Date header.
+      STATE.upstreamStatus = 429;
+      STATE.upstreamHeaders = {
+        date: "Wed, 21 Oct 2026 07:28:00 GMT",
+        "retry-after": "Wed, 21 Oct 2026 07:30:00 GMT", // +120s
+      };
+      STATE.upstreamPayload = {
+        ok: false,
+        code: "RATE_LIMITED",
+        human_message: "Too many requests.",
+        detail: "Slow down.",
+        correlation_id: "cid-throttle-date",
+        recoverable: true,
+      };
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("120");
+      expect(res.headers.get("Retry-After")).not.toContain("NaN");
+    });
+
+    it("TRAP-3: a 429 with NO `Retry-After` answers 429 and names NO duration", async () => {
+      // Absence must never become a fabricated wait. No header in, no header
+      // out — and no sentence claiming a time nobody stated.
+      STATE.upstreamStatus = 429;
+      STATE.upstreamHeaders = {};
+      STATE.upstreamPayload = {
+        ok: false,
+        code: "RATE_LIMITED",
+        human_message: "Too many requests.",
+        detail: "Slow down.",
+        correlation_id: "cid-throttle-bare",
+        recoverable: true,
+      };
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBeNull();
+      const body = await res.json();
+      expect(body.code).toBe("PROBE_RATE_LIMITED");
+      // Hand-typed: the route's own existing 429 sentence, reused rather than
+      // authored. It must not acquire a duration it cannot substantiate.
+      expect(body.error).toBe("Too many requests");
+      expect(body.error).not.toMatch(/\d/);
+    });
+
+    it("a 429 with a NON-JSON body (edge/WAF) still answers 429 with the wait", async () => {
+      // A throttle imposed above our service carries no machine code at all.
+      // The upstream STATUS is the gate precisely so this case still works —
+      // a code-only gate would drop it back onto the substring cascade.
+      STATE.upstreamStatus = 429;
+      STATE.upstreamContentType = "text/html";
+      STATE.upstreamHeaders = { "retry-after": "15" };
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("15");
+      expect((await res.json()).code).toBe("PROBE_RATE_LIMITED");
+    });
+
+    it("the throttle arm sits ABOVE the cascade — a 429 whose sentence says 'timeout' is not our timeout", async () => {
+      // Ordering proof. The cascade's `includes("timeout")` branch would claim
+      // OUR probe timed out, which is a false statement about whose fault the
+      // failure is, and it would lose the wait.
+      STATE.upstreamStatus = 429;
+      STATE.upstreamHeaders = { "retry-after": "45" };
+      STATE.upstreamPayload = {
+        ok: false,
+        code: "RATE_LIMITED",
+        human_message: "Too many requests.",
+        detail: "Throttled after a timeout storm on this key.",
+        correlation_id: "cid-throttle-collide",
+        recoverable: true,
+      };
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(429);
+      expect((await res.json()).code).toBe("PROBE_RATE_LIMITED");
+    });
+
+    it("ANTI-REGRESSION: a 503 carrying `Retry-After` is NOT a throttle — it keeps its 502 upstream-fault answer", async () => {
+      // The gate is the status 429, not "a wait arrived". A 5xx is an upstream
+      // FAULT even when it advertises a cooldown, and mislabelling it as a
+      // throttle would tell the user they had made too many requests.
+      STATE.upstreamStatus = 503;
+      STATE.upstreamHeaders = { "retry-after": "60" };
+      STATE.upstreamPayload = {
+        ok: false,
+        code: "SEAM_DEGRADED",
+        human_message: "The analytics store is not responding. Try again shortly.",
+        detail: "downstream down",
+        correlation_id: "cid-503",
+        recoverable: true,
+      };
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(502);
+      // PROBE_FAILED, not PROBE_BACKEND_UNAVAILABLE: this body HAS a readable
+      // human sentence, so the thrown message is that sentence rather than the
+      // `Upstream 5…` fallback the config branch keys on. Measured against the
+      // untouched tree, not assumed — this route's existing
+      // `PROBE_BACKEND_UNAVAILABLE` case is the one whose body is unreadable.
+      expect((await res.json()).code).toBe("PROBE_FAILED");
+      expect(
+        res.headers.get("Retry-After"),
+        "A 5xx is an upstream FAULT even when it advertises a cooldown. " +
+          "Forwarding the wait here would dress a fault as a throttle.",
+      ).toBeNull();
+    });
+
+    it("PRESERVE (NOT a TS-34 deliverable): a CircuitOpenError still answers 503 with Retry-After from retryAfterS", async () => {
+      // This arm was ALREADY correct before this plan. The case exists only to
+      // prove the throttle work did not disturb it — it counts toward nothing.
+      RF.breakerOpen = true;
+      RF.retryAfterS = 17;
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("Retry-After")).toBe("17");
+      expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+    });
+
+    it("ANTI-REGRESSION: a config fault and a timeout keep their existing codes and statuses", async () => {
+      // The substring cascade is deliberately KEPT as the fallback for
+      // genuinely uncoded faults, and this route's private PROBE_* vocabulary
+      // is deliberately NOT replaced by the shared classifier.
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      // An UNREADABLE 5xx body — the only shape that reaches the `Upstream 5…`
+      // fallback the config branch keys on.
+      STATE.upstreamStatus = 500;
+      STATE.upstreamPayload = { unexpected: "shape" };
+      const { GET } = await import("./route");
+      const backendRes = await GET(makeRequest(KEY_ID));
+      expect(backendRes.status).toBe(502);
+      expect((await backendRes.json()).code).toBe("PROBE_BACKEND_UNAVAILABLE");
+
+      STATE.upstreamStatus = 200;
+      STATE.upstreamThrow = true;
+      const throwRes = await GET(makeRequest(KEY_ID));
+      expect(throwRes.status).toBe(502);
+      // "ECONNREFUSED upstream down" — the config-error branch, unchanged.
+      expect((await throwRes.json()).code).toBe("PROBE_BACKEND_UNAVAILABLE");
+
+      consoleErr.mockRestore();
+    });
+
+    it("ANTI-REGRESSION: 140.3-03's 2xx fail-CLOSED still answers 502 PROBE_FAILED", async () => {
+      // The security fail-closed message was deliberately engineered by
+      // 140.3-03 to match NONE of this route's classifier substrings so it
+      // lands on the generic PROBE_FAILED 502. Routing this route through the
+      // shared classifier would have turned it into a terminal UNKNOWN 500 —
+      // measured, and the reason the vocabularies stay separate.
+      STATE.upstreamStatus = 200;
+      STATE.upstreamPayload = {};
+
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = await GET(makeRequest(KEY_ID));
+      consoleErr.mockRestore();
+
+      expect(res.status).toBe(502);
+      expect((await res.json()).code).toBe("PROBE_FAILED");
+    });
   });
 
   it("a body with no readable `detail` still throws the pre-plan `Upstream <status>` message", async () => {
