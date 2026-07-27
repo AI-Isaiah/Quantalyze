@@ -204,6 +204,74 @@ describe("[SEAMCORE-06 / TRAP-1] the redaction leaf is safe in BOTH directions",
     expect(scrubbed).toContain(String(MIN_REDACTABLE_SECRET_LENGTH));
   });
 
+  // ── HI-03 — the floor governs ENV secrets ONLY ─────────────────────────────
+  //
+  // The floor is correct for env secrets: every one is ours, every one is >= 32
+  // chars, and the refusal notice's remedy ("lengthen the secret") is one the
+  // operator can actually apply.
+  //
+  // It is WRONG for per-request secrets, which are USER-OWNED and not
+  // length-controlled by us:
+  //   · MT5's `api_key` is the account LOGIN NUMBER — 8 digits.
+  //   · OKX / Coinbase passphrases are user-chosen; validate-and-encrypt checks
+  //     only `passphrase.trim().length !== 0` and create-with-key only non-empty
+  //     and <= 512, so a 6-character passphrase is accepted today.
+  //
+  // Under the old global floor those values went to `console.error` AND to
+  // Sentry verbatim — a live credential leaving our infrastructure — with a
+  // notice telling the operator to lengthen a secret belonging to the user.
+
+  it("REDACTS a short PER-REQUEST secret — an 8-digit MT5 login is a live credential", () => {
+    // Hand-typed: the shape of a real MT5 account login. 8 characters, i.e.
+    // below the env floor of 12.
+    const mt5Login = "26547876";
+
+    const scrubbed = scrubSeamString(
+      `mt5 gateway rejected login ${mt5Login}: connect ECONNREFUSED 10.0.0.1:8001`,
+      [mt5Login],
+    );
+
+    expect(
+      scrubbed,
+      "An 8-digit MT5 login is the account credential. It went to console.error " +
+        "AND to Sentry verbatim because the ENV floor was applied to a " +
+        "per-request secret the user owns and we do not length-control.",
+    ).not.toContain(mt5Login);
+    expect(scrubbed).toContain(REDACTED);
+    // The preserve side still holds on the same scrub.
+    expect(scrubbed).toContain("ECONNREFUSED");
+  });
+
+  it("REDACTS a short user-chosen passphrase rather than advising the operator to lengthen it", () => {
+    // 6 characters — accepted by both key-connect routes today.
+    const passphrase = "hunter";
+
+    const scrubbed = scrubSeamString(
+      `okx rejected passphrase=${passphrase} while connecting`,
+      [passphrase],
+    );
+
+    expect(scrubbed).not.toContain(`passphrase=${passphrase}`);
+    // ...and it must NOT print the env remedy, which the operator cannot apply
+    // to a credential the USER chose.
+    expect(scrubbed).not.toContain("lengthen the secret");
+  });
+
+  it("still REFUSES a short ENV secret — the floor is not lowered, it is scoped", () => {
+    // ⚠️ The two halves of HI-03 pull in opposite directions, so both are pinned
+    // on the SAME file. `CONN` is a substring of `ECONNREFUSED`: applying it
+    // would destroy the syscall token. An env secret is OURS, so the floor and
+    // its "lengthen the secret" remedy are both still right here. A fix that
+    // simply lowered MIN_REDACTABLE_SECRET_LENGTH would redden this case.
+    vi.stubEnv("CRON_SECRET", "CONN");
+
+    const scrubbed = scrubSeamString(undiciMessage());
+
+    expect(messageBody(scrubbed)).toContain("connect ECONNREFUSED 10.0.0.1:8002");
+    expect(scrubbed).toContain("CRON_SECRET");
+    expect(scrubbed).toContain("lengthen the secret");
+  });
+
   it("does not add a refusal notice for a short secret that is ABSENT from the line", () => {
     // A refusal notice on every line where a short secret merely EXISTS would
     // be noise on the healthy path and would train operators to ignore it.
