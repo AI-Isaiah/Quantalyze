@@ -803,6 +803,110 @@ export function decodeBreakerLock(
   return { armedAtMs: Number(parsed[1]), expiresAtMs: Number(parsed[2]) };
 }
 
+// ---------------------------------------------------------------------------
+// SEAMCORE-06 — the breaker's transitions are OBSERVABLE
+//
+// The breaker has never emitted a transition event. Store state answered "is
+// this circuit open right now"; nothing answered "when did it open, which
+// dependency, and how many failures caused it" — which is the whole of an
+// operator's question during an incident, and part of why A-01 (one dependency
+// denying every call site) took so long to attribute.
+// ---------------------------------------------------------------------------
+
+/**
+ * The transition event's payload. FOUR FIELDS, AND THAT IS A CEILING.
+ *
+ * `recordSeamFailure`'s constraint stays in force verbatim: never log a request
+ * body or a header value from this module, because the seam carries raw exchange
+ * API secrets and `INTERNAL_API_TOKEN`. There is no path here either — a breaker
+ * key is a module-derived value from a frozen closed set (threat T-140-01),
+ * whereas a path is caller input. `resilient-fetch.test.ts` asserts the key set
+ * EXACTLY, so a future field carrying request detail reddens rather than ships.
+ */
+interface SeamBreakerTransition {
+  /** The circuit that moved. Per-dependency since 140.2-06. */
+  breakerKey: string;
+  /** Failures counted in the window at the moment of the trip. */
+  failures: number;
+  /** The lock's own cooldown, read from the lock rather than from the constant. */
+  cooldownS: number;
+  /** Correlates an open with the close of the SAME lock. */
+  correlationId: string;
+}
+
+/**
+ * Emit one transition.
+ *
+ * A PLAIN STRUCTURED LOG, deliberately — it performs no I/O, so there is nothing
+ * to await and TRAP-7 (a fire-and-forget promise orphaned by Fluid Compute
+ * freeze) cannot apply. If this ever gains a network sink it must become an
+ * awaited call at both sites, for exactly the reason the recording arms are
+ * awaited inline.
+ *
+ * `console.warn`, not `error`: a breaker transition is an operational fact, and
+ * the OPEN half is a mitigation working. Routing it to `error` would make every
+ * recovery look like a fault.
+ */
+function emitBreakerTransition(
+  kind: "open" | "close",
+  breakerKey: string,
+  lock: { armedAtMs: number; expiresAtMs: number },
+  failures: number,
+): void {
+  const payload: SeamBreakerTransition = {
+    breakerKey,
+    failures,
+    cooldownS: Math.round((lock.expiresAtMs - lock.armedAtMs) / 1000),
+    // Derived from the LOCK, so the open and the close of one lock carry the
+    // same id. A per-request id could not do that: the request that trips a
+    // circuit is never the request that observes it heal.
+    correlationId: `${breakerKey}@${lock.armedAtMs}`,
+  };
+  console.warn(`[resilient-fetch] seam.breaker.${kind}`, payload);
+}
+
+/**
+ * Locks whose CLOSE has already been announced by this instance.
+ *
+ * Best-effort by nature and stated as such: module scope is per-instance under
+ * Fluid Compute, so two instances observing the same recovery each announce it
+ * once. That is the right trade — the alternative is a store write on the read
+ * path of every healthy request, which would make the breaker's own bookkeeping
+ * the seam's dominant cost.
+ *
+ * Bounded by clearing rather than by an LRU: entries are only added on a
+ * recovery, the id includes `armedAtMs` so it never repeats, and a cleared set
+ * can at worst re-announce one close.
+ */
+const announcedCloses = new Set<string>();
+const MAX_ANNOUNCED_CLOSES = 64;
+
+/**
+ * Announce a healed circuit, at most once per lock per instance.
+ *
+ * ⚠️ THIS IS WHERE THE CLOSE LIVES, AND IT IS NOT A COMPROMISE. Locked decision
+ * 3: TTL expiry IS the half-open transition — there is no state machine and no
+ * probe scheduler. The first read that observes a lock past its ENCODED expiry
+ * is therefore the only moment "the circuit is usable again" becomes a fact
+ * anything can see. Inventing a scheduler to fire this event would add the very
+ * machinery the design rejects, for a log line.
+ */
+function announceBreakerClosed(
+  breakerKey: string,
+  lock: { armedAtMs: number; expiresAtMs: number },
+): void {
+  const id = `${breakerKey}@${lock.armedAtMs}`;
+  if (announcedCloses.has(id)) return;
+  if (announcedCloses.size >= MAX_ANNOUNCED_CLOSES) announcedCloses.clear();
+  announcedCloses.add(id);
+  // A lock exists only because the threshold was reached — `recordSeamFailure`
+  // has no other write path — so the failure count that caused it is
+  // `BREAKER_FAILURE_THRESHOLD` by construction. It is stated here rather than
+  // read back, because the counter is never cleared on a trip and reading it now
+  // would report the CURRENT window, not the one that armed this lock.
+  emitBreakerTransition("close", breakerKey, lock, BREAKER_FAILURE_THRESHOLD);
+}
+
 /**
  * Is a circuit this call site depends on currently open?
  *
@@ -838,14 +942,23 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
     // FIRST live lock wins, and `keys` puts the declared dependencies before the
     // global one — see `breakerKeysFor` for why the more specific cooldown is
     // the right `retryAfterS` tie-break.
-    for (const state of states) {
-      const lock = decodeBreakerLock(state);
+    // INDEXED rather than `for…of` since SEAMCORE-06: `states` is parallel to
+    // `keys`, and the close event has to name WHICH circuit healed. The
+    // `mget` fake and the real client both return one slot per requested key,
+    // in request order, so the index is the key.
+    for (let i = 0; i < states.length; i++) {
+      const lock = decodeBreakerLock(states[i]);
       // A lock whose ENCODED expiry has passed is a tombstone, not an open
       // circuit. The key deliberately outlives the lock (see
       // `BREAKER_LOCK_TOMBSTONE_S`), so "present" and "open" are different
       // questions and reading the first as the second would deny a HEALED
       // circuit for another full minute.
-      if (!lock || lock.expiresAtMs <= now) continue;
+      if (!lock) continue;
+      if (lock.expiresAtMs <= now) {
+        // A tombstone this instance has not seen before IS the observed close.
+        announceBreakerClosed(keys[i] ?? BREAKER_KEY, lock);
+        continue;
+      }
       return {
         open: true,
         retryAfterS: Math.ceil((lock.expiresAtMs - now) / 1000),
@@ -937,6 +1050,15 @@ export async function recordSeamFailure(
     // outright denial.
     if (success && remaining > 0) return;
 
+    // Failures counted in the window at the moment of the trip, read from the
+    // verdict rather than assumed to be the threshold: `limit` is what the
+    // limiter was actually built with, so a retune shows up in the event instead
+    // of the event asserting the constant back at the operator.
+    const failures =
+      typeof verdict.limit === "number" && typeof remaining === "number"
+        ? verdict.limit - remaining
+        : BREAKER_FAILURE_THRESHOLD;
+
     // ── THE TRIP PATH ───────────────────────────────────────────────────────
     // Reached once per `BREAKER_FAILURE_THRESHOLD` failures, so the extra read
     // below costs one round trip on the rarest path rather than on every
@@ -971,18 +1093,37 @@ export async function recordSeamFailure(
       if (admittedAtMs <= existing.armedAtMs) return;
     }
 
-    const value = encodeBreakerLock(now, now + BREAKER_COOLDOWN_S * 1_000);
+    const expiresAtMs = now + BREAKER_COOLDOWN_S * 1_000;
+    const value = encodeBreakerLock(now, expiresAtMs);
     const ttlS = BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S;
+    let written: unknown;
     if (existing === null) {
       // `nx: true` makes CONCURRENT trips idempotent — two instances tripping
       // milliseconds apart, neither of which saw the other's write. Benign race,
       // deliberately not serialised with Lua.
-      await redis.set(breakerKey, value, { ex: ttlS, nx: true });
+      written = await redis.set(breakerKey, value, { ex: ttlS, nx: true });
     } else {
       // Overwriting a TOMBSTONE, which `nx` would refuse. Reaching here means
       // the previous lock has expired AND this failure is new evidence gathered
       // after it was armed, so a fresh cooldown is exactly right.
-      await redis.set(breakerKey, value, { ex: ttlS });
+      written = await redis.set(breakerKey, value, { ex: ttlS });
+    }
+    // SEAMCORE-06 — announce the OPEN, and only when this call is the one that
+    // armed it. `nx` answers `null` when a concurrent instance won the race, and
+    // that instance is emitting its own event; claiming a transition here would
+    // double-count every trip across a Fluid Compute fleet.
+    //
+    // The key comes from the VERDICT (it is this function's argument, built only
+    // by `seamBreakerVerdict` from a frozen closed set), never from
+    // `BREAKER_KEY` — an event that named the global key for every trip would be
+    // decorative, and indistinguishable from a correct one on the global path.
+    if (written) {
+      emitBreakerTransition(
+        "open",
+        breakerKey,
+        { armedAtMs: now, expiresAtMs },
+        failures,
+      );
     }
   } catch (err) {
     // SCRUBBED, same reason as the read arm above: the store credential is in

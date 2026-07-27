@@ -1932,10 +1932,17 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
 
   type Emitted = { event: string; payload: Record<string, unknown> };
 
-  /** Collect transition events off a console.warn spy. */
-  function transitionsFrom(
-    spy: ReturnType<typeof vi.spyOn<Console, "warn">>,
-  ): Emitted[] {
+  /**
+   * Collect transition events off a console.warn spy.
+   *
+   * The parameter is typed STRUCTURALLY rather than as `ReturnType<typeof
+   * vi.spyOn<...>>`: vitest 4's `spyOn` type parameters are (object, key) and
+   * spelling them for `Console` does not type-check, while the only thing this
+   * helper needs is `mock.calls`.
+   */
+  function transitionsFrom(spy: {
+    mock: { calls: unknown[][] };
+  }): Emitted[] {
     return spy.mock.calls
       .filter((call) => String(call[0]).includes("seam.breaker."))
       .map((call) => ({
@@ -1943,6 +1950,11 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
         payload: call[1] as Record<string, unknown>,
       }));
   }
+
+  afterEach(() => {
+    // A leaked fake clock would silently expire every later test's locks.
+    vi.useRealTimers();
+  });
 
   it("emits ONE open event at the trip, carrying exactly the four permitted fields", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -2023,16 +2035,15 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
     const openEvent = transitionsFrom(warnSpy)[0];
     expect(openEvent.event).toContain("seam.breaker.open");
 
-    // Age the lock past its ENCODED expiry while leaving the key in the store —
-    // exactly the tombstone window `BREAKER_LOCK_TOMBSTONE_S` exists to create.
-    // The armedAt is preserved, which is what makes the two events correlatable.
-    const armedAtMs = Number(
-      String(openEvent.payload.correlationId).split("@")[1],
-    );
-    shared.store.set("breaker:railway", {
-      value: encodeFakeBreakerLock(armedAtMs, Date.now() - 1),
-      expiresAt: Date.now() + 30_000,
-    });
+    // Age the CLOCK past the lock's encoded expiry rather than rewriting the
+    // lock. The stored value stays byte-for-byte what the core wrote — same
+    // armedAt, same 30 s span — so the close event is derived from a REAL lock
+    // and the two events are correlatable for the right reason. Rewriting the
+    // entry would let this case pass against a value production never produces.
+    // The key itself outlives the lock by `BREAKER_LOCK_TOMBSTONE_S` (60 s), so
+    // at +31 s it is still in the store: that window IS the tombstone.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date(Date.now() + 31_000));
 
     const state = await mod.isBreakerOpen("bridge");
     expect(state.open).toBe(false);
@@ -2057,10 +2068,12 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
 
   it("emits the close ONCE, not once per read through the tombstone window", async () => {
     const mod = await import("./resilient-fetch");
+    // An aged lock in its tombstone window: armed 40 s ago, its 30 s cooldown
+    // expired 10 s ago, the KEY still present for another 20 s.
     const armedAtMs = Date.now() - 40_000;
     shared.store.set("breaker:railway", {
-      value: encodeFakeBreakerLock(armedAtMs, Date.now() - 1),
-      expiresAt: Date.now() + 30_000,
+      value: encodeFakeBreakerLock(armedAtMs, armedAtMs + 30_000),
+      expiresAt: armedAtMs + 90_000,
     });
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
