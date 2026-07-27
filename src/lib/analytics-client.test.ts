@@ -14,6 +14,8 @@
  *      used with `headers.get()`.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 vi.mock("server-only", () => ({}));
 
@@ -1074,5 +1076,261 @@ describe("[140.2-09 / TS-04 / SC7] analytics-client mints X-Tenant-Claim", () =>
       caught = e;
     }
     expect((caught as Error).name).toBe("TenantClaimError");
+  });
+
+  /**
+   * ROADMAP SC7's own test clause: *"a test must prove a request from tenant A
+   * cannot consume tenant B's allowance"*.
+   *
+   * ⚠️ THIS IS NOT `expect(header).toBeDefined()`. That assertion is green
+   * against a mint that returns a constant, against a mint keyed on the wrong
+   * secret, and against a mint over an empty payload — the last of which is
+   * 140.1's mutation #3 shape, which shipped GREEN against an identity
+   * assertion. What follows drives the SAME wrapper twice with two different
+   * server-derived identities and then reproduces the BUCKET DECISION the Python
+   * limiter makes, with the verifier's semantics written out by hand here.
+   */
+  describe("SC7 — tenant A cannot consume tenant B's allowance", () => {
+    /**
+     * A hand-written mirror of `analytics-service/services/rate_limit.py`:
+     * `verify_tenant_claim` + `tenant_or_platform_key`, transcribed from the
+     * Python source, NOT imported from anywhere on the TS side.
+     *
+     * That transcription is the whole point. Asserting "two claim strings
+     * differ" would pass for two claims that BOTH fail `compare_digest` and
+     * therefore BOTH land in the same `platform:<path>` bucket — which is
+     * exactly the regression being tested for. The only honest oracle is the
+     * decision the other side actually makes.
+     */
+    async function pythonBucketKey(
+      claim: string | undefined,
+      scope: string,
+      routePath: string,
+      secret: string | undefined,
+    ): Promise<string> {
+      const { createHmac, timingSafeEqual } = await import("node:crypto");
+      const platform = `platform:${routePath}`;
+      // `if not raw or len(raw) > _CLAIM_MAX_CHARS: return None`
+      if (!claim || claim.length > 512) return platform;
+      if (!secret) return platform;
+      // `payload, exp_raw, provided_mac = raw.rsplit(".", 2)`
+      const idx2 = claim.lastIndexOf(".");
+      const idx1 = claim.lastIndexOf(".", idx2 - 1);
+      if (idx1 <= 0 || idx2 <= idx1) return platform;
+      const payload = claim.slice(0, idx1);
+      const expRaw = claim.slice(idx1 + 1, idx2);
+      const providedMac = claim.slice(idx2 + 1);
+      // `if not payload: return None`
+      if (!payload) return platform;
+      // `if int(exp_raw) < int(time.time()): return None`
+      if (Number(expRaw) < Math.floor(Date.now() / 1000)) return platform;
+      const expected = createHmac("sha256", secret)
+        .update(`${payload}.${expRaw}`)
+        .digest("hex");
+      // `hmac.compare_digest(provided_mac, expected_mac)`
+      if (
+        providedMac.length !== expected.length ||
+        !timingSafeEqual(Buffer.from(providedMac), Buffer.from(expected))
+      ) {
+        return platform;
+      }
+      // `if payload == ANON_PAYLOAD: return f"{scope}:anon"`
+      if (payload === "public") return `${scope}:anon`;
+      return `${scope}:t:${payload}`;
+    }
+
+    it("two different tenants land in two DIFFERENT per-tenant buckets on /api/optimize-weights", async () => {
+      // The sharpest of the five live flips: 20/minute, a PLATFORM ceiling
+      // before this landed, so two allocators running Scenario Composer
+      // concurrently could 429 each other.
+      const headersA = await sentHeaders((m) =>
+        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-a" }),
+      );
+      const headersB = await sentHeaders((m) =>
+        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-b" }),
+      );
+
+      const claimA = headersA["X-Tenant-Claim"];
+      const claimB = headersB["X-Tenant-Claim"];
+      expect(claimA).not.toBe(claimB);
+
+      const bucketA = await pythonBucketKey(
+        claimA,
+        "optimize_weights",
+        "/api/optimize-weights",
+        INTERNAL_TOKEN,
+      );
+      const bucketB = await pythonBucketKey(
+        claimB,
+        "optimize_weights",
+        "/api/optimize-weights",
+        INTERNAL_TOKEN,
+      );
+
+      // Hand-typed expectations, not derived from the claims.
+      expect(bucketA).toBe("optimize_weights:t:tenant-a");
+      expect(bucketB).toBe("optimize_weights:t:tenant-b");
+      expect(bucketA).not.toBe(bucketB);
+      // The regression this replaces: BOTH used to be this single string, and
+      // still would be if the MAC failed for any reason.
+      expect(bucketA).not.toBe("platform:/api/optimize-weights");
+      expect(bucketB).not.toBe("platform:/api/optimize-weights");
+    });
+
+    it("tenant A's claim does NOT verify as tenant B — the payload is bound by the MAC", async () => {
+      const headersA = await sentHeaders((m) =>
+        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-a" }),
+      );
+      const [, exp, macA] = headersA["X-Tenant-Claim"].split(".");
+
+      // Splice tenant-b's payload onto tenant-a's MAC — the forgery a caller
+      // holding a captured claim would attempt in order to spend B's window.
+      const forged = `tenant-b.${exp}.${macA}`;
+      const bucket = await pythonBucketKey(
+        forged,
+        "optimize_weights",
+        "/api/optimize-weights",
+        INTERNAL_TOKEN,
+      );
+
+      // It falls back to the platform bucket. It does NOT become
+      // `optimize_weights:t:tenant-b`, which is what "A consuming B's
+      // allowance" would actually look like.
+      expect(bucket).toBe("platform:/api/optimize-weights");
+      expect(bucket).not.toBe("optimize_weights:t:tenant-b");
+    });
+
+    it("each of the five LIVE routes buckets per tenant, not one of them", async () => {
+      // Hand-typed roster of the five LIVE flips and their Python scopes, read
+      // off the `partial(tenant_or_platform_key, scope=…)` decorators. The dead
+      // sixth (portfolio-analytics) is covered by the mint roster above.
+      const LIVE: ReadonlyArray<{
+        scope: string;
+        path: string;
+        invoke: (
+          m: AnalyticsClient,
+          userId: string,
+        ) => Promise<unknown>;
+      }> = [
+        {
+          scope: "validate_key",
+          path: "/api/validate-key",
+          invoke: (m, userId) =>
+            m.validateKey("deribit", "k", "s", undefined, { userId }),
+        },
+        {
+          scope: "encrypt_key",
+          path: "/api/encrypt-key",
+          invoke: (m, userId) =>
+            m.encryptKey("deribit", "k", "s", undefined, { userId }),
+        },
+        {
+          scope: "optimize_weights",
+          path: "/api/optimize-weights",
+          invoke: (m, userId) =>
+            m.optimizeScenarioWeights({}, "min_vol", { userId }),
+        },
+        {
+          scope: "portfolio_optimizer",
+          path: "/api/portfolio-optimizer",
+          invoke: (m, userId) => m.runPortfolioOptimizer("portfolio-1", userId),
+        },
+        {
+          scope: "portfolio_bridge",
+          path: "/api/portfolio-bridge",
+          invoke: (m, userId) =>
+            m.findReplacementCandidates("portfolio-1", "strategy-1", userId),
+        },
+      ];
+      expect(LIVE).toHaveLength(5);
+
+      for (const { scope, path, invoke } of LIVE) {
+        const a = await sentHeaders((m) => invoke(m, "tenant-a"));
+        const b = await sentHeaders((m) => invoke(m, "tenant-b"));
+        expect(
+          await pythonBucketKey(a["X-Tenant-Claim"], scope, path, INTERNAL_TOKEN),
+          `${path} did not bucket tenant-a per tenant`,
+        ).toBe(`${scope}:t:tenant-a`);
+        expect(
+          await pythonBucketKey(b["X-Tenant-Claim"], scope, path, INTERNAL_TOKEN),
+          `${path} did not bucket tenant-b per tenant`,
+        ).toBe(`${scope}:t:tenant-b`);
+      }
+    });
+
+    it("a claim minted with the WRONG secret degrades to the platform bucket (why M44 must redden)", async () => {
+      const headers = await sentHeaders((m) =>
+        m.optimizeScenarioWeights({}, "min_vol", { userId: "tenant-a" }),
+      );
+      // The verifier holds INTERNAL_API_TOKEN. Verifying against the OTHER
+      // secret in scope in this module is what swapping the MAC key would do in
+      // production — and note the failure is SILENT on the Python side: no
+      // error, no warning, just a platform-wide bucket.
+      expect(
+        await pythonBucketKey(
+          headers["X-Tenant-Claim"],
+          "optimize_weights",
+          "/api/optimize-weights",
+          SERVICE_KEY,
+        ),
+      ).toBe("platform:/api/optimize-weights");
+    });
+
+    it("an EXPIRED claim degrades to the platform bucket rather than granting a permanent window", async () => {
+      // The TTL is what stops a claim captured from a log or a proxy being a
+      // permanent key to that tenant's allowance.
+      const stale = "tenant-a.1000000000.".concat("0".repeat(64));
+      expect(
+        await pythonBucketKey(
+          stale,
+          "optimize_weights",
+          "/api/optimize-weights",
+          INTERNAL_TOKEN,
+        ),
+      ).toBe("platform:/api/optimize-weights");
+    });
+  });
+
+  /**
+   * The committed cross-language case table, read at the WIRE level.
+   *
+   * `tenant-claim.test.ts` binds the mint to these bytes; this binds the
+   * CLIENT to them, so a claim that stopped riding the header, or started
+   * riding it in a different shape, reddens against the same file a future
+   * pytest reader will consume.
+   */
+  describe("SC7 — the wire header matches the committed parity fixture", () => {
+    it.each(
+      (
+        JSON.parse(
+          readFileSync(
+            join(process.cwd(), "tests/fixtures/tenant-claim-parity.json"),
+            "utf8",
+          ),
+        ) as {
+          cases: Array<{ name: string; payload: string; secret: string; exp: number }>;
+        }
+      ).cases,
+    )(
+      "fixture case $name rides X-Tenant-Claim byte-for-byte",
+      async ({ payload, secret, exp }) => {
+        process.env.INTERNAL_API_TOKEN = secret;
+        vi.useFakeTimers();
+        // now = exp - TTL(300, hand-typed), so the mint lands on the fixture exp.
+        vi.setSystemTime(new Date((exp - 300) * 1000));
+        try {
+          const headers = await sentHeaders((m) =>
+            m.optimizeScenarioWeights({}, "min_vol", { userId: payload }),
+          );
+          const [sentPayload, sentExp, mac] =
+            headers["X-Tenant-Claim"].split(".");
+          expect(sentPayload).toBe(payload);
+          expect(Number(sentExp)).toBe(exp);
+          expect(mac).toBe(await hmacHex(secret, `${payload}.${exp}`));
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
   });
 });
