@@ -808,3 +808,160 @@ describe("[UAT] composite asset_class hardcode tripwire", () => {
     expect((CRYPTO_EXCHANGES as readonly string[]).includes("mt5")).toBe(false);
   });
 });
+
+/**
+ * Phase 140.3-02 / TS-02 — the duplicate branch must key on the CODE ALONE.
+ *
+ * ⚠️ WHAT WAS WRONG, and why it was wrong in BOTH directions.
+ *
+ * The branch read `upstream.queued === false && upstream.code === "WIZARD_DUPLICATE"`.
+ * `queued` and `code` are ORTHOGONAL facts on this reply — `queued` is a JOB fact
+ * ("a compute job is now enqueued or running"), `code`/`idempotent` are a
+ * SUBMISSION fact ("this submission was a duplicate"). Neither implies the other,
+ * and `process_key.py:_resume_duplicate_job` exists precisely to produce the state
+ * where BOTH are true: the RESUMED WEDGE — a duplicate submission whose wedged job
+ * we re-enqueued. `_wizard_duplicate_reply` is ONE shared builder for both duplicate
+ * emitters and it takes `queued` as a PARAMETER, so `queued: true` beside
+ * `code: "WIZARD_DUPLICATE"` is the normal reply, not a backbone bug.
+ *
+ * So the `queued === false &&` conjunct SKIPPED the duplicate branch on exactly the
+ * case that most needs it, and the user got a plain 202 "syncing" with no duplicate
+ * code for a submission that was recognised as a duplicate. TS-01 established the
+ * same fact on the finalize side, where `SubmitStep.tsx:156` already branches on
+ * `data.code === "WIZARD_DUPLICATE"` alone — this route is the straggler.
+ *
+ * ORACLE INDEPENDENCE: every fixture key and every expected value below is a
+ * hand-typed literal. Nothing is imported from the route or from the client.
+ */
+describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys on the CODE, never on `queued`", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    // api_key_id SET → definitively single-key, so the composite hoist is skipped
+    // and the request reaches the unified /process-key dispatch under test.
+    ownershipResult.data = {
+      id: TEST_STRATEGY_ID,
+      user_id: TEST_USER.id,
+      api_key_id: "33333333-3333-3333-3333-333333333333",
+    };
+    ownershipQuery.table = null;
+    ownershipQuery.selectCols = null;
+    ownershipQuery.filters = [];
+    ownershipQuery.capturing = false;
+    authState.user = { id: TEST_USER.id };
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockUpsert.mockReturnValue({ error: null });
+  });
+
+  it("THE RESUMED WEDGE — `queued: true` WITH `code: WIZARD_DUPLICATE` takes the duplicate branch", async () => {
+    // The exact reply `_resume_duplicate_job` produces, hand-typed from the
+    // Python builder's own key set (process_key.py:_wizard_duplicate_reply).
+    mockPostProcessKey.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+        verification_id: "55555555-5555-5555-5555-555555555555",
+        status: "validated",
+        trust_tier: "api_verified",
+        correlation_id: "11111111-2222-3333-4444-555555555555",
+        queued: true,
+        job_state: "enqueued",
+      },
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    const body = await res.json();
+
+    // The duplicate branch answers 200 (idempotency is a feature, not a failure)
+    // and NAMES the condition, so the wizard's WIZARD_DUPLICATE copy can render.
+    expect(
+      body.code,
+      "A resumed-wedge reply carries `queued: true` AND `code: WIZARD_DUPLICATE`. " +
+        "A branch conjoined on `queued === false` silently SKIPS the duplicate " +
+        "case it exists for, and the user is told a duplicate submission is a " +
+        "fresh sync — TS-02.",
+    ).toBe("WIZARD_DUPLICATE");
+    expect(res.status).toBe(200);
+    expect(body.idempotent).toBe(true);
+    expect(body.verification_id).toBe("55555555-5555-5555-5555-555555555555");
+    // The upstream's preserved row status, not a fabricated "syncing".
+    expect(body.status).toBe("validated");
+    // THE JOB FACT IS FORWARDED HONESTLY. The branch used to hardcode
+    // `queued: false`, which on a resumed wedge is a false statement about a job
+    // that IS enqueued — re-pointing the branch without this would have moved
+    // the lie rather than removed it.
+    expect(
+      body.queued,
+      "A resumed wedge HAS an enqueued job. Reporting `queued: false` beside " +
+        "`idempotent: true` states the opposite of what the backbone just did.",
+    ).toBe(true);
+    // Unified is a single-key resync path — never a composite.
+    expect(body.composite).toBe(false);
+    expect(body.ok).toBe(true);
+    expect(body.accepted).toBe(true);
+  });
+
+  it("the no-job duplicate — `queued: false` WITH the code — still takes the duplicate branch", async () => {
+    // The other shape the SAME builder emits: a duplicate for which no background
+    // job applies. This case was already green; it is kept so the re-point is
+    // proven to have WIDENED the branch rather than moved it.
+    mockPostProcessKey.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+        verification_id: "66666666-6666-6666-6666-666666666666",
+        status: "published",
+        correlation_id: "11111111-2222-3333-4444-555555555555",
+        queued: false,
+        job_state: null,
+      },
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.idempotent).toBe(true);
+    expect(body.queued).toBe(false);
+    expect(body.status).toBe("published");
+  });
+
+  it("NEGATIVE — an ordinary fresh enqueue (`queued: true`, NO code) is still a plain 202 with no duplicate vocabulary", async () => {
+    // The guard against over-widening: dropping the `queued` conjunct must not
+    // make every enqueue look like a duplicate.
+    mockPostProcessKey.mockResolvedValue({
+      ok: true,
+      status: 202,
+      body: {
+        ok: true,
+        queued: true,
+        verification_id: "77777777-7777-7777-7777-777777777777",
+        correlation_id: "11111111-2222-3333-4444-555555555555",
+      },
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    const body = await res.json();
+
+    expect(res.status).toBe(202);
+    expect(body.code).toBeUndefined();
+    expect(body.idempotent).toBeUndefined();
+    expect(body.status).toBe("syncing");
+    expect(body.queued).toBe(true);
+  });
+});

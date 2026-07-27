@@ -264,3 +264,103 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     expect(postProcessKeyMock).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 140.3-02 / TS-13 + TS-14 — the unified CSV finalize decides success from
+ * the envelope's `ok`, and KEEPS the `isUuid` shape guard beside it.
+ *
+ * The two guards answer different questions and neither subsumes the other:
+ *   · `ok` is the SEMANTIC verdict the service states about its own work.
+ *   · `isUuid(strategy_id)` is DEFENCE IN DEPTH against drift — a 2xx whose body
+ *     lost or mistyped the id. TS-13 says to keep it, and it is kept: emitting
+ *     `ok: true` for a body with no usable strategy_id leaves the wizard's
+ *     SyncProgress poller hitting `if (!data) return` forever, because no
+ *     strategy_analytics row exists for it to find (API H-1).
+ *
+ * ⚠️ NOT TOUCHED BY THIS PLAN: this route's `debug_context` echo of the whole
+ * upstream body and its `console.error` of the same. That is TS-24, owned jointly
+ * with Phase 145, which owns this file's transaction shape. Two phases editing one
+ * file in one pass is TRAP-8.
+ *
+ * ORACLE INDEPENDENCE: fixture keys hand-typed from the Python builder's key set
+ * (`{ok, strategy_id, status, correlation_id, step}`); expected values are literals.
+ */
+describe("[140.3-02 / TS-13] POST /api/strategies/csv-finalize — decides from `ok`, and isUuid survives", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
+    updateMock.mockResolvedValue({ error: null });
+  });
+
+  it("a 200 carrying `ok: false` is NEVER re-stamped `ok: true`, even with a well-formed strategy_id", async () => {
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        ok: false,
+        code: "CSV_FINALIZE_FAILED",
+        human_message: "finalize_csv_strategy RPC failed.",
+        correlation_id: "11111111-2222-3333-4444-555555555555",
+        // A VALID uuid — so the isUuid guard alone cannot catch this.
+        strategy_id: NEW_STRATEGY_ID,
+      },
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(
+      body.ok,
+      "The route strips the upstream `ok` and stamps its own `ok: true` on the " +
+        "success path. Deciding that path by `isUuid(strategy_id)` alone turns " +
+        "an upstream FAILURE that happens to carry an id into a reported " +
+        "success — TS-13.",
+    ).toBe(false);
+    expect(res.status).toBe(502);
+    expect(body.code).toBe("CSV_FINALIZE_FAIL");
+  });
+
+  it("PIN — isUuid still refuses a 2xx whose strategy_id is not a UUID (defence in depth, kept)", async () => {
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        strategy_id: "not-a-uuid",
+        status: "pending_review",
+        correlation_id: "11111111-2222-3333-4444-555555555555",
+        step: "finalize",
+      },
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("CSV_FINALIZE_FAIL");
+  });
+
+  it("the real finalize success (`ok: true` + a UUID) still returns 200 with the route's own ok:true", async () => {
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        strategy_id: NEW_STRATEGY_ID,
+        status: "pending_review",
+        correlation_id: "11111111-2222-3333-4444-555555555555",
+        step: "finalize",
+      },
+    });
+
+    const res = await POST(makeRequest(validBody()));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(NEW_STRATEGY_ID);
+    expect(body.status).toBe("pending_review");
+  });
+});

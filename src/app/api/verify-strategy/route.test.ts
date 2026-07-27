@@ -341,3 +341,158 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
     expect(body).toHaveProperty("expires_at");
   });
 });
+
+/**
+ * Phase 140.3-02 / TS-12 + TS-14 — success is decided by the envelope's OWN
+ * `ok` discriminator, never by sniffing a field and never by the status.
+ *
+ * ⚠️ WHY NOT THE STATUS (fold-in M-6 from the 140.1 code review). `validate-only`
+ * answers **200 with `ok:false`** where `_scope_rejected` answers **403**, on the
+ * IDENTICAL `not val.valid` predicate. It was judged a deliberate carve-out, but
+ * `STATUS_CONTRACT.md` records the exception nowhere. A consumer branching on
+ * STATUS is therefore wrong on one of the two paths no matter which status it
+ * picks. Branching on `ok` is correct on both. Do NOT "simplify" this back.
+ *
+ * ⚠️ WHY NOT `verification_id`. The route used to decide success by
+ * `typeof upstream.verification_id === "string"`. The Python terminal-success
+ * builder's own docstring (`process_key.py`, the `flow_type=teaser` return) names
+ * this exact site as the shape consumers used to SNIFF, and adds `ok: true` +
+ * `code: null` precisely so they stop. A sniff cannot tell a success carrying an
+ * id from a FAILURE carrying an id.
+ *
+ * ORACLE INDEPENDENCE: every fixture key and expected value is a hand-typed
+ * literal, taken from the Python builders' key sets, not imported from anything.
+ */
+describe("[140.3-02 / TS-12] POST /api/verify-strategy — success is decided by `ok`, not by sniffing verification_id", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    verificationCount = 0;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("A 200 carrying `ok: false` is NEVER treated as a verification — no public_token is minted", async () => {
+    const updateSpy = vi
+      .fn()
+      .mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") return { update: updateSpy };
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+    // A FAILURE envelope that nonetheless carries a top-level verification_id.
+    // The old `typeof upstream.verification_id === "string"` sniff reads this as
+    // a success and publishes a teaser factsheet for a key that FAILED
+    // validation, complete with a queryable public_token.
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          ok: false,
+          code: "AUTH_FAILED",
+          human_message: "Those API credentials were rejected by the exchange.",
+          correlation_id: "11111111-2222-3333-4444-555555555555",
+          recoverable: false,
+          verification_id: "88888888-8888-8888-8888-888888888888",
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "A 200 whose envelope says `ok: false` is a FAILURE. Deciding success by " +
+        "the presence of a verification_id mints a public_token for a key the " +
+        "exchange rejected — TS-12.",
+    ).not.toBe(200);
+    expect(body).not.toHaveProperty("public_token");
+    // And nothing was written: no row is stamped with a token for a failure.
+    expect(updateSpy).not.toHaveBeenCalled();
+  });
+
+  it("PIN — a 200 carrying `ok: true` but NO verification_id is still refused (the shape guard is DRIFT cover, not rejection cover)", async () => {
+    // ⚠️ FINDING recorded against TS-12's premise. The plan called this guard's
+    // rejection case dead and said to DELETE the guard. Its REJECTION trigger is
+    // indeed dead — a rejection returns at the client's `!result.ok` fork above.
+    // Its DRIFT trigger is NOT: a 2xx whose body lost `verification_id` reaches
+    // here. Deleting the guard would emit 200 + a public_token persisted to
+    // `.eq("id", null)` — a token queryable against no row, which is the
+    // "silent success on failure" defect this phase exists to close, and the
+    // exact twin of the `isUuid` guard TS-13 says to KEEP one route over.
+    // This case is GREEN before and after the change BY DESIGN — that is what
+    // makes it a pin rather than a falsifier.
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: () => ({ eq: async () => ({ error: null }) }) };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: { ok: true, code: null, status: "published" },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body).not.toHaveProperty("public_token");
+  });
+
+  it("the terminal success (`ok: true`, `code: null`, verification_id) still mints and returns a public_token", async () => {
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => ({
+        from(table: string) {
+          if (table === "strategy_verifications") {
+            return { update: () => ({ eq: async () => ({ error: null }) }) };
+          }
+          throw new Error(`unexpected: ${table}`);
+        },
+      }),
+    }));
+    // Hand-typed from the Python terminal-success builder's key set.
+    vi.doMock("@/lib/process-key-client", () => ({
+      postProcessKey: vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        body: {
+          ok: true,
+          code: null,
+          verification_id: "99999999-9999-9999-9999-999999999999",
+          status: "published",
+          trust_tier: "api_verified",
+          metrics_snapshot: { twr: 0.12 },
+        },
+      }),
+    }));
+
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.verification_id).toBe("99999999-9999-9999-9999-999999999999");
+    expect(typeof body.public_token).toBe("string");
+    expect(body.status).toBe("published");
+  });
+});
