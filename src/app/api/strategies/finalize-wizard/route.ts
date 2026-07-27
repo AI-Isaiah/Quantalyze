@@ -21,6 +21,12 @@ import { logAuditEventAsUser } from "@/lib/audit";
 // applied here implicitly, by the predicate's `body is` narrowing — importing
 // the name explicitly would be an unused binding.)
 import { isProcessKeyOnboardResponse } from "@/lib/process-key-onboard-contract";
+// 140.3-03 / SEAMUX-07 — the publish gate's contract. ONE schema, shared with
+// the sibling route that reads the same upstream body.
+import {
+  LivePermissionsSchema,
+  type LivePermissions,
+} from "@/lib/analytics-schemas";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -122,12 +128,26 @@ const CIRCUIT_OPEN_COPY =
  */
 const MAX_COMPOSITE_MEMBERS = 10;
 
-interface LivePermissions {
-  read: boolean;
-  trade: boolean;
-  withdraw: boolean;
-  probe_error?: boolean;
-}
+/**
+ * 140.3-03 / SEAMUX-07 — the value a body the schema could not read resolves
+ * to, and the reason this route no longer declares a `LivePermissions`
+ * interface of its own.
+ *
+ * The shape used to be an `interface` here and the body was cast to it with
+ * `as`, which checks NOTHING at runtime. It is now `z.infer`red from
+ * `LivePermissionsSchema` — one declaration, shared with the sibling route that
+ * reads the same upstream (`keys/[id]/permissions`), so the two members of this
+ * class cannot drift apart again.
+ *
+ * A parse miss resolves to this sentinel rather than throwing or returning a
+ * fabricated triple, so it lands on the EXISTING `probe_error` arm below: a
+ * body that could not be read is a probe that did not run, which is the
+ * fail-CLOSED doctrine this file already states. Carrying no scope fields at
+ * all is deliberate — it makes it structurally impossible for a parse miss to
+ * present a scope verdict, however the gates below are later reordered.
+ */
+const PROBE_PARSE_MISS = { probe_error: true } as const;
+type ProbeParseMiss = typeof PROBE_PARSE_MISS;
 
 /**
  * Force-refresh the live `{read, trade, withdraw}` triple for an
@@ -153,7 +173,7 @@ interface LivePermissions {
  */
 async function fetchLivePermissions(
   keyId: string,
-): Promise<LivePermissions> {
+): Promise<LivePermissions | ProbeParseMiss> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
     throw new Error("INTERNAL_API_TOKEN is not configured");
@@ -184,7 +204,33 @@ async function fetchLivePermissions(
   // the only safe answer — a key whose live scopes could not be re-checked must
   // never be promoted to pending_review. A body that stalled mid-stream is a
   // probe that did not run.
-  return (await res.json()) as LivePermissions;
+  //
+  // 140.3-03 / SEAMUX-07 — THE UNCHECKED CAST IS GONE (the type name it
+  // asserted is deliberately not spelled out here: the acceptance grep proving
+  // the cast is gone would otherwise match this very comment — the same trap
+  // the route-local-scrubber note below records). It asserted a shape and
+  // verified none, and the gate below rejects only on an explicit
+  // `=== true`: a 2xx `{}` or one renamed field left both scopes `undefined`,
+  // both gates passed, and a key holding trade/withdraw scope was published as
+  // read-only-verified. `read`/`trade`/`withdraw` are REQUIRED in the schema
+  // precisely because their absence is that drift.
+  //
+  // The fallback direction is INVERTED relative to `src/lib/api/errorSchema.ts`,
+  // which degrades an unparseable body to `{}` — right for error COPY, and the
+  // vulnerability here. A miss fails CLOSED instead, on the same arm as a probe
+  // that did not run.
+  const parsed = LivePermissionsSchema.safeParse(await res.json());
+  if (!parsed.success) {
+    console.error(
+      `[strategies/finalize-wizard] live permissions probe returned an ` +
+        `unreadable body — failing CLOSED (fields: ` +
+        `${parsed.error.issues
+          .map((issue) => `${issue.path.join(".") || "<root>"}:${issue.code}`)
+          .join(", ")})`,
+    );
+    return PROBE_PARSE_MISS;
+  }
+  return parsed.data;
 }
 
 function validateStringArray(value: unknown): string[] {
@@ -430,7 +476,7 @@ function validatePayload(
 async function runScopeBroadeningProbe(
   apiKeyId: string,
 ): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
-  let livePerms: LivePermissions;
+  let livePerms: LivePermissions | ProbeParseMiss;
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
   } catch (probeErr) {
