@@ -194,9 +194,55 @@ async function unifiedVerifyStrategyHandler(
   if (!result.ok) return result.response;
 
   const upstream = (result.body ?? {}) as Record<string, unknown>;
+
+  /**
+   * Phase 140.3-02 / TS-12 + TS-14 — SUCCESS IS DECIDED BY THE ENVELOPE'S OWN
+   * `ok`, NEVER BY SNIFFING A FIELD AND NEVER BY THE STATUS.
+   *
+   * ⚠️ WHY NOT THE STATUS (fold-in M-6 from the 140.1 code review). `validate-only`
+   * answers **200 with `ok:false`** where `_scope_rejected` answers **403**, on the
+   * IDENTICAL `not val.valid` predicate. It was judged a deliberate carve-out, but
+   * it contradicts the contract and `STATUS_CONTRACT.md` records the exception
+   * nowhere. A consumer branching on STATUS is therefore wrong on one of the two
+   * paths no matter which status it picks. Branching on `ok` is correct on both.
+   * Do NOT "simplify" this back to a status check.
+   *
+   * ⚠️ WHY NOT `verification_id`. This used to read
+   * `typeof upstream.verification_id === "string"` and call that success. The
+   * Python terminal-success builder's own docstring names THIS site as the shape
+   * consumers used to SNIFF, and adds `ok: true` + an explicit `code: null` so
+   * they stop. A sniff cannot tell a success carrying an id from a FAILURE
+   * carrying one — and treating the latter as success mints a queryable
+   * public_token and publishes a teaser factsheet for a key the exchange rejected.
+   *
+   * ⚠️ THE SHAPE GUARD BELOW IS NOT DEAD — a FINDING against TS-12's premise,
+   * recorded here rather than silently satisfied. TS-12 called the 502 fallback's
+   * rejection case dead and said to delete the guard. Its REJECTION trigger IS
+   * dead: a rejection now returns at `!result.ok` above and never reaches here.
+   * Its DRIFT trigger is not. A 2xx whose body lost `verification_id` still
+   * arrives, and without the guard this route answers 200 with a public_token
+   * persisted against `.eq("id", null)` — a token queryable against no row. That
+   * is the "silent success on failure" defect this phase exists to close, and the
+   * exact twin of the `isUuid` guard TS-13 explicitly says to KEEP one route over.
+   * So the guard stays; only its RATIONALE narrows, and both halves are named in
+   * the log line so an operator can tell which one fired.
+   */
   const verificationId =
     typeof upstream.verification_id === "string" ? upstream.verification_id : null;
-  if (!verificationId) {
+  if (upstream.ok !== true || !verificationId) {
+    console.error(
+      "[verify-strategy] upstream 2xx is not a usable verification:",
+      {
+        // Diagnostics only — never the body, which carries encrypted_credentials.
+        ok: upstream.ok,
+        upstream_code: typeof upstream.code === "string" ? upstream.code : null,
+        has_verification_id: verificationId !== null,
+        correlation_id:
+          typeof upstream.correlation_id === "string"
+            ? upstream.correlation_id
+            : null,
+      },
+    );
     return NextResponse.json(
       { error: "Verification service returned an invalid response" },
       { status: 502 },

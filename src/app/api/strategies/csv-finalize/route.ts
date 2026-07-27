@@ -1210,8 +1210,22 @@ async function unifiedCsvFinalizeHandler(args: {
   // strategy_analytics row exists for it to find. Surface 502
   // CSV_FINALIZE_FAIL so the wizard can retry / contact support
   // with the correlation_id.
-  const unifiedBody = result.body as { strategy_id?: unknown };
-  if (!isUuid(unifiedBody?.strategy_id)) {
+  //
+  // Phase 140.3-02 / TS-13 + TS-14 — the `ok` half is NEW; the `isUuid` half is
+  // KEPT. They answer different questions and neither subsumes the other:
+  //   · `ok` is the SEMANTIC verdict the service states about its own work. It
+  //     is read rather than the STATUS because `validate-only` answers 200 with
+  //     `ok:false` where `_scope_rejected` answers 403 on the identical
+  //     predicate (fold-in M-6), so a status branch is wrong on one of the two
+  //     paths whichever status it picks. It is read rather than sniffed for the
+  //     same reason as the H-1 note above: without it, an upstream FAILURE that
+  //     happens to carry a well-formed strategy_id is re-stamped `ok: true` by
+  //     the success envelope below — the route asserting success on a body that
+  //     said the opposite.
+  //   · `isUuid` is DEFENCE IN DEPTH against drift, and TS-13 says to keep it.
+  //     It is what stops a 2xx that lost its id from stranding the poller.
+  const unifiedBody = result.body as { ok?: unknown; strategy_id?: unknown };
+  if (unifiedBody?.ok !== true || !isUuid(unifiedBody?.strategy_id)) {
     console.error(
       `[strategies/csv-finalize unified] missing/invalid strategy_id in upstream body [correlation_id=${args.correlationId}]:`,
       unifiedBody,

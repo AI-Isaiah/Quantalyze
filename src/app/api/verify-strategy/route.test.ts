@@ -235,6 +235,13 @@ describe("NEW-C35-02 — unified path persists trust_tier=self_reported for teas
         ok: true,
         response: null,
         body: {
+          // 140.3-02 / TS-12 — `ok: true` + an explicit `code: null` are what the
+          // real terminal-success builder emits; this double previously omitted
+          // them, i.e. it disagreed with the contract it stands in for. The route
+          // now reads the discriminator, so the FIXTURE is corrected — the
+          // trust_tier assertion below is untouched and just as strong.
+          ok: true,
+          code: null,
           verification_id: "44444444-4444-4444-4444-444444444444",
           status: "published",
           // upstream reports api_verified — the teaser path must override this
@@ -303,6 +310,11 @@ describe("NEW-C35-01 — unified path does not spread encrypted_credentials", ()
         ok: true,
         response: null,
         body: {
+          // 140.3-02 / TS-12 — see the note on the NEW-C35-02 fixture above: the
+          // real terminal-success builder carries `ok: true` + `code: null`.
+          // The leak assertions below are untouched.
+          ok: true,
+          code: null,
           verification_id: "33333333-3333-3333-3333-333333333333",
           status: "published",
           trust_tier: "api_verified",

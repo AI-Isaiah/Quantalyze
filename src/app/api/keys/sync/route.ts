@@ -427,15 +427,33 @@ async function unifiedKeysSyncHandler(args: {
   // `body.strategy_id` keep working. Preserve verification_id + queued as
   // additive fields.
   //
-  // CT-5 (army2) — branch on queued: a real enqueue (`queued===true`)
-  // returns 202 syncing; an idempotent WIZARD_DUPLICATE
-  // (`queued===false && code==='WIZARD_DUPLICATE'`) returns 200 with the
-  // upstream's preserved status (e.g. 'validated' or whatever the
-  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE
-  // code so the wizardErrors copy can render even on a 200.
+  // CT-5 (army2) — a real enqueue returns 202 syncing; a duplicate returns 200
+  // with the upstream's preserved status (e.g. 'validated' or whatever the
+  // pre-existing row holds), the idempotent flag, and the WIZARD_DUPLICATE code
+  // so the wizardErrors copy can render even on a 200.
+  //
+  // ⚠️ Phase 140.3-02 / TS-02 — THE DUPLICATE BRANCH KEYS ON THE CODE ALONE.
+  // It used to read `queued === false && code === "WIZARD_DUPLICATE"`, and that
+  // conjunct was provably wrong in BOTH directions. `queued` and `code` are
+  // ORTHOGONAL facts on this reply:
+  //   · `queued` / `job_state` is a JOB fact — a compute job is now enqueued or
+  //     running for this verification.
+  //   · `code: "WIZARD_DUPLICATE"` + `idempotent: true` is a SUBMISSION fact —
+  //     this submission was a duplicate; no new verification was created.
+  // Neither implies the other, and `process_key.py:_resume_duplicate_job` exists
+  // precisely to produce the state where BOTH are true: the RESUMED WEDGE — a
+  // duplicate submission whose wedged job we re-enqueued. Both duplicate
+  // emitters share ONE builder (`_wizard_duplicate_reply`) which takes `queued`
+  // as a PARAMETER, so `queued: true` beside the code is the normal reply.
+  // The old conjunct therefore SKIPPED the duplicate branch on exactly the case
+  // that most needs it, and reported a recognised duplicate as a fresh sync.
+  // `SubmitStep.tsx` already branches on `data.code === "WIZARD_DUPLICATE"`
+  // alone on the finalize side; this route was the straggler. (The same false
+  // mutual exclusion was deleted from the onboard predicate by TS-01/TS-03 —
+  // see `src/lib/process-key-onboard-contract.ts`. Do not re-introduce it here.)
   const upstream = (result.body ?? {}) as Record<string, unknown>;
   if (upstream && typeof upstream === "object" && "queued" in upstream) {
-    if (upstream.queued === false && upstream.code === "WIZARD_DUPLICATE") {
+    if (upstream.code === "WIZARD_DUPLICATE") {
       return NextResponse.json(
         {
           // H-0309: uniform `ok: true` success discriminator (alongside the
@@ -445,7 +463,11 @@ async function unifiedKeysSyncHandler(args: {
           strategy_id: args.strategy_id,
           status: typeof upstream.status === "string" ? upstream.status : "syncing",
           verification_id: upstream.verification_id ?? null,
-          queued: false,
+          // TS-02 — FORWARD the job fact rather than asserting it. This was
+          // hardcoded `false`, which on a resumed wedge states the opposite of
+          // what the backbone just did: a job IS enqueued. Re-pointing the
+          // branch without this would have moved the lie instead of removing it.
+          queued: upstream.queued === true,
           code: "WIZARD_DUPLICATE",
           idempotent: true,
           // Unified is a single-key resync path — never a composite.

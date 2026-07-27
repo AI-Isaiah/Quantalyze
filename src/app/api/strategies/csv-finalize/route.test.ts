@@ -80,15 +80,32 @@ vi.mock("@/lib/supabase/admin", () => ({
   }),
 }));
 
+// 140.3-02 / TS-13 — the upstream body carries `ok: true`, because the real
+// Python builder does (`process_key.py`, the csv-finalize return:
+// `{ok, strategy_id, status, correlation_id, step}`). This double previously
+// omitted it, which made it a fake that disagreed with the contract it stands
+// in for; the route now reads the discriminator, so the fixture is corrected
+// rather than the guard weakened.
+// The `body` is typed as an open record rather than left to inference: the
+// upstream envelope is a WIRE shape with many optional keys, and inferring it
+// from this one default would make every other fixture in the file a type error
+// for carrying a key the default happens not to use.
 const postProcessKeyMock = vi.hoisted(() =>
-  vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    body: {
-      strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-      status: "pending_review",
-    },
-  })),
+  vi.fn(
+    async (): Promise<{
+      ok: boolean;
+      status: number;
+      body: Record<string, unknown>;
+    }> => ({
+      ok: true,
+      status: 200,
+      body: {
+        ok: true,
+        strategy_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+        status: "pending_review",
+      },
+    }),
+  ),
 );
 vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: postProcessKeyMock,
@@ -144,10 +161,12 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
     rpcMock.mockResolvedValue({ data: NEW_STRATEGY_ID, error: null });
     updateMock.mockResolvedValue({ error: null });
+    // 140.3-02 / TS-13 — `ok: true` added to match the real Python builder; see
+    // the note on postProcessKeyMock's hoisted default.
     postProcessKeyMock.mockResolvedValue({
       ok: true,
       status: 200,
-      body: { strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
+      body: { ok: true, strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
     });
   });
 
