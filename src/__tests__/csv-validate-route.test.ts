@@ -473,8 +473,7 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockResolvedValue({
       ok: true,
-      body: {
-        strategy_id: "11111111-1111-4111-8111-111111111111",
+      body: { ok: true, strategy_id: "11111111-1111-4111-8111-111111111111",
         status: "pending_review",
       },
     });
@@ -521,7 +520,7 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       process.env.INTERNAL_API_TOKEN = "test-token";
       postProcessKeyMock.mockResolvedValue({
         ok: true,
-        body: { strategy_id: "22222222-2222-4222-8222-222222222222", status: "pending_review" },
+        body: { ok: true, strategy_id: "22222222-2222-4222-8222-222222222222", status: "pending_review" },
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -574,7 +573,7 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       process.env.INTERNAL_API_TOKEN = "test-token";
       postProcessKeyMock.mockResolvedValue({
         ok: true,
-        body: { strategy_id: "33333333-3333-4333-8333-333333333333", status: "pending_review" },
+        body: { ok: true, strategy_id: "33333333-3333-4333-8333-333333333333", status: "pending_review" },
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -602,7 +601,7 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       process.env.INTERNAL_API_TOKEN = "test-token";
       postProcessKeyMock.mockResolvedValue({
         ok: true,
-        body: { strategy_id: "44444444-4444-4444-8444-444444444444", status: "pending_review" },
+        body: { ok: true, strategy_id: "44444444-4444-4444-8444-444444444444", status: "pending_review" },
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -674,7 +673,7 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockResolvedValue({
       ok: true,
-      body: { strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
+      body: { ok: true, strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
     });
     // Default behaviour: any rpcMock call resolves successfully.
     // Tests that need per-RPC behaviour override via mockImplementation.
@@ -923,7 +922,7 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     const unifiedStrategyId = "66666666-6666-4666-8666-666666666666";
     postProcessKeyMock.mockResolvedValue({
       ok: true,
-      body: { strategy_id: unifiedStrategyId, status: "pending_review" },
+      body: { ok: true, strategy_id: unifiedStrategyId, status: "pending_review" },
     });
     // Default rpcMock impl returns success for persist_csv_daily_returns.
     process.env.INTERNAL_API_TOKEN = "test-token";
@@ -1253,7 +1252,7 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     postProcessKeyMock.mockResolvedValue({
       ok: true,
       status: 200,
-      body: { strategy_id: "not-a-uuid", status: "pending_review" },
+      body: { ok: true, strategy_id: "not-a-uuid", status: "pending_review" },
     });
     process.env.INTERNAL_API_TOKEN = "test-token";
 
