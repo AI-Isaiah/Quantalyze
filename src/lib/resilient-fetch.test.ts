@@ -63,6 +63,18 @@ const shared = vi.hoisted(() => {
     throwOnGet: false,
     /** true → the failure counter rejects, exercising the swallow-and-log arm. */
     throwOnLimit: false,
+    /**
+     * true → the failure counter resolves `@upstash/ratelimit`'s FAIL-OPEN
+     * timeout sentinel instead of a real verdict (A-09).
+     *
+     * The library resolves `{ success: true, limit: 0, remaining: 0, reset: 0,
+     * reason: "timeout" }` when its own 5 000 ms `timeout` fires — read at
+     * `node_modules/@upstash/ratelimit/dist/index.mjs` `applyTimeout`. Its
+     * intent is unambiguous: `success: true` means LET TRAFFIC THROUGH. The
+     * shape is reproduced here by hand rather than imported, so the double
+     * cannot inherit a change to it.
+     */
+    sentinelOnLimit: false,
   };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
@@ -85,12 +97,24 @@ const shared = vi.hoisted(() => {
    * hand-typed integers.
    */
   const counters = { limitCalls: 0 };
+  /**
+   * What the core passed to `Redis.fromEnv(...)`, OBSERVED and never CONSUMED.
+   *
+   * This is the only place the store's own bounding (SEAMCORE-03 / A-04) is
+   * visible from a test: the config never reaches the fake client, it reaches
+   * the SDK's HttpClient, whose retry loop and abort branch are what actually
+   * spend the lambda's wall clock. Recording the argument and asserting against
+   * hand-typed literals is what makes "the client is bounded" falsifiable
+   * (ledger row M29).
+   */
+  const redisConfigs: Array<Record<string, unknown> | undefined> = [];
   return {
     store,
     mode,
     ctx,
     constructed,
     counters,
+    redisConfigs,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -109,7 +133,8 @@ vi.mock("@upstash/redis", async () => {
   const { fakeRedisFor } = await import("@/test/helpers/upstash-breaker");
   return {
     Redis: {
-      fromEnv: () => {
+      fromEnv: (config?: Record<string, unknown>) => {
+        shared.redisConfigs.push(config);
         const base = fakeRedisFor(shared.beginContext());
         return {
           ...base,
@@ -162,6 +187,17 @@ vi.mock("@upstash/ratelimit", async () => {
         shared.counters.limitCalls += 1;
         if (shared.mode.throwOnLimit) {
           return Promise.reject(new Error("upstash: limiter unavailable"));
+        }
+        if (shared.mode.sentinelOnLimit) {
+          // The library's FAIL-OPEN timeout sentinel, hand-typed. Never
+          // imported and never derived from the fake's own counting.
+          return Promise.resolve({
+            success: true,
+            limit: 0,
+            remaining: 0,
+            reset: 0,
+            reason: "timeout",
+          });
         }
         return this.fake.limit(identifier);
       }
@@ -261,7 +297,9 @@ beforeEach(() => {
   // counter for every later test, which makes "the breaker did not trip"
   // assertions pass for entirely the wrong reason.
   shared.mode.throwOnLimit = false;
+  shared.mode.sentinelOnLimit = false;
   shared.constructed.length = 0;
+  shared.redisConfigs.length = 0;
   shared.counters.limitCalls = 0;
   configureUpstash();
 });
@@ -388,6 +426,84 @@ describe("isBreakerOpen", () => {
   });
 });
 
+describe("[SEAMCORE-03 / A-04] the breaker's own store is bounded", () => {
+  /**
+   * Every expected value below is a hand-typed literal. `seam-constants.pin.test.ts`
+   * pins the same three numbers against the exported constants, so production
+   * and this file are two independent statements of the same tuning — either may
+   * change, but not both silently.
+   *
+   * WHY THIS MATTERS AT ALL. `Redis.fromEnv()` with no config takes the SDK
+   * defaults: SIX fetch attempts (`i <= retry.attempts`, `attempts = 5`) with
+   * `Math.exp(i) * 50` backoff, and `signal: undefined` — no deadline on any of
+   * them. Fail-open covers REJECTIONS; a HANG is not a rejection, so a degraded
+   * Upstash held the lambda for as long as it liked and none of that time
+   * appeared in the SC-4b budget arithmetic.
+   */
+  it("passes an explicit retry count and a FIXED backoff, not the SDK's exponential default", async () => {
+    await import("./resilient-fetch");
+
+    expect(
+      shared.redisConfigs,
+      "The core did not construct exactly one Redis client for this module " +
+        "context.",
+    ).toHaveLength(1);
+    const config = shared.redisConfigs[0];
+    expect(
+      config,
+      "Redis.fromEnv() was called with NO configuration. That takes the SDK " +
+        "defaults — six attempts, exponential backoff, and no deadline at all — " +
+        "so a hung Upstash holds the lambda for an unbounded time and none of it " +
+        "is in the SC-4b arithmetic.",
+    ).toBeDefined();
+
+    const retry = config?.retry as
+      | { retries?: number; backoff?: (n: number) => number }
+      | undefined;
+    expect(retry?.retries).toBe(1);
+    // FIXED, at every retry index. The SDK default is `Math.exp(i) * 50`, which
+    // reads 50 at i=0 and 1004 at i=3 — so evaluating at two indices is what
+    // distinguishes "a fixed backoff was configured" from "the default was left
+    // in place and happens to be small at i=0".
+    expect(retry?.backoff?.(0)).toBe(250);
+    expect(retry?.backoff?.(3)).toBe(250);
+  });
+
+  it("supplies the deadline as a FACTORY, and each call gets a FRESH signal", async () => {
+    await import("./resilient-fetch");
+    const signal = shared.redisConfigs[0]?.signal;
+
+    // A FUNCTION, for two independent reasons, both read at source in
+    // `@upstash/redis/chunk-2X4SLXT7.mjs`:
+    //
+    //  1. The client evaluates `isSignalFunction ? signal() : signal` once per
+    //     `request()`. A single AbortSignal INSTANCE is therefore already
+    //     aborted on the second store command, so every command after the first
+    //     would abort instantly.
+    //  2. On abort the two forms behave differently. With a FUNCTION the client
+    //     RETHROWS. With a plain signal it fabricates a `new Response(...)` with
+    //     `status: 200` whose body is the abort reason — so an aborted `GET`
+    //     would look like a SUCCESSFUL read of a value that is not a lock, and
+    //     an aborted `SET` would look like a lock that was written. The first is
+    //     harmlessly fail-open; the second is an UNARMED breaker reported as
+    //     armed, which is the one direction this module may not take.
+    expect(
+      typeof signal,
+      "The breaker's Redis client was given a plain AbortSignal (or none). A " +
+        "single instance is already-aborted on the second command, and the " +
+        "SDK's plain-signal abort branch fabricates a 200 response carrying the " +
+        "abort reason — which would make a swallowed SET look like an armed lock.",
+    ).toBe("function");
+
+    const first = (signal as () => AbortSignal)();
+    const second = (signal as () => AbortSignal)();
+    expect(first).toBeInstanceOf(AbortSignal);
+    expect(first).not.toBe(second);
+    expect(first.aborted).toBe(false);
+    expect(second.aborted).toBe(false);
+  });
+});
+
 describe("recordSeamFailure", () => {
   it("constructs the failure counter from the table's threshold and window", async () => {
     // PLUMBING, with hand-typed expectations. The double no longer consumes
@@ -468,6 +584,54 @@ describe("recordSeamFailure", () => {
     await mod.recordSeamFailure("breaker:railway");
 
     expect(shared.store.get(mod.BREAKER_KEY)?.expiresAt).toBe(firstExpiry);
+  });
+
+  it("[SEAMCORE-04 / A-09] a SLOW store does not trip the breaker", async () => {
+    // A LIVE defect, not a hardening nicety. `@upstash/ratelimit`'s `timeout`
+    // defaults to 5 000 ms and its sentinel resolves
+    // `{ success: true, limit: 0, remaining: 0, reason: "timeout" }` — the
+    // library saying LET TRAFFIC THROUGH, because it could not reach the
+    // counter. The core's trip test was `if (success && remaining > 0) return;`,
+    // so `remaining === 0` fell THROUGH and armed the lock. ONE recorded failure
+    // plus one slow Upstash was a full trip.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.sentinelOnLimit = true;
+    const mod = await import("./resilient-fetch");
+
+    // A hand-typed 5 — well past the threshold, so if the sentinel counted at
+    // all the lock would certainly exist by now.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    expect(
+      shared.store.get("breaker:railway"),
+      "A slow Upstash tripped the breaker. The limiter's timeout sentinel means " +
+        "'the counter was UNREACHABLE, let traffic through', and reading it as " +
+        "'the counter is EXHAUSTED' makes the breaker's own store outage into a " +
+        "seam outage — the exact inversion LOCKED DECISION 4 forbids.",
+    ).toBeUndefined();
+
+    // Logged DISTINCTLY, so an operator can tell "unreachable" from "exhausted".
+    const logged = errorSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toContain("counter was unreachable");
+  });
+
+  it("[SEAMCORE-04] NEGATIVE CONTROL: genuine exhaustion still trips on the threshold-th failure", async () => {
+    // Without this, a guard that returned early on EVERY result would satisfy
+    // the sentinel case above while disabling the breaker completely.
+    const mod = await import("./resilient-fetch");
+
+    // Hand-typed 4, then the 5th. A sliding window of 5 ALLOWS the 5th (leaving
+    // `remaining === 0`) and denies the 6th, so the breaker must open ON the
+    // 5th — not one failure later.
+    for (let i = 0; i < 4; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+    expect(shared.store.get("breaker:railway")).toBeUndefined();
+
+    await mod.recordSeamFailure("breaker:railway");
+    expect(shared.store.get("breaker:railway")).toBeDefined();
   });
 
   it("is a no-op when Upstash is unconfigured", async () => {

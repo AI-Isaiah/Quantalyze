@@ -7,6 +7,9 @@ import {
   BREAKER_COOLDOWN_S,
   DEFAULT_RETRY_AFTER_S,
   SEAM_RETRIES,
+  BREAKER_STORE_TIMEOUT_MS,
+  BREAKER_STORE_RETRIES,
+  BREAKER_STORE_BACKOFF_MS,
   breakerKeyFor,
 } from "./resilient-fetch";
 import { seamBreakerVerdict } from "./seam-discriminator";
@@ -352,6 +355,60 @@ describe("breaker constants — all six pinned to hand-typed literals", () => {
         "not decayed when the lock expires, so ONE failure re-trips and the " +
         "breaker flaps permanently — an ordering fault, not a tuning choice.",
     ).toBeGreaterThanOrEqual(30_000);
+  });
+});
+
+describe("[SEAMCORE-03] breaker STORE constants — all three pinned to hand-typed literals", () => {
+  /**
+   * These three bound the breaker's OWN store, and they are the terms
+   * `seam-budgets.invariant.test.ts` adds to the SC-4b worst case. Pinning them
+   * here is what makes a retune a reviewed value rather than a diff absorbed
+   * into an arithmetic nobody reads.
+   *
+   * The pre-phase construction was a bare `Redis.fromEnv()`, i.e. the SDK
+   * defaults: `retries: 5` (six attempts, `i <= attempts`), `Math.exp(i) * 50`
+   * backoff summing to ≈4 290 ms, and `signal: undefined` — no deadline on any
+   * attempt. A HANG is not a rejection, so fail-open did not cover it.
+   */
+  it("BREAKER_STORE_TIMEOUT_MS is the literal 2000", () => {
+    expect(
+      BREAKER_STORE_TIMEOUT_MS,
+      "The per-attempt store deadline changed. Raising it multiplies every " +
+        "seam route's worst-case lambda hold (it appears in SC-4b three times " +
+        "over in the failing state); lowering it below Upstash's real REST " +
+        "latency turns healthy round trips into aborts, which fail OPEN and " +
+        "quietly disable the breaker.",
+    ).toBe(2_000);
+  });
+
+  it("BREAKER_STORE_RETRIES is the literal 1", () => {
+    expect(
+      BREAKER_STORE_RETRIES,
+      "The store retry count changed. The SDK default is 5 (six attempts); the " +
+        "whole point of pinning it is that the attempt count is a term in the " +
+        "budget arithmetic rather than an SDK default nobody declared.",
+    ).toBe(1);
+  });
+
+  it("BREAKER_STORE_BACKOFF_MS is the literal 250", () => {
+    // FIXED, not exponential. The SDK default `Math.exp(i) * 50` is 50 ms at
+    // i=0 and 1 004 ms at i=3, so its contribution to a worst case depends on
+    // the attempt index — a term that cannot be stated as one number in SC-4b.
+    expect(BREAKER_STORE_BACKOFF_MS).toBe(250);
+  });
+
+  it("A-04: the store's whole worst case is a small fraction of the tightest route ceiling", () => {
+    // Both sides literal. `(1 + retries)` attempts, each bounded by the
+    // per-attempt deadline, plus `retries` fixed backoffs between them:
+    //   (1 + 1) * 2000 + 1 * 250 = 4250 ms per store command.
+    // The tightest ceiling any seam route declares is 300 s. This is an
+    // ORDER-OF-MAGNITUDE fence, not the SC-4b assertion — that one lives next
+    // door and compares against each route's maxDuration read from disk.
+    const perCommandMs =
+      (1 + BREAKER_STORE_RETRIES) * BREAKER_STORE_TIMEOUT_MS +
+      BREAKER_STORE_RETRIES * BREAKER_STORE_BACKOFF_MS;
+    expect(perCommandMs).toBe(4_250);
+    expect(perCommandMs).toBeLessThan(300_000 / 10);
   });
 });
 
