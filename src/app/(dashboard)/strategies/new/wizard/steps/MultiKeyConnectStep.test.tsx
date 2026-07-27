@@ -1015,3 +1015,317 @@ describe("[ONB-01] MultiKeyConnectStep — tap targets (v1.4 flex-compression)",
     }
   });
 });
+
+/**
+ * 140.3-13a / SEAMUX-08 — the composite variant of the wizard funnel.
+ *
+ * ⚠️ THE BASELINE WAS ZERO. Measured on the untouched tree,
+ * `grep -vE '^\s*(//|\*)' MultiKeyConnectStep.tsx | grep -c trackForQuantsEventClient`
+ * returned **0**: this component emitted no `wizard_error` on ANY of its error
+ * paths. A seam outage during a multi-key connect produced the same funnel
+ * signal as nobody attempting one — it was not merely under-specific, it was
+ * silent. That is what makes ledger row M70 (delete the emission) meaningful.
+ *
+ * It also carried TWO of the three unvalidated `as WizardErrorCode` casts of
+ * network data, at two DIFFERENT routes with DIFFERENT code contracts. Both are
+ * membership-checked here, each against its own route's set — and the
+ * cross-contract case below is what proves the sets were not merged into one.
+ *
+ * The step name is deliberately NOT "connect_key": State A of this component
+ * delegates to ConnectKeyStep, which emits that value, so sharing it would have
+ * merged the single-key and composite funnels back into one bucket.
+ */
+describe("[140.3-13a / SEAMUX-08] MultiKeyConnectStep — every error path emits wizard_error with its specific code", () => {
+  const STEP = "connect_key_multi";
+
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  /** Every wizard_error payload emitted so far, in order. */
+  function wizardErrors(): Array<{ code: string; step: string }> {
+    return trackMock.mock.calls
+      .filter((c) => (c as unknown[])[0] === "wizard_error")
+      .map((c) => (c as unknown[])[1] as { code: string; step: string });
+  }
+
+  async function onlyWizardError(): Promise<{ code: string; step: string }> {
+    await waitFor(() => {
+      expect(
+        wizardErrors().length,
+        "no wizard_error event was emitted — the composite funnel is blind to this failure",
+      ).toBeGreaterThan(0);
+    });
+    return wizardErrors()[wizardErrors().length - 1];
+  }
+
+  /** Enter State B and fill panel 1's credentials, ready to validate. */
+  function enterMultiAndFillKey2() {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    return panel1;
+  }
+
+  /** Validate both panels against a 200 add-key, then click Continue. */
+  async function validateBothAndContinue(
+    setMembersBody: unknown,
+    setMembersStatus: number,
+  ) {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        if (url.includes("composite/set-members")) {
+          return jsonResponse(setMembersBody, setMembersStatus);
+        }
+        return jsonResponse({}, 200);
+      },
+    );
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    for (const [idx, start, end] of [
+      [0, "2024-01-01", "2024-06-01"],
+      [1, "2024-06-01", "2024-09-01"],
+    ] as const) {
+      const panel = screen.getByTestId(`key-panel-${idx}`);
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-key`), {
+        target: { value: `AK_LIVE_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-secret`), {
+        target: { value: `SECRET_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-start`), {
+        target: { value: start },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-end`), {
+        target: { value: end },
+      });
+      fireEvent.click(within(panel).getByTestId(`key-${idx}-validate`));
+      await waitFor(() =>
+        expect(screen.getByTestId(`key-${idx}-summary`)).toBeInTheDocument(),
+      );
+    }
+    trackMock.mockClear();
+    fireEvent.click(screen.getByTestId("multi-continue"));
+  }
+
+  // ── add-key (the per-key validate path) ────────────────────────────────────
+
+  it("POSITIVE: an add-key failure emits wizard_error carrying the SPECIFIC code (falsifies M70)", async () => {
+    // A breaker trip at composite/add-key. Before this plan the panel rendered
+    // the envelope and the funnel recorded nothing at all.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "SERVICE_UNAVAILABLE_RETRY" }, 503),
+    );
+    const panel1 = enterMultiAndFillKey2();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const payload = await onlyWizardError();
+    expect(
+      payload.code,
+      "an outage at the composite key-connect must be distinguishable from a bad key in the funnel — SEAMUX-08",
+    ).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(payload.step).toBe(STEP);
+    // The screen and the funnel are set from the same local and must agree.
+    expect(
+      await within(screen.getByTestId("key-panel-1")).findByTestId(
+        "error-envelope",
+      ),
+    ).toHaveAttribute("data-error-code", "SERVICE_UNAVAILABLE_RETRY");
+  });
+
+  it("an UNRECOGNISED add-key code resolves to UNKNOWN rather than being admitted into the union", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "ZZ_NOT_A_WIZARD_CODE" }, 500),
+    );
+    const panel1 = enterMultiAndFillKey2();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    expect((await onlyWizardError()).code).toBe("UNKNOWN");
+    expect(
+      await within(screen.getByTestId("key-panel-1")).findByTestId(
+        "error-envelope",
+      ),
+    ).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+
+  it("a thrown add-key fetch emits KEY_NETWORK_TIMEOUT", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const panel1 = enterMultiAndFillKey2();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const payload = await onlyWizardError();
+    expect(payload.code).toBe("KEY_NETWORK_TIMEOUT");
+    expect(payload.step).toBe(STEP);
+    errSpy.mockRestore();
+  });
+
+  // ── set-members (the Continue path) ────────────────────────────────────────
+
+  it("POSITIVE: a set-members rejection emits wizard_error with the route's own code", async () => {
+    await validateBothAndContinue({ ok: false, code: "MULTI_KEY_WINDOWS_INVALID" }, 400);
+    const payload = await onlyWizardError();
+    expect(payload.code).toBe("MULTI_KEY_WINDOWS_INVALID");
+    expect(payload.step).toBe(STEP);
+  });
+
+  it("an UNRECOGNISED set-members code resolves to UNKNOWN", async () => {
+    await validateBothAndContinue({ ok: false, code: "ZZ_NOT_A_WIZARD_CODE" }, 500);
+    expect((await onlyWizardError()).code).toBe("UNKNOWN");
+  });
+
+  it("🔴 THE SET-SEPARATION CASE: a real code from ADD-KEY's contract is NOT admitted at set-members", async () => {
+    // KEY_AUTH_FAILED is a genuine WizardErrorCode and a genuine add-key
+    // outcome. set-members performs no key validation at all — it never calls
+    // classifyKeyValidationError and emits exactly four codes. If the two sets
+    // were merged into one per-step set (or replaced by a totality check over
+    // the union), this body would render "the exchange rejected your
+    // credentials" on a call that only ever persisted date windows, and the
+    // funnel would record a credential failure that never happened.
+    await validateBothAndContinue({ ok: false, code: "KEY_AUTH_FAILED" }, 400);
+    const payload = await onlyWizardError();
+    expect(
+      payload.code,
+      "set-members' set admitted a code only add-key can emit — the two route contracts have been merged",
+    ).toBe("UNKNOWN");
+  });
+
+  it("a thrown set-members fetch emits KEY_NETWORK_TIMEOUT", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("composite/add-key")) {
+          return jsonResponse(
+            { ok: true, strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID },
+            200,
+          );
+        }
+        if (url.includes("composite/set-members")) throw new Error("offline");
+        return jsonResponse({}, 200);
+      },
+    );
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    for (const [idx, start, end] of [
+      [0, "2024-01-01", "2024-06-01"],
+      [1, "2024-06-01", "2024-09-01"],
+    ] as const) {
+      const panel = screen.getByTestId(`key-panel-${idx}`);
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-key`), {
+        target: { value: `AK_LIVE_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-secret`), {
+        target: { value: `SECRET_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-start`), {
+        target: { value: start },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-end`), {
+        target: { value: end },
+      });
+      fireEvent.click(within(panel).getByTestId(`key-${idx}-validate`));
+      await waitFor(() =>
+        expect(screen.getByTestId(`key-${idx}-summary`)).toBeInTheDocument(),
+      );
+    }
+    trackMock.mockClear();
+    fireEvent.click(screen.getByTestId("multi-continue"));
+
+    expect((await onlyWizardError()).code).toBe("KEY_NETWORK_TIMEOUT");
+    errSpy.mockRestore();
+  });
+
+  // ── the rehydrate GET (the third surface, in no source document) ───────────
+
+  it("a failed members GET emits wizard_error with WIZARD_KEYS_LOAD_FAILED — the code the banner actually renders", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (input: RequestInfo | URL) => {
+        if (String(input).includes("composite/members")) {
+          return jsonResponse({}, 500);
+        }
+        return jsonResponse({}, 200);
+      },
+    );
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    const rendered = within(err)
+      .getByTestId("error-envelope")
+      .getAttribute("data-error-code");
+    const payload = await onlyWizardError();
+    expect(payload.code).toBe("WIZARD_KEYS_LOAD_FAILED");
+    expect(payload.step).toBe(STEP);
+    // The funnel and the screen must not be able to disagree about which
+    // failure the user is looking at.
+    expect(payload.code).toBe(rendered);
+    errSpy.mockRestore();
+  });
+
+  // ── anti-vacuity ──────────────────────────────────────────────────────────
+
+  it("ANTI-REGRESSION: a clean multi-key flow emits NO wizard_error at all", async () => {
+    // Without this, a component that emitted unconditionally on every code path
+    // would satisfy every positive case above while making the funnel useless.
+    routeFetch();
+    const onSuccess = vi.fn();
+    render(
+      <MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={onSuccess} />,
+    );
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    for (const [idx, start, end] of [
+      [0, "2024-01-01", "2024-06-01"],
+      [1, "2024-06-01", "2024-09-01"],
+    ] as const) {
+      const panel = screen.getByTestId(`key-panel-${idx}`);
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-key`), {
+        target: { value: `AK_LIVE_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-api-secret`), {
+        target: { value: `SECRET_${idx}` },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-start`), {
+        target: { value: start },
+      });
+      fireEvent.change(within(panel).getByTestId(`key-${idx}-window-end`), {
+        target: { value: end },
+      });
+      fireEvent.click(within(panel).getByTestId(`key-${idx}-validate`));
+      await waitFor(() =>
+        expect(screen.getByTestId(`key-${idx}-summary`)).toBeInTheDocument(),
+      );
+    }
+    fireEvent.click(screen.getByTestId("multi-continue"));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    expect(wizardErrors()).toEqual([]);
+  });
+});
