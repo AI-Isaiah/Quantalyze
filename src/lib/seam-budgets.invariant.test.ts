@@ -42,40 +42,63 @@ import {
  * checked in-repo fact.
  *
  * HONEST READING OF THE HEADROOM ASSERTION, RESTATED FOR THE STORE TERMS
- * (plan 140.2-07).
+ * (plan 140.2-07) AND THE BRANCH MODEL (plan 140.2-10).
  *
  * The arithmetic is no longer request time alone. The breaker's OWN store is
  * wall clock the route spends too, and leaving it out is what let a `Redis`
  * client with SIX unbounded attempts sit inside a "bounded" route without
- * appearing anywhere in this file. SC-4b now computes, per route:
+ * appearing anywhere in this file. SC-4b computes, per route:
  *
- *   worstCaseMs(state) = Σ over the row's budgets of
- *                          ( timeoutMs × calls × (1 + row.retries) )
- *                      + storeCommands(state) × STORE_COMMAND_WORST_CASE_MS
- *                          × (total seam calls on the route)
+ *   worstCaseMs(state) = MAX over the row's BRANCHES of (
+ *                          Σ over that branch's budgets of
+ *                            ( timeoutMs × calls × (1 + row.retries) )
+ *                        + storeCommands(state) × STORE_COMMAND_WORST_CASE_MS
+ *                            × (that branch's total seam calls)
+ *                        )
  *
  * asserted separately in the CLOSED, OPEN and FAILING states, each against the
- * route's own on-disk `maxDuration`. Where that leaves the numbers today, with
- * every row at `retries: 0` and one store command costing 4 250 ms:
+ * route's own on-disk `maxDuration`.
  *
- *   | state   | worst route (validate-and-encrypt, 3 calls) | 2-call route |
- *   |---------|---------------------------------------------|--------------|
- *   | closed  | 120 000 + 12 750 = 132 750 ms               |  38 500 ms   |
- *   | open    |               0 + 12 750 =  12 750 ms       |   8 500 ms   |
- *   | failing | 120 000 + 38 250 = 158 250 ms               |  55 500 ms   |
+ * ⚠️ WHY A MAX OVER BRANCHES AND NOT ONE SUM (plan 140.2-10 / A-29). A route
+ * whose legs belong to MUTUALLY EXCLUSIVE branches spends one branch or the
+ * other, never both, and summing them across branches over-states the worst
+ * case badly enough to force a false breach. `finalize-wizard` is that route:
+ * its composite branch re-probes every member key and returns through
+ * `runLegacyFinalize` (whose enqueue is a Supabase RPC, NOT a seam call), while
+ * its single-key branch probes once and then spends `process-key-enqueue`. The
+ * legs are labelled with a `branch` and grouped; a row with NO labels is a
+ * single implicit branch, i.e. the plain sum, which is what the other fourteen
+ * rows are. Unlabelled legs on a LABELLED row are shared and charged to every
+ * branch.
  *
- * against a 300 000 ms ceiling — so the OPEN state on a two-seam-call route
- * (`finalize-wizard`, `create-with-key`) has **291 500 ms of headroom**, and the
- * tightest case in the table, the worst route FAILING, still has 141 750 ms.
+ * Where that leaves the numbers today, with every row at `retries: 0` and one
+ * store command costing 4 250 ms:
  *
- * So this is STILL not, today, a tight guard, and a reader should not mistake it
- * for one. Its three real jobs are (a) to hold automatically when Phase 141
- * raises a row's retries — at retries=1 the worst route's closed state is
- * already 252 750 ms and at retries=2 it BREACHES; (b) to fail if a future
- * budget is raised without the ceiling moving with it; and (c) — new here — to
- * fail if the store's own bounding is loosened, which previously changed a
- * route's real worst case while changing nothing this file could see. The teeth
- * in the meantime still come from the on-disk read in SC-4a.
+ *   | state   | validate-and-encrypt (3 calls) | finalize-wizard (composite, 10) |
+ *   |---------|--------------------------------|---------------------------------|
+ *   | closed  | 120 000 + 12 750 = 132 750 ms  | 150 000 + 42 500 = 192 500 ms   |
+ *   | open    |          0 + 12 750 = 12 750   |          0 + 42 500 =  42 500   |
+ *   | failing | 120 000 + 38 250 = 158 250 ms  | 150 000 + 127 500 = 277 500 ms  |
+ *
+ * against a 300 000 ms ceiling. The tightest case in the whole table is now
+ * `finalize-wizard` FAILING at 277 500 ms — **22 500 ms of headroom**, where
+ * before this plan the same route declared 55 500 ms and was modelling a branch
+ * it does not take when it fans out. Its single-key branch is unchanged
+ * (38 500 / 8 500 / 55 500 ms) and is dominated. `create-with-key` remains the
+ * two-call shape the old table described (38 500 / 8 500 / 55 500 ms).
+ *
+ * So this is no longer a comfortable guard for one route, and that is the point:
+ * `MAX_COMPOSITE_MEMBERS` is 10 because 11 members would put the failing state
+ * at 305 250 ms — a real breach, discovered here rather than in a killed lambda.
+ * Its four real jobs are (a) to hold automatically when Phase 141 raises a row's
+ * retries — at retries=1 finalize-wizard's composite branch is already at
+ * 427 500 ms failing and BREACHES, which is a fact Phase 141 must plan around;
+ * (b) to fail if a future budget is raised without the ceiling moving with it;
+ * (c) to fail if the store's own bounding is loosened, which previously changed
+ * a route's real worst case while changing nothing this file could see; and
+ * (d) — new here — to fail if the composite fan-out cap is raised without the
+ * declaration and the arithmetic being re-checked. The teeth for the other
+ * fourteen routes still come mostly from the on-disk read in SC-4a.
  *
  * ⚠️ THE ARITHMETIC READS THE ROW, NOT THE MODULE CONSTANT (plan 140.2-06).
  * `SEAM_RETRIES` survives as the value every row is SEEDED from and as the
@@ -189,7 +212,7 @@ const EXPECTED_ROUTE_BUDGETS: Record<
   string,
   {
     expectedMaxDurationS: number;
-    budgets: Array<{ key: string; calls: number }>;
+    budgets: Array<{ key: string; calls: number; branch?: string }>;
   }
 > = {
   "src/app/api/keys/validate-and-encrypt/route.ts": {
@@ -245,8 +268,11 @@ const EXPECTED_ROUTE_BUDGETS: Record<
   "src/app/api/strategies/finalize-wizard/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "keys-permissions", calls: 1 },
-      { key: "process-key-enqueue", calls: 1 },
+      // 10 is MAX_COMPOSITE_MEMBERS, hand-typed here and bound to the route's
+      // own declaration by the cross-file assertion below.
+      { key: "keys-permissions", calls: 10, branch: "composite" },
+      { key: "keys-permissions", calls: 1, branch: "single-key" },
+      { key: "process-key-enqueue", calls: 1, branch: "single-key" },
     ],
   },
   "src/app/api/verify-strategy/route.ts": {
@@ -316,6 +342,70 @@ function stripComments(src: string): string {
     .split("\n")
     .filter((line) => !line.trim().startsWith("//"))
     .join("\n");
+}
+
+/**
+ * The composite fan-out cap, read from the ROUTE FILE on disk.
+ *
+ * Same idiom, and the same reason, as `readMaxDurationFromDisk` below: the
+ * budget table and the constant that actually bounds the query live in two
+ * different files, and an assertion that took both sides from the table would
+ * be green forever. A Next.js route module cannot `export` an arbitrary
+ * constant (its export surface is validated against the route-segment
+ * contract), so a disk read is not a shortcut here — it is the only genuine
+ * cross-file link available.
+ *
+ * `^` under `m` anchors to the start of a line, so a comment mentioning the
+ * constant cannot satisfy the pattern; this phase hit prose-defeats-the-guard
+ * twice.
+ */
+const MAX_COMPOSITE_MEMBERS_DECL = /^const MAX_COMPOSITE_MEMBERS = (\d+)/m;
+
+const FINALIZE_WIZARD_ROUTE =
+  "src/app/api/strategies/finalize-wizard/route.ts";
+
+function readCompositeCapFromDisk(): number {
+  const src = readFileSync(join(REPO, FINALIZE_WIZARD_ROUTE), "utf8");
+  const m = MAX_COMPOSITE_MEMBERS_DECL.exec(src);
+  if (!m) {
+    throw new Error(
+      `"${FINALIZE_WIZARD_ROUTE}" has no \`const MAX_COMPOSITE_MEMBERS = <n>\` ` +
+        `declaration. The composite member fan-out is what this route's ` +
+        `keys-permissions leg is DECLARED to cost; without the cap the ` +
+        `declaration bounds nothing. Restore the constant — do NOT relax this ` +
+        `test.`,
+    );
+  }
+  return Number(m[1]);
+}
+
+/**
+ * Group a row's legs into the mutually exclusive BRANCHES the route can take.
+ *
+ * A leg with no `branch` is SHARED: on an unlabelled row (fourteen of fifteen)
+ * that collapses to one implicit branch, i.e. the plain sum this file computed
+ * before plan 140.2-10; on a labelled row a shared leg is charged to every
+ * branch, because "spent whichever way the request goes" is what no label
+ * means.
+ */
+function branchesOf(
+  budgets: ReadonlyArray<{ key: string; calls: number; branch?: string }>,
+): Array<{ label: string; legs: Array<{ key: string; calls: number }> }> {
+  const shared = budgets.filter((b) => b.branch === undefined);
+  const labels = [
+    ...new Set(
+      budgets
+        .map((b) => b.branch)
+        .filter((b): b is string => typeof b === "string"),
+    ),
+  ];
+  if (labels.length === 0) {
+    return [{ label: "(single path)", legs: [...shared] }];
+  }
+  return labels.map((label) => ({
+    label,
+    legs: [...shared, ...budgets.filter((b) => b.branch === label)],
+  }));
 }
 
 /** The declared ceiling as the DEPLOYMENT ADAPTER would read it, from disk. */
@@ -396,51 +486,68 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         // store terms are read from the core alongside the budgets.
         const ceilingMs = readMaxDurationFromDisk(routePath) * 1000;
 
-        // SUMMED, not per-call. Three routes make two sequential seam calls
-        // (create-with-key, composite/add-key, finalize-wizard's probe+enqueue
-        // pair) and validate-and-encrypt nominally reaches three. A per-entry
+        // SUMMED within a branch, MAXIMISED across branches.
+        //
+        // Summed, not per-call: several routes make two sequential seam calls
+        // and validate-and-encrypt nominally reaches three, so a per-entry
         // assertion would pass while the route's real worst case is double or
-        // triple — wrong for a third of the surface (140-RESEARCH §6.3).
-        const requestMs = STATE_SPENDS_REQUEST_BUDGET[state]
-          ? entry.budgets.reduce(
-              (acc, b) =>
-                acc +
-                SEAM_BUDGETS[b.key].timeoutMs *
-                  b.calls *
-                  (1 + SEAM_BUDGETS[b.key].retries),
-              0,
+        // triple (140-RESEARCH §6.3). Maximised across branches, not summed:
+        // finalize-wizard's composite and single-key branches are mutually
+        // exclusive, and charging one request for both describes a path no
+        // request takes (plan 140.2-10 / A-29).
+        const perBranch = branchesOf(entry.budgets).map((branch) => {
+          const requestMs = STATE_SPENDS_REQUEST_BUDGET[state]
+            ? branch.legs.reduce(
+                (acc, b) =>
+                  acc +
+                  SEAM_BUDGETS[b.key].timeoutMs *
+                    b.calls *
+                    (1 + SEAM_BUDGETS[b.key].retries),
+                0,
+              )
+            : 0;
+          // The breaker is consulted once per SEAM CALL, so the store cost
+          // scales with the number of calls THIS BRANCH makes and not with the
+          // number of distinct budget rows the route declares.
+          const seamCalls = branch.legs.reduce((acc, b) => acc + b.calls, 0);
+          const storeMs =
+            STORE_COMMANDS_PER_SEAM_CALL[state] *
+            STORE_COMMAND_WORST_CASE_MS *
+            seamCalls;
+          const spent = branch.legs
+            .map(
+              (b) =>
+                `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms` +
+                `x(1+${SEAM_BUDGETS[b.key].retries})`,
             )
-          : 0;
+            .join(" + ");
+          return {
+            label: branch.label,
+            requestMs,
+            seamCalls,
+            storeMs,
+            worstCaseMs: requestMs + storeMs,
+            spent,
+          };
+        });
 
-        // The breaker is consulted once per SEAM CALL, so the store cost scales
-        // with the number of calls the route makes and not with the number of
-        // distinct budget rows it spends.
-        const seamCalls = entry.budgets.reduce((acc, b) => acc + b.calls, 0);
-        const storeMs =
-          STORE_COMMANDS_PER_SEAM_CALL[state] *
-          STORE_COMMAND_WORST_CASE_MS *
-          seamCalls;
-
-        const worstCaseMs = requestMs + storeMs;
-
-        const spent = entry.budgets
-          .map(
-            (b) =>
-              `${b.key}x${b.calls}@${SEAM_BUDGETS[b.key].timeoutMs}ms` +
-              `x(1+${SEAM_BUDGETS[b.key].retries})`,
-          )
-          .join(" + ");
+        const worst = perBranch.reduce((a, b) =>
+          b.worstCaseMs > a.worstCaseMs ? b : a,
+        );
+        const worstCaseMs = worst.worstCaseMs;
 
         expect(
           worstCaseMs,
-          `"${routePath}" can spend ${worstCaseMs}ms in the ${state} state ` +
-            `(request: ${requestMs}ms = ${spent}; store: ${storeMs}ms = ` +
-            `${STORE_COMMANDS_PER_SEAM_CALL[state]} command(s) x ` +
-            `${STORE_COMMAND_WORST_CASE_MS}ms x ${seamCalls} seam call(s)) ` +
+          `"${routePath}" can spend ${worstCaseMs}ms in the ${state} state on ` +
+            `its worst branch [${worst.label}] ` +
+            `(request: ${worst.requestMs}ms = ${worst.spent}; store: ` +
+            `${worst.storeMs}ms = ${STORE_COMMANDS_PER_SEAM_CALL[state]} ` +
+            `command(s) x ${STORE_COMMAND_WORST_CASE_MS}ms x ` +
+            `${worst.seamCalls} seam call(s)) ` +
             `against a ${ceilingMs}ms function ceiling. The lambda would be killed ` +
             `mid-request with no typed envelope. Lower a budget in SEAM_BUDGETS, ` +
-            `TIGHTEN THE BREAKER STORE CONSTANTS, or raise this route's ` +
-            `maxDuration AND expectedMaxDurationS together.`,
+            `LOWER A FAN-OUT CAP, TIGHTEN THE BREAKER STORE CONSTANTS, or raise ` +
+            `this route's maxDuration AND expectedMaxDurationS together.`,
         ).toBeLessThan(ceilingMs);
       },
     );
@@ -465,6 +572,77 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
       expect(STORE_COMMANDS_PER_SEAM_CALL.failing).toBeGreaterThan(
         STORE_COMMANDS_PER_SEAM_CALL.closed,
       );
+    });
+  });
+
+  describe("SC-4e / SEAMCORE-10 — the composite fan-out cap is bound to its declaration", () => {
+    it("declares keys-permissions x MAX_COMPOSITE_MEMBERS on the composite branch", () => {
+      // THE CROSS-FILE LINK. The left side is read from the ROUTE FILE on disk;
+      // the right side is the exported table. Neither is derived from the
+      // other, so raising the cap without raising the declaration (ledger row
+      // M47) reddens HERE — which matters because every other assertion in this
+      // file would stay green under it: the table would simply keep describing
+      // a smaller fan-out than the route can now issue, and SC-4b would keep
+      // certifying headroom the route no longer has.
+      const capOnDisk = readCompositeCapFromDisk();
+      const composite = SEAM_ROUTE_BUDGETS[FINALIZE_WIZARD_ROUTE].budgets.filter(
+        (b) => b.branch === "composite",
+      );
+
+      expect(
+        composite.map((b) => b.key),
+        "The composite branch of finalize-wizard must declare exactly the " +
+          "per-member permissions probe. It returns through runLegacyFinalize, " +
+          "whose enqueue is a Supabase RPC and NOT a seam call — declaring an " +
+          "enqueue leg here would model the single-key path (A-29).",
+      ).toEqual(["keys-permissions"]);
+
+      expect(
+        composite[0].calls,
+        `The route caps its composite member read at ${capOnDisk} ` +
+          `(MAX_COMPOSITE_MEMBERS, read from ${FINALIZE_WIZARD_ROUTE}), but ` +
+          `SEAM_ROUTE_BUDGETS declares ${composite[0].calls} keys-permissions ` +
+          `call(s) on that branch. The cap and the declaration are the SAME ` +
+          `number by construction: the declaration is what SC-4b uses to prove ` +
+          `the fan-out fits inside the function ceiling. Change both together, ` +
+          `and re-check the headroom in this file's header.`,
+      ).toBe(capOnDisk);
+    });
+
+    it("models finalize-wizard's two branches as MUTUALLY EXCLUSIVE", () => {
+      // The anti-vacuity fence for the branch model. Deleting the `branch`
+      // labels turns the MAX back into a SUM silently — the direction that
+      // over-states, so no headroom assertion would notice on its own. The
+      // roster is hand-typed here.
+      const labels = [
+        ...new Set(
+          SEAM_ROUTE_BUDGETS[FINALIZE_WIZARD_ROUTE].budgets.map(
+            (b) => b.branch,
+          ),
+        ),
+      ];
+      expect(
+        labels.sort(),
+        "finalize-wizard no longer declares two exclusive branches. Its " +
+          "composite path (per-member probes, then runLegacyFinalize) and its " +
+          "single-key path (one probe, then the process-key enqueue) cannot " +
+          "both be spent by one request; a row that sums them describes a path " +
+          "no request takes.",
+      ).toEqual(["composite", "single-key"]);
+    });
+
+    it("exercises the branch MAX on at least one row — a table of single-path rows would not", () => {
+      // Without this, `branchesOf` could be deleted and replaced by the old sum
+      // and only the numbers above would notice. Hand-typed 1: exactly one row
+      // is multi-branch today.
+      const multiBranch = Object.entries(SEAM_ROUTE_BUDGETS).filter(
+        ([, entry]) => branchesOf(entry.budgets).length > 1,
+      );
+      expect(multiBranch.map(([path]) => path)).toEqual([
+        FINALIZE_WIZARD_ROUTE,
+      ]);
+      expect(branchesOf(SEAM_ROUTE_BUDGETS[FINALIZE_WIZARD_ROUTE].budgets)
+        .length).toBe(2);
     });
   });
 
