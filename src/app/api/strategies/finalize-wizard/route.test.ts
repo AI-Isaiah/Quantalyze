@@ -91,6 +91,11 @@ const STATE = vi.hoisted(() => ({
   // seq). A read error fails CLOSED (never enqueue an un-enumerable composite).
   strategyKeysList: [] as Array<{ api_key_id: string | null }> | null,
   strategyKeysListError: null as { message: string } | null,
+  // Phase 140.2-10 / SEAMCORE-10 — the `.limit(n)` argument the member read
+  // carried, captured so a test can assert the fan-out is bounded AT THE QUERY
+  // rather than only inside the loop. `null` means the route issued the read
+  // with no `.limit()` at all, which is the pre-cap (unbounded) shape.
+  strategyKeysListLimit: null as number | null,
   // F3 / F5(b) — capture strategy_analytics upserts the after() fail-closed
   // branch stamps (terminal 'failed' so the wizard poller reaches a gate; the
   // reconcile cron does NOT re-drive composites) so tests can assert the
@@ -223,9 +228,23 @@ vi.mock("@/lib/supabase/admin", () => ({
         // One chain serves both: it is thenable (count path) AND exposes .order
         // (list path), so `await …eq()` yields the count and `…eq().order()`
         // yields the ordered member rows.
+        //
+        // Phase 140.2-10 / SEAMCORE-10 — `.order()` now returns a chain that is
+        // ITSELF thenable AND exposes `.limit(n)`. Both shapes must resolve:
+        // the capped shape (`…order().limit(n)`) is what production issues, and
+        // the un-capped shape (`await …order()`) must still resolve so that
+        // REMOVING the `.limit()` (ledger row M32) fails an assertion rather
+        // than crashing the route — a mutation that explodes proves nothing
+        // about the property under test.
+        type StrategyKeysListChain = {
+          limit: (n: number) => Promise<{ data: unknown; error: unknown }>;
+          then: (
+            onFulfilled: (v: { data: unknown; error: unknown }) => unknown,
+          ) => Promise<unknown>;
+        };
         type StrategyKeysChain = {
           eq: () => StrategyKeysChain;
-          order: () => Promise<{ data: unknown; error: unknown }>;
+          order: () => StrategyKeysListChain;
           then: (
             onFulfilled: (v: {
               count: number | null;
@@ -234,12 +253,20 @@ vi.mock("@/lib/supabase/admin", () => ({
             }) => unknown,
           ) => Promise<unknown>;
         };
+        const listResult = () => ({
+          data: STATE.strategyKeysListError ? null : STATE.strategyKeysList,
+          error: STATE.strategyKeysListError,
+        });
+        const listChain: StrategyKeysListChain = {
+          limit: async (n: number) => {
+            STATE.strategyKeysListLimit = n;
+            return listResult();
+          },
+          then: (onFulfilled) => Promise.resolve(listResult()).then(onFulfilled),
+        };
         const chain: StrategyKeysChain = {
           eq: () => chain,
-          order: async () => ({
-            data: STATE.strategyKeysListError ? null : STATE.strategyKeysList,
-            error: STATE.strategyKeysListError,
-          }),
+          order: () => listChain,
           then: (onFulfilled) =>
             Promise.resolve({
               count: STATE.strategyKeysCountError
@@ -414,6 +441,7 @@ beforeEach(async () => {
   STATE.strategyKeysCountError = null;
   STATE.strategyKeysList = [];
   STATE.strategyKeysListError = null;
+  STATE.strategyKeysListLimit = null;
   STATE.strategyAnalyticsUpserts = [];
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
@@ -1962,6 +1990,172 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
         (p) => p.computation_status === "failed",
       ),
     ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.2-10 / SEAMCORE-10 (A-06, A-29) — the composite fan-out cap.
+//
+// The composite branch issues ONE cache-bypassing 15 000 ms seam probe PER
+// MEMBER, sequentially, and the member read had no `.limit()`. The route's
+// SEAM_ROUTE_BUDGETS row declared `keys-permissions × 1`, so the budget
+// invariant asserted a fixed figure against the 300 000 ms function ceiling
+// regardless of N — ~20 members reached the ceiling and nothing reddened.
+//
+// TWO independent properties are pinned here, and neither substitutes for the
+// other:
+//   1. the fan-out is bounded AT THE QUERY (`.limit(<cap>)`), not merely by the
+//      loop — a loop bound cannot stop the read itself from returning 10 000
+//      rows, and it is the read the budget table has to be able to trust;
+//   2. a list that arrives AT the cap FAILS LOUD, because the route cannot
+//      distinguish "exactly <cap> members" from "more than <cap>, truncated by
+//      the limit" — and proceeding on a truncated list finalises a composite
+//      whose remaining member keys were never re-probed, which is the
+//      connect→submit scope-broadening hazard wearing a different disguise.
+//
+// EVERY expected number below is hand-typed. Nothing is imported from the
+// route, and nothing is derived from SEAM_ROUTE_BUDGETS: the cross-file binding
+// between the cap and the declared `calls` lives in
+// `src/lib/seam-budgets.invariant.test.ts`, where BOTH sides are read
+// independently (the table from the module, the constant from disk).
+// ══════════════════════════════════════════════════════════════════════════
+describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out cap", () => {
+  function readOnlyResponse(): Response {
+    return new Response(
+      JSON.stringify({
+        read: true,
+        trade: false,
+        withdraw: false,
+        probe_error: false,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  /** `n` distinct member rows, ordered — ids are irrelevant, the COUNT is not. */
+  function membersOfLength(n: number): Array<{ api_key_id: string }> {
+    return Array.from({ length: n }, (_unused, i) => ({
+      api_key_id: `66666666-6666-4666-8666-${String(i).padStart(12, "0")}`,
+    }));
+  }
+
+  it("bounds the member read AT THE QUERY — the read carries .limit(10)", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null }; // composite
+    STATE.strategyKeysCount = 2;
+    STATE.strategyKeysList = membersOfLength(2);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // 10, hand-typed. The route's own MAX_COMPOSITE_MEMBERS is deliberately NOT
+    // imported: an expectation read out of the module under test cannot
+    // disagree with it, which is the self-referential oracle this phase exists
+    // to eliminate.
+    expect(
+      STATE.strategyKeysListLimit,
+      "The composite member read issued no .limit(). The fan-out is bounded " +
+        "only by however many rows the database chooses to return, so the " +
+        "declared keys-permissions call count in SEAM_ROUTE_BUDGETS is a " +
+        "statement about nothing (ledger row M32).",
+    ).toBe(10);
+    fetchSpy.mockRestore();
+  });
+
+  it("fails LOUD when the member list arrives AT the cap — no probe, no finalize, no enqueue", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    // The count probe and the list agree: this draft has at least 10 members.
+    STATE.strategyKeysCount = 10;
+    STATE.strategyKeysList = membersOfLength(10);
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Fail CLOSED, exactly as an un-enumerable member list does.
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    // ZERO probes: the refusal happens BEFORE the loop, so a truncated list
+    // never even spends the fan-out it could not bound.
+    expect(fetchSpy).toHaveBeenCalledTimes(0);
+
+    await flushAfter();
+    // Nothing was finalised and nothing was enqueued — a composite with
+    // unprobed members must not reach pending_review or the worker.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    expect(
+      STATE.adminRpcCalls.find((c) => c.name === "enqueue_compute_job"),
+    ).toBeUndefined();
+
+    // The operator gets a DISTINCT step tag: the user-facing envelope is
+    // deliberately the existing membership-unknown one (this phase authors no
+    // copy — 140.3's fence), so the log/Sentry side is the only place the cap
+    // is nameable.
+    const sentry = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.step === "composite-member-cap",
+    );
+    expect(
+      sentry,
+      "Reaching the cap produced no Sentry event tagged " +
+        "`composite-member-cap`. A truncation that finalises unprobed keys " +
+        "must be alertable, not merely refused (ledger row M48).",
+    ).toBeDefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("does NOT fire one member below the cap — 9 members are all probed and the composite finalises", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 9;
+    STATE.strategyKeysList = membersOfLength(9);
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    // 9, hand-typed: the cap arm is an INEQUALITY at exactly one point, and a
+    // guard written `>` instead of `>=` (or `>=` at the wrong number) is
+    // invisible without both sides of the boundary asserted.
+    expect(fetchSpy).toHaveBeenCalledTimes(9);
+
+    await flushAfter();
+    const enqueue = STATE.adminRpcCalls.find(
+      (c) => c.name === "enqueue_compute_job",
+    );
+    expect(enqueue).toBeDefined();
+    expect(enqueue!.args.p_kind).toBe("stitch_composite");
+    fetchSpy.mockRestore();
+  });
+
+  it("zero members (api_key_id NULL) never reaches the member read at all", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 0;
+    STATE.strategyKeysList = [];
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    // The CSV / no-member draft falls through to the unified arm without ever
+    // enumerating members, so neither the read nor the cap arm engages.
+    expect(STATE.strategyKeysListLimit).toBeNull();
     fetchSpy.mockRestore();
   });
 });
