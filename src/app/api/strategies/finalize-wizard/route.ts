@@ -12,7 +12,7 @@ import { postProcessKey } from "@/lib/process-key-client";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { captureToSentry } from "@/lib/sentry-capture";
-import { scrubSeamError } from "@/lib/seam-redaction";
+import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
 // Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
 // dependency-free leaf so the cross-process parity test can exercise THIS
@@ -75,6 +75,43 @@ export const maxDuration = 300;
  */
 const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
+
+/**
+ * SEAMCORE-10 (A-06 / A-29) — the hard bound on the composite member fan-out.
+ *
+ * WHY A CAP EXISTS AT ALL. The composite branch below re-probes EVERY member
+ * key through the third Railway seam, sequentially, bypassing both cache layers
+ * (`fetchLivePermissions`, `?force_refresh=true`). Each probe costs the
+ * `keys-permissions` budget — 15 000 ms — plus the breaker's own store round
+ * trips. The member read had no `.limit()`, so N was whatever the database
+ * returned and the route's real worst case was N × 15 000 ms against a 300 s
+ * function ceiling. A draft with enough members holds a lambda until Vercel
+ * kills it mid-request, with no typed envelope and no finalize.
+ *
+ * WHY 10, and not a number that merely felt safe. Two independent bounds meet
+ * here and 10 is the smaller-of / larger-of pair that satisfies both:
+ *
+ *   · PRODUCT. Real composites are small — the largest receipted book is a
+ *     three-key venue stitch, and the wizard's multi-key connect step exists to
+ *     combine a handful of accounts, not a portfolio of them. Nine usable
+ *     members (see the fail-loud arm below) is roughly 3x the largest composite
+ *     anyone has built.
+ *   · THE FUNCTION CEILING. In the breaker's FAILING state the invariant charges
+ *     each seam call 15 000 ms of request budget plus three store commands at
+ *     4 250 ms each — 27 750 ms per member. Eleven members is 305 250 ms and
+ *     BREACHES the 300 000 ms ceiling this route declares; ten is 277 500 ms and
+ *     fits. So 10 is the largest cap that keeps SC-4b true in every breaker
+ *     state, and `src/lib/seam-budgets.invariant.test.ts` recomputes exactly
+ *     that arithmetic — raising this constant without lowering a budget reddens
+ *     there rather than being discovered in production.
+ *
+ * DELIBERATELY NOT `export`ed. A Next.js route module's export surface is
+ * validated against the route-segment contract, so an extra export is a build
+ * error, not a style choice. The budget invariant therefore reads this
+ * declaration from DISK — the same idiom it already uses for `maxDuration`, and
+ * a genuine cross-file link rather than a table compared against itself.
+ */
+const MAX_COMPOSITE_MEMBERS = 10;
 
 interface LivePermissions {
   read: boolean;
@@ -745,11 +782,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // single-key path returns. Ownership is already established by the
       // owner-scoped strategy lookup above (:427-432); membership ids are not
       // sensitive, so the admin client is used only to enumerate them.
+      //
+      // SEAMCORE-10 — the read is CAPPED, and the cap lives on the QUERY. A
+      // bound applied inside the loop below would still let the database hand
+      // this lambda an arbitrarily long list, and it is the read that the
+      // SEAM_ROUTE_BUDGETS declaration has to be able to trust: that table
+      // declares `keys-permissions × MAX_COMPOSITE_MEMBERS` for this branch,
+      // and the two numbers are pinned to each other cross-file.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
         .select("api_key_id")
         .eq("strategy_id", fields.strategy_id)
-        .order("seq", { ascending: true });
+        .order("seq", { ascending: true })
+        .limit(MAX_COMPOSITE_MEMBERS);
       if (membersErr) {
         // A member-list read error also fails CLOSED — never enqueue a
         // composite whose members we could not enumerate to re-probe.
@@ -763,6 +808,67 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           },
           extra: { strategy_id: fields.strategy_id },
         });
+        return NextResponse.json(
+          {
+            error: "Could not load composite members; please retry.",
+            code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          },
+          { status: 503, headers: NO_STORE_HEADERS },
+        );
+      }
+      // SEAMCORE-10 — AT the cap is a REFUSAL, not a truncation.
+      //
+      // `.limit(MAX_COMPOSITE_MEMBERS)` cannot tell this route the difference
+      // between "this composite has exactly MAX_COMPOSITE_MEMBERS members" and
+      // "it has more, and you are holding the first MAX_COMPOSITE_MEMBERS of
+      // them". Proceeding on the second reading finalises a composite whose
+      // remaining member keys were never re-probed — the same
+      // connect→submit scope-broadening hole the O-1 loop exists to close,
+      // reintroduced by a silently short list. So the route refuses, which
+      // costs a genuine MAX_COMPOSITE_MEMBERS-member draft a submission and
+      // makes the usable maximum MAX_COMPOSITE_MEMBERS - 1. That trade is
+      // deliberate: refusing a draft is recoverable, publishing an unprobed
+      // key is not.
+      //
+      // `>=` rather than `===` on purpose — if the `.limit()` above were ever
+      // dropped, this arm still refuses an oversized list rather than fanning
+      // out over it.
+      if ((members?.length ?? 0) >= MAX_COMPOSITE_MEMBERS) {
+        // No caught value reaches this line — every interpolated term is an
+        // integer or an id this route generated. It goes through the shared
+        // scrubber anyway because it is a seam-route log line and this file
+        // keeps ONE mechanism for all of them (140.2-08); a future edit that
+        // interpolates an error here inherits the redaction instead of
+        // reintroducing a leak.
+        console.error(
+          scrubSeamString(
+            `[strategies/finalize-wizard] composite member list reached the ` +
+              `${MAX_COMPOSITE_MEMBERS}-member cap for strategy ` +
+              `${fields.strategy_id}; refusing rather than finalizing a ` +
+              `possibly truncated member list with unprobed keys`,
+          ),
+        );
+        captureToSentry(
+          new Error("composite member list reached MAX_COMPOSITE_MEMBERS"),
+          {
+            tags: {
+              surface: "finalize-wizard",
+              step: "composite-member-cap",
+            },
+            extra: {
+              strategy_id: fields.strategy_id,
+              max_composite_members: MAX_COMPOSITE_MEMBERS,
+            },
+          },
+        );
+        // The ENVELOPE is deliberately the existing membership-unknown one,
+        // byte-identical to the member-list-read failure above: a list this
+        // route cannot trust to be complete IS an undetermined membership, and
+        // phase 140.2 authors no user-facing copy (that fence is 140.3's). The
+        // operator-facing half — which is where "cap", not "transient", is the
+        // true word — is the log line and the Sentry step tag above. 140.3
+        // owns giving this arm its own code and copy; the retry affordance the
+        // shared envelope renders is wrong for a permanent condition.
         return NextResponse.json(
           {
             error: "Could not load composite members; please retry.",
