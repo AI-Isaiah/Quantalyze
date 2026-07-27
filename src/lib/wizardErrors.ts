@@ -154,6 +154,11 @@ export type WizardErrorCode =
   // a moment". Before this code existed the trip fell through to UNKNOWN/500
   // ("something went wrong, our team has been notified"), which is both untrue
   // and un-actionable during an infra outage.
+  // ✅ 140.3-12 APPLIED THE REMEDY THIS COMMENT ARGUES FOR. The quoted sentence
+  // is a historical citation, not a description of shipped copy: UNKNOWN no
+  // longer claims notification, and neither does any other entry in the table.
+  // `wizardErrors.test.ts` scans the WHOLE table for the claim, so it cannot
+  // grow back on a code nobody thought to check.
   | "SERVICE_UNAVAILABLE_RETRY"
   // Phase 140.3-05 / SEAMUX-01 — we ISSUED the request to our own analytics
   // service and never got an answer: the deadline fired, or the connection
@@ -360,14 +365,20 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["try_another_key", "request_call"],
   },
 
-  // TODO-COPY-140.3-12 — NON-FINAL. Exists so the
-  // `Record<WizardErrorCode, …>` type-checks now that KEY_EXCHANGE_UNAVAILABLE
-  // is a union member; the final sentence is 140.3-12's to author against the
-  // whole surface at once. `actions` IS decided here — it drives `recoverable`
-  // via RECOVERABLE_ACTIONS in src/lib/envelope.ts and therefore whether a
-  // Retry control renders, which is behaviour, not copy. A venue maintenance
-  // window clears on its own, so `clear_and_retry` stays and `try_another_key`
-  // is ABSENT: a second key on the same venue fails identically.
+  // 140.3-12 / SEAMUX-04 — copy FINAL, reviewed and KEPT as 140.3-05 drafted it.
+  // `actions` were already final there (they drive `recoverable` via
+  // RECOVERABLE_ACTIONS in src/lib/envelope.ts, so they are behaviour, not
+  // copy): a venue maintenance window clears on its own, so `clear_and_retry`
+  // stays and `try_another_key` is ABSENT because a second key on the same
+  // venue fails identically.
+  //
+  // Why "your key was not stored and nothing was submitted" is allowed to stand
+  // here when the identical sentence had to be struck from SERVICE_UNREACHABLE:
+  // this verdict is reached only from `classifyKeyValidationError`, on the
+  // key-connect paths, and it is reached because the VENUE ANSWERED — it
+  // refused. A refusal is an observation, so validation demonstrably never
+  // passed and storage was never reached. A timeout is the opposite: no answer,
+  // nothing observed, nothing knowable.
   KEY_EXCHANGE_UNAVAILABLE: {
     title: "The exchange is not available right now.",
     cause:
@@ -380,7 +391,9 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
-  // TODO-COPY-140.3-12 — NON-FINAL, same rule as the entry above.
+  // 140.3-12 / SEAMUX-04 — copy FINAL, reviewed and KEPT, same reasoning as the
+  // entry above: the venue's edge ANSWERED with a refusal, so "not stored,
+  // nothing submitted" is observed rather than assumed.
   //
   // ⚠️ WHAT THIS COPY MUST NOT SAY, and the reason the code exists. Before
   // TS-35 this verdict rendered KEY_IP_ALLOWLIST — "This key has an IP
@@ -460,13 +473,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["expand_log", "leave_and_return", "request_call"],
   },
 
+  // 140.3-12 / SEAMUX-04 — copy corrected. This entry used to open "We fetched
+  // your trades but the analytics computation did not complete", which asserted
+  // BOTH that a fetch succeeded and which later stage failed. The client can
+  // observe neither: 140.3-10 made this the FALLBACK for every kickoff failure
+  // that carries no code we recognise, including a breaker trip in which no
+  // trade was ever fetched. It therefore names no stage at all.
   SYNC_FAILED: {
     title: "Sync failed.",
     cause:
-      "We fetched your trades but the analytics computation did not complete. The failure is on our side, not on your exchange.",
+      "The sync did not complete. We cannot tell from here which step failed or how far it got. Your draft is saved.",
     fix: [
       "Retry the sync from this page.",
-      "If it keeps failing, your draft is saved — contact security@quantalyze.com with your draft ID.",
+      "If it keeps failing, contact security@quantalyze.com with your draft ID and the diagnostics below.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -497,13 +516,23 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["try_another_key", "request_call"],
   },
 
+  // 140.3-12 / SEAMUX-04 — TWO false claims removed from this one entry, and
+  // neither was listed in any source document: they were found by grepping the
+  // SENTENCE rather than the code.
+  //   1. "We fetched your trades successfully" — the same unobservable claim
+  //      SYNC_FAILED made, worded more strongly. The server reports the STAGE
+  //      it failed at; it does not report that the earlier stage succeeded.
+  //   2. the fix line claimed we had already been told. This code is reachable
+  //      from routes that capture nothing, so that was an audit trail asserted
+  //      and absent. Contacting us is now stated as the thing that reaches a
+  //      person, without claiming anything already has.
   GATE_ANALYTICS_FAILED: {
     title: "Analytics computation failed.",
     cause:
-      "We fetched your trades successfully, but the risk metrics pipeline errored out. The failure is on our side.",
+      "The analytics step failed for this draft. We cannot tell from here how much of the sync before it completed. The fault is in our pipeline, not at your exchange.",
     fix: [
       "Retry the sync from this page.",
-      "If it fails again, email security@quantalyze.com with your draft ID — we have been notified.",
+      "If it fails again, email security@quantalyze.com with your draft ID and the diagnostics below.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -771,14 +800,22 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // 140.3-12 / SEAMUX-04 — "your data is unchanged" removed from BOTH the title
+  // and the fix list. It was an assertion about server state that the browser
+  // cannot make: this code is raised on a 500 from a handler that runs
+  // `finalize_csv_strategy`, and uvicorn does not cancel a handler on client
+  // disconnect, so the write may well have landed. The old wording also STEERED
+  // the user straight back into a resubmit, which is the dead end the reply
+  // contract has not yet fixed. The copy now states the uncertainty and puts a
+  // non-destructive check FIRST, ahead of any resubmit.
   CSV_SUBMIT_FAILED: {
-    title:
-      "Your file validated cleanly, but saving the strategy hit an error. Click Submit strategy again to retry — your data is unchanged.",
+    title: "We could not confirm whether your strategy was saved.",
     cause:
-      "We validated your CSV but the strategy-creation RPC errored.",
+      "Your file passed validation, then the save step returned an error. The error does not tell us whether the save completed, so we cannot promise it did or that it did not.",
     fix: [
-      "Click Submit strategy again — your data is unchanged.",
-      "If it keeps failing, contact security@quantalyze.com with your wizard session id.",
+      "Open /strategies in another tab first. If your strategy is listed, the save did complete and submitting again would create a second copy.",
+      "If it is not listed, submit again.",
+      "If you are unsure, contact security@quantalyze.com with your wizard session id and the diagnostics below.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -788,8 +825,15 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     title:
       "Submission succeeded but the server did not return a strategy id. Retry to confirm.",
     cause: "The finalize RPC returned 200 but no strategy_id.",
+    // 140.3-12 / SEAMUX-04 — the duplicate-protection promise is SCOPED to the
+    // flow that actually has the mechanism, and the internal field name is gone
+    // from the user's screen. The guarantee itself is real HERE and is kept:
+    // this code is CSV-only, and both `csv-validate` and `csv-finalize` send the
+    // wizard session id today. It must NOT be widened to the API path — that
+    // call site sends no id, and a promise made ahead of its mechanism is how
+    // this whole class of copy started.
     fix: [
-      "Click Submit strategy again to confirm — duplicates are prevented by wizard_session_id idempotency.",
+      "Submit again. On the CSV path a repeat submit of the same wizard session cannot create a second strategy.",
       "If it persists, contact security@quantalyze.com.",
     ],
     docsHref: "/security#sync-timing",
@@ -856,12 +900,21 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // 140.3-12 / SEAMUX-04 — the key-storage half of this sentence is gone, on
+  // 140.3-05's recorded hand-off. That plan aliased the wire code CIRCUIT_OPEN
+  // onto this member, so the entry is now reached at FINALIZE as well as at
+  // key-connect — and at finalize the key was stored several steps earlier, so
+  // "your key has not been saved" was false on the newer of its two paths. The
+  // load-bearing half is true at BOTH and is what remains: the breaker declined
+  // to issue the request, so nothing was submitted. That claim is knowable
+  // precisely because no request was ever sent — do not copy this wording to a
+  // TIMEOUT, where the request WAS sent (see SERVICE_UNREACHABLE below).
   SERVICE_UNAVAILABLE_RETRY: {
     title: "Our service is temporarily unavailable.",
     cause:
-      "We paused outbound requests after repeated failures so the service can recover. Your key has not been saved and nothing was submitted — this is on our side, not your key.",
+      "We paused outbound requests after repeated failures so the service can recover, so this request was never sent. Nothing was submitted — this is on our side, not your key.",
     fix: [
-      "Wait a moment, then try connecting the key again.",
+      "Wait a moment, then try the same action again.",
       "If it is still failing after a few minutes, contact security@quantalyze.com.",
     ],
     docsHref: "/security#sync-timing",
@@ -870,38 +923,54 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
-  // TODO-COPY-140.3-12 — NON-FINAL, same rule as the two entries below: this
-  // exists so the `Record<WizardErrorCode, …>` type-checks now that
-  // SERVICE_UNREACHABLE is a union member. It is NOT a copy decision, and
-  // 140.3-12 closes it by grepping this token to 0.
+  // 140.3-12 / SEAMUX-04 — copy FINAL. `actions` were already final (140.3-05).
   //
-  // The `actions` ARE a decision and they are made here, not deferred: they
-  // drive `recoverable` through `RECOVERABLE_ACTIONS` in `src/lib/envelope.ts`,
-  // which is what decides whether a Retry control renders at all. A request
-  // that never reached us is retryable by definition, so `clear_and_retry`
-  // stays. `try_another_key` is deliberately ABSENT — the key is not implicated.
+  // ⚠️ 140.3-05's non-final draft claimed "Nothing was submitted and your draft
+  // is unchanged", and that claim was FALSE-BY-CONSTRUCTION here. This member
+  // homes UPSTREAM_TIMEOUT and UPSTREAM_NETWORK_ERROR: the request WAS issued
+  // and no answer came back. A deadline firing tells us nothing about whether
+  // the far side processed the request — it is the canonical case in which the
+  // work may well have completed. Asserting a negative we cannot observe is the
+  // same defect as CSV_SUBMIT_FAILED's old "your data is unchanged", and it
+  // reached this entry by being copied from SERVICE_UNAVAILABLE_RETRY, where a
+  // breaker DECLINED to send and the identical sentence IS knowable. The two
+  // codes are one line apart and one of them may say it. Do not re-merge them.
   SERVICE_UNREACHABLE: {
     title: "We could not reach our own service.",
     cause:
-      "We sent the request and never got an answer back — the connection failed or ran out of time. Nothing was submitted and your draft is unchanged. This is on our side, not your key or your exchange.",
+      "We sent the request and never got an answer — the connection failed or ran out of time. Because no answer came back, we cannot tell whether it was processed. This is on our side, not your key or your exchange.",
     fix: [
-      "Wait a moment, then try again.",
+      "If you were submitting a strategy, open /strategies before retrying — the request may have completed without answering.",
+      "Otherwise, try the same action again.",
       "If it is still failing after a few minutes, contact security@quantalyze.com with your draft ID.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
   },
 
-  // TODO-COPY-140.3-12 — NON-FINAL. This entry exists so the
-  // `Record<WizardErrorCode, …>` type-checks now that `VALIDATION_FAILED` is a
-  // union member; it is NOT a copy decision. The final sentence is 140.3's copy
-  // plan's to author alongside TS-35, against the whole surface at once rather
-  // than one site at a time. Treat this as unwritten copy, not a shipped
-  // string. 140.3-12 closes it by grepping this token to 0.
+  // 140.3-12 / SEAMUX-04 — copy FINAL, and the PRODUCER ATTRIBUTION is gone.
+  //
+  // ⚠️ The non-final draft said "The analytics service rejected the shape of
+  // the request". That named one producer, and it is why 140.3-10 refused to
+  // route `/api/keys/sync`'s two 400 arms here: those rejections are made by
+  // OUR OWN route, before the analytics service is ever called, so the sentence
+  // would have been a fresh false attribution — a vague error turned into a
+  // specific lie, which is worse than the vague one it replaced.
+  //
+  // This member is a RENDERING code, not a wire code. The one fact it stands
+  // for is "a request was refused on its shape before any work ran", and that
+  // is exactly true of both producers: the analytics service's 422 and this
+  // app's own 400. Naming neither is what lets one honest sentence serve both,
+  // and is why no new union member was minted (the table size is unchanged).
+  //
+  // What stays knowable, and why the claim is safe here in a way it is NOT on
+  // SERVICE_UNREACHABLE: a shape rejection happens BEFORE execution, so
+  // "nothing was submitted" is a fact about a request that never ran, not a
+  // guess about one whose outcome we never learned.
   VALIDATION_FAILED: {
     title: "We could not read that request.",
     cause:
-      "The analytics service rejected the shape of the request before it ran. Nothing was submitted and nothing was changed.",
+      "We sent a request that failed its shape check before any work started. Nothing was submitted and nothing was changed. The fault is in our software, not in your key or your data.",
     fix: [
       "Contact security@quantalyze.com with your draft ID — a request-shape fault is on our side and retrying the same action will not clear it.",
     ],
@@ -912,30 +981,52 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["request_call"],
   },
 
-  // TODO-COPY-140.3-12 — NON-FINAL, same rule as the entry above.
+  // 140.3-12 / SEAMUX-04 — copy FINAL, and the wait is DELIBERATELY ABSENT from
+  // these strings. Read this before "improving" it by adding a duration.
   //
-  // ⚠️ A NOTE THE COPY PLAN NEEDS. DESIGN.md's voice section requires stating a
-  // limitation WITH THE THRESHOLD ATTACHED, and the honest threshold here is
-  // the server's `Retry-After` / `retry_after_seconds`. Neither
-  // `WizardErrorContext` nor `ErrorEnvelope` carries a wait field today, so
-  // naming the real wait is currently UNREPRESENTABLE, not merely unwritten —
-  // that plumbing is part of what 140.3-12 has to budget for.
+  // DESIGN.md §Voice asks for a limitation stated WITH ITS THRESHOLD, and the
+  // honest threshold is the server's own `Retry-After`. 140.3-09 built that
+  // plumbing (`WizardErrorContext.retryAfterSeconds` → the envelope's
+  // `retry_after_seconds`), so the number is now representable — but it belongs
+  // to the RENDERER, not to this table. `ErrorEnvelope` prints "Try again in
+  // Ns." from the server's own figure when one arrived, and prints nothing at
+  // all when none did.
+  //
+  // A duration written HERE would be a static string on every path, including
+  // the ones where no `Retry-After` was ever sent — a number we invented,
+  // presented as the server's. So the copy says to wait without saying how
+  // long, and the figure appears above it exactly when it is real.
   RATE_LIMITED: {
     title: "You have reached our request limit.",
     cause:
-      "We limit how often this action can run. Nothing was submitted and nothing was changed — this is our limit, not your exchange's.",
-    fix: ["Wait a moment, then try the same action again."],
+      "We cap how often this action can run and this attempt went over the cap. Nothing was submitted and nothing was changed — the cap is ours, not your exchange's.",
+    fix: [
+      "Wait, then run the same action again. We do not queue it or retry it for you.",
+    ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // 140.3-12 / SEAMUX-04 — the notification claim is GONE. It asserted an audit
+  // trail that does not exist: 9 of the 15 seam routes capture nothing at all,
+  // so on those paths the sentence promised a person was looking at something
+  // no one could see.
+  //
+  // ⚠️ THE REPLACEMENT DELIBERATELY SAYS NOTHING ABOUT NOTIFICATION IN EITHER
+  // DIRECTION, and that is the whole point. The obvious correction — telling
+  // the user nothing reaches us automatically — is a SECOND false claim, just
+  // pointed the other way: the other 6 routes DO capture, and this code is
+  // reachable from them. The client cannot tell which route it came from, so
+  // the only sentence true on every path is one that makes no claim about our
+  // side at all. If 140.3-13 adds the missing captures, the claim may come back
+  // — but only with the receipt, and only where it is true.
   UNKNOWN: {
     title: "Something went wrong.",
     cause:
-      "We are not sure what happened. Our team has been notified and is looking into it.",
+      "We could not classify this failure, so we cannot tell you what happened or whether your last action took effect.",
     fix: [
       "Try the last action again.",
-      "If it keeps failing, contact security@quantalyze.com with your draft ID.",
+      "If it keeps failing, contact security@quantalyze.com with your draft ID and the diagnostics below.",
     ],
     docsHref: "/security",
     actions: ["clear_and_retry", "request_call"],
@@ -1183,6 +1274,13 @@ export function classifyKeyValidationError(error: unknown): {
   // branch is the DOGFOOD-3-class failure this code exists to kill: during a
   // Railway outage the founder saw an unexplained 500 with no retry affordance.
   //
+  // ✅ 140.3-12: the quoted sentence is HISTORY — UNKNOWN no longer claims
+  // notification. The terminal is still a dead end worth keeping traffic out of
+  // (it now says only that we could not classify the failure), so this branch's
+  // ordering requirement is UNCHANGED and this comment is not an invitation to
+  // relax it. Honest copy at the terminal is not a substitute for not landing
+  // on the terminal.
+  //
   // Never replace this with a substring match on the word c-i-r-c-u-i-t
   // (research Pitfall 2 names that as the warning sign; it is spelled out here
   // so the acceptance grep that forbids such a branch cannot be tripped by this
@@ -1330,6 +1428,10 @@ export function classifyKeyValidationError(error: unknown): {
  * three wire codes are the complete set of non-`WizardErrorCode` codes that
  * `finalize-wizard` can put in front of a user today; every one of them landed
  * on UNKNOWN's "our team has been notified" before this entry existed.
+ * (140.3-12 removed that sentence from UNKNOWN, so the phrase above is a
+ * historical citation. The aliasing still matters for the same reason: an
+ * honest generic terminal is still a terminal, and these codes deserve their
+ * own specific, true copy rather than the one that admits knowing nothing.)
  * (`draft_state_invalid` and `COMPOSITE_UNSUPPORTED_UNIFIED` also reach
  * SubmitStep without a wizard member — both are deliberately out of scope here
  * and are recorded in the TS-35 ledger row, NOT silently absorbed.)

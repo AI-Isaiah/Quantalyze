@@ -1210,9 +1210,24 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
       "The envelope's data-error-code is the machine-readable half of the " +
         "render — a copy rewrite in 140.3-12 must not be able to satisfy this.",
     ).toHaveAttribute("data-error-code", "RATE_LIMITED");
-    // And the specific lie is named, so a regression cannot pass by rendering
-    // some other wrong-but-different state.
-    expect(screen.queryByText(/We fetched your trades/i)).toBeNull();
+
+    // ⚠️ RE-POINTED by 140.3-12. This line used to read
+    // `expect(screen.queryByText(/We fetched your trades/i)).toBeNull()`.
+    // 140.3-12 deleted that sentence from the copy table entirely, so the
+    // assertion became VACUOUS — a negative on a string that no longer exists
+    // anywhere passes forever and can never falsify anything. (Same shape as
+    // 140.3-11's M77c: an oracle asserting an absence cannot detect the
+    // mechanism that produces absences.)
+    //
+    // Re-pointed at SYNC_FAILED's CURRENT distinctive phrase, so the guard
+    // still fails if a 429 falls back to the generic sync failure, plus a
+    // POSITIVE assertion that the throttle's own copy actually rendered.
+    expect(screen.queryByText(/which step failed/i)).toBeNull();
+    expect(
+      screen.getByText(/we cap how often this action can run/i),
+      "The positive half. Without it, a state rendering NEITHER copy would " +
+        "satisfy every negative assertion in this case.",
+    ).toBeInTheDocument();
   });
 
   it("a 429's advertised wait reaches the envelope — and is never fabricated when absent", async () => {
