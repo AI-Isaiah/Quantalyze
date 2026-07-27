@@ -110,10 +110,56 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+/**
+ * 140.3-13a / SEAMUX-08 — the admin client, now driveable.
+ *
+ * `adminState.persistThrow` defaults to `null`, so every case written before
+ * this plan sees the identical no-op success it saw before. The new case sets
+ * it to a Supabase transport failure so the route's persist-threw arm — one of
+ * this route's four Sentry captures — becomes reachable with the REAL capture
+ * helper in the loop.
+ */
+const adminState = vi.hoisted(() => ({
+  persistThrow: null as unknown,
+}));
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => ({
-    from: () => ({ update: () => ({ eq: async () => ({ error: null }) }) }),
+    from: () => ({
+      update: () => ({
+        eq: async () => {
+          if (adminState.persistThrow !== null) throw adminState.persistThrow;
+          return { error: null };
+        },
+      }),
+    }),
   }),
+}));
+
+/**
+ * 140.3-13a / SEAMUX-08 — a FAKE Sentry transport, with the REAL capture helper.
+ *
+ * `@/lib/sentry-capture` is deliberately NOT mocked in this file: the scrub is
+ * folded into that helper (SEAMCORE-06), so mocking it would make the payload
+ * assertions below pass with the scrubber deleted — the vacuous-oracle shape
+ * this phase keeps finding. The sibling `route.test.ts` DOES mock the helper
+ * (it predates this plan) and therefore proves only the call site; this file is
+ * where "the dispatched payload is genuinely scrubbed" is falsifiable.
+ */
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: { tags?: Record<string, string>; extra?: Record<string, unknown> };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
 }));
 
 vi.mock("@/lib/correlation-id", () => ({
@@ -170,6 +216,8 @@ describe("[140.3-02 / TS-15] POST /api/verify-strategy — REAL client through t
     shared.store.clear();
     sessionState.session = { access_token: TEST_USER_JWT };
     fetchMock = installFetchMock();
+    adminState.persistThrow = null;
+    sentryState.captured.length = 0;
   });
 
   afterEach(() => {
@@ -263,5 +311,134 @@ describe("[140.3-02 / TS-15] POST /api/verify-strategy — REAL client through t
     ).toContain("ECONNREFUSED");
     // And the line is genuinely the seam's transport log, not some other error.
     expect(logged).toContain("/process-key upstream fetch threw");
+  });
+});
+
+/**
+ * 140.3-13a / SEAMUX-08 — the Sentry payload is scrubbed, END TO END, with the
+ * REAL `captureToSentry` in the loop.
+ *
+ * ⚠️ WHY THIS LIVES HERE AND NOT IN `route.test.ts`. That file mocks
+ * `@/lib/sentry-capture` wholesale, and the scrub lives INSIDE that helper. A
+ * "no secret in the payload" assertion written there would pass with the
+ * scrubber deleted — it would assert nothing about redaction at all. This file
+ * mocks only the Sentry transport, so the helper's scrub actually runs.
+ *
+ * ⚠️ THE SECRET HERE IS PER-REQUEST AND UNKNOWABLE TO ANY ENV LIST. The JWT is
+ * a live end-user Supabase token and the api_secret is the caller's raw
+ * exchange credential. Neither can be defended by `SEAM_SECRET_ENV_NAMES`;
+ * both reach the redactor ONLY because the route names them in `secrets`.
+ * That is why the negative below is falsifiable: delete `perRequestSecrets`
+ * from the persist arm and this case reddens, while the INTERNAL_API_TOKEN
+ * assertion (env-derived) would stay green and hide it.
+ */
+describe("[140.3-13a / SEAMUX-08] POST /api/verify-strategy — the Sentry payload is scrubbed", () => {
+  /** The caller's RAW exchange secret — per-request, above the redaction floor. */
+  const RAW_API_SECRET = "SEC_kX7pQ2mN9vB4tR8sL1wY6hG3jD5fA0cZ";
+
+  // ⚠️ A SIBLING describe does NOT inherit the outer one's `beforeEach`. The
+  // full seam setup is repeated here deliberately: without `shared.store
+  // .clear()` the breaker carries failure counts over from the outer block and
+  // every case in here answers 503 for the wrong reason. Same "ENV BEFORE
+  // IMPORT" rule as above — the core reads ANALYTICS_SERVICE_URL in its module
+  // body, so setting it after the dynamic import leaves the seam inert.
+  beforeEach(() => {
+    process.env.UPSTASH_REDIS_REST_URL = "https://fake.upstash.invalid";
+    process.env.UPSTASH_REDIS_REST_TOKEN = "fake-token";
+    process.env.ANALYTICS_SERVICE_URL = ANALYTICS_BASE;
+    process.env.INTERNAL_API_TOKEN = "test-internal-token-32-chars-long";
+    vi.resetModules();
+
+    shared.store.clear();
+    sessionState.session = { access_token: TEST_USER_JWT };
+    adminState.persistThrow = null;
+    sentryState.captured.length = 0;
+    fetchMock = installFetchMock();
+  });
+
+  afterEach(() => {
+    restoreFetchMock();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  function postReqWithSecret(): NextRequest {
+    return new NextRequest("http://localhost:3000/api/verify-strategy", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:3000",
+      },
+      body: JSON.stringify({
+        email: "test@example.com",
+        exchange: "okx",
+        api_key: "AK_LIVE_9f3a1c7e5b2d84a6f0c1e3d5",
+        api_secret: RAW_API_SECRET,
+      }),
+    });
+  }
+
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "the persist arm captured nothing — a verification that succeeded upstream and failed to persist reaches nobody",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  it("TRAP-1 BOTH DIRECTIONS: the dispatched payload loses the LIVE JWT, the raw api_secret and the internal token — and KEEPS ECONNREFUSED", async () => {
+    fetchMock.mockResolvedValue(successResponse());
+    // The shape a Supabase transport failure actually produces at this hop:
+    // the outgoing request's headers and body inlined into the message,
+    // alongside the syscall token that IS the diagnosis.
+    adminState.persistThrow = new Error(
+      `connect ECONNREFUSED 10.0.0.9:5432 ` +
+        `(headers: {"Authorization":"Bearer ${TEST_USER_JWT}",` +
+        `"X-Internal-Token":"test-internal-token-32-chars-long"}, ` +
+        `body: {"api_secret":"${RAW_API_SECRET}"})`,
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { POST } = await import("./route");
+    const res = await POST(postReqWithSecret());
+    expect(res.status).toBe(500);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("verify-strategy");
+    expect(options.tags?.step).toBe("public-token-persist-threw");
+
+    const message = (err as Error).message;
+    // UNDER-redaction, the per-request half. 140.3-02 closed exactly this leak
+    // on the LOG channel; adding Sentry must not re-open it on a third-party one.
+    expect(
+      message,
+      "a LIVE end-user Supabase JWT was dispatched to Sentry. No env list can know it — only the route's `secrets` array can, which is why dropping that argument must redden here.",
+    ).not.toContain(TEST_USER_JWT);
+    expect(
+      message,
+      "the caller's RAW exchange api_secret was dispatched to Sentry",
+    ).not.toContain(RAW_API_SECRET);
+    // UNDER-redaction, the env half — a different mechanism, asserted separately
+    // so a regression in one cannot hide behind the other.
+    expect(message).not.toContain("test-internal-token-32-chars-long");
+    // ⚠️ OVER-redaction. A redactor that eats the syscall token has replaced one
+    // incident with two, and a one-sided assertion ships that state green.
+    expect(
+      message,
+      "the syscall token was destroyed — ECONNREFUSED is the most valuable thing in a transport line",
+    ).toContain("ECONNREFUSED");
+    errorSpy.mockRestore();
+  });
+
+  it("ANTI-REGRESSION: a clean terminal success dispatches NOTHING to Sentry", async () => {
+    fetchMock.mockResolvedValue(successResponse());
+    const { POST } = await import("./route");
+    const res = await POST(postReqWithSecret());
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
   });
 });

@@ -30,6 +30,38 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13a / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. The house pattern elsewhere mocks the helper itself, which is fine for
+// "did the call site fire" but makes every payload assertion VACUOUS about
+// scrubbing: the scrub lives INSIDE the helper (SEAMCORE-06), so a mocked
+// helper never runs it and a test asserting "no secret in the payload" would
+// pass with the scrubber deleted. Running the real helper over a faked Sentry
+// transport is what makes both halves of TRAP-1 falsifiable here.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
+
+
 const VALID_ORIGIN = { origin: "http://localhost:3000" };
 
 const userState = vi.hoisted<{ current: { id: string } | null }>(() => ({
@@ -361,5 +393,157 @@ describe("GET /api/admin/match/eval — upstream status survives (140.3-11 / TS-
     const res = await GET(makeReq());
     expect(res.status).toBe(401);
     expect(evalState.lastArgs).toBeNull();
+  });
+});
+
+/**
+ * 140.3-13a / SEAMUX-08 — this route captures to Sentry, under ONE policy.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, AND SO WAS IT AT EIGHT SIBLINGS. Measured on the
+ * untouched tree, nine of the fifteen seam routes read 0 for
+ * `grep -vE '^\s*(//|\*)' | grep -c captureToSentry`, while `wizardErrors.ts`
+ * copy told users "our team has been notified". `140.3-12` removed the claim;
+ * this is where it starts becoming true. The policy is written out in full in
+ * `src/app/api/admin/match/eval/route.ts` and `140.3-13b` applies it verbatim
+ * at the remaining five routes.
+ *
+ * The NEGATIVE cases below are the ones that keep the policy from being "log
+ * everything". Each pairs its zero-capture assertion with a POSITIVE assertion
+ * that the arm actually ran (its own status), so a route that threw before
+ * reaching any arm could not satisfy them.
+ */
+describe("[140.3-13a / SEAMUX-08] GET /api/admin/match/eval — Sentry capture policy", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    sentryState.captured.length = 0;
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    evalState.result = { rows: [] };
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubEnv("INTERNAL_API_TOKEN", INTERNAL_TOKEN);
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal arm is the only place an unclassified seam failure is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  it("POSITIVE: an unclassified transport failure IS captured, with the route's tags", async () => {
+    evalState.throwValue = new Error(
+      `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq("?lookback_days=7"));
+    expect(res.status).toBe(500);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("admin-match-eval");
+    expect(options.tags?.step).toBe("upstream-error");
+    expect(err).toBeInstanceOf(Error);
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the secret and KEEPS the syscall token", async () => {
+    evalState.throwValue = new Error(
+      `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+    );
+    const { GET } = await import("./route");
+    await GET(makeReq());
+
+    const { err } = await nextCapture();
+    const message = (err as Error).message;
+    // UNDER-redaction: a credential leaving our infrastructure for a third
+    // party is the whole of T-140.3-13-01.
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    // OVER-redaction: destroying the syscall token replaces one incident with
+    // two, and a one-sided test ships that state green.
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ECONNREFUSED is the most valuable thing in a transport line",
+    ).toContain("ECONNREFUSED");
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured (it fires on every seam route at once)", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    evalState.throwValue = new CircuitOpenError(30);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    // The POSITIVE half: the breaker arm really ran, so the zero below is
+    // about the policy and not about the request never reaching the catch.
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: an upstream timeout is NEVER captured (expected under a cold start; a sustained one trips the breaker)", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsTimeoutError("/api/match/eval", 30_000);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(504);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a forwarded upstream 4xx is NEVER captured (a deliberate refusal is not our defect)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError("bybit is not responding", 424);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(424);
+    await expectNoCapture();
+  });
+
+  it("POSITIVE COUNTERPART: an upstream 5xx DOES fall through to the terminal arm and IS captured", async () => {
+    // The 4xx/5xx split is the policy's "service-permanent outcome" half. If
+    // the range check ever widened to forward 5xx too, this reddens — which is
+    // what stops the negative above from silently becoming "never capture".
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError("upstream exploded", 503);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    expect((await nextCapture()).options.tags?.surface).toBe("admin-match-eval");
+  });
+
+  it("NEGATIVE: a caller fault (unauthenticated) is NEVER captured", async () => {
+    userState.current = null;
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(401);
+    await expectNoCapture();
+  });
+
+  it("the capture never replaces the operator log line — both channels fire", async () => {
+    evalState.throwValue = new Error("boom");
+    const { GET } = await import("./route");
+    await GET(makeReq());
+    await nextCapture();
+    expect(errorSpy).toHaveBeenCalled();
   });
 });

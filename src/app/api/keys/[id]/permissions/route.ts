@@ -21,6 +21,13 @@ import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 // header cannot manufacture a bogus wait. Never add a second parser here.
 import { parseRetryAfterSeconds } from "@/lib/retry";
 import { scrubSeamError } from "@/lib/seam-redaction";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
+// ⚠️ The caught value is passed to it UNMODIFIED even though this file already
+// imports `scrubSeamError` for its console lines: `captureToSentry` scrubs at
+// the chokepoint (SEAMCORE-06), and pre-scrubbing would hand Sentry a string
+// instead of an Error, destroying grouping and the stack.
+import { captureToSentry } from "@/lib/sentry-capture";
 import type { User } from "@supabase/supabase-js";
 
 /**
@@ -543,6 +550,30 @@ export const GET = withAuth(
       // credentials are decrypted inside the Python service, never here, and
       // `keyId` is an opaque row id that is deliberately kept in the line
       // because it is what makes the failure triageable.
+      // 140.3-13a / SEAMUX-08 — THE TERMINAL ARM, and the only capture in this
+      // route, under the policy in `admin/match/eval/route.ts`.
+      //
+      // The two arms above capture NOTHING, both deliberately:
+      //   · the `CircuitOpenError` arm — a trip is an expected infrastructure
+      //     fact that fires on every seam route at once during one incident;
+      //   · the 429 throttle arm — the upstream refused this caller on purpose
+      //     and told us for how long. That is the limiter working, not a fault.
+      // This arm is what is left: a config fault, a transport failure, a 5xx,
+      // or an unreadable body — none of which we can classify further, and all
+      // of which someone has to look at.
+      //
+      // `secrets` is EMPTY here, and that is a fact about this route rather
+      // than an oversight: unlike the two key-connect paths it holds NO
+      // per-request credential — exchange material is decrypted inside the
+      // Python service, never here — and the one credential the outgoing
+      // request DOES carry (`X-Internal-Token`, which undici inlines into the
+      // error message) is `INTERNAL_API_TOKEN`, already on the leaf's env-name
+      // list. `keyId` is an opaque row id and is deliberately kept, because it
+      // is what makes the failure triageable.
+      captureToSentry(err, {
+        tags: { surface: "keys-permissions", step: "upstream-proxy" },
+        extra: { key_id: keyId },
+      });
       console.error(
         `[keys/permissions] proxy failed for ${keyId}:`,
         scrubSeamError(err),

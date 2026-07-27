@@ -26,6 +26,36 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13a / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. The scrub lives INSIDE the helper (SEAMCORE-06), so mocking the helper —
+// which is the house pattern elsewhere — would make every payload assertion
+// below pass with the scrubber deleted. Running the real helper over a faked
+// Sentry transport is what makes both halves of TRAP-1 falsifiable here.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
+
+
 const USER = { id: "00000000-0000-0000-0000-000000000001" };
 const KEY_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
@@ -1074,5 +1104,151 @@ describe("[140.3-03 / SEAMUX-07] the permissions proxy fails CLOSED on an unread
     // Replayed from the cache: the seam was crossed exactly once.
     expect(RF.calls).toBe(1);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * 140.3-13a / SEAMUX-08 — this route captures to Sentry, under the ONE policy
+ * written out in full in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO here too. This route is one of the nine of fifteen
+ * seam routes that captured nothing while the wizard copy claimed a team had
+ * been notified. It is also the route whose failures are the least visible
+ * anywhere else: the scope badge fails quietly beside a money-bearing key.
+ *
+ * Its TWO typed arms above the terminal one capture NOTHING and both negatives
+ * are pinned, each alongside a POSITIVE assertion that the arm actually ran.
+ */
+describe("[140.3-13a / SEAMUX-08] GET /api/keys/[id]/permissions — Sentry capture policy", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+
+  beforeEach(() => {
+    sentryState.captured.length = 0;
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN;
+  });
+
+  afterEach(() => {
+    process.env.INTERNAL_API_TOKEN = "test-internal-token";
+  });
+
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal arm is the only place this route's unclassified proxy failures are ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  /** Re-stub the upstream so it throws a transport error carrying the token. */
+  function stubTransportFailure(message: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error(message);
+      }),
+    );
+  }
+
+  it("POSITIVE: an unclassified proxy failure IS captured, tagged and carrying the key id", async () => {
+    stubTransportFailure(
+      `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+
+    const { options } = await nextCapture();
+    expect(options.tags?.surface).toBe("keys-permissions");
+    expect(options.tags?.step).toBe("upstream-proxy");
+    // `keyId` is an opaque row id, deliberately kept because it is what makes
+    // the failure triageable — the same reason the console line keeps it.
+    expect(options.extra?.key_id).toBe(KEY_ID);
+    errSpy.mockRestore();
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the token and KEEPS the syscall token", async () => {
+    stubTransportFailure(
+      `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    await GET(makeRequest(KEY_ID));
+
+    const message = ((await nextCapture()).err as Error).message;
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — over-redaction replaces one incident with two",
+    ).toContain("ECONNREFUSED");
+    errSpy.mockRestore();
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured", async () => {
+    RF.breakerOpen = true;
+    RF.retryAfterS = 45;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    // POSITIVE half: the breaker arm really ran.
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("45");
+    await expectNoCapture();
+    errSpy.mockRestore();
+  });
+
+  it("NEGATIVE: an upstream 429 throttle is NEVER captured — the limiter working is not a fault", async () => {
+    STATE.upstreamStatus = 429;
+    STATE.upstreamHeaders = { "retry-after": "60" };
+    STATE.upstreamPayload = { detail: "per-key throttle", code: "RATE_LIMITED" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    // POSITIVE half: 140.3-09's throttle arm really ran, so the zero below is
+    // about the policy rather than about the request never reaching a catch.
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    await expectNoCapture();
+    errSpy.mockRestore();
+  });
+
+  it("NEGATIVE: a caller fault (not the caller's key) is NEVER captured", async () => {
+    STATE.keyRow = { id: KEY_ID, user_id: "99999999-9999-4999-8999-999999999999" };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(403);
+    await expectNoCapture();
+  });
+
+  it("POSITIVE COUNTERPART: an upstream 5xx DOES reach the terminal arm and IS captured", async () => {
+    STATE.upstreamStatus = 503;
+    STATE.upstreamPayload = { detail: "railway is down" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+    expect(res.status).toBe(502);
+    expect((await nextCapture()).options.tags?.surface).toBe("keys-permissions");
+    errSpy.mockRestore();
+  });
+
+  it("the capture never replaces the operator log line — both channels fire", async () => {
+    stubTransportFailure("ECONNREFUSED");
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    await GET(makeRequest(KEY_ID));
+    await nextCapture();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });

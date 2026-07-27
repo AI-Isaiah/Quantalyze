@@ -11,6 +11,12 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
+// That docblock is the source of truth for all nine seam routes and is
+// deliberately NOT duplicated here: two copies of a policy is how two policies
+// start. Read it before adding, moving or removing any capture in this file.
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -175,6 +181,23 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
+    // 140.3-13a / SEAMUX-08 — THE TERMINAL ARM, and the only capture in this
+    // route, under the policy in `admin/match/eval/route.ts`. The breaker,
+    // timeout and forwarded-4xx arms above deliberately capture NOTHING: each
+    // is an expected, self-describing condition, and a breaker trip in
+    // particular fires on every request to every seam route at once.
+    //
+    // Delivered in the SAME commit as the sibling route's, and asserted per
+    // file: these two have the same shape and had the same gap (each read 0
+    // `captureToSentry` on the untouched tree), and fixing one while reporting
+    // the class closed is this programme's signature failure — the same reason
+    // `140.3-11` gave when it added the 4xx arm to both.
+    //
+    // Value passed UNMODIFIED; `captureToSentry` scrubs at the chokepoint. No
+    // per-request credential exists on this route, so `secrets` is empty.
+    captureToSentry(err, {
+      tags: { surface: "admin-match-recompute", step: "upstream-error" },
+    });
     console.error("[api/admin/match/recompute] error:", err);
     return NextResponse.json(
       { error: GENERIC_COPY },

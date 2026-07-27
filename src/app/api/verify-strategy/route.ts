@@ -7,6 +7,18 @@ import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
 import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
 import { createClient } from "@/lib/supabase/server";
+// 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
+//
+// ⚠️ THIS ROUTE IS THE SECRET-BEARING ONE OF THIS PLAN'S FOUR. It holds a LIVE
+// user Supabase JWT (`userAccessToken`, forwarded by TS-15) and the caller's
+// RAW exchange `api_key` / `api_secret` from the request body. No module-level
+// env list can know those three values, so every capture below names them in
+// `secrets: [...]` — that argument is the ONLY thing standing between undici's
+// header-inlining (TRAP-1) and a credential leaving our infrastructure for a
+// third party. `140.3-02` closed a live end-user JWT log leak one wave-set ago;
+// adding an observability channel must not re-open it through Sentry instead.
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -214,6 +226,31 @@ async function unifiedVerifyStrategyHandler(
     userAccessToken = undefined;
   }
 
+  /**
+   * 140.3-13a / SEAMUX-08 — the per-request credentials every `captureToSentry`
+   * in this handler must name.
+   *
+   * Declared ONCE, here, rather than re-typed at each of the four call sites:
+   * four sites each remembering three values is the instance-not-class shape
+   * this programme has already paid for, and the failure mode is silent — a
+   * capture that forgets one still succeeds, still looks correct in review, and
+   * ships the credential to a third party.
+   *
+   * All three are unknowable to any module-level env list:
+   *   · `userAccessToken` — a LIVE end-user Supabase JWT (TS-15 forwards it, so
+   *     undici can inline it into an outgoing-header error message: TRAP-1);
+   *   · `api_key` / `api_secret` — the caller's RAW exchange credentials, which
+   *     this handler puts in the outgoing request body.
+   *
+   * ⚠️ `undefined` members are harmless — `scrubSeamString` skips non-strings —
+   * so the anonymous case (no session) needs no separate array.
+   */
+  const perRequestSecrets: readonly unknown[] = [
+    userAccessToken,
+    body.api_key,
+    body.api_secret,
+  ];
+
   const result = await postProcessKey({
     flow_type: "teaser",
     source: exchange,
@@ -270,6 +307,29 @@ async function unifiedVerifyStrategyHandler(
   const verificationId =
     typeof upstream.verification_id === "string" ? upstream.verification_id : null;
   if (upstream.ok !== true || !verificationId) {
+    // 140.3-13a / SEAMUX-08 — the CONTRACT-VIOLATION half of the capture policy
+    // (`admin/match/eval/route.ts`). A 2xx we cannot use is not a caller fault
+    // and not an expected infrastructure condition: either the upstream said
+    // `ok:false` on a 2xx, or its terminal-success builder dropped
+    // `verification_id`. Both are drift in a contract only we can fix, and
+    // neither produces any other alert — the caller just sees a 502.
+    //
+    // A SYNTHETIC Error, deliberately: the raw upstream body carries
+    // `encrypted_credentials` and is never handed to Sentry, exactly as the
+    // console line below already refuses to log it.
+    captureToSentry(
+      new Error("verify-strategy: upstream 2xx is not a usable verification"),
+      {
+        tags: { surface: "verify-strategy", step: "upstream-contract" },
+        extra: {
+          ok: String(upstream.ok),
+          upstream_code:
+            typeof upstream.code === "string" ? upstream.code : null,
+          has_verification_id: verificationId !== null,
+        },
+        secrets: perRequestSecrets,
+      },
+    );
     console.error(
       "[verify-strategy] upstream 2xx is not a usable verification:",
       {
@@ -305,6 +365,22 @@ async function unifiedVerifyStrategyHandler(
   try {
     admin = createAdminClient();
   } catch (configErr) {
+    // 140.3-13a / SEAMUX-08 — TERMINAL, UNCLASSIFIED. 🔴 The comment above
+    // ALREADY promised this fault would be "loud in logs/Sentry", and until
+    // this line the Sentry half of that sentence was false: `grep -c
+    // captureToSentry` on this file read 0. The claim is now true rather than
+    // removed, because a service-role client that will not construct is a
+    // permanent config fault that takes the whole anonymous teaser down and
+    // nothing else reports it.
+    //
+    // `secrets` names all three per-request credentials: a Supabase client
+    // constructor error can inline the key it was handed, and this handler is
+    // holding the caller's raw exchange material at the same time.
+    captureToSentry(configErr, {
+      tags: { surface: "verify-strategy", step: "admin-client-config" },
+      level: "fatal",
+      secrets: perRequestSecrets,
+    });
     console.error("[verify-strategy] createAdminClient config error:", configErr);
     return NextResponse.json(
       { error: "Verification service misconfigured" },
@@ -336,6 +412,14 @@ async function unifiedVerifyStrategyHandler(
       })
       .eq("id", verificationId);
     if (persistError) {
+      // 140.3-13a / SEAMUX-08 — TERMINAL, UNCLASSIFIED. The verification ran and
+      // succeeded upstream; only OUR write of the public_token failed, so the
+      // user is told "Failed to finalize" for work that already happened. There
+      // is no typed branch above this and no other alert on the path.
+      captureToSentry(persistError, {
+        tags: { surface: "verify-strategy", step: "public-token-persist" },
+        secrets: perRequestSecrets,
+      });
       console.error(
         "[verify-strategy] CT-3 public_token persist failed:",
         persistError,
@@ -346,6 +430,13 @@ async function unifiedVerifyStrategyHandler(
       );
     }
   } catch (err) {
+    // The THROWN twin of the arm above — a transport failure reaching Supabase
+    // rather than a returned PostgrestError. Same policy arm, same secrets, and
+    // separately captured because the two are separately reachable.
+    captureToSentry(err, {
+      tags: { surface: "verify-strategy", step: "public-token-persist-threw" },
+      secrets: perRequestSecrets,
+    });
     console.error("[verify-strategy] CT-3 public_token persist threw:", err);
     return NextResponse.json(
       { error: "Failed to finalize verification" },
