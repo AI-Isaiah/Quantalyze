@@ -52,6 +52,31 @@ export class CircuitOpenError extends Error {
   constructor(retryAfterS: number) {
     super("Analytics service circuit is open");
     this.name = "CircuitOpenError";
+    // Phase 140.2-11 / SEAMCORE-11 (A-15): fail loud on a value this class
+    // cannot honestly publish. `AnalyticsUpstreamError`, sixty lines away in
+    // `analytics-client.ts`, already `RangeError`s on a malformed HTTP status
+    // for exactly this reason — the value is forwarded onto the wire. This one
+    // is forwarded as a `Retry-After` HEADER by both seam clients
+    // (`String(err.retryAfterS)`), to callers including the anonymous
+    // verify-strategy teaser, and it accepted anything: `new
+    // CircuitOpenError(NaN)` put the bytes `Retry-After: NaN` on the wire.
+    //
+    // The shape is the sibling's: `Number.isInteger` (which rejects NaN,
+    // ±Infinity, a fractional value and every non-number without coercing)
+    // plus a range check. `Retry-After` is RFC-7231 delta-seconds, so a
+    // fractional value is as malformed as a NaN.
+    //
+    // NOT A CLAMP, DELIBERATELY. The value comes from a store read
+    // (`isBreakerOpen` → `Math.ceil((lock.expiresAtMs - now) / 1000)`, an
+    // encoded expiry since plan 140.2-07). Substituting 0 or the default
+    // cooldown would publish a plausible header and leave the broken read
+    // looking like a working one, with nothing downstream able to tell the
+    // difference. Every production caller passes a strictly-positive integer.
+    if (!Number.isInteger(retryAfterS) || retryAfterS < 0) {
+      throw new RangeError(
+        `CircuitOpenError: invalid retryAfterS ${String(retryAfterS)} (expected a non-negative integer number of seconds)`,
+      );
+    }
     this.retryAfterS = retryAfterS;
   }
 }
