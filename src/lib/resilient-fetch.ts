@@ -472,10 +472,36 @@ export const SEAM_BUDGETS: Record<
   },
   "process-key-sync": {
     timeoutMs: 60_000,
-    // The public lead-generating teaser reaches this budget ANONYMOUSLY
-    // (verify-strategy). Declaring nothing keeps an unauthenticated caller's
-    // blast radius at the global key alone, and no /process-key site raises a
-    // counting 503 naming a dependency at HEAD.
+    // ⚠️ ME-04 — THE PUBLIC TEASER REACHES THIS BUDGET ANONYMOUSLY
+    // (verify-strategy), AND `dependencies: []` IS NOT A CONTAINMENT.
+    //
+    // The previous comment here said declaring nothing "keeps an
+    // unauthenticated caller's blast radius at the global key alone". That
+    // reads as if the global key were the small one. It is the LARGEST:
+    // `breakerKeysFor` appends `BREAKER_KEY` to EVERY call site's check, so a
+    // lock on `breaker:railway` blocks all fifteen routes. Declaring nothing
+    // therefore puts the anonymous path on the WIDEST key in the system, not
+    // the narrowest. Pinned by "ME-04: the anonymous teaser's failures land on
+    // the key EVERY call site checks" in resilient-fetch.test.ts, so this
+    // statement cannot quietly revert to the comfortable one.
+    //
+    // The exposure is real and is ACCEPTED for now, not overlooked: five
+    // deadline expiries or transport failures inside the 30 s window open the
+    // global circuit for every authenticated user for one cooldown, and
+    // Vercel's 10 req/60 s per-IP cap is no defence against a distributed
+    // caller. Fail-open is doctrine and a fail-open breaker cannot be made
+    // safe against this by tightening it.
+    //
+    // WHY IT IS NOT FIXED HERE. The obvious fix — a dedicated `breaker:teaser`
+    // key — requires a new member of `SeamServiceDependency`, which is a CLOSED
+    // set hand-typed in this file, re-typed in `seam-discriminator`, pinned in
+    // `seam-constants.pin.test.ts`, and mirrored by `SERVICE_DEPENDENCIES` in
+    // `analytics-service/services/error_contract.py`, whose `_validate` REFUSES
+    // an unknown dependency. Adding one is a cross-language change, and this
+    // phase's fence is zero Python. It is also not a one-line re-key: this row
+    // is MIXED — the authenticated `csv-validate` / `csv-finalize` paths spend
+    // it too — so containment needs keying by CALLER, not by budget row, which
+    // is a change to SEAMCORE-01's keying model. Recorded for Phase 141.
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
@@ -1629,12 +1655,21 @@ export async function resilientFetch(
     // Headers, body, and cache pass through byte-for-byte. A dropped
     // `Authorization` turns a working call into a 401 the breaker would then
     // count as degradation, and a dropped `X-Service-Key` silently
-    // unauthenticates every analytics call. (`X-User-Id` is forwarded too, but
-    // it is UNSIGNED client input and is deliberately NOT what the Python
-    // limiter buckets on — the signed `X-Tenant-Claim` is. An earlier comment
-    // here claimed dropping `X-User-Id` re-opens the CT-4 cross-tenant
-    // rate-limit defect; that is false, and a false claim that plausibly masks
-    // a real defect is worth the line to correct.)
+    // unauthenticates every analytics call.
+    //
+    // (`X-User-Id` is forwarded too. It is SERVER-DERIVED at all five callers —
+    // `process-key-client` sends `args.userId`, which is `user.id` or the
+    // literal `"public"` at every caller route — but it travels UNSIGNED, so it
+    // is deliberately NOT what the Python limiter buckets on; the signed
+    // `X-Tenant-Claim` is.
+    //
+    // ⚠️ TWO CORRECTIONS HAVE NOW LANDED ON THIS ONE COMMENT, so read the next
+    // edit carefully. An earlier version claimed dropping `X-User-Id` re-opens
+    // the CT-4 cross-tenant rate-limit defect — false. Its replacement called
+    // the header "UNSIGNED client input" — also false, and in the direction
+    // that matters, because "client input" implies a caller can choose it and
+    // no caller can. Unsigned ON THE WIRE is the true statement and the one
+    // that actually justifies the limiter's choice.)
     res = await fetch(requestUrl, {
       ...requestInit,
       // A-23, and it outranks the call site deliberately: `follow` is the

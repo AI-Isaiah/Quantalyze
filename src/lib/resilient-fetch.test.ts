@@ -2154,6 +2154,39 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
   // lane, because every case that claimed to cover concurrency returned at the
   // still-live-lock guard before any `set`.
 
+  it("ME-04: the anonymous teaser's failures land on the key EVERY call site checks", async () => {
+    // ⚠️ THIS PINS AN UNCOMFORTABLE FACT ON PURPOSE.
+    //
+    // `process-key-sync` declares `dependencies: []`, and its comment used to
+    // say that keeps an unauthenticated caller's blast radius "at the global key
+    // alone" — as if the global key were the small one. It is the LARGEST:
+    // `breakerKeysFor` appends BREAKER_KEY to every call site's check. So the
+    // least-authenticated path in the system records onto the widest key, and
+    // the anonymous teaser can deny a logged-in user's `validate-key`.
+    //
+    // The exposure is ACCEPTED (fail-open is doctrine, and containment needs a
+    // `breaker:teaser` member of a closed set that is mirrored in Python —
+    // outside this phase's zero-Python fence; recorded for Phase 141). What is
+    // NOT acceptable is a comment that reads as though it were contained, so
+    // the true statement is asserted here and the comment now matches it.
+    const mod = await import("./resilient-fetch");
+
+    // Five failures on the key the anonymous `process-key-sync` row records to.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    // `validate-key` is an AUTHENTICATED, credential-bearing budget that shares
+    // no dependency with the teaser. It is blocked anyway.
+    const blocked = await mod.isBreakerOpen("validate-key");
+    expect(
+      blocked.open,
+      "The global key stopped suppressing unrelated call sites. If that is a " +
+        "deliberate change, ME-04's accepted exposure has changed with it and " +
+        "the process-key-sync comment must be re-derived rather than left.",
+    ).toBe(true);
+  });
+
   it("HI-01: a stale-reading concurrent instance cannot RATCHET a live lock", async () => {
     // The race `nx: true` exists for: instance B's read lands before instance
     // A's write, so B sees `null` and proceeds to the trip write with a live
