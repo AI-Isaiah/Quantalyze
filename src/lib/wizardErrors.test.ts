@@ -5,6 +5,7 @@ import {
   formatKeyError,
   gateFailureToWizardError,
   classifyKeyValidationError,
+  recogniseSeamErrorCode,
   WIZARD_ERROR_COPY,
   CSV_RULE_LABELS,
   CSV_UPLOAD_STEP_HEADINGS,
@@ -819,5 +820,86 @@ describe("classifyKeyValidationError — Phase 140 CircuitOpenError type branch 
     expect(blob.toLowerCase()).not.toMatch(/your key (is|was) (invalid|wrong|bad)/);
     // T-140-14: no upstream infrastructure detail reaches the wizard.
     expect(blob).not.toMatch(/circuit|breaker|upstash|redis|railway|http|localhost/i);
+  });
+});
+
+/**
+ * [140.3-01 / TS-09] The two seam codes the wizard could not name.
+ *
+ * THE SPLIT, STATED SO NEITHER PLAN ASSUMES THE OTHER DID IT. A union member is
+ * a TYPE and lands here. A copy string is a RENDER and belongs to 140.3's copy
+ * plan, alongside TS-35, so that copy is designed once against the whole
+ * surface rather than one site at a time. `WIZARD_ERROR_COPY` is a
+ * `Record<WizardErrorCode, …>`, so a member without an entry does not
+ * type-check — hence a minimal, explicitly NON-FINAL entry, marked in-file with
+ * the hand-off token `TODO-COPY-140.3-12`.
+ *
+ * ⚠️ Both codes are DISTINCT from members the union already had.
+ * `KEY_RATE_LIMIT` is the wizard's own classification of an EXCHANGE throttle
+ * reached through the substring cascade; `RATE_LIMITED` is the seam's machine
+ * code from the app-global `RateLimitExceeded` handler. `CSV_VALIDATION_FAILED`
+ * is a CSV-branch code; `VALIDATION_FAILED` is the seam's `RequestValidationError`
+ * code. Conflating either pair would render a CSV message for a 422 on the API
+ * path, or blame an exchange for our own limiter.
+ */
+describe("[140.3-01 / TS-09] seam machine codes are recognised, not collapsed to UNKNOWN", () => {
+  it("VALIDATION_FAILED and RATE_LIMITED are WizardErrorCode members with a copy entry", () => {
+    // Word-boundary, so the pre-existing CSV_VALIDATION_FAILED and
+    // KEY_RATE_LIMIT members cannot satisfy this by substring.
+    const codes = Object.keys(WIZARD_ERROR_COPY);
+    expect(codes).toContain("VALIDATION_FAILED");
+    expect(codes).toContain("RATE_LIMITED");
+    // The neighbours they must not be confused with are still there.
+    expect(codes).toContain("CSV_VALIDATION_FAILED");
+    expect(codes).toContain("KEY_RATE_LIMIT");
+  });
+
+  it("the recognition branch maps an incoming RATE_LIMITED to its member, not UNKNOWN", () => {
+    expect(
+      recogniseSeamErrorCode("RATE_LIMITED"),
+      "A seam code that has a wizard member must never fall through to " +
+        "UNKNOWN — that is the 'something went wrong, our team has been " +
+        "notified' dead end this obligation exists to close.",
+    ).toBe("RATE_LIMITED");
+  });
+
+  it("the recognition branch maps an incoming VALIDATION_FAILED to its member, not UNKNOWN", () => {
+    expect(recogniseSeamErrorCode("VALIDATION_FAILED")).toBe(
+      "VALIDATION_FAILED",
+    );
+  });
+
+  it("an unrecognised, absent, or prototype-shaped code answers UNKNOWN", () => {
+    expect(recogniseSeamErrorCode("SEAM_DEGRADED")).toBe("UNKNOWN");
+    expect(recogniseSeamErrorCode(null)).toBe("UNKNOWN");
+    expect(recogniseSeamErrorCode(undefined)).toBe("UNKNOWN");
+    // The lookup must not be a plain-object index: the body arrives over the
+    // wire, so `"constructor"` / `"toString"` would resolve to an inherited
+    // Function and be returned as if it were a WizardErrorCode.
+    expect(recogniseSeamErrorCode("constructor")).toBe("UNKNOWN");
+    expect(recogniseSeamErrorCode("toString")).toBe("UNKNOWN");
+    expect(recogniseSeamErrorCode("__proto__")).toBe("UNKNOWN");
+  });
+
+  it("both placeholder entries carry the exact hand-off token 140.3's copy plan greps to zero", () => {
+    // ⚠️ THIS TOKEN IS THE HAND-OFF MECHANISM, NOT DECORATION. 140.3's copy
+    // plan closes these two entries by grepping the token to 0; without it
+    // that plan's closing criterion is vacuous and the copy is silently never
+    // written. Asserted here rather than only in a shell so the hand-off is
+    // falsifiable in CI.
+    //
+    // The bare word "placeholder" is deliberately NOT the marker: this file
+    // already contains it three times (a live `SIZE_MB_PLACEHOLDER` constant
+    // used for file-size interpolation, plus two docblocks), so a generic grep
+    // would be unsatisfiable without deleting working code.
+    const source = readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8");
+    const matches = source.match(/TODO-COPY-140\.3-12/g) ?? [];
+    expect(
+      matches.length,
+      "Exactly one marker per non-final copy entry (VALIDATION_FAILED, " +
+        "RATE_LIMITED).",
+    ).toBe(2);
+    // The live interpolation machinery is untouched — it is not a copy marker.
+    expect((source.match(/SIZE_MB_PLACEHOLDER/g) ?? []).length).toBe(3);
   });
 });
