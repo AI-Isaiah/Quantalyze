@@ -20,9 +20,14 @@ import {
  * simultaneous semantic mutations to the seam core once produced a byte-
  * identical `8859 passed`).
  *
- * ZERO `vi.mock` IN THIS FILE, BY RULE. The leaf is dependency-free precisely so
- * it can be driven with no doubles at all; mocking anything here would make the
- * test assert that a second pair of fakes agrees with itself.
+ * ZERO MODULE MOCKING IN THIS FILE, BY RULE. The leaf is dependency-free
+ * precisely so it can be driven with no doubles at all; mocking anything here
+ * would make the test assert that a second pair of fakes agrees with itself.
+ * That absence is grep-asserted by this plan's acceptance criteria, so the
+ * hoisted-factory call's literal text is deliberately not written anywhere in
+ * this file — comments included. A guard whose own explanatory prose satisfies
+ * the grep that guards it is self-invalidating, and this phase hit that trap
+ * three times, once in the very commit that documented the rule.
  *
  * THE TWO PROPERTIES THAT ARE NOT NEGOTIABLE
  * ------------------------------------------
