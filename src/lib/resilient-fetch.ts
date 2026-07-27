@@ -1520,13 +1520,32 @@ export async function resilientFetch(
   // with a TypeError, a negative or absurd value with a RangeError — and it
   // used to do so from INSIDE the try. Validate at entry instead, and name the
   // offending value: it is a number the caller passed, never a secret.
-  if ("timeoutMsOverride" in init) {
+  // ⚠️ A VALUE CHECK, NOT `"timeoutMsOverride" in init` (ME-03). The declared
+  // type is `timeoutMsOverride?: number`, and under this repo's tsconfig (no
+  // `exactOptionalPropertyTypes`) an explicit `undefined` is type-IDENTICAL to
+  // an absent property. Testing PRESENCE therefore drew a distinction `tsc`
+  // cannot express: `{ ...base, timeoutMsOverride: maybeOverride }` — the
+  // ordinary way to forward an optional value — became a hard `SeamConfigError`
+  // whenever `maybeOverride` was undefined, which both clients then render as a
+  // dead upstream. `analytics-client` dodges it with a conditional spread, but
+  // that is a convention at one call site, not a mechanism. An explicit
+  // `undefined` now takes the row's declared budget, exactly as omitting the
+  // property does.
+  if (timeoutMsOverride !== undefined) {
     if (
       typeof timeoutMsOverride !== "number" ||
       !Number.isFinite(timeoutMsOverride) ||
       timeoutMsOverride < MIN_TIMEOUT_MS ||
       timeoutMsOverride > MAX_TIMEOUT_MS
     ) {
+      // ME-01 — LOG BEFORE THROWING, matching both URL branches below. This
+      // branch used to throw silently, so an invalid override was invisible in
+      // the operator log AND wore a dead-upstream envelope downstream. The
+      // value is a number the caller passed, never a secret, so naming it is
+      // safe and is the whole point.
+      console.error(
+        `[resilient-fetch] ${budgetKey}: CONFIG fault — invalid timeoutMsOverride ${String(timeoutMsOverride)}. This is a caller/deployment misconfiguration, NOT an analytics-service failure.`,
+      );
       throw new SeamConfigError(
         `[resilient-fetch] ${budgetKey}: invalid timeoutMsOverride ${String(timeoutMsOverride)} — expected a finite number of milliseconds between ${MIN_TIMEOUT_MS} and ${MAX_TIMEOUT_MS}`,
       );

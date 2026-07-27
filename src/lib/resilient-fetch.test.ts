@@ -1766,7 +1766,6 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
    */
   const INVALID_OVERRIDES: Array<[string, unknown]> = [
     ["NaN", Number.NaN],
-    ["undefined as a value", undefined],
     ["negative", -1],
     ["zero", 0],
     ["absurdly large", 1e15],
@@ -1797,6 +1796,71 @@ describe("[SEAMCORE-11 / A-22 + A-28] caller and config faults are NOT Railway d
       expect(shared.counters.limitCalls).toBe(0);
     },
   );
+
+  it("ME-03: an EXPLICIT undefined timeoutMsOverride falls back to the row's budget", async () => {
+    // ⚠️ WHY THIS MOVED OUT OF THE INVALID LIST.
+    //
+    // The guard was `if ("timeoutMsOverride" in init)` — PROPERTY PRESENCE, not
+    // value. The declared type is `timeoutMsOverride?: number`, and under this
+    // repo's tsconfig (no `exactOptionalPropertyTypes`) an explicit `undefined`
+    // is type-IDENTICAL to an absent property. So the core drew a distinction
+    // `tsc` cannot express: two call sites indistinguishable to the compiler,
+    // one succeeding and one throwing a hard `SeamConfigError` that both clients
+    // then render as a dead upstream — a 502 "could not reach the analytics
+    // service" caused by nothing but a spread.
+    //
+    // And the shape that triggers it is the ORDINARY one:
+    //   resilientFetch(key, path, { ...base, timeoutMsOverride: maybeOverride })
+    // `analytics-client` dodges it with a conditional spread, but that is a
+    // convention held at ONE call site, not a mechanism — nothing stops the
+    // other four, or a new one, from writing the natural form.
+    //
+    // Falling back to the row's declared budget is what an absent property
+    // already does, so this makes the two indistinguishable-to-tsc forms
+    // behave the same. It is NOT a silent degradation: the deadline used is the
+    // one SEAM_BUDGETS declares and SC-4b bounds.
+    const fetchMock = okFetch();
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+    const mod = await import("./resilient-fetch");
+
+    await mod.resilientFetch("bridge", "/api/portfolio-bridge", {
+      method: "POST",
+      timeoutMsOverride: undefined,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // 15 000, hand-typed: the `bridge` row's declared timeoutMs. Reading it back
+    // out of SEAM_BUDGETS would be the self-referential oracle this phase
+    // exists to remove — and this literal earned its keep immediately, catching
+    // a wrong first guess that a self-referential expectation would have
+    // silently agreed with.
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+    timeoutSpy.mockRestore();
+  });
+
+  it("ME-01: an invalid timeoutMsOverride LOGS before it throws, like both URL branches", async () => {
+    // The two URL config faults each `console.error` a line naming the fault as
+    // a deployment misconfiguration before throwing. This branch threw silently,
+    // so an invalid override was invisible in the operator log AND wore a
+    // dead-upstream envelope downstream — the worst of both.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    await mod
+      .resilientFetch("bridge", "/api/portfolio-bridge", {
+        method: "POST",
+        timeoutMsOverride: -1,
+      })
+      .catch(() => {});
+
+    const logged = errorSpy.mock.calls.map((a) => String(a[0])).join("\n");
+    expect(logged).toContain("CONFIG fault");
+    expect(logged).toContain("timeoutMsOverride");
+    // It must say whose fault it is, because the whole point of A-22/A-28 is
+    // that ops stop being pointed at Railway for our own config typo.
+    expect(logged).toContain("NOT an analytics-service failure");
+    errorSpy.mockRestore();
+  });
 
   it("a valid timeoutMsOverride still reaches AbortSignal.timeout", async () => {
     // The negative control for the validation above: a guard that rejected

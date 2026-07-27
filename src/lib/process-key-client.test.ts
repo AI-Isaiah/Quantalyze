@@ -188,6 +188,45 @@ describe("postProcessKey — Phase 140 / SEAM-04 CIRCUIT_OPEN envelope", () => {
     expect(failureResponse(result).headers.get("Retry-After")).toBe("7");
   });
 
+  it("ME-01: NAMES a SeamConfigError as our own config fault in the operator log", async () => {
+    // ⚠️ THE LOG HALF ONLY, AND THAT BOUNDARY IS DELIBERATE.
+    //
+    // A config fault took the UPSTREAM_NETWORK_ERROR 502 arm with
+    // human_message "Could not reach the ingestion service", so a malformed
+    // ANALYTICS_SERVICE_URL — our own deployment typo — read to ops as Railway
+    // being down. `analytics-client`'s sibling fix rethrows the class
+    // unwrapped; that is not available here, because this function is declared
+    // never to throw at its five caller routes.
+    //
+    // Giving the fault its own `code` and `human_message` is authoring
+    // user-facing copy, which is 140.3's fence. So this asserts the OPERATOR
+    // half now and the envelope stays as-is, recorded as an obligation rather
+    // than half-changed.
+    const { SeamConfigError } = await import("@/lib/resilient-fetch");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    coreSpy.mockRejectedValue(
+      new SeamConfigError(
+        "[resilient-fetch] ANALYTICS_SERVICE_URL is not a usable base URL",
+      ),
+    );
+
+    const result = await postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: { key_id: "k1" },
+      userId: "u1",
+      correlationId: "c-config",
+      routeTag: "keys/sync",
+    });
+
+    expect(result.ok).toBe(false);
+    const logged = errorSpy.mock.calls.map((a) => String(a[0])).join("\n");
+    expect(logged).toContain("CONFIG fault");
+    expect(logged).toContain("NOT a reason to blame Railway");
+    expect(logged).toContain("keys/sync");
+    errorSpy.mockRestore();
+  });
+
   it("does NOT flatten CIRCUIT_OPEN into the 504 UPSTREAM_TIMEOUT arm", async () => {
     coreSpy.mockRejectedValue(new CircuitOpenError(30));
     const result = await postProcessKey({

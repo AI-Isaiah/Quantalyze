@@ -762,6 +762,62 @@ describe("Phase 140 / SEAM-01 — analyticsRequest delegates to the resilience c
     expect(caught).toBe(tripped);
   });
 
+  it("ME-01: lets SeamConfigError propagate UNWRAPPED, and names it a CONFIG fault", async () => {
+    // ⚠️ A NAMED CLASS WITH NO CONSUMER IS A COMMENT, NOT A MECHANISM.
+    //
+    // `SeamConfigError` exists "to separate" a fault on OUR side from a dead
+    // upstream, and the BREAKER half of that separation works — the fault is
+    // raised above the classification window and records nothing. But the
+    // separation stopped at the core's boundary: no client and no route
+    // branched on it, so it took arm 3 here and became
+    // `NOT_REACHABLE_MESSAGE`. A malformed ANALYTICS_SERVICE_URL — our own
+    // deployment typo — reached the user as "the analytics service is not
+    // reachable" and pointed ops at Railway.
+    //
+    // `tenant-claim.ts` uses precisely this argument to justify a named class
+    // ("a configuration fault on OUR side reported as a dead upstream is the
+    // exact silent degradation these guards exist to prevent"), and
+    // `TenantClaimError` IS handled at both call sites. This closes the same
+    // gap for its sibling.
+    const { SeamConfigError } = await import("./resilient-fetch");
+    const configFault = new SeamConfigError(
+      "[resilient-fetch] ANALYTICS_SERVICE_URL is not a usable base URL",
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new Error("fetch must not be reached")),
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.doMock("./resilient-fetch", async () => {
+      const actual =
+        await vi.importActual<typeof import("./resilient-fetch")>(
+          "./resilient-fetch",
+        );
+      return {
+        ...actual,
+        resilientFetch: vi.fn().mockRejectedValue(configFault),
+      };
+    });
+    const mod = await import("./analytics-client");
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    // Identity, not instanceof: a re-wrapped look-alike is exactly the defect.
+    expect(caught).toBe(configFault);
+    expect((caught as Error).message).not.toMatch(/not reachable/i);
+    const logged = errorSpy.mock.calls.map((a) => String(a[0])).join("\n");
+    expect(logged).toContain("CONFIG fault");
+    expect(logged).toContain("not an upstream failure");
+    errorSpy.mockRestore();
+  });
+
   it("still maps a generic network throw to the 'not reachable' Error", async () => {
     vi.stubGlobal(
       "fetch",

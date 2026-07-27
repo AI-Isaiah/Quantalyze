@@ -12,6 +12,7 @@ import {
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
 import {
   resilientFetch,
+  SeamConfigError,
   SEAM_BUDGETS,
   type SeamBudgetKey,
   type SeamResponse,
@@ -305,6 +306,29 @@ async function analyticsRequest(
     //    as "the analytics service is not reachable" and the entire circuit
     //    feature would be invisible.
     if (err instanceof CircuitOpenError) {
+      throw err;
+    }
+    // 1b. ME-01 — a CONFIG fault on OUR side, rethrown UNWRAPPED and named.
+    //
+    // `SeamConfigError` exists "to separate" a deployment/caller fault from a
+    // dead upstream, and the BREAKER half of that separation already worked:
+    // the fault is raised above the classification window and records nothing.
+    // But the separation stopped at the core's boundary — no client branched on
+    // it, so a malformed `ANALYTICS_SERVICE_URL` or an invalid
+    // `timeoutMsOverride` took arm 3 below and reached the user as "the
+    // analytics service is not reachable", pointing ops at Railway for our own
+    // typo. That is verbatim the silent degradation `tenant-claim.ts` cites to
+    // justify a named class — and `TenantClaimError` IS handled at both call
+    // sites, while this one was handled nowhere.
+    //
+    // Rethrowing UNWRAPPED puts it in the callers' generic arms (a 500 "we
+    // failed", not a 502 "they are down"). Giving it its own ENVELOPE and copy
+    // is 140.3's fence, not this phase's.
+    if (err instanceof SeamConfigError) {
+      console.error(
+        `[analytics-client] CONFIG fault on ${path} — not an upstream failure, and NOT a reason to blame Railway:`,
+        scrubSeamString(err.message),
+      );
       throw err;
     }
     // 2. Deadline exceeded. STRICTLY BROADER than the pre-140 check

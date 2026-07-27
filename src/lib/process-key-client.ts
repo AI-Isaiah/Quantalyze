@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
   resilientFetch,
+  SeamConfigError,
   SEAM_BUDGETS,
   type SeamBudgetKey,
   type SeamResponse,
@@ -396,6 +397,29 @@ export async function postProcessKey(
           },
         ),
       };
+    }
+    // ME-01 — a CONFIG fault on OUR side is NAMED in the operator log before it
+    // takes the generic envelope below.
+    //
+    // `SeamConfigError` is raised above the classification window, so the
+    // breaker correctly hears nothing. What was missing is that nothing
+    // downstream could tell it apart from a dead upstream: it took the
+    // `UPSTREAM_NETWORK_ERROR` 502 arm with human_message "Could not reach the
+    // ingestion service", so a malformed `ANALYTICS_SERVICE_URL` — our own
+    // deployment typo — read to ops as Railway being down.
+    //
+    // ⚠️ THE LOG IS FIXED HERE; THE ENVELOPE IS NOT, DELIBERATELY. This function
+    // is declared never to throw at its five caller routes, so the sibling fix
+    // in `analytics-client` (rethrow unwrapped) is not available. Giving this
+    // fault its own `code` and `human_message` is authoring user-facing copy,
+    // which is 140.3's fence. Recorded as an obligation in
+    // `140.1-TS-OBLIGATIONS.md` rather than half-done here.
+    if (err instanceof SeamConfigError) {
+      console.error(
+        `[${tag}] CONFIG fault reaching /process-key — not an upstream failure, and NOT a reason to blame Railway:`,
+        scrubSeamError(err),
+        { correlation_id: correlationId },
+      );
     }
     // A body-read failure maps onto the taxonomy ALREADY here rather than
     // getting an envelope of its own: `deadlineExceeded` true is the same fact
