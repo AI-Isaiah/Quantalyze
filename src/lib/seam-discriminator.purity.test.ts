@@ -69,15 +69,31 @@ const LEAF_CODE = stripComments(
 /**
  * The leaf's exported surface, typed HERE as a literal.
  *
- * THREE members, and deliberately a SET rather than a lower bound. The closed
+ * FOUR members, and deliberately a SET rather than a lower bound. The closed
  * service-dependency vocabulary and the global-key literal are NOT exported and
  * must not become so: everything exported from a leaf is browser-reachable and
  * survives every wholesale seam mock, and a consumer that imported the
  * vocabulary could build its own key from it — the one thing threat T-140-01
  * exists to prevent. The verdict function is the ONE key builder.
+ *
+ * `seamDependencyName` was added by 140.3-11 / TS-18 and is the FOURTH member.
+ * The decision it records — and the reason it is a narrow, purpose-named
+ * extractor rather than an export of the private `nestedDetail` reader or a
+ * generic `field` getter — is written at its declaration in the leaf. Exporting
+ * `nestedDetail` would have handed every consumer the whole envelope and made
+ * the next hand-rolled `body.detail` branch a one-liner, which is the class
+ * `140.3-01` closed. A generic getter would have made this set unable to say
+ * WHICH fields are reachable, which is the only thing it is for.
+ *
+ * ⚠️ `140.3-15` needs `correlation_id` from the same envelope. It must add a
+ * FIFTH narrow member here (`seamCorrelationId`) built on the same private
+ * `nestedDetail`, NOT a private reader of its own and NOT a widening of this
+ * one. Two plans each inventing a reader for one leaf is the drift this
+ * programme exists to close.
  */
 const EXPECTED_EXPORTS: string[] = [
   "seamBreakerVerdict",
+  "seamDependencyName",
   "seamErrorCode",
   "seamHumanMessage",
 ];

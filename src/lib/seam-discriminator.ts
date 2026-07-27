@@ -206,6 +206,58 @@ export function seamHumanMessage(body: unknown): string | null {
 }
 
 /**
+ * The VENUE named by a nested envelope, safe to DISPLAY — never to key on.
+ *
+ * 140.3-11 / TS-18. Distinct from `serviceDependencyOf` above in both direction
+ * and purpose, and the pair must not be collapsed:
+ *
+ *   `serviceDependencyOf` answers "may this become a BREAKER KEY?" and admits
+ *      ONLY the closed service set. It is private, and stays private (T-140-01).
+ *   `seamDependencyName` answers "may this be SHOWN to a human as the third
+ *      party that failed?" and admits only names OUTSIDE that set.
+ *
+ * The two vocabularies are disjoint by CONTRACT, not by hope:
+ * `analytics-service/services/error_contract.py`'s `_validate` requires a
+ * non-empty `dependency` on a 424, refuses one that is a member of
+ * `SERVICE_DEPENDENCIES` ("a 424 names the caller's venue, and a fault in our
+ * own dependency is 500/503"), and refuses a venue name on a 500. Verified at
+ * that source on 2026-07-27 before this reader was written.
+ *
+ * The membership check below is DEFENCE IN DEPTH over that contract, and it is
+ * kept because this value reaches a human as an ATTRIBUTION. A body that named
+ * `supabase` here would tell an admin that the caller's exchange failed when
+ * OUR datastore did — theme 2 in reverse, and the one lie SEAMUX-04 exists to
+ * make impossible. Returning `null` degrades to the un-named venue state, which
+ * is truthful; rendering the name would not be.
+ *
+ * ⚠️ THE VENUE VOCABULARY IS OPEN AND MUST STAY OPEN. There is no allow-list of
+ * exchanges here and there must never be one: every venue we add would have to
+ * be added twice, and the failure mode of forgetting is that a real outage
+ * renders as no outage. The bound is on the SHAPE — a slug — not the value.
+ * That bound is not decoration: the string arrives over the wire, and an
+ * unbounded one would be rendered verbatim into an admin's screen.
+ *
+ * Returns `null` for BOTH flat shapes by construction (§2.1 — a scalar `detail`
+ * carries no dependency), which is the common case: the flat
+ * `VenueTransientHTTPException` 424 that `140.3-06` put on the wire names no
+ * venue at all. A caller that gets `null` has learned "a venue failed and the
+ * wire did not say which", and must render exactly that.
+ */
+export function seamDependencyName(body: unknown): string | null {
+  const detail = nestedDetail(body);
+  if (detail === null) return null;
+  const dependency = detail.dependency;
+  if (typeof dependency !== "string") return null;
+  // A slug: 1–40 chars of lowercase alphanumerics, dot, underscore or hyphen.
+  // Anchored at both ends, so a hostile value cannot smuggle a prefix or a
+  // newline past it. `mt5-gateway`, `binance`, `sfox` and `bybit` all satisfy it.
+  if (!/^[a-z0-9][a-z0-9._-]{0,39}$/.test(dependency)) return null;
+  // Ours, not the caller's — see the defence-in-depth note above.
+  if (SERVICE_DEPENDENCIES.includes(dependency)) return null;
+  return dependency;
+}
+
+/**
  * Does this response count against the analytics service's own health, and if
  * so, against which breaker key?
  *
@@ -265,10 +317,24 @@ export function seamBreakerVerdict(
   }
 
   if (status < 500) {
-    // ⚠️ 424 is NOT "the" venue signal (M-4). The CLASSIFIED venue-failure path —
-    // the one that actually fires — still answers 400 in the flat
-    // `{detail, code, recoverable}` shape. Every 4xx is breaker-inert BY
-    // CONSTRUCTION, so the sub-classes below change only what 140.3 renders.
+    // ⚠️ CORRECTED by 140.3-11. This comment used to read "the CLASSIFIED
+    // venue-failure path — the one that actually fires — still answers 400",
+    // and that stopped being true at commit 1f8ad052: `140.3-06` remapped all
+    // seven `VenueTransientHTTPException` sites from 400 to 424, so the path
+    // that actually fires answers 424 now. That plan's hardest acceptance
+    // criterion was zero `src/` diffs, so it routed the stale sentence here
+    // rather than smuggling the fix in. The verdict below was correct
+    // throughout and is unchanged — only the claim above it had rotted.
+    //
+    // Two 424 SHAPES are now on the wire and a consumer must handle both: the
+    // nested `service_error(424, dependency=<venue>)` envelope, which names the
+    // venue, and the flat `{detail, code, recoverable}` one, which carries no
+    // `dependency` key at all. `seamDependencyName` above returns `null` for
+    // the flat shape, and 140.3-11's consumers degrade to an un-named venue
+    // state rather than inventing one.
+    //
+    // Every 4xx is breaker-inert BY CONSTRUCTION, so the sub-classes below
+    // change only what 140.3 renders — that part was, and remains, correct.
     if (status === 424) {
       return {
         attributability: "caller-exchange",

@@ -19,6 +19,7 @@ import { ModeBadge, ScoreCell } from "@/components/admin/match/ModeBadge";
 import { MatchQueueSkeleton } from "@/components/admin/match/MatchQueueSkeleton";
 import { ShortcutHelpModal } from "@/components/admin/match/ShortcutHelpModal";
 import { ShortlistCard } from "@/components/admin/match/ShortlistCard";
+import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -250,6 +251,26 @@ export function AllocatorMatchQueue({
       // SyntaxError thrown here would replace the real failure with a parse error.
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
+        // 140.3-11 / TS-18 — a 424 is CALLER'S EXCHANGE (STATUS_CONTRACT §1,
+        // obligation O-1): the third party the caller named failed, it is
+        // recoverable, and it never counts against our own health. Collapsed
+        // into the generic arm below it reads as OUR outage — the theme-2 lie —
+        // and the founder re-runs a recompute that will fail identically until
+        // the venue returns.
+        //
+        // `dependency` is read from the ROUTE's flat `{error, dependency}` body,
+        // not from the seam envelope: the route already extracted it through
+        // `seamDependencyName`, which shape-checks the slug and refuses any name
+        // inside OUR closed service set. The `typeof` guard is the second half
+        // of that — this component treats its own route's body as untrusted too.
+        // It is `null` for the FLAT 424 shape, which carries no dependency at
+        // all, and the copy names no venue in that case rather than inventing
+        // one.
+        if (res.status === 424) {
+          const dependency =
+            typeof errBody.dependency === "string" ? errBody.dependency : null;
+          throw new Error(venueOutageMessage(dependency));
+        }
         throw new Error(
           typeof errBody.error === "string" && errBody.error
             ? errBody.error

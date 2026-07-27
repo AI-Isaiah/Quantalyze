@@ -147,8 +147,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       console.error(
         `[api/admin/match/eval] upstream ${err.status} (${err.seamCode ?? "no code"})`,
       );
+      // 140.3-11 / TS-18 — `dependency` rides along so a 424 can be rendered as
+      // the CALLER'S venue failing rather than as our outage. It is `null` on
+      // every other 4xx and on the flat 424 shape, and a consumer that sees
+      // `null` must say "a venue failed" without naming one.
       return NextResponse.json(
-        { error: err.message },
+        { error: err.message, dependency: err.dependency },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }

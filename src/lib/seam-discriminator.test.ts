@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   seamBreakerVerdict,
+  seamDependencyName,
   seamErrorCode,
   seamHumanMessage,
 } from "./seam-discriminator";
@@ -559,6 +560,100 @@ describe("[STATUS_CONTRACT §2.1 / O-5] human-string extraction", () => {
     expect(seamHumanMessage({ detail: null })).toBeNull();
     expect(seamHumanMessage({ detail: [] })).toBeNull();
     expect(seamHumanMessage({ detail: { detail: 7 } })).toBeNull();
+  });
+});
+
+/**
+ * 140.3-11 / TS-18 — the DISPLAYABLE venue name.
+ *
+ * Every expectation below is hand-typed. The two vocabularies this reader sits
+ * between are `analytics-service/services/error_contract.py`'s
+ * `SERVICE_DEPENDENCIES` (ours, closed) and the venue slugs (the caller's,
+ * open); `_validate` keeps them disjoint on the emit side and this reader
+ * refuses the overlap again on the consume side, because the value reaches a
+ * human as an ATTRIBUTION and a wrong one is the lie SEAMUX-04 exists to stop.
+ */
+describe("[140.3-11 / TS-18] the venue name a consumer may DISPLAY", () => {
+  it("nested envelope → the venue slug", () => {
+    expect(
+      seamDependencyName(
+        nested("EXCHANGE_UNAVAILABLE", "binance", true, "Binance is down."),
+      ),
+    ).toBe("binance");
+  });
+
+  it("a SECOND venue, to prove nothing is special-cased", () => {
+    // The venue vocabulary is OPEN. A reader that recognised one exchange and
+    // not another would render a real outage as no outage for every venue its
+    // author did not think of.
+    expect(
+      seamDependencyName(nested("DDOS_PROTECTION", "bybit", true, "Blocked.")),
+    ).toBe("bybit");
+    expect(
+      seamDependencyName(nested("EXCHANGE_UNAVAILABLE", "sfox", true, "Down.")),
+    ).toBe("sfox");
+  });
+
+  it("BOTH flat shapes → null, because they carry no dependency by construction", () => {
+    // The flat `VenueTransientHTTPException` 424 that 140.3-06 put on the wire
+    // is this case, and it is the common one. `null` means "a venue failed and
+    // the wire did not say which" — a consumer must render exactly that.
+    expect(
+      seamDependencyName(flatVenueTransient("EXCHANGE_UNAVAILABLE", "down")),
+    ).toBeNull();
+    expect(seamDependencyName(flatAppGlobal("RATE_LIMITED", "slow"))).toBeNull();
+    expect(seamDependencyName(bareScalar("down"))).toBeNull();
+  });
+
+  it("refuses every member of OUR closed service set — an outage of ours is never shown as the caller's venue", () => {
+    // Defence in depth over `_validate`, which already refuses these on a 424.
+    // Rendering `supabase` as "the venue that failed" would tell an admin the
+    // caller's exchange broke when OUR datastore did.
+    for (const ours of ["mt5-gateway", "kek", "supabase", "egress-proxy"]) {
+      expect(seamDependencyName(nested("X", ours, true, "msg"))).toBeNull();
+    }
+  });
+
+  it("refuses a value that is not a bounded lowercase slug", () => {
+    const rejected: unknown[] = [
+      "", // empty
+      "Binance", // upper case — the wire emits slugs
+      "binance exchange", // whitespace
+      "binance\nX-Injected: 1", // a newline, i.e. a header/log injection shape
+      "<img src=x onerror=alert(1)>", // markup
+      "-leading-hyphen",
+      "b".repeat(41), // past the 40-char bound
+      42,
+      null,
+      { slug: "binance" },
+      ["binance"],
+    ];
+    for (const value of rejected) {
+      expect(seamDependencyName({ detail: { dependency: value } })).toBeNull();
+    }
+    // ...and the bound is a bound, not a ban: 40 chars is still accepted.
+    expect(
+      seamDependencyName({ detail: { dependency: "b".repeat(40) } }),
+    ).toBe("b".repeat(40));
+  });
+
+  it("malformed and absent bodies yield null rather than throwing", () => {
+    // Same contract as the two readers beside it: this is called from inside a
+    // catch arm, where a throw would replace the real upstream error (TRAP-2).
+    for (const junk of [undefined, null, 42, "", {}, [], { detail: null }]) {
+      expect(() => seamDependencyName(junk)).not.toThrow();
+      expect(seamDependencyName(junk)).toBeNull();
+    }
+  });
+
+  it("does not log — an unrecognised venue is expected, not a drift signal", () => {
+    // `serviceDependencyOf` warns LOUDLY on an unknown name because there the
+    // value was supposed to be one of four. Here the set is open, so a name
+    // this reader has never seen is the normal case and a warning would be
+    // noise on every venue we ever add.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    seamDependencyName(nested("X", "a-venue-nobody-has-heard-of", true, "m"));
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
