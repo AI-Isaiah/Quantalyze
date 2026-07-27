@@ -8,6 +8,12 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
 // 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06).
 import { seamErrorCode, seamHumanMessage } from "@/lib/seam-discriminator";
+// 140.3-03 / SEAMUX-07 — the publish gate's contract, DERIVED from the same
+// LivePermissionsSchema the wizard's probe parses. Do not re-declare it here.
+import {
+  KeyPermissionsPayloadSchema,
+  type KeyPermissionsPayload,
+} from "@/lib/analytics-schemas";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import type { User } from "@supabase/supabase-js";
@@ -57,23 +63,28 @@ export const maxDuration = 300;
 const CIRCUIT_OPEN_COPY =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
-interface PermissionPayload {
-  read: boolean;
-  trade: boolean;
-  withdraw: boolean;
-  detected_at: string;
-  /**
-   * True when the Python service caught an exchange-side exception and
-   * returned the fail-CLOSED default ({read,trade,withdraw}=true). The
-   * field used to be silently stripped here because the interface did
-   * not include it, which made the frontend `KeyPermissionBadge` render
-   * the "No read permission detected — the key may have been revoked"
-   * warning whenever the exchange API was just temporarily down.
-   * Forwarding the flag lets the badge distinguish "exchange down" from
-   * "key actually revoked".
-   */
-  probe_error?: boolean;
-}
+/**
+ * 140.3-03 / SEAMUX-07 — the payload shape is no longer declared here.
+ *
+ * It used to be a route-local `interface` and the upstream body was cast to it
+ * with an unchecked assertion, which verifies nothing at runtime. The shape now
+ * comes from `KeyPermissionsPayloadSchema`, which DERIVES from the same
+ * `LivePermissionsSchema` the wizard's publish gate parses — one definition of
+ * the three boolean scopes across both members of this class, so they cannot
+ * drift apart again.
+ *
+ * `probe_error` survives the move and is still forwarded. It is true when the
+ * Python service caught an exchange-side exception and returned its fail-CLOSED
+ * default; the field used to be silently stripped here because the interface
+ * omitted it, which made `KeyPermissionBadge` render "No read permission
+ * detected — the key may have been revoked" whenever the exchange API was
+ * merely down. Forwarding it lets the badge distinguish "exchange down" from
+ * "key actually revoked".
+ *
+ * The imported `KeyPermissionsPayload` is used directly at both call sites
+ * below rather than re-aliased to a route-local name — a second name for one
+ * concept is how the two members of this class drifted in the first place.
+ */
 
 /**
  * Fetch the live permission triple from the Python service. Wrapped in
@@ -97,12 +108,12 @@ interface PermissionPayload {
  * decrypt, not a cache hit.
  */
 function makeCachedFetcher(keyId: string): {
-  fetchPermissions: () => Promise<PermissionPayload>;
+  fetchPermissions: () => Promise<KeyPermissionsPayload>;
   wasFreshDecrypt: () => boolean;
 } {
   let didDecrypt = false;
   const fetchPermissions = unstable_cache(
-    async (): Promise<PermissionPayload> => {
+    async (): Promise<KeyPermissionsPayload> => {
       didDecrypt = true; // runs only on a cache MISS
       const internalToken = process.env.INTERNAL_API_TOKEN;
       if (!internalToken) {
@@ -196,7 +207,45 @@ function makeCachedFetcher(keyId: string): {
       //    it needs no new arm, because the message-sniffing classifier's
       //    generic `PROBE_FAILED` 502 is the correct answer for it and no new
       //    user-facing copy belongs in this plan.
-      return (await res.json()) as PermissionPayload;
+      //
+      // 140.3-03 / SEAMUX-07 — THE UNCHECKED CAST IS GONE (the type name it
+      // asserted is deliberately not spelled out: the acceptance grep proving
+      // the cast is gone would otherwise match this very comment).
+      //
+      // A cast verifies nothing at runtime, so a 2xx `{}` reached
+      // `KeyPermissionBadge` as `{read: undefined, trade: undefined, withdraw:
+      // undefined}` and rendered as a CONFIDENT read-only verdict about a
+      // money-bearing key whose scopes were in fact unknown. The wizard's
+      // publish gate read the same upstream through the same defect
+      // (`strategies/finalize-wizard`); ONE schema and ONE fail-closed posture
+      // now cover both members.
+      //
+      // WHY A THROW RATHER THAN A RETURNED ERROR VALUE — this is the property
+      // that makes this member worse than its sibling. The fork writes the
+      // cache entry only after the callback RESOLVES (see note 2 above), so a
+      // throw leaves NO entry, while an error returned as a VALUE would be
+      // memoized: an unvalidated scope verdict replayed for 60 seconds to
+      // callers that never saw the body, surviving the request that produced
+      // it. Asserted behaviourally — a second call after a rejection must
+      // re-hit the upstream.
+      //
+      // The message is diagnostics-only and deliberately matches NONE of the
+      // handler's classifier substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
+      // `ECONNREFUSED`, `not configured`, `aborted`, `timeout`), so it lands on
+      // the route's existing generic `PROBE_FAILED` 502 — the same
+      // probe-failure envelope this route already returns. No new copy.
+      const parsed = KeyPermissionsPayloadSchema.safeParse(await res.json());
+      if (!parsed.success) {
+        throw new Error(
+          `permissions payload failed schema validation (fields: ` +
+            `${parsed.error.issues
+              .map(
+                (issue) => `${issue.path.join(".") || "<root>"}:${issue.code}`,
+              )
+              .join(", ")})`,
+        );
+      }
+      return parsed.data;
     },
     [`key-permissions:${keyId}`],
     { revalidate: 60, tags: [`key-permissions:${keyId}`] },
