@@ -76,6 +76,33 @@ const shared = vi.hoisted(() => {
      * cannot inherit a change to it.
      */
     sentinelOnLimit: false,
+    /**
+     * HI-01 / W-2 — simulate the CONCURRENT read the breaker's trip path races
+     * on, deterministically.
+     *
+     * When true, the NEXT `get` of a key beginning `breaker:` answers `null`
+     * whatever the store holds, and the flag disarms itself. That is exactly
+     * the observation a second Fluid Compute instance makes when its read lands
+     * before the first instance's write: it sees no lock and proceeds to the
+     * trip write. Nothing else in the repo can produce that interleaving — every
+     * existing "concurrency" case returns at the still-live-lock guard BEFORE
+     * any `set`, which is why `nx: true` was provably untested.
+     *
+     * A deterministic one-shot rather than a real race: two `Promise.all`
+     * drivers would interleave at whichever await happened to be reached first,
+     * which is a flake, not a falsifier.
+     */
+    staleReadOnce: false,
+    /**
+     * W-2 — force the store's `set` to answer `null` on a `breaker:` key.
+     *
+     * `written` gates `emitBreakerTransition("open", ...)`. A null reply is the
+     * store saying "another instance won the race and is emitting its own
+     * event"; claiming a transition here would double-count every trip across
+     * the fleet, which the code's own comment forbids. Nothing asserted that,
+     * because nothing could make the reply null.
+     */
+    nullOnBreakerSet: false,
   };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
@@ -159,6 +186,12 @@ vi.mock("@upstash/redis", async () => {
             if (shared.mode.throwOnGet) {
               throw new Error("upstash: connection reset");
             }
+            if (shared.mode.staleReadOnce && key.startsWith("breaker:")) {
+              // One-shot: the racing instance makes exactly ONE stale
+              // observation, then behaves normally.
+              shared.mode.staleReadOnce = false;
+              return null;
+            }
             return base.get(key);
           },
           mget: async (...keys: string[]) => {
@@ -178,6 +211,11 @@ vi.mock("@upstash/redis", async () => {
             opts?: { ex?: number; nx?: boolean },
           ) => {
             shared.counters.storeCommands += 1;
+            if (shared.mode.nullOnBreakerSet && key.startsWith("breaker:")) {
+              // The store refused the write. The value is deliberately NOT
+              // stored, because a null reply means it was not.
+              return null;
+            }
             return base.set(key, value, opts);
           },
         };
@@ -379,6 +417,11 @@ beforeEach(() => {
   // assertions pass for entirely the wrong reason.
   shared.mode.throwOnLimit = false;
   shared.mode.sentinelOnLimit = false;
+  // A leaked `staleReadOnce` would make the NEXT test's first breaker read
+  // answer null, and a leaked `nullOnBreakerSet` would silently disable every
+  // later trip — both produce "the breaker did not open" for the wrong reason.
+  shared.mode.staleReadOnce = false;
+  shared.mode.nullOnBreakerSet = false;
   shared.constructed.length = 0;
   shared.redisConfigs.length = 0;
   shared.counters.limitCalls = 0;
@@ -2011,9 +2054,14 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
     );
   });
 
-  it("emits NOTHING when a concurrent instance already armed the lock", async () => {
-    // `nx: true` refuses the write. No transition happened here, so claiming one
-    // would double-count every trip across instances.
+  it("emits NOTHING when the lock it would arm is already live", async () => {
+    // ⚠️ THE MECHANISM HERE IS THE STILL-LIVE-LOCK GUARD, NOT `nx` (LO-03).
+    // This case used to claim "`nx: true` refuses the write". It does not reach
+    // a `set` at all: both extra calls return at `if (existing.expiresAtMs >
+    // now) return;`, ahead of every write. Prose naming a mechanism the
+    // assertion never exercises is what concealed HI-01 from five reviews — the
+    // mirror of the comment-defeats-the-grep failure this phase hit repeatedly.
+    // The `nx` and race properties have their own cases below.
     const mod = await import("./resilient-fetch");
     for (let i = 0; i < 5; i++) {
       await mod.recordSeamFailure("breaker:railway");
@@ -2024,6 +2072,129 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
     await mod.recordSeamFailure("breaker:railway");
 
     expect(transitionsFrom(warnSpy)).toHaveLength(0);
+  });
+
+  // ── HI-01 / W-2 — the CONCURRENT trip, which nothing could reach ───────────
+  //
+  // Three properties ride on the trip write. All three were unfalsifiable:
+  // deleting `nx: true` left the entire suite green, including the real-Redis
+  // lane, because every case that claimed to cover concurrency returned at the
+  // still-live-lock guard before any `set`.
+
+  it("HI-01: a stale-reading concurrent instance cannot RATCHET a live lock", async () => {
+    // The race `nx: true` exists for: instance B's read lands before instance
+    // A's write, so B sees `null` and proceeds to the trip write with a live
+    // lock already in the store. `staleReadOnce` reproduces exactly that
+    // observation, deterministically.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+    const firstLock = shared.store.get("breaker:railway");
+    expect(firstLock).toBeDefined();
+    expect(transitionsFrom(warnSpy)).toHaveLength(1);
+
+    shared.mode.staleReadOnce = true;
+    await mod.recordSeamFailure("breaker:railway");
+
+    // The FIRST writer's lock stands, byte for byte. A blind write here re-arms
+    // a fresh cooldown on behalf of an instance that never observed a recovery
+    // — the R-3 ratchet, arriving through the one door the wave-7 guard cannot
+    // watch.
+    expect(
+      shared.store.get("breaker:railway")?.value,
+      "A concurrent instance whose read missed the lock OVERWROTE it. `nx: " +
+        "true` is the only thing standing between that and a cooldown that " +
+        "ratchets for as long as instances keep racing.",
+    ).toBe(firstLock?.value);
+    // ...and it claimed a transition that was not its own, double-counting one
+    // trip across the fleet (W-2).
+    expect(transitionsFrom(warnSpy)).toHaveLength(1);
+  });
+
+  it("W-2: emits NOTHING when the store refuses the trip write", async () => {
+    // `written` gates the open event. A null reply means another instance won
+    // the race and is emitting its own event, so claiming one here double-counts
+    // the trip — which the code's own comment forbids and nothing asserted,
+    // because nothing could make the reply null.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+    shared.mode.nullOnBreakerSet = true;
+
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    expect(transitionsFrom(warnSpy)).toHaveLength(0);
+    expect(shared.store.get("breaker:railway")).toBeUndefined();
+  });
+
+  it("HI-01: only ONE of N instances re-arming from the SAME tombstone claims the trip", async () => {
+    // ⚠️ THE BRANCH THAT ACTUALLY RACES, AND IT HAD NO `nx` AT ALL.
+    //
+    // A lock armed at t=0 expires at t=30; the key survives to t=90 as a
+    // tombstone. At t=31 Railway is still degraded, so N instances each hit the
+    // trip path within a few milliseconds. Each reads the tombstone (so the
+    // still-live-lock guard does not fire), each passes the A-25 admission
+    // guard, and each took the `else` branch — a BLIND write. Every one of them
+    // got a truthy reply, so every one of them emitted `seam.breaker.open` for
+    // ONE trip, and each write extended the expiry by its own write-time delta.
+    //
+    // The claim key is what serialises them: every instance racing off the same
+    // observation computes the same key from the tombstone it read, and exactly
+    // one `SET NX` wins. Seeding it here is the deterministic stand-in for
+    // "another instance got there first".
+    const mod = await import("./resilient-fetch");
+    const armedAtMs = Date.now() - 60_000;
+    const expiresAtMs = Date.now() - 30_000;
+    shared.store.set("breaker:railway", {
+      value: `open:${armedAtMs}:${expiresAtMs}`,
+      expiresAt: Date.now() + 30_000,
+    });
+    // Hand-typed against the core's template — literal against literal, never
+    // imported, so neither side can change silently.
+    shared.store.set(`breaker:railway:claim:${expiresAtMs}`, {
+      value: "1",
+      expiresAt: Date.now() + 90_000,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    expect(
+      shared.store.get("breaker:railway")?.value,
+      "A second instance re-armed from a tombstone another instance had " +
+        "already claimed. The tombstone branch is a BLIND write, so every " +
+        "racing instance wins it — N open events for one trip, and a cooldown " +
+        "that ratchets by each write's delta.",
+    ).toBe(`open:${armedAtMs}:${expiresAtMs}`);
+    expect(transitionsFrom(warnSpy)).toHaveLength(0);
+  });
+
+  it("HI-01: an UNCLAIMED tombstone still re-arms — the guard is exclusion, not a freeze", async () => {
+    // The negative control. Without it the case above passes on an
+    // implementation that simply never re-arms after a tombstone, which would
+    // disable the breaker for the whole 60s tombstone window.
+    const mod = await import("./resilient-fetch");
+    const armedAtMs = Date.now() - 60_000;
+    const expiresAtMs = Date.now() - 30_000;
+    shared.store.set("breaker:railway", {
+      value: `open:${armedAtMs}:${expiresAtMs}`,
+      expiresAt: Date.now() + 30_000,
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    expect(shared.store.get("breaker:railway")?.value).not.toBe(
+      `open:${armedAtMs}:${expiresAtMs}`,
+    );
+    expect(transitionsFrom(warnSpy)).toHaveLength(1);
   });
 
   it("emits a close event on the first observed closed-after-open read, sharing the open event's correlation id", async () => {
