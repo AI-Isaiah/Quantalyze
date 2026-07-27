@@ -314,7 +314,92 @@ describe("[SEAMCORE-06] scrubSeamError covers the shapes undici and the core pro
       const out = scrubSeamError(thrown);
       expect(typeof out).toBe("string");
       expect(out.length).toBeGreaterThan(0);
+      // ⚠️ TOTALITY IS NOT THE WHOLE CONTRACT, and asserting only totality is
+      // what let CR-01 ship. `typeof out === "string"` and `out.length > 0` are
+      // BOTH satisfied by the string `"[object Object]"`, so the two assertions
+      // above cannot redden for ANY rendering whatsoever — including the one
+      // that destroys the entire diagnosis. A renderer is useless if it is
+      // total and says nothing; pin the second half here.
+      expect(out).not.toBe("[object Object]");
     }
+  });
+
+  // ── CR-01 — the PLAIN-OBJECT branch ────────────────────────────────────────
+  //
+  // Supabase/PostgREST errors on the NON-throwing path are plain parsed-JSON
+  // objects, not `PostgrestError` instances: `postgrest-js` constructs the class
+  // only under `shouldThrowOnError`, and every `const { data, error } = await
+  // supabase…` in this repo takes the other path. `String(plainObject)` is
+  // `"[object Object]"`, so a renderer with no plain-object branch throws away
+  // the SQLSTATE, the message, the details and the hint — the A-10 harm,
+  // reintroduced by the mechanism meant to close it.
+
+  it("renders a PLAIN OBJECT's diagnostic fields rather than [object Object]", () => {
+    // Hand-typed to the shape a Node system error takes when it arrives as a
+    // plain object rather than an Error instance.
+    const out = scrubSeamError({
+      code: "ECONNREFUSED",
+      message: "connect ECONNREFUSED 10.0.0.1:8002",
+    });
+
+    expect(out).not.toBe("[object Object]");
+    // The PRESERVE side, asserted on a PLAIN OBJECT: the syscall token is the
+    // most valuable thing in the line and it must survive this branch too.
+    expect(out).toContain("ECONNREFUSED");
+    expect(out).toContain("10.0.0.1:8002");
+  });
+
+  it("preserves the SQLSTATE, message, details and hint of a PostgREST-shaped object", () => {
+    // The exact shape `finalize-wizard`'s six converted Supabase log sites hand
+    // to the leaf. Every field below is hand-typed; nothing is read back out of
+    // the module under test.
+    const out = scrubSeamError({
+      code: "42501",
+      message: "permission denied for table strategy_keys",
+      details: "RLS policy strategy_keys_owner_select denied the read",
+      hint: "check auth.uid() against owner_id",
+    });
+
+    expect(out).not.toBe("[object Object]");
+    expect(out).toContain("42501");
+    expect(out).toContain("permission denied for table strategy_keys");
+    expect(out).toContain("RLS policy strategy_keys_owner_select denied the read");
+    expect(out).toContain("check auth.uid() against owner_id");
+  });
+
+  it("still redacts a secret carried in a PLAIN OBJECT's field", () => {
+    // The plain-object branch must not become an under-redaction hole: it feeds
+    // `scrubSeamString` exactly like the `Error` branch does.
+    vi.stubEnv("INTERNAL_API_TOKEN", INTERNAL_TOKEN);
+
+    const out = scrubSeamError({
+      code: "ETIMEDOUT",
+      message: `upstream rejected authorization=Bearer ${INTERNAL_TOKEN}`,
+    });
+
+    expect(out).not.toContain(INTERNAL_TOKEN);
+    expect(out).toContain(REDACTED);
+    expect(out).toContain("ETIMEDOUT");
+  });
+
+  it("falls back to a serialisation for an object with NO named diagnostic field", () => {
+    // No `name`/`code`/`message`/`details`/`hint`/`errno`/`syscall`, and the
+    // INHERITED `Object.prototype.toString` renders "[object Object]". A
+    // serialisation is the only thing left that says anything at all.
+    const out = scrubSeamError({ status: 503, upstream: "railway" });
+
+    expect(out).not.toBe("[object Object]");
+    expect(out).toContain("503");
+    expect(out).toContain("railway");
+  });
+
+  it("keeps a USEFUL custom toString instead of serialising over it", () => {
+    // A `URL`, a `Date`, or any class with its own renderer says more through
+    // `toString()` than through its (empty) own-property set. The branch must
+    // only override the INHERITED "[object Object]", never a real renderer.
+    const out = scrubSeamError(new URL("https://analytics.internal:8002/health"));
+
+    expect(out).toContain("analytics.internal:8002");
   });
 
   it("terminates on a self-referential cause chain", () => {
