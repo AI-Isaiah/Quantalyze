@@ -136,6 +136,21 @@ export type WizardErrorCode =
   // ("something went wrong, our team has been notified"), which is both untrue
   // and un-actionable during an infra outage.
   | "SERVICE_UNAVAILABLE_RETRY"
+  // Phase 140.3-05 / SEAMUX-01 — we ISSUED the request to our own analytics
+  // service and never got an answer: the deadline fired, or the connection
+  // failed. `process-key-client` already names both on the wire
+  // (`UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR`) and `finalize-wizard`
+  // forwards that envelope verbatim, so this is a code the user's browser
+  // ALREADY receives — it simply had no wizard member and collapsed to UNKNOWN.
+  //
+  // ⚠️ NOT a duplicate of the three near-misses, and this file's own convention
+  // is what separates them:
+  //   · SERVICE_UNAVAILABLE_RETRY — we DECLINED to try (the breaker is open).
+  //   · KEY_NETWORK_TIMEOUT — we could not reach the EXCHANGE. Reusing it here
+  //     would assert a venue fault for a fault on our own hop, which is exactly
+  //     the "copy that asserts something false" class this phase exists to kill.
+  //   · KEY_PROBE_FAILED — the probe RAN and fail-closed.
+  | "SERVICE_UNREACHABLE"
   // Phase 140.3-01 / TS-09 — the two machine codes the APP-GLOBAL handlers in
   // `analytics-service/main.py` emit (STATUS_CONTRACT.md §2.1). Both arrive on
   // the FLAT wire shape, with the code at the TOP level of the body.
@@ -797,6 +812,28 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // TODO-COPY-140.3-12 — NON-FINAL, same rule as the two entries below: this
+  // exists so the `Record<WizardErrorCode, …>` type-checks now that
+  // SERVICE_UNREACHABLE is a union member. It is NOT a copy decision, and
+  // 140.3-12 closes it by grepping this token to 0.
+  //
+  // The `actions` ARE a decision and they are made here, not deferred: they
+  // drive `recoverable` through `RECOVERABLE_ACTIONS` in `src/lib/envelope.ts`,
+  // which is what decides whether a Retry control renders at all. A request
+  // that never reached us is retryable by definition, so `clear_and_retry`
+  // stays. `try_another_key` is deliberately ABSENT — the key is not implicated.
+  SERVICE_UNREACHABLE: {
+    title: "We could not reach our own service.",
+    cause:
+      "We sent the request and never got an answer back — the connection failed or ran out of time. Nothing was submitted and your draft is unchanged. This is on our side, not your key or your exchange.",
+    fix: [
+      "Wait a moment, then try again.",
+      "If it is still failing after a few minutes, contact security@quantalyze.com with your draft ID.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
   // TODO-COPY-140.3-12 — NON-FINAL. This entry exists so the
   // `Record<WizardErrorCode, …>` type-checks now that `VALIDATION_FAILED` is a
   // union member; it is NOT a copy decision. The final sentence is 140.3's copy
@@ -1104,11 +1141,27 @@ export function classifyKeyValidationError(error: unknown): {
  * wizard member and correctly answer `UNKNOWN`; writing the mapping as
  * `code as WizardErrorCode` would silently admit every one of them.
  *
- * ⚠️ SCOPE. This lands the TYPE half of TS-09. Wiring it into the emitters that
- * currently derive a code from a substring cascade is TS-35, and it belongs to
- * 140.3's copy plan — `classifyKeyValidationError`'s cascade above must NOT be
- * deleted until every emitter carries a code, or the class re-opens from the
- * other side.
+ * ⚠️ 140.3-05 / SEAMUX-01 — THE ONE DECISION ABOUT `CIRCUIT_OPEN`. Three
+ * production sites answer a breaker trip with the WIRE code `CIRCUIT_OPEN`
+ * (`strategies/finalize-wizard`, `keys/[id]/permissions`, and
+ * `process-key-client`'s forwarded 503). `CIRCUIT_OPEN` is deliberately NOT
+ * added to `WizardErrorCode`: `SERVICE_UNAVAILABLE_RETRY` already IS the wizard
+ * member for "the breaker is open, we declined to try, nothing was submitted",
+ * and minting a second member with the same meaning is how a vocabulary starts
+ * lying. It is an ALIAS, recorded here, in the ONE table — never a second local
+ * one at a consumer.
+ *
+ * The same reasoning admits `process-key-client`'s two transport codes. Those
+ * three wire codes are the complete set of non-`WizardErrorCode` codes that
+ * `finalize-wizard` can put in front of a user today; every one of them landed
+ * on UNKNOWN's "our team has been notified" before this entry existed.
+ * (`draft_state_invalid` and `COMPOSITE_UNSUPPORTED_UNIFIED` also reach
+ * SubmitStep without a wizard member — both are deliberately out of scope here
+ * and are recorded in the TS-35 ledger row, NOT silently absorbed.)
+ *
+ * ⚠️ SCOPE. TS-09's type half landed in 140.3-01. `classifyKeyValidationError`'s
+ * cascade must still NOT be deleted until every emitter carries a code, or the
+ * class re-opens from the other side.
  */
 const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<
   string,
@@ -1116,6 +1169,9 @@ const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<
 >([
   ["VALIDATION_FAILED", "VALIDATION_FAILED"],
   ["RATE_LIMITED", "RATE_LIMITED"],
+  ["CIRCUIT_OPEN", "SERVICE_UNAVAILABLE_RETRY"],
+  ["UPSTREAM_TIMEOUT", "SERVICE_UNREACHABLE"],
+  ["UPSTREAM_NETWORK_ERROR", "SERVICE_UNREACHABLE"],
 ]);
 
 export function recogniseSeamErrorCode(

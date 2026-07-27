@@ -6,7 +6,10 @@ import {
   FactsheetPreview,
   type FactsheetPreviewMetric,
 } from "@/components/strategy/FactsheetPreview";
-import { type WizardErrorCode } from "@/lib/wizardErrors";
+import {
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
+} from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
@@ -131,11 +134,35 @@ export function SubmitStep({
             // Recoverable copy renders the Retry affordance rather than
             // degrading to the generic UNKNOWN envelope.
             "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            // Phase 140.3-05 / SEAMUX-01 + SEAMUX-08 — the two members the
+            // seam's own outage codes translate onto. Before this, a breaker
+            // trip mid-outage rendered "Our team has been notified" AND
+            // reported `wizard_error {code:"UNKNOWN"}`, so the funnel could not
+            // tell an infra outage from a bad draft. Neither of these is
+            // reachable from a raw `data.code` — see the translation below.
+            "SERVICE_UNAVAILABLE_RETRY",
+            "SERVICE_UNREACHABLE",
           ],
         );
+        // 140.3-05 — TRANSLATE THE WIRE CODE FIRST, THEN CHECK MEMBERSHIP. The
+        // wire vocabulary and the wizard vocabulary are not the same set:
+        // finalize-wizard answers a breaker trip with `CIRCUIT_OPEN` (its own
+        // scope-probe arm at :493, and process-key-client's forwarded 503), and
+        // a seam transport failure with `UPSTREAM_TIMEOUT` /
+        // `UPSTREAM_NETWORK_ERROR`. None of the three is a WizardErrorCode, so
+        // all three failed the membership check below and fell to UNKNOWN.
+        //
+        // The mapping lives in `wizardErrors.ts` (`recogniseSeamErrorCode`) —
+        // the ONE wire→wizard table — never in a second copy here. The
+        // membership check is NOT weakened: an unrecognised wire code leaves
+        // `translated` at "UNKNOWN", `candidate` falls back to the raw code, and
+        // a raw code that is not a known finalize code still resolves to
+        // UNKNOWN exactly as before.
+        const translated = recogniseSeamErrorCode(data.code);
+        const candidate = translated === "UNKNOWN" ? data.code : translated;
         const surfaced: WizardErrorCode =
-          data.code && KNOWN_FINALIZE_CODES.has(data.code as WizardErrorCode)
-            ? (data.code as WizardErrorCode)
+          candidate && KNOWN_FINALIZE_CODES.has(candidate as WizardErrorCode)
+            ? (candidate as WizardErrorCode)
             : "UNKNOWN";
         setErrorCode(surfaced);
         trackForQuantsEventClient("wizard_error", {

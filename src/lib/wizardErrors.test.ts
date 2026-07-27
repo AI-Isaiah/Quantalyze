@@ -896,10 +896,77 @@ describe("[140.3-01 / TS-09] seam machine codes are recognised, not collapsed to
     const matches = source.match(/TODO-COPY-140\.3-12/g) ?? [];
     expect(
       matches.length,
-      "Exactly one marker per non-final copy entry (VALIDATION_FAILED, " +
-        "RATE_LIMITED).",
-    ).toBe(2);
+      "Exactly one marker per non-final copy entry. 140.3-01 left 2 " +
+        "(VALIDATION_FAILED, RATE_LIMITED); 140.3-05 adds 1 more " +
+        "(SERVICE_UNREACHABLE). 'At or above' is NOT the criterion — it is " +
+        "satisfied by adding a union member and emitting NO marker, in which " +
+        "case 140.3-12 closes only the markers that already existed and the " +
+        "new code ships with no copy, silently.",
+    ).toBe(3);
     // The live interpolation machinery is untouched — it is not a copy marker.
     expect((source.match(/SIZE_MB_PLACEHOLDER/g) ?? []).length).toBe(3);
+  });
+});
+
+/**
+ * [140.3-05 / SEAMUX-01] The wire codes the wizard could not name.
+ *
+ * THE ONE DECISION, PINNED HERE. `CIRCUIT_OPEN` is a WIRE code emitted by three
+ * production sites; it is deliberately NOT a `WizardErrorCode`, because
+ * `SERVICE_UNAVAILABLE_RETRY` already means exactly "the breaker is open, we
+ * declined to try, nothing was submitted". It is an ALIAS in the ONE wire→wizard
+ * table. These cases are what stops a later reader from "fixing" that by minting
+ * a second member with the same meaning.
+ *
+ * The two transport codes are the CLASS half. `process-key-client` emits
+ * `CIRCUIT_OPEN`, `UPSTREAM_TIMEOUT` and `UPSTREAM_NETWORK_ERROR`, and
+ * `finalize-wizard` forwards all three verbatim. Naming only the breaker would
+ * leave two siblings from the same helper on the "our team has been notified"
+ * dead end — the instance-fix signature this programme keeps hitting.
+ */
+describe("[140.3-05 / SEAMUX-01] the seam's outage wire codes translate onto real members", () => {
+  it("CIRCUIT_OPEN aliases onto SERVICE_UNAVAILABLE_RETRY rather than minting a second member", () => {
+    expect(
+      recogniseSeamErrorCode("CIRCUIT_OPEN"),
+      "A breaker trip must reach the member whose copy already says the pause " +
+        "is on our side and nothing was submitted.",
+    ).toBe("SERVICE_UNAVAILABLE_RETRY");
+    // …and the alias did NOT become a union member of its own. Two codes with
+    // one meaning is how a vocabulary starts lying, and PostHog `wizard_error
+    // {code}` values are contractually stable.
+    expect(Object.keys(WIZARD_ERROR_COPY)).not.toContain("CIRCUIT_OPEN");
+  });
+
+  it("both of process-key-client's transport codes translate onto SERVICE_UNREACHABLE", () => {
+    expect(recogniseSeamErrorCode("UPSTREAM_TIMEOUT")).toBe(
+      "SERVICE_UNREACHABLE",
+    );
+    expect(recogniseSeamErrorCode("UPSTREAM_NETWORK_ERROR")).toBe(
+      "SERVICE_UNREACHABLE",
+    );
+  });
+
+  it("SERVICE_UNREACHABLE renders real, non-UNKNOWN copy with a retry affordance", () => {
+    expect(Object.keys(WIZARD_ERROR_COPY)).toContain("SERVICE_UNREACHABLE");
+    const copy = formatKeyError("SERVICE_UNREACHABLE");
+    expect(copy.title).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.title);
+    expect(copy.cause).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.cause);
+    // `actions` is a BEHAVIOUR decision, not a copy decision: it drives
+    // `recoverable` in src/lib/envelope.ts, which drives whether a Retry
+    // control renders at all. A request that never reached us is retryable.
+    expect(copy.actions).toContain("clear_and_retry");
+    // It must not blame the key or the exchange for a fault on our own hop.
+    expect(copy.actions).not.toContain("try_another_key");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`;
+    expect(blob).not.toMatch(/circuit|breaker|upstash|redis|railway|http|localhost/i);
+  });
+
+  it("a code that merely LOOKS like a wire code is not admitted", () => {
+    // The table is closed and hand-typed: an upstream-supplied string selects a
+    // verdict ONLY by exact membership. No prefix match, no normalisation.
+    expect(recogniseSeamErrorCode("CIRCUIT_OPEN_BUT_NOT_REALLY")).toBe(
+      "UNKNOWN",
+    );
+    expect(recogniseSeamErrorCode("circuit_open")).toBe("UNKNOWN");
   });
 });

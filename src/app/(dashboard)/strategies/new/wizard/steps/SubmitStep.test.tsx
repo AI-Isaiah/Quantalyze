@@ -103,6 +103,125 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(payload.step).toBe("submit");
   });
 
+  // ============================================================
+  // Phase 140.3-05 / SEAMUX-01 + SEAMUX-08 — the breaker trip at finalize.
+  //
+  // `finalize-wizard` answers a breaker trip with the WIRE code
+  // `CIRCUIT_OPEN` (its own live-permissions scope-probe arm, and
+  // `process-key-client`'s forwarded 503). That is not a `WizardErrorCode`, so
+  // it failed `KNOWN_FINALIZE_CODES` and became `"UNKNOWN"` — rendering
+  // "Something went wrong. / We are not sure what happened. Our team has been
+  // notified…" during a Railway outage, AND reporting
+  // `wizard_error {code:"UNKNOWN"}` so the funnel could not tell an outage from
+  // a bad draft. ONE line, three simultaneous failures (correction C-9).
+  //
+  // ⚠️ ORACLE INDEPENDENCE: every expected sentence below is a LITERAL typed in
+  // this file. Reading `WIZARD_ERROR_COPY[code].title` on the expected side of
+  // an `expect` would make the assertion agree with any reword, including a
+  // reword back to the dead end (validation hazard #2).
+  // ============================================================
+
+  it("[140.3-05] a breaker trip (CIRCUIT_OPEN 503) renders the breaker's own copy, not UNKNOWN's", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CIRCUIT_OPEN",
+          human_message:
+            "The analytics service is temporarily unavailable. Please try again in a moment.",
+          correlation_id: "corr-1",
+          recoverable: true,
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // SERVICE_UNAVAILABLE_RETRY's title, typed as a literal here.
+    expect(
+      await screen.findByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    // …and UNKNOWN's dead end is GONE. Both halves matter: asserting only the
+    // presence of the new copy would still pass if both rendered.
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Our team has been notified/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.3-05] the same breaker trip emits wizard_error with the specific code, not UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "CIRCUIT_OPEN",
+          human_message:
+            "The analytics service is temporarily unavailable. Please try again in a moment.",
+          correlation_id: "corr-1",
+          recoverable: true,
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    const payload = findWizardError()!;
+    expect(payload.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(payload.code).not.toBe("UNKNOWN");
+    expect(payload.step).toBe("submit");
+  });
+
+  // The two OTHER wire codes `process-key-client` forwards through
+  // finalize-wizard. Fixing only `CIRCUIT_OPEN` and leaving these two on the
+  // dead end is the instance-fix signature this programme keeps hitting: same
+  // helper, same envelope, same line, same lie.
+  it.each([
+    ["UPSTREAM_TIMEOUT", 504],
+    ["UPSTREAM_NETWORK_ERROR", 502],
+  ])(
+    "[140.3-05] a seam transport failure (%s) surfaces SERVICE_UNREACHABLE, not UNKNOWN",
+    async (wireCode, status) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse(
+          {
+            ok: false,
+            code: wireCode,
+            human_message: "no answer",
+            correlation_id: "corr-2",
+            recoverable: true,
+          },
+          status,
+        ),
+      );
+      renderStep();
+      fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+      await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+      expect(findWizardError()!.code).toBe("SERVICE_UNREACHABLE");
+      expect(
+        await screen.findByText("We could not reach our own service."),
+      ).toBeInTheDocument();
+    },
+  );
+
+  // ANTI-REGRESSION CONTROL. The membership check is the reason a garbled or
+  // hostile `code` cannot poison the envelope copy. Widening it to a bare cast
+  // would be a regression dressed as a simplification, and this case is what
+  // makes that visible — it must keep passing after the translation step above.
+  it("[140.3-05] an unrecognised code still resolves to UNKNOWN — the membership check survives", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "CIRCUIT_OPEN_BUT_NOT_REALLY", error: "weird" }, 503),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("UNKNOWN");
+  });
+
   it("maps an unknown/garbled server code to UNKNOWN (poison guard)", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({ code: "TOTALLY_MADE_UP", error: "weird" }, 500),
