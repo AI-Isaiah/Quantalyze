@@ -415,6 +415,49 @@ describe("postProcessKey — X-Tenant-Claim (PYAPI-02)", () => {
     expect(mac).toBe(await hmacHex("internal-test-token", `${payload}.${exp}`));
     expect(payload).toBe("cross-lang-user");
   });
+
+  /**
+   * Phase 140.2-09 / TS-04 — the mint moved to `@/lib/tenant-claim` and gained
+   * fail-loud refusals, so a call that previously could not throw now can.
+   *
+   * TWO things are pinned here, and the SECOND is the one that matters. The
+   * refusal must not be reported as a dead upstream: minted inline in the
+   * headers object it would sit INSIDE the transport `try`, and the catch would
+   * classify a configuration fault on our side as `UPSTREAM_NETWORK_ERROR` 502
+   * — a silent degradation wearing a dying-Railway costume. It must also not
+   * ESCAPE, because `postProcessKey` has never thrown at any of its five caller
+   * routes and none of them has a catch for it.
+   */
+  it("REFUSES to call upstream (503, no fetch, not a 502) when the payload cannot be minted", async () => {
+    const fetchMock = mockFetchOk();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const result = await postProcessKey({
+      flow_type: "onboard",
+      source: "binance",
+      context: {},
+      // The empty-payload refusal. A claim over "" verifies perfectly and
+      // buckets EVERY caller to `process_key:t:` — one shared window wearing
+      // the costume of per-tenant isolation.
+      userId: "",
+      correlationId: "c1",
+      routeTag: "test-route",
+    });
+
+    expect(result.ok).toBe(false);
+    // No request may leave: an unmintable claim means we cannot honestly
+    // identify the tenant, and spending upstream capacity anyway is the
+    // platform-bucket regression this phase exists to close.
+    expect(fetchMock).not.toHaveBeenCalled();
+    if (result.ok) throw new Error("unreachable");
+    expect(result.response.status).toBe(503);
+    expect(result.response.status).not.toBe(502);
+    expect(errorSpy).toHaveBeenCalled();
+    // The log names the failure without echoing the secret.
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(
+      "internal-test-token",
+    );
+  });
 });
 
 /**

@@ -1,4 +1,3 @@
-import { createHmac } from "node:crypto";
 import { NextResponse } from "next/server";
 import { getCorrelationId } from "@/lib/correlation-id";
 import {
@@ -9,6 +8,7 @@ import {
 } from "@/lib/resilient-fetch";
 import { CircuitOpenError, SeamBodyReadError } from "@/lib/seam-errors";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import { mintTenantClaim } from "@/lib/tenant-claim";
 
 /**
  * Phase 19 / M-3 — shared client for the unified `/process-key` upstream.
@@ -76,48 +76,19 @@ const CIRCUIT_OPEN_HUMAN_MESSAGE =
   "The analytics service is temporarily unavailable. Please try again in a moment.";
 
 /**
- * Phase 140.1 / PYAPI-02 — how long a minted `X-Tenant-Claim` stays valid.
+ * Phase 140.1 / PYAPI-02 — the `X-Tenant-Claim` mint used to live HERE, as a
+ * module-private `mintTenantClaim` + `TENANT_CLAIM_TTL_SECONDS` pair.
  *
- * Short on purpose. The claim is a bearer of tenant identity for the rate
- * limiter, so a value captured from a log line or an intermediary must not be a
- * permanent key to that tenant's window. Five minutes is far longer than the
- * request it accompanies and far shorter than anything worth stealing.
+ * Phase 140.2-09 / TS-04 moved it, ALGORITHM UNCHANGED, to
+ * `src/lib/tenant-claim.ts`, because `analytics-client.ts` now mints the same
+ * header for the six rekeyed Python routes it reaches. Two copies of an HMAC
+ * construction that must also agree with a third implementation in another
+ * language is the drift class this programme exists to close. The "why no new
+ * secret" / "why not just X-User-Id" reasoning moved with it — read it there.
+ *
+ * The wire bytes are unchanged: `process-key-client.test.ts` still pins the same
+ * cross-language literal `analytics-service/tests/test_process_key.py` reads.
  */
-const TENANT_CLAIM_TTL_SECONDS = 300;
-
-/**
- * Mint the `X-Tenant-Claim` the Python limiter buckets on.
- *
- * Wire format `<payload>.<exp>.<hex-hmac-sha256>`, MAC over `"<payload>.<exp>"`,
- * key = `INTERNAL_API_TOKEN`. The verifying half is
- * `analytics-service/services/rate_limit.py:verify_tenant_claim`; the two are
- * pinned together by a copy-pasted fixture literal shared between
- * `process-key-client.test.ts` and `tests/test_process_key.py` (they cannot
- * import each other, so a shared literal is the only real proof they agree).
- *
- * WHY THIS EXISTS. `/process-key` used to be throttled by ONE 100/hour bucket
- * keyed on a hash of `INTERNAL_API_TOKEN` — a single shared platform secret, so
- * that was one window for every tenant at once. The landing-page teaser is
- * capped Vercel-side at 10 req/60s per IP = 600/hour, so a single anonymous
- * visitor could drain the entire platform's allowance in about ten minutes.
- *
- * WHY NOT JUST `X-User-Id` (which is already sent). It is unsigned
- * client-controlled input. Bucketing on it lets any holder of the internal
- * token set a fresh uuid per request and bypass the limiter entirely, or set a
- * victim's uuid and drain their window (the PR#241 red-team finding). The HMAC
- * is what makes the same identifier trustworthy at the limiter.
- *
- * WHY NO NEW SECRET. `INTERNAL_API_TOKEN` is already the credential this
- * endpoint authenticates with and is already present on both sides, so the
- * claim adds no new trust surface: an attacker who has it already holds full
- * `/process-key` auth, and the limiter is not the marginal loss.
- */
-function mintTenantClaim(payload: string, secret: string): string {
-  const exp = Math.floor(Date.now() / 1000) + TENANT_CLAIM_TTL_SECONDS;
-  const signed = `${payload}.${exp}`;
-  const mac = createHmac("sha256", secret).update(signed).digest("hex");
-  return `${signed}.${mac}`;
-}
 
 /**
  * Body-read fallback for the upstream response.
@@ -206,6 +177,46 @@ export async function postProcessKey(
   const budgetKey = budgetKeyFor(args.flow_type);
   const timeoutMs = SEAM_BUDGETS[budgetKey].timeoutMs;
 
+  /**
+   * Phase 140.2-09 / TS-04 — the claim is minted HERE, OUTSIDE the transport
+   * `try`, and that placement is load-bearing.
+   *
+   * The extraction to `@/lib/tenant-claim` added fail-loud refusals (empty
+   * payload, dotted payload, absent secret) to a call that previously could not
+   * throw. The mint used to sit inline in the headers object below — i.e. INSIDE
+   * the classification window — so a refusal would have been swallowed by the
+   * catch and reported to the caller as `UPSTREAM_NETWORK_ERROR` 502: a
+   * configuration fault on OUR side wearing a dead-Railway costume, which is the
+   * precise silent degradation the refusals exist to prevent.
+   *
+   * It does not THROW out of `postProcessKey` either. This function's declared
+   * type is `Promise<PostProcessKeyResult>` and it has never thrown at any of
+   * its five caller routes, none of which has a catch for it (see the ⚠️ block
+   * on `body` below). A refusal therefore takes the SAME shape as the
+   * missing-token 503 above: loud in the server log, clean envelope on the wire.
+   */
+  let tenantClaim: string;
+  try {
+    tenantClaim = mintTenantClaim(args.userId, internalToken);
+  } catch (err) {
+    const tag = args.routeTag ?? "process-key-client";
+    console.error(
+      `[${tag}] refusing to call /process-key — could not mint X-Tenant-Claim`,
+      {
+        correlation_id: correlationId,
+        // The mint's messages name the variable, never its value.
+        reason: err instanceof Error ? err.message : "unknown",
+      },
+    );
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { error: "Service unavailable" },
+        { status: 503 },
+      ),
+    };
+  }
+
   // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
   // run inside its classification window. Only `ok`, `status` and `json` are
   // used here, all of which the closed surface carries.
@@ -249,8 +260,10 @@ export async function postProcessKey(
         // is the ONE chokepoint: all five postProcessKey callers share this
         // headers assembly, so minting here is what makes per-tenant throttling
         // live end-to-end. Teaser callers pass userId "public", which mints the
-        // shared anonymous bucket rather than a tenant one.
-        "X-Tenant-Claim": mintTenantClaim(args.userId, internalToken),
+        // shared anonymous bucket rather than a tenant one. Minted ABOVE, not
+        // inline: see the tenantClaim block for why the call must not sit inside
+        // this try.
+        "X-Tenant-Claim": tenantClaim,
         // Phase 19.1 — forward the end user's access token so the unified
         // router can call user-auth SECURITY DEFINER RPCs (finalize_csv_strategy)
         // as the user. Only present for the CSV finalize step.
