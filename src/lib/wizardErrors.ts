@@ -60,6 +60,25 @@ export type WizardErrorCode =
   | "KEY_MT5_WRONG_SERVER"
   | "KEY_INVALID_FORMAT"
   | "KEY_IP_ALLOWLIST"
+  // Phase 140.3-05 / TS-35 — the two venue-transient verdicts that had no
+  // wizard member, read off the machine `code` the Python service has emitted
+  // on the wire since 140.1.2 (contract:
+  // `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json`).
+  //
+  //   KEY_EXCHANGE_UNAVAILABLE — wire `EXCHANGE_UNAVAILABLE`. The venue itself
+  //     is down or in a maintenance window (ccxt.ExchangeNotAvailable). Its
+  //     copy matched NO branch of the substring cascade, so a Binance
+  //     maintenance window during key-connect rendered as UNKNOWN/500 with no
+  //     retry affordance — the DOGFOOD-3 dead end.
+  //   KEY_VENUE_TRANSIENT — wire `DDOS_PROTECTION`. The venue's EDGE (WAF /
+  //     anti-DDoS) refused our request before the exchange ever saw it.
+  //     ⚠️ This one did NOT fall through — it silently matched the cascade's
+  //     `ip` + `allow` branch and rendered KEY_IP_ALLOWLIST, telling the user
+  //     their key has an IP allowlist problem when the truth is that a venue
+  //     edge blocked US. Invisible to an audit asking "does it reach UNKNOWN?"
+  //     (correction C-6), which is why it survived the original enumeration.
+  | "KEY_EXCHANGE_UNAVAILABLE"
+  | "KEY_VENUE_TRANSIENT"
   | "KEY_RATE_LIMIT"
   | "KEY_NETWORK_TIMEOUT"
   | "KEY_SCOPE_BROADENED"
@@ -339,6 +358,45 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     ],
     docsHref: "/security#egress-ips",
     actions: ["try_another_key", "request_call"],
+  },
+
+  // TODO-COPY-140.3-12 — NON-FINAL. Exists so the
+  // `Record<WizardErrorCode, …>` type-checks now that KEY_EXCHANGE_UNAVAILABLE
+  // is a union member; the final sentence is 140.3-12's to author against the
+  // whole surface at once. `actions` IS decided here — it drives `recoverable`
+  // via RECOVERABLE_ACTIONS in src/lib/envelope.ts and therefore whether a
+  // Retry control renders, which is behaviour, not copy. A venue maintenance
+  // window clears on its own, so `clear_and_retry` stays and `try_another_key`
+  // is ABSENT: a second key on the same venue fails identically.
+  KEY_EXCHANGE_UNAVAILABLE: {
+    title: "The exchange is not available right now.",
+    cause:
+      "The venue reported that it is unavailable — usually a maintenance window or an outage on their side. Your key was not stored and nothing was submitted. This is not a problem with your key.",
+    fix: [
+      "Wait a few minutes and try again — venue maintenance windows are usually short.",
+      "Check your exchange's status page if it keeps failing.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  // TODO-COPY-140.3-12 — NON-FINAL, same rule as the entry above.
+  //
+  // ⚠️ WHAT THIS COPY MUST NOT SAY, and the reason the code exists. Before
+  // TS-35 this verdict rendered KEY_IP_ALLOWLIST — "This key has an IP
+  // allowlist that does not include Quantalyze" — and sent the user to edit
+  // restrictions on a key that was never the problem. The block is at the
+  // VENUE'S edge, against us. Never re-attach an allowlist instruction here.
+  KEY_VENUE_TRANSIENT: {
+    title: "The exchange blocked our request at its edge.",
+    cause:
+      "The venue's edge protection refused the request before the exchange itself saw it. It is aimed at where the request came from, not at your key. Your key was not stored and nothing was submitted.",
+    fix: [
+      "Wait a moment and try again — these blocks are usually short-lived.",
+      "If it keeps failing, contact security@quantalyze.com so we can raise it with the venue.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
   },
 
   KEY_RATE_LIMIT: {
@@ -1006,6 +1064,79 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
 }
 
 /**
+ * Phase 140.3-05 / TS-35 — the venue-transient wire vocabulary, mapped
+ * EXPLICITLY onto wizard verdicts.
+ *
+ * WHAT THIS REPLACES. `classifyKeyValidationError` below derived both the
+ * wizard code and the returned HTTP status from a substring cascade over the
+ * HUMAN string, discarding the machine code entirely. Phase 140.1.2 made all
+ * seven venue-transient sites emit a stable `code` on the wire; nothing read
+ * it. Replaying the cascade's real predicates over the committed contract
+ * bytes, three of the six real verdicts were wrong — and only two of the three
+ * were visible as UNKNOWN:
+ *
+ *   EXCHANGE_UNAVAILABLE  -> UNKNOWN 500            (a venue outage as a mystery)
+ *   NETWORK_UNAVAILABLE   -> UNKNOWN 500            (a two-string near-miss)
+ *   DDOS_PROTECTION       -> KEY_IP_ALLOWLIST 502   (a venue WAF block blamed
+ *                                                    on the user's key — silent)
+ *
+ * WHY A `Map` AND NOT A `Record`, restated because it is a security property,
+ * not a style choice: the key arrives OVER THE WIRE. A plain-object index
+ * resolves `"constructor"`, `"toString"` and `"__proto__"` to inherited
+ * members, so `TABLE[code] ?? fallback` would hand back a Function typed as a
+ * verdict. A `Map` has no inherited keys. Same reasoning as
+ * `SEAM_CODE_TO_WIZARD_CODE` below.
+ *
+ * WHY IT IS A LOOKUP AND NEVER A SUBSTRING TEST. The `TYPE CHECK FIRST, BY
+ * DESIGN` note in the function below argues this for the breaker's code, and
+ * the argument is not specific to it: a substring branch is simultaneously too
+ * narrow (any reword upstream silently re-opens the cascade) and too broad (an
+ * unrelated message containing the token is mislabelled), and in a cascade it
+ * loses to whichever earlier branch the message happened to collide with,
+ * because ORDERING decides, not specificity.
+ *
+ * THE TABLE IS CLOSED AND HAND-TYPED. An upstream-supplied code that is not a
+ * member — the contract's own `ZZ_UNRECOGNISED_VENUE_CODE` control, or a venue
+ * code minted after this table was written — falls through to the cascade and
+ * then to UNKNOWN. There is no dynamic key construction and no `code as
+ * WizardErrorCode` shortcut, which would admit every future string unchecked.
+ *
+ * ⚠️ `RATE_LIMITED` IS IN TWO WIRE VOCABULARIES WITH TWO MEANINGS, and that is
+ * why this table is separate from `SEAM_CODE_TO_WIZARD_CODE`. Here it is the
+ * VENUE throttling us (venue-transient contract, `KEY_RATE_LIMIT`); there it is
+ * OUR OWN limiter refusing the request (the app-global `RateLimitExceeded`
+ * handler, `RATE_LIMITED`). Merging the two tables would force one answer onto
+ * both producers and blame a venue for our own limit, or the reverse. Telling
+ * them apart needs the upstream STATUS (400 vs 429), which this function still
+ * discards — that is TS-32 / TS-34's, deliberately not smuggled in here.
+ *
+ * ⚠️ The wire `recoverable` flag is NOT read. `recoverable` on the wizard side
+ * is derived from `actions` (`src/lib/envelope.ts`) and is a RENDER hint. The
+ * two are not the same predicate — the contract marks `AUTH_FAILED`
+ * non-recoverable because retrying the SAME credentials cannot help, while the
+ * wizard offers `clear_and_retry` because entering DIFFERENT credentials can.
+ * The divergence is deliberate, and pinned in the parity test. Do not wire
+ * either into an automated retry loop; retry is Phase 141 (rider W-4).
+ */
+const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
+  string,
+  { code: WizardErrorCode; status: number }
+> = new Map([
+  // Already correct through the cascade; mapped explicitly so the verdict no
+  // longer depends on an accident of substring ordering.
+  ["RATE_LIMITED", { code: "KEY_RATE_LIMIT", status: 503 }],
+  ["PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],
+  ["AUTH_FAILED", { code: "KEY_AUTH_FAILED", status: 400 }],
+  // The three the cascade got wrong.
+  ["EXCHANGE_UNAVAILABLE", { code: "KEY_EXCHANGE_UNAVAILABLE", status: 503 }],
+  // Reuses the existing member: "We could not reach the exchange" is exactly
+  // what this verdict means, so a new member would be a second code with one
+  // meaning.
+  ["NETWORK_UNAVAILABLE", { code: "KEY_NETWORK_TIMEOUT", status: 502 }],
+  ["DDOS_PROTECTION", { code: "KEY_VENUE_TRANSIENT", status: 503 }],
+]);
+
+/**
  * Classify a caught key-validation exception into a stable wizard error code +
  * HTTP status. SINGLE source of truth for the wizard's key-entry routes
  * (`create-with-key` and `composite/add-key`, which fed byte-identical inline
@@ -1047,6 +1178,33 @@ export function classifyKeyValidationError(error: unknown): {
   // decides the substring cascade.
   if (error instanceof CircuitOpenError) {
     return { code: "SERVICE_UNAVAILABLE_RETRY", status: 503 };
+  }
+
+  // ⚠️ Phase 140.3-05 / TS-35 — THE MACHINE CODE, READ BEFORE THE MESSAGE IS
+  // SNIFFED. Position is load-bearing in both directions: BELOW the type check
+  // (a `CircuitOpenError` carries no wire body, and the breaker verdict must
+  // never be decided by anything an upstream can set), and ABOVE the cascade
+  // (otherwise a message that happens to collide with an earlier substring
+  // branch keeps winning, which is exactly how DDOS_PROTECTION was rendering as
+  // KEY_IP_ALLOWLIST).
+  //
+  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`. Sixteen
+  // route test files `vi.mock("@/lib/analytics-client")` wholesale, so
+  // `AnalyticsUpstreamError` is `undefined` inside those suites and an
+  // `instanceof` here would throw from inside a catch block. `seamCode` is an
+  // own property assigned in that class's constructor (140.3-01), so this read
+  // survives every mock shape and simply answers `undefined` when the thrower
+  // was not the seam client. The cast is to an optional-property shape, never
+  // to the class.
+  const seamCode = (error as { seamCode?: unknown } | null | undefined)
+    ?.seamCode;
+  if (typeof seamCode === "string") {
+    const verdict = VENUE_WIRE_CODE_TO_VERDICT.get(seamCode);
+    // No `??` fallback here BY DESIGN: an unrecognised wire code must fall
+    // through to the cascade below rather than short-circuit to UNKNOWN, so a
+    // venue code minted after this table was written still gets whatever the
+    // human string can earn it.
+    if (verdict !== undefined) return verdict;
   }
 
   // `String(error)` keeps the classifier TOTAL: `throw {…}` / `throw undefined`

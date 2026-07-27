@@ -16,6 +16,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+// 140.3-05 / TS-35 — the REAL classifier, imported directly. Nothing between it
+// and the real thrown error: that gap is where "the helper works but nothing
+// calls it" hides.
+import { classifyKeyValidationError } from "./wizardErrors";
 
 vi.mock("server-only", () => ({}));
 
@@ -1804,5 +1808,76 @@ describe("[140.3-01 / TS-05] analytics-client reads the seam error body through 
     expect(
       (caught as InstanceType<typeof mod.AnalyticsUpstreamError>).seamCode,
     ).toBeNull();
+  });
+
+  // ============================================================
+  // [140.3-05 / TS-35] The WIRING, not the helper.
+  //
+  // `classifyKeyValidationError`'s new branch reads a `seamCode` property off
+  // the caught value. A unit test that hands it a hand-built object proves the
+  // branch works; it does NOT prove the seam client actually PUTS that property
+  // on what it throws, which is the half that has silently broken before in
+  // this programme. These two cases drive the REAL client over the REAL
+  // venue-transient wire shape and hand the REAL throwable to the REAL
+  // classifier — no mocked module between them.
+  //
+  // The bodies are byte-identical to
+  // `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json`,
+  // typed here as literals. `status` is NOT asserted as a literal: plan
+  // 140.3-06 remaps 400 -> 424 in the next wave and these cases must survive it.
+  // ============================================================
+
+  it("[140.3-05 / TS-35] a venue-transient body's flat `code` reaches the thrown error, and the classifier reads it", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail:
+            "Exchange blocked the validation request at the edge (DDoS / WAF protection). Check region / IP allowlist.",
+          code: "DDOS_PROTECTION",
+          recoverable: true,
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { mod, caught } = await caughtFrom(fetchMock);
+
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    const err = caught as InstanceType<typeof mod.AnalyticsUpstreamError>;
+    expect(err.seamCode).toBe("DDOS_PROTECTION");
+    // The property must be an OWN data property, readable with `typeof` and
+    // never `instanceof`: sixteen route test files mock this module wholesale,
+    // so the class identity is unavailable inside the catch arms that consume
+    // this value.
+    expect(Object.hasOwn(err, "seamCode")).toBe(true);
+    // …and the real classifier, driven by the real throwable, no longer blames
+    // the user's key for a block at the venue's edge.
+    expect(classifyKeyValidationError(err).code).toBe("KEY_VENUE_TRANSIENT");
+  });
+
+  it("[140.3-05 / TS-35] the headline venue outage survives the whole client→classifier path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "Exchange is currently unavailable. Try again in a few minutes.",
+          code: "EXCHANGE_UNAVAILABLE",
+          recoverable: true,
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const { caught } = await caughtFrom(fetchMock);
+
+    expect((caught as { seamCode?: unknown }).seamCode).toBe(
+      "EXCHANGE_UNAVAILABLE",
+    );
+    expect(
+      classifyKeyValidationError(caught).code,
+      "A Binance maintenance window during key-connect rendered as UNKNOWN/500 " +
+        "'something went wrong, our team has been notified' with no retry " +
+        "affordance. The machine code has been on the wire since 140.1.2; " +
+        "nothing read it.",
+    ).toBe("KEY_EXCHANGE_UNAVAILABLE");
   });
 });

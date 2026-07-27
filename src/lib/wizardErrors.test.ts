@@ -897,12 +897,13 @@ describe("[140.3-01 / TS-09] seam machine codes are recognised, not collapsed to
     expect(
       matches.length,
       "Exactly one marker per non-final copy entry. 140.3-01 left 2 " +
-        "(VALIDATION_FAILED, RATE_LIMITED); 140.3-05 adds 1 more " +
-        "(SERVICE_UNREACHABLE). 'At or above' is NOT the criterion — it is " +
-        "satisfied by adding a union member and emitting NO marker, in which " +
-        "case 140.3-12 closes only the markers that already existed and the " +
-        "new code ships with no copy, silently.",
-    ).toBe(3);
+        "(VALIDATION_FAILED, RATE_LIMITED); 140.3-05 adds 3 " +
+        "(SERVICE_UNREACHABLE, KEY_EXCHANGE_UNAVAILABLE, KEY_VENUE_TRANSIENT). " +
+        "'At or above' is NOT the criterion — it is satisfied by adding union " +
+        "members and emitting NO marker, in which case 140.3-12 closes only " +
+        "the markers that already existed and the new codes ship with no copy, " +
+        "silently.",
+    ).toBe(5);
     // The live interpolation machinery is untouched — it is not a copy marker.
     expect((source.match(/SIZE_MB_PLACEHOLDER/g) ?? []).length).toBe(3);
   });
@@ -968,5 +969,223 @@ describe("[140.3-05 / SEAMUX-01] the seam's outage wire codes translate onto rea
       "UNKNOWN",
     );
     expect(recogniseSeamErrorCode("circuit_open")).toBe("UNKNOWN");
+  });
+});
+
+/**
+ * [140.3-05 / TS-35] `classifyKeyValidationError` reads the machine code before
+ * it sniffs the human string.
+ *
+ * These are UNIT cases over hand-built throwables. The cross-language half —
+ * the same classifier driven over the COMMITTED Python contract bytes — is
+ * `tests/lib/validate-key-venue-transient-parity.test.ts`. Both exist on
+ * purpose: this file pins the branch's SHAPE (ordering, fall-through, the
+ * property read), the parity file pins its AGREEMENT with the other language.
+ *
+ * The messages below are the byte-identical wire copy from
+ * `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json`,
+ * typed here as literals. They are what make the "without the code branch this
+ * lands somewhere else" claim checkable rather than asserted.
+ */
+describe("[140.3-05 / TS-35] the wire code decides before the substring cascade does", () => {
+  /** A seam client throw: a plain Error carrying the own `seamCode` property. */
+  function seamThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  it("EXCHANGE_UNAVAILABLE no longer falls through to UNKNOWN/500", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(
+        "Exchange is currently unavailable. Try again in a few minutes.",
+        "EXCHANGE_UNAVAILABLE",
+      ),
+    );
+    expect(
+      verdict.code,
+      "A venue maintenance window rendered as 'something went wrong, our team " +
+        "has been notified' with no retry affordance — the DOGFOOD-3 dead end.",
+    ).toBe("KEY_EXCHANGE_UNAVAILABLE");
+    expect(verdict.status).toBe(503);
+    // The same message with NO code still lands where it always did. This is
+    // what proves the code — not a reworded predicate — moved the verdict.
+    expect(
+      classifyKeyValidationError(
+        new Error("Exchange is currently unavailable. Try again in a few minutes."),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("NETWORK_UNAVAILABLE no longer falls through to UNKNOWN/500", () => {
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Network error reaching the exchange. Check connectivity and try again.",
+          "NETWORK_UNAVAILABLE",
+        ),
+      ),
+    ).toEqual({ code: "KEY_NETWORK_TIMEOUT", status: 502 });
+    expect(
+      classifyKeyValidationError(
+        new Error(
+          "Network error reaching the exchange. Check connectivity and try again.",
+        ),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("a venue WAF block (DDOS_PROTECTION) is no longer rendered as the user's own IP allowlist", () => {
+    // ⚠️ THE MEMBER THE ORIGINAL ENUMERATION MISSED (correction C-6). This one
+    // never reached UNKNOWN, so an audit asking "does it fall through?" could
+    // not see it: the detail ends "Check region / IP allowlist." and the
+    // cascade's fifth branch tests for `ip` AND `allow`, so a block at the
+    // VENUE's edge was rendered as "This key has an IP allowlist that does not
+    // include Quantalyze" and the user was sent to edit a key that was never
+    // the problem.
+    const detail =
+      "Exchange blocked the validation request at the edge (DDoS / WAF protection). Check region / IP allowlist.";
+    const verdict = classifyKeyValidationError(
+      seamThrow(detail, "DDOS_PROTECTION"),
+    );
+    expect(verdict.code).toBe("KEY_VENUE_TRANSIENT");
+    expect(
+      verdict.code,
+      "A venue edge block must never be presented as a fault in the user's key.",
+    ).not.toBe("KEY_IP_ALLOWLIST");
+    expect(verdict.status).toBe(503);
+    // The mis-map is real, not hypothetical: the identical message with no
+    // machine code STILL reaches KEY_IP_ALLOWLIST through the cascade. That is
+    // the cascade surviving as the documented fallback, and it is also the
+    // measurement of what the code branch bought.
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "KEY_IP_ALLOWLIST",
+      status: 502,
+    });
+    // And the copy the new code renders must not re-attach the allowlist
+    // instruction the old verdict carried.
+    const copy = formatKeyError("KEY_VENUE_TRANSIENT");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`;
+    expect(blob.toLowerCase()).not.toMatch(/allowlist|allow list|ip restriction/);
+  });
+
+  it("the three verdicts the cascade already got right are unchanged", () => {
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Exchange rate-limited the validation request. Wait a moment and try again — repeated failures may indicate a missing read scope.",
+          "RATE_LIMITED",
+        ),
+      ),
+    ).toEqual({ code: "KEY_RATE_LIMIT", status: 503 });
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Could not verify the key's permission scopes — the permission probe failed. Try again in a moment.",
+          "PROBE_FAILED",
+        ),
+      ),
+    ).toEqual({ code: "KEY_PROBE_FAILED", status: 503 });
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Authentication failed. Check your API key and secret.",
+          "AUTH_FAILED",
+        ),
+      ),
+    ).toEqual({ code: "KEY_AUTH_FAILED", status: 400 });
+  });
+
+  it("an unrecognised wire code falls through to the cascade, then to UNKNOWN", () => {
+    // The contract ships this control precisely so the closed table is proven
+    // closed. It must NOT short-circuit to UNKNOWN above the cascade — a code
+    // minted after this table was written still earns whatever its human
+    // string can.
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "A synthetic verdict from a venue code this router has never seen.",
+          "ZZ_UNRECOGNISED_VENUE_CODE",
+        ),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+    // Fall-through, not short-circuit: an unrecognised code on a message the
+    // cascade CAN read keeps the cascade's answer.
+    expect(
+      classifyKeyValidationError(
+        seamThrow("connect ETIMEDOUT 10.0.0.1:443", "ZZ_UNRECOGNISED_VENUE_CODE"),
+      ),
+    ).toEqual({ code: "KEY_NETWORK_TIMEOUT", status: 502 });
+  });
+
+  it("the breaker type check still wins over any wire code an upstream can set", () => {
+    // Ordering, asserted rather than assumed. A hostile or confused body must
+    // not be able to relabel a breaker trip: the type check is above the lookup
+    // and stays there.
+    const breaker = Object.assign(new CircuitOpenError(30), {
+      seamCode: "AUTH_FAILED",
+    });
+    expect(classifyKeyValidationError(breaker)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("a non-string seamCode is ignored and never indexes the table", () => {
+    // The property arrives over the wire. `typeof === "string"` is the guard;
+    // without it a `{}` or a number would reach `.get()` and, on a plain
+    // object, `"constructor"` would resolve to an inherited Function.
+    for (const bogus of [42, {}, null, ["AUTH_FAILED"], () => "AUTH_FAILED"]) {
+      expect(
+        classifyKeyValidationError(
+          Object.assign(new Error("nothing the cascade can read"), {
+            seamCode: bogus,
+          }),
+        ),
+      ).toEqual({ code: "UNKNOWN", status: 500 });
+    }
+    // A prototype-shaped string is a miss, not a Function.
+    expect(
+      classifyKeyValidationError(
+        Object.assign(new Error("nothing the cascade can read"), {
+          seamCode: "constructor",
+        }),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("both new members carry the hand-off token, and 140.3-01's two survive untouched", () => {
+    // ⚠️ EXACT, not "at or above". "At or above" is satisfied by adding union
+    // members and emitting ZERO new markers, in which case 140.3-12 closes only
+    // the markers that already existed and the new codes ship with no copy —
+    // silently, because every count still passes.
+    //
+    // 2 (140.3-01: VALIDATION_FAILED, RATE_LIMITED)
+    //   + 3 (140.3-05: SERVICE_UNREACHABLE, KEY_EXCHANGE_UNAVAILABLE,
+    //        KEY_VENUE_TRANSIENT)
+    //   = 5.
+    const source = readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8");
+    expect((source.match(/TODO-COPY-140\.3-12/g) ?? []).length).toBe(5);
+    // 140.3-01's two entries are NOT re-authored here: RATE_LIMITED's copy has
+    // to name the real wait, and the wait field does not exist until 140.3-09
+    // lands the plumbing.
+    expect(source).toContain("You have reached our request limit.");
+    expect(source).toContain("We could not read that request.");
+  });
+
+  it("the substring cascade is still the fallback — it was not deleted", () => {
+    // TS-35 is explicit: keep the cascade until every emitter carries a code,
+    // or the class re-opens from the other side. Every one of these throws
+    // carries NO machine code and must still be classified.
+    expect(classifyKeyValidationError("Invalid signature").code).toBe(
+      "KEY_INVALID_SIGNATURE",
+    );
+    expect(classifyKeyValidationError("MT5 master password detected").code).toBe(
+      "KEY_MT5_MASTER_PASSWORD",
+    );
+    expect(classifyKeyValidationError("Rate limit exceeded").code).toBe(
+      "KEY_RATE_LIMIT",
+    );
+    expect(
+      classifyKeyValidationError("Could not verify the key's permission scopes").code,
+    ).toBe("KEY_PROBE_FAILED");
   });
 });
