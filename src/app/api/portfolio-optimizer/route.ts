@@ -11,6 +11,16 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. Cited, never restated. The caught value is passed UNMODIFIED:
+// `captureToSentry` scrubs at the chokepoint (SEAMCORE-06), and pre-scrubbing
+// here would hand Sentry a string, destroying grouping and the stack.
+//
+// PER-REQUEST SECRETS AT THIS ROUTE: none. The body carries one opaque
+// `portfolio_id` row id; no credential, no user JWT, no exchange material
+// crosses this handler. Stated rather than assumed (M78b).
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -207,6 +217,22 @@ export async function POST(req: NextRequest) {
     // bubble internal URLs (http://localhost:8002/...), Python tracebacks,
     // service-key header names, etc. Restore the hard-coded opaque
     // envelope; log the underlying error to console.error for ops.
+    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM, and the only capture in this
+    // route. The two arms above (breaker short-circuit, upstream timeout) are
+    // conditions we already classified and already answer with their own
+    // status; this arm is by construction the one that means "we do not know
+    // what this is". This route has NO typed upstream-error branch at all, so
+    // an analytics 5xx also lands here and IS captured — the
+    // "service-permanent outcome" half of the policy, reached without needing a
+    // range split.
+    //
+    // `extra` carries the opaque row id only. The body has no other field, and
+    // the raw `err` — which can bubble an internal URL or a Python traceback
+    // (M-0333) — reaches Sentry only through the scrubbing chokepoint.
+    captureToSentry(err, {
+      tags: { surface: "portfolio-optimizer", step: "analytics-unreachable" },
+      extra: { portfolio_id: portfolioId },
+    });
     console.error("[api/portfolio-optimizer] analytics call failed:", err);
     // Audit-2026-05-07 red-team R-0002: refund on the generic 503 path
     // too (analytics service unreachable is also upstream-of-caller).

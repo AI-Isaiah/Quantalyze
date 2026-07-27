@@ -22,6 +22,48 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13b / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. Mocking the helper would answer "did the call site fire" while making
+// every payload assertion VACUOUS about scrubbing — the scrub lives INSIDE the
+// helper (SEAMCORE-06), so a mocked helper never runs it and "no secret in the
+// payload" would pass with the scrubber deleted. Inherited from `140.3-13a`.
+//
+// ⚠️ SECRET-BEARING, exactly like `create-with-key`: the body carries the
+// caller's RAW exchange credentials, which no module-level env list can know.
+// `140.3-13a`'s M78b is the receipt — with `secrets` omitted the env-derived
+// redaction keeps working, so an assertion written against an env token stays
+// GREEN while the per-request credential ships verbatim. The cases below assert
+// against the BODY values.
+//
+// ⚠️ AND THIS IS THE SECOND MEMBER OF THE PAIR. `create-with-key` is the one
+// CONTEXT names and the one a single-route delivery would pick; add-key is the
+// multi-key path, whose funnel was silent until `140.3-13a`. Both files carry
+// the same cases so a delivery that instrumented only the famous one cannot
+// pass as the class.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
+
 const MOCK_USER = { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as unknown as
   import("@supabase/supabase-js").User;
 
@@ -801,5 +843,197 @@ describe("POST /api/strategies/composite/add-key — HI-02 credential redaction"
     // The A-10 half: never answer redaction by dropping the error.
     expect(logged).toContain("ECONNREFUSED");
     consoleErr.mockRestore();
+  });
+});
+
+/**
+ * 140.3-13b / SEAMUX-08 — this route captures to Sentry, under the ONE policy
+ * written out in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, measured on the untouched tree:
+ * `grep -vE '^\s*(//|\*)' route.ts | grep -c captureToSentry` read **0** here.
+ * CONTEXT named this route and `create-with-key` as the two that "do not import
+ * Sentry"; the real class was **9 of 15**, five times what the locked text said.
+ *
+ * ⚠️ DIVERGENCE-FREE BY DESIGN. Every case here has a twin in
+ * `create-with-key/route.test.ts` at the same four arms. These two routes share
+ * `classifyKeyValidationError` precisely so the single-key and "+ Add another
+ * key" paths cannot drift; instrumenting one and reporting the class closed is
+ * this programme's signature failure, so both counts are asserted per file.
+ */
+describe("[140.3-13b / SEAMUX-08] POST /api/strategies/composite/add-key — Sentry capture policy", () => {
+  let consoleErr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    resetHappyMocks();
+    sentryState.captured.length = 0;
+    consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErr.mockRestore();
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the classifier's UNKNOWN terminal is the only place an unclassified key-connect failure is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  it("POSITIVE: an UNCLASSIFIED throw IS captured, with this route's OWN surface tag", async () => {
+    validateKeyMock.mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.5:8002"));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+
+    const { err, options } = await nextCapture();
+    // The surface must NOT be create-with-key's: a composite outage and a
+    // single-key outage have to be tellable apart in Sentry, which is the
+    // whole reason the tags are per route rather than per policy.
+    expect(options.tags?.surface).toBe("strategies-composite-add-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+    expect(err).toBeInstanceOf(Error);
+    expect(options.extra?.exchange).toBe("okx");
+  });
+
+  it("M78b GUARD: the RAW per-request api_key / api_secret / passphrase never reach Sentry — and ECONNREFUSED survives", async () => {
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 ` +
+          `(sent api_key=${VALID_BODY.api_key} api_secret=${VALID_BODY.api_secret} ` +
+          `passphrase=${VALID_BODY.passphrase})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const message = ((await nextCapture()).err as Error).message;
+    expect(
+      message,
+      "the caller's RAW exchange api_key was dispatched to Sentry (TRAP-1)",
+    ).not.toContain(VALID_BODY.api_key);
+    expect(
+      message,
+      "the caller's RAW exchange api_secret was dispatched to Sentry (TRAP-1)",
+    ).not.toContain(VALID_BODY.api_secret);
+    expect(
+      message,
+      "the caller's RAW exchange passphrase was dispatched to Sentry (TRAP-1)",
+    ).not.toContain(VALID_BODY.passphrase);
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ECONNREFUSED is the most valuable thing in a transport line",
+    ).toContain("ECONNREFUSED");
+  });
+
+  it("POSITIVE: an encrypt 2xx with no api_key_encrypted IS captured as a CONTRACT violation", async () => {
+    encryptKeyMock.mockResolvedValue({
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      kek_version: 1,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.step).toBe("encrypt-contract");
+    expect(options.extra?.returned_keys).toEqual([
+      "api_secret_encrypted",
+      "passphrase_encrypted",
+      "kek_version",
+    ]);
+    expect((err as Error).message).toContain("api_key_encrypted");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("POSITIVE: an UNRECOGNISED RPC failure IS captured (23505 / 42501 are recognised and are not)", async () => {
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+
+    const { options } = await nextCapture();
+    expect(options.tags?.step).toBe("draft-rpc-error");
+    expect(options.extra?.pg_code).toBe("57014");
+  });
+
+  it("POSITIVE: an RPC that SUCCEEDS with no usable row IS captured as a CONTRACT violation", async () => {
+    rpcMock.mockResolvedValue({ data: [], error: null });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+
+    const { options } = await nextCapture();
+    expect(options.tags?.step).toBe("draft-rpc-contract");
+    expect(options.extra?.row_present).toBe(false);
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured — and the breaker cell is UNDISTURBED", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // The POSITIVE half re-pins all three properties this route mirrors from
+    // create-with-key: the caught VALUE reached the shared classifier (only a
+    // type check yields SERVICE_UNAVAILABLE_RETRY — a stringified error would
+    // land on UNKNOWN/500), the STATUS came from the classifier, and the
+    // conditional Retry-After carries the breaker's own TTL.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a classified CALLER FAULT is never captured (a wrong secret is not our defect)", async () => {
+    validateKeyMock.mockRejectedValue(new Error("Invalid signature for request"));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_SIGNATURE");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a classified upstream TIMEOUT is never captured (60s cold starts are documented as normal)", async () => {
+    validateKeyMock.mockRejectedValue(new Error("request timeout reaching analytics"));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: our own rate-limit rejection is NEVER captured (the limiter working is not a fault)", async () => {
+    checkLimitMock.mockResolvedValue({ success: false, retryAfter: 30 });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(429);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    await expectNoCapture();
   });
 });

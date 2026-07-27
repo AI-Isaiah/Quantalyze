@@ -25,9 +25,44 @@
 
 // @vitest-environment node
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13b / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. Mocking the helper would answer "did the call site fire" while making
+// every payload assertion VACUOUS about scrubbing — the scrub lives INSIDE the
+// helper (SEAMCORE-06), so a mocked helper never runs it and "no secret in the
+// payload" would pass with the scrubber deleted. Inherited from `140.3-13a`.
+//
+// ⚠️ THIS FILE IS WHY THE PLAN'S VERIFY COMMAND NAMES `src/__tests__/`.
+// `csv-validate`'s tests do NOT live beside its route —
+// `src/app/api/strategies/csv-validate/` contains `route.ts` only — so a verify
+// scoped to `src/app/api/` reaches this route's PRODUCTION file and none of its
+// cases. That is exactly how a nine-route obligation silently ships as eight.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
 
 // ---------------------------------------------------------------------
 // Module mocks — withAuth + ratelimit + analytics-client + supabase server
@@ -201,7 +236,10 @@ async function flushAfter(): Promise<void> {
 // Helpers
 // ---------------------------------------------------------------------
 
-import { NextRequest } from "next/server";
+// `NextResponse` is used by the 140.3-13b capture cases to build the
+// already-classified envelope `postProcessKey` forwards on `!result.ok` — the
+// arm the capture policy deliberately does NOT capture.
+import { NextRequest, NextResponse } from "next/server";
 
 function makeMultipartRequest(
   file: File | null,
@@ -399,6 +437,181 @@ describe("/api/strategies/csv-validate", () => {
     const json = await res.json();
     expect(json.code).toBe("CSV_RATE_LIMIT");
     expect(json.correlation_id).toBeNull();
+  });
+});
+
+/**
+ * 140.3-13b / SEAMUX-08 — `/api/strategies/csv-validate` captures to Sentry,
+ * under the ONE policy written out in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, measured on the untouched tree:
+ * `grep -vE '^\s*(//|\*)' route.ts | grep -c captureToSentry` read **0** here
+ * and at eight sibling seam routes, while `wizardErrors.ts` copy told users
+ * "our team has been notified". `140.3-12` removed the claim; `140.3-13a`
+ * (4 routes) and `140.3-13b` (5) make it true — 4 + 5 = 9 of 9.
+ *
+ * ⚠️ THIS BLOCK IS THE ONE THAT ONLY RUNS IF THE VERIFY COMMAND REACHES
+ * `src/__tests__/`. See the mock header at the top of this file.
+ */
+describe("[140.3-13b / SEAMUX-08] /api/strategies/csv-validate — Sentry capture policy", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    sentryState.captured.length = 0;
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN;
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    process.env.INTERNAL_API_TOKEN = "test-token";
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal throw arm is the only place an unclassified CSV seam failure is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  function validateRequest() {
+    return makeMultipartRequest(
+      new File(["x"], "x.csv", { type: "text/csv" }),
+      "daily_returns",
+    );
+  }
+
+  it("POSITIVE: an unclassified throw from the unified path IS captured, with this route's tags", async () => {
+    postProcessKeyMock.mockRejectedValue(
+      new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      ),
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    expect(res.status).toBe(502);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-csv-validate");
+    expect(options.tags?.step).toBe("unified-path-threw");
+    // The Error TYPE survives — `captureToSentry` rebuilds an Error rather than
+    // stringifying, so Sentry keeps its grouping and stack. The route logs
+    // `err.message`; the CAPTURE takes the value.
+    expect(err).toBeInstanceOf(Error);
+    expect(options.extra?.fmt).toBe("daily_returns");
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the secret and KEEPS the syscall token", async () => {
+    postProcessKeyMock.mockRejectedValue(
+      new Error(
+        `getaddrinfo ENOTFOUND analytics.internal (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      ),
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    await POST(validateRequest());
+
+    const message = ((await nextCapture()).err as Error).message;
+    // UNDER-redaction: a credential leaving our infrastructure for a third
+    // party is the whole of T-140.3-13-01.
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    // OVER-redaction: destroying the syscall token replaces one incident with
+    // two, and a one-sided test ships that state green.
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ENOTFOUND is the most valuable thing in a transport line",
+    ).toContain("ENOTFOUND");
+  });
+
+  it("POSITIVE: a missing INTERNAL_API_TOKEN is captured FATAL, and the env VALUE is not in the payload", async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    // The arm's own contract is unchanged: the CSV-shaped 503 envelope, not the
+    // generic one.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CSV_UPSTREAM_FAIL");
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.step).toBe("config-missing");
+    // A permanent config fault that takes the whole CSV path down for every
+    // user is the one thing on this route worth waking someone for.
+    expect(options.level).toBe("fatal");
+    // The NAME may be stated; the VALUE must never be near a capture payload.
+    expect((err as Error).message).toContain("INTERNAL_API_TOKEN");
+    expect((err as Error).message).not.toContain(INTERNAL_TOKEN);
+    // The upstream was never called — this is a pre-flight gate.
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE: an already-classified `!result.ok` envelope is NEVER captured (this is where the breaker's 503 lives)", async () => {
+    const forwarded = NextResponse.json(
+      { ok: false, code: "CIRCUIT_OPEN", human_message: "..." },
+      { status: 503 },
+    );
+    postProcessKeyMock.mockResolvedValue({ ok: false, response: forwarded });
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    // The POSITIVE half: the arm really ran and forwarded the client's own
+    // envelope, so the zero below is about the policy and not about the request
+    // never reaching that branch.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a caller-fault 400 is NEVER captured, and never reaches the seam at all", async () => {
+    const req = makeMultipartRequest(
+      new File(["x"], "x.csv", { type: "text/csv" }),
+      "not_a_format",
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: our own rate-limit rejection is NEVER captured (the limiter working is not a fault)", async () => {
+    checkLimitMock.mockResolvedValueOnce({ success: false, retryAfter: 30 });
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a soft-fail validation result (ok:true, errors populated) is NEVER captured", async () => {
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      body: {
+        ok: false,
+        preview: null,
+        errors: [{ rule: "monotonic_dates", row: 2, message: "..." }],
+        correlation_id: null,
+      },
+    });
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    // A user's CSV failing row-schema validation is the route WORKING.
+    expect(res.status).toBe(200);
+    await expectNoCapture();
   });
 });
 

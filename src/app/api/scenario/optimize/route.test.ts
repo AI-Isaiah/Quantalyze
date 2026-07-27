@@ -36,6 +36,37 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 // route.ts reaches server-only modules transitively (supabase/server, csrf).
 vi.mock("server-only", () => ({}));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13b / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. The house pattern elsewhere mocks the helper itself, which answers "did
+// the call site fire" but makes every payload assertion VACUOUS about scrubbing:
+// the scrub lives INSIDE the helper (SEAMCORE-06), so a mocked helper never runs
+// it and a test asserting "no secret in the payload" would pass with the
+// scrubber deleted. Running the real helper over a faked transport is what makes
+// both halves of TRAP-1 falsifiable. Inherited verbatim from `140.3-13a`.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
+
 const STATE = vi.hoisted(() => ({
   authUser: {
     id: "00000000-0000-0000-0000-000000000001",
@@ -161,6 +192,7 @@ beforeEach(() => {
   // The error arms are asserted to keep their diagnostics server-side, so the
   // log channel is spied rather than merely silenced.
   errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  sentryState.captured.length = 0;
 });
 
 afterEach(() => {
@@ -335,5 +367,173 @@ describe("POST /api/scenario/optimize", () => {
 
     expect(res.status).toBe(400);
     expect((await res.json()).error).toBe("Invalid JSON body");
+  });
+});
+
+/**
+ * 140.3-13b / SEAMUX-08 — this route captures to Sentry, under the ONE policy
+ * written out in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, measured on the untouched tree:
+ * `grep -vE '^\s*(//|\*)' route.ts | grep -c captureToSentry` read **0** here
+ * and at four sibling routes, while `wizardErrors.ts` copy told users "our team
+ * has been notified". `140.3-12` removed the claim; `140.3-13a` and this plan
+ * make it true — 4 + 5 = 9 of 9.
+ *
+ * Every NEGATIVE case pairs its zero-capture assertion with a POSITIVE
+ * assertion that the arm actually ran (its own status), so a route that threw
+ * before reaching any arm could not satisfy it.
+ */
+describe("[140.3-13b / SEAMUX-08] POST /api/scenario/optimize — Sentry capture policy", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+
+  beforeEach(() => {
+    vi.stubEnv("INTERNAL_API_TOKEN", INTERNAL_TOKEN);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal arm is the only place an unclassified seam failure at this route is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  it("POSITIVE: an unclassified transport failure IS captured, with this route's tags", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(500);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("scenario-optimize");
+    expect(options.tags?.step).toBe("unexpected-error");
+    // The Error TYPE survives — `captureToSentry` rebuilds an Error rather than
+    // stringifying, so Sentry keeps its grouping and stack.
+    expect(err).toBeInstanceOf(Error);
+    expect(options.extra?.objective).toBe("min_vol");
+    expect(options.extra?.series_count).toBe(2);
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the secret and KEEPS the syscall token", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      );
+    };
+    const { POST } = await import("./route");
+    await POST(makeRequest(validBody()));
+
+    const message = ((await nextCapture()).err as Error).message;
+    // UNDER-redaction: a credential leaving our infrastructure for a third
+    // party is the whole of T-140.3-13-01.
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    // OVER-redaction: destroying the syscall token replaces one incident with
+    // two, and a one-sided test ships that state green.
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ECONNREFUSED is the most valuable thing in a transport line",
+    ).toContain("ECONNREFUSED");
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured (it fires on every seam route at once)", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new CircuitOpenError(13);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    // The POSITIVE half: the breaker arm really ran, so the zero below is about
+    // the policy and not about the request never reaching the catch.
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("13");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: an upstream timeout is NEVER captured (expected under a cold start; a sustained one trips the breaker)", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    STATE.optimizeImpl = async () => {
+      throw new AnalyticsTimeoutError("/api/optimize-weights", 30_000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(504);
+    await expectNoCapture();
+  });
+
+  /**
+   * AMBIGUITY-1, pinned in BOTH directions — see the block comment on the
+   * `AnalyticsUpstreamError` arm in route.ts.
+   *
+   * This route answers every `AnalyticsUpstreamError` with a flat 502 (no range
+   * split, unlike `admin/match/eval`). The inherited policy excludes a
+   * "forwarded upstream 4xx" and includes the service-permanent 5xx half, so the
+   * reading applied here discriminates on STATUS rather than on which arm the
+   * value happened to land in. Both directions are asserted, because a
+   * capture-everything and a capture-nothing implementation each satisfy only
+   * one of them.
+   */
+  it("NEGATIVE: an upstream 4xx is NEVER captured (a deliberate refusal is not our defect)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    STATE.optimizeImpl = async () => {
+      throw new AnalyticsUpstreamError("bybit is not responding", 424);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(502);
+    await expectNoCapture();
+  });
+
+  it("POSITIVE: an upstream 5xx IS captured — the policy's service-permanent half", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    STATE.optimizeImpl = async () => {
+      throw new AnalyticsUpstreamError("optimizer crashed", 503);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    // Unchanged response contract: the capture is additive, the flat 502 stays.
+    expect(res.status).toBe(502);
+
+    const { options } = await nextCapture();
+    expect(options.tags?.step).toBe("upstream-5xx");
+    expect(options.extra?.upstream_status).toBe(503);
+  });
+
+  it("NEGATIVE: a caller-fault 400 is NEVER captured, and never reaches the seam at all", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({ series: SERIES, objective: "max_return" }),
+    );
+    expect(res.status).toBe(400);
+    expect(STATE.optimizeCalls).toHaveLength(0);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: our own rate-limit rejection is NEVER captured (the limiter working is not a fault)", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 30 };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(429);
+    await expectNoCapture();
   });
 });

@@ -5,6 +5,18 @@ import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. Cited, never restated. The caught value is passed UNMODIFIED:
+// `captureToSentry` scrubs at the chokepoint (SEAMCORE-06).
+//
+// PER-REQUEST SECRETS AT THIS ROUTE: none. The one credential the outgoing
+// request carries is `INTERNAL_API_TOKEN`, which is already on
+// `seam-redaction.ts`'s env-name list; no end-user JWT is forwarded from here
+// and no exchange material exists on the CSV path. The uploaded BYTES are not a
+// credential, and they are never put in a capture payload — only `fmt` and a
+// size are. Stated rather than assumed (M78b).
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -196,6 +208,24 @@ async function unifiedCsvValidateHandler(args: {
   // is still used for the actual POST so the per-route fetch boilerplate is
   // gone.
   if (!process.env.INTERNAL_API_TOKEN) {
+    // 140.3-13b / SEAMUX-08 — a PERMANENT CONFIG FAULT, captured `fatal`. The
+    // isomorph of `verify-strategy`'s admin-client-config arm, which
+    // `140.3-13a` captured for the same reason: a misconfigured deployment
+    // takes the whole CSV upload path down for every user, it can never
+    // self-heal, and nothing else reports it — a `console.error` on a serverless
+    // function is not an alert. It is NOT an upstream condition, so it is not
+    // excluded by the policy's breaker / timeout / forwarded-4xx list.
+    //
+    // A SYNTHETIC Error, deliberately: there is no caught value here, and the
+    // ENV VALUE must never be near a capture payload. Only the name is stated,
+    // and it is absent by definition on this arm.
+    captureToSentry(
+      new Error("csv-validate: INTERNAL_API_TOKEN is not configured"),
+      {
+        tags: { surface: "strategies-csv-validate", step: "config-missing" },
+        level: "fatal",
+      },
+    );
     console.error("[strategies/csv-validate] INTERNAL_API_TOKEN not configured");
     return csvErrorEnvelope("CSV_UPSTREAM_FAIL", "Service unavailable.", {}, 503);
   }
@@ -218,10 +248,28 @@ async function unifiedCsvValidateHandler(args: {
       // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
       userId: args.userId,
     });
+    // 140.3-13b / SEAMUX-08 — DELIBERATELY NOT CAPTURED. `postProcessKey`
+    // returns an ALREADY-CLASSIFIED envelope here: this is where the breaker's
+    // forwarded 503 lives, alongside the client's own transport codes and any
+    // upstream refusal. Capturing it would alert on every short-circuit during
+    // the exact correlated incident Sentry exists to surface — the policy's
+    // named exclusion — and would double-report anything the client itself
+    // already answers for. Same reading `140.3-13a` applied to
+    // `verify-strategy`'s `!result.ok`.
     if (!result.ok) return result.response;
     return NextResponse.json(result.body, { headers: NO_STORE_HEADERS });
   } catch (err) {
     const message = err instanceof Error ? err.message : "CSV validation failed";
+    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM. `postProcessKey` classifies
+    // every outcome it can into the `!result.ok` envelope above, so a THROW
+    // reaching here is by construction the unclassified residue: a transport
+    // failure, a missing-config throw from the client, a contract-drift parse
+    // throw, or any untyped throw. The caught VALUE (not `message`) is passed,
+    // so Sentry keeps the Error type, its grouping and its stack.
+    captureToSentry(err, {
+      tags: { surface: "strategies-csv-validate", step: "unified-path-threw" },
+      extra: { fmt: args.fmt, size_bytes: args.file.size },
+    });
     console.error("[strategies/csv-validate] unified path threw:", message);
     return csvErrorEnvelope("CSV_UPSTREAM_FAIL", message, {}, 502);
   }
