@@ -521,6 +521,51 @@ export async function postProcessKey(
     };
   }
 
+  /**
+   * Phase 140.3-02 / TS-11 — VERIFIED, NOT CHANGED. Read this before "restoring"
+   * anything about the flow below.
+   *
+   * ⚠️ THERE ARE TWO `ok`s ON THIS SEAM AND THEY ANSWER DIFFERENT QUESTIONS.
+   *
+   *   · `PostProcessKeyResult.ok` (this function's) is a TRANSPORT verdict:
+   *     "did the upstream answer 2xx with a usable body". Nothing more.
+   *   · `body.ok` (the Python envelope's, `process_key.py:_envelope_error` and
+   *     every success builder) is the SEMANTIC verdict: "did the thing the
+   *     caller asked for succeed".
+   *
+   * They disagree in BOTH directions, which is why no caller may treat one as
+   * the other and why none may branch on the STATUS instead:
+   *
+   *   403 write-capable-key verdict (PYAPI-10b)  → `{ok:false, response}`, the
+   *       Python envelope forwarded VERBATIM at 403. No change required here;
+   *       the callers' `if (!result.ok) return result.response` already emits it.
+   *   403 ordinary validation failure            → the SAME arm. `_scope_rejected`
+   *       is a three-arm OR behind one return, so `not val.valid` moved to 403
+   *       beside the two scope arms. A caller branching on the status renders an
+   *       ordinary validation failure as "you're not allowed".
+   *   200 with `body.ok === false`               → `{ok:true, status:200, body}`.
+   *       THIS is the case that makes a status branch wrong on the other side:
+   *       `validate-only` answers 200 with `ok:false` on the IDENTICAL
+   *       `not val.valid` predicate that `_scope_rejected` answers 403 on
+   *       (fold-in M-6 from the 140.1 code review; STATUS_CONTRACT.md records
+   *       the carve-out nowhere). A consumer branching on STATUS is therefore
+   *       wrong on one of the two paths no matter which status it picks.
+   *       Branching on `body.ok` is correct on both — do NOT "simplify" it back.
+   *   202 enqueue                                → `{ok:true, status:202, body}`
+   *       with `body` = `{ok:true, queued:true, verification_id, correlation_id}`.
+   *
+   * CONSEQUENCE FOR CALLERS, stated because it is the non-obvious half: every
+   * caller's `if (!result.ok) return result.response` now SHORT-CIRCUITS on a
+   * rejection that used to flow through the success path. A downstream shape
+   * guard that used to double as the rejection handler no longer sees rejections
+   * — but it still sees DRIFT (a 2xx whose body is the wrong shape), so it is
+   * not dead and must not be deleted on the strength of the short-circuit alone.
+   *
+   * The 403-vs-422 split is deliberately HOMELESS and stays homeless: 403 is not
+   * wrong (all three arms are CALLER-class and breaker-inert) but it is coarse.
+   * It needs its own plan; handling the envelope by `ok` makes it a non-issue
+   * here either way.
+   */
   if (!res.ok) {
     return {
       ok: false,
