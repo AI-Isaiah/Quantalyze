@@ -13,6 +13,7 @@ import {
 } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import { scrubSeamError } from "@/lib/seam-redaction";
 // The dependency-free leaf. `analytics-client` re-exports the class, but this
 // route must not depend on that re-export: it is wholesale-mocked by the route
 // test files, where `instanceof` against an undefined binding throws.
@@ -241,7 +242,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // console.error convention).
     console.error(
       "[strategies/create-with-key] idempotency fence SELECT failed; proceeding to RPC (DB fence still dedups):",
-      existingDraftErr.message,
+      scrubSeamError(existingDraftErr),
       existingDraftErr.code,
     );
   }
@@ -371,7 +372,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (error) {
       console.error(
         "[strategies/create-with-key] RPC error:",
-        error.message,
+        scrubSeamError(error),
         error.code,
       );
       if (error.code === "23505") {
@@ -438,7 +439,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (assetClassErr) {
       console.warn(
         "[strategies/create-with-key] asset_class force-derive failed (non-blocking):",
-        assetClassErr.message,
+        scrubSeamError(assetClassErr),
         assetClassErr.code,
       );
     }
@@ -457,11 +458,26 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { headers: NO_STORE_HEADERS },
     );
   } catch (err) {
-    // Log the raw message server-side only — never forward it to the client.
-    // Raw Railway/exchange strings can contain partial secrets or internal
-    // service details (H-0305).
-    const message = err instanceof Error ? err.message : "Validation failed";
-    console.error("[strategies/create-with-key] caught exception:", message);
+    // SEAMCORE-06 / HI-02 — THROUGH THE LEAF, with this route's PER-REQUEST
+    // secrets named.
+    //
+    // This catch wraps `validateKey` / `encryptKey`, the two calls whose request
+    // bodies carry the raw exchange `api_key`, `api_secret` and `passphrase`,
+    // and whose outgoing headers carry `X-Service-Key` and the minted
+    // `X-Tenant-Claim`. undici embeds those headers in `err.message` and, in one
+    // shape, in `err.name`. No module-level env list can know the body values,
+    // so they are named explicitly, exactly as `validate-and-encrypt` does.
+    //
+    // It used to log `err.message` raw. The exposure was narrower than at
+    // `validate-and-encrypt` only because `analytics-client` replaces the undici
+    // message with a static NOT_REACHABLE_MESSAGE before it reaches here — a
+    // property of a DIFFERENT file's catch ordering, not of this route. Any
+    // direct throw, any `AnalyticsUpstreamError` echoing a request field, or any
+    // refactor of that client re-opens it.
+    console.error(
+      "[strategies/create-with-key] caught exception:",
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull]),
+    );
 
     // Classify into a stable wizardErrors code so the client never sees the raw
     // Railway message (H-0305). The mapping is the SHARED

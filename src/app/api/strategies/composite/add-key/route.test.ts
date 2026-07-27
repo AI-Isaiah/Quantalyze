@@ -769,3 +769,37 @@ describe("POST /api/strategies/composite/add-key — circuit-breaker trip (SEAM-
     consoleErr.mockRestore();
   });
 });
+
+describe("POST /api/strategies/composite/add-key — HI-02 credential redaction", () => {
+  beforeEach(resetHappyMocks);
+
+  it("the catch scrubs THIS ROUTE's per-request exchange credentials", async () => {
+    // ⚠️ THE WIRING, NOT THE ROSTER, and deliberately the MIRROR of the
+    // create-with-key case. These two routes share
+    // `classifyKeyValidationError` precisely so the single-key and "+ Add
+    // another key" paths cannot drift; their redaction must not drift either,
+    // and a defect present in one and absent from the other is the
+    // instance-not-class shape this programme exists to close.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `fetch failed: connect ECONNREFUSED 10.0.0.1:8002 ` +
+          `(x-service-key: svc, body: {"api_secret":"${VALID_BODY.api_secret}",` +
+          `"passphrase":"${VALID_BODY.passphrase}"})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("caught exception");
+    expect(logged).not.toContain(VALID_BODY.api_secret);
+    expect(logged).not.toContain(VALID_BODY.passphrase);
+    // The A-10 half: never answer redaction by dropping the error.
+    expect(logged).toContain("ECONNREFUSED");
+    consoleErr.mockRestore();
+  });
+});

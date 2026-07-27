@@ -1045,6 +1045,41 @@ describe("POST /api/strategies/create-with-key — circuit-breaker trip (SEAM-04
     consoleErr.mockRestore();
   });
 
+  it("HI-02: the catch scrubs THIS ROUTE's per-request exchange credentials", async () => {
+    // ⚠️ THE WIRING, NOT THE ROSTER. `seam-log-coverage.test.ts` proves this
+    // file is now scanned; this proves the catch actually redacts. Both are
+    // needed: the scan is a source predicate and cannot see runtime bytes.
+    //
+    // This catch wraps validateKey/encryptKey, whose request bodies carry the
+    // raw exchange credentials and whose outgoing headers carry X-Service-Key.
+    // undici embeds those headers in `err.message`. Until HI-02 this site
+    // logged `err.message` raw; the exposure was narrow only because a
+    // DIFFERENT file (analytics-client) happens to replace the undici message
+    // first — a property of that file's catch ordering, not of this route.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `fetch failed: connect ECONNREFUSED 10.0.0.1:8002 ` +
+          `(x-service-key: svc, body: {"api_secret":"${VALID_BODY.api_secret}",` +
+          `"passphrase":"${VALID_BODY.passphrase}"})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("caught exception");
+    expect(logged).not.toContain(VALID_BODY.api_secret);
+    expect(logged).not.toContain(VALID_BODY.passphrase);
+    // The A-10 half: redacting must not answer by dropping the error. The
+    // syscall token is the most valuable thing in this line.
+    expect(logged).toContain("ECONNREFUSED");
+    consoleErr.mockRestore();
+  });
+
   it("still classifies non-breaker errors by message (the substring cascade is intact)", async () => {
     // Negative control. If the route ever stopped threading the error object
     // and started passing something else, the first two tests could pass while

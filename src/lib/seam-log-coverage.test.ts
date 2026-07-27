@@ -34,8 +34,8 @@ import { join } from "node:path";
  */
 
 /**
- * The six seam files. Hand-typed, and deliberately NOT derived from
- * `SEAM_ROUTE_BUDGETS`: that table lists fifteen ROUTES, of which only three
+ * The eight seam files. Hand-typed, and deliberately NOT derived from
+ * `SEAM_ROUTE_BUDGETS`: that table lists fifteen ROUTES, of which only five
  * carry credential-bearing error logs, and a derived list would silently widen
  * or narrow this guard whenever the budget table moved.
  *
@@ -43,6 +43,14 @@ import { join } from "node:path";
  * `SEAM_EXCLUSIONS` gives: they do not route through the core, they must not
  * consume breaker budget, and their two `console.info` calls carry no error at
  * all.
+ *
+ * ⚠️ EIGHT SINCE HI-02, AND THE LAST TWO WERE THE HOLE. `create-with-key` and
+ * `composite/add-key` both spend the `validate-key` + `encrypt-key` budgets,
+ * both were edited by this phase, and both logged a raw `err.message` — and
+ * neither was here NOR in `SEAM_EXCLUSIONS`, so this guard could not see them
+ * while the REGISTRY entry claimed class closure. A hand-typed roster cannot
+ * close a class by itself; the completeness assertion below is what makes the
+ * omission of a NEW credential-bearing route redden on the day it is written.
  */
 const SEAM_FILES: readonly string[] = [
   "src/lib/resilient-fetch.ts",
@@ -51,6 +59,8 @@ const SEAM_FILES: readonly string[] = [
   "src/app/api/keys/[id]/permissions/route.ts",
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
+  "src/app/api/strategies/create-with-key/route.ts",
+  "src/app/api/strategies/composite/add-key/route.ts",
 ];
 
 /** The scrub functions a caught value may legally be passed through. */

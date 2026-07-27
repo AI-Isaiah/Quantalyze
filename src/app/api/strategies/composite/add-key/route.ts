@@ -12,6 +12,7 @@ import {
 } from "@/lib/closed-sets";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { classifyKeyValidationError } from "@/lib/wizardErrors";
+import { scrubSeamError } from "@/lib/seam-redaction";
 // The dependency-free leaf. `analytics-client` re-exports the class, but this
 // route must not depend on that re-export: it is wholesale-mocked by the route
 // test files, where `instanceof` against an undefined binding throws.
@@ -355,7 +356,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     if (error) {
       console.error(
         "[strategies/composite/add-key] RPC error:",
-        error.message,
+        scrubSeamError(error),
         error.code,
       );
       if (error.code === "23505") {
@@ -412,11 +413,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       { headers: NO_STORE_HEADERS },
     );
   } catch (err) {
-    // Log the raw message server-side only — never forward it to the client.
-    // Raw Railway/exchange strings can contain partial secrets or internal
-    // service details (H-0305).
-    const message = err instanceof Error ? err.message : "Validation failed";
-    console.error("[strategies/composite/add-key] caught exception:", message);
+    // SEAMCORE-06 / HI-02 — THROUGH THE LEAF, with this route's PER-REQUEST
+    // secrets named. Identical reasoning to `create-with-key`'s catch, and
+    // deliberately identical in shape: these two routes share
+    // `classifyKeyValidationError` precisely so the single-key and "+ Add
+    // another key" paths cannot drift, and their redaction must not drift
+    // either.
+    console.error(
+      "[strategies/composite/add-key] caught exception:",
+      scrubSeamError(err, [api_key, apiSecretNormalized, passphraseOrNull]),
+    );
 
     // Classify into a stable wizardErrors code so the client never sees the raw
     // Railway message (H-0305). The mapping is the SHARED
