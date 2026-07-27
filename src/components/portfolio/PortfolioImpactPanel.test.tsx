@@ -55,6 +55,11 @@ describe("<PortfolioImpactPanel>", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    // A leaked global stub is this repo's known CI-only failure mode (CI Node 22
+    // vs local Node 25). This file assigns `globalThis.fetch` directly rather
+    // than via `vi.stubGlobal`, so the fence costs nothing today and closes the
+    // door if a future case reaches for the stub API.
+    vi.unstubAllGlobals();
   });
 
   it("renders the loading skeleton while the fetch is in flight", () => {
@@ -294,6 +299,185 @@ describe("<PortfolioImpactPanel>", () => {
     const retryButton = await screen.findByRole("button", { name: "Retry" });
     expect(retryButton).toBeDisabled();
     expect(screen.getByText(/Try again in 2 min/)).toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // 140.3-09 / SEAMUX-06 (B-23) — the breaker's 503 drives the countdown too.
+  //
+  // The `Retry-After` read used to sit INSIDE `if (res.status === 429)`, so every
+  // wait `/api/simulator` published on a 503 (the breaker short-circuit's
+  // `String(err.retryAfterS)`, and the fail-CLOSED limiter-misconfigured arm) was
+  // discarded. Re-gating the read on `res.status === 429` must redden the 503
+  // cases below WHILE the 429 cases above stay green — that is mutation M65, and
+  // it is what proves the two statuses are independently covered rather than one
+  // shared assertion standing in for both.
+  //
+  // ⚠️ This component is the ONLY seam-route `Retry-After` reader on the client.
+  // The complete reader class is three sites; the other two — `useMandateAutoSave`
+  // (/api/preferences) and `StarToggle` (/api/watchlist/*) — do not call a seam
+  // route and are deliberately untouched.
+  // ---------------------------------------------------------------------------
+  it("[140.3-09] a breaker 503 carrying Retry-After disables retry and drives the countdown", async () => {
+    // The exact shape `/api/simulator`'s CircuitOpenError arm emits: a 503 whose
+    // wait lives ONLY in the header — there is no body `retryAfter` on that path.
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({
+          error: "Our service is temporarily unavailable.",
+          code: "CIRCUIT_OPEN",
+        }),
+        {
+          status: 503,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "30",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Breaker open"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 30s/)).toBeInTheDocument();
+    // The server's own sentence still reaches the user — the wait is additive
+    // to the copy, it does not replace it with the throttle sentence.
+    expect(
+      screen.getByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Too many simulations/)).toBeNull();
+  });
+
+  it("[140.3-09] a 503 with an HTTP-DATE Retry-After yields a finite wait, not NaN", async () => {
+    // The ONE parser handles the RFC 9110 date form against the response's own
+    // Date header. A raw `Number(header)` here would be NaN, `isRateLimited`
+    // would be false, and the Retry button would stay ENABLED during an outage
+    // the server had already dated — the B20 defect, re-opened at a new status.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Service unavailable." }), {
+        status: 503,
+        headers: {
+          "Content-Type": "application/json",
+          Date: "Wed, 21 Oct 2026 07:28:00 GMT",
+          "Retry-After": "Wed, 21 Oct 2026 07:30:00 GMT", // +120s
+        },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Breaker open, dated"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 2 min/)).toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).toBeNull();
+  });
+
+  it("[140.3-09] a 503 with NO Retry-After renders the error state with retry ENABLED and no countdown", async () => {
+    // TRAP-3: absence of a header must not become a fabricated duration. The
+    // surface must say nothing about timing rather than invent a wait — and the
+    // Retry control stays usable, because nobody told us to wait.
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Service unavailable." }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Breaker open, no header"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeEnabled();
+    expect(screen.getByText("Service unavailable.")).toBeInTheDocument();
+    expect(screen.queryByText(/Try again in/)).toBeNull();
+    // Specifically NOT a zero-countdown, which is what a `?? 0` default would
+    // have produced and would read as "retry now" beside a dead service.
+    expect(screen.queryByText(/Try again in 0/)).toBeNull();
+  });
+
+  it("[140.3-09] ANTI-REGRESSION: the 429 path keeps body-over-header precedence", async () => {
+    // Hoisting the read must not disturb B20's precedence rule. The body says
+    // 300s and the header says 30s; the body must win, exactly as before.
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify({ error: "Too many simulations.", retryAfter: 300 }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": "30",
+          },
+        },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Body wins"
+        onClose={() => {}}
+      />,
+    );
+
+    const retryButton = await screen.findByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(screen.getByText(/Try again in 5 min/)).toBeInTheDocument();
+    expect(screen.queryByText(/Try again in 30s/)).toBeNull();
+  });
+
+  it("[140.3-09] ANTI-REGRESSION: a 500 with no wait still throws to the generic error path", async () => {
+    // The new `retryAfter !== undefined` arm must not swallow ordinary failures.
+    // A 500 with no header still reaches the outer catch and its operator log.
+    const consoleSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    mockFetch(async () =>
+      new Response(JSON.stringify({ error: "Simulation failed." }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Plain 500"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("Simulation failed.")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "Retry" }),
+    ).toBeEnabled();
+    expect(consoleSpy).toHaveBeenCalledWith(
+      "[PortfolioImpactPanel] simulate impact failed",
+      expect.anything(),
+    );
+    consoleSpy.mockRestore();
   });
 
   it("renders the insufficient_data empty state", async () => {

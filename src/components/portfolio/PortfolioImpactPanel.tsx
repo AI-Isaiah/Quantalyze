@@ -130,22 +130,62 @@ export function PortfolioImpactPanel({
             { status: res.status, seamCode, body },
           );
         }
+        // B20: the route's own body.retryAfter takes precedence; otherwise parse
+        // the Retry-After header through the shared primitive. This adds HTTP-date
+        // handling — the old raw `Number()` produced NaN for a date-form header,
+        // left the Retry button ENABLED, and a re-click just re-429'd. This value
+        // is ADVISORY (disables the Retry button + drives the countdown), so it is
+        // intentionally NOT clamped — a 42-minute server wait must show as 42 min.
+        //
+        // 140.3-09 / SEAMUX-06 (B-23) — READ UNGATED, ABOVE THE STATUS BRANCH.
+        //
+        // This read used to sit INSIDE the throttle-status branch below. (That
+        // branch's condition is deliberately NOT reproduced in this comment: the
+        // acceptance check proving the read was hoisted OUT of it brackets the
+        // block by matching that very condition, so spelling it here would
+        // silently re-extend the range over these lines and make the check pass
+        // on an untouched tree. Same trap the permissions route documents.)
+        //
+        // `/api/simulator` publishes `Retry-After` on its 503 arms too — the
+        // breaker short-circuit (`String(err.retryAfterS)`) and the fail-CLOSED
+        // limiter-misconfigured arm — and every one of those waits was
+        // discarded, because a 503 never entered the block that did the reading.
+        // The user got a bare error with an enabled Retry button during an
+        // outage whose length the server had already told us. Status decides the
+        // COPY below; it must not decide whether we are willing to hear a wait
+        // at all.
+        const headerSec = parseRetryAfterSeconds(res.headers);
+        const retryAfter =
+          typeof body.retryAfter === "number"
+            ? body.retryAfter
+            : (headerSec ?? undefined);
         if (res.status === 429) {
-          // B20: the route's own body.retryAfter takes precedence; otherwise parse
-          // the Retry-After header through the shared primitive. This adds HTTP-date
-          // handling — the old raw `Number()` produced NaN for a date-form header,
-          // left the Retry button ENABLED, and a re-click just re-429'd. This value
-          // is ADVISORY (disables the Retry button + drives the countdown), so it is
-          // intentionally NOT clamped — a 42-minute server wait must show as 42 min.
-          const headerSec = parseRetryAfterSeconds(res.headers);
-          const retryAfter =
-            typeof body.retryAfter === "number"
-              ? body.retryAfter
-              : (headerSec ?? undefined);
           if (!controller.signal.aborted) {
             setState({
               kind: "error",
               message: serverMessage ?? "Too many simulations. Try again later.",
+              retryAfter,
+            });
+          }
+          return;
+        }
+        if (retryAfter !== undefined) {
+          // A non-429 that advertised a wait — in practice the breaker's 503.
+          // Surfaced as the SAME error state the 429 path uses so the advisory
+          // countdown and the disabled Retry control come along, but with this
+          // status's own server-supplied copy rather than the throttle sentence.
+          //
+          // Logged here because this arm returns instead of throwing, so the
+          // outer catch's operator log never sees it — and a breaker trip is
+          // exactly the failure an operator needs in the console (Rule 12).
+          console.error(
+            "[PortfolioImpactPanel] simulate impact failed with an advertised wait",
+            { status: res.status, retryAfter, seamCode },
+          );
+          if (!controller.signal.aborted) {
+            setState({
+              kind: "error",
+              message: serverMessage ?? `HTTP ${res.status}`,
               retryAfter,
             });
           }
