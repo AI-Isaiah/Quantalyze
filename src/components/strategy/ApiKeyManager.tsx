@@ -31,6 +31,84 @@ function stripValidationFields(
   return copy;
 }
 
+/**
+ * 140.3-08 / SEAMUX-04 (C-9) — what the user is told when a sync could not be
+ * started and the response carried no reviewed copy of its own.
+ *
+ * REPLACES a sentence that told the user the analytics service was unavailable
+ * and then instructed them to check that one of our own server-side environment
+ * variables was configured. That is a DESIGN.md §Voice violation and an
+ * information-disclosure smell: it tells a user something they can neither act
+ * on nor should know, and it names our infrastructure to anyone who can trip the
+ * arm. The deleted string is NOT reproduced here — the acceptance grep for it
+ * scans this file, and a comment quoting it would keep the grep red forever
+ * while the copy was genuinely gone.
+ *
+ * DESIGN.md §Voice: declarative, sentence-case, active voice, no exclamation, no
+ * adjective where a number exists. There is no number to give here — this
+ * component reads no `Retry-After` (that is SEAMUX-06, plan `140.3-09`), so
+ * inventing a wait would be the fabrication the rule exists to prevent.
+ *
+ * "Your key is saved" is a fact at BOTH call sites, not reassurance: the
+ * background sync runs only inside `if (newKey)` (the insert returned a row),
+ * and the explicit sync runs only after `handleLinkKey` resolved without error.
+ */
+const SYNC_UNAVAILABLE_COPY =
+  "We couldn't start the sync. Your key is saved — retry in a moment, and contact support if it keeps failing.";
+
+/**
+ * The user-facing message for a non-2xx `/api/keys/sync` response.
+ *
+ * Shared by BOTH call sites deliberately: a class fixed two different ways is a
+ * class a reviewer cannot audit, and "3 of 5 sites" is this programme's
+ * signature failure.
+ *
+ * Two things it does that reading `res.json()` directly does not:
+ *
+ *  1. **Branches on `content-type` BEFORE the JSON read.** A proxy or gateway
+ *     answers an outage with an HTML error page; `res.json()` on that throws a
+ *     `SyntaxError` INSIDE the failure path, replacing the real failure with a
+ *     parse error.
+ *  2. **Reads `human_message` as well as `error`.** These are two different
+ *     envelopes from the same route and BOTH are live. The route's own arms emit
+ *     `{ error }` (400 / 404 / 429 / the composite-probe 503); every envelope
+ *     `postProcessKey` builds emits `{ code, human_message }` — including the
+ *     breaker's 503, whose sentence `140.3-04` consolidated onto ONE production
+ *     source precisely so it reaches users. Reading `error` alone rendered
+ *     "Trade sync failed" over the top of it.
+ */
+async function syncFailureMessage(res: Response): Promise<string> {
+  const contentType = res.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const body: unknown = await res.json().catch(() => null);
+    if (body !== null && typeof body === "object") {
+      const fields = body as Record<string, unknown>;
+      if (typeof fields.error === "string" && fields.error) return fields.error;
+      if (typeof fields.human_message === "string" && fields.human_message) {
+        return fields.human_message;
+      }
+    }
+  }
+  return SYNC_UNAVAILABLE_COPY;
+}
+
+/**
+ * Did this 2xx actually enqueue a job?
+ *
+ * `/api/keys/sync` stamps `ok: true` on its three structured success branches
+ * ONLY. Its drift fallback returns the unrecognised upstream body through
+ * un-stamped, and says why in the route: *"marking an unrecognized shape ok:true
+ * would falsely signal success"*. So the one 2xx that means "no job was
+ * enqueued" is exactly the one that must not start a poll for it.
+ */
+function isSyncEnqueued(body: unknown): boolean {
+  return (
+    body !== null &&
+    typeof body === "object" &&
+    (body as Record<string, unknown>).ok === true
+  );
+}
+
 export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: ApiKeyManagerProps) {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [showForm, setShowForm] = useState(false);
@@ -198,17 +276,48 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
           );
         }
 
-        // Auto-sync trades in background (don't block the UI)
+        // Auto-sync trades in background (don't block the UI).
+        //
+        // 140.3-08 / SEAMUX-05 (B-06) — observe the HTTP OUTCOME, not just a
+        // transport rejection. This was `fetch(…).catch(…)`, and the comment
+        // beside it claimed it handled 401/403/500 errors. It could not:
+        // `.catch()` fires ONLY when the request never completes, so every one
+        // of those — and a breaker 503 — RESOLVED the promise and was invisible.
+        // The user was told the key was added and nothing ever said the sync had
+        // not started.
+        //
+        // Still NOT awaited: "don't block the UI" is a real requirement and the
+        // add-key flow continues below regardless. The outcome is observed
+        // INSIDE the promise chain and routed to the same SyncProgress surface
+        // an explicit sync failure uses, so a failed background sync cannot be
+        // read as a completed one.
+        //
+        // `lastAttemptedKeyId` is set so SyncProgress's Retry button has a
+        // target; without it the retry closure would see null and no-op (the
+        // pre-existing bug the state's own comment above records).
+        setLastAttemptedKeyId(newKey.id);
         fetch("/api/keys/sync", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ strategy_id: strategyId }),
-        }).catch((err) => {
-          // FINDING-10: log failure so operators can diagnose why a newly-added
-          // key never synced. Non-critical UX (user can resync manually), but
-          // the empty catch previously left zero evidence of 401/403/500 errors.
-          console.warn("[ApiKeyManager] background sync after key add failed:", err);
-        });
+        })
+          .then(async (res) => {
+            if (!res.ok) throw new Error(await syncFailureMessage(res));
+            // Same enqueue-evidence requirement as the explicit sync below —
+            // one shape at both members of the class, not two.
+            const body: unknown = await res.json().catch(() => null);
+            if (!isSyncEnqueued(body)) throw new Error(SYNC_UNAVAILABLE_COPY);
+          })
+          .catch((err: unknown) => {
+            // FINDING-10: keep the operator log — it is how a never-synced key
+            // gets diagnosed, and the caught value goes HERE rather than to the
+            // DOM (140.3-07's B-27 discipline).
+            console.warn("[ApiKeyManager] background sync after key add failed:", err);
+            setSyncStatus("error");
+            setSyncError(
+              err instanceof Error ? err.message : SYNC_UNAVAILABLE_COPY,
+            );
+          });
       }
 
       setShowForm(false);
@@ -269,15 +378,25 @@ export function ApiKeyManager({ strategyId, currentKeyId, defaultExchange }: Api
       });
 
       if (!res.ok) {
-        const contentType = res.headers.get("content-type") ?? "";
-        if (contentType.includes("application/json")) {
-          const err = await res.json().catch(() => ({ error: "Sync failed" }));
-          throw new Error(err.error || "Trade sync failed");
-        }
-        throw new Error("Analytics service unavailable. Ensure SUPABASE_SERVICE_ROLE_KEY is configured.");
+        throw new Error(await syncFailureMessage(res));
       }
 
-      // API returned success -- analytics may still be computing.
+      // 140.3-08 / SEAMUX-05 (B-15) — a 2xx is not evidence that a job was
+      // enqueued, and this line used to assume it was. `/api/keys/sync` answers
+      // an unrecognised upstream shape with a deliberately UN-stamped
+      // passthrough, so the one response meaning "nothing was enqueued" was the
+      // one that started a 15-minute poll for it, ending in a timeout that
+      // blamed the computation.
+      //
+      // The fix is NOT entering the state. A wall-clock backstop would only time
+      // the symptom out — the poll would still run, and the user would still be
+      // told their analytics were computing when nothing was.
+      const body: unknown = await res.json().catch(() => null);
+      if (!isSyncEnqueued(body)) {
+        throw new Error(SYNC_UNAVAILABLE_COPY);
+      }
+
+      // A job IS enqueued -- analytics may still be computing.
       // SyncProgress will poll strategy_analytics to track completion.
       setSyncStatus("computing");
       // NEW-C37-04: pass the key being synced so lastSyncAt reads from
