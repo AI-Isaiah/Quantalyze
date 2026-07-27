@@ -1,0 +1,156 @@
+import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import * as seamCopy from "./seam-copy";
+
+/**
+ * Phase 140.3 / SEAMUX-01 — the seam-copy leaf stays dependency-free.
+ *
+ * Same shape and same reasoning as `seam-discriminator.purity.test.ts` and
+ * `seam-errors.purity.test.ts`, for a third leaf. It is a separate file rather
+ * than a generalised sweep on purpose: the three leaves have DIFFERENT exported
+ * surfaces and different reasons for existing, and a shared parameterised guard
+ * would have to weaken the set-equality half to the intersection of all three —
+ * which is the assertion that actually catches a member being added or removed.
+ *
+ * TWO INDEPENDENT CONSTRAINTS force the purity, and the failure messages below
+ * name both, because a future editor who only knows one of them will "fix" the
+ * other away:
+ *
+ *  1. BUNDLE BOUNDARY. `src/lib/process-key-client.ts` reads this constant and
+ *     the UNAUTHENTICATED teaser path renders the string directly, so a
+ *     dependency added here ships to the browser for every anonymous visitor.
+ *     Anything seam-adjacent drags `@upstash/redis`, `@upstash/ratelimit` and a
+ *     `Redis.fromEnv()` module-load side effect in with it. The tempting
+ *     tidy-ups are the dangerous ones: importing `NO_STORE_HEADERS` from a route
+ *     helper, or the `WizardErrorCode` union, or the envelope builder, to keep
+ *     the copy "next to" the thing that wraps it.
+ *  2. MOCK SURVIVAL. Sixteen route test files replace the seam clients
+ *     wholesale, most with a full factory and no `importActual`. A value reached
+ *     THROUGH such a module evaluates to `undefined` — and all ten emitters read
+ *     this constant from inside a CATCH block, so an `undefined` body turns a
+ *     clean 503 into a crash. Nothing mocks this leaf, and that property
+ *     survives only while it imports nothing worth mocking.
+ *
+ * ORACLE INDEPENDENCE. Every expected value here is a hand-typed literal. The
+ * exported-name set is typed in this file, never read back out of the module it
+ * guards.
+ *
+ * GREP-GATE HYGIENE. The source is comment-stripped BEFORE matching and the
+ * patterns are additionally anchored with `^` under `/m`. Either alone would do;
+ * both are kept because this programme hit prose-defeats-the-guard repeatedly,
+ * once in the very commit that documented the rule. Without the strip, the
+ * leaf's own docblock — which necessarily discusses imports and bundles — would
+ * satisfy an unanchored pattern and the guard would pass on a file that had been
+ * ruined.
+ */
+
+const LEAF_PATH = "src/lib/seam-copy.ts";
+
+/**
+ * Whole-line comments and block comments go; a trailing comment stays. Leaving
+ * trailing comments in can only produce a FALSE POSITIVE (a guard that fails
+ * when it should not), which is the safe direction for a purity assertion.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !line.trim().startsWith("//"))
+    .join("\n");
+}
+
+const LEAF_CODE = stripComments(
+  readFileSync(join(process.cwd(), LEAF_PATH), "utf8"),
+);
+
+/**
+ * The leaf's exported surface, typed HERE as a literal.
+ *
+ * ONE member, and deliberately a SET rather than a lower bound. A second export
+ * is not a free convenience here: the whole point of this module is that the
+ * sentence has exactly one declaration, and a sibling export aliasing the same
+ * bytes is a second name that a later editor can reword independently. The two
+ * binding names the ten emitters use (`CIRCUIT_OPEN_COPY` and
+ * `CIRCUIT_OPEN_HUMAN_MESSAGE`) are IMPORT ALIASES of this one declaration, not
+ * two exports. Adding a member is a decision to record here in the same commit,
+ * not a side effect.
+ */
+const EXPECTED_EXPORTS: string[] = ["CIRCUIT_OPEN_COPY"];
+
+const PURITY_RATIONALE =
+  "Two things break at once. (1) BUNDLE BOUNDARY: process-key-client reads this " +
+  "constant and the UNAUTHENTICATED teaser renders the string directly, so a " +
+  "dependency added here ships to the browser for every anonymous visitor — " +
+  "including, for anything seam-adjacent, a Redis client and a module-load side " +
+  "effect. (2) MOCK SURVIVAL: sixteen route tests replace the seam clients " +
+  "wholesale, and all ten emitters read this constant from inside a CATCH block, " +
+  "so a value reached through a wholesale mock is undefined and turns a clean 503 " +
+  "into a crash. If this leaf genuinely needs a dependency, the thing that needs " +
+  "it has to move — widening this guard is never the fix.";
+
+describe("[140.3-04 / SEAMUX-01] seam-copy.ts is a dependency-free leaf", () => {
+  it("contains no import statement", () => {
+    expect(
+      /^\s*import\s/m.test(LEAF_CODE),
+      `${LEAF_PATH} now has an import statement. ${PURITY_RATIONALE}`,
+    ).toBe(false);
+  });
+
+  it("contains no re-export from another module", () => {
+    // `export … from "…"` is a dependency edge exactly like an import: it makes
+    // the other module part of this one's graph in both bundles.
+    expect(
+      /^\s*export\s[^\n]*\bfrom\s/m.test(LEAF_CODE),
+      `${LEAF_PATH} now re-exports from another module, which is an import in ` +
+        `everything but name. ${PURITY_RATIONALE}`,
+    ).toBe(false);
+  });
+
+  it("contains no require() call", () => {
+    expect(
+      /\brequire\s*\(/.test(LEAF_CODE),
+      `${LEAF_PATH} now calls require(). ${PURITY_RATIONALE}`,
+    ).toBe(false);
+  });
+
+  it("reads no environment variable", () => {
+    // An env read is a module-load side effect in the browser bundle, where the
+    // variable does not exist — and copy that could vary by environment is worse
+    // than copy that cannot: preview and production would tell a user different
+    // things about the same outage, with nothing in the suite to see it.
+    expect(
+      /process\.env/.test(LEAF_CODE),
+      `${LEAF_PATH} now reads process.env. The leaf must be inert at module ` +
+        `load in BOTH bundles, and the copy must be STATIC (T-140-05 / ` +
+        `T-140-08). ${PURITY_RATIONALE}`,
+    ).toBe(false);
+  });
+
+  it("exposes the copy as a plain string constant, never a function", () => {
+    // A function is how "static by design" dies: the first caller that wants to
+    // name the cooldown passes it in, and the unauthenticated teaser starts
+    // rendering an infrastructure fact. The constraint is threat T-140-08 and it
+    // is enforced structurally, not by review.
+    expect(
+      typeof seamCopy.CIRCUIT_OPEN_COPY,
+      `The breaker copy must stay a plain string. Making it a function or a ` +
+        `template is how an upstream URL, a status or a cooldown reaches an ` +
+        `unauthenticated visitor (T-140-08).`,
+    ).toBe("string");
+  });
+
+  it("exports exactly the hand-typed name set (SET equality, not a count)", () => {
+    // A length check passes a RENAME, measured in plan 140.2-02: renaming a
+    // budget key left the count unchanged and only the set equality saw it.
+    expect(
+      Object.keys(seamCopy).sort(),
+      `${LEAF_PATH}'s exported surface drifted. Everything exported from this ` +
+        `leaf is reachable from the browser bundle and survives every wholesale ` +
+        `seam mock — both are privileges. A SECOND copy export is specifically ` +
+        `refused: the two binding names the emitters use are import aliases of ` +
+        `the one declaration, and a sibling export is a second name that can be ` +
+        `reworded independently, which is the drift this module exists to close.`,
+    ).toEqual([...EXPECTED_EXPORTS].sort());
+  });
+});
