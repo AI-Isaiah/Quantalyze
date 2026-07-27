@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -284,6 +284,55 @@ describe("[SEAMCORE-06 / SC6] no seam log site passes a raw caught error", () =>
       expect(offences, `${offences.join("; ")}. ${FAILURE_REASON}`).toEqual([]);
     },
   );
+
+  it("HI-02: every route that spends a CREDENTIAL-BEARING budget is on the roster", () => {
+    // ⚠️ THE ROSTER IS THE CLASS, AND A HAND-TYPED LIST CANNOT CLOSE A CLASS ON
+    // ITS OWN. `SEAM_FILES` is hand-typed for a good reason (a derived list
+    // would silently widen or narrow whenever SEAM_ROUTE_BUDGETS moved), but
+    // that leaves exactly one failure mode: a route that BELONGS on it and was
+    // never added. `create-with-key` and `composite/add-key` sat in that gap —
+    // both spend the validate-key + encrypt-key budgets, both were edited by
+    // this very phase, and both logged a raw `err.message`. Neither was on this
+    // roster, so the guard could not see them, while the REGISTRY entry claimed
+    // class closure.
+    //
+    // This assertion is the completeness half: the MEMBERSHIP TEST is scanned
+    // from disk (does this route call the two credential-bearing clients?),
+    // while WHAT IS ASSERTED about a member stays hand-typed. So a NEW route
+    // that starts carrying raw exchange credentials reddens here on the day it
+    // is written, rather than on the day someone notices.
+    const routeFiles: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(join(process.cwd(), dir), {
+        withFileTypes: true,
+      })) {
+        const rel = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) walk(rel);
+        else if (entry.name === "route.ts") routeFiles.push(rel);
+      }
+    };
+    walk("src/app/api");
+
+    // The two clients whose REQUEST BODIES carry the raw exchange `api_key`,
+    // `api_secret` and `passphrase`, and whose outgoing headers carry
+    // `X-Service-Key` and the minted `X-Tenant-Claim`. Hand-typed.
+    const CREDENTIAL_BEARING_CALLS = ["validateKey(", "encryptKey("];
+
+    const uncovered = routeFiles.filter((file) => {
+      const code = stripComments(readFileSync(join(process.cwd(), file), "utf8"));
+      const carriesCredentials = CREDENTIAL_BEARING_CALLS.some((call) =>
+        code.includes(call),
+      );
+      return carriesCredentials && !SEAM_FILES.includes(file);
+    });
+
+    expect(
+      uncovered,
+      `These routes call validateKey/encryptKey — so their catch blocks stand ` +
+        `over the raw exchange credentials — but are absent from SEAM_FILES, ` +
+        `which means this guard never inspects them. ${FAILURE_REASON}`,
+    ).toEqual([]);
+  });
 
   it("the scan actually finds console calls and catch bindings (fail-loud on a broken scanner)", () => {
     // A scanner that matched NOTHING would report every file clean forever —
