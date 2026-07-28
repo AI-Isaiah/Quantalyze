@@ -76,6 +76,46 @@ export function isLedgerBackedExchange(
   return exchange === "deribit";
 }
 
+/**
+ * Thrown when `checkStrategyGate` is handed an input it cannot evaluate.
+ *
+ * WHY THIS IS A REFUSAL AND NOT A VERDICT (C-3). `StrategyGateInput` documents
+ * `earliestTradeAt` as "Timestamp of the earliest trade, or null when no trades
+ * exist" (and `latestTradeAt` identically). So on the TRADE-SOURCED branch —
+ * where `tradeCount` has already cleared `STRATEGY_GATE_MIN_TRADES`, i.e. trades
+ * demonstrably exist — an unreadable span is a CONTRADICTION, not an absence:
+ * the only way to reach it is a caller whose `earliestTradeAt`/`latestTradeAt`
+ * read failed (or returned corrupt, out-of-order timestamps). Returning any
+ * verdict there means answering a question about a strategy whose history was
+ * never measured, and the answer the old code gave was PASS — a 2-day track
+ * record published as verified the moment a timestamp read failed.
+ *
+ * Every OTHER null combination keeps its meaning: `tradeCount === 0` with null
+ * timestamps is the genuine absence the docstring describes, and the
+ * daily-returns branch (CSV upload / ledger-backed venue) never consults the
+ * trade span at all. Neither refuses.
+ *
+ * ⚠️ CONSEQUENCE: `checkStrategyGate` is now a PARTIAL function. It answers a
+ * verdict for representable inputs and refuses for unrepresentable ones, so
+ * EVERY caller needs a fail-loud arm. A caller that lets this escape uncaught
+ * fails closed (no publish, no render) — which is the safe direction — but the
+ * intended handling is an explicit catch that reports a service-side failure
+ * about US rather than a gate verdict about the strategy.
+ *
+ * The message carries NO user data: only `tradeCount`, an integer this module's
+ * own caller counted. Never a timestamp, an id, or a database error string.
+ */
+export class StrategyGateUnevaluableError extends Error {
+  constructor(tradeCount: number) {
+    super(
+      `Strategy gate cannot evaluate this strategy: ${tradeCount} trade(s) reported, ` +
+        `but the trade span is unreadable (earliest/latest trade timestamps missing or out of order). ` +
+        `Trades exist, so the span was never measured rather than being absent.`,
+    );
+    this.name = "StrategyGateUnevaluableError";
+  }
+}
+
 export interface StrategyGateResult {
   /** True iff every threshold is satisfied. */
   passed: boolean;
@@ -162,6 +202,14 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     }
 
     const spanDays = computeSpanDays(input.earliestTradeAt, input.latestTradeAt);
+    // Trades cleared the count floor above, so `earliestTradeAt`/`latestTradeAt`
+    // cannot legitimately be null here (see StrategyGateUnevaluableError, which
+    // quotes the input type's own docstring for those two fields). Refuse rather
+    // than fall through: the comparison below is a `<`, so a null span used to
+    // skip the day gate ENTIRELY and return PASS.
+    if (spanDays === null) {
+      throw new StrategyGateUnevaluableError(input.tradeCount);
+    }
     if (spanDays !== null && spanDays < STRATEGY_GATE_MIN_DAYS) {
       return {
         passed: false,

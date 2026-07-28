@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   checkStrategyGate,
+  StrategyGateUnevaluableError,
   STRATEGY_GATE_MIN_TRADES,
   STRATEGY_GATE_MIN_DAYS,
   STRATEGY_GATE_MIN_CSV_ROWS,
@@ -385,6 +386,8 @@ describe("checkStrategyGate", () => {
       caught = err;
     }
     expect(caught).toBeInstanceOf(Error);
+    // Exported from the module under test so callers can narrow on it.
+    expect(caught).toBeInstanceOf(StrategyGateUnevaluableError);
     expect((caught as Error).name).toBe("StrategyGateUnevaluableError");
     // Names BOTH halves of the contradiction: trades present, span unreadable.
     expect((caught as Error).message).toMatch(/5 trade/);
