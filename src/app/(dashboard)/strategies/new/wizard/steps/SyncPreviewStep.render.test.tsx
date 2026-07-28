@@ -2232,6 +2232,47 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
           await renderThroughTheGate({ ...baseProps });
         },
       },
+      // ── 140.4-12 / SEAMRIM-08 — THE ENLARGED REACHABLE SET ──────────────
+      // Making the kickoff arm translate before it membership-checks turns
+      // four seam WIRE codes into codes that can reach `gate_failed`, so the
+      // population this property is stated over grows. That is exactly the
+      // interaction 140.4-11's pin has to absorb: a newly renderable code must
+      // not arrive with a destructive sole affordance. The rows are INPUTS
+      // (an HTTP arm and its body), never the code they produce — the code is
+      // still read back off `data-error-code` below.
+      {
+        input: "kickoff 503 with the breaker's own wire code",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "CIRCUIT_OPEN" }), {
+              status: 503,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 504 on a seam transport deadline",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "UPSTREAM_TIMEOUT" }), {
+              status: 504,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 500 naming a configuration fault on our own side",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "SEAM_MISCONFIGURED" }), {
+              status: 500,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
       {
         input: "gate: keyless draft, no trades, no daily returns",
         drive: async () => {
@@ -2326,16 +2367,21 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     }
 
     // ── VACUITY FENCE ───────────────────────────────────────────────────
-    // A scanner that drove nothing would report agreement forever. Eleven
-    // DISTINCT codes reach this render today (140.4 CONTEXT §4, independently
-    // re-derived by the pattern-mapper); the literal is hand-typed so it
-    // cannot be satisfied by the loop measuring itself.
+    // A scanner that drove nothing would report agreement forever. ELEVEN
+    // distinct codes reached this render when 140.4-11 wrote this pin (140.4
+    // CONTEXT §4, independently re-derived by the pattern-mapper); 140.4-12
+    // raised it to FOURTEEN by making the kickoff arm translate before it
+    // membership-checks, which admits SERVICE_UNAVAILABLE_RETRY,
+    // SERVICE_UNREACHABLE and SEAM_MISCONFIGURED. The literal is hand-typed —
+    // never `scenarios.length`, which would measure the loop against itself —
+    // and it is RAISED rather than left at 11, so the three new rows cannot
+    // silently stop driving anything.
     expect(
       observed.size,
-      "Fewer than eleven distinct codes were actually driven. A loop that " +
+      "Fewer than fourteen distinct codes were actually driven. A loop that " +
         "renders nothing satisfies every assertion inside it and reports " +
         "agreement forever — which is worse than having no guard at all.",
-    ).toBeGreaterThanOrEqual(11);
+    ).toBeGreaterThanOrEqual(14);
 
     // The forced choice must be absent from the WHOLE observed set, stated
     // once more as a set-level claim so a per-row `continue` cannot hide it.
