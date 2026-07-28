@@ -10,10 +10,18 @@
  *   - csv-validate proxy: validateCsv() (analytics-client) is mocked
  *   - csv-finalize proxy: supabase rpc() is mocked
  *
- * Cross-AI revision 2026-04-30: the validateCsv-throws path asserts that
- * the original throw message ("ANALYTICS_SERVICE_URL not configured")
- * surfaces verbatim in the human_message field. The csv-finalize route
- * tests cover strategy_name validation BEFORE the RPC is called.
+ * 140.4-09 / SEAMRIM-06 — SUPERSEDES the Cross-AI revision 2026-04-30, which
+ * asserted that the original throw message ("ANALYTICS_SERVICE_URL not
+ * configured") surfaces VERBATIM in human_message. It does not, and must not:
+ * that assertion pinned the leak green. The 502's human_message is now a STATIC
+ * sentence and the thrown text stays server-side, under the H-1062 rule
+ * `src/app/api/bridge/route.ts:190-193` states verbatim. The two cases below
+ * assert the absence in BOTH directions — the original string, and a
+ * distinctive synthetic one, because an assertion naming a single string is
+ * satisfied by a route that echoes everything except that string.
+ *
+ * The csv-finalize route tests cover strategy_name validation BEFORE the RPC
+ * is called.
  *
  * **Vitest environment override** — these tests must run under the `node`
  * environment, NOT jsdom. jsdom's Request.formData() does not parse
@@ -379,7 +387,15 @@ describe("/api/strategies/csv-validate", () => {
     expect(validateCsvMock).not.toHaveBeenCalled();
   });
 
-  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with original message in human_message", async () => {
+  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with a STATIC human_message, not the thrown text", async () => {
+    // 140.4-09 / SEAMRIM-06. This case previously asserted
+    // `toContain("ANALYTICS_SERVICE_URL not configured")` — it PINNED THE LEAK
+    // GREEN. The thrown text is internal prose (a config fault, a Python
+    // contract-drift string, a FastAPI 5xx detail) and it is rendered by
+    // `CsvUploadStep` → `CsvValidationEnvelope` as the wizard panel's title and
+    // subtitle. H-1062, stated verbatim at `src/app/api/bridge/route.ts:190-193`:
+    // genuine 5xx / unexpected exceptions return a STATIC message and the detail
+    // stays server-side.
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockRejectedValue(
       new Error("ANALYTICS_SERVICE_URL not configured"),
@@ -391,9 +407,65 @@ describe("/api/strategies/csv-validate", () => {
     expect(res.status).toBe(502);
     const json = await res.json();
     expect(json.code).toBe("CSV_UPSTREAM_FAIL");
-    // Cross-AI revision 2026-04-30: throw message surfaces verbatim.
-    expect(json.human_message).toContain("ANALYTICS_SERVICE_URL not configured");
+    // THE NEGATIVE FIRST, deliberately: it is the assertion that replaced the
+    // pin, so it is the one that must be seen reddening on the untouched tree.
+    // Ordering it after the sentence pin would let `toBe` short-circuit and the
+    // replacement would never be observed failing.
+    //
+    // The WHOLE serialised body, not just human_message: `debug_context` is a
+    // second channel into the same panel and a human_message-only assertion
+    // would not see a move from one field to the other.
+    expect(
+      JSON.stringify(json),
+      "the thrown text reached the wizard error panel — H-1062 requires a static sentence here",
+    ).not.toContain("ANALYTICS_SERVICE_URL");
+    // Hand-typed literal, never read off the route — the sentence is the oracle.
+    expect(json.human_message).toBe("CSV validation failed. Try again shortly.");
     expect(json.correlation_id).toBeNull();
+  });
+
+  it("GENERALISED: no thrown text reaches the 502 body, whatever it says — and the operator still gets it", async () => {
+    // ⚠️ THE CASE ABOVE IS SATISFIABLE BY SPECIAL-CASING ONE STRING. A route
+    // that echoed `err.message` and stripped the literal
+    // "ANALYTICS_SERVICE_URL" would pass it. This drives a DISTINCTIVE
+    // synthetic message that no production code can know about, so only a route
+    // that echoes NOTHING passes.
+    //
+    // The second half is the A-10 anti-regression: answering the finding by
+    // DROPPING the value from the log replaces one defect with another. The
+    // operator must still receive the detail, scrubbed, server-side. Both
+    // directions are asserted here because a one-sided test ships either state
+    // green.
+    const SYNTHETIC =
+      "zq7f4e-marker: relation \"strategy_verifications\" does not exist";
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(new Error(SYNTHETIC));
+    // DEF-16-1: vi.spyOn + restore, never vi.stubGlobal.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = new File(["x"], "x.csv", { type: "text/csv" });
+      const req = makeMultipartRequest(file, "daily_returns");
+      const { POST } = await import("@/app/api/strategies/csv-validate/route");
+      const res = await POST(req);
+      expect(res.status).toBe(502);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_UPSTREAM_FAIL");
+      expect(
+        JSON.stringify(json),
+        "an arbitrary thrown message reached the wizard error panel — the 502 is echoing, not answering statically",
+      ).not.toContain("zq7f4e-marker");
+      expect(json.human_message).toBe("CSV validation failed. Try again shortly.");
+
+      const logged = errorSpy.mock.calls
+        .map((call) => call.map((arg) => String(arg)).join(" "))
+        .join("\n");
+      expect(
+        logged,
+        "the detail was DROPPED from the log instead of being scrubbed — that is the A-10 defect, and it leaves the operator able to see THAT the seam failed and never WHY",
+      ).toContain("zq7f4e-marker");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   // Phase 15 / WR-03: defense-in-depth UUID gate. The Python router

@@ -532,8 +532,20 @@ function parseResponse<T>(
       scrubSeamString(JSON.stringify(result.error.issues)),
     );
     // Throw so callers get a clear error rather than silently wrong data.
+    //
+    // 140.4-09 / SEAMRIM-06 — SCRUBBED, for the reason stated four lines above.
+    // The rule was written for the log and applied only there; this THROW is
+    // reached from 8 of the 9 wrappers, and its message is caught and logged
+    // again by every one of their callers. The channel is the issue PATH rather
+    // than its message — a zod `invalid_type` message renders type NAMES only,
+    // but a `z.record` key is response-controlled and becomes a path segment.
+    //
+    // ⚠️ NO STRUCTURAL GUARD WATCHES THIS LINE. `seam-log-coverage.test.ts` is
+    // scoped to `console.*`, and a thrown sink is invisible to a console-scoped
+    // predicate — there is no scan that can fail when this is re-opened. The
+    // cases in `analytics-client.test.ts` are the only thing holding it.
     throw new Error(
-      `Analytics response contract violation on ${endpoint}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+      `Analytics response contract violation on ${endpoint}: ${scrubSeamString(result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "))}`,
     );
   }
   return result.data;
