@@ -1328,6 +1328,14 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * `expand_log`: no destructive member, so the guard below is unaffected in
    * substance and the number is the only thing that moved.
    *
+   * **55 at 140.3-15**, which added `SEAM_MISCONFIGURED` (TS-38 — our own
+   * configuration fault, which until now wore the dead-upstream envelope). Its
+   * `actions` are `request_call` + `expand_log` as well: again no destructive
+   * member, so this guard is unaffected in substance. The reasoning below was
+   * re-run over the new entry BEFORE the number moved — bumping the literal
+   * without re-running it is how a growing table smuggles a violation past a
+   * size guard.
+   *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
@@ -1337,7 +1345,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 54;
+  const EXPECTED_TABLE_SIZE = 55;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1469,12 +1477,18 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * HAND-TYPED SIZE GUARD, mirroring 140.3-10's. A scan over an emptied table
    * passes every assertion below vacuously.
    *
-   * 53 at 140.3-12; **54 at 140.3-14** (`COMPOSITE_TOO_MANY_MEMBERS`). The new
-   * entry was read against every FORBIDDEN fragment by hand before the number
-   * moved — bumping the literal without re-running the reasoning is how a
-   * growing table smuggles a lie past a size guard.
+   * 53 at 140.3-12; **54 at 140.3-14** (`COMPOSITE_TOO_MANY_MEMBERS`);
+   * **55 at 140.3-15** (`SEAM_MISCONFIGURED`). Each new entry was read against
+   * every FORBIDDEN fragment by hand before the number moved — bumping the
+   * literal without re-running the reasoning is how a growing table smuggles a
+   * lie past a size guard.
+   *
+   * 140.3-15's entry needed the "data is unchanged" fragment checked with care:
+   * it says "nothing was changed", which is NOT the banned string and, unlike
+   * the CSV case that fragment came from, is knowable — `SeamConfigError` is
+   * raised before any store or network I/O, so no write could have landed.
    */
-  const EXPECTED_TABLE_SIZE = 54;
+  const EXPECTED_TABLE_SIZE = 55;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(

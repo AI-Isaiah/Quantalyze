@@ -214,6 +214,31 @@ export type WizardErrorCode =
   //     about their file.
   | "VALIDATION_FAILED"
   | "RATE_LIMITED"
+  // Phase 140.3-15 / TS-38 — a CONFIGURATION fault on OUR side, caught before
+  // the request was ever issued. `resilient-fetch` raises `SeamConfigError`
+  // ABOVE its classification window ("before any store or network I/O"), so
+  // nothing was sent, the breaker correctly hears nothing, and Railway is fine.
+  // Until this member existed the fault took `process-key-client`'s
+  // `UPSTREAM_NETWORK_ERROR` 502 arm and told the user we could not reach the
+  // ingestion service — a false claim about whose fault it is, with a Retry
+  // control that could never succeed.
+  //
+  // ⚠️ NOT A DUPLICATE OF ANY OF THE THREE NEAR-MISSES, and each of them
+  // asserts something FALSE here — which is why an alias was rejected:
+  //   · SERVICE_UNREACHABLE — "We sent the request and never got an answer."
+  //     No request was sent. It is also recoverable; this is not.
+  //   · SERVICE_UNAVAILABLE_RETRY — "wait a moment, then try the same action
+  //     again." True of a breaker cooling down, false of a config typo: waiting
+  //     changes nothing until we fix it and redeploy.
+  //   · VALIDATION_FAILED — "a request that failed its shape check." Closest on
+  //     BEHAVIOUR (non-recoverable, our software's fault) and wrong on the
+  //     FACT: nothing was sent and nothing was shape-checked.
+  //
+  // NOT recoverable, deliberately: `actions` carries neither member of
+  // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+  // `recoverable: false` and `ErrorEnvelope` renders NO Retry control. The
+  // absence IS the fix, on the same mechanism `COMPOSITE_TOO_MANY_MEMBERS` uses.
+  | "SEAM_MISCONFIGURED"
   // Fallback
   | "UNKNOWN";
 
@@ -1056,6 +1081,40 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry", "request_call"],
   },
 
+  // 140.3-15 / TS-38 — copy FINAL, and it is written under THREE simultaneous
+  // constraints, each of which rules out an easier sentence:
+  //   1. It must not blame the upstream. That is the lie being removed.
+  //   2. It must not invite a retry. The setting stays wrong until we redeploy,
+  //      so "try again" is a control that cannot work — and the sentence says
+  //      so explicitly rather than merely omitting the invitation.
+  //   3. It must claim only what is knowable. "Nothing was submitted and
+  //      nothing was changed" is safe HERE in a way it is NOT on
+  //      SERVICE_UNREACHABLE, and the difference is structural rather than
+  //      stylistic: `SeamConfigError` is raised BEFORE any store or network
+  //      I/O, so it is a fact about a request that never left, not a guess
+  //      about one whose outcome we never learned.
+  //
+  // No env variable name, no route name, no status: this entry is reachable
+  // from `finalize-wizard`, which forwards the seam envelope verbatim, and the
+  // wire sentence beside it is rendered by the anonymous teaser.
+  SEAM_MISCONFIGURED: {
+    title: "We could not send this request — our own configuration is wrong.",
+    cause:
+      "A setting on our side is wrong, so we stopped before sending the request. Nothing was submitted and nothing was changed. Retrying will not clear it: the setting stays wrong until we fix it and redeploy. This is not your key, your exchange or your data.",
+    fix: [
+      "Email security@quantalyze.com with the correlation id below — a configuration fault is ours to fix, and running the same action again will not clear it.",
+      "Nothing needs undoing on your side. The request never left our servers, so no draft, key or strategy changed.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts). Their absence derives
+    // `recoverable: false` and suppresses the Retry control, and that BEHAVIOUR
+    // is half of what this entry exists to change. `request_call` keeps a way
+    // out that can actually resolve it; `expand_log` opens the diagnostics the
+    // first fix line asks the user to quote.
+    actions: ["request_call", "expand_log"],
+  },
+
   // 140.3-12 / SEAMUX-04 — the notification claim is GONE. It asserted an audit
   // trail that does not exist: 9 of the 15 seam routes capture nothing at all,
   // so on those paths the sentence promised a person was looking at something
@@ -1498,6 +1557,13 @@ const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<
   ["CIRCUIT_OPEN", "SERVICE_UNAVAILABLE_RETRY"],
   ["UPSTREAM_TIMEOUT", "SERVICE_UNREACHABLE"],
   ["UPSTREAM_NETWORK_ERROR", "SERVICE_UNREACHABLE"],
+  // 140.3-15 / TS-38. Unlike the three above this is NOT an alias: the wire
+  // code and the wizard member share a name because they stand for the same
+  // fact. It is still listed EXPLICITLY rather than admitted by an identity
+  // rule — writing the mapping as `code as WizardErrorCode` would silently
+  // admit `SEAM_DEGRADED`, `MT5_GATEWAY_UNREACHABLE` and every venue code too,
+  // which is the reason this table is explicit at all.
+  ["SEAM_MISCONFIGURED", "SEAM_MISCONFIGURED"],
 ]);
 
 export function recogniseSeamErrorCode(

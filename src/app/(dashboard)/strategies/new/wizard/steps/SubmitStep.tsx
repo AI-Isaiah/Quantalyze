@@ -155,6 +155,18 @@ export function SubmitStep({
             // reachable from a raw `data.code` — see the translation below.
             "SERVICE_UNAVAILABLE_RETRY",
             "SERVICE_UNREACHABLE",
+            // Phase 140.3-15 / TS-38 — a CONFIGURATION fault on our side, which
+            // `process-key-client` now answers with its own code (500) instead
+            // of the dead-upstream 502. Admitted HERE IN THE SAME COMMIT that
+            // the client starts emitting it: without this line the code fails
+            // the membership check below, falls to UNKNOWN, and the user sees
+            // the generic dead end while every client-side test stays green.
+            // That is `140.3-14`'s M81, one plan ago, on a different code.
+            //
+            // ⚠️ Like COMPOSITE_TOO_MANY_MEMBERS above, its copy is deliberately
+            // NON-recoverable, so it renders no Retry control. Correct: the
+            // setting stays wrong until we fix it and redeploy.
+            "SEAM_MISCONFIGURED",
           ],
         );
         // 140.3-05 — TRANSLATE THE WIRE CODE FIRST, THEN CHECK MEMBERSHIP. The

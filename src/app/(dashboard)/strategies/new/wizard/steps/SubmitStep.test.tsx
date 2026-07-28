@@ -620,32 +620,27 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("[140.3-15 / TS-38] ANTI-REGRESSION: the two transport codes still render their own recoverable copy", async () => {
-    // The new member sits beside them in the SAME translation table and the
-    // SAME membership set. A sweep that re-pointed either would be invisible to
-    // the two cases above.
-    for (const wireCode of ["UPSTREAM_NETWORK_ERROR", "UPSTREAM_TIMEOUT"]) {
+  // ANTI-REGRESSION, one case PER wire code rather than a loop: the new member
+  // sits beside these two in the SAME translation table and the SAME membership
+  // set, and a sweep that re-pointed either would be invisible to the two cases
+  // above. Separate cases so a failure names WHICH sibling was swallowed.
+  it.each(["UPSTREAM_NETWORK_ERROR", "UPSTREAM_TIMEOUT"])(
+    "[140.3-15 / TS-38] ANTI-REGRESSION: %s still renders its own recoverable copy",
+    async (wireCode) => {
       vi.spyOn(globalThis, "fetch").mockResolvedValue(
         jsonResponse({ ok: false, code: wireCode }, 502),
       );
-      const view = render(
-        <SubmitStep
-          strategyId="strat-1"
-          snapshot={SNAPSHOT}
-          metadata={METADATA}
-          onSubmitted={vi.fn()}
-        />,
-      );
-      fireEvent.click(screen.getAllByTestId("wizard-submit-for-review")[0]);
+      renderStep();
+      fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
       expect(
-        await screen.findAllByText("We could not reach our own service."),
-      ).not.toHaveLength(0);
+        await screen.findByText("We could not reach our own service."),
+      ).toBeInTheDocument();
       expect(
-        await screen.findAllByRole("button", { name: "Retry" }),
+        await screen.findByRole("button", { name: "Retry" }),
         "A genuine transport failure lost its Retry control \u2014 the config-fault " +
           "arm swallowed a sibling.",
-      ).not.toHaveLength(0);
-      view.unmount();
-    }
-  });
+      ).toBeInTheDocument();
+    },
+  );
 });

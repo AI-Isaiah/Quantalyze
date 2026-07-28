@@ -88,6 +88,59 @@ const UPSTREAM_NETWORK_ERROR_HUMAN_MESSAGE =
   "Could not reach the ingestion service.";
 
 /**
+ * Phase 140.3-15 / TS-38 + SEAMUX-04 — user-facing copy for "the fault is a
+ * setting on OUR side", the envelope half 140.2 recorded as owed to this phase.
+ *
+ * ⚠️ STATIC, under the SAME constraint as `CIRCUIT_OPEN_HUMAN_MESSAGE` (threat
+ * T-140-08 / T-140.3-15-02): the UNAUTHENTICATED landing-page teaser renders
+ * this string directly, so it carries NO URL, NO status, NO hostname and NO env
+ * variable name. The diagnosable half — which config value, which route — goes
+ * to the operator log beside the `correlation_id`, where ME-01 already pins it.
+ *
+ * THREE CONSTRAINTS AT ONCE, and each one rules out an easier sentence:
+ *   1. It must NOT blame the upstream. "Could not reach the ingestion service"
+ *      is the lie TS-38 exists to remove — nothing was ever sent, and Railway
+ *      is fine.
+ *   2. It must NOT invite a retry. `SeamConfigError` is raised BEFORE any store
+ *      or network I/O (`resilient-fetch.ts`: "throws SeamConfigError for a
+ *      caller/config fault (before any store or network I/O)"), and the setting
+ *      stays wrong until we redeploy. Saying so in the sentence is what stops a
+ *      user burning their own time on a control that cannot work.
+ *   3. It must be true on every path that reaches it. The one fact common to
+ *      every `SeamConfigError` is that the request was never issued.
+ *
+ * DESIGN.md §Voice: declarative, sentence-case, active, no exclamation, no
+ * adjective where a fact will do. The em dash is one of the five permitted
+ * semantic glyphs.
+ */
+const SEAM_MISCONFIGURED_HUMAN_MESSAGE =
+  "We could not send this request — our own configuration is wrong. Retrying will not clear it.";
+
+/**
+ * The routable status for the outcome above.
+ *
+ * ⚠️ THIS IS A DECISION, NOT A COPY OF THE SIBLING. Every other status on this
+ * function was rejected first, and the reasons are the obligation:
+ *   · 502 — "the UPSTREAM is bad". That is precisely the false attribution
+ *     TS-38 exists to stop; keeping it would leave the lie in the status line
+ *     after removing it from the sentence.
+ *   · 503 / 504 — both signal TRANSIENCE. This condition is permanent until an
+ *     operator redeploys, so a transient-signalling status invites exactly the
+ *     retry `recoverable: false` is removing. (`140.3-14` recorded the same
+ *     mismatch as a residual on the composite member cap; this arm does not
+ *     inherit it.)
+ *   · 500 — "the server that produced THIS response is at fault", which is the
+ *     literal truth: we are the server, and our configuration is wrong. It is
+ *     also the status `STATUS_CONTRACT.md` §1 gives the SERVICE-PERMANENT class
+ *     ("a deterministic fault can only be cleared by an operator"), which is
+ *     this fault exactly.
+ *
+ * No `Retry-After` rides with it: naming a wait no one advertised is TRAP-3,
+ * and there is no wait that would help.
+ */
+const SEAM_MISCONFIGURED_STATUS = 500;
+
+/**
  * Phase 140.2-11 / SEAMCORE-11 (A-27) — THE ONE DEFINED OUTCOME for an
  * ambiguous transport. Stated identically here and in
  * `src/lib/analytics-client.ts` so the next reader does not have to diff the two
@@ -407,18 +460,40 @@ export async function postProcessKey(
     // ingestion service", so a malformed `ANALYTICS_SERVICE_URL` — our own
     // deployment typo — read to ops as Railway being down.
     //
-    // ⚠️ THE LOG IS FIXED HERE; THE ENVELOPE IS NOT, DELIBERATELY. This function
-    // is declared never to throw at its five caller routes, so the sibling fix
-    // in `analytics-client` (rethrow unwrapped) is not available. Giving this
-    // fault its own `code` and `human_message` is authoring user-facing copy,
-    // which is 140.3's fence. Recorded as an obligation in
-    // `140.1-TS-OBLIGATIONS.md` rather than half-done here.
+    // ✅ 140.3-15 / TS-38 CLOSED THE ENVELOPE HALF. The paragraph above is the
+    // history; below is what ships. 140.2 could fix only the LOG, because
+    // giving this fault its own `code` and `human_message` is authoring
+    // user-facing copy and that was 140.2's fence. `analytics-client`'s sibling
+    // remedy — rethrow unwrapped — remains unavailable and always will be: this
+    // function is declared never to throw at its five caller routes, none of
+    // which has a catch for it. So the arm RETURNS an envelope, exactly like
+    // every other arm in this catch.
+    //
+    // ⚠️ THE LOG LINE IS BYTE-UNCHANGED. `process-key-client.test.ts`'s ME-01
+    // falsifier pins the operator half; this plan adds the user half BESIDE it
+    // and must not disturb it (TRAP-9).
     if (err instanceof SeamConfigError) {
       console.error(
         `[${tag}] CONFIG fault reaching /process-key — not an upstream failure, and NOT a reason to blame Railway:`,
         scrubSeamError(err),
         { correlation_id: correlationId },
       );
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            ok: false,
+            code: "SEAM_MISCONFIGURED",
+            human_message: SEAM_MISCONFIGURED_HUMAN_MESSAGE,
+            correlation_id: correlationId,
+            // Permanent until an operator redeploys. `recoverable: false` is
+            // what stops `ErrorEnvelope` rendering a Retry control, and a
+            // control that can never succeed is the second half of the defect.
+            recoverable: false,
+          },
+          { status: SEAM_MISCONFIGURED_STATUS },
+        ),
+      };
     }
     // A body-read failure maps onto the taxonomy ALREADY here rather than
     // getting an envelope of its own: `deadlineExceeded` true is the same fact

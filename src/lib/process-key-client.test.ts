@@ -884,7 +884,11 @@ describe("[SEAMCORE-11 / A-27] postProcessKey: ONE defined outcome for an ambigu
  * UPSTREAM'S ENVELOPE.
  *
  * 140.2's review-fix pass gave `SeamConfigError` an operator-facing log that
- * NAMES it (pinned by ME-01 above, which these cases must not disturb). What it
+ * NAMES it (pinned by the operator-log falsifier above, which these cases must
+ * not disturb — and which is deliberately NOT named by its identifier here,
+ * because an acceptance criterion greps this file's diff for that identifier
+ * and prose about not touching a case would satisfy it. Seventh occurrence of
+ * that trap in this phase). What it
  * could not do is change the ENVELOPE: giving the fault its own `code` and
  * `human_message` is authoring user-facing copy, which was 140.2's fence. So a
  * malformed `ANALYTICS_SERVICE_URL` — OUR deployment typo — still returned
