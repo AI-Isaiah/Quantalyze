@@ -1,0 +1,619 @@
+// @vitest-environment node
+
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { NextRequest } from "next/server";
+
+/**
+ * 140.4-13 / SEAMRIM-05 — A LIMITER MISCONFIGURATION IS NOT A THROTTLE.
+ *
+ * ── WHAT THIS FILE EXISTS TO STOP ────────────────────────────────────────────
+ *
+ * Every seam route runs `checkLimit` FIRST, before it ever reaches the
+ * analytics service. When Upstash is unreachable, `checkLimit` answers
+ * `{success: false, reason: "ratelimit_misconfigured"}` — a fail-CLOSED denial
+ * that means "we could not consult the cap", not "you exceeded it".
+ *
+ * Measured on the untouched tree at the start of this plan: of the 15 seam
+ * routes, **3** translated that into a 503 (`bridge`, `simulator`,
+ * `strategies/finalize-wizard`), **11** answered **429**, and 1 has no limiter.
+ * A 429 says the CALLER is being throttled. On `create-with-key` and
+ * `composite/add-key` the wizard renders that as `KEY_RATE_LIMIT`, whose copy
+ * reads *"a transient, exchange-side throttle and not a problem with your
+ * key"* — so during our own outage we told every user, on their first click,
+ * that their exchange was throttling them. And because a 429 is not a 5xx, the
+ * canary watching for outages never saw it.
+ *
+ * ⚠️ THE BREAKER BESIDE THE LIMITER CANNOT COVER FOR THIS. The limiter runs
+ * first, so during an Upstash outage the seam call never happens and the
+ * breaker never trips. The 429 was the only signal there was.
+ *
+ * ── WHY THE FIX WAS AN ADOPTION, NOT ELEVEN NEW PREDICATE CALLS ──────────────
+ *
+ * `rateLimitDenyJson` already made this decision for 9 other routes and 2
+ * wrappers — and zero seam routes. Its own docblock said why: *"routes whose
+ * tests `vi.mock("@/lib/ratelimit")` still inline the branch to keep their
+ * existing mocks intact."* Test-mock convenience is what kept the seam off the
+ * artefact. That justification has been replaced in the source with what is now
+ * true; this file is the receipt that the adoption HOLDS.
+ *
+ * ── HONEST STATEMENT OF SCOPE — READ THIS BEFORE TRUSTING THE FILE ───────────
+ *
+ * This guard has two halves and they cover different things.
+ *
+ *   STRUCTURAL (all 15 routes, derived from disk every run). Proves that every
+ *   seam route that consumes a rate-limit token routes its DENY through the
+ *   chokepoint, and that it does so ONCE PER ARM. A new seam route that inlines
+ *   a 429-only arm fails here BY NAME on the day it is written. What it cannot
+ *   prove is that the 503 actually reaches the wire — it reads source, not
+ *   responses.
+ *
+ *   BEHAVIOURAL (3 of the 15). Drives real handlers and asserts the status and
+ *   body a client would receive. Three routes, chosen to span the three auth
+ *   shapes the seam has — PUBLIC/anonymous (`verify-strategy`), AUTHENTICATED
+ *   (`keys/sync`, which is also the only route with TWO arms) and ADMIN
+ *   (`admin/match/recompute`).
+ *
+ * ⚠️ A FULL 15-ROUTE BEHAVIOURAL TABLE IS NOT WHAT IS MISSING HERE, AND SAYING
+ * SO MATTERS. Each route needs its own fixture — different auth wrapper,
+ * different required body, different downstream mocks — so a "table" would be
+ * fifteen bespoke stacks, each free to drift from its route. The remaining
+ * twelve are covered structurally here AND behaviourally in their own
+ * `route.test.ts` files, where their real fixtures already live. A guard that
+ * implied behavioural coverage it does not have would be worse than one that
+ * states its boundary.
+ */
+
+// ---------------------------------------------------------------------------
+// PART 1 — THE STRUCTURAL HALF. Population DERIVED FROM DISK, never hand-typed.
+// ---------------------------------------------------------------------------
+
+/** The three modules through which every seam call in this repo is made. */
+const SEAM_MODULES = [
+  "analytics-client",
+  "resilient-fetch",
+  "process-key-client",
+] as const;
+
+/**
+ * Matches the IMPORT EDGE, never a bare mention.
+ *
+ * Duplicated (not imported) from `seam-poll-disjointness.pin.test.ts` on
+ * purpose: a test file must not import another test file, and two independent
+ * scanners that agree are worth more than one shared helper whose single bug
+ * blinds both tiers.
+ */
+const SEAM_IMPORT_EDGE = new RegExp(
+  `from\\s*["'](?:@/lib/|\\./|\\.\\./)?(?:lib/)?(?:${SEAM_MODULES.join("|")})["']`,
+);
+
+/**
+ * Strip comments before counting.
+ *
+ * ⚠️ THIS IS LOAD-BEARING, NOT COSMETIC, AND IT IS A REAL SHAPE IN THIS EXACT
+ * POPULATION. `admin/match/eval/route.ts` and `admin/match/recompute/route.ts`
+ * both carry the line *"Same pairing as rateLimitDenyJson (…)"* in a COMMENT.
+ * `eval` has no limiter at all, so an unstripped scan reads it as adopting the
+ * chokepoint and reports this class closed while it is open — the precise way a
+ * source guard becomes worse than no guard. Both polarities are self-tested
+ * below.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .split("\n")
+    .map((line) => (line.trim().startsWith("//") ? "" : line))
+    .join("\n");
+}
+
+function countMatches(src: string, re: RegExp): number {
+  return src.match(re)?.length ?? 0;
+}
+
+/** Rate-limit token consumption sites. */
+const CHECK_LIMIT_CALL = /\bcheckLimit\s*\(/g;
+
+/**
+ * Sites where the 503-vs-429 decision is made by the ARTEFACT rather than by an
+ * inlined status literal. Either builder counts, and so does a direct
+ * `isRateLimitMisconfigured` branch — that predicate lives inside
+ * `src/lib/ratelimit.ts` and is the single source of the decision the builders
+ * themselves call, so a route applying it directly (as `bridge`, `simulator`
+ * and `finalize-wizard` do) is holding the same property.
+ */
+const DENY_ROUTED_CALL =
+  /\b(?:rateLimitDenyJson|rateLimitDenyText|isRateLimitMisconfigured)\s*\(/g;
+
+interface RouteScan {
+  /** Repo-relative path, e.g. `src/app/api/keys/sync/route.ts`. */
+  path: string;
+  checkLimitSites: number;
+  denyRoutedSites: number;
+}
+
+function deriveSeamRouteFiles(apiRoot: string): string[] {
+  const paths: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(join(process.cwd(), dir), {
+      withFileTypes: true,
+    })) {
+      const rel = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(rel);
+        continue;
+      }
+      if (entry.name !== "route.ts") continue;
+      if (!SEAM_IMPORT_EDGE.test(readFileSync(join(process.cwd(), rel), "utf8")))
+        continue;
+      paths.push(rel);
+    }
+  };
+  walk(apiRoot);
+  return paths.sort();
+}
+
+function scanRoute(path: string): RouteScan {
+  const src = stripComments(readFileSync(join(process.cwd(), path), "utf8"));
+  return {
+    path,
+    checkLimitSites: countMatches(src, CHECK_LIMIT_CALL),
+    denyRoutedSites: countMatches(src, DENY_ROUTED_CALL),
+  };
+}
+
+const SEAM_ROUTE_FILES = deriveSeamRouteFiles("src/app/api");
+const SCANS = SEAM_ROUTE_FILES.map(scanRoute);
+const LIMITER_ROUTES = SCANS.filter((s) => s.checkLimitSites > 0);
+const NO_LIMITER_ROUTES = SCANS.filter((s) => s.checkLimitSites === 0);
+
+/**
+ * The seam routes that consume a rate-limit token. HAND-TYPED, and compared
+ * against the from-disk derivation above.
+ *
+ * ⚠️ HAND-TYPED ON PURPOSE. Deriving both sides would be two scanners agreeing
+ * with each other, which is not evidence. A new seam route with a limiter fails
+ * this equality BY NAME, which forces a conscious decision about its deny arm
+ * rather than letting it inherit whatever the author typed.
+ */
+const EXPECTED_LIMITER_ROUTES: readonly string[] = [
+  "src/app/api/admin/match/recompute/route.ts",
+  "src/app/api/bridge/route.ts",
+  "src/app/api/keys/[id]/permissions/route.ts",
+  "src/app/api/keys/sync/route.ts",
+  "src/app/api/keys/validate-and-encrypt/route.ts",
+  "src/app/api/portfolio-optimizer/route.ts",
+  "src/app/api/scenario/optimize/route.ts",
+  "src/app/api/simulator/route.ts",
+  "src/app/api/strategies/composite/add-key/route.ts",
+  "src/app/api/strategies/create-with-key/route.ts",
+  "src/app/api/strategies/csv-finalize/route.ts",
+  "src/app/api/strategies/csv-validate/route.ts",
+  "src/app/api/strategies/finalize-wizard/route.ts",
+  "src/app/api/verify-strategy/route.ts",
+];
+
+/**
+ * The seam route with NO limiter, quarantined by an EQUALITY rather than a
+ * containment check.
+ *
+ * `admin/match/eval` is the genuine no-limiter row. Adding a limiter to it is a
+ * policy decision about a new rate cap, not an error-contract fix, and this
+ * plan deliberately did not make it. The shape here is
+ * `analytics-service/tests/test_limiter_identity.py:462-479`'s, and so is its
+ * reason: IF IT IS EVER GIVEN A LIMITER, THIS QUARANTINE MUST SHRINK IN THE
+ * SAME COMMIT. An equality forces that; a containment check would let a stale
+ * exemption outlive the thing it exempted.
+ */
+const NO_LIMITER_QUARANTINE: readonly string[] = [
+  "src/app/api/admin/match/eval/route.ts",
+];
+
+describe("[140.4-13 / SEAMRIM-05] structural — every seam limiter deny goes through the chokepoint", () => {
+  it("the scan is not vacuous (a scanner that matched nothing would report agreement forever)", () => {
+    // ⚠️ THE FENCE, NOT THE MEASUREMENT. Measured at plan time: 15 seam routes
+    // carrying 15 `checkLimit` sites (`keys/sync` has two). The bounds below are
+    // deliberately looser than those numbers so ordinary growth does not redden
+    // the file — what they exist to catch is a walker that stopped walking or a
+    // needle that stopped matching, either of which makes every set equality
+    // below trivially true.
+    expect(
+      SEAM_ROUTE_FILES.length,
+      "The seam-route walk found fewer than 15 routes. `SEAM_IMPORT_EDGE` " +
+        "stopped matching, or the walker's root moved. Every assertion in this " +
+        "file is now vacuous — a guard that scans nothing agrees with " +
+        "everything, forever.",
+    ).toBeGreaterThanOrEqual(15);
+
+    const totalCheckLimitSites = SCANS.reduce(
+      (n, s) => n + s.checkLimitSites,
+      0,
+    );
+    expect(
+      totalCheckLimitSites,
+      "Fewer than 12 `checkLimit` call sites were found across the seam. The " +
+        "call needle stopped matching (a rename, a wrapper), so the " +
+        "compliance partition below is measuring an empty population.",
+    ).toBeGreaterThanOrEqual(12);
+  });
+
+  it("the derived limiter population matches the hand-typed roster (a new seam route fails BY NAME)", () => {
+    expect(
+      LIMITER_ROUTES.map((s) => s.path),
+      "The set of seam routes consuming a rate-limit token drifted from the " +
+        "roster hand-typed in this file. A route added here is a route whose " +
+        "deny arm nobody reviewed. Add it to the roster in the SAME commit " +
+        "that adds its limiter — and give it a chokepoint-routed deny while " +
+        "you are there, or the next assertion will tell you so.",
+    ).toEqual([...EXPECTED_LIMITER_ROUTES]);
+  });
+
+  it("EVERY limiter route routes its deny through the artefact — ONCE PER ARM", () => {
+    // ⚠️ PER ARM, NOT PER FILE. `keys/sync` has TWO `checkLimit` sites. A check
+    // that only asked "does this FILE mention `rateLimitDenyJson`?" stays green
+    // with the SECOND arm reverted to an inlined 429, because the first arm
+    // still does — the file-level check would certify a half-fixed route. This
+    // plan's Falsifiability Ledger row M105 runs exactly that mutation.
+    const underRouted = LIMITER_ROUTES.filter(
+      (s) => s.denyRoutedSites < s.checkLimitSites,
+    ).map((s) => `${s.path} (${s.denyRoutedSites}/${s.checkLimitSites} arms)`);
+
+    expect(
+      underRouted,
+      "A seam route consumes more rate-limit tokens than it has " +
+        "chokepoint-routed deny arms. At least one arm decides 503-vs-429 " +
+        "with an inlined status literal, so a limiter MISCONFIGURATION on that " +
+        "arm answers 429 — telling the user they are being throttled during " +
+        "OUR outage, and hiding the outage from the canary that watches 5xx. " +
+        "Route the arm through `rateLimitDenyJson` (passing its existing 429 " +
+        "body and headers verbatim); do NOT relax this assertion to a " +
+        "per-file check.",
+    ).toEqual([]);
+  });
+
+  it("the no-limiter set EQUALS the quarantine (a repair must shrink it in the same commit)", () => {
+    expect(
+      NO_LIMITER_ROUTES.map((s) => s.path),
+      "The set of seam routes with NO rate limiter changed. This is an " +
+        "EQUALITY, not a containment check, and that is deliberate: if " +
+        "`admin/match/eval` is ever given a limiter, the quarantine must " +
+        "SHRINK in the same commit, so a repair cannot leave a stale exemption " +
+        "behind. If a NEW route appears here it is an unlimited seam route — " +
+        "decide whether that is intended and write the reason down beside the " +
+        "roster.",
+    ).toEqual([...NO_LIMITER_QUARANTINE]);
+  });
+
+  it("the partition is total (every derived seam route is classified exactly once)", () => {
+    expect(LIMITER_ROUTES.length + NO_LIMITER_ROUTES.length).toBe(
+      SEAM_ROUTE_FILES.length,
+    );
+    expect(
+      [...LIMITER_ROUTES, ...NO_LIMITER_ROUTES].map((s) => s.path).sort(),
+    ).toEqual([...SEAM_ROUTE_FILES].sort());
+  });
+});
+
+describe("[140.4-13 / SEAMRIM-05] the needle self-test — BOTH polarities", () => {
+  /** Classify an in-test source SAMPLE exactly as the scan above classifies a file. */
+  function classify(sample: string): "no-limiter" | "routed" | "inlined" {
+    const src = stripComments(sample);
+    const checks = countMatches(src, CHECK_LIMIT_CALL);
+    const routed = countMatches(src, DENY_ROUTED_CALL);
+    if (checks === 0) return "no-limiter";
+    return routed >= checks ? "routed" : "inlined";
+  }
+
+  it("POSITIVE: an inlined 429-only deny arm is DETECTED", () => {
+    expect(
+      classify(`
+        const rl = await checkLimit(userActionLimiter, key);
+        if (!rl.success) {
+          return NextResponse.json(
+            { error: "Too many requests" },
+            { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
+          );
+        }
+      `),
+    ).toBe("inlined");
+  });
+
+  it("NEGATIVE: a chokepoint-routed deny arm is NOT flagged", () => {
+    expect(
+      classify(`
+        const rl = await checkLimit(userActionLimiter, key);
+        if (!rl.success) {
+          return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
+        }
+      `),
+    ).toBe("routed");
+
+    // The three already-correct routes use the predicate directly rather than
+    // the builder. That is the same decision, made in the same module.
+    expect(
+      classify(`
+        const rl = await checkLimit(simulatorLimiter, key);
+        if (!rl.success) {
+          if (isRateLimitMisconfigured(rl)) return NextResponse.json({}, { status: 503 });
+          return NextResponse.json({}, { status: 429 });
+        }
+      `),
+    ).toBe("routed");
+  });
+
+  it("NEGATIVE: a `rateLimitDenyJson` mention INSIDE A COMMENT does not count as adoption", () => {
+    // ⚠️ THIS IS A REAL SHAPE IN TWO FILES TODAY, NOT A HYPOTHETICAL.
+    // `admin/match/eval` and `admin/match/recompute` both carry
+    // "Same pairing as rateLimitDenyJson (…)" in prose. A line-based grep
+    // counts it as adoption (DEF-16-2), and a scanner that does reports this
+    // class closed while it is open.
+    expect(
+      classify(`
+        const rl = await checkLimit(userActionLimiter, key);
+        // Same pairing as rateLimitDenyJson (src/lib/ratelimit.ts).
+        /* also mentioned here: rateLimitDenyJson and isRateLimitMisconfigured */
+        if (!rl.success) {
+          return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+        }
+      `),
+    ).toBe("inlined");
+  });
+
+  it("NEGATIVE: a route with NO checkLimit is classified no-limiter, not a violation", () => {
+    expect(
+      classify(`
+        // This route has no rate limit at all — see rateLimitDenyJson for the
+        // shape it WOULD use if it ever gained one.
+        export async function POST(req: NextRequest) {
+          return NextResponse.json({ ok: true });
+        }
+      `),
+    ).toBe("no-limiter");
+  });
+
+  it("POSITIVE: a TWO-ARM route with only ONE routed arm is DETECTED (the M105 shape)", () => {
+    // The file mentions `rateLimitDenyJson`, so every "does this file adopt the
+    // builder" check is satisfied. Only counting arms sees it.
+    expect(
+      classify(`
+        const userRl = await checkLimit(keysSyncUserLimiter, a);
+        if (!userRl.success) return rateLimitDenyJson(userRl, {});
+        const rl = await checkLimit(userActionLimiter, b);
+        if (!rl.success) {
+          return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+        }
+      `),
+    ).toBe("inlined");
+  });
+
+  it("the import-edge regex matches an edge and NOT a prose mention", () => {
+    expect(SEAM_IMPORT_EDGE.test(`import { x } from "@/lib/resilient-fetch";`)).toBe(true);
+    expect(SEAM_IMPORT_EDGE.test(`import { y } from "./analytics-client";`)).toBe(true);
+    expect(SEAM_IMPORT_EDGE.test(`// do NOT simplify this to @/lib/resilient-fetch`)).toBe(false);
+    expect(SEAM_IMPORT_EDGE.test(`import { z } from "@/lib/seam-errors";`)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PART 2 — THE BEHAVIOURAL HALF. Three routes, three auth shapes, real handlers.
+//
+// ⚠️ `vi.spyOn` + `vi.restoreAllMocks()`. NEVER `vi.stubGlobal` (DEF-16-1) —
+// a leaked global stub is this repo's known CI-only failure cause (CI Node 22,
+// local Node 25). The limiter itself is spied on the REAL module, so the deny
+// builder under test is the real one and cannot drift from a double.
+// ---------------------------------------------------------------------------
+
+const authState = vi.hoisted(() => ({
+  user: { id: "00000000-0000-0000-0000-00000000abcd" } as { id: string } | null,
+  isAdmin: true,
+}));
+
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/csrf", () => ({ assertSameOrigin: () => null }));
+vi.mock("@/lib/admin", () => ({
+  isAdminUser: async () => authState.isAdmin,
+}));
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => ({
+    auth: { getUser: async () => ({ data: { user: authState.user }, error: null }) },
+  }),
+}));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    throw new Error(
+      "unreachable: the deny arm must return before any DB work runs",
+    );
+  },
+}));
+vi.mock("@/lib/audit", () => ({
+  logAuditEvent: async () => {},
+  logAuditEventAsUser: async () => {},
+}));
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: async () => {},
+}));
+vi.mock("@/lib/analytics-client", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/analytics-client")>()),
+  recomputeMatch: async () => {
+    throw new Error("unreachable: the deny arm must return before the seam call");
+  },
+}));
+vi.mock("@/lib/process-key-client", () => ({
+  postProcessKey: async () => {
+    throw new Error("unreachable: the deny arm must return before the seam call");
+  },
+}));
+
+// The REAL limiter module — nothing mocks it, so `rateLimitDenyJson` under test
+// is the production implementation and `checkLimit` is spy-able on it.
+import * as ratelimit from "./ratelimit";
+
+const MISCONFIGURED = {
+  success: false as const,
+  retryAfter: 60,
+  reason: "ratelimit_misconfigured" as const,
+};
+
+function jsonReq(url: string, body: unknown): NextRequest {
+  return new NextRequest(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "http://localhost:3000",
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+describe("[140.4-13 / SEAMRIM-05] behavioural — the 503 reaches the wire, across all three auth shapes", () => {
+  beforeEach(() => {
+    authState.user = { id: "00000000-0000-0000-0000-00000000abcd" };
+    authState.isAdmin = true;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  describe("PUBLIC / anonymous — verify-strategy", () => {
+    it("ratelimit_misconfigured → 503, not a 429 blaming a first-time visitor", async () => {
+      vi.spyOn(ratelimit, "checkLimit").mockResolvedValue(MISCONFIGURED);
+      const { POST } = await import("@/app/api/verify-strategy/route");
+
+      const res = await POST(
+        jsonReq("http://localhost:3000/api/verify-strategy", {
+          email: "a@b.co",
+          exchange: "okx",
+          api_key: "k",
+          api_secret: "s",
+        }),
+      );
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+      expect(res.headers.get("Retry-After")).toBe("60");
+    });
+
+    it("a genuine throttle still answers 429 with its own body", async () => {
+      vi.spyOn(ratelimit, "checkLimit").mockResolvedValue({
+        success: false,
+        retryAfter: 42,
+      });
+      const { POST } = await import("@/app/api/verify-strategy/route");
+
+      const res = await POST(
+        jsonReq("http://localhost:3000/api/verify-strategy", {
+          email: "a@b.co",
+          exchange: "okx",
+          api_key: "k",
+          api_secret: "s",
+        }),
+      );
+
+      expect(res.status).toBe(429);
+      expect(await res.json()).toEqual({ error: "Too many requests" });
+      expect(res.headers.get("Retry-After")).toBe("42");
+      // The one seam route whose 429 carries no NO_STORE_HEADERS. Unchanged.
+      expect(res.headers.get("Cache-Control")).toBeNull();
+    });
+  });
+
+  describe("AUTHENTICATED — keys/sync, and it has TWO arms", () => {
+    const STRATEGY_ID = "11111111-1111-4111-8111-111111111111";
+
+    function syncReq() {
+      return jsonReq("http://localhost:3000/api/keys/sync", {
+        strategy_id: STRATEGY_ID,
+      });
+    }
+
+    it("ARM 1 (per-user ceiling) misconfigured → 503", async () => {
+      // Only the FIRST call denies; the second would allow. The ceiling
+      // short-circuits, so this can only be arm 1 answering.
+      const spy = vi.spyOn(ratelimit, "checkLimit");
+      spy.mockResolvedValueOnce(MISCONFIGURED);
+      spy.mockResolvedValue({ success: true });
+      const { POST } = await import("@/app/api/keys/sync/route");
+
+      const res = await POST(syncReq());
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(spy).toHaveBeenCalledTimes(1);
+    });
+
+    it("ARM 2 (per-(user, strategy) bucket) misconfigured → 503 — reachable ONLY through the second site", async () => {
+      // ⚠️ THE ARM THIS PLAN'S LEDGER ROW MUTATES. The ceiling ALLOWS, so this
+      // response can only have come from the second call site. Reverting that
+      // one site to an inlined 429 leaves the file still mentioning
+      // `rateLimitDenyJson` — every file-level check stays green, and this case
+      // plus the per-arm structural count are the only things that see it.
+      const spy = vi.spyOn(ratelimit, "checkLimit");
+      spy.mockResolvedValueOnce({ success: true });
+      spy.mockResolvedValueOnce(MISCONFIGURED);
+      const { POST } = await import("@/app/api/keys/sync/route");
+
+      const res = await POST(syncReq());
+
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it("ARM 2 — a genuine throttle keeps its own 429 body, code RATE_LIMITED", async () => {
+      const spy = vi.spyOn(ratelimit, "checkLimit");
+      spy.mockResolvedValueOnce({ success: true });
+      spy.mockResolvedValueOnce({ success: false, retryAfter: 9 });
+      const { POST } = await import("@/app/api/keys/sync/route");
+
+      const res = await POST(syncReq());
+
+      expect(res.status).toBe(429);
+      // Hand-typed: `{error, code}` in THAT key order.
+      expect(await res.json()).toEqual({
+        error: "Too many requests",
+        code: "RATE_LIMITED",
+      });
+      expect(res.headers.get("Retry-After")).toBe("9");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+  });
+
+  describe("ADMIN — admin/match/recompute", () => {
+    function recomputeReq() {
+      return jsonReq("http://localhost:3000/api/admin/match/recompute", {
+        allocator_id: "22222222-2222-4222-8222-222222222222",
+        force: false,
+      });
+    }
+
+    it("ratelimit_misconfigured → 503, not a 429 that reads as an admin over-clicking", async () => {
+      vi.spyOn(ratelimit, "checkLimit").mockResolvedValue(MISCONFIGURED);
+      const { POST } = await import("@/app/api/admin/match/recompute/route");
+
+      const res = await POST(recomputeReq());
+
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("a genuine throttle still answers 429 with its own body", async () => {
+      vi.spyOn(ratelimit, "checkLimit").mockResolvedValue({
+        success: false,
+        retryAfter: 42,
+      });
+      const { POST } = await import("@/app/api/admin/match/recompute/route");
+
+      const res = await POST(recomputeReq());
+
+      expect(res.status).toBe(429);
+      expect(await res.json()).toEqual({ error: "Too many requests" });
+      expect(res.headers.get("Retry-After")).toBe("42");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+  });
+});
