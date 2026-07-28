@@ -1455,9 +1455,13 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     {
       fragment: "wizard_session_id idempotency",
       why:
-        "An internal field name shown to a user, promising a guarantee that " +
-        "holds on the CSV path and NOT on the API path. Scope the sentence to " +
-        "the flow that has the mechanism, or drop the mechanism.",
+        "An internal field name shown to a user. 140.3-12 also banned it for " +
+        "promising a guarantee that held on the CSV path and NOT on the API " +
+        "path; 140.3-14 / TS-33 closed that half by wiring the id into " +
+        "finalize-wizard's postProcessKey context, so the GUARANTEE now holds " +
+        "on both. The BAN stands regardless and on its first ground alone: an " +
+        "internal column name is not user-facing copy. Say what the user gets, " +
+        "never the mechanism's field name.",
     },
   ];
 

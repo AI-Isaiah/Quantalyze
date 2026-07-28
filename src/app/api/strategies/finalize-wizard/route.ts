@@ -621,9 +621,30 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // strategy, then (b) read the api_keys.exchange via the admin client.
   // The downstream SECURITY DEFINER RPC re-checks ownership, but the
   // probe + admin-client lookup BOTH fire before that point.
+  // 140.3-14 / TS-33 — `wizard_session_id` is selected here, on the read this
+  // handler ALREADY performs, so the dedupe id costs no extra query.
+  //
+  // ⚠️ IT IS READ FROM THE DRAFT ROW, NOT FROM THE REQUEST BODY, and that is a
+  // deliberate improvement on the CSV path's shape rather than a deviation from
+  // it. The placement it is forwarded in is identical (`postProcessKey`'s
+  // `context.wizard_session_id`); only the SOURCE differs. `create-with-key`
+  // and the composite RPC both persist the client's stable session id onto
+  // `strategies.wizard_session_id` at draft creation (migration
+  // 20260602190000, F6), and this select is already owner-scoped
+  // (`.eq("user_id", user.id)`), so the value cannot be supplied, guessed or
+  // swapped by the caller of THIS request. A body field would have re-opened
+  // exactly the caller-supplied-id surface that migration 20260726000225
+  // (140.1 / PYAPI-01) had to scope the unique index to `(strategy_id,
+  // wizard_session_id)` to contain.
+  //
+  // It is also the only source that is STABLE across the duplicate submissions
+  // this is meant to dedupe: the correlation id in `X-Correlation-Id` is
+  // memoized per PAGE LOAD, so a reload — the single most likely way a user
+  // double-submits — mints a new one and would key the dedupe on a value that
+  // changes per request, which is worse than sending nothing.
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
-    .select("api_key_id")
+    .select("api_key_id, wizard_session_id")
     .eq("id", fields.strategy_id)
     .eq("user_id", user.id)
     .maybeSingle();
@@ -647,6 +668,22 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const apiKeyId =
     typeof strategyRow.api_key_id === "string" ? strategyRow.api_key_id : null;
+
+  // 140.3-14 / TS-33. Narrowed the same way `apiKeyId` is, one line above: the
+  // column is NULLABLE (migration 20260602190000 — "only wizard drafts set
+  // it"), so a draft that predates F6, or one minted by a path that does not
+  // stamp it, yields `null`.
+  //
+  // `null` is forwarded as ABSENCE, never as a synthesised value. Python's
+  // `idempotent_by_session` reads `bool(context.get("wizard_session_id"))` and
+  // mints a fresh uuid4 when it is missing, so absence reproduces today's
+  // behaviour byte for byte — the dedupe is simply off for that request, which
+  // is where it already was. Inventing an id to fill the gap would key the
+  // dedupe on a per-request value and make it worse than absent.
+  const wizardSessionId =
+    typeof strategyRow.wizard_session_id === "string"
+      ? strategyRow.wizard_session_id
+      : null;
 
   // #597 — persist the strategy's asset class onto the draft row. The
   // SECURITY DEFINER `finalize_wizard_strategy` RPC signature does not carry
@@ -1037,6 +1074,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   return await unifiedFinalizeWizardHandler({
     strategy_id: fields.strategy_id,
     userId: user.id,
+    // 140.3-14 / TS-33 — read off the owner-scoped draft row above.
+    wizardSessionId,
     // NEW-C14-06: forward the validated+normalized `fields` object instead
     // of the raw body. Pre-fix: `payload: body as Record<string,unknown>`
     // bypassed canonicalizeExchangeList + string→number coercion so the
@@ -1455,6 +1494,13 @@ async function compositeMemberCount(
 async function unifiedFinalizeWizardHandler(args: {
   strategy_id: string;
   userId: string;
+  /**
+   * 140.3-14 / TS-33 — the draft's persisted wizard session id, or `null` when
+   * the draft carries none. Forwarded into the `postProcessKey` context, which
+   * is the ONE place `/process-key` reads it from; `null` is forwarded as
+   * absence, never as a synthesised id.
+   */
+  wizardSessionId: string | null;
   payload: Record<string, unknown>;
   apiKeyId: string | null;
   source: string;
@@ -1520,6 +1566,26 @@ async function unifiedFinalizeWizardHandler(args: {
       strategy_id: args.strategy_id,
       user_id: args.userId,
       api_key_id: args.apiKeyId,
+      // 140.3-14 / TS-33 — ONE field, in the SAME place and the SAME shape the
+      // CSV routes already use (`csv-validate` and `csv-finalize` both put
+      // `wizard_session_id` in this context object, and `process_key.py` reads
+      // it from exactly here). Until now `finalize-wizard` sent no id, so
+      // Python's `idempotent_by_session` was FALSE on every onboard/resync and
+      // the dedupe mechanism — which exists and works on the CSV path — was
+      // unreachable from this route. A duplicate submit therefore created a
+      // second verification row and a second job.
+      //
+      // ⚠️ SPREAD ORDER IS LOAD-BEARING. This sits AFTER `...args.payload`, so
+      // it cannot be shadowed by a same-named key arriving from the validated
+      // client fields — the same discipline `strategy_id` / `user_id` above
+      // already rely on.
+      //
+      // Conditional spread, not `wizard_session_id: x ?? undefined`: the key is
+      // ABSENT rather than present-and-undefined when the draft carries no id,
+      // so the JSON body matches the pre-140.3-14 body exactly on that path.
+      ...(args.wizardSessionId !== null
+        ? { wizard_session_id: args.wizardSessionId }
+        : {}),
       step: "finalize",
     },
     routeTag: "strategies/finalize-wizard",
