@@ -2392,3 +2392,184 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     expect(forced.map(([code]) => code)).toEqual([]);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.4-12 / SEAMRIM-11 (C-3) — THE RESUME FRESHNESS PROBE.
+//
+// The LAST unchecked PostgREST read in this file, and the one 140.4-02's
+// seven-member conversion never reached: it sits ~530 lines ABOVE that
+// `Promise.all`, in the mount effect. 140.4-14's `no-unchecked-supabase-read`
+// rule reports it as its single true positive, which is why that rule's glob
+// could not admit this file.
+//
+// ⚠️ A READ FAILURE AND AN ABSENT ROW ARE DIFFERENT FACTS, AND THAT IS THE
+// WHOLE POINT. `.maybeSingle()` answers a genuinely missing row with
+// `{ data: null, error: null }` — the normal first-time-draft case this probe
+// EXISTS to detect. An RLS denial or a statement timeout answers
+// `{ data: null, error: <PostgrestError> }`. Unchecked, the two were
+// byte-identical here: both silently produced `isComplete === false` and
+// nothing anywhere recorded that a read had failed.
+//
+// Both polarities are pinned. Asserting only the failure half would be
+// satisfied by an implementation that logged unconditionally — which would
+// re-label every legitimate absence as a fault and is the over-refusal
+// 140.4-01 carved PGRST116 out to avoid.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[140.4-12 / SEAMRIM-11] SyncPreviewStep — the resume freshness probe binds error", () => {
+  /**
+   * The needle, HAND-TYPED here and never imported from the component. It
+   * names the READ, so a log that fired from some other site cannot satisfy
+   * it.
+   */
+  const READ_FAILURE_NEEDLE = "resume freshness probe read failed";
+
+  /** Freshness probe answers `outcome`; everything else is inert. */
+  function installProbeClient(outcome: { data: unknown; error: unknown }) {
+    currentClientFactory = () => ({
+      from: () => ({
+        select: (cols: string) => ({
+          eq: () => ({
+            maybeSingle: () =>
+              Promise.resolve(
+                cols === "computation_status, computed_at"
+                  ? outcome
+                  : { data: null, error: null },
+              ),
+          }),
+        }),
+      }),
+    });
+  }
+
+  function loggedReadFailures(spy: {
+    mock: { calls: unknown[][] };
+  }): unknown[][] {
+    return spy.mock.calls.filter((call: unknown[]) =>
+      String(call[0]).includes(READ_FAILURE_NEEDLE),
+    );
+  }
+
+  beforeEach(() => {
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    installProbeClient({ data: null, error: null });
+  });
+
+  it("a FAILED freshness probe is REPORTED — not silently read as 'this draft has no analytics row'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installProbeClient({
+      data: null,
+      error: {
+        message: "canceling statement due to statement timeout",
+        code: "57014",
+        details: "",
+        hint: "",
+      },
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "compute failed" }), {
+          status: 500,
+        }),
+      );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      loggedReadFailures(errSpy).length,
+      "The freshness probe read FAILED and nothing recorded it. supabase-js " +
+        "resolves a failed read AS A VALUE, so an unbound `error` makes a " +
+        "statement timeout indistinguishable from a draft that simply has no " +
+        "analytics row yet — the C-3 shape, at the last unchecked read in " +
+        "this file.",
+    ).toBe(1);
+
+    // ...and the resume degrades to a COLD START rather than to a terminal
+    // state. This half is the anti-over-refusal guard: the probe is an
+    // OPTIMISATION (skip the kickoff when the row is complete and fresh), so a
+    // transient blip on it must not end the wizard. A fix that threw here
+    // would pass the assertion above and fail this one.
+    expect(
+      fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/api/keys/sync"))
+        .length,
+      "A failed freshness probe must fall through to the kickoff POST — the " +
+        "same thing a cold start does. Refusing instead would be a " +
+        "self-inflicted outage on a read that only ever saves a round-trip.",
+    ).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  it("an ABSENT analytics row stays SILENT — an absence is not a failure", async () => {
+    // `.maybeSingle()` on zero rows: `data: null, error: null`. This is the
+    // ordinary first-time-draft path. It must produce no fault signal at all,
+    // or the log becomes noise and the distinction the fix exists to draw is
+    // erased from the other side.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installProbeClient({ data: null, error: null });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "compute failed" }), {
+          status: 500,
+        }),
+      );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      loggedReadFailures(errSpy),
+      "A genuinely absent analytics row was reported as a read failure. " +
+        "`maybeSingle()` answers no-rows with `error: null`; treating that as " +
+        "a fault re-labels every first-time draft as broken.",
+    ).toEqual([]);
+    expect(
+      fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/api/keys/sync"))
+        .length,
+    ).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  it("a COMPLETE + FRESH row still takes the WIZ-05 skip — the probe's success path is untouched", async () => {
+    // The positive counterpart. Both assertions above are about what happens
+    // when the probe returns nothing usable; without this case an
+    // implementation that ignored `data` entirely would satisfy both.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installProbeClient({
+      data: {
+        computation_status: "complete",
+        computed_at: new Date().toISOString(),
+      },
+      error: null,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", {
+          name: /computing your verified factsheet/i,
+        }),
+      ).toBeInTheDocument(),
+    );
+
+    expect(
+      fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/api/keys/sync"))
+        .length,
+      "A COMPLETE + FRESH row must still skip the kickoff. If the freshness " +
+        "derivation moved behind the new error branch, this is what notices.",
+    ).toBe(0);
+    expect(loggedReadFailures(errSpy)).toEqual([]);
+    errSpy.mockRestore();
+  });
+});
