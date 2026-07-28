@@ -19,7 +19,7 @@
  * ignored-Supabase-error escalation. These drive the setTimeout backoff loop
  * with fake timers so they stay fast and deterministic.
  */
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   SyncPreviewStep,
@@ -1823,14 +1823,27 @@ async function renderThroughTheGate(props: SyncPreviewStepProps) {
   });
 }
 
+/**
+ * Per-scenario fetch behaviour, swapped inside the derived loop below. ONE
+ * `vi.spyOn` wraps it for the whole describe — re-spying the same global
+ * mid-test is how a leaked stub survives into the next file, which is this
+ * repo's known CI-only (Node 22 vs Node 25) failure class. The global-stubbing
+ * helper DEF-16-1 bans is deliberately NOT NAMED here: an acceptance receipt
+ * counts occurrences of that identifier in this file, and reciting it inside a
+ * comment that says "we did not use it" is exactly how a grep stops
+ * discriminating (DEF-16-2, and the third occurrence of that trap in this
+ * programme).
+ */
+let fetchImpl: () => Promise<Response> = async () =>
+  new Response(JSON.stringify({}), { status: 200 });
+
 describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     baseProps.onComplete = vi.fn();
     baseProps.onTryAnotherKey = vi.fn();
-    vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({}), { status: 200 }),
-    );
+    fetchImpl = async () => new Response(JSON.stringify({}), { status: 200 });
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => fetchImpl());
   });
 
   afterEach(() => {
@@ -1882,5 +1895,284 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
       screen.getByTestId("wizard-back-to-strategies"),
       "A state with no way out at all is worse than a destructive one.",
     ).toBeInTheDocument();
+  });
+
+  // ── The POSITIVE counterpart ────────────────────────────────────────────
+  // A negative-only oracle is what M-9 measured going vacuous: a render that
+  // dropped EVERY control from EVERY state would satisfy every "…is not the
+  // sole affordance" assertion in this file. Some code must still EARN the
+  // key-replacement route, and "this account has too little history, bring a
+  // different one" is precisely the case where replacing the key IS the remedy.
+  it("POSITIVE — GATE_INSUFFICIENT_TRADES DOES earn the key-replacement control", async () => {
+    installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+
+    await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "GATE_INSUFFICIENT_TRADES",
+    );
+    expect(
+      screen.getByTestId("wizard-try-another-key"),
+      "`try_another_key` is in this code's actions. If the inversion removed " +
+        "the control everywhere it would satisfy every negative in this file " +
+        "while destroying the wizard's primary recovery route.",
+    ).toBeInTheDocument();
+    // ...and it is still not the SOLE affordance.
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
+  });
+
+  // ── The mislabelled `recoverable` ───────────────────────────────────────
+  it("GATE_INSUFFICIENT_TRADES renders NO Retry — handleKickoffRetry re-evaluates an IDENTICAL gate", async () => {
+    installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+
+    await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "GATE_INSUFFICIENT_TRADES",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "This state IS `recoverable` — but it earns that flag through " +
+        "`try_another_key`, a remedy `handleKickoffRetry` cannot perform. " +
+        "That handler re-runs the kickoff and re-evaluates the SAME gate " +
+        "against the SAME account, so the outcome is fixed before the click. " +
+        "`recoverable` is MISLABELLED here, not spurious.",
+    ).toBeNull();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE DERIVED PIN — the property, across every code this render can reach.
+  //
+  // HOW THE POPULATION IS DERIVED, and why it is not a roster in test
+  // clothing: every row below is a production INPUT — an HTTP arm, a thrown
+  // fetch, or a `checkStrategyGate` fixture — and the code under test is READ
+  // BACK off the rendered envelope's `data-error-code`. The table never states
+  // which code a scenario produces; production decides, and the pin follows.
+  // Re-point `KNOWN_KICKOFF_CODES` or `gateFailureToWizardError` at a
+  // different member and the population moves with it, silently and
+  // correctly. A hand-typed list of eleven code strings is the roster problem
+  // this plan just deleted from production, and it is how a twelfth code
+  // ships unexamined.
+  //
+  // ⚠️ RESIDUAL, RECORDED NOT FIXED — `isComposite` is provably `false` on
+  // every non-2xx kickoff (it is set only from a 2xx body's `composite: true`
+  // or the WIZ-05 marker read), so `onReviewKeys` — the NON-destructive escape
+  // hatch — was structurally unreachable on exactly the arms where the
+  // destructive button appeared. `COMPOSITE_MEMBERSHIP_UNKNOWN`, a code ABOUT
+  // composites, therefore rendered the SINGLE-KEY destructive control. This
+  // plan did NOT change `isComposite`'s derivation: doing so changes what the
+  // wizard believes about a draft mid-computation, which is a different
+  // finding with a different blast radius. The residual after this plan is the
+  // strictly smaller one — "a code about composites renders the single-key
+  // affordance" — and that affordance is now NON-DESTRUCTIVE.
+  // ══════════════════════════════════════════════════════════════════════
+
+  /** Restore the client that does NOT take the WIZ-05 fresh-skip, so the mount effect POSTs. */
+  function installKickoffClient() {
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  }
+
+  /**
+   * ⚠️ HAND-TYPED ON PURPOSE, and it is an ORACLE, not the population. These
+   * are the codes a reader of `wizardErrors.ts` would say have asked to
+   * replace the key. Deriving it (`actions.includes("try_another_key")`)
+   * would compare production's answer to production's answer and could never
+   * fail — Oracle Independence hazard #6 in its classic form.
+   */
+  const CODES_THAT_EARN_KEY_REPLACEMENT = [
+    "GATE_INSUFFICIENT_TRADES",
+    "GATE_INSUFFICIENT_DAYS",
+  ];
+
+  it("PROPERTY — no reachable terminal code renders the destructive control as its SOLE affordance", async () => {
+    const scenarios: { input: string; drive: () => Promise<void> }[] = [
+      {
+        input: "kickoff 429 carrying a throttle code",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "RATE_LIMITED" }), {
+              status: 429,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 404 (uniform across 'no such draft' and 'not yours')",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "GATE_DRAFT_GONE" }), {
+              status: 404,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 503 on an unknowable composite membership",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(
+              JSON.stringify({ code: "COMPOSITE_MEMBERSHIP_UNKNOWN" }),
+              { status: 503 },
+            );
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 400 on a request shape our own route refused",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "INVALID_STRATEGY_ID" }), {
+              status: 400,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 500 with no machine code at all",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ error: "compute failed" }), {
+              status: 500,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff POST throws (offline)",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () => {
+            throw new Error("offline");
+          };
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "gate: keyless draft, no trades, no daily returns",
+        drive: async () => {
+          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: null });
+        },
+      },
+      {
+        input: "gate: keyless draft with a too-short daily-returns series",
+        drive: async () => {
+          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 3 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: null });
+        },
+      },
+      {
+        input: "gate: keyed account below the trade-count floor",
+        drive: async () => {
+          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+      {
+        input: "gate: keyed account with trades spanning under a week",
+        drive: async () => {
+          installGateSupabaseMock({
+            tradeCount: 40,
+            csvRowCount: 0,
+            earliestTradeAt: "2026-01-01T00:00:00.000Z",
+            latestTradeAt: "2026-01-03T00:00:00.000Z",
+          });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+      {
+        input: "gate: a hard-failed analytics computation",
+        drive: async () => {
+          installGateSupabaseMock({
+            status: "failed",
+            computationError: "worker OOM",
+          });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+    ];
+
+    const observed = new Map<string, string[]>();
+
+    for (const scenario of scenarios) {
+      await scenario.drive();
+
+      const envelope = screen.getByTestId("error-envelope");
+      const code = envelope.getAttribute("data-error-code");
+      expect(
+        code,
+        `The scenario "${scenario.input}" rendered an envelope with no code. ` +
+          "A row that cannot name its state cannot pin a property about it.",
+      ).toBeTruthy();
+
+      const controls: string[] = [];
+      if (screen.queryByRole("button", { name: "Retry" })) controls.push("retry");
+      if (screen.queryByTestId("wizard-try-another-key")) {
+        controls.push("key-replacement");
+      }
+      if (screen.queryByTestId("wizard-back-to-strategies")) {
+        controls.push("back-to-strategies");
+      }
+
+      // THE PROPERTY. Not "has ≥2 controls" — a state may legitimately offer
+      // only the non-destructive exit. The forbidden shape is the FORCED
+      // CHOICE: the one thing on screen deletes the draft and every
+      // strategy_keys member under it.
+      expect(
+        controls,
+        `${code} (via "${scenario.input}") offers the draft-deleting control ` +
+          "as its SOLE affordance. That is a forced choice, not a remedy: " +
+          "the only way forward destroys the user's work.",
+      ).not.toEqual(["key-replacement"]);
+
+      // ...and the destructive control appears ONLY where the code earned it.
+      if (controls.includes("key-replacement")) {
+        expect(
+          CODES_THAT_EARN_KEY_REPLACEMENT,
+          `${code} rendered the key-replacement control. That control fires ` +
+            "handleDeleteDraft(). Only a code whose own remedy is 'bring a " +
+            "different key' has asked for it.",
+        ).toContain(code);
+      }
+
+      observed.set(code as string, controls);
+      cleanup();
+      vi.clearAllTimers();
+    }
+
+    // ── VACUITY FENCE ───────────────────────────────────────────────────
+    // A scanner that drove nothing would report agreement forever. Eleven
+    // DISTINCT codes reach this render today (140.4 CONTEXT §4, independently
+    // re-derived by the pattern-mapper); the literal is hand-typed so it
+    // cannot be satisfied by the loop measuring itself.
+    expect(
+      observed.size,
+      "Fewer than eleven distinct codes were actually driven. A loop that " +
+        "renders nothing satisfies every assertion inside it and reports " +
+        "agreement forever — which is worse than having no guard at all.",
+    ).toBeGreaterThanOrEqual(11);
+
+    // The forced choice must be absent from the WHOLE observed set, stated
+    // once more as a set-level claim so a per-row `continue` cannot hide it.
+    const forced = [...observed.entries()].filter(
+      ([, controls]) =>
+        controls.length === 1 && controls[0] === "key-replacement",
+    );
+    expect(forced.map(([code]) => code)).toEqual([]);
   });
 });
