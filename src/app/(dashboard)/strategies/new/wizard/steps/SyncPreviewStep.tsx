@@ -162,7 +162,13 @@ const KNOWN_KICKOFF_CODES: Readonly<Record<string, WizardErrorCode>> = {
   //
   // No new union member was minted for this. A second code meaning the same
   // thing is how a vocabulary starts lying (140.3-05's CIRCUIT_OPEN reasoning),
-  // and the copy table's hand-typed size guard stays at 53.
+  // and the copy table's hand-typed size guard — `EXPECTED_TABLE_SIZE` in
+  // `src/lib/wizardErrors.test.ts` — is therefore not touched by this. That
+  // guard's literal is hand-typed ON PURPOSE (deriving it would re-create the
+  // self-referential `expect(found.length).toBe(discovered.length)` shape both
+  // seam pins forbid by name), so the pointer is the durable statement and the
+  // number is not restated here (140.3-G2 / GC-4: this comment previously
+  // recited a size it did not own, and the size had moved).
   MISSING_STRATEGY_ID: "VALIDATION_FAILED",
   INVALID_STRATEGY_ID: "VALIDATION_FAILED",
 };
