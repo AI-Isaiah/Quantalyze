@@ -1280,6 +1280,118 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     );
   });
 
+  // ---------------------------------------------------------------------
+  // Phase 140.3-15 / TS-20 — THE SECOND CONSUMER THAT HOLDS A SEAM BODY.
+  //
+  // `/api/keys/sync` does `if (!result.ok) return result.response`, so
+  // `process-key-client`'s envelope — including its `correlation_id`, the id
+  // that appears in OUR server logs — reaches this component verbatim. Until
+  // now the envelope rendered only `getWizardCorrelationId()`, a value minted
+  // in the browser and memoized per PAGE LOAD, which appears in no log
+  // anywhere.
+  //
+  // \u26a0\ufe0f WIRED AT BOTH CONSUMERS, NOT ONE. SubmitStep is the obvious member
+  // and it is the one a plan reading "the render slot" would fix; this file is
+  // the SECOND, and it is where the mutation is aimed for exactly that reason.
+  // POSITIVE identity assertions, per 140.3-11's M77c: a deleted carry and a
+  // correctly-absent value both produce the local id, so each case names the
+  // exact id that must appear AND the local id it must have displaced.
+  // ---------------------------------------------------------------------
+
+  it("[140.3-15 / TS-20] the kickoff failure renders the SERVER's correlation id, not the browser's", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "UPSTREAM_NETWORK_ERROR",
+          human_message: "Could not reach the ingestion service.",
+          correlation_id: "srv-5c2e91a4-70bd-4d33-9a18-6e0f2b7c8d55",
+          recoverable: true,
+        }),
+        { status: 502 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    // POSITIVE: the server's own id is on screen.
+    expect(
+      screen.getByText("srv-5c2e91a4-70bd-4d33-9a18-6e0f2b7c8d55"),
+    ).toBeInTheDocument();
+    // ...and the browser's per-page-load id has been displaced. Without this
+    // half a deleted carry passes: some id would still render.
+    expect(
+      screen.queryByText(/^wizard:[0-9a-f-]{36}$/),
+      "The browser's own correlation id is still on screen. It appears in NO " +
+        "server log, so a user quoting it gives support nothing to search.",
+    ).toBeNull();
+  });
+
+  it("[140.3-15 / TS-20] a NESTED service_error envelope's id renders here too", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "SCORING_FAILED",
+            dependency: null,
+            retryable: false,
+            detail: "Scoring failed.",
+            correlation_id: "srv-nested-1d9f4c07-2b56-4e8a-b311-90ac5d6e7f22",
+          },
+        }),
+        { status: 500 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(
+      screen.getByText("srv-nested-1d9f4c07-2b56-4e8a-b311-90ac5d6e7f22"),
+    ).toBeInTheDocument();
+  });
+
+  it("[140.3-15 / TS-20] FALLBACK: no id on the wire \u21d2 the browser's id still renders", async () => {
+    // The fallback is what makes the change additive. A body with no
+    // `correlation_id` must render exactly what it rendered before.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(
+      screen.getByText(/^wizard:[0-9a-f-]{36}$/),
+      "The fallback broke: a failure carrying no upstream id now renders no id " +
+        "at all, which is strictly worse than before.",
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("[140.3-15 / TS-20] a HOSTILE id is refused and the browser's id renders instead", async () => {
+    // On the app-global handlers `correlation_id` is the caller-supplied
+    // `x-correlation-id` header echoed back, and this value is rendered verbatim
+    // into the DOM and copied to the clipboard by "Copy diagnostics".
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          code: "RATE_LIMITED",
+          correlation_id: "evil\r\nX-Forwarded-For: 10.0.0.1",
+        }),
+        { status: 429 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.getByText(/^wizard:[0-9a-f-]{36}$/)).toBeInTheDocument();
+    expect(screen.queryByText(/X-Forwarded-For/)).toBeNull();
+  });
+
   it("ANTI-REGRESSION — an UNCODED non-2xx still falls back to SYNC_FAILED", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

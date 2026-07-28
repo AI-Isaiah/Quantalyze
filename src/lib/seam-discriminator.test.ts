@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   seamBreakerVerdict,
+  seamCorrelationId,
   seamDependencyName,
   seamErrorCode,
   seamHumanMessage,
@@ -698,5 +699,156 @@ describe("[TRAP-2] the verdict never throws, whatever it is handed", () => {
       expect(verdict.breakerKey).toBe(GLOBAL_KEY);
       expect(verdict.attributability).toBe("transport");
     }
+  });
+});
+
+/**
+ * Phase 140.3-15 / TS-20 — `seamCorrelationId`, the FIFTH narrow member.
+ *
+ * ⚠️ THE MECHANISM WAS DECIDED BY `140.3-11`, NOT HERE. That plan faced the
+ * identical question for `dependency` and recorded the answer in its SUMMARY,
+ * in the leaf's own docblock, and in `seam-discriminator.purity.test.ts`'s
+ * docblock so it would be found: ONE narrow, purpose-named extractor over the
+ * private `nestedDetail`, with `EXPECTED_EXPORTS` edited in the SAME commit.
+ * Exporting `nestedDetail` itself, or a generic `seamDetailField(body, name)`
+ * getter, were both rejected there with reasons. This is the same mechanism, so
+ * there is ONE reader on record for this leaf rather than two.
+ *
+ * WHY IT MATTERS. Plan `140.1-04` moved the diagnostic OUT of the seam body —
+ * it had been leaking raw exception text including table names, row payloads
+ * and DSNs — and replaced it with this id. If nobody renders the id, the
+ * diagnostic was not relocated, it was deleted.
+ *
+ * ⚠️ IT MIRRORS `seamErrorCode`'s BOTH-SHAPE read, and that is the whole trick:
+ * `correlation_id` is NESTED on the `service_error` envelope and TOP-LEVEL on
+ * the app-global flat envelopes (`analytics-service/main.py`'s 422 and 429
+ * handlers, and `process_key.py`'s own error envelopes). A reader that looked
+ * only in one place would return `null` on every body from the other, and a
+ * `null` is indistinguishable from a correctly-absent value — which is exactly
+ * how `140.3-11`'s M77c returned GREEN across 3163 tests.
+ *
+ * ORACLE INDEPENDENCE: every expected id below is a literal typed in this file.
+ */
+describe("[140.3-15 / TS-20] seamCorrelationId — the relocated diagnostic becomes reachable", () => {
+  it("reads the NESTED id off a service_error envelope", () => {
+    expect(
+      seamCorrelationId({
+        detail: {
+          code: "SCORING_FAILED",
+          dependency: null,
+          retryable: false,
+          detail: "Scoring failed.",
+          correlation_id: "nested-corr-1",
+        },
+      }),
+    ).toBe("nested-corr-1");
+  });
+
+  it("reads the TOP-LEVEL id off both app-global flat envelopes", () => {
+    // main.py's 422 handler and its 429 sibling both put `correlation_id` at
+    // the top level beside a SCALAR `detail`. A nested-only reader answers null
+    // on every one of them.
+    expect(seamCorrelationId(flatAppGlobal("VALIDATION_FAILED", "bad shape"))).toBe(
+      "corr-abc",
+    );
+    expect(
+      seamCorrelationId({
+        ok: false,
+        code: "SEAM_MISCONFIGURED",
+        human_message: "…",
+        correlation_id: "wire-corr-9",
+        recoverable: false,
+      }),
+    ).toBe("wire-corr-9");
+  });
+
+  it("the NESTED id WINS when a body carries both — the inner envelope is the specific one", () => {
+    // Same precedence as `seamErrorCode`: when `detail` is an object it IS the
+    // envelope, and the outer keys are the transport wrapper.
+    expect(
+      seamCorrelationId({
+        correlation_id: "outer-wrapper",
+        detail: { code: "EVAL_FAILED", correlation_id: "inner-envelope" },
+      }),
+    ).toBe("inner-envelope");
+  });
+
+  it("returns null when no id was sent, on every shape", () => {
+    expect(seamCorrelationId(flatVenueTransient("EXCHANGE_UNAVAILABLE", "down"))).toBeNull();
+    expect(seamCorrelationId(bareScalar("down"))).toBeNull();
+    expect(seamCorrelationId(nested("EVAL_FAILED", null, false, "boom"))).toBeNull();
+  });
+
+  it("never throws on a malformed body — it is called from inside a catch arm", () => {
+    for (const junk of [null, undefined, 42, "a string", [], [1, 2], { detail: [] }]) {
+      expect(() => seamCorrelationId(junk)).not.toThrow();
+      expect(seamCorrelationId(junk)).toBeNull();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // THE SHAPE GUARD. This value is rendered VERBATIM into the user's DOM and
+  // copied to their clipboard in the QUANTALYZE_DIAG block, and on the
+  // app-global handlers it is `request.headers.get("x-correlation-id")` —
+  // CALLER-SUPPLIED and echoed back. Unbounded, that is an injection surface.
+  // -------------------------------------------------------------------------
+
+  it("refuses a value that is not correlation-id SHAPED", () => {
+    const hostile = [
+      "",                                   // empty
+      "   ",                                // whitespace only
+      "corr with spaces",
+      "corr\nX-Forwarded-For: evil",        // header/log splitting
+      "corr\r\ninjected",
+      "<script>alert(1)</script>",
+      "corr/../../etc/passwd",
+      "corr;drop",
+      "corr@example.com",
+      "a".repeat(129),                      // one past the bound
+    ];
+    for (const value of hostile) {
+      expect(
+        seamCorrelationId({ correlation_id: value }),
+        `a correlation_id of ${JSON.stringify(value.slice(0, 24))} reached the reader`,
+      ).toBeNull();
+      expect(seamCorrelationId({ detail: { correlation_id: value } })).toBeNull();
+    }
+  });
+
+  it("ACCEPTS the real shapes, so the bound is a bound and not a ban", () => {
+    // The three forms this system actually mints, plus the boundary. Typed by
+    // hand rather than imported from `correlation-id.ts` — that module imports
+    // `server-only` and `next/headers`, so the leaf can never see it and the
+    // duplication of the shape IS the falsifier between the two.
+    expect(
+      seamCorrelationId({ correlation_id: "9b3a47de-8c12-4d75-a2e6-ff0e10b2c1d3" }),
+    ).toBe("9b3a47de-8c12-4d75-a2e6-ff0e10b2c1d3");
+    expect(seamCorrelationId({ correlation_id: "wizard:9b3a47de-8c12-4d75-a2e6-ff0e10b2c1d3" })).toBe(
+      "wizard:9b3a47de-8c12-4d75-a2e6-ff0e10b2c1d3",
+    );
+    // A Sentry trace id: 32 lowercase hex, no separators.
+    expect(seamCorrelationId({ correlation_id: "4bf92f3577b34da6a3ce929d0e0e4736" })).toBe(
+      "4bf92f3577b34da6a3ce929d0e0e4736",
+    );
+    // Exactly at the 128-character bound.
+    const atBound = "a".repeat(128);
+    expect(seamCorrelationId({ correlation_id: atBound })).toBe(atBound);
+  });
+
+  it("ANTI-REGRESSION: the four pre-existing predicates are untouched by the fifth", () => {
+    // Driven with the SAME builders the cases above use. A reader added on top
+    // of the shared private `nestedDetail` could break its three siblings, and
+    // none of the assertions above would see it.
+    expect(seamErrorCode(nested("EVAL_FAILED", null, false, "boom"))).toBe(
+      "EVAL_FAILED",
+    );
+    expect(seamErrorCode(flatAppGlobal("RATE_LIMITED", "slow"))).toBe("RATE_LIMITED");
+    expect(seamHumanMessage(nested("EVAL_FAILED", null, false, "boom"))).toBe("boom");
+    expect(seamHumanMessage(bareScalar("down"))).toBe("down");
+    expect(
+      seamDependencyName(nested("EXCHANGE_UNAVAILABLE", "binance", true, "down")),
+    ).toBe("binance");
+    expect(seamBreakerVerdict(424).counts).toBe(false);
+    expect(seamBreakerVerdict(503).breakerKey).toBe("breaker:railway");
   });
 });

@@ -643,4 +643,104 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
       ).toBeInTheDocument();
     },
   );
+
+  // ============================================================
+  // Phase 140.3-15 / TS-20 — THE RELOCATED DIAGNOSTIC REACHES THE RENDER.
+  //
+  // `140.1-04` moved the diagnostic OUT of the seam body — it had been leaking
+  // raw exception text including table names, row payloads and DSNs — and
+  // replaced it with `correlation_id`. `finalize-wizard` forwards the seam
+  // envelope VERBATIM, so that id arrives in this component's hands; until now
+  // nothing read it and the envelope showed only the browser's own per-page-load
+  // id, which appears in no server log.
+  //
+  // \u26a0\ufe0f THESE ARE POSITIVE IDENTITY ASSERTIONS, DELIBERATELY.
+  // `140.3-11`'s M77c proved that a carry through this seam is invisible to a
+  // `toBeNull()` / `toBeDefined()` oracle: a DELETED carry and a CORRECTLY-ABSENT
+  // value both produce the same answer, and the entire 3163-test repo could not
+  // see the difference. So each case names the EXACT id that must appear AND
+  // asserts the local id it must have displaced.
+  // ============================================================
+
+  it("[140.3-15 / TS-20] the UPSTREAM correlation_id renders — not the browser's own", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "SEAM_MISCONFIGURED",
+          correlation_id: "upstream-7f3c1a20-9d44-4b21-8e77-2c5a11d0e6b3",
+        },
+        500,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+
+    // POSITIVE: the id the SERVER sent is the one on screen.
+    expect(
+      await screen.findByText("upstream-7f3c1a20-9d44-4b21-8e77-2c5a11d0e6b3"),
+    ).toBeInTheDocument();
+
+    // ...and it DISPLACED the browser's per-page-load id. Without this half a
+    // deleted carry passes: the local id would still render and the case would
+    // only be asserting that some id exists.
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const localId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(localId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(
+      screen.queryByText(localId!),
+      "The browser's own correlation id is still on screen. It appears in NO " +
+        "server log, so a user quoting it gives support nothing to search.",
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.3-15 / TS-20] a NESTED service_error envelope's id renders too", async () => {
+    // The other wire shape: `body.detail.correlation_id`. A reader that looked
+    // only at the top level answers null here, and null is what a deleted carry
+    // also produces.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          detail: {
+            code: "EVAL_FAILED",
+            dependency: null,
+            retryable: false,
+            detail: "Evaluation failed.",
+            correlation_id: "nested-b41d8e02-3aa7-4c19-9f60-77e2b3c4d5a1",
+          },
+        },
+        500,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+
+    expect(
+      await screen.findByText("nested-b41d8e02-3aa7-4c19-9f60-77e2b3c4d5a1"),
+    ).toBeInTheDocument();
+  });
+
+  it("[140.3-15 / TS-20] a HOSTILE id is refused and the local one still renders", async () => {
+    // On the app-global handlers `correlation_id` is
+    // `request.headers.get("x-correlation-id")` \u2014 caller-supplied and echoed
+    // back \u2014 and this value is rendered verbatim into the DOM and copied to
+    // the clipboard. The leaf's shape guard is what stops that; here we prove the
+    // component degrades to the local id rather than to NO id.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { ok: false, code: "UNKNOWN", correlation_id: "<script>alert(1)</script>" },
+        500,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+
+    const init = fetchSpy.mock.calls[0][1] as RequestInit;
+    const localId = new Headers(init.headers).get("X-Correlation-Id");
+    expect(await screen.findByText(localId!)).toBeInTheDocument();
+    expect(screen.queryByText("<script>alert(1)</script>")).not.toBeInTheDocument();
+  });
 });
