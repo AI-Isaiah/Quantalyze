@@ -111,6 +111,16 @@ const shared = vi.hoisted(() => {
      * because nothing could make the reply null.
      */
     nullOnBreakerSet: false,
+    /**
+     * SEAMRIM-04 — true → `after()` throws, as it genuinely does outside a
+     * request scope (cron, prerender).
+     *
+     * Research assumption A6. `audit.ts` handles exactly this with a
+     * `queueMicrotask` fallback, and this flag is what stops that fallback
+     * being "simplified away": with it set, the capture must still be
+     * attempted and nothing may propagate to the caller.
+     */
+    throwOnAfter: false,
   };
   /** The store the CURRENT module context is bound to. */
   const ctx = { store };
@@ -157,6 +167,29 @@ const shared = vi.hoisted(() => {
    * (ledger row M29).
    */
   const redisConfigs: Array<Record<string, unknown> | undefined> = [];
+  /**
+   * SEAMRIM-04 — what the core handed to `captureToSentry`, and what it handed
+   * to `after()`.
+   *
+   * ⚠️ THESE ARE TWO SEPARATE RECORDS ON PURPOSE, AND THAT IS THE WHOLE POINT
+   * OF LEDGER ROW M97. Replacing `after(() => p…)` with a bare `void p`
+   * re-creates NEW-C10-03 while leaving the `captureToSentry` CALL untouched —
+   * so `captures` still fills, and a grep for `captureToSentry` in the source
+   * still reports the guard satisfied. Only `afterTasks` can tell the two
+   * apart: a capture that is never scheduled is orphaned by the Fluid Compute
+   * freeze during exactly the correlated incident it exists for.
+   */
+  const captures: Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }> = [];
+  /** Every value handed to `after()`, and the promises those tasks produced. */
+  const afterTasks: unknown[] = [];
+  const afterSettled: Array<Promise<unknown>> = [];
   return {
     store,
     mode,
@@ -164,6 +197,9 @@ const shared = vi.hoisted(() => {
     constructed,
     counters,
     redisConfigs,
+    captures,
+    afterTasks,
+    afterSettled,
     /**
      * Called once per module context, from the mocked `Redis.fromEnv()` —
      * the core constructs its redis singleton before its limiter, so both
@@ -177,6 +213,58 @@ const shared = vi.hoisted(() => {
     },
   };
 });
+
+/**
+ * SEAMRIM-04 — `after()` is the SCHEDULING SEAM, so it is the one this file
+ * doubles.
+ *
+ * A partial mock: everything else `next/server` exports is preserved, because
+ * the core's module graph must keep working. The double RUNS the task, as the
+ * platform does once the response has flushed, and keeps the resulting promise
+ * so a test can await the capture rather than poll for it.
+ */
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (task: unknown) => {
+      if (shared.mode.throwOnAfter) {
+        // The real failure mode, reproduced: outside a request scope `after()`
+        // throws SYNCHRONOUSLY.
+        throw new Error("`after()` was called outside a request scope");
+      }
+      shared.afterTasks.push(task);
+      const produced =
+        typeof task === "function" ? (task as () => unknown)() : task;
+      shared.afterSettled.push(Promise.resolve(produced));
+    },
+  };
+});
+
+/**
+ * The capture chokepoint, doubled at the module boundary.
+ *
+ * It RETURNS A PROMISE, exactly as the real leaf does since plan 140.4-06 task
+ * 1 — a double that returned `undefined` would make `after(() => p.catch(…))`
+ * throw in the test and nowhere else, i.e. a fake that cannot agree with
+ * production. `sentry-capture.test.ts` owns the scrub contract; this file owns
+ * only "did the sink reach the chokepoint, and was the result scheduled".
+ */
+vi.mock("./sentry-capture", () => ({
+  captureToSentry: (err: unknown, options: Record<string, unknown>) => {
+    shared.captures.push({
+      err,
+      options: options as {
+        tags?: Record<string, string>;
+        extra?: Record<string, unknown>;
+        level?: string;
+      },
+    });
+    return Promise.resolve();
+  },
+}));
 
 vi.mock("@upstash/redis", async () => {
   const { fakeRedisFor } = await import("@/test/helpers/upstash-breaker");
@@ -431,6 +519,13 @@ beforeEach(() => {
   // later trip — both produce "the breaker did not open" for the wrong reason.
   shared.mode.staleReadOnce = null;
   shared.mode.nullOnBreakerSet = false;
+  // A leaked `throwOnAfter` would silently route every later test's capture
+  // down the queueMicrotask fallback, so "the capture was scheduled" would
+  // pass for the wrong reason.
+  shared.mode.throwOnAfter = false;
+  shared.captures.length = 0;
+  shared.afterTasks.length = 0;
+  shared.afterSettled.length = 0;
   shared.constructed.length = 0;
   shared.redisConfigs.length = 0;
   shared.counters.limitCalls = 0;
@@ -2470,5 +2565,204 @@ describe("[SEAMCORE-06 / A-10] the network-failure line is diagnostic AND safe",
     vi.resetModules();
     await loggedLines(refusedConnection());
     expect(shared.counters.limitCalls).toBe(1);
+  });
+});
+
+/**
+ * Phase 140.4 / SEAMRIM-04 — the breaker's three sinks reach a DELIVERING sink.
+ *
+ * ⚠️ WHY A `console.warn` WAS NEVER AN ALERT. `src/instrumentation.ts` calls
+ * `Sentry.init` with NO `integrations`, so `captureConsoleIntegration` is not
+ * enabled and nothing this module logs has ever reached Sentry. The breaker's
+ * only health sink was one `console.warn` that no operator was ever paged by.
+ *
+ * ⚠️ THE SCHEDULING IS THE PROPERTY, NOT THE CALL. `emitBreakerTransition`'s own
+ * docblock wrote the rule before the sink existed: *"If this ever gains a
+ * network sink it must become an awaited call at both sites."* A capture that is
+ * merely FIRED loses to the Fluid Compute freeze during the correlated incident
+ * it exists for (TRAP-7), which is why every case below asserts `after()` was
+ * handed the work — see `shared.afterTasks`.
+ *
+ * ⚠️ COVERAGE LAW (CONTEXT §2): these three sinks are a ROW 3 per-site edit and
+ * therefore PARTIAL BY CONSTRUCTION. Living in one file does not make three
+ * hand-enumerated call sites one artefact. It is acceptable only because the set
+ * is fully enumerated — `emitBreakerTransition`, `isBreakerOpen`'s catch and
+ * `recordSeamFailure`'s catch, and the file contains no fourth.
+ */
+describe("[SEAMRIM-04] the breaker's transitions and store failures reach the capture chokepoint", () => {
+  /** Settle every task `after()` was handed, as the platform's waitUntil does. */
+  async function settleScheduled(): Promise<void> {
+    await Promise.all(shared.afterSettled);
+  }
+
+  it("an OPEN transition captures at `warning` AND keeps its console line", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    // A hand-typed 5 — the fake's threshold.
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+    await settleScheduled();
+
+    expect(
+      shared.captures,
+      "The breaker opened and nothing reached the capture chokepoint. Its only " +
+        "other sink is a console.warn that Sentry.init is not configured to " +
+        "capture, so the single most operationally significant thing this " +
+        "module does was invisible to the people on call for it.",
+    ).toHaveLength(1);
+    expect(shared.captures[0].options.level).toBe("warning");
+    expect(shared.captures[0].options.extra?.breakerKey).toBe("breaker:railway");
+    expect(shared.captures[0].options.extra?.failures).toBe(5);
+    expect(shared.captures[0].options.extra?.cooldownS).toBe(30);
+    expect(
+      String(shared.captures[0].options.extra?.correlationId),
+    ).toMatch(/^breaker:railway@\d+$/);
+
+    // BOTH, never one instead of the other: the console line is the operator's
+    // local trace and replacing it with a capture is a regression.
+    const consoleEvents = warnSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("seam.breaker.open"),
+    );
+    expect(
+      consoleEvents,
+      "The capture REPLACED the structured console line rather than joining it.",
+    ).toHaveLength(1);
+  });
+
+  it("the OPEN capture is SCHEDULED with after(), not fired and forgotten", async () => {
+    // ⚠️ LEDGER ROW M97 LIVES HERE. Under the mutation `after(p)` → `void p`
+    // the capture above still lands and a grep for `captureToSentry` in the
+    // source still hits — only this assertion moves.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < 5; i++) {
+      await mod.recordSeamFailure("breaker:railway");
+    }
+
+    expect(
+      shared.afterTasks,
+      "The capture was never handed to `after()`. On Vercel that promise is " +
+        "orphaned the moment the response flushes — the alert is dropped by " +
+        "the freeze during precisely the incident it was raised for (TRAP-7).",
+    ).toHaveLength(1);
+  });
+
+  it("a CLOSE transition captures at `warning` too — a recovery is not a fault", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("./resilient-fetch");
+
+    // An EXPIRED lock is the observed close: the first read past the encoded
+    // expiry is the only moment "usable again" becomes a fact.
+    const armedAtMs = Date.now() - 60_000;
+    const expiresAtMs = Date.now() - 30_000;
+    shared.store.set("breaker:railway", {
+      value: encodeFakeBreakerLock(armedAtMs, expiresAtMs),
+      expiresAt: Date.now() + 60_000,
+    });
+
+    // `bridge` declares no dependencies, so its whole check set is the residual
+    // global key — the one the lock above was seeded on.
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({
+      open: false,
+    });
+    await settleScheduled();
+
+    expect(shared.captures).toHaveLength(1);
+    expect(
+      shared.captures[0].options.level,
+      "A healed circuit was captured as an `error`. The OPEN half is a " +
+        "mitigation working and the CLOSE half is a recovery — routing either " +
+        "to `error` makes every recovery look like a fault, which is exactly " +
+        "why the existing log is `warn`.",
+    ).toBe("warning");
+    expect(shared.afterTasks).toHaveLength(1);
+  });
+
+  it("isBreakerOpen's store rejection captures at `error` and STILL fails OPEN", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.throwOnGet = true;
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.isBreakerOpen("bridge"),
+      "The fail-OPEN posture changed. A breaker that refuses traffic because " +
+        "of its OWN misconfiguration is strictly worse than having no breaker " +
+        "at all (SEAM-03) — this plan makes the failure observable, it does " +
+        "not change what the failure does.",
+    ).resolves.toEqual({ open: false });
+    await settleScheduled();
+
+    expect(shared.captures).toHaveLength(1);
+    expect(shared.captures[0].options.level).toBe("error");
+    expect(shared.afterTasks).toHaveLength(1);
+    // The scrubbed console line survives — it is the operator's local trace.
+    expect(
+      errorSpy.mock.calls.map((c) => String(c[0])).join("\n"),
+    ).toContain("breaker check failed");
+  });
+
+  it("recordSeamFailure's store rejection captures at `error` and still swallows", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.throwOnLimit = true;
+    const mod = await import("./resilient-fetch");
+
+    await expect(
+      mod.recordSeamFailure("breaker:railway"),
+    ).resolves.toBeUndefined();
+    await settleScheduled();
+
+    expect(shared.captures).toHaveLength(1);
+    expect(shared.captures[0].options.level).toBe("error");
+    expect(shared.afterTasks).toHaveLength(1);
+    expect(
+      errorSpy.mock.calls.map((c) => String(c[0])).join("\n"),
+    ).toContain("failed to record seam failure");
+  });
+
+  it("A6: outside a request scope the capture still goes out and NOTHING propagates", async () => {
+    // `after()` throws synchronously in a cron / prerender context. `audit.ts`
+    // handles that with a queueMicrotask fallback and this case is what stops
+    // that fallback being "simplified away" — without it, a seam call on a
+    // non-route path would throw a scheduling error from inside a catch block,
+    // replacing the real upstream error with a bookkeeping one.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    shared.mode.throwOnAfter = true;
+    const mod = await import("./resilient-fetch");
+
+    for (let i = 0; i < 5; i++) {
+      await expect(
+        mod.recordSeamFailure("breaker:railway"),
+      ).resolves.toBeUndefined();
+    }
+    // Drain the microtask queue the fallback scheduled onto.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(shared.afterTasks).toHaveLength(0);
+    expect(
+      shared.captures,
+      "`after()` threw and the capture was abandoned. The non-request-scope " +
+        "fallback is not optional (research assumption A6).",
+    ).toHaveLength(1);
+    // The fallback announces itself, so log aggregation can quantify the
+    // non-route path rather than silently attributing its drops to Sentry.
+    expect(
+      warnSpy.mock.calls.map((c) => String(c[0])).join("\n"),
+    ).toContain("non-request scope");
+  });
+
+  it("NEGATIVE CONTROL: a healthy breaker check captures NOTHING", async () => {
+    // Without this, an implementation that captured on every call would satisfy
+    // every case above while turning the seam's happy path into a Sentry flood.
+    const mod = await import("./resilient-fetch");
+
+    await expect(mod.isBreakerOpen("bridge")).resolves.toEqual({ open: false });
+    await mod.recordSeamFailure("breaker:railway");
+    await settleScheduled();
+
+    expect(shared.captures).toHaveLength(0);
+    expect(shared.afterTasks).toHaveLength(0);
   });
 });

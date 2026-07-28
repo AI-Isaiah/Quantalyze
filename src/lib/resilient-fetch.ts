@@ -1,8 +1,10 @@
+import { after } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { seamBreakerVerdict } from "./seam-discriminator";
 import { scrubSeamError } from "./seam-redaction";
+import { captureToSentry } from "./sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -892,17 +894,64 @@ interface SeamBreakerTransition {
 }
 
 /**
+ * Schedule a capture so it survives the response flush.
+ *
+ * ⚠️ COPIED FROM `audit.ts`'s `logAuditEvent` AND THE FALLBACK IS NOT OPTIONAL.
+ * `after()` is only valid inside a request scope; on a non-route path (cron,
+ * prerender) it throws SYNCHRONOUSLY, and this module is reachable from such a
+ * path. Dropping the `queueMicrotask` arm would turn an observability concern
+ * into a thrown scheduling error raised from inside a catch block — replacing
+ * the real upstream error with a bookkeeping one, which is the exact failure
+ * `recordSeamFailure`'s whole-body swallow exists to prevent (research
+ * assumption A6).
+ *
+ * The capture promise's rejection is swallowed at both arms: `captureToSentry`
+ * already resolves on every failure path, and letting anything escape `after()`
+ * becomes an unhandled rejection that changes nothing about the already-flushed
+ * response.
+ */
+function scheduleSeamCapture(capture: Promise<void>, event: string): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    // Outside a request scope. Announce the fallback with the module's stable
+    // prefix so log aggregation can distinguish it from the `after()` path and
+    // quantify the non-route drop rate, exactly as `audit.ts` does.
+    console.warn(
+      "[resilient-fetch] scheduling capture via queueMicrotask fallback (non-request scope):",
+      { event },
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
+/**
  * Emit one transition.
  *
- * A PLAIN STRUCTURED LOG, deliberately — it performs no I/O, so there is nothing
- * to await and TRAP-7 (a fire-and-forget promise orphaned by Fluid Compute
- * freeze) cannot apply. If this ever gains a network sink it must become an
- * awaited call at both sites, for exactly the reason the recording arms are
- * awaited inline.
+ * ⚠️ THIS DOCBLOCK USED TO SAY *"A PLAIN STRUCTURED LOG, deliberately — it
+ * performs no I/O, so there is nothing to await and TRAP-7 … cannot apply. If
+ * this ever gains a network sink it must become an awaited call at both sites."*
+ * It has now gained that network sink, so the condition the module set for
+ * itself is live: the capture is SCHEDULED with `after()` rather than fired and
+ * forgotten. A bare fire-and-forget promise is orphaned by the Fluid Compute
+ * freeze the moment the response flushes — during precisely the correlated
+ * incident the alert exists for (TRAP-7). `after()` hands it to `waitUntil`,
+ * which holds the instance alive until the capture settles; that only works
+ * because `captureToSentry` returns its import chain rather than detaching it
+ * (`audit.ts`'s NEW-C10-03, re-created in `sentry-capture.ts` and fixed in plan
+ * 140.4-06).
  *
- * `console.warn`, not `error`: a breaker transition is an operational fact, and
- * the OPEN half is a mitigation working. Routing it to `error` would make every
- * recovery look like a fault.
+ * ⚠️ THE CONSOLE LINE STAYS. It is the operator's LOCAL trace — `grep`-able in
+ * the Vercel function log without a Sentry round trip — and the capture is the
+ * remote one. Replacing either with the other is a regression, so both are
+ * asserted.
+ *
+ * `console.warn`, not `error`, AND `level: "warning"` on the capture for the
+ * same reason: a breaker transition is an operational fact, and the OPEN half is
+ * a mitigation working. Routing it to `error` would make every recovery look
+ * like a fault.
  */
 function emitBreakerTransition(
   kind: "open" | "close",
@@ -920,6 +969,20 @@ function emitBreakerTransition(
     correlationId: `${breakerKey}@${lock.armedAtMs}`,
   };
   console.warn(`[resilient-fetch] seam.breaker.${kind}`, payload);
+  scheduleSeamCapture(
+    captureToSentry(new Error(`[resilient-fetch] seam.breaker.${kind}`), {
+      tags: {
+        surface: "seam-breaker",
+        transition: kind,
+        breakerKey,
+      },
+      // The SAME four fields, and that ceiling holds here too: a breaker key is
+      // a module-derived value from a frozen closed set, never caller input.
+      extra: { ...payload },
+      level: "warning",
+    }),
+    `seam.breaker.${kind}`,
+  );
 }
 
 /**
@@ -1031,6 +1094,21 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
     console.error(
       "[resilient-fetch] breaker check failed — failing OPEN:",
       scrubSeamError(err),
+    );
+    // SEAMRIM-04 — and the fail-OPEN posture below is UNCHANGED. A breaker that
+    // refuses traffic because of its own misconfiguration is strictly worse
+    // than having no breaker at all (SEAM-03); what was wrong is that this arm
+    // silently removed the protection with no remote record that it had.
+    // `err` goes to the chokepoint RAW deliberately: `captureToSentry` scrubs
+    // unconditionally (and rebuilds the Error so Sentry's grouping and stack
+    // survive), whereas pre-rendering it to a string here would hand Sentry a
+    // stackless message for no security gain.
+    scheduleSeamCapture(
+      captureToSentry(err, {
+        tags: { surface: "seam-breaker", stage: "check", budgetKey },
+        level: "error",
+      }),
+      "seam.breaker.check_failed",
     );
     return { open: false };
   }
@@ -1239,6 +1317,17 @@ export async function recordSeamFailure(
     console.error(
       "[resilient-fetch] failed to record seam failure — breaker state may be stale:",
       scrubSeamError(err),
+    );
+    // SEAMRIM-04. The swallow is preserved — this runs inside the caller's
+    // catch arm, so a throw here would replace the real upstream error — but a
+    // breaker whose bookkeeping is failing is a breaker that will not trip when
+    // it should, and that was invisible beyond this one console line.
+    scheduleSeamCapture(
+      captureToSentry(err, {
+        tags: { surface: "seam-breaker", stage: "record", breakerKey },
+        level: "error",
+      }),
+      "seam.breaker.record_failed",
     );
   }
 }
