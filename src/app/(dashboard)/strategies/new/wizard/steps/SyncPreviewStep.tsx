@@ -521,11 +521,47 @@ export function SyncPreviewStep({
         // already complete+fresh; that path stays byte-neutral for single-key,
         // and a broken composite is still caught by the shared failed-gate
         // fail-safe in the poll effect.
-        const { data: existing } = await supabase
+        // ⚠️ 140.4-12 / SEAMRIM-11 (C-3) — `error` IS BOUND, AND A READ FAILURE
+        // IS NOT THE SAME FACT AS AN ABSENT ROW.
+        //
+        // supabase-js resolves a failed read AS A VALUE, so before this an RLS
+        // denial or a statement timeout arrived here as `{ data: null }` —
+        // byte-identical to the ordinary first-time draft that simply has no
+        // analytics row yet. `.maybeSingle()` answers genuine no-rows with
+        // `{ data: null, error: null }`, so the two ARE distinguishable; they
+        // just were not being distinguished. This was the last unchecked read
+        // in this file: `140.4-02` converted the seven-member `Promise.all`
+        // ~530 lines below and never reached this one.
+        //
+        // WHY THIS LOGS AND FALLS THROUGH RATHER THAN THROWING, unlike the
+        // marker read a few lines down. That one decides COMPOSITE vs
+        // SINGLE-KEY routing, so it fails CLOSED. This one decides only whether
+        // to SKIP a round-trip: on a failed read `data` is null, so the
+        // derivations below already resolve to "not complete, not fresh" and
+        // the effect falls through to the kickoff POST — exactly what a cold
+        // start does. Throwing would end the wizard on a transient blip in an
+        // optimisation, which is the over-refusal `140.4-01` carved PGRST116
+        // out to avoid, on a path where the fail-open direction cannot occur (a
+        // failed read can never produce `isComplete === true`).
+        //
+        // So the defect closed here is SILENCE, not a wrong branch: the failure
+        // is now recorded and is distinguishable from an absence. Both
+        // polarities are pinned in `SyncPreviewStep.render.test.tsx` — a
+        // failure logs exactly once and still kicks off, an absence logs
+        // nothing.
+        const { data: existing, error: existingErr } = await supabase
           .from("strategy_analytics")
           .select("computation_status, computed_at")
           .eq("strategy_id", strategyId)
           .maybeSingle();
+        if (existingErr) {
+          console.error(
+            "[wizard:SyncPreviewStep] resume freshness probe read failed — " +
+              "treating this resume as a COLD START, not as an absent " +
+              "analytics row:",
+            existingErr.message,
+          );
+        }
         const computedAtMs = existing?.computed_at
           ? Date.parse(existing.computed_at)
           : null;
