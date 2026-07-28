@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 // `SEAM_RETRIES` is deliberately NOT imported here. It survives as the value
 // every `SEAM_BUDGETS` row is seeded from and as the subject of the module-level
@@ -108,17 +108,115 @@ import {
  * assertion exists to bound. Summing per row is also correct in principle: a
  * multi-leg route can mix a retried leg with a non-retried one.
  *
- * CEILING (honest): this file reads ONLY the fifteen route files enumerated in
- * `SEAM_ROUTE_BUDGETS`, plus the exclusion paths. It does NOT walk the import
+ * ⭐ THE CEILING PARAGRAPH THAT USED TO SIT HERE IS NOW FALSE, AND THE CHANGE
+ * IS THE POINT OF PLAN 140.4-10. It read: "this file reads ONLY the fifteen
+ * route files enumerated in `SEAM_ROUTE_BUDGETS` … It does NOT walk the import
  * graph, so it cannot notice a SIXTEENTH route that starts calling the seam
- * clients without being added to the table — that route would simply not be
- * scanned. The guard for that class is the `quantalyze/no-raw-analytics-fetch`
- * ESLint rule plus code review of a new `resilientFetch` call site, not this
- * test. A table-vs-import-graph reconciliation walker is the stronger (unbuilt)
- * version.
+ * clients without being added to the table … A table-vs-import-graph
+ * reconciliation walker is the stronger (unbuilt) version."
+ *
+ * IT IS BUILT. `SC-4f` at the bottom of this file walks `src/app/api` for the
+ * IMPORT EDGE and compares the result to `Object.keys(SEAM_ROUTE_BUDGETS)` as a
+ * sorted SET EQUALITY. It is the single highest-leverage line in the phase,
+ * because the table is the population every other assertion here iterates: the
+ * on-disk `maxDuration` parity, the SC-4b headroom arithmetic, the SC-4d row
+ * contents and — since 140.4-10 — the membership of `SEAM_FILES` over in
+ * `seam-log-coverage.test.ts` all read a route only if the table names it. A
+ * sixteenth route was previously invisible to ALL of them at once.
+ *
+ * ⚠️ H-13's PREMISE WAS REFUTED INDEPENDENTLY BY TWO REVIEWERS, and the
+ * correction is why this is one assertion rather than a work package. H-13
+ * claimed "every guard derives its population from `/resilientFetch\s*\(/` or
+ * the ESLint base-URL taint; a new route consuming an existing seam wrapper
+ * matches neither." `SEAM_IMPORT_EDGE` matches ALL THREE wrapper modules, so a
+ * route that only calls `computePortfolioAnalytics()` DOES match. The needle
+ * existed and was already CI-wired in two files. What was missing was one set
+ * comparison nobody had written.
+ *
+ * ⚠️ AND THE LENGTH FENCE ABOVE IT STAYS. `expect(ROUTE_ENTRIES.length).toBe(15)`
+ * is NOT made redundant by the equality and deleting it "to avoid duplication"
+ * would remove the thing that catches an emptied table — the state in which the
+ * equality would compare two empties and agree. `resilient-fetch.wiring.test.ts`
+ * keeps its floor beside its three equalities for exactly this reason.
  */
 
 const REPO = process.cwd();
+
+// ---------------------------------------------------------------------------
+// 140.4-10 / SEAMRIM-06 — the seam route set, DERIVED FROM THE IMPORT EDGE.
+//
+// Duplicated (not imported) from `seam-poll-disjointness.pin.test.ts`, which
+// states the reason at its own copy: "a test file must not import another test
+// file, and two independent scanners that agree are worth more than one shared
+// helper whose single bug blinds both tiers." This is the FOURTH copy in the
+// repo and that is deliberate, not sloppy.
+//
+// The source is read RAW rather than comment-stripped, matching the owning
+// file. `SEAM_IMPORT_EDGE` matches a quoted module specifier after `from`, a
+// shape prose does not accidentally produce — and the two derivations were
+// measured against each other at plan time: identical, 15 == 15, both
+// difference directions empty.
+// ---------------------------------------------------------------------------
+
+/** The three modules through which every seam call in this repo is made. */
+const SEAM_MODULES = [
+  "analytics-client",
+  "resilient-fetch",
+  "process-key-client",
+] as const;
+
+/** Matches the IMPORT EDGE, never a bare mention — see the SSR pin for why. */
+const SEAM_IMPORT_EDGE = new RegExp(
+  `from\\s*["'](?:@/lib/|\\./|\\.\\./)?(?:lib/)?(?:${SEAM_MODULES.join("|")})["']`,
+);
+
+/**
+ * Every `src/app/api/**​/route.ts` standing on the import edge, as a REPO-ROOT
+ * RELATIVE PATH — the same key shape `SEAM_ROUTE_BUDGETS` uses, so the two sets
+ * are directly comparable without either side being normalised into the other's
+ * vocabulary.
+ */
+function deriveSeamRouteFiles(apiRoot: string): string[] {
+  const paths: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(join(REPO, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        walk(rel);
+        continue;
+      }
+      if (entry.name !== "route.ts") continue;
+      if (!SEAM_IMPORT_EDGE.test(readFileSync(join(REPO, rel), "utf8"))) continue;
+      paths.push(rel);
+    }
+  };
+  walk(apiRoot);
+  return paths.sort();
+}
+
+/**
+ * The two `SEAM_EXCLUSIONS` entries that are ROUTES (the third is a lib
+ * module), hand-typed here.
+ *
+ * Asserted below as a POSITIVE FACT about why they are absent from the
+ * derivation, NOT carried as an allow-list: neither imports the core, which is
+ * the entire content of its exclusion row. `debug-key-flow` runs a bespoke
+ * client-abort SSE design the core does not model; `cron/warm-analytics` is a
+ * `/health` probe, and A-12 is why it may never enter the core — "a cold
+ * `/health` probe failing IS the normal case", so routing one through the core
+ * feeds `recordSeamFailure` on every cold start, trips the breaker, and the
+ * open breaker then short-circuits the very probe whose success is the recovery
+ * signal.
+ *
+ * If either one ever DID import the core, the equality below would already fail
+ * by reporting it as an unbudgeted arrival. This assertion is what keeps that
+ * reading unambiguous — the difference between "absent because it is exempt"
+ * and "absent because it genuinely does not call the seam".
+ */
+const EXCLUDED_ROUTE_PATHS: string[] = [
+  "src/app/api/debug-key-flow/route.ts",
+  "src/app/api/cron/warm-analytics/route.ts",
+];
 
 /**
  * Matches the route-segment config STATEMENT only.
@@ -767,6 +865,107 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
         contradictions,
         `A path cannot both route through the core and be excluded from it: ${contradictions.join(", ")}`,
       ).toEqual([]);
+    });
+  });
+
+  describe("SC-4f / SEAMRIM-06 — the table describes exactly the routes on the import edge", () => {
+    it("the WALK finds seam routes at all (fail-loud on a vacuous discovery)", () => {
+      // ⚠️ THE FENCE GOES BESIDE THE EQUALITY, NEVER INSTEAD OF IT. A walk that
+      // matched nothing and a table that had been emptied would agree with each
+      // other perfectly — two empty sets are equal — and this file would report
+      // that the seam is fully described while describing nothing. The `.toBe(15)`
+      // fence above catches the emptied TABLE; this one catches the blind WALK.
+      // Neither implies the other.
+      //
+      // The floor is 10 against a measured 15, so a deliberate route deletion
+      // does not redden the wrong assertion.
+      expect(
+        deriveSeamRouteFiles("src/app/api").length,
+        "the import-edge walk over src/app/api found (almost) no seam routes. " +
+          "The directory moved, a seam module was renamed, or SEAM_IMPORT_EDGE " +
+          "stopped matching — this assertion is now BLIND, NOT SATISFIED. Fix " +
+          "the walk; never lower this floor.",
+      ).toBeGreaterThanOrEqual(10);
+    });
+
+    it("the DERIVED seam route set EQUALS Object.keys(SEAM_ROUTE_BUDGETS)", () => {
+      // ⭐ THE ONE ASSERTION THE MIDDLE TIER WAS MISSING. Everything else in
+      // this file iterates ROUTE_ENTRIES, so a route that reaches the seam
+      // without a row is invisible to all of it at once; and `.toBe(15)` pins a
+      // COUNT against a literal with NO DISK TERM AT ALL, so a route added to
+      // the table with the literal bumped from 15 to 16 passes.
+      //
+      // ZERO SLACK AND NO ALLOW-LIST, because the two sets are set-identical
+      // today (measured 15 == 15, both difference directions empty). An
+      // equality is what makes BOTH directions loud; a superset check or a
+      // `toHaveLength` sees neither a stale row nor — the harder case — a route
+      // that quietly LEAVES the edge.
+      //
+      // ⚠️ ORACLE INDEPENDENCE. This is a from-disk derivation compared to
+      // `SEAM_ROUTE_BUDGETS`, which is NOT a second derivation: it is a
+      // hand-maintained production table in `resilient-fetch.ts`. So this is
+      // derivation-vs-hand-typed, the intended shape. (The `SEAM_FILES` half in
+      // `seam-log-coverage.test.ts` answers the same hazard by keeping
+      // `EXPECTED_SEAM_FILES` hand-typed BESIDE its derivation.) Between the
+      // two files there are three independent statements — the disk, this
+      // table, and that roster — which must all agree. NEVER resolve a
+      // disagreement by deriving one of them from another.
+      const derived = deriveSeamRouteFiles("src/app/api");
+      const declared = Object.keys(SEAM_ROUTE_BUDGETS).sort();
+      const missing = derived.filter((p) => !declared.includes(p));
+      const stale = declared.filter((p) => !derived.includes(p));
+
+      expect(
+        derived,
+        `SEAM_ROUTE_BUDGETS no longer describes exactly the routes that import ` +
+          `the seam. MISSING ROW(S) — on the import edge, absent from the ` +
+          `table: ${missing.join(", ") || "none"}. STALE ROW(S) — in the table, ` +
+          `no longer on the edge: ${stale.join(", ") || "none"}. ` +
+          `\n\nA MISSING row means a route calls the seam with NO timeout ` +
+          `budget, NO breaker accounting and NO maxDuration headroom check, and ` +
+          `every other assertion in this file stays green because they all ` +
+          `iterate the table. Add the budget row DELIBERATELY, in the same ` +
+          `commit — with its legs, its expectedMaxDurationS, and a re-check of ` +
+          `the headroom table in this file's header. ` +
+          `\n\nA STALE row means a route stopped calling the seam; delete the ` +
+          `row and its EXPECTED_ROUTE_BUDGETS twin together. ` +
+          `\n\nNever widen this assertion, and never add an allow-list to it: ` +
+          `the two sets are identical today, so any slack introduced here is ` +
+          `slack nobody measured.`,
+      ).toEqual(declared);
+    });
+
+    it("the two EXCLUDED routes are absent from the derivation — because they do not import the core", () => {
+      // A POSITIVE FACT, not an allow-list. The equality above passes today
+      // WITHOUT either of these paths being special-cased anywhere, and this
+      // assertion is what states WHY: they are raw-fetch by design. A-12 is the
+      // reason for the warmer — a cold `/health` probe failing IS the normal
+      // case, so a warmer inside the core would trip the breaker on every cold
+      // start and the open breaker would then block the recovery probe.
+      //
+      // If one of them ever acquired a seam import, the equality above would
+      // redden by reporting it as a MISSING row — and this assertion would
+      // redden too, which is the signal that the correct fix is to reconsider
+      // the exclusion rather than to add a budget row.
+      const derived = deriveSeamRouteFiles("src/app/api");
+      const leaked = EXCLUDED_ROUTE_PATHS.filter((p) => derived.includes(p));
+      expect(
+        leaked,
+        `A documented SEAM_EXCLUSIONS route now stands on the seam import ` +
+          `edge: ${leaked.join(", ")}. These two are excluded because they do ` +
+          `NOT enter the core: debug-key-flow runs a bespoke client-abort SSE ` +
+          `design the core does not model, and cron/warm-analytics is a ` +
+          `/health probe whose FAILURE is the normal case (A-12 — routing it ` +
+          `through the core trips breaker:railway on every cold start, and the ` +
+          `open breaker then short-circuits the very probe that proves ` +
+          `recovery). Do not resolve this by giving it a budget row; resolve it ` +
+          `by removing the import.`,
+      ).toEqual([]);
+      // The positive counterpart: this assertion must be looking at real paths.
+      // Two `existsSync` misses would also produce "not derived".
+      for (const p of EXCLUDED_ROUTE_PATHS) {
+        expect(existsSync(join(REPO, p)), `${p} no longer exists`).toBe(true);
+      }
     });
   });
 });
