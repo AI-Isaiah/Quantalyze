@@ -21,7 +21,11 @@
  */
 import { render, screen, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SyncPreviewStep, type SyncPreviewSnapshot } from "./SyncPreviewStep";
+import {
+  SyncPreviewStep,
+  type SyncPreviewSnapshot,
+  type SyncPreviewStepProps,
+} from "./SyncPreviewStep";
 
 // Supabase mock. `createClient()` delegates to a mutable module-level
 // factory so individual tests can swap in a richer client (the polling
@@ -1613,5 +1617,212 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
     expect(screen.queryByTestId("wizard-back-to-strategies")).toBeNull();
     errSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.4-11 / SEAMRIM-07 — TRAP-4 restated as a PROPERTY.
+//
+// The gate-sourced codes (`GATE_NO_DATA_SOURCE`, `GATE_INSUFFICIENT_TRADES`,
+// `GATE_INSUFFICIENT_DAYS`) are NOT reachable from the kickoff arm the suite
+// above drives: they are minted by `checkStrategyGate` at the END of the poll
+// loop's heavy terminal fetch. Reaching them needs a client that serves the
+// whole fan-out, which is what `installGateSupabaseMock` below is for. The
+// mount effect takes the WIZ-05 fresh-complete skip (no kickoff POST at all),
+// then one poll tick lands on the terminal branch.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Serve the ENTIRE single-key terminal fan-out so `checkStrategyGate` runs on
+ * caller-chosen inputs. Every read resolves with `error: null` — this suite is
+ * about which CONTROL renders for a gate verdict, not about read failures
+ * (those are `SyncPreviewStep.readfailure.runtime.test.tsx`'s subject).
+ */
+function installGateSupabaseMock(opts: {
+  tradeCount?: number;
+  csvRowCount?: number;
+  earliestTradeAt?: string | null;
+  latestTradeAt?: string | null;
+  status?: string;
+  computationError?: string | null;
+}) {
+  const {
+    tradeCount = 0,
+    csvRowCount = 0,
+    earliestTradeAt = null,
+    latestTradeAt = null,
+    status = "complete",
+    computationError = null,
+  } = opts;
+
+  type Resolved = { data: unknown; count: number | null; error: null };
+
+  const client = {
+    from: (table: string) => ({
+      select: (cols: string) => {
+        // Mount effect — freshness probe. A COMPLETE + FRESH row takes the
+        // WIZ-05 skip, so no /api/keys/sync POST fires and the component lands
+        // straight in `waiting_for_complete`.
+        if (cols === "computation_status, computed_at") {
+          return {
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: {
+                    computation_status: "complete",
+                    computed_at: new Date().toISOString(),
+                  },
+                  error: null,
+                }),
+            }),
+          };
+        }
+        // Mount effect — composite marker. Present and NOT composite, so the
+        // fresh-skip resolves to the single-key arm rather than failing closed.
+        if (cols === "data_quality_flags") {
+          return {
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: { data_quality_flags: {} },
+                  error: null,
+                }),
+            }),
+          };
+        }
+        // Poll tick — terminal on a computed status.
+        if (cols === "computation_status, computation_error") {
+          return {
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: {
+                    computation_status: status,
+                    computation_error: computationError,
+                  },
+                  error: null,
+                }),
+            }),
+          };
+        }
+
+        // Heavy terminal fan-out. `ascending` is captured off the real
+        // `.order()` call so the earliest/latest pair is discriminated the same
+        // way production discriminates it, not by call ordering.
+        let ascending = true;
+        const resolve = (): Resolved => {
+          if (table === "csv_daily_returns") {
+            return { data: null, count: csvRowCount, error: null };
+          }
+          if (table === "trades" && cols === "id") {
+            return { data: null, count: tradeCount, error: null };
+          }
+          if (table === "trades" && cols === "timestamp") {
+            const ts = ascending ? earliestTradeAt : latestTradeAt;
+            return {
+              data: ts === null ? [] : [{ timestamp: ts }],
+              count: null,
+              error: null,
+            };
+          }
+          // trade-symbol sample.
+          return { data: [], count: null, error: null };
+        };
+
+        const node = {
+          eq: () => node,
+          neq: () => node,
+          limit: () => node,
+          order: (_col: string, o?: { ascending?: boolean }) => {
+            ascending = o?.ascending !== false;
+            return node;
+          },
+          // strategy_analytics metric columns + api_keys.exchange.
+          maybeSingle: () =>
+            Promise.resolve(
+              table === "api_keys"
+                ? { data: { exchange: "binance" }, error: null }
+                : { data: null, error: null },
+            ),
+          then: (r: (v: Resolved) => void) => r(resolve()),
+        };
+        return node;
+      },
+    }),
+  };
+
+  currentClientFactory = () => client;
+}
+
+/** Mount, take the fresh-skip, and walk one poll tick into the gate verdict. */
+async function renderThroughTheGate(props: SyncPreviewStepProps) {
+  render(<SyncPreviewStep {...props} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(6000);
+  });
+}
+
+describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  // ⚠️ THE ONE VERIFIED VIOLATION (140.4 CONTEXT §4 / C-4). `GATE_NO_DATA_SOURCE`
+  // is non-recoverable, so `ErrorEnvelope` renders no Retry; `request_call` and
+  // `start_fresh` render no control at all. Before the inversion the SOLE thing
+  // on screen was "Try another key", which fires WizardClient's
+  // `handleDeleteDraft()` and cascades away every `strategy_keys` member. Its
+  // `actions` are byte-identical to `GATE_DRAFT_GONE`'s — the code the old
+  // exemption roster was written for — which is exactly why a roster is the
+  // wrong mechanism: it was forgotten for the member that needed it most.
+  it("[C-4] GATE_NO_DATA_SOURCE never offers the draft-deleting control as its sole way out", async () => {
+    installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+
+    await renderThroughTheGate({ ...baseProps, apiKeyId: null });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(
+      envelope,
+      "Drive check: this case is worthless unless the gate actually minted " +
+        "GATE_NO_DATA_SOURCE. A fixture that silently produced some other " +
+        "code would assert the property about the wrong state.",
+    ).toHaveAttribute("data-error-code", "GATE_NO_DATA_SOURCE");
+
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "'Try another key' fires handleDeleteDraft() — it DESTROYS the draft " +
+        "and every strategy_keys member under it. This state's own actions " +
+        "are start_fresh + request_call: it never earned a control that " +
+        "deletes anything, and it is the one code in the reachable set whose " +
+        "ONLY control this was.",
+    ).toBeNull();
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+      "A state with no way out at all is worse than a destructive one.",
+    ).toBeInTheDocument();
   });
 });
