@@ -19,6 +19,11 @@ import { createClient } from "@/lib/supabase/server";
 // third party. `140.3-02` closed a live end-user JWT log leak one wave-set ago;
 // adding an observability channel must not re-open it through Sentry instead.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-07 / SEAMRIM-06 — the same three per-request credentials the block above
+// names for Sentry apply verbatim to the CONSOLE. Until this import, they were
+// applied to Sentry ONLY, and the three console sites below logged the caught
+// value raw — on the PUBLIC, anonymous route that declares them.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -381,7 +386,10 @@ async function unifiedVerifyStrategyHandler(
       level: "fatal",
       secrets: perRequestSecrets,
     });
-    console.error("[verify-strategy] createAdminClient config error:", configErr);
+    console.error(
+      "[verify-strategy] createAdminClient config error:",
+      scrubSeamError(configErr, perRequestSecrets),
+    );
     return NextResponse.json(
       { error: "Verification service misconfigured" },
       { status: 500 },
@@ -422,7 +430,7 @@ async function unifiedVerifyStrategyHandler(
       });
       console.error(
         "[verify-strategy] CT-3 public_token persist failed:",
-        persistError,
+        scrubSeamError(persistError, perRequestSecrets),
       );
       return NextResponse.json(
         { error: "Failed to finalize verification" },
@@ -437,7 +445,10 @@ async function unifiedVerifyStrategyHandler(
       tags: { surface: "verify-strategy", step: "public-token-persist-threw" },
       secrets: perRequestSecrets,
     });
-    console.error("[verify-strategy] CT-3 public_token persist threw:", err);
+    console.error(
+      "[verify-strategy] CT-3 public_token persist threw:",
+      scrubSeamError(err, perRequestSecrets),
+    );
     return NextResponse.json(
       { error: "Failed to finalize verification" },
       { status: 500 },
