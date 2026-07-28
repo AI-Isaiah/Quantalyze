@@ -376,7 +376,32 @@ export function deriveWizardResumeOverrides(
   if (!loaded) return {};
   const out: WizardResumeOverrides = {};
 
-  if (loaded.wizardSessionId) {
+  // Phase 140.4 / SEAMRIM-03 — the restore is gated on `source`.
+  //
+  // WHY, stated as the reason rather than the rule: there is ONE shared storage
+  // key (STORAGE_KEY above) for both wizards, and clearWizardState fires only on
+  // submit / delete-draft / start-fresh — so an ABANDONED API draft leaves its
+  // payload intact for the CSV wizard to pick up. Restoring the session id
+  // unconditionally therefore carried a `source='wizard'` submission's
+  // idempotency token across into a `source='csv'` submission. That is what
+  // makes a cross-source collision reachable at all.
+  //
+  // ⚠️ THIS IS TRIGGER REMOVAL, NOT THE GUARANTEE. The guarantee is the partial
+  // unique index `strategies_user_wizard_session_source_uniq` on
+  // (user_id, wizard_session_id, source) (migration 20260728120000), whose third
+  // column makes the cross-source case legal at the database. This line removes
+  // the one known trigger; if a second one is ever found, the DB still holds.
+  // Do not let this gate be read as permission to narrow that index.
+  //
+  // `?? "api"` is load-bearing: `source` is optional and its documented meaning
+  // when absent is 'api' (v1 payloads predate the CSV branch), so a bare
+  // `loaded.source === source` would silently stop restoring on the API branch
+  // for every legacy payload.
+  //
+  // Declining the restore is safe: WizardClient seeds wizardSessionId from
+  // `newWizardSessionId()` on mount, so the CSV wizard simply keeps its own
+  // fresh token — which is what a distinct submission should carry anyway.
+  if (loaded.wizardSessionId && (loaded.source ?? "api") === source) {
     out.wizardSessionId = loaded.wizardSessionId;
   }
 
