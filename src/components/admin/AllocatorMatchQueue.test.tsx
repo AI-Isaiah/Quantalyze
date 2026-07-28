@@ -31,6 +31,27 @@ import { AllocatorMatchQueue } from "./AllocatorMatchQueue";
  * IS expected — that's how the queue loads.
  */
 
+
+/**
+ * [140.4-05 / SEAMRIM-10] A failure sentence now appears TWICE in the error
+ * render: once in the visible card, and once in the sr-only `<LiveRegion>` that
+ * announces it. (This surface renders the SAME error card for a failed initial
+ * load and for a failed recompute — `if (error || !data)` returns early for
+ * both — so every recompute-failure case below sees the announcement too.)
+ *
+ * Strictly STRONGER than the `getByText(…)` it replaces: the exact count pins
+ * the visible copy AND the announcement together, so it fails if either is
+ * dropped. Deleting the announcement is exactly Falsifiability row M96.
+ */
+function visibleAndAnnounced(text: string): HTMLElement[] {
+  const nodes = screen.getAllByText(text);
+  expect(
+    nodes,
+    `"${text}" must appear exactly twice \u2014 the visible card + the sr-only LiveRegion`,
+  ).toHaveLength(2);
+  return nodes;
+}
+
 const ALLOCATOR_ID = "11111111-1111-4111-8111-111111111111";
 
 // jsdom doesn't implement matchMedia. The component uses `useMediaQuery`
@@ -492,7 +513,7 @@ describe("<AllocatorMatchQueue> — SEAMUX-05: handleRecompute observes the outc
 
     // The failure surfaces on the component's own error-first card …
     await waitFor(() => {
-      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument();
     });
     // … and the queue it invalidates nothing about is NOT refetched. A refetch
     // is what made a trip read as a completed recompute.
@@ -728,7 +749,7 @@ describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", 
     fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
 
     await waitFor(() => {
-      expect(screen.getByText(GENERIC_500)).toBeInTheDocument();
+      expect(visibleAndAnnounced(GENERIC_500)[0]).toBeInTheDocument();
     });
     // The 424 arm did not swallow every failure into a venue state.
     expect(document.body.textContent).not.toContain("isn't responding");
@@ -745,7 +766,7 @@ describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", 
     );
     fireEvent.click(screen.getByRole("button", { name: /Recompute now/i }));
     await waitFor(() => {
-      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument();
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument();
     });
   });
 
@@ -791,7 +812,7 @@ describe("<AllocatorMatchQueue> — [140.4-05] the load failure is announced", (
     expect(alert).toHaveTextContent(ROUTE_MESSAGE);
 
     // The visible card is unchanged — the announcement is purely additive.
-    expect(screen.getByText(ROUTE_MESSAGE)).toBeInTheDocument();
+    expect(visibleAndAnnounced(ROUTE_MESSAGE)[0]).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
   });
 

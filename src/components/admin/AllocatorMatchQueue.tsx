@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
+import { LiveRegion } from "@/components/ui/LiveRegion";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
@@ -403,6 +404,12 @@ export function AllocatorMatchQueue({
   if (error || !data) {
     return (
       <Card className="border-negative/40">
+        {/* The announcement is the ONLY channel here: this branch returns
+            early so the loaded tree never mounts, and the queue's primary
+            action is a keyboard shortcut (`r`) with no focus change. This
+            surface regressed from a modal alert() — always announced — to a
+            silent inline card. Carries the card's own string (DESIGN-05). */}
+        <LiveRegion message={error || "Failed to load"} assertive />
         <p className="text-small text-negative">{error || "Failed to load"}</p>
         <Button variant="secondary" size="sm" onClick={load} className="mt-3">
           Retry

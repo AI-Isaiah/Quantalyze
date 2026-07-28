@@ -33,6 +33,26 @@ const SUGGESTION: OptimizerSuggestion = {
   score: 0.8,
 };
 
+/**
+ * [140.4-05 / SEAMRIM-10] A failure sentence now appears TWICE in the error
+ * render: once in the visible card, and once in the sr-only `<LiveRegion>` that
+ * announces it to assistive tech.
+ *
+ * This is strictly STRONGER than the `getByText(…)` it replaces, not a
+ * relaxation to `getAllByText`: the exact count pins the visible copy AND the
+ * announcement together. It fails if the visible copy is dropped, if the
+ * announcement is dropped (which is what Falsifiability row M96 does at the
+ * sibling surface), and if a third copy appears.
+ */
+function visibleAndAnnounced(text: string): HTMLElement[] {
+  const nodes = screen.getAllByText(text);
+  expect(
+    nodes,
+    `"${text}" must appear exactly twice — the visible card + the sr-only LiveRegion`,
+  ).toHaveLength(2);
+  return nodes;
+}
+
 /** The value <p> is the 2nd <p> inside the MetricCell that owns `label`. */
 function metricValue(label: string): string {
   const labelEl = screen.getByText(label);
@@ -157,7 +177,7 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
     clickReRun();
 
     await waitFor(() =>
-      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument(),
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument(),
     );
 
     // THE assertion: the action control is gone, not merely accompanied by a
@@ -209,7 +229,7 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
     // that replaced every caught message with a component fallback would delete
     // the breaker surface at a seam consumer.
     await waitFor(() =>
-      expect(screen.getByText(BREAKER_SENTENCE)).toBeInTheDocument(),
+      expect(visibleAndAnnounced(BREAKER_SENTENCE)[0]).toBeInTheDocument(),
     );
   });
 
@@ -345,7 +365,7 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
 
     expect(screen.getByText("Optimizer failed")).toBeInTheDocument();
     expect(
-      screen.getByText("We couldn't compute suggestions for this portfolio."),
+      visibleAndAnnounced("We couldn't compute suggestions for this portfolio.")[0],
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
