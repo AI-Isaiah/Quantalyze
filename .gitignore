@@ -46,10 +46,24 @@ yarn-error.log*
 # gstack security reports and local state
 .gstack/
 
-# Claude Code local session state (settings.local.json, worktrees, locks) and
-# gstack planning artifacts — both are per-developer tooling, never in the repo.
+# Claude Code local session state (settings.local.json, worktrees, locks) —
+# genuinely per-developer, never in the repo.
 .claude/
-.planning/
+
+# .planning/ is TRACKED (GSD default: planning.commit_docs = true). It was
+# gitignored on 2026-04-17 (16f1ab17) for gstack, whose model treated planning
+# as per-developer scratch; GSD's model is the opposite — plans, summaries and
+# validation ledgers are project history. Keeping the gstack line cost us three
+# things: executor worktrees could not read their own PLAN.md (so waves ran
+# sequentially and lost their entire purpose), the ledgers had no git backup
+# (a bad sed truncated ROADMAP.md with nothing to restore from, and `git
+# checkout` silently deletes untracked ledgers), and we inherited upstream bug
+# classes that only exist in the gitignored configuration
+# (gsd-build/get-shit-done#2838 destroyed SUMMARY.md files exactly this way).
+# Key-shaped strings in these markdowns are redaction-test fixtures and are
+# allowlisted by path in .gitleaks.toml.
+# Session-scoped workstream pointer is local state, not history:
+.planning/active-workstream
 
 # Per-developer AI scratchpads (ADVERSARIAL_USER_NOTES.md etc.) — never committed.
 tasks/

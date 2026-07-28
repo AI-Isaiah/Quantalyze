@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quantalyze — My Allocation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Instrument+Serif:ital@0;1&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --accent: #1B6B5A;
+      --accent-hover: #155A4B;
+      --accent-10: rgba(27, 107, 90, 0.08);
+      --accent-20: rgba(27, 107, 90, 0.16);
+      --bg: #F8F9FA;
+      --surface: #FFFFFF;
+      --sidebar: #0F172A;
+      --sidebar-hover: rgba(255, 255, 255, 0.06);
+      --sidebar-active: rgba(27, 107, 90, 0.22);
+      --sidebar-text: #CBD5E1;
+      --sidebar-text-active: #FFFFFF;
+      --text-primary: #1A1A2E;
+      --text-secondary: #4A5568;
+      --text-muted: #718096;
+      --positive: #16A34A;
+      --negative: #DC2626;
+      --warning: #D97706;
+      --border: #E2E8F0;
+      --border-strong: #CBD5E1;
+      --border-focus: #1B6B5A;
+      --chart-strategy: #1B6B5A;
+      --chart-benchmark: #94A3B8;
+
+      --radius-sm: 4px;
+      --radius-md: 6px;
+      --radius-lg: 8px;
+      --radius-xl: 12px;
+
+      --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.04);
+      --shadow-pop: 0 8px 24px rgba(15, 23, 42, 0.12);
+
+      --row-h: 44px;
+      --density-pad: 16px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: "DM Sans", -apple-system, system-ui, sans-serif;
+      font-size: 14px;
+      color: var(--text-primary);
+      background: var(--bg);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      font-feature-settings: "ss01" on;
+    }
+
+    .font-display { font-family: "Instrument Serif", Georgia, serif; font-weight: 400; letter-spacing: -0.005em; }
+    .font-mono { font-family: "Geist Mono", ui-monospace, monospace; font-feature-settings: "tnum" on, "zero" on; }
+    .tnum { font-variant-numeric: tabular-nums; }
+
+    .pos { color: var(--positive); }
+    .neg { color: var(--negative); }
+    .warn { color: var(--warning); }
+    .muted { color: var(--text-muted); }
+    .secondary { color: var(--text-secondary); }
+
+    /* scrollbar */
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 8px; border: 2px solid #F8F9FA; }
+    ::-webkit-scrollbar-track { background: transparent; }
+
+    #root { min-height: 100vh; }
+
+    /* Hide chrome inside focus mode (tweaks panel positioning etc.) */
+    button { font-family: inherit; }
+
+    /* Density modifier */
+    body[data-density="tight"] { --row-h: 36px; --density-pad: 12px; font-size: 13px; }
+    body[data-density="loose"] { --row-h: 52px; --density-pad: 20px; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+  <script type="text/babel" data-presets="react" src="./src/data.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/primitives.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/charts.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/sidebar.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/bridge.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/holdings.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/outcomes.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/tweaks.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/range-picker.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/widget-grid.jsx"></script>
+  <script type="text/babel" data-presets="react" src="./src/app.jsx"></script>
+</body>
+</html>
