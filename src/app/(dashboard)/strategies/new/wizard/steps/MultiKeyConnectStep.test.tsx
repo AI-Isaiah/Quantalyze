@@ -1329,3 +1329,128 @@ describe("[140.3-13a / SEAMUX-08] MultiKeyConnectStep — every error path emits
     expect(wizardErrors()).toEqual([]);
   });
 });
+
+/**
+ * 140.4-15 / SEAMRIM-08 — the seam WIRE vocabulary is translated BEFORE the
+ * membership check on the composite add-key path too.
+ *
+ * The sibling half of `ConnectKeyStep`'s block of the same name, and the second
+ * member of the class. Plan `140.4-13` made `composite/add-key/route.ts:254`
+ * answer a limiter MISCONFIGURATION with the wire code `SEAM_MISCONFIGURED`;
+ * `KNOWN_ADD_KEY_CODES` has no member for it and this step had no translation
+ * hop, so it collapsed to `UNKNOWN` — *"Try the last action again."*, with a
+ * Retry control, for a fault whose own copy says retrying cannot clear it.
+ *
+ * ⚠️ SCOPE FENCE: the hop is added at the ADD-KEY arm only. `set-members` is a
+ * different route with a different contract and does not deny through
+ * `rateLimitDenyJson`'s misconfigured arm; the set-separation case above stays
+ * the guard for that boundary.
+ */
+describe("[140.4-15 / SEAMRIM-08] MultiKeyConnectStep — a seam WIRE code is translated before the membership check", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    cleanup();
+  });
+
+  function wizardErrorCodes(): string[] {
+    return trackMock.mock.calls
+      .filter((c) => (c as unknown[])[0] === "wizard_error")
+      .map((c) => ((c as unknown[])[1] as { code: string }).code);
+  }
+
+  /** Enter State B and fill panel 1's credentials, ready to validate. */
+  function enterMultiAndFillKey2() {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    return panel1;
+  }
+
+  it("our own configuration fault (SEAM_MISCONFIGURED) reaches its own state and offers NO retry", async () => {
+    // The exact body composite/add-key's misconfigured arm puts on the wire —
+    // hand-typed from the route, not imported.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
+        503,
+      ),
+    );
+    const panel1 = enterMultiAndFillKey2();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const envelope = await within(
+      screen.getByTestId("key-panel-1"),
+    ).findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the wire code collapsed to UNKNOWN on the composite path — the user is " +
+        "told to try again for a misconfiguration that retrying cannot clear",
+    ).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+
+    expect(
+      within(screen.getByTestId("key-panel-1")).getByText(
+        "We could not send this request — our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+
+    // The BEHAVIOURAL half: `recoverable` derives false from the code's
+    // actions, so the panel offers no Retry.
+    expect(
+      within(screen.getByTestId("key-panel-1")).queryByRole("button", {
+        name: "Retry",
+      }),
+      "a Retry control was offered for a fault that stays wrong until we redeploy",
+    ).toBeNull();
+
+    await waitFor(() =>
+      expect(wizardErrorCodes()).toContain("SEAM_MISCONFIGURED"),
+    );
+  });
+
+  it("POSITIVE COUNTERPART: an unrecognised code still falls to UNKNOWN, which DOES render Retry", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "ZZ_NOT_A_WIZARD_CODE" }, 500),
+    );
+    const panel1 = enterMultiAndFillKey2();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const envelope = await within(
+      screen.getByTestId("key-panel-1"),
+    ).findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(
+      within(screen.getByTestId("key-panel-1")).getByRole("button", {
+        name: "Retry",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("the translation hop does not shadow the roster: a wire code with no table entry is still UNKNOWN", async () => {
+    // SEAM_DEGRADED is a real seam wire code deliberately absent from
+    // SEAM_CODE_TO_WIZARD_CODE. A hop written as a cast would admit it.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "SEAM_DEGRADED" }, 503),
+    );
+    const panel1 = enterMultiAndFillKey2();
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const envelope = await within(
+      screen.getByTestId("key-panel-1"),
+    ).findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "UNKNOWN");
+  });
+});
