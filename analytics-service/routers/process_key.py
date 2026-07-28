@@ -1102,14 +1102,103 @@ async def process_key(
                 )
                 new_strategy_id = rpc_result.data
             except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "process_key.csv_finalize_rpc_failed", error=str(exc)[:200]
-                )
+                msg = str(exc)
+                # SEAMRIM-03 (review finding C-2) — the double-submit fence.
+                # Migration 20260728120000 gave `strategies` a partial unique
+                # index on (user_id, wizard_session_id, source) and made
+                # finalize_csv_strategy write the session id, so a repeat submit
+                # now raises 23505 and rolls BOTH inserts back (the RPC has no
+                # EXCEPTION block). That duplicate is the one the product's own
+                # copy INSTRUCTS — CSV_SUBMIT_NO_STRATEGY_ID says "Submit
+                # again." — so it must resolve to the existing strategy at 200,
+                # not become a 422 dead end.
+                #
+                # Same detection predicate as the race-winner arm below
+                # (`if "23505" in msg or "duplicate key" in msg.lower()`), and
+                # the same rules: maybe_single so a no-row result is a value and
+                # not a PGRST116 500, and surface the ORIGINAL failure if the
+                # re-fetch finds nothing rather than fabricating a success.
+                if "23505" in msg or "duplicate key" in msg.lower():
+                    # PYAPI-01d / C-08: the re-fetch MUST carry the same scope as
+                    # the index. Filtering on wizard_session_id alone would
+                    # re-fetch, and echo, another strategy's row. `source` is in
+                    # the filter for the same reason it is in the index: an
+                    # abandoned source='wizard' draft can hold the very same
+                    # session id (localStorage.ts:379-381 restores it across the
+                    # CSV/API boundary), and echoing THAT row would hand the user
+                    # a different strategy's id as if it were their CSV upload.
+                    #
+                    # It runs on `user_sb`, not the service-role client: RLS then
+                    # fences the read a second time, under the explicit filters,
+                    # instead of trusting the caller-supplied body.user_id.
+                    try:
+                        existing = one(
+                            user_sb.table("strategies")
+                            .select("id, status")
+                            .eq("user_id", user_id)
+                            .eq("wizard_session_id", wsid)
+                            .eq("source", "csv")
+                            .maybe_single()
+                            .execute()
+                        )
+                    except Exception as refetch_exc:  # noqa: BLE001
+                        # The re-fetch is itself a network call. Letting it throw
+                        # from inside this handler would turn a well-understood
+                        # duplicate into an uncaught 500, which is the "cryptic
+                        # 500" this arm exists to avoid. Treat it as a miss and
+                        # fall through to the static residual reply.
+                        log.warning(
+                            "process_key.csv_finalize_idempotent_refetch_failed",
+                            error=str(refetch_exc)[:200],
+                        )
+                        existing = None
+                    if existing:
+                        # Distinguishable from a first submit in the logs, so an
+                        # operator can tell a dedup from a create. Mirrors
+                        # `process_key.idempotent_race_resolved`.
+                        log.info(
+                            "process_key.csv_finalize_idempotent_hit",
+                            strategy_id=str(existing["id"]),
+                        )
+                        # `status` is ECHOED from the row rather than hardcoded
+                        # to 'pending_review' like the first-submit reply: this
+                        # row already exists and may sit at 'private' (the
+                        # CONTRIB-02 flow). Reporting a status we did not read
+                        # would be fabricating an observation.
+                        return {
+                            "ok": True,
+                            "strategy_id": existing["id"],
+                            "status": existing.get("status") or "pending_review",
+                            "correlation_id": correlation_id,
+                            "step": "finalize",
+                        }
+                    log.warning(
+                        "process_key.csv_finalize_idempotent_refetch_missed",
+                        error=msg[:200],
+                    )
+                log.warning("process_key.csv_finalize_rpc_failed", error=msg[:200])
+                # STATIC message. The old body interpolated `exc`, so the raw
+                # `duplicate key value violates unique constraint "..."` — and
+                # every other internal error string, DSNs and hostnames included
+                # — was painted onto the user's screen. That is a live member of
+                # C-1's surviving class (raw internal prose into the browser),
+                # and this fix would have CREATED a new one. The operator half
+                # stays in the structured log above.
+                #
+                # It deliberately makes NO claim about whether the write landed:
+                # this arm catches every non-23505 failure too, and from here we
+                # cannot observe the outcome. Asserting "nothing was created"
+                # would be the same fabricated-measurement defect the phase
+                # exists to close.
                 return JSONResponse(
                     status_code=422,
                     content=_envelope_error(
                         "CSV_FINALIZE_FAILED",
-                        f"finalize_csv_strategy RPC failed: {exc}",
+                        (
+                            "We could not complete the save. Check /strategies "
+                            "before submitting again — we cannot tell from here "
+                            "whether the strategy was created."
+                        ),
                         correlation_id,
                         None,
                     ),
