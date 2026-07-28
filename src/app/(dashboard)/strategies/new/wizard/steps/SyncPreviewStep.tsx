@@ -18,6 +18,7 @@ import {
 import {
   formatKeyError,
   gateFailureToWizardError,
+  recogniseSeamErrorCode,
   type WizardErrorAction,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
@@ -25,7 +26,7 @@ import { buildEnvelope } from "@/lib/envelope";
 // 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
 // reader for this envelope's fields; a hand-rolled `failure.detail?.correlation_id`
 // branch here is the drift class 140.3-01 closed.
-import { seamCorrelationId } from "@/lib/seam-discriminator";
+import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
@@ -600,10 +601,42 @@ export function SyncPreviewStep({
           const failure = (await res.json().catch(() => null)) as {
             code?: unknown;
           } | null;
-          const surfaced =
-            (typeof failure?.code === "string" &&
-              KNOWN_KICKOFF_CODES[failure.code]) ||
-            "SYNC_FAILED";
+          // 140.4-12 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK.
+          //
+          // Until this, the lookup below was the ONLY hop and it indexed the
+          // RAW WIRE STRING. `KNOWN_KICKOFF_CODES` holds wizard codes OUR OWN
+          // route mints, and its intersection with the seam's wire vocabulary
+          // (`CIRCUIT_OPEN`, `UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR`,
+          // `SEAM_MISCONFIGURED`) is EMPTY — so a breaker trip or a dead
+          // upstream during the kickoff rendered SYNC_FAILED, which asks the
+          // user which step failed about a computation that never started.
+          // `SubmitStep` has had the translation hop since 140.3-05; this
+          // sibling arm never did.
+          //
+          // Order matters and is the whole change: `SEAM_CODE_TO_WIZARD_CODE`
+          // (the ONE wire→wizard table, in `wizardErrors.ts`) answers for WIRE
+          // codes, and `KNOWN_KICKOFF_CODES` answers for the route-minted ones
+          // it has always owned. NEITHER LIST GAINED A MEMBER — the roster's
+          // reasoning below (why the two 400 arms map to VALIDATION_FAILED and
+          // why no new union member was minted) is unchanged and still governs
+          // its own domain.
+          //
+          // The fallback is NOT weakened: an unrecognised wire code leaves the
+          // translation at "UNKNOWN" and then misses the roster, so it still
+          // reaches SYNC_FAILED — deliberately, because a map pretending to be
+          // total turns an unfamiliar code into a silent undefined state.
+          //
+          // The code is read through `seamErrorCode`, the same leaf
+          // `seamCorrelationId` below already comes from, so a nested
+          // `service_error` body (`body.detail.code`) is seen rather than read
+          // as a body carrying no code at all.
+          const wireCode = seamErrorCode(failure);
+          const translated = recogniseSeamErrorCode(wireCode);
+          const surfaced: WizardErrorCode =
+            translated !== "UNKNOWN"
+              ? translated
+              : (wireCode !== null && KNOWN_KICKOFF_CODES[wireCode]) ||
+                "SYNC_FAILED";
           // The wait rides the HEADER, read through the ONE parser
           // (`parseRetryAfterSeconds` — HTTP-date safe, never NaN/0/negative).
           // Absent header ⇒ no wait, and the envelope then names no duration at
