@@ -17,6 +17,21 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // credential, and they are never put in a capture payload — only `fmt` and a
 // size are. Stated rather than assumed (M78b).
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-09 / SEAMRIM-06 — the seam's ONE redaction leaf (SEAMCORE-06), for the
+// terminal catch's console line.
+//
+// ⚠️ THE ABSENCE OF THIS IMPORT WAS RECORDED AS EVIDENCE OF A CREDENTIAL LEAK,
+// AND THAT READING IS REFUTED. `grep -c scrubSeamError` returned 0 on this file
+// and was reported by five independent registers as C-1 CRITICAL. It is a FALSE
+// SIGNAL: the credential this route's outgoing request carries is
+// `INTERNAL_API_TOKEN`, which is already on `seam-redaction.ts`'s env-name list
+// and is therefore scrubbed unconditionally inside `captureToSentry` — the
+// chokepoint — and no real transport failure inlines it into `err.message`
+// anyway (ECONNREFUSED / ECONNRESET / DNS / timeout / parse all produce a
+// constant `fetch failed`). What was actually wrong here was HYGIENE, and it is
+// what this import fixes: an unscrubbed console line. Do not re-derive the
+// stronger claim from the fact that this import is new.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -259,18 +274,44 @@ async function unifiedCsvValidateHandler(args: {
     if (!result.ok) return result.response;
     return NextResponse.json(result.body, { headers: NO_STORE_HEADERS });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "CSV validation failed";
     // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM. `postProcessKey` classifies
     // every outcome it can into the `!result.ok` envelope above, so a THROW
     // reaching here is by construction the unclassified residue: a transport
     // failure, a missing-config throw from the client, a contract-drift parse
-    // throw, or any untyped throw. The caught VALUE (not `message`) is passed,
-    // so Sentry keeps the Error type, its grouping and its stack.
+    // throw, or any untyped throw. The caught VALUE is passed, so Sentry keeps
+    // the Error type, its grouping and its stack.
     captureToSentry(err, {
       tags: { surface: "strategies-csv-validate", step: "unified-path-threw" },
       extra: { fmt: args.fmt, size_bytes: args.file.size },
     });
-    console.error("[strategies/csv-validate] unified path threw:", message);
-    return csvErrorEnvelope("CSV_UPSTREAM_FAIL", message, {}, 502);
+    // 140.4-09 / SEAMRIM-06 — H-1062, the rule `src/app/api/bridge/route.ts`
+    // states verbatim at its own terminal arm: a genuine 5xx / unexpected
+    // exception returns a STATIC message and THE DETAIL STAYS SERVER-SIDE.
+    // Echoing `err.message` there leaked Python contract-drift strings (the
+    // multi-line Zod issue list `parseResponse()` throws) and FastAPI 5xx
+    // detail to authenticated allocators. Here it was worse-placed: this body's
+    // `human_message` is rendered by `CsvUploadStep` → `CsvValidationEnvelope`
+    // as the wizard panel's TITLE and SUBTITLE — the one surface whose job is
+    // "the upload failed, send this to support".
+    //
+    // The operator loses nothing. The caught value goes to Sentry above with
+    // its type and its stack, and the line below carries the rendered detail
+    // SCRUBBED. Answering this by dropping `err` from the log instead would be
+    // the A-10 defect — the syscall token is the most valuable thing in a
+    // transport line.
+    console.error(
+      "[strategies/csv-validate] unified path threw:",
+      scrubSeamError(err),
+    );
+    return csvErrorEnvelope(
+      "CSV_UPSTREAM_FAIL",
+      // The route's OWN existing fallback sentence, kept rather than authored
+      // fresh: this arm already read "CSV validation failed" for a non-Error
+      // throw, and "Try again shortly." is the retry clause its sibling seam
+      // routes already use. 140.3-12 owns new sentences; this is not one.
+      "CSV validation failed. Try again shortly.",
+      {},
+      502,
+    );
   }
 }
