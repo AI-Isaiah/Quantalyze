@@ -748,7 +748,25 @@ describe("[P72] SyncPreviewStep — ledger-backed (Deribit) success path", () =>
             };
           }
           if (table === "csv_daily_returns") return thenable(null, csvCount);
-          if (table === "trades") return thenable(null, 0);
+          if (table === "trades") {
+            // DOUBLE FIDELITY (140.4-02). `trades` is read three different ways
+            // in the single-key terminal arm and they do NOT share a resolved
+            // shape: the `head: true` exact count (`select("id")`) resolves
+            // `data: null` WITH a count, while the earliest / latest / sample
+            // reads are LIST selects, and postgrest-js never resolves
+            // `data: null` on a successful list select — it resolves `[]`.
+            //
+            // This double answered `null` for all three. That went unnoticed
+            // only because the production code carried a `?? []` whose sole
+            // purpose was to absorb a shape the real client cannot produce; the
+            // checked-read conversion made that coercion provably dead and
+            // removed it, at which point the double's infidelity surfaced.
+            // Fixed here rather than by restoring the coercion: a fake must be
+            // pinned to the contract it stands in for, or it silently licenses
+            // production code to handle cases that do not exist while missing
+            // ones that do.
+            return cols === "id" ? thenable(null, 0) : thenable([], 0);
+          }
           if (table === "api_keys") return thenable({ exchange: "deribit" }, 0);
           // Heavy analytics-column row.
           return thenable(
