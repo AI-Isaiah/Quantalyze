@@ -756,11 +756,17 @@ describe("POST /api/keys/sync", () => {
       const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
       expect(res.status).toBe(503);
+      // SEAMRIM-06 — the value now goes through `scrubSeamError`, so it arrives
+      // as a STRING rather than the raw PostgREST object. The assertion is
+      // strengthened rather than relaxed: it still pins that the stamp failure
+      // is logged, and it additionally pins that the diagnosis SURVIVED the
+      // scrub. Answering a scrub finding by DROPPING the value is the A-10
+      // defect, and this line is what would catch it.
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining(
           "failed to stamp terminal 'failed' (membership_unknown)",
         ),
-        expect.objectContaining({ message: "stamp write denied" }),
+        expect.stringContaining("stamp write denied"),
       );
       consoleSpy.mockRestore();
     });
