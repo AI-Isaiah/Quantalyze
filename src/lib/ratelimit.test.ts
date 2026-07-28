@@ -8,6 +8,54 @@ import {
 import type { Ratelimit } from "@upstash/ratelimit";
 
 /**
+ * SEAMRIM-04 — the scheduling seam and the capture chokepoint, doubled.
+ *
+ * `after()` is partial-mocked so `NextResponse` (which `rateLimitDenyJson` and
+ * `rateLimitDenyText` return) keeps working. The double RUNS the task, as the
+ * platform does once the response has flushed.
+ */
+const seam = vi.hoisted(() => ({
+  captures: [] as Array<{
+    err: unknown;
+    options: { tags?: Record<string, string>; level?: string; extra?: Record<string, unknown> };
+  }>,
+  afterTasks: [] as unknown[],
+  afterSettled: [] as Array<Promise<unknown>>,
+}));
+
+vi.mock("next/server", async () => {
+  const actual = await vi.importActual<typeof import("next/server")>(
+    "next/server",
+  );
+  return {
+    ...actual,
+    after: (task: unknown) => {
+      seam.afterTasks.push(task);
+      const produced =
+        typeof task === "function" ? (task as () => unknown)() : task;
+      seam.afterSettled.push(Promise.resolve(produced));
+    },
+  };
+});
+
+vi.mock("./sentry-capture", () => ({
+  // RETURNS A PROMISE, as the real leaf does since plan 140.4-06 task 1: a
+  // double returning `undefined` would make the production `after(() => p…)`
+  // shape throw here and nowhere else.
+  captureToSentry: (err: unknown, options: Record<string, unknown>) => {
+    seam.captures.push({
+      err,
+      options: options as {
+        tags?: Record<string, string>;
+        level?: string;
+        extra?: Record<string, unknown>;
+      },
+    });
+    return Promise.resolve();
+  },
+}));
+
+/**
  * Unit tests for the Upstash rate limit helpers. These do NOT touch a real
  * Upstash database — every Ratelimit instance is mocked. The contract under
  * test is the public surface of `checkLimit` + `getClientIp`:
@@ -33,6 +81,9 @@ describe("checkLimit", () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    seam.captures.length = 0;
+    seam.afterTasks.length = 0;
+    seam.afterSettled.length = 0;
   });
 
   afterEach(() => {
@@ -103,10 +154,53 @@ describe("checkLimit", () => {
     } as unknown as Ratelimit;
     const result = await checkLimit(mockLimiter, "user:abc");
     expect(result).toEqual({ success: true });
+    // ⚠️ STRENGTHENED, NOT WEAKENED (TRAP-9). This assertion read
+    //   expect(errSpy).toHaveBeenCalledWith("[ratelimit] check failed:", expect.any(Error));
+    // which pinned the raw `Error` OBJECT — i.e. it pinned the leak in place.
+    // The prefix is still asserted; the payload is now asserted to be the
+    // SCRUBBED rendering, and the dedicated leak case below is what fails when
+    // the scrub is removed.
     expect(errSpy).toHaveBeenCalledWith(
       "[ratelimit] check failed:",
-      expect.any(Error),
+      expect.stringContaining("Redis unavailable"),
     );
+  });
+
+  it("SEAMRIM-04 — the limiter's own store credential never reaches the log", async () => {
+    // The store command carries `UPSTASH_REDIS_REST_TOKEN` in an Authorization
+    // header and undici INLINES the outgoing request into the error it
+    // produces. `resilient-fetch.ts` scrubs both of its store-rejection arms
+    // for exactly this reason and names it verbatim; `checkLimit` logged the
+    // raw error object, so the same store, reached through the same SDK,
+    // spilled the same credential from the other module.
+    delete (process.env as Record<string, string | undefined>).VERCEL_ENV;
+    const TOKEN = "AX7zAAIncDEyMzQ1Njc4OTBhYmNkZWY";
+    vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", TOKEN);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockRejectedValue(
+        new Error(
+          "fetch failed\n  request: { headers: { authorization: 'Bearer " +
+            TOKEN +
+            "' } }",
+        ),
+      ),
+    } as unknown as Ratelimit;
+
+    await checkLimit(mockLimiter, "user:abc");
+
+    const logged = errSpy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(
+      logged,
+      "The rate limiter logged its own Upstash bearer token. Anything in a " +
+        "Vercel function log is readable by every operator and by log " +
+        "aggregation — this is a credential disclosure, not a hygiene nit.",
+    ).not.toContain(TOKEN);
+    // Over-redaction is the same failure as under-redaction: the diagnosis has
+    // to survive or the operator has to reproduce the outage to learn what the
+    // log already knew.
+    expect(logged).toContain("fetch failed");
+    vi.unstubAllEnvs();
   });
 
   // ── P709 (audit-2026-05-07) — fail-CLOSED in production ─────────────
@@ -208,6 +302,111 @@ describe("checkLimit", () => {
     const result = await checkLimit(mockLimiter, "user:abc");
     expect(result).toEqual({ success: true });
     expect(errSpy).toHaveBeenCalled();
+  });
+
+  // ── SEAMRIM-04 — the THIRD posture becomes observable ────────────────
+  //
+  // `checkLimit` has never had two postures. `@upstash/ratelimit` 2.0.8 races a
+  // 5 000 ms timeout that resolves `{ success: true, limit: 0, remaining: 0,
+  // reset: 0, reason: "timeout" }` — "I could not reach the counter, let the
+  // traffic through". Only `{ success, reset }` were destructured, so that
+  // fail-OPEN was indistinguishable from a genuine allow: a regulatory cap
+  // silently stopped being enforced and nothing anywhere recorded it.
+  //
+  // The posture is NOT changed by these cases. Traffic still passes.
+
+  it("SEAMRIM-04 — the timeout sentinel still ALLOWS the request (posture unchanged)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      // The library's sentinel, HAND-TYPED. Never imported, so this double
+      // cannot inherit a change to the shape it is standing in for.
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 0,
+        remaining: 0,
+        reset: 0,
+        reason: "timeout",
+      }),
+    } as unknown as Ratelimit;
+
+    const result = await checkLimit(mockLimiter, "user:abc");
+
+    expect(
+      result,
+      "The timeout sentinel changed what checkLimit RETURNS. This plan makes " +
+        "the third posture observable; making the limiter fail CLOSED on a " +
+        "hanging store is a different decision with its own blast radius.",
+    ).toEqual({ success: true });
+  });
+
+  it("SEAMRIM-04 — the timeout sentinel is RECORDED, and the capture is scheduled", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 0,
+        remaining: 0,
+        reset: 0,
+        reason: "timeout",
+      }),
+    } as unknown as Ratelimit;
+
+    await checkLimit(mockLimiter, "user:abc");
+    await Promise.all(seam.afterSettled);
+
+    expect(
+      seam.captures,
+      "The limiter's store timed out, the cap was NOT enforced for this " +
+        "request, and nothing recorded it. A limiter whose store is missing " +
+        "silently removes a regulatory cap.",
+    ).toHaveLength(1);
+    expect(seam.captures[0].options.level).toBe("warning");
+    expect(seam.afterTasks).toHaveLength(1);
+    // The operator's local trace survives alongside the capture.
+    expect(
+      warnSpy.mock.calls.map((c) => String(c[0])).join("\n"),
+    ).toContain("[ratelimit]");
+  });
+
+  it("SEAMRIM-04 NEGATIVE CONTROL — a genuine allow records NOTHING", async () => {
+    // Without this, "the sentinel is recorded" is satisfied by an
+    // implementation that records on every single request.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 10,
+        remaining: 9,
+        reset: Date.now() + 60_000,
+      }),
+    } as unknown as Ratelimit;
+
+    const result = await checkLimit(mockLimiter, "user:abc");
+
+    expect(result).toEqual({ success: true });
+    expect(seam.captures).toHaveLength(0);
+    expect(seam.afterTasks).toHaveLength(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("SEAMRIM-04 NEGATIVE CONTROL — a genuine DENY records nothing either", async () => {
+    // `cacheBlock` and a plain over-limit deny are real denials, not fail-opens.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: false,
+        limit: 10,
+        remaining: 0,
+        reset: Date.now() + 30_000,
+        reason: "cacheBlock",
+      }),
+    } as unknown as Ratelimit;
+
+    const result = await checkLimit(mockLimiter, "user:abc");
+
+    expect(result.success).toBe(false);
+    expect(seam.captures).toHaveLength(0);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it("CI regression — VERCEL_ENV=preview fails-OPEN (limiter null)", async () => {

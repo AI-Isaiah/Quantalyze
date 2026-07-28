@@ -1,6 +1,8 @@
-import { NextResponse } from "next/server";
+import { NextResponse, after } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
+import { scrubSeamError } from "./seam-redaction";
+import { captureToSentry } from "./sentry-capture";
 
 /**
  * Upstash rate-limit helpers for sensitive routes.
@@ -291,6 +293,38 @@ export function rateLimitDenyText(rl: DenyResult): NextResponse {
 const MISCONFIGURED_RETRY_AFTER_S = 60;
 
 /**
+ * `@upstash/ratelimit` 2.0.8's FAIL-OPEN timeout sentinel, hand-typed.
+ *
+ * `applyTimeout` races the real verdict against a 5 000 ms timer that resolves
+ * `{ success: true, limit: 0, remaining: 0, reset: 0, reason: "timeout" }` —
+ * the library saying "I could not reach the counter, let the traffic through".
+ *
+ * ⚠️ THE DISCRIMINATOR IS `reason`, NOT `limit === 0`. `"cacheBlock"` is the
+ * OTHER reason the limiter can answer without touching Redis and it is a
+ * GENUINE denial; `"denyList"` likewise. Only `"timeout"` is a fail-open.
+ * `resilient-fetch.ts` reasons identically at its own copy of this branch.
+ */
+const LIMITER_TIMEOUT_REASON = "timeout";
+
+/**
+ * Schedule a capture so it outlives the response, with the non-request-scope
+ * fallback `after()` requires. Same shape as `audit.ts`'s `logAuditEvent` and
+ * `resilient-fetch.ts`'s `scheduleSeamCapture`.
+ */
+function scheduleLimiterCapture(capture: Promise<void>): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    console.warn(
+      "[ratelimit] scheduling capture via queueMicrotask fallback (non-request scope)",
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
+/**
  * Consume one rate-limit token for the given identifier. Returns success
  * with retryAfter (seconds) when the limit is exceeded.
  *
@@ -299,6 +333,28 @@ const MISCONFIGURED_RETRY_AFTER_S = 60;
  * variant signals route handlers to emit 503 Service Unavailable. Fail-OPEN
  * outside production so local dev / preview deploys without Upstash keep
  * working. See P709 + the module docstring for the full behavior matrix.
+ *
+ * ── SEAMRIM-04: THERE ARE THREE POSTURES HERE, NOT TWO ──────────────────────
+ *
+ * The behaviour matrix above describes two, and the deployed limiter has three.
+ * Which one fires depends on HOW the store is unhealthy, not on whether it is:
+ *
+ *   1. FAIL-CLOSED — an HTTP-5xx (or any rejection) from the store. `@upstash/
+ *      redis` does not retry a non-ok HTTP response, so the rejection arrives
+ *      promptly and production answers `ratelimit_misconfigured` → 503.
+ *   2. FAIL-OPEN, plus up to 5 s of the user's latency — a HANGING store. The
+ *      SDK never rejects; `applyTimeout`'s sentinel wins the race and says
+ *      "let it through". The cap is NOT enforced for that request.
+ *   3. NON-DETERMINISTIC — a REFUSED socket, where the SDK's ~4.29 s retry
+ *      ladder races the 5 s sentinel and either of the two above can win.
+ *
+ * ⚠️ THIS FUNCTION DOES NOT CHANGE ANY OF THEM, AND THAT IS DELIBERATE. What
+ * was wrong is that posture 2 was SILENT: only `{ success, reset }` were
+ * destructured, so a request that passed because the regulatory cap could not
+ * be consulted was byte-indistinguishable from one that passed because it was
+ * under the cap. It is now recorded. Making the limiter fail CLOSED on a
+ * hanging store is a different decision with its own blast radius and is not
+ * taken here.
  */
 export async function checkLimit(
   limiter: Ratelimit | null,
@@ -315,8 +371,30 @@ export async function checkLimit(
     return { success: true };
   }
   try {
-    const { success, reset } = await limiter.limit(identifier);
-    if (success) return { success: true };
+    const { success, reset, reason } = await limiter.limit(identifier);
+    if (success) {
+      if (reason === LIMITER_TIMEOUT_REASON) {
+        // POSTURE 2 — recorded, not changed. The identifier is deliberately
+        // NOT logged or captured: it is a user id or a client IP, and this
+        // event says nothing about WHO was let through, only that the cap went
+        // unenforced.
+        console.warn(
+          "[ratelimit] store timeout — the cap was NOT enforced for this " +
+            "request (fail-OPEN). This is the store being unreachable, not the " +
+            "caller being under the limit.",
+        );
+        scheduleLimiterCapture(
+          captureToSentry(
+            new Error("[ratelimit] store timeout — cap not enforced"),
+            {
+              tags: { surface: "ratelimit", posture: "fail_open_timeout" },
+              level: "warning",
+            },
+          ),
+        );
+      }
+      return { success: true };
+    }
     const retryAfter = Math.max(1, Math.ceil((reset - Date.now()) / 1000));
     return { success: false, retryAfter };
   } catch (err) {
@@ -324,7 +402,16 @@ export async function checkLimit(
     // production fail-CLOSED so a Redis outage doesn't silently unlock
     // cost-sensitive endpoints; outside production fail-OPEN so a dev
     // without Upstash can still iterate.
-    console.error("[ratelimit] check failed:", err);
+    //
+    // ⚠️ SCRUBBED (SEAMRIM-04 / TRAP-1). The store command carries
+    // `UPSTASH_REDIS_REST_TOKEN` in an Authorization header and undici inlines
+    // the outgoing request into the error it produces, so logging `err` raw
+    // spilled this module's own store credential into the function log.
+    // `resilient-fetch.ts` scrubs both of its store-rejection arms for exactly
+    // this reason; the same store reached through the same SDK was unscrubbed
+    // from here. The syscall detail survives the scrub — a refused store and an
+    // expired certificate are different incidents.
+    console.error("[ratelimit] check failed:", scrubSeamError(err));
     if (isProduction()) {
       return {
         success: false,

@@ -121,6 +121,33 @@ function scrubRecord<T extends Record<string, unknown>>(
   }
 }
 
+/**
+ * Capture to Sentry, RETURNING the import chain so the caller can hold the
+ * request alive until it settles.
+ *
+ * ── SEAMRIM-04 (Phase 140.4): NEW-C10-03, RE-CREATED HERE AND NOW FIXED ──────
+ *
+ * `src/lib/audit.ts`'s `reportToSentry` carries the diagnosis verbatim: the
+ * prior implementation used `void import(...).then(...)`, which returns
+ * SYNCHRONOUSLY — the in-flight dynamic-import promise is detached before
+ * `captureException` resolves, so under `after()` on a cold finish the lambda
+ * can be reaped before Sentry flushes and the alert is lost silently. That red
+ * team (audit-2026-05-26) fixed `reportToSentry` by returning the chain. This
+ * helper kept the defective shape until now. Two adjacent modules, one rule.
+ *
+ * ⚠️ SCHEDULING IS THE CALLER'S JOB, AND THAT IS A BUNDLE CONSTRAINT, NOT A
+ * STYLE PREFERENCE. This module is imported by SIX `"use client"` components
+ * (`ForQuantsCtas`, `ScenarioCommitDrawer`, `widget-boundary`, `EquityChart`,
+ * `useMandateAutoSave`, `storage/cross-tab`), so it MUST NOT import
+ * `next/server` — doing so would ship a server-only module into the browser
+ * bundle. It imports exactly one module (`./seam-redaction`) and must keep that
+ * property. `after()` therefore lives at the server-only call sites
+ * (`resilient-fetch.ts`, `ratelimit.ts`), never here.
+ *
+ * SOURCE-COMPATIBLE BY DESIGN: an unused returned promise is legal, so the 100+
+ * existing call sites that discard the return value are unaffected. A site that
+ * needs the capture to survive a cold finish schedules it explicitly.
+ */
 export function captureToSentry(
   err: unknown,
   options: {
@@ -135,13 +162,13 @@ export function captureToSentry(
      */
     secrets?: readonly unknown[];
   },
-): void {
+): Promise<void> {
   try {
     const secrets = options.secrets ?? [];
     const payload = scrubCaptureInput(err, secrets);
     const tags = scrubRecord(options.tags, secrets) ?? {};
     const extra = scrubRecord(options.extra, secrets);
-    void import("@sentry/nextjs")
+    return import("@sentry/nextjs")
       .then((Sentry) => {
         try {
           Sentry.captureException(payload, {
@@ -154,9 +181,14 @@ export function captureToSentry(
         }
       })
       .catch(() => {
-        // Sentry import failed — swallow.
+        // Sentry import failed — swallow. RESOLVING rather than rejecting is
+        // load-bearing now that the chain is returned: a floating rejection
+        // would become an unhandled rejection at every call site.
       });
   } catch {
-    // import() construction failed (extremely unlikely) — swallow.
+    // import() construction failed (extremely unlikely) — swallow, and still
+    // hand the caller a settled promise so `after(captureToSentry(...))` and
+    // `await` are total.
+    return Promise.resolve();
   }
 }
