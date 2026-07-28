@@ -24,6 +24,12 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // list is the whole defence. Stated rather than assumed, because M78b showed the
 // env mechanism staying green while a per-request credential shipped verbatim.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — the CONSOLE half of the same rule, and the reason it
+// is a SEPARATE import rather than a redundant one: `captureToSentry` scrubs at
+// its own chokepoint, `console.*` has none. The `secrets` reasoning above
+// carries over unchanged — no per-request credential exists here, so no second
+// argument is passed at either site.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 28 (OPT-01/02) — suggest long-only scenario weights.
@@ -195,7 +201,19 @@ export async function POST(req: NextRequest) {
     }
     if (err instanceof AnalyticsUpstreamError) {
       // Never echo the raw upstream detail (schema/internal leak) — log it, return a clean message.
-      console.error("[scenario/optimize] upstream error", { status: err.status });
+      //
+      // ⚠️ `err.status` is a `number` we set (`analytics-client.ts:66`), so the
+      // leaf is a rendering no-op on it. It goes through anyway because the
+      // source guard cannot know a type and its safe-property allowlist is
+      // `retryAfterS` / `deadlineExceeded` / `code` only — and the alternatives
+      // are worse: `scrubSeamError(err)` would put the raw upstream detail this
+      // very comment excludes back into the line, and binding it to a
+      // non-error-shaped local would hide the read behind the one-hop alias
+      // hole plan 140.4-09 exists to close. Same call as the sibling sites in
+      // `src/app/api/admin/match/eval/route.ts`.
+      console.error("[scenario/optimize] upstream error", {
+        status: scrubSeamError(err.status),
+      });
       // ⚠️ 140.3-13b / SEAMUX-08 — AMBIGUITY-1 IN THE INHERITED POLICY, and the
       // reading chosen, recorded here rather than resolved silently.
       //
@@ -242,7 +260,7 @@ export async function POST(req: NextRequest) {
       tags: { surface: "scenario-optimize", step: "unexpected-error" },
       extra: { objective, series_count: ids.length },
     });
-    console.error("[scenario/optimize] unexpected error", err);
+    console.error("[scenario/optimize] unexpected error", scrubSeamError(err));
     return NextResponse.json(
       { error: "Could not compute suggested weights." },
       { status: 500, headers: NO_STORE_HEADERS },

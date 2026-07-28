@@ -11,6 +11,9 @@ import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { BridgeRequestSchema } from "@/lib/api/bridgeSchema";
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — `captureToSentry` scrubs at its own chokepoint;
+// `console.*` has none, so the log site below wraps the caught value here.
+import { scrubSeamError } from "@/lib/seam-redaction";
 import {
   userActionLimiter,
   checkLimit,
@@ -191,7 +194,7 @@ export const POST = withAuth(async (req, user) => {
     // Echoing err.message here leaked Python contract-drift strings (the
     // multi-line Zod issue list parseResponse() throws) and FastAPI 5xx
     // detail to authenticated allocators. Keep the detail server-side only.
-    console.error("[bridge] Scoring failed:", err);
+    console.error("[bridge] Scoring failed:", scrubSeamError(err));
     captureToSentry(err, {
       tags: { route: "api/bridge", op: "findReplacementCandidates" },
     });

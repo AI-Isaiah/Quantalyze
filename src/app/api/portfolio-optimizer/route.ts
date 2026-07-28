@@ -21,6 +21,11 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // `portfolio_id` row id; no credential, no user JWT, no exchange material
 // crosses this handler. Stated rather than assumed (M78b).
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — the CONSOLE half of the same rule. Sentry has a
+// scrubbing chokepoint; `console.*` has none, so both log sites in this file
+// wrap the caught value here. `secrets` stays empty for the reason stated
+// above — this route holds no per-request credential.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -123,9 +128,15 @@ export async function POST(req: NextRequest) {
     try {
       await userActionLimiter.resetUsedTokens(rateLimitKey);
     } catch (err) {
+      // 140.4-08 / SEAMRIM-06 — the WHOLE ternary is replaced by one leaf call,
+      // not one of its arms. `err.message` is exactly where undici puts the
+      // outgoing headers, and `String(err)` on the other arm renders
+      // `name: message`, so scrubbing one arm leaves the same bytes reachable
+      // through the other. `scrubSeamError` is total and renders both shapes,
+      // so the ternary was buying nothing the leaf does not already do.
       console.error(
         `[api/portfolio-optimizer] rate-limit refund failed (${reason}):`,
-        err instanceof Error ? err.message : err,
+        scrubSeamError(err),
       );
     }
   };
@@ -233,7 +244,10 @@ export async function POST(req: NextRequest) {
       tags: { surface: "portfolio-optimizer", step: "analytics-unreachable" },
       extra: { portfolio_id: portfolioId },
     });
-    console.error("[api/portfolio-optimizer] analytics call failed:", err);
+    console.error(
+      "[api/portfolio-optimizer] analytics call failed:",
+      scrubSeamError(err),
+    );
     // Audit-2026-05-07 red-team R-0002: refund on the generic 503 path
     // too (analytics service unreachable is also upstream-of-caller).
     await refundRateLimitToken("analytics_unreachable");
