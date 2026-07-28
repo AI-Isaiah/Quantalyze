@@ -1881,3 +1881,98 @@ describe("[140.3-01 / TS-05] analytics-client reads the seam error body through 
     ).toBe("KEY_EXCHANGE_UNAVAILABLE");
   });
 });
+
+/**
+ * 140.4-09 / SEAMRIM-06 — THE THROWN TWIN.
+ *
+ * `parseResponse`'s `!result.success` arm does two things four lines apart, and
+ * until this plan they disagreed:
+ *
+ *     console.error(…, scrubSeamString(JSON.stringify(result.error.issues)));   // scrubbed
+ *     throw new Error(`… ${result.error.issues.map(…).join("; ")}`);            // NOT scrubbed
+ *
+ * with the comment immediately above the scrubbed call stating the very rule the
+ * throw broke. `parseResponse` is reached from 8 of the 9 wrappers, so the
+ * string is producible on every seam route.
+ *
+ * ⚠️ THIS IS ROW 3 WITH NO STRUCTURAL GUARD BEHIND IT, and that is stated here
+ * rather than left implied. `seam-log-coverage.test.ts` is scoped to `console.*`
+ * — a THROWN sink is structurally invisible to it, so no scan can fail when a
+ * future edit re-opens this. These cases are the only thing holding it.
+ *
+ * THE CHANNEL IS THE ISSUE **PATH**, not the message. Measured against zod
+ * 4.x: an `invalid_type` message renders type NAMES only ("expected number,
+ * received string") and never a value. But `weights` is
+ * `z.record(z.string(), z.number())`, so a RESPONSE-CONTROLLED KEY becomes a
+ * path segment and is interpolated verbatim into both sinks.
+ */
+describe("[140.4-09 / SEAMRIM-06] parseResponse's THROWN message is scrubbed, like its log", () => {
+  /** A 40-char internal token — the shape INTERNAL_API_TOKEN actually carries. */
+  const TOKEN = "int_5c1d90b7ae42f68d3b0e7a91c4f25d8e6b30a7f1";
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = TOKEN;
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
+
+  /** Drive the real client to a 200 whose body violates the schema. */
+  async function thrownFrom(body: Record<string, unknown>): Promise<unknown> {
+    vi.spyOn(globalThis, "fetch").mockImplementation((async () =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })) as unknown as typeof globalThis.fetch);
+    const mod = await import("./analytics-client");
+    try {
+      await mod.optimizeScenarioWeights({}, "min_vol", TENANT);
+    } catch (err) {
+      return err;
+    }
+    throw new Error("expected a contract violation to throw, and it did not");
+  }
+
+  /** A schema-violating body whose zod issue PATH carries the token. */
+  function bodyEchoing(secret: string): Record<string, unknown> {
+    return {
+      ok: true,
+      objective: "min_vol",
+      n: 1,
+      k: 1,
+      in_sample: true,
+      reason: "",
+      // A record key is a path segment; the value's wrong type is what makes
+      // zod emit an issue naming it.
+      weights: { [secret]: "not-a-number" },
+    };
+  }
+
+  it("does NOT put a known secret into the THROWN message", async () => {
+    const err = (await thrownFrom(bodyEchoing(TOKEN))) as Error;
+    expect(
+      err.message,
+      "a credential reached a THROWN Error.message. It is caught and logged by " +
+        "every one of the 8 wrappers' callers, and the console-scoped log guard " +
+        "structurally cannot see a thrown sink — nothing else is watching this.",
+    ).not.toContain(TOKEN);
+  });
+
+  it("still THROWS, still names the endpoint, and still says what went wrong", async () => {
+    // The A-10 direction. Answering the leak by throwing a bare static string
+    // would strip the operator's only account of WHICH contract drifted — and
+    // the 8 wrappers' callers depend on the throw itself.
+    const err = (await thrownFrom(bodyEchoing(TOKEN))) as Error;
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toContain("/api/optimize-weights");
+    expect(err.message).toContain("contract violation");
+  });
+
+  it("keeps NON-secret drift detail, so the redaction is not a blanket wipe", async () => {
+    // Over-redaction is the other half of TRAP-1. A field name that is NOT a
+    // credential must survive, or the message stops being actionable.
+    const err = (await thrownFrom(bodyEchoing("btc_perp"))) as Error;
+    expect(err.message).toContain("btc_perp");
+  });
+});
