@@ -1676,6 +1676,176 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     ).toBeNull();
     errSpy.mockRestore();
   });
+
+  // ════════════════════════════════════════════════════════════════════
+  // Phase 140.4-12 / SEAMRIM-08 — THIS ARM HAD NO TRANSLATION HOP AT ALL.
+  //
+  // `KNOWN_KICKOFF_CODES` indexes the RAW WIRE STRING. Its intersection with
+  // the four seam wire codes — CIRCUIT_OPEN, UPSTREAM_TIMEOUT,
+  // UPSTREAM_NETWORK_ERROR, SEAM_MISCONFIGURED — is EMPTY, so a breaker trip or
+  // a dead upstream during the kickoff rendered SYNC_FAILED, whose sentence
+  // asks the user "which step failed" about a computation that never started.
+  // `SubmitStep` had the translation hop and this sibling never did.
+  //
+  // The remedy is the same structure as `SubmitStep`'s: translate through the
+  // ONE table FIRST, fall back to `KNOWN_KICKOFF_CODES` for the wizard codes
+  // OUR OWN route mints, then SYNC_FAILED. No member is added to either list.
+  //
+  // ⚠️ ORACLE INDEPENDENCE: `data-error-code` is the machine-readable half, and
+  // every expected sentence below is a LITERAL typed here.
+  // ════════════════════════════════════════════════════════════════════
+
+  it("[140.4-12] a breaker trip (CIRCUIT_OPEN) renders the breaker's own state, not SYNC_FAILED", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "CIRCUIT_OPEN",
+          human_message: "The analytics service is temporarily unavailable.",
+          correlation_id: "corr-co-1",
+        }),
+        { status: 503 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "CIRCUIT_OPEN is a WIRE code with no entry in KNOWN_KICKOFF_CODES, so " +
+        "it fell to SYNC_FAILED — a sentence that claims we fetched trades " +
+        "and the computation did not complete. The breaker declined to send " +
+        "the request; nothing was fetched and nothing ran.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNAVAILABLE_RETRY");
+
+    expect(
+      screen.getByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/which step failed/i)).toBeNull();
+  });
+
+  it.each([
+    ["UPSTREAM_TIMEOUT", 504],
+    ["UPSTREAM_NETWORK_ERROR", 502],
+  ])(
+    "[140.4-12] a seam transport failure (%s) renders SERVICE_UNREACHABLE, not SYNC_FAILED",
+    async (wireCode, status) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ ok: false, code: wireCode }), { status }),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute(
+        "data-error-code",
+        "SERVICE_UNREACHABLE",
+      );
+      expect(
+        screen.getByText("We could not reach our own service."),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("[140.4-12] our own configuration fault (SEAM_MISCONFIGURED) reaches its own state", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: false, code: "SEAM_MISCONFIGURED" }),
+        { status: 500 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+    expect(
+      screen.getByText(
+        "We could not send this request — our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("[140.4-12] the NESTED python envelope's code is read at this arm too", async () => {
+    // `body.detail.code` is the shape every `service_error()` answer carries.
+    // A top-level-only reader answers `undefined` here — byte-identical to a
+    // body that carried no code at all, which is how 21 codes stay invisible.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "CIRCUIT_OPEN",
+            dependency: null,
+            retryable: true,
+            detail: "Breaker open.",
+            correlation_id: "srv-nested-co-8b2d1f40-6c93-4a55-b027-1e5f9a3c7d64",
+          },
+        }),
+        { status: 503 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "The nested envelope carried CIRCUIT_OPEN and this arm did not see it. " +
+        "The flat and nested shapes must produce the SAME state.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNAVAILABLE_RETRY");
+  });
+
+  it.each([
+    ["RATE_LIMITED", 429, "RATE_LIMITED"],
+    ["GATE_DRAFT_GONE", 404, "GATE_DRAFT_GONE"],
+    ["COMPOSITE_MEMBERSHIP_UNKNOWN", 503, "COMPOSITE_MEMBERSHIP_UNKNOWN"],
+    ["MISSING_STRATEGY_ID", 400, "VALIDATION_FAILED"],
+    ["INVALID_STRATEGY_ID", 400, "VALIDATION_FAILED"],
+  ])(
+    "[140.4-12] ANTI-REGRESSION: the pre-existing kickoff member %s still renders %s",
+    async (wireCode, status, expected) => {
+      // ⚠️ ALL FIVE MEMBERS OF `KNOWN_KICKOFF_CODES`, IN ONE PLACE. Putting the
+      // translation hop AHEAD of this roster changes which lookup answers
+      // first, so every pre-existing member is a candidate for being silently
+      // re-pointed — `RATE_LIMITED` in particular is in BOTH tables and is now
+      // answered by the translation rather than by the roster, with the same
+      // outcome. Individually pinned above too; this case is the set-level
+      // statement, so a sweep that re-pointed one member cannot hide behind the
+      // four that still pass.
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ code: wireCode }), { status }),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", expected);
+      errSpy.mockRestore();
+    },
+  );
+
+  it("[140.4-12] NEGATIVE CONTROL — a real seam wire code with no wizard member still falls back to SYNC_FAILED", async () => {
+    // `SEAM_DEGRADED` is named in `SEAM_CODE_TO_WIZARD_CODE`'s own docblock as
+    // the code an IDENTITY rule would silently admit. It is a genuine wire
+    // code, not a garbled one — which is what makes it the sharp control. If
+    // this ever renders `SEAM_DEGRADED`, the explicit table has been replaced
+    // by a cast and both membership checks have been deleted rather than
+    // re-scoped.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "SEAM_DEGRADED" }), { status: 503 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SYNC_FAILED");
+    errSpy.mockRestore();
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════
