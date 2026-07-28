@@ -19,9 +19,13 @@
  * ignored-Supabase-error escalation. These drive the setTimeout backoff loop
  * with fake timers so they stay fast and deterministic.
  */
-import { render, screen, waitFor, act } from "@testing-library/react";
+import { render, screen, waitFor, act, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { SyncPreviewStep, type SyncPreviewSnapshot } from "./SyncPreviewStep";
+import {
+  SyncPreviewStep,
+  type SyncPreviewSnapshot,
+  type SyncPreviewStepProps,
+} from "./SyncPreviewStep";
 
 // Supabase mock. `createClient()` delegates to a mutable module-level
 // factory so individual tests can swap in a richer client (the polling
@@ -94,9 +98,22 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
     expect(
       await screen.findByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED. This used to assert `wizard-try-another-key`,
+    // using the DESTRUCTIVE control as a proxy for "the terminal state
+    // rendered". SYNC_FAILED's actions are clear_and_retry + request_call, so
+    // it no longer earns that control. Re-pointed at the machine-readable code
+    // plus the exit affordance, which is strictly stronger: the old line passed
+    // for ANY error code, this one names the state and still proves it is not a
+    // dead end.
     await waitFor(() =>
-      expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument(),
+      expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+        "data-error-code",
+        "SYNC_FAILED",
+      ),
     );
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -106,9 +123,18 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
 
     render(<SyncPreviewStep {...baseProps} />);
 
+    // ⚠️ 140.4-11 RE-POINTED, same reason — and this one gains a real
+    // discrimination it never had: the old assertion could not tell a
+    // network-timeout apart from the generic SYNC_FAILED fallback.
     await waitFor(() =>
-      expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument(),
+      expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+        "data-error-code",
+        "KEY_NETWORK_TIMEOUT",
+      ),
     );
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
     errSpy.mockRestore();
   });
 });
@@ -361,7 +387,14 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(
       screen.getByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED off the destructive control (SYNC_FAILED does not
+    // earn it) onto the code + the exit affordance. Strictly stronger: it now
+    // names WHICH state the escalation produced.
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "SYNC_FAILED",
+    );
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -384,7 +417,12 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(
       screen.getByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED, same reason as H-0197 above.
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "SYNC_FAILED",
+    );
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -679,7 +717,11 @@ describe("[H-0197] SyncPreviewStep — persistent heavy-fetch fault escalates", 
       screen.getByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/Sync failed\./i)).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED off the destructive control onto the exit
+    // affordance. The point of the line is "the wizard is not a dead end after
+    // the escalation", and a way out that does not delete the draft makes it
+    // better, not weaker.
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
 
     // The status read genuinely kept succeeding each tick (the precondition
     // that defeats a shared counter) — so this is the heavy-fetch path, not
@@ -1598,20 +1640,539 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     errSpy.mockRestore();
   });
 
-  it("ANTI-REGRESSION — every OTHER error state keeps 'Try another key'", async () => {
+  // ⚠️ 140.4-11 REPLACED "ANTI-REGRESSION — every OTHER error state keeps 'Try
+  // another key'", whose CLAIM this plan inverts. That case asserted the
+  // destructive control renders for SYNC_FAILED and that no exit link renders
+  // beside it — i.e. it PINNED the [Retry, destructive] pairing TRAP-4 forbids.
+  // Its legitimate half (the state is not a dead end, and the roster is not
+  // applied blanket-wide) survives here, strictly stronger: it names the
+  // machine-readable code, keeps the Retry pin, and additionally proves the
+  // remaining way out destroys nothing.
+  it("ANTI-REGRESSION — a transient state keeps its Retry and gains a NON-destructive exit", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
     );
 
     render(<SyncPreviewStep {...baseProps} />);
-    await screen.findByTestId("error-envelope");
+    const envelope = await screen.findByTestId("error-envelope");
 
-    // The guard is scoped to the one state where the control is wrong. A
-    // blanket removal would have broken the primary recovery affordance for
-    // every key-related failure in the wizard.
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-back-to-strategies")).toBeNull();
+    expect(envelope).toHaveAttribute("data-error-code", "SYNC_FAILED");
+    // SYNC_FAILED asks for `clear_and_retry`, so the Retry is genuine and MUST
+    // survive the inversion. A change that dropped every control from every
+    // state would satisfy the two negatives below on their own.
+    expect(
+      screen.getByRole("button", { name: "Retry" }),
+      "SEAMUX-06 still holds: a transient seam failure offers a retry.",
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "SYNC_FAILED's actions are clear_and_retry + request_call. Swapping the " +
+        "key is not this state's remedy, and the control that would do it " +
+        "deletes the draft on the way.",
+    ).toBeNull();
     errSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.4-11 / SEAMRIM-07 — TRAP-4 restated as a PROPERTY.
+//
+// The gate-sourced codes (`GATE_NO_DATA_SOURCE`, `GATE_INSUFFICIENT_TRADES`,
+// `GATE_INSUFFICIENT_DAYS`) are NOT reachable from the kickoff arm the suite
+// above drives: they are minted by `checkStrategyGate` at the END of the poll
+// loop's heavy terminal fetch. Reaching them needs a client that serves the
+// whole fan-out, which is what `installGateSupabaseMock` below is for. The
+// mount effect takes the WIZ-05 fresh-complete skip (no kickoff POST at all),
+// then one poll tick lands on the terminal branch.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Serve the ENTIRE single-key terminal fan-out so `checkStrategyGate` runs on
+ * caller-chosen inputs. Every read resolves with `error: null` — this suite is
+ * about which CONTROL renders for a gate verdict, not about read failures
+ * (those are `SyncPreviewStep.readfailure.runtime.test.tsx`'s subject).
+ */
+function installGateSupabaseMock(opts: {
+  tradeCount?: number;
+  csvRowCount?: number;
+  earliestTradeAt?: string | null;
+  latestTradeAt?: string | null;
+  status?: string;
+  computationError?: string | null;
+}) {
+  const {
+    tradeCount = 0,
+    csvRowCount = 0,
+    earliestTradeAt = null,
+    latestTradeAt = null,
+    status = "complete",
+    computationError = null,
+  } = opts;
+
+  type Resolved = { data: unknown; count: number | null; error: null };
+
+  const client = {
+    from: (table: string) => ({
+      select: (cols: string) => {
+        // Mount effect — freshness probe. A COMPLETE + FRESH row takes the
+        // WIZ-05 skip, so no /api/keys/sync POST fires and the component lands
+        // straight in `waiting_for_complete`.
+        if (cols === "computation_status, computed_at") {
+          return {
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: {
+                    computation_status: "complete",
+                    computed_at: new Date().toISOString(),
+                  },
+                  error: null,
+                }),
+            }),
+          };
+        }
+        // Mount effect — composite marker. Present and NOT composite, so the
+        // fresh-skip resolves to the single-key arm rather than failing closed.
+        if (cols === "data_quality_flags") {
+          return {
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: { data_quality_flags: {} },
+                  error: null,
+                }),
+            }),
+          };
+        }
+        // Poll tick — terminal on a computed status.
+        if (cols === "computation_status, computation_error") {
+          return {
+            eq: () => ({
+              maybeSingle: () =>
+                Promise.resolve({
+                  data: {
+                    computation_status: status,
+                    computation_error: computationError,
+                  },
+                  error: null,
+                }),
+            }),
+          };
+        }
+
+        // Heavy terminal fan-out. `ascending` is captured off the real
+        // `.order()` call so the earliest/latest pair is discriminated the same
+        // way production discriminates it, not by call ordering.
+        let ascending = true;
+        const resolve = (): Resolved => {
+          if (table === "csv_daily_returns") {
+            return { data: null, count: csvRowCount, error: null };
+          }
+          if (table === "trades" && cols === "id") {
+            return { data: null, count: tradeCount, error: null };
+          }
+          if (table === "trades" && cols === "timestamp") {
+            const ts = ascending ? earliestTradeAt : latestTradeAt;
+            return {
+              data: ts === null ? [] : [{ timestamp: ts }],
+              count: null,
+              error: null,
+            };
+          }
+          // trade-symbol sample.
+          return { data: [], count: null, error: null };
+        };
+
+        const node = {
+          eq: () => node,
+          neq: () => node,
+          limit: () => node,
+          order: (_col: string, o?: { ascending?: boolean }) => {
+            ascending = o?.ascending !== false;
+            return node;
+          },
+          // strategy_analytics metric columns + api_keys.exchange.
+          maybeSingle: () =>
+            Promise.resolve(
+              table === "api_keys"
+                ? { data: { exchange: "binance" }, error: null }
+                : { data: null, error: null },
+            ),
+          then: (r: (v: Resolved) => void) => r(resolve()),
+        };
+        return node;
+      },
+    }),
+  };
+
+  currentClientFactory = () => client;
+}
+
+/** Mount, take the fresh-skip, and walk one poll tick into the gate verdict. */
+async function renderThroughTheGate(props: SyncPreviewStepProps) {
+  render(<SyncPreviewStep {...props} />);
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(6000);
+  });
+}
+
+/**
+ * Per-scenario fetch behaviour, swapped inside the derived loop below. ONE
+ * `vi.spyOn` wraps it for the whole describe — re-spying the same global
+ * mid-test is how a leaked stub survives into the next file, which is this
+ * repo's known CI-only (Node 22 vs Node 25) failure class. The global-stubbing
+ * helper DEF-16-1 bans is deliberately NOT NAMED here: an acceptance receipt
+ * counts occurrences of that identifier in this file, and reciting it inside a
+ * comment that says "we did not use it" is exactly how a grep stops
+ * discriminating (DEF-16-2, and the third occurrence of that trap in this
+ * programme).
+ */
+let fetchImpl: () => Promise<Response> = async () =>
+  new Response(JSON.stringify({}), { status: 200 });
+
+describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    fetchImpl = async () => new Response(JSON.stringify({}), { status: 200 });
+    vi.spyOn(globalThis, "fetch").mockImplementation(() => fetchImpl());
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  // ⚠️ THE ONE VERIFIED VIOLATION (140.4 CONTEXT §4 / C-4). `GATE_NO_DATA_SOURCE`
+  // is non-recoverable, so `ErrorEnvelope` renders no Retry; `request_call` and
+  // `start_fresh` render no control at all. Before the inversion the SOLE thing
+  // on screen was "Try another key", which fires WizardClient's
+  // `handleDeleteDraft()` and cascades away every `strategy_keys` member. Its
+  // `actions` are byte-identical to `GATE_DRAFT_GONE`'s — the code the old
+  // exemption roster was written for — which is exactly why a roster is the
+  // wrong mechanism: it was forgotten for the member that needed it most.
+  it("[C-4] GATE_NO_DATA_SOURCE never offers the draft-deleting control as its sole way out", async () => {
+    installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+
+    await renderThroughTheGate({ ...baseProps, apiKeyId: null });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(
+      envelope,
+      "Drive check: this case is worthless unless the gate actually minted " +
+        "GATE_NO_DATA_SOURCE. A fixture that silently produced some other " +
+        "code would assert the property about the wrong state.",
+    ).toHaveAttribute("data-error-code", "GATE_NO_DATA_SOURCE");
+
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "'Try another key' fires handleDeleteDraft() — it DESTROYS the draft " +
+        "and every strategy_keys member under it. This state's own actions " +
+        "are start_fresh + request_call: it never earned a control that " +
+        "deletes anything, and it is the one code in the reachable set whose " +
+        "ONLY control this was.",
+    ).toBeNull();
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+      "A state with no way out at all is worse than a destructive one.",
+    ).toBeInTheDocument();
+  });
+
+  // ── The POSITIVE counterpart ────────────────────────────────────────────
+  // A negative-only oracle is what M-9 measured going vacuous: a render that
+  // dropped EVERY control from EVERY state would satisfy every "…is not the
+  // sole affordance" assertion in this file. Some code must still EARN the
+  // key-replacement route, and "this account has too little history, bring a
+  // different one" is precisely the case where replacing the key IS the remedy.
+  it("POSITIVE — GATE_INSUFFICIENT_TRADES DOES earn the key-replacement control", async () => {
+    installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+
+    await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "GATE_INSUFFICIENT_TRADES",
+    );
+    expect(
+      screen.getByTestId("wizard-try-another-key"),
+      "`try_another_key` is in this code's actions. If the inversion removed " +
+        "the control everywhere it would satisfy every negative in this file " +
+        "while destroying the wizard's primary recovery route.",
+    ).toBeInTheDocument();
+    // ...and it is still not the SOLE affordance.
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
+  });
+
+  // ── The mislabelled `recoverable` ───────────────────────────────────────
+  it("GATE_INSUFFICIENT_TRADES renders NO Retry — handleKickoffRetry re-evaluates an IDENTICAL gate", async () => {
+    installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+
+    await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "GATE_INSUFFICIENT_TRADES",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "This state IS `recoverable` — but it earns that flag through " +
+        "`try_another_key`, a remedy `handleKickoffRetry` cannot perform. " +
+        "That handler re-runs the kickoff and re-evaluates the SAME gate " +
+        "against the SAME account, so the outcome is fixed before the click. " +
+        "`recoverable` is MISLABELLED here, not spurious.",
+    ).toBeNull();
+  });
+
+  // ══════════════════════════════════════════════════════════════════════
+  // THE DERIVED PIN — the property, across every code this render can reach.
+  //
+  // HOW THE POPULATION IS DERIVED, and why it is not a roster in test
+  // clothing: every row below is a production INPUT — an HTTP arm, a thrown
+  // fetch, or a `checkStrategyGate` fixture — and the code under test is READ
+  // BACK off the rendered envelope's `data-error-code`. The table never states
+  // which code a scenario produces; production decides, and the pin follows.
+  // Re-point `KNOWN_KICKOFF_CODES` or `gateFailureToWizardError` at a
+  // different member and the population moves with it, silently and
+  // correctly. A hand-typed list of eleven code strings is the roster problem
+  // this plan just deleted from production, and it is how a twelfth code
+  // ships unexamined.
+  //
+  // ⚠️ RESIDUAL, RECORDED NOT FIXED — `isComposite` is provably `false` on
+  // every non-2xx kickoff (it is set only from a 2xx body's `composite: true`
+  // or the WIZ-05 marker read), so `onReviewKeys` — the NON-destructive escape
+  // hatch — was structurally unreachable on exactly the arms where the
+  // destructive button appeared. `COMPOSITE_MEMBERSHIP_UNKNOWN`, a code ABOUT
+  // composites, therefore rendered the SINGLE-KEY destructive control. This
+  // plan did NOT change `isComposite`'s derivation: doing so changes what the
+  // wizard believes about a draft mid-computation, which is a different
+  // finding with a different blast radius. The residual after this plan is the
+  // strictly smaller one — "a code about composites renders the single-key
+  // affordance" — and that affordance is now NON-DESTRUCTIVE.
+  // ══════════════════════════════════════════════════════════════════════
+
+  /** Restore the client that does NOT take the WIZ-05 fresh-skip, so the mount effect POSTs. */
+  function installKickoffClient() {
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  }
+
+  /**
+   * ⚠️ HAND-TYPED ON PURPOSE, and it is an ORACLE, not the population. These
+   * are the codes a reader of `wizardErrors.ts` would say have asked to
+   * replace the key. Deriving it (`actions.includes("try_another_key")`)
+   * would compare production's answer to production's answer and could never
+   * fail — Oracle Independence hazard #6 in its classic form.
+   */
+  const CODES_THAT_EARN_KEY_REPLACEMENT = [
+    "GATE_INSUFFICIENT_TRADES",
+    "GATE_INSUFFICIENT_DAYS",
+  ];
+
+  it("PROPERTY — no reachable terminal code renders the destructive control as its SOLE affordance", async () => {
+    const scenarios: { input: string; drive: () => Promise<void> }[] = [
+      {
+        input: "kickoff 429 carrying a throttle code",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "RATE_LIMITED" }), {
+              status: 429,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 404 (uniform across 'no such draft' and 'not yours')",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "GATE_DRAFT_GONE" }), {
+              status: 404,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 503 on an unknowable composite membership",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(
+              JSON.stringify({ code: "COMPOSITE_MEMBERSHIP_UNKNOWN" }),
+              { status: 503 },
+            );
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 400 on a request shape our own route refused",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "INVALID_STRATEGY_ID" }), {
+              status: 400,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 500 with no machine code at all",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ error: "compute failed" }), {
+              status: 500,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff POST throws (offline)",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () => {
+            throw new Error("offline");
+          };
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "gate: keyless draft, no trades, no daily returns",
+        drive: async () => {
+          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: null });
+        },
+      },
+      {
+        input: "gate: keyless draft with a too-short daily-returns series",
+        drive: async () => {
+          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 3 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: null });
+        },
+      },
+      {
+        input: "gate: keyed account below the trade-count floor",
+        drive: async () => {
+          installGateSupabaseMock({ tradeCount: 0, csvRowCount: 0 });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+      {
+        input: "gate: keyed account with trades spanning under a week",
+        drive: async () => {
+          installGateSupabaseMock({
+            tradeCount: 40,
+            csvRowCount: 0,
+            earliestTradeAt: "2026-01-01T00:00:00.000Z",
+            latestTradeAt: "2026-01-03T00:00:00.000Z",
+          });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+      {
+        input: "gate: a hard-failed analytics computation",
+        drive: async () => {
+          installGateSupabaseMock({
+            status: "failed",
+            computationError: "worker OOM",
+          });
+          await renderThroughTheGate({ ...baseProps, apiKeyId: "key-1" });
+        },
+      },
+    ];
+
+    const observed = new Map<string, string[]>();
+
+    for (const scenario of scenarios) {
+      await scenario.drive();
+
+      const envelope = screen.getByTestId("error-envelope");
+      const code = envelope.getAttribute("data-error-code");
+      expect(
+        code,
+        `The scenario "${scenario.input}" rendered an envelope with no code. ` +
+          "A row that cannot name its state cannot pin a property about it.",
+      ).toBeTruthy();
+
+      const controls: string[] = [];
+      if (screen.queryByRole("button", { name: "Retry" })) controls.push("retry");
+      if (screen.queryByTestId("wizard-try-another-key")) {
+        controls.push("key-replacement");
+      }
+      if (screen.queryByTestId("wizard-back-to-strategies")) {
+        controls.push("back-to-strategies");
+      }
+
+      // THE PROPERTY. Not "has ≥2 controls" — a state may legitimately offer
+      // only the non-destructive exit. The forbidden shape is the FORCED
+      // CHOICE: the one thing on screen deletes the draft and every
+      // strategy_keys member under it.
+      expect(
+        controls,
+        `${code} (via "${scenario.input}") offers the draft-deleting control ` +
+          "as its SOLE affordance. That is a forced choice, not a remedy: " +
+          "the only way forward destroys the user's work.",
+      ).not.toEqual(["key-replacement"]);
+
+      // ...and the destructive control appears ONLY where the code earned it.
+      if (controls.includes("key-replacement")) {
+        expect(
+          CODES_THAT_EARN_KEY_REPLACEMENT,
+          `${code} rendered the key-replacement control. That control fires ` +
+            "handleDeleteDraft(). Only a code whose own remedy is 'bring a " +
+            "different key' has asked for it.",
+        ).toContain(code);
+      }
+
+      observed.set(code as string, controls);
+      cleanup();
+      vi.clearAllTimers();
+    }
+
+    // ── VACUITY FENCE ───────────────────────────────────────────────────
+    // A scanner that drove nothing would report agreement forever. Eleven
+    // DISTINCT codes reach this render today (140.4 CONTEXT §4, independently
+    // re-derived by the pattern-mapper); the literal is hand-typed so it
+    // cannot be satisfied by the loop measuring itself.
+    expect(
+      observed.size,
+      "Fewer than eleven distinct codes were actually driven. A loop that " +
+        "renders nothing satisfies every assertion inside it and reports " +
+        "agreement forever — which is worse than having no guard at all.",
+    ).toBeGreaterThanOrEqual(11);
+
+    // The forced choice must be absent from the WHOLE observed set, stated
+    // once more as a set-level claim so a per-row `continue` cannot hide it.
+    const forced = [...observed.entries()].filter(
+      ([, controls]) =>
+        controls.length === 1 && controls[0] === "key-replacement",
+    );
+    expect(forced.map(([code]) => code)).toEqual([]);
   });
 });

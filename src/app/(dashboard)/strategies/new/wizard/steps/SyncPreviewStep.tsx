@@ -16,7 +16,9 @@ import {
   type StrategyGateResult,
 } from "@/lib/strategyGate";
 import {
+  formatKeyError,
   gateFailureToWizardError,
+  type WizardErrorAction,
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
@@ -1373,11 +1375,16 @@ export function SyncPreviewStep({
    * This step passed NO `onRetry`, so `showRetry` was STRUCTURALLY false: a
    * recoverable seam error rendered with no retry control at all, which is
    * exactly what SEAMUX-06 forbids. The handler is supplied only where retrying
-   * is genuinely the right thing — `recoverable` already encodes that, since it
-   * is derived from the code's own `actions`. A non-recoverable state
-   * (`GATE_DRAFT_GONE`) gets `undefined` and renders no Retry, because retrying
-   * a draft that is gone re-fails identically and a control that cannot work is
-   * a false affordance.
+   * is genuinely the right thing. A non-recoverable state (`GATE_DRAFT_GONE`)
+   * gets `undefined` and renders no Retry, because retrying a draft that is gone
+   * re-fails identically and a control that cannot work is a false affordance.
+   *
+   * ⚠️ 140.4-11 RE-POINTED THE PREDICATE. This block used to say `recoverable`
+   * "already encodes that". It does not: `recoverable` is any of
+   * `clear_and_retry` OR `try_another_key`, and the two history codes earn it
+   * through the latter — a remedy this handler cannot perform. The gate is now
+   * `clear_and_retry` specifically (`kickoffRetryCanChangeTheOutcome`, below).
+   * Every code that rendered a Retry for a `clear_and_retry` reason still does.
    */
   const handleKickoffRetry = useCallback(() => {
     setErrorCode(null);
@@ -1391,49 +1398,102 @@ export function SyncPreviewStep({
   }, []);
 
   /**
-   * ⚠️ 140.3-10 / TRAP-4 — the destructive-control guard at this render.
+   * ⚠️ 140.4-11 / SEAMRIM-07 — TRAP-4, RESTATED AS A PROPERTY.
    *
-   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
-   * the draft and every strategy_keys member under it. That is correct for a
-   * REJECTED key, which is what this button is for, and its intentional-delete
-   * path is pinned in WizardClient's suite.
+   * TRAP-4 is registered against a STALE premise: it pins its hazard to
+   * "`/api/keys/sync` … denies codeless", which `140.3-10` closed. A literal
+   * reading therefore concludes the trap is discharged — and that is exactly
+   * the reasoning that left the members of this render unexamined. The trap
+   * this render is actually held to is:
    *
-   * It is NOT correct as the SOLE control on `GATE_DRAFT_GONE`. That state is
-   * reachable from `/api/keys/sync`'s 404 arm, and the 404 is deliberately
-   * uniform across "no such draft" AND "a draft you do not own" (P458) — so the
-   * one thing on screen would delete a draft the user may still have. Combined
-   * with a retry affordance above it, that is the five-clicks-of-our-own-copy
-   * path this plan exists to prevent.
+   *   A terminal error render must not offer a destructive control as the SOLE
+   *   affordance, nor place a retry beside one. This is a property of the
+   *   RENDER, not of a code list — and `recoverable` is NOT a usable proxy for
+   *   it, because `try_another_key` earns `recoverable` for codes whose only
+   *   "retry" re-evaluates an identical gate.
    *
-   * Deleting this flag is the mutation that must redden a test.
+   * WHAT THIS REPLACED, AND WHY THE REPLACEMENT IS A DIFFERENT MECHANISM.
+   * `140.3-10` shipped a hand-typed EXEMPTION roster (`GATE_DRAFT_GONE`);
+   * `140.3-12` widened it to two (`+ VALIDATION_FAILED`). Eleven distinct codes
+   * reach this render. Of the nine left outside the roster exactly ONE —
+   * `GATE_NO_DATA_SOURCE` — had the destructive control as its SOLE route (the
+   * other eight render `[Retry, destructive]`, a bad pairing but not a forced
+   * choice). The count of genuine sole-control violations was 1, not 9, and
+   * that one code's `actions` are BYTE-IDENTICAL to `GATE_DRAFT_GONE`'s — the
+   * code the roster was written for. It was forgotten anyway, which is what a
+   * roster does: the phase's measured coverage for a hand-typed allow-list is
+   * 9/37 codes · 8/15 files · 2/3 codes. Partial by construction.
    *
-   * ⚠️ 140.3-12 WIDENED THIS FROM ONE CODE TO A HAND-TYPED SET, and the widening
-   * was FORCED by routing the two 400 arms to a wizard state. Wiring them
-   * without it would have created a fresh TRAP-4 at the site 140.3-10 had just
-   * guarded: `VALIDATION_FAILED` is non-recoverable (its only action is
-   * `request_call`), so no Retry renders, and the SOLE remaining control would
-   * have been "Try another key" — which fires `handleDeleteDraft()`. That means
-   * telling a user "our software sent a request we could not read" and offering
-   * them exactly one button, which DESTROYS their draft. Swapping the user's
-   * key cannot fix a bug in our own page.
+   * So the decision is INVERTED rather than widened. The destructive control is
+   * now EARNED by the code's own `actions` — the same source `buildEnvelope`
+   * derives `recoverable` from — and there is no second list to forget to edit.
+   * The earning action is the one that actually means *replace the key*:
+   * `try_another_key`. A code whose actions are `start_fresh` / `request_call` /
+   * `clear_and_retry` has not asked for a control that deletes the draft.
    *
-   * The set is HAND-TYPED and the flag is now about the PROPERTY (states where
-   * a destructive control is the wrong and only way out), not about one code —
-   * an `===` against a single member is the instance-check this programme keeps
-   * finding. Formerly `errorStateIsDraftGone`; the ledger's M66c mutation
-   * applies unchanged to the flag under its new name.
+   * THREE conditions, each load-bearing, each rejecting an easier version:
+   *
+   *   1. `keyReplacementIsEarned` — read off the code table, not off
+   *      `recoverable`. `recoverable` is true for `clear_and_retry` too, so it
+   *      would re-admit `SYNC_FAILED`, `RATE_LIMITED`, `KEY_NETWORK_TIMEOUT`,
+   *      `GATE_ANALYTICS_FAILED`, `UNKNOWN` and `COMPOSITE_MEMBERSHIP_UNKNOWN`
+   *      — the last of which is a code ABOUT COMPOSITES rendering the
+   *      SINGLE-KEY destructive control.
+   *   2. `compositeReviewIsAvailable` — the composite route destroys nothing
+   *      (`onReviewKeys` is a pure step transition, WIZ-03), so it is offered
+   *      unconditionally. It requires the prop to be PRESENT: without it the
+   *      button falls back to `onTryAnotherKey`, i.e. it is destructive while
+   *      wearing the non-destructive label, and gating on `isComposite` alone
+   *      would ship exactly that.
+   *   3. The non-destructive `<Link>` renders ALWAYS, not as an else-branch.
+   *      An either/or leaves `GATE_INSUFFICIENT_TRADES` and
+   *      `GATE_INSUFFICIENT_DAYS` — which legitimately EARN key replacement and
+   *      get no Retry (see below) — rendering the destructive button as their
+   *      sole affordance, re-creating the very violation this closes one code
+   *      over. "Never the sole affordance" is a claim about the whole control
+   *      row, so the safe exit has to be unconditional.
+   *
+   * Referenced by NAME, never by line number: 140.2 comments falsified by
+   * 140.3 commits are a measured class in this programme (7 of 17).
    */
-  const DESTRUCTIVE_CONTROL_IS_WRONG_FOR: readonly WizardErrorCode[] = [
-    // The draft may be perfectly intact — the 404 is uniform across "no such
-    // draft" and "not yours" (P458).
-    "GATE_DRAFT_GONE",
-    // A fault in our own request shape. Deleting the draft cannot fix it, and
-    // retrying cannot either, so neither control belongs here.
-    "VALIDATION_FAILED",
-  ];
-  const errorStateHidesDestructiveControl =
-    errorCode !== null &&
-    DESTRUCTIVE_CONTROL_IS_WRONG_FOR.includes(errorCode as WizardErrorCode);
+  const errorActions: readonly WizardErrorAction[] = errorCode
+    ? formatKeyError(errorCode).actions
+    : [];
+  /**
+   * The composite "Review your keys" route is NON-destructive by construction
+   * (WIZ-03: a pure step transition, no `handleDeleteDraft`, no fresh session),
+   * so it needs no earning. The `Boolean(onReviewKeys)` term is the whole
+   * safety of this line — see condition 2 above.
+   */
+  const compositeReviewIsAvailable = isComposite && Boolean(onReviewKeys);
+  /**
+   * `onTryAnotherKey` fires `handleDeleteDraft()` in WizardClient: it DESTROYS
+   * the draft and every `strategy_keys` member under it. Correct for a REJECTED
+   * key — which is what "this account has too little history, bring a different
+   * one" means — and wrong everywhere else.
+   */
+  const keyReplacementIsEarned = errorActions.includes("try_another_key");
+  const showKeyControl = compositeReviewIsAvailable || keyReplacementIsEarned;
+  /**
+   * ⚠️ `recoverable` SPLIT FROM "a kickoff retry will help" — the mislabel, not
+   * a spurious flag.
+   *
+   * `onRetry` here is `handleKickoffRetry`, which re-runs the kickoff and then
+   * re-evaluates an IDENTICAL gate. `GATE_INSUFFICIENT_TRADES` and
+   * `GATE_INSUFFICIENT_DAYS` are `recoverable` — earned by `try_another_key`,
+   * which is a genuine remedy — but the remedy is a different KEY, not a second
+   * attempt at the same one. A Retry there promises the outcome can change when
+   * nothing about the account has. So the handler is passed only when the code
+   * asks for `clear_and_retry`, i.e. when the failure is transient.
+   *
+   * `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)` is UNCHANGED
+   * and does the rest — this is a decision about what this step passes, not a
+   * change to a shared artefact. `RECOVERABLE_ACTIONS` and `buildEnvelope` are
+   * deliberately untouched: `recoverable` still means "some action can help",
+   * which is what the envelope's copy and its wait-countdown are keyed off.
+   */
+  const kickoffRetryCanChangeTheOutcome =
+    errorActions.includes("clear_and_retry");
 
   // --- Rendering --------------------------------------------------------
 
@@ -1456,32 +1516,38 @@ export function SyncPreviewStep({
           <WizardErrorEnvelope
             envelope={errorEnvelope}
             onRetry={
-              errorEnvelope.recoverable ? handleKickoffRetry : undefined
+              kickoffRetryCanChangeTheOutcome ? handleKickoffRetry : undefined
             }
           />
         </div>
         <div className="mt-6 flex gap-3">
-          {errorStateHidesDestructiveControl ? (
-            // Non-destructive, and it is the state's OWN fix line: "Start a new
-            // strategy from the strategies page." Navigating away destroys
-            // nothing, which is the property that matters when the draft may
-            // still exist and simply not be ours to read.
-            <Link href="/strategies" data-testid="wizard-back-to-strategies">
-              <Button type="button" variant="ghost">
-                Back to strategies
-              </Button>
-            </Link>
-          ) : (
+          {showKeyControl && (
             <Button
               type="button"
               onClick={
-                isComposite && onReviewKeys ? onReviewKeys : onTryAnotherKey
+                compositeReviewIsAvailable && onReviewKeys
+                  ? onReviewKeys
+                  : onTryAnotherKey
               }
               data-testid="wizard-try-another-key"
             >
-              {isComposite ? "Review your keys" : "Try another key"}
+              {/* The label follows what the button DOES. Keying it off
+                  `isComposite` alone put "Review your keys" on a click that
+                  deletes the draft whenever `onReviewKeys` was absent. */}
+              {compositeReviewIsAvailable ? "Review your keys" : "Try another key"}
             </Button>
           )}
+          {/* UNCONDITIONAL — condition 3 above. Non-destructive, and it is the
+              state's OWN fix line: "Start a new strategy from the strategies
+              page." Navigating away destroys nothing, which is the property
+              that matters both when the draft may still exist and simply not be
+              ours to read, and when the only other control on the row deletes
+              it. */}
+          <Link href="/strategies" data-testid="wizard-back-to-strategies">
+            <Button type="button" variant="ghost">
+              Back to strategies
+            </Button>
+          </Link>
         </div>
       </section>
     );
