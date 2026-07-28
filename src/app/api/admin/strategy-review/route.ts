@@ -8,8 +8,39 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
-import { checkStrategyGate, isLedgerBackedExchange, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
+import { checkStrategyGate, isLedgerBackedExchange, StrategyGateUnevaluableError, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
 import { logAuditEventAsUser } from "@/lib/audit";
+
+/**
+ * C-3 — the publish-side read discipline for this route.
+ *
+ * supabase-js RESOLVES a failed read; it does not throw. So an unbound `error`
+ * makes a read failure indistinguishable from real data, and the coercions that
+ * follow (`?? 0`, `?.timestamp ?? null`) turn it into a MEASUREMENT about the
+ * manager's account. On the approve path that measurement feeds `checkStrategyGate`,
+ * whose only consumer here is the `{ status: "published" }` write below.
+ *
+ * The two guards that predate this one (csv-count, api_keys exchange) both
+ * defend the fail-CLOSED direction — a false REJECTION. Nothing defended the
+ * fail-OPEN direction, which is the one that publishes: a failed earliest/latest
+ * timestamp read made the gate's span null, which skipped the 7-day check
+ * entirely and returned PASS. Every read that participates in the decision now
+ * answers 503 ABOUT US, before any write.
+ *
+ * NO-ROWS IS NOT A READ FAILURE. PostgREST reports "0 rows" from `.single()` as
+ * an error object carrying code PGRST116 (it uses the same code when a
+ * `.single()` matches more than one row). In BOTH shapes `data` is null, so the
+ * value reaching the gate is the same one an absent row would produce, and the
+ * gate already has a fail-CLOSED verdict for it — NO_DATA_SOURCE or
+ * ANALYTICS_MISSING, both 400. Answering 503 there would replace a manager's
+ * actionable "sync trades first" with an outage message, and it can never be the
+ * fail-open direction. Every OTHER error is a read we could not perform.
+ */
+const POSTGREST_NO_ROWS = "PGRST116";
+
+function isReadFailure(err: { code?: string } | null | undefined): boolean {
+  return Boolean(err) && err?.code !== POSTGREST_NO_ROWS;
+}
 
 // Handler body inlined (rather than wrapped via withAdminAuth) so we run a
 // single createClient + getUser + isAdminUser round-trip per request.
@@ -96,11 +127,11 @@ export async function POST(req: NextRequest) {
 
   if (action === "approve") {
     const [
-      { data: strategy },
-      { count: tradeCount },
-      { data: earliestTrade },
-      { data: latestTrade },
-      { data: analytics },
+      { data: strategy, error: strategyError },
+      { count: tradeCount, error: tradeCountError },
+      { data: earliestTrade, error: earliestTradeError },
+      { data: latestTrade, error: latestTradeError },
+      { data: analytics, error: analyticsError },
       { count: csvRowCount, error: csvCountError },
     ] = await Promise.all([
       admin.from("strategies").select("api_key_id, name, user_id").eq("id", id).single(),
@@ -120,6 +151,58 @@ export async function POST(req: NextRequest) {
     // with no diagnostic trail. Mirrors the verify-strategy count-read guard.
     if (csvCountError) {
       console.error("[admin/strategy-review] csv_daily_returns count failed:", csvCountError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+
+    // C-3 — the other five members of the same Promise.all. Each read below
+    // feeds `checkStrategyGate` (or the key lookup that selects its branch), so
+    // a coerced value here is a claim about the strategy that nobody measured.
+    // Same sentence as the guard above, reused verbatim: the failure is ours,
+    // and the manager can retry it.
+    if (isReadFailure(strategyError)) {
+      console.error("[admin/strategy-review] strategies read failed:", strategyError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+    // A null count with NO error is equally unrepresentable: `?? 0` would hand
+    // the gate "this strategy has zero trades" — the exact fabrication this
+    // finding is about — and zero trades is a verdict (INSUFFICIENT_TRADES),
+    // not an absence of one.
+    if (isReadFailure(tradeCountError) || tradeCount === null) {
+      console.error("[admin/strategy-review] trades count read failed:", tradeCountError ?? "count was null with no error");
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+    // THE publish-side fail-open. A failed earliest/latest read left the gate's
+    // span null, and `spanDays !== null &&` skipped the 7-day history check
+    // entirely — an under-history track record published as verified. The two
+    // probes are guarded separately so the log names which one failed.
+    if (isReadFailure(earliestTradeError)) {
+      console.error("[admin/strategy-review] earliest trade read failed:", earliestTradeError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+    if (isReadFailure(latestTradeError)) {
+      console.error("[admin/strategy-review] latest trade read failed:", latestTradeError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+    // No-rows is NOT a failure here (see isReadFailure): an absent analytics row
+    // is the ANALYTICS_MISSING verdict the gate already returns, and answering
+    // 503 to it would turn "sync your trades first" into an outage message.
+    if (isReadFailure(analyticsError)) {
+      console.error("[admin/strategy-review] strategy_analytics read failed:", analyticsError);
       return NextResponse.json(
         { error: "Cannot verify strategy data source. Please try again." },
         { status: 503 },
@@ -153,16 +236,33 @@ export async function POST(req: NextRequest) {
       isLedgerBacked = isLedgerBackedExchange(keyRow?.exchange);
     }
 
-    const gate = checkStrategyGate({
-      apiKeyId: strategy?.api_key_id ?? null,
-      tradeCount: tradeCount ?? 0,
-      earliestTradeAt: earliestTrade?.[0]?.timestamp ? new Date(earliestTrade[0].timestamp) : null,
-      latestTradeAt: latestTrade?.[0]?.timestamp ? new Date(latestTrade[0].timestamp) : null,
-      computationStatus: analytics?.computation_status ?? null,
-      computationError: analytics?.computation_error ?? null,
-      csvRowCount: csvRowCount ?? 0,
-      isLedgerBacked,
-    });
+    // `checkStrategyGate` is PARTIAL: it refuses (throws) rather than answering
+    // for an input it cannot evaluate — trades present, span unreadable. The
+    // guards above should make that unreachable from here, and the arm exists
+    // anyway: a refusal must never decay into a verdict. The catch is narrowed
+    // by `instanceof` and rethrows everything else — swallowing an unknown
+    // throw at the last gate before the publish write is how a fail-open
+    // returns.
+    let gate;
+    try {
+      gate = checkStrategyGate({
+        apiKeyId: strategy?.api_key_id ?? null,
+        tradeCount,
+        earliestTradeAt: earliestTrade?.[0]?.timestamp ? new Date(earliestTrade[0].timestamp) : null,
+        latestTradeAt: latestTrade?.[0]?.timestamp ? new Date(latestTrade[0].timestamp) : null,
+        computationStatus: analytics?.computation_status ?? null,
+        computationError: analytics?.computation_error ?? null,
+        csvRowCount: csvRowCount ?? 0,
+        isLedgerBacked,
+      });
+    } catch (err) {
+      if (!(err instanceof StrategyGateUnevaluableError)) throw err;
+      console.error("[admin/strategy-review] gate refused to evaluate:", err.message);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
 
     if (!gate.passed) {
       return NextResponse.json({ error: `Cannot approve: ${gate.reason}` }, { status: 400 });
@@ -197,9 +297,9 @@ export async function POST(req: NextRequest) {
   // 'draft' is idempotent regardless of any intervening state.
   if (action === "approve") {
     const [
-      { count: recheckTradeCount },
+      { count: recheckTradeCount, error: recheckTradeCountError },
       { count: recheckCsvCount, error: recheckCsvError },
-      { data: recheckAnalytics },
+      { data: recheckAnalytics, error: recheckAnalyticsError },
     ] = await Promise.all([
       // P72: the strategies `api_key_id` re-check was dropped — the
       // daily-returns predicate below no longer keys off `!api_key_id`
@@ -229,6 +329,24 @@ export async function POST(req: NextRequest) {
         { status: 503 },
       );
     }
+    // C-3 — the re-check's other two reads. Both decide 409-vs-publish, so an
+    // unread value here is answered about US, never as a 409 claiming the
+    // strategy's trade count or analytics changed during review. A null count
+    // with no error is refused for the same reason as the first-pass one.
+    if (isReadFailure(recheckTradeCountError) || recheckTradeCount === null) {
+      console.error("[admin/strategy-review] trades re-check count failed:", recheckTradeCountError ?? "count was null with no error");
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
+    if (isReadFailure(recheckAnalyticsError)) {
+      console.error("[admin/strategy-review] strategy_analytics re-check read failed:", recheckAnalyticsError);
+      return NextResponse.json(
+        { error: "Cannot verify strategy data source. Please try again." },
+        { status: 503 },
+      );
+    }
     // Daily-returns-sourced strategies (zero trades, history in
     // csv_daily_returns) must re-check the CSV row count, not the trade count —
     // the trade branch would 409 every such strategy on a `trades < 5` that is 0
@@ -238,7 +356,7 @@ export async function POST(req: NextRequest) {
     // first-pass gate's isDailyReturnsSourced predicate EXACTLY (P72), including
     // the `!api_key_id || isLedgerBacked` venue term — the two must never diverge.
     const isDailyReturnsSourced =
-      (recheckTradeCount ?? 0) === 0 &&
+      recheckTradeCount === 0 &&
       (recheckCsvCount ?? 0) > 0 &&
       (!approveApiKeyId || isLedgerBacked);
     if (isDailyReturnsSourced) {
@@ -248,7 +366,7 @@ export async function POST(req: NextRequest) {
           { status: 409 },
         );
       }
-    } else if ((recheckTradeCount ?? 0) < STRATEGY_GATE_MIN_TRADES) {
+    } else if (recheckTradeCount < STRATEGY_GATE_MIN_TRADES) {
       return NextResponse.json(
         { error: "Cannot approve: trade count fell below threshold during review." },
         { status: 409 },
