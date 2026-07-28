@@ -104,8 +104,25 @@ const FROZEN_EXEMPT: Array<{ rule: string; file: string }> = [
   { rule: "no-raw-font-px", file: "src/app/factsheet/[id]/v2/TimeSeriesChart.tsx" },
 ];
 
+// HAND-TYPED, and it must stay that way. Replacing this with
+// `Object.keys(quantalyzePlugin.rules)` would make the wiring assertion below
+// compare the plugin to itself — an assertion that can never fail (Oracle
+// Independence hazard #3, forbidden by 140.3-10 and 140.3-12). Note the
+// asymmetry that makes the split necessary: EXPECTED_RULES is every rule the
+// plugin EXPORTS, while REPO_WIDE_ERROR_RULES is the subset wired to "error"
+// repo-wide. A SCOPED rule belongs in the first list and NOT the second.
 const EXPECTED_RULES = [
   ...REPO_WIDE_ERROR_RULES,
+  // SEAMRIM-11 (Phase 140.4) — bans an awaited PostgREST read destructured for
+  // `data`/`count` without binding `error`, in BOTH the object form and the
+  // `Promise.all` ARRAY form (an object-only predicate returns zero on the
+  // array form, which is how C-3 survived every prior census). SCOPED, not
+  // repo-wide: the baseline is dirty and definition-dependent, so it is wired
+  // to "error" only on the surface a plan has PROVEN clean
+  // (src/app/api/admin/strategy-review/route.ts) and ratchets outward. It is
+  // therefore deliberately absent from REPO_WIDE_ERROR_RULES above — adding it
+  // there would assert repo-wide teeth this rule does not yet have.
+  "no-unchecked-supabase-read",
 ] as const;
 
 interface Guard {
