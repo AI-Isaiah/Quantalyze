@@ -753,3 +753,78 @@ describe("<AllocatorMatchQueue> — TS-18: a 424 is the caller's venue, named", 
     return mock.mock.calls.filter((c) => c[0] === url).length;
   }
 });
+
+/**
+ * [140.4-05 / SEAMRIM-10] The load failure is ANNOUNCED, not only drawn.
+ *
+ * This surface is the SECOND member of the converted class (the first is
+ * `PortfolioOptimizer`), and it is the member the Falsifiability Ledger row
+ * M96 mutates — mutating the second member is what distinguishes a class fix
+ * from an instance fix.
+ *
+ * Why the announcement is the only channel here: the queue's primary action is
+ * bound to the `r` keyboard shortcut, and this surface regressed from a modal
+ * `alert()` (which assistive tech always announces) to a silent inline card.
+ * The error branch is an early `return` — the loaded tree never mounts — so
+ * there is no focus event either.
+ */
+describe("<AllocatorMatchQueue> — [140.4-05] the load failure is announced", () => {
+  afterEach(() => {
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  /** The message the route hands back, hand-typed so a copy change reddens here. */
+  const ROUTE_MESSAGE = "Match queue is unavailable.";
+
+  it("ANNOUNCES the load failure through role=alert, carrying the card's own message", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: ROUTE_MESSAGE }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(ROUTE_MESSAGE);
+
+    // The visible card is unchanged — the announcement is purely additive.
+    expect(screen.getByText(ROUTE_MESSAGE)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/i })).toBeInTheDocument();
+  });
+
+  it("ANNOUNCES the static fallback when the route sends no message", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response("not json", { status: 500 }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    // `error || "Failed to load"` — the announcement carries whichever of the
+    // two the card is showing, never a third string invented for the region.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load match queue");
+  });
+
+  it("NEGATIVE CONTROL: the loaded queue exposes NO role=alert", async () => {
+    // Without this the assertions above are satisfied by a component that
+    // announces unconditionally, which would fire on every successful load.
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(buildPayload()), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    render(<AllocatorMatchQueue allocatorId={ALLOCATOR_ID} />);
+
+    // `findByRole("heading", …)` not `findByText` — the allocator name appears
+    // in BOTH the breadcrumb span and the h1, so a bare text query is ambiguous.
+    expect(
+      await screen.findByRole("heading", { name: /Demo Allocator/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});

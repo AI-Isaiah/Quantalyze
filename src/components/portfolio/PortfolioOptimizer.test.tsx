@@ -349,4 +349,51 @@ describe("[140.3-07 / SEAMUX-09] a failed re-run discards the invalidated rankin
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
+
+  /**
+   * [140.4-05 / SEAMRIM-10] The failure is ANNOUNCED, not only drawn.
+   *
+   * This surface is the headline instance of the measured regression: the
+   * error branch `return`s a DIFFERENT tree, so the "Re-run" button the user
+   * just activated UNMOUNTS and focus falls to `<body>`. A screen-reader user
+   * therefore gets no focus event, no announcement, and no way to discover
+   * that anything happened at all — the announcement is the ONLY channel.
+   *
+   * The assertion is `getByRole("alert")`, not a DOM-attribute string match, so
+   * a refactor that preserves the semantics keeps this green. A grep would not
+   * do: an announcement added AFTER the early `return` is dead code that greps
+   * clean and announces nothing.
+   */
+  it("ANNOUNCES the failure through role=alert, carrying the sentence the card shows", async () => {
+    renderLoaded();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 503,
+        json: async () => ({ status: "failed", suggestions: null, error: BREAKER_SENTENCE }),
+      }),
+    );
+
+    clickReRun();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(BREAKER_SENTENCE);
+
+    // The visible tree is unchanged — the announcement is ADDITIVE, not a
+    // replacement for the card a sighted user reads.
+    expect(screen.getByText("Optimizer failed")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  });
+
+  it("NEGATIVE CONTROL: the success render exposes NO role=alert", () => {
+    // Without this, the assertion above is satisfied by a component that
+    // announces unconditionally — which would announce on every render and is
+    // worse than silence, because it trains the user to ignore the region.
+    renderLoaded();
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByText("Uncorrelated Vol")).toBeInTheDocument();
+  });
 });
