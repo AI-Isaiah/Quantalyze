@@ -696,9 +696,14 @@ export function SyncPreviewStep({
   // re-renders that recreate the onTerminal closure; per the invariant it never
   // needs a reset — every non-throwing heavy outcome (passed / gate-fail) stops
   // the loop, so the only path that repolls is a throw. (A Supabase error
-  // returned AS A VALUE on a heavy read throws below, so it escalates here too;
-  // an RLS denial on `trades` instead drops tradeCount to 0 via `?? 0` and the
-  // gate fails INSUFFICIENT_TRADES — a terminal, loop-stopping outcome.)
+  // returned AS A VALUE on a heavy read throws below — on BOTH arms as of
+  // 140.4-02 — so it escalates here. Previously only the composite arm checked;
+  // an RLS denial on the single-key `trades` read dropped tradeCount to 0 via
+  // `?? 0` and the gate answered INSUFFICIENT_TRADES, telling the user we had
+  // measured zero trades on an account we had failed to read — a terminal,
+  // loop-stopping outcome with no self-recovery. All seven single-key members
+  // now bind `error`, and both head-counts refuse a null count for the same
+  // reason: a count that did not come back is not a count of zero.)
   const heavyFetchErrorsRef = useRef(0);
 
   /**
@@ -1051,12 +1056,12 @@ export function SyncPreviewStep({
           }
 
           const [
-            { data: analytics },
-            { count: tradeCount },
-            { data: earliest },
-            { data: latest },
-            { data: sample },
-            { count: csvRowCount },
+            analyticsRes,
+            tradeCountRes,
+            earliestRes,
+            latestRes,
+            sampleRes,
+            csvRowCountRes,
             keyRowResult,
           ] = await Promise.all([
             supabase
@@ -1113,8 +1118,82 @@ export function SyncPreviewStep({
               : Promise.resolve({ data: null as { exchange?: string } | null }),
           ]);
 
+          // C-3 / SEAMRIM-02 — EVERY member binds `error`, in the same shape the
+          // composite arm 200 lines above already uses. supabase-js resolves a
+          // PostgREST failure AS A VALUE, so an unchecked destructure is
+          // indistinguishable from real data: an RLS denial or a statement
+          // timeout on `trades` used to arrive as `count: null`, become 0 via
+          // `?? 0`, and render "We found only 0 filled trade(s) on this key." —
+          // a measurement we never took, on a product whose whole value is a
+          // trustworthy verified track record. Throwing routes the failure into
+          // the `heavyFetchErrorsRef` escalation below (one transient fault
+          // tolerated, then the recoverable SYNC_FAILED envelope with an exit
+          // affordance) instead of a terminal, loop-stopping gate verdict.
+          if (analyticsRes.error) {
+            throw new Error(
+              `single-key analytics read failed: ${analyticsRes.error.message}`,
+            );
+          }
+          if (tradeCountRes.error) {
+            throw new Error(
+              `single-key trades count read failed: ${tradeCountRes.error.message}`,
+            );
+          }
+          if (earliestRes.error) {
+            throw new Error(
+              `single-key earliest-trade read failed: ${earliestRes.error.message}`,
+            );
+          }
+          if (latestRes.error) {
+            throw new Error(
+              `single-key latest-trade read failed: ${latestRes.error.message}`,
+            );
+          }
+          if (sampleRes.error) {
+            throw new Error(
+              `single-key trade-sample read failed: ${sampleRes.error.message}`,
+            );
+          }
+          if (csvRowCountRes.error) {
+            throw new Error(
+              `single-key csv daily-returns count read failed: ${csvRowCountRes.error.message}`,
+            );
+          }
+          // ⚠️ MEMBER 7 IS A TERNARY AND STAYS ONE. When `apiKeyId` is falsy the
+          // else-branch resolves a SYNTHETIC `{ data: null }` that has no `error`
+          // property at all — a keyless draft, not a read failure. Checking it
+          // unconditionally would turn this fix into an outage for every keyless
+          // draft, so the property's PRESENCE is what gates the check.
+          if ("error" in keyRowResult && keyRowResult.error) {
+            throw new Error(
+              `single-key api_keys read failed: ${keyRowResult.error.message}`,
+            );
+          }
+
+          const analytics = analyticsRes.data;
+          const tradeCount = tradeCountRes.count;
+          const earliest = earliestRes.data;
+          const latest = latestRes.data;
+          const sample = sampleRes.data;
+          const csvRowCount = csvRowCountRes.count;
+
+          // COUNTS ARE PART OF THE CLASS. Both of these are `head: true` exact
+          // counts, so a null count with NO error is as unrepresentable as an
+          // error — and `?? 0` on it is the same fabrication by another route.
+          // Refuse it rather than coercing; the throw lands in the same sink.
+          if (tradeCount === null) {
+            throw new Error(
+              "single-key trades count read returned no count (head:true exact count was null)",
+            );
+          }
+          if (csvRowCount === null) {
+            throw new Error(
+              "single-key csv daily-returns count read returned no count (head:true exact count was null)",
+            );
+          }
+
           const detectedMarkets = deriveDetectedMarkets(
-            (sample ?? []).map((t) => (t as { symbol?: string }).symbol),
+            sample.map((t) => (t as { symbol?: string }).symbol),
           );
 
           const keyRow = keyRowResult.data;
@@ -1123,16 +1202,16 @@ export function SyncPreviewStep({
 
           const gate = checkStrategyGate({
             apiKeyId,
-            tradeCount: tradeCount ?? 0,
-            earliestTradeAt: earliest?.[0]?.timestamp
+            tradeCount,
+            earliestTradeAt: earliest[0]?.timestamp
               ? new Date(earliest[0].timestamp)
               : null,
-            latestTradeAt: latest?.[0]?.timestamp
+            latestTradeAt: latest[0]?.timestamp
               ? new Date(latest[0].timestamp)
               : null,
             computationStatus: nextStatus,
             computationError: nextError,
-            csvRowCount: csvRowCount ?? 0,
+            csvRowCount,
             // P72 — only a ledger-backed (Deribit) keyed strategy may pass on a
             // daily-returns series; a keyed perp with 0 fills must stay on the
             // trade branch (its funding series has no completeness gate).
@@ -1148,7 +1227,7 @@ export function SyncPreviewStep({
               wizard_session_id: wizardSessionId,
               step: "sync_preview",
               code: wizardCode,
-              trade_count: tradeCount ?? 0,
+              trade_count: tradeCount,
             });
             return "done";
           }
@@ -1172,10 +1251,10 @@ export function SyncPreviewStep({
           ];
 
           const nextSnapshot: SyncPreviewSnapshot = {
-            tradeCount: tradeCount ?? 0,
-            csvRowCount: csvRowCount ?? 0,
-            earliestTradeAt: earliest?.[0]?.timestamp ?? null,
-            latestTradeAt: latest?.[0]?.timestamp ?? null,
+            tradeCount,
+            csvRowCount,
+            earliestTradeAt: earliest[0]?.timestamp ?? null,
+            latestTradeAt: latest[0]?.timestamp ?? null,
             detectedMarkets,
             exchange: keyRow?.exchange ?? null,
             metrics,
