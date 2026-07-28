@@ -6,16 +6,9 @@ import { useBreakpoint } from "@/hooks/useBreakpoint";
 
 /**
  * Phase 48 / CHART-01b — the ONE breakpoint-gated Recharts `<Tooltip trigger>`
- * shim every in-scope Recharts chart consumes (plan 02 swapped `<Tooltip>` →
- * `<TouchTooltip>` across every tooltip-bearing Recharts chart in the
- * codebase). The DRY anchor that avoids inline `trigger` duplication at each of
- * those call sites (D-Area-1).
- *
- * ⚠️ No importer count is recited here, deliberately (140.3-G2 / GC-4). The
- * enforced contract is not a number — it is the one-file allow-list in
- * `tests/visual/recharts-touchtooltip-usage.test.ts`, which asserts that this
- * file is the SOLE importer of the raw recharts `Tooltip`. A pointer cannot
- * drift; a transcribed count has no oracle and had already gone stale here.
+ * shim every in-scope Recharts chart consumes (plan 02 swaps `<Tooltip>` →
+ * `<TouchTooltip>` across 18 files). The DRY anchor that avoids 18× inline
+ * `trigger` duplication (D-Area-1).
  *
  * Touch parity without new gesture machinery: Recharts owns its own pointer
  * layer, so the native `trigger` prop IS the tap-to-pin path. On mobile we set
@@ -41,7 +34,7 @@ export function TouchTooltip(props: TooltipProps) {
   // Mirror the canonical "is mobile" spelling (HeatmapPanels.tsx:263) so the
   // project has ONE definition of mobile.
   const trigger = useBreakpoint() === "mobile" ? "click" : "hover";
-  // Spread AFTER `trigger` so a caller could override it (none do today —
-  // every call site passes only `formatter` + `contentStyle`).
+  // Spread AFTER `trigger` so a caller could override it (none do today — all
+  // 18 charts pass only `formatter` + `contentStyle`).
   return <Tooltip trigger={trigger} {...props} />;
 }
