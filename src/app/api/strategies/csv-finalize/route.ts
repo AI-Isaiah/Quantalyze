@@ -10,6 +10,7 @@ import { postProcessKey } from "@/lib/process-key-client";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
 /**
@@ -531,8 +532,12 @@ async function persistDailyReturnsOrErrorResponse(
   if (persistError) {
     console.error(
       `${opts.logPrefix} persist_csv_daily_returns error [correlation_id=${opts.correlationId}]:`,
+      // SEAMRIM-06 — `.code` is the five-character SQLSTATE the branches below
+      // key off, and it is allowlisted by the seam log guard for exactly that
+      // reason, so it stays beside the scrubbed rendering. `.message` does not:
+      // it is where undici and postgrest inline what they were handed.
       persistError.code,
-      persistError.message,
+      scrubSeamError(persistError),
     );
     // NEW-C14-02: write a `failed` strategy_analytics placeholder BEFORE
     // returning the 500 so the SyncProgress poller can break out with a
@@ -630,7 +635,7 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       .maybeSingle();
     if (selectErr) {
       console.warn(
-        `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${selectErr.message}`,
+        `${opts.logPrefix} ${opts.subcontext} placeholder pre-check SELECT failed (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(selectErr)}`,
       );
       // FINDING-7: capture to Sentry so admin-client SELECT failures
       // (misconfiguration, PostgREST 5xx) are alertable. Without this,
@@ -675,7 +680,7 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       );
     if (placeholderErr) {
       console.warn(
-        `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderErr.message}`,
+        `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert failed (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(placeholderErr)}`,
       );
       // D7 fail-loud (106-04): a silent placeholder-upsert failure leaves the
       // strategy stuck computing with zero trace beyond the warn above. Pair
@@ -686,8 +691,14 @@ async function writeFailedStrategyAnalyticsPlaceholder(
       });
     }
   } catch (placeholderThrow) {
+    // SEAMRIM-06 — the WHOLE ternary is replaced by one leaf call, not just the
+    // `.message` arm. This is the CSV finalize flow, whose outgoing headers
+    // carry `X-User-Access-Token` (a live end-user Supabase JWT), and
+    // `err.message` is precisely where undici puts them. Scrubbing one arm and
+    // leaving `String(placeholderThrow)` — which renders `name: message` — would
+    // be an instance fix of a two-reference site.
     console.warn(
-      `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${placeholderThrow instanceof Error ? placeholderThrow.message : String(placeholderThrow)}`,
+      `${opts.logPrefix} ${opts.subcontext} strategy_analytics placeholder upsert threw (non-blocking) [correlation_id=${opts.correlationId}]: ${scrubSeamError(placeholderThrow)}`,
     );
     // D7 fail-loud (106-04): the placeholder write threw (admin-client
     // construction / PostgREST fault) — surface it so the stuck-computing
@@ -819,8 +830,10 @@ async function applyCsvMetadataUpdate(
     // category/markets while the user believed everything saved.
     console.error(
       "[strategies/csv-finalize] metadata update non-fatal error:",
+      // `.code` is the allowlisted SQLSTATE (SEAMRIM-06) and stays beside the
+      // scrubbed rendering; `.message` is the shape that carries headers.
       updateError.code,
-      updateError.message,
+      scrubSeamError(updateError),
     );
     captureToSentry(updateError, {
       tags: { surface: "csv-finalize", step: "metadata-update" },
@@ -1364,8 +1377,14 @@ async function contributionCsvFinalizeHandler(args: {
   if (error || !isUuid(newStrategyId)) {
     console.error(
       `[strategies/csv-finalize contribution] finalize_csv_strategy failed [correlation_id=${args.correlationId}]:`,
-      error?.code,
-      error?.message,
+      // SEAMRIM-06 — BOTH references in this one call are wrapped, not one.
+      // `error?.code` was NOT covered by the guard's `code` allowlist: that
+      // allowlist matches a literal `.code`, and OPTIONAL chaining is a
+      // different token, so the pre-state reported this single call TWICE.
+      // `scrubSeamError` renders the SQLSTATE itself (`code=…`), so nothing the
+      // operator had is lost — and `error` may legitimately be null here (the
+      // `!isUuid(newStrategyId)` arm), which the leaf renders totally.
+      scrubSeamError(error),
     );
     // CONTRIB-02 observability — pair the console.error with captureToSentry so
     // a systematic contribution-finalize outage is alertable, mirroring this
