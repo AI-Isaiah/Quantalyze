@@ -221,8 +221,18 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     expect(raw).not.toContain("boom");
     expect(raw).not.toContain("localhost");
     expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
-    // ...and the detail is not simply discarded — it goes to the server log.
-    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), leaky);
+    // ...and the detail is not simply discarded — it goes to the server log,
+    // SCRUBBED (140.4-08 / SEAMRIM-06). Pinning the raw `leaky` object here
+    // pinned the leak in place; pinning the scrubbed rendering pins two facts
+    // instead of one — that the value went through `scrubSeamError` (it is a
+    // string, not the Error instance) AND that the diagnosis survived it. The
+    // second half is the A-10 non-drop check, and it is the ONLY mechanism in
+    // this tree that catches a "fix" which answers a scrub finding by dropping
+    // the value: the source predicate cannot see a drop, this assertion can.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("boom with http://localhost:8002 secret detail"),
+    );
   });
 
   it("returns 500 with the same STATIC copy when evalMatch throws a non-Error value", async () => {
