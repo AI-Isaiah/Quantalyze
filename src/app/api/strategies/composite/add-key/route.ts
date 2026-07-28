@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateKey, encryptKey } from "@/lib/analytics-client";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
 import {
@@ -238,13 +238,23 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-composite-add-key:${user.id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { code: "KEY_RATE_LIMIT", error: "Too many requests" },
-      {
-        status: 429,
-        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503 instead of the 429 below.
+    //
+    // ⚠️ THE 429 BODY IS UNCHANGED, `{code, error}` IN THAT ORDER. `KEY_RATE_LIMIT`
+    // is a live contract: `MultiKeyConnectStep`'s KNOWN_ADD_KEY_CODES admits it,
+    // and its copy calls the throttle "exchange-side". That sentence is FALSE
+    // for our own limiter and honestly rewording it is plan 140.4-12's change,
+    // not this one — but it is only ever reached on a GENUINE throttle now,
+    // because a misconfiguration no longer arrives here at all.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      misconfiguredBody: {
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
       },
-    );
+    });
   }
 
   // DIVERGENCE (1): NO existing-draft short-circuit. create-with-key does a

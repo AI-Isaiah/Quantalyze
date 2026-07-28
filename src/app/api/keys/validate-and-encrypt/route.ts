@@ -12,7 +12,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
 import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
 
 import { getCorrelationId } from "@/lib/correlation-id";
@@ -133,10 +133,10 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
 
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503. The 429 body is the builder's default,
+    // byte-identical to what was inlined here; NO_STORE_HEADERS is kept.
+    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
   }
 
   // Phase 19 / API-2 — DO NOT delegate to /process-key for validate-and-encrypt.

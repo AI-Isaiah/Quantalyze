@@ -9,7 +9,7 @@ import {
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
@@ -105,13 +105,10 @@ export async function POST(req: NextRequest) {
   const rateLimitKey = `optimizer:${user.id}`;
   const rl = await checkLimit(userActionLimiter, rateLimitKey);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      {
-        status: 429,
-        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
-      },
-    );
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503. The 429 body is the builder's default,
+    // byte-identical to what was inlined here; NO_STORE_HEADERS is kept.
+    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
   }
 
   // Audit-2026-05-07 red-team R-0002 (HIGH c7): symmetric token refund on

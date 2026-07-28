@@ -32,11 +32,39 @@ vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  publicIpLimiter: null,
-  checkLimit: async () => ({ success: true, retryAfter: 0 }),
-  getClientIp: () => "127.0.0.1",
+/**
+ * 140.4-13 / SEAMRIM-05 — the limiter verdict this file drives the route with.
+ *
+ * Hoisted so the `vi.mock` factory can close over it and each test can pick the
+ * outcome without re-mocking. Default is the ALLOW the pre-existing tests were
+ * written against, and the SEAMRIM-05 describe below restores it in `afterEach`
+ * so no ordering dependency is created.
+ */
+const limiter = vi.hoisted(() => ({
+  result: { success: true, retryAfter: 0 } as
+    | { success: true; retryAfter?: number }
+    | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
 }));
+
+/**
+ * ⚠️ EXTENDED, NOT REPLACED (140.4-13). The factory used to omit
+ * `rateLimitDenyJson`; now that the route routes its deny through the
+ * chokepoint, an omitted export would be `undefined` at call time and throw
+ * from inside the handler. The pure helpers come from `importActual` rather
+ * than a hand-written double SO THE MOCK CANNOT DRIFT FROM THE REAL 503-vs-429
+ * DECISION — a double that always answered 429 would make this file green on
+ * precisely the bug the plan closes.
+ */
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    publicIpLimiter: null,
+    checkLimit: async () => limiter.result,
+    getClientIp: () => "127.0.0.1",
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/analytics-client", () => {
   // Real-shape error classes so the route's `err instanceof AnalyticsUpstreamError`
@@ -111,6 +139,72 @@ const VALID_BODY = {
   api_key: "k",
   api_secret: "s",
 };
+
+/**
+ * 140.4-13 / SEAMRIM-05 — the limiter deny arm, all THREE outcomes.
+ *
+ * ⚠️ THIS ROUTE IS THE PUBLIC/ANONYMOUS AUTH SHAPE. A first-time visitor
+ * evaluating the product hits it with no account. Before this plan a limiter
+ * MISCONFIGURATION on our side answered 429 "Too many requests" — our outage,
+ * rendered as the visitor's fault, on their very first click.
+ *
+ * The 429 case is the ANTI-REGRESSION half and it matters more than the 503:
+ * throttling is the common outcome and its body is a live contract.
+ */
+describe("[140.4-13 / SEAMRIM-05] POST /api/verify-strategy — the limiter deny arm", () => {
+  afterEach(() => {
+    limiter.result = { success: true, retryAfter: 0 };
+    vi.restoreAllMocks();
+  });
+
+  it("ratelimit_misconfigured → 503, NOT a 429 blaming the caller", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    expect(res.headers.get("Retry-After")).toBe("60");
+    // Nothing downstream ran: the deny is the whole response.
+    expect(verifyStrategyMock).not.toHaveBeenCalled();
+  });
+
+  it("a genuine throttle → 429 with a BYTE-IDENTICAL body and headers", async () => {
+    limiter.result = { success: false, retryAfter: 42 };
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    expect(res.status).toBe(429);
+    // Hand-typed from the pre-adoption source, not read back off the builder.
+    expect(await res.json()).toEqual({ error: "Too many requests" });
+    expect(res.headers.get("Retry-After")).toBe("42");
+    // This route is the ONE seam route whose 429 carries no NO_STORE_HEADERS.
+    // Adoption must not have added one.
+    expect(res.headers.get("Cache-Control")).toBeNull();
+    expect(verifyStrategyMock).not.toHaveBeenCalled();
+  });
+
+  it("success → the deny arm does NOT fire and the request runs on past it", async () => {
+    limiter.result = { success: true, retryAfter: 0 };
+    verifyStrategyMock.mockResolvedValue({
+      verification_id: "22222222-2222-2222-2222-222222222222",
+    });
+    const { POST } = await import("./route");
+    const res = await POST(postReq(VALID_BODY));
+    // ⚠️ NOT `expect(status).not.toBe(503)`. This route answers its OWN 503
+    // downstream when `INTERNAL_API_TOKEN` is unset, which is the case in this
+    // suite — a status-only oracle here would assert the wrong fact and would
+    // have to be weakened later. The limiter's deny arm is identified by the
+    // `Retry-After` header it stamps and by its body, and neither is present.
+    expect(res.status).not.toBe(429);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    const body = await res.json();
+    expect(body.error).not.toBe("Too many requests");
+    expect(body.error).not.toBe("Rate limiter unavailable");
+  });
+});
 
 describe("POST /api/verify-strategy — input validation (H-0335)", () => {
   beforeEach(() => {

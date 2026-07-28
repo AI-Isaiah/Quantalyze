@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
-import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
+import { csvValidateLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
@@ -74,6 +74,30 @@ export const maxDuration = 300;
 const MAX_BYTES = 10 * 1024 * 1024;
 
 /**
+ * M-14: the CSV v0 envelope BODY — `ok: false`, code, human_message,
+ * debug_context, correlation_id, in that order.
+ *
+ * 140.4-13 / SEAMRIM-05 split this out of `csvErrorEnvelope` below so the deny
+ * arm can hand the SAME body to `rateLimitDenyJson` without re-typing the five
+ * fields. Re-typing them would have made this route the one place where the
+ * envelope has a second definition — the exact opposite of M-14's stated reason
+ * for existing, and the shape a future `correlation_id` thread would miss.
+ */
+function csvErrorBody(
+  code: string,
+  human_message: string,
+  debug_context: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ok: false,
+    code,
+    human_message,
+    debug_context,
+    correlation_id: null,
+  };
+}
+
+/**
  * M-14: shared error-envelope builder for the CSV routes. Every error path
  * returns the same v0 envelope shape (`ok: false`, code, human_message,
  * debug_context, correlation_id: null) — co-locate that here so a future
@@ -87,13 +111,7 @@ function csvErrorEnvelope(
   init: ResponseInit = {},
 ): NextResponse {
   return NextResponse.json(
-    {
-      ok: false,
-      code,
-      human_message,
-      debug_context,
-      correlation_id: null,
-    },
+    csvErrorBody(code, human_message, debug_context),
     // NO_STORE_HEADERS is the base so every error envelope is private,no-store;
     // caller headers (e.g. the 429's Retry-After) merge ON TOP without
     // clobbering Cache-Control. Spread order matters: a flat `...init` last
@@ -182,13 +200,29 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-csv-validate:${user.id}`,
   );
   if (!rl.success) {
-    return csvErrorEnvelope(
-      "CSV_RATE_LIMIT",
-      "Too many requests. Wait a minute and try again.",
-      {},
-      429,
-      { headers: { "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503.
+    //
+    // ⚠️ WHICH OF THE TWO ALLOWED SHAPES THIS ROUTE USES, AND WHY. The plan
+    // permitted either passing the envelope as a body override or keeping
+    // `csvErrorEnvelope` and branching on `isRateLimitMisconfigured` locally.
+    // Neither verbatim: the body comes from `csvErrorBody` — the SAME builder
+    // `csvErrorEnvelope` uses — so the five v0 fields keep one definition, and
+    // the STATUS comes from `rateLimitDenyJson`, so the 503-vs-429 decision
+    // lives in the artefact rather than in a twelfth inlined copy. Re-typing
+    // the envelope here would have been the "simplification" that gave this
+    // route a second envelope definition to drift.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: csvErrorBody(
+        "CSV_RATE_LIMIT",
+        "Too many requests. Wait a minute and try again.",
+      ),
+      misconfiguredBody: csvErrorBody(
+        "SEAM_MISCONFIGURED",
+        "Our rate limiter is unavailable, so we stopped before checking your file. This is a fault on our side, not your data. Nothing was uploaded — try again in a minute.",
+      ),
+    });
   }
 
   // Phase 106 Stage B (D2): the unified backbone is the sole validate path.

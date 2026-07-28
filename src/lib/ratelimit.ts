@@ -300,7 +300,7 @@ export type RateLimitDenyOptions = {
    * Extra response headers. Merged UNDERNEATH the artefact's own `Retry-After`,
    * so a caller cannot clobber the value (asserted).
    */
-  headers?: Record<string, string>;
+  headers?: Readonly<Record<string, string>>;
   /** Body for the genuine-throttle (429) branch. Passed through VERBATIM — key order included. */
   throttledBody?: unknown;
   /** Body for the limiter-misconfigured (503) branch. Passed through VERBATIM. */

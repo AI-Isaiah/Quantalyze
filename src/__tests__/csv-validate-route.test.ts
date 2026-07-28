@@ -85,14 +85,34 @@ vi.mock("@/lib/api/withAuth", () => ({
 }));
 
 const checkLimitMock = vi.hoisted(() =>
-  vi.fn(async () => ({ success: true, retryAfter: 0 })),
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
+  vi.fn(
+    async (): Promise<{
+      success: boolean;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    }> => ({ success: true, retryAfter: 0 }),
+  ),
 );
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  csvValidateLimiter: {},
-  checkLimit: checkLimitMock,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). The route's deny arm now
+// routes its status decision through `rateLimitDenyJson`; an omitted export is
+// `undefined` at call time. The pure helpers come from `importActual` rather
+// than a hand-written double SO THE MOCK CANNOT DRIFT FROM THE REAL 503-vs-429
+// DECISION — a double that always answered 429 would make this file green on
+// exactly the bug the plan closes.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    csvValidateLimiter: {},
+    checkLimit: checkLimitMock,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 const validateCsvMock = vi.hoisted(() => vi.fn());
 
@@ -509,6 +529,74 @@ describe("/api/strategies/csv-validate", () => {
     const json = await res.json();
     expect(json.code).toBe("CSV_RATE_LIMIT");
     expect(json.correlation_id).toBeNull();
+    // 140.4-13 / SEAMRIM-05 — ALL FIVE v0 fields survive the chokepoint
+    // adoption. The deny arm now calls `rateLimitDenyJson` with a body from
+    // `csvErrorBody` — the same builder `csvErrorEnvelope` uses — so this
+    // envelope has ONE definition, not two. Hand-typed here, not read back.
+    expect(json).toEqual({
+      ok: false,
+      code: "CSV_RATE_LIMIT",
+      human_message: "Too many requests. Wait a minute and try again.",
+      debug_context: {},
+      correlation_id: null,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503 in the SAME v0 envelope", async () => {
+    checkLimitMock.mockResolvedValueOnce({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    expect(
+      res.status,
+      "Our limiter's store being unreachable is not the user uploading too " +
+        "fast. 429 says it is, and hides the outage from the canary.",
+    ).toBe(503);
+    const json = await res.json();
+    // The envelope SHAPE is preserved so `CsvUploadStep` still renders a
+    // sentence off `human_message` and reports `code` to the wizard_error
+    // funnel; `SEAM_MISCONFIGURED` is an EXISTING WizardErrorCode, not a newly
+    // minted one.
+    expect(Object.keys(json).sort()).toEqual([
+      "code",
+      "correlation_id",
+      "debug_context",
+      "human_message",
+      "ok",
+    ]);
+    expect(json.ok).toBe(false);
+    expect(json.code).toBe("SEAM_MISCONFIGURED");
+    expect(json.code).not.toBe("CSV_RATE_LIMIT");
+    expect(json.human_message).toContain("fault on our side");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(validateCsvMock).not.toHaveBeenCalled();
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    checkLimitMock.mockResolvedValueOnce({ success: true, retryAfter: 0 });
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    // ⚠️ NOT a status-only oracle. This suite leaves the unified path throwing
+    // a seeded DB error, so the route legitimately answers its OWN 5xx here —
+    // asserting `not.toBe(503)` would pin the wrong fact and have to be
+    // weakened later. The limiter's deny arm is identified by the `Retry-After`
+    // it stamps and by its two codes; neither is present.
+    expect(res.status).not.toBe(429);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    const json = await res.json();
+    expect(json.code).not.toBe("CSV_RATE_LIMIT");
+    expect(json.code).not.toBe("SEAM_MISCONFIGURED");
   });
 });
 

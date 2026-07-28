@@ -63,6 +63,10 @@ const STATE = vi.hoisted(() => ({
   keyRow: null as { id: string; user_id: string } | null,
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
   rateLimitOk: true as boolean,
+  // 140.4-13 / SEAMRIM-05 — the THIRD limiter outcome. `undefined` is a genuine
+  // throttle (429); "ratelimit_misconfigured" is OUR store being unreachable and
+  // must answer 503, not a 429 that reads as the caller's fault.
+  rateLimitReason: undefined as "ratelimit_misconfigured" | undefined,
   // unstable_cache simulation: when true the cache REPLAYS cachedHitPayload
   // without running the fetcher body (a hit — no decrypt). When false the body
   // runs (a miss — sets didDecrypt, drives the stubbed upstream below).
@@ -151,13 +155,24 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: null,
-  checkLimit: async () => ({
-    success: STATE.rateLimitOk,
-    retryAfter: STATE.rateLimitOk ? 0 : 60,
-  }),
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+// `rateLimitReason` drives the misconfigured branch; unset it for a genuine
+// throttle.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: null,
+    checkLimit: async () => ({
+      success: STATE.rateLimitOk,
+      retryAfter: STATE.rateLimitOk ? 0 : 60,
+      ...(STATE.rateLimitReason ? { reason: STATE.rateLimitReason } : {}),
+    }),
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 // Emulate unstable_cache: a HIT returns the memoized value WITHOUT invoking the
 // body (so the route's didDecrypt closure flag stays false); a MISS runs the
@@ -346,6 +361,59 @@ describe("GET /api/keys/[id]/permissions — audit-log emission (Task 7.1a)", ()
     expect(
       STATE.rpcCalls.filter((c) => c.name === "log_audit_event"),
     ).toHaveLength(0);
+  });
+});
+
+/**
+ * 140.4-13 / SEAMRIM-05 — a limiter MISCONFIGURATION is not a throttle.
+ *
+ * This route is read-only and cheap, so a 429 here reads to the allocator as
+ * "you clicked too fast". During an Upstash outage that sentence was emitted on
+ * the FIRST click, for every user, and the outage never reached the canary that
+ * watches 5xx.
+ */
+describe("[140.4-13 / SEAMRIM-05] GET /api/keys/[id]/permissions — the limiter deny arm", () => {
+  afterEach(() => {
+    STATE.rateLimitOk = true;
+    STATE.rateLimitReason = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it("ratelimit_misconfigured → 503, not 429", async () => {
+    STATE.rateLimitOk = false;
+    STATE.rateLimitReason = "ratelimit_misconfigured";
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+  });
+
+  it("a genuine throttle → 429 with a BYTE-IDENTICAL body and headers", async () => {
+    STATE.rateLimitOk = false;
+    STATE.rateLimitReason = undefined;
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).toBe(429);
+    // Hand-typed from the pre-adoption source, not read back off the builder.
+    expect(await res.json()).toEqual({ error: "Too many requests" });
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("success → the deny arm does not fire", async () => {
+    STATE.rateLimitOk = true;
+
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(KEY_ID));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
   });
 });
 

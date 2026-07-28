@@ -9,7 +9,7 @@ import {
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
-import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out in full in `src/app/api/admin/match/eval/route.ts`.
@@ -89,10 +89,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   // invalid body never consumes one of the admin's tokens.
   const rl = await checkLimit(adminActionLimiter, `match-recompute:${user!.id}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — the ADMIN auth shape. The 503-vs-429 decision is
+    // the chokepoint's; this route keeps only NO_STORE_HEADERS. The 429 body
+    // stays the builder's default, which is byte-identical to what was inlined
+    // here.
+    return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
   }
 
   try {
