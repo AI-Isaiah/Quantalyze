@@ -510,6 +510,11 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
   // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
   // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
   // keeps its Retry button (RED-TEAM R1 regression guard).
+  //
+  // ⚠️ READ AS A PAIR with the case directly BELOW. `wizardErrors.ts` records
+  // that these are the two codes `finalize-wizard` can put in front of a user
+  // with no wizard member behind them. Both are pinned here so the pair is
+  // discoverable from either end; neither resolution is accidental.
   it("maps a 409 unknown code (draft_state_invalid) to UNKNOWN (recoverable)", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
@@ -521,6 +526,59 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
     await vi.waitFor(() => expect(findWizardError()).toBeDefined());
     expect(findWizardError()!.code).toBe("UNKNOWN");
+  });
+
+  // ⚠️ READ AS A PAIR with the sibling directly ABOVE. This is the SECOND
+  // residual wire code, and unlike its sibling it is reachable on the LIVE
+  // unified-backbone path. Recorded, not overlooked: 140.3-G2 / GC-3, and
+  // `deferred-items.md` DEF-G2-1 carries the owner.
+  //
+  // The failure message below is the deliverable, not the assertion. An
+  // assertion that "UNKNOWN is what happens" would read as blessing a defect;
+  // the message exists so that whoever reddens this test learns what has to
+  // ship alongside the fix.
+  it("[140.3-G2] the unified-backbone 409 is a RECORDED residual: COMPOSITE_UNSUPPORTED_UNIFIED resolves to UNKNOWN until TRAP-4 is cleared", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          // The body the route actually sends — read at
+          // `finalize-wizard/route.ts:1545-1553`, not invented here.
+          error:
+            "Composite (multi-key) strategies are not yet supported on this path.",
+          code: "COMPOSITE_UNSUPPORTED_UNIFIED",
+        },
+        409,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(
+      findWizardError()!.code,
+      [
+        "READ THIS BEFORE CHANGING IT.",
+        "",
+        "1. `finalize-wizard/route.ts:1551` emits `COMPOSITE_UNSUPPORTED_UNIFIED` on a",
+        "   409 on the LIVE unified-backbone finalize path, so a real user reaches",
+        "   this arm — it is not a hypothetical.",
+        "2. It is DELIBERATELY NOT a member of `KNOWN_FINALIZE_CODES` (SubmitStep.tsx),",
+        "   so it renders as UNKNOWN and the `wizard_error` funnel reports UNKNOWN,",
+        "   which collapses this arm into every other unrecognised one. That touches",
+        "   SC2's recognition clause and SC6's specificity clause. It is a RECORDED",
+        "   residual (140.3-G2 / GC-3; DEF-G2-1, owner Phase 140.4) — not an accident,",
+        "   and this assertion is not an endorsement of the outcome.",
+        "3. IF YOU ARE READING THIS BECAUSE YOU JUST ADMITTED THE CODE: that is the",
+        "   right fix and this test is doing its job. Admitting a code is a CODE-SET",
+        "   change, so widen `DESTRUCTIVE_CONTROL_IS_WRONG_FOR` (`SyncPreviewStep.tsx`)",
+        "   IN THE SAME COMMIT if the new member's copy is non-recoverable. A",
+        "   non-recoverable code renders no Retry, which can leave 'Try another key'",
+        "   -> handleDeleteDraft() as the SOLE affordance and destroy the user's",
+        "   composite draft. That is TRAP-4, a locked CONTEXT decision, and it is the",
+        "   exact coupling DEF-15-1 records for the sibling KNOWN_KICKOFF_CODES set.",
+        "4. THEN update this case to assert the new code. Do not delete it: the pair",
+        "   above and below is how the next reader finds the other residual.",
+      ].join("\n"),
+    ).toBe("UNKNOWN");
   });
 
   // UX-02 (#30) — the log-matching contract. Before the wizardFetch swap the
