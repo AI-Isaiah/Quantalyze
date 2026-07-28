@@ -1676,6 +1676,176 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     ).toBeNull();
     errSpy.mockRestore();
   });
+
+  // ════════════════════════════════════════════════════════════════════
+  // Phase 140.4-12 / SEAMRIM-08 — THIS ARM HAD NO TRANSLATION HOP AT ALL.
+  //
+  // `KNOWN_KICKOFF_CODES` indexes the RAW WIRE STRING. Its intersection with
+  // the four seam wire codes — CIRCUIT_OPEN, UPSTREAM_TIMEOUT,
+  // UPSTREAM_NETWORK_ERROR, SEAM_MISCONFIGURED — is EMPTY, so a breaker trip or
+  // a dead upstream during the kickoff rendered SYNC_FAILED, whose sentence
+  // asks the user "which step failed" about a computation that never started.
+  // `SubmitStep` had the translation hop and this sibling never did.
+  //
+  // The remedy is the same structure as `SubmitStep`'s: translate through the
+  // ONE table FIRST, fall back to `KNOWN_KICKOFF_CODES` for the wizard codes
+  // OUR OWN route mints, then SYNC_FAILED. No member is added to either list.
+  //
+  // ⚠️ ORACLE INDEPENDENCE: `data-error-code` is the machine-readable half, and
+  // every expected sentence below is a LITERAL typed here.
+  // ════════════════════════════════════════════════════════════════════
+
+  it("[140.4-12] a breaker trip (CIRCUIT_OPEN) renders the breaker's own state, not SYNC_FAILED", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: false,
+          code: "CIRCUIT_OPEN",
+          human_message: "The analytics service is temporarily unavailable.",
+          correlation_id: "corr-co-1",
+        }),
+        { status: 503 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "CIRCUIT_OPEN is a WIRE code with no entry in KNOWN_KICKOFF_CODES, so " +
+        "it fell to SYNC_FAILED — a sentence that claims we fetched trades " +
+        "and the computation did not complete. The breaker declined to send " +
+        "the request; nothing was fetched and nothing ran.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNAVAILABLE_RETRY");
+
+    expect(
+      screen.getByText("Our service is temporarily unavailable."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/which step failed/i)).toBeNull();
+  });
+
+  it.each([
+    ["UPSTREAM_TIMEOUT", 504],
+    ["UPSTREAM_NETWORK_ERROR", 502],
+  ])(
+    "[140.4-12] a seam transport failure (%s) renders SERVICE_UNREACHABLE, not SYNC_FAILED",
+    async (wireCode, status) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ ok: false, code: wireCode }), { status }),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute(
+        "data-error-code",
+        "SERVICE_UNREACHABLE",
+      );
+      expect(
+        screen.getByText("We could not reach our own service."),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("[140.4-12] our own configuration fault (SEAM_MISCONFIGURED) reaches its own state", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: false, code: "SEAM_MISCONFIGURED" }),
+        { status: 500 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+    expect(
+      screen.getByText(
+        "We could not send this request — our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+    errSpy.mockRestore();
+  });
+
+  it("[140.4-12] the NESTED python envelope's code is read at this arm too", async () => {
+    // `body.detail.code` is the shape every `service_error()` answer carries.
+    // A top-level-only reader answers `undefined` here — byte-identical to a
+    // body that carried no code at all, which is how 21 codes stay invisible.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: {
+            code: "CIRCUIT_OPEN",
+            dependency: null,
+            retryable: true,
+            detail: "Breaker open.",
+            correlation_id: "srv-nested-co-8b2d1f40-6c93-4a55-b027-1e5f9a3c7d64",
+          },
+        }),
+        { status: 503 },
+      ),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "The nested envelope carried CIRCUIT_OPEN and this arm did not see it. " +
+        "The flat and nested shapes must produce the SAME state.",
+    ).toHaveAttribute("data-error-code", "SERVICE_UNAVAILABLE_RETRY");
+  });
+
+  it.each([
+    ["RATE_LIMITED", 429, "RATE_LIMITED"],
+    ["GATE_DRAFT_GONE", 404, "GATE_DRAFT_GONE"],
+    ["COMPOSITE_MEMBERSHIP_UNKNOWN", 503, "COMPOSITE_MEMBERSHIP_UNKNOWN"],
+    ["MISSING_STRATEGY_ID", 400, "VALIDATION_FAILED"],
+    ["INVALID_STRATEGY_ID", 400, "VALIDATION_FAILED"],
+  ])(
+    "[140.4-12] ANTI-REGRESSION: the pre-existing kickoff member %s still renders %s",
+    async (wireCode, status, expected) => {
+      // ⚠️ ALL FIVE MEMBERS OF `KNOWN_KICKOFF_CODES`, IN ONE PLACE. Putting the
+      // translation hop AHEAD of this roster changes which lookup answers
+      // first, so every pre-existing member is a candidate for being silently
+      // re-pointed — `RATE_LIMITED` in particular is in BOTH tables and is now
+      // answered by the translation rather than by the roster, with the same
+      // outcome. Individually pinned above too; this case is the set-level
+      // statement, so a sweep that re-pointed one member cannot hide behind the
+      // four that still pass.
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ code: wireCode }), { status }),
+      );
+
+      render(<SyncPreviewStep {...baseProps} />);
+
+      const envelope = await screen.findByTestId("error-envelope");
+      expect(envelope).toHaveAttribute("data-error-code", expected);
+      errSpy.mockRestore();
+    },
+  );
+
+  it("[140.4-12] NEGATIVE CONTROL — a real seam wire code with no wizard member still falls back to SYNC_FAILED", async () => {
+    // `SEAM_DEGRADED` is named in `SEAM_CODE_TO_WIZARD_CODE`'s own docblock as
+    // the code an IDENTITY rule would silently admit. It is a genuine wire
+    // code, not a garbled one — which is what makes it the sharp control. If
+    // this ever renders `SEAM_DEGRADED`, the explicit table has been replaced
+    // by a cast and both membership checks have been deleted rather than
+    // re-scoped.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ code: "SEAM_DEGRADED" }), { status: 503 }),
+    );
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SYNC_FAILED");
+    errSpy.mockRestore();
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════
@@ -2062,6 +2232,47 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
           await renderThroughTheGate({ ...baseProps });
         },
       },
+      // ── 140.4-12 / SEAMRIM-08 — THE ENLARGED REACHABLE SET ──────────────
+      // Making the kickoff arm translate before it membership-checks turns
+      // four seam WIRE codes into codes that can reach `gate_failed`, so the
+      // population this property is stated over grows. That is exactly the
+      // interaction 140.4-11's pin has to absorb: a newly renderable code must
+      // not arrive with a destructive sole affordance. The rows are INPUTS
+      // (an HTTP arm and its body), never the code they produce — the code is
+      // still read back off `data-error-code` below.
+      {
+        input: "kickoff 503 with the breaker's own wire code",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "CIRCUIT_OPEN" }), {
+              status: 503,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 504 on a seam transport deadline",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "UPSTREAM_TIMEOUT" }), {
+              status: 504,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
+      {
+        input: "kickoff 500 naming a configuration fault on our own side",
+        drive: async () => {
+          installKickoffClient();
+          fetchImpl = async () =>
+            new Response(JSON.stringify({ code: "SEAM_MISCONFIGURED" }), {
+              status: 500,
+            });
+          await renderThroughTheGate({ ...baseProps });
+        },
+      },
       {
         input: "gate: keyless draft, no trades, no daily returns",
         drive: async () => {
@@ -2156,16 +2367,21 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     }
 
     // ── VACUITY FENCE ───────────────────────────────────────────────────
-    // A scanner that drove nothing would report agreement forever. Eleven
-    // DISTINCT codes reach this render today (140.4 CONTEXT §4, independently
-    // re-derived by the pattern-mapper); the literal is hand-typed so it
-    // cannot be satisfied by the loop measuring itself.
+    // A scanner that drove nothing would report agreement forever. ELEVEN
+    // distinct codes reached this render when 140.4-11 wrote this pin (140.4
+    // CONTEXT §4, independently re-derived by the pattern-mapper); 140.4-12
+    // raised it to FOURTEEN by making the kickoff arm translate before it
+    // membership-checks, which admits SERVICE_UNAVAILABLE_RETRY,
+    // SERVICE_UNREACHABLE and SEAM_MISCONFIGURED. The literal is hand-typed —
+    // never `scenarios.length`, which would measure the loop against itself —
+    // and it is RAISED rather than left at 11, so the three new rows cannot
+    // silently stop driving anything.
     expect(
       observed.size,
-      "Fewer than eleven distinct codes were actually driven. A loop that " +
+      "Fewer than fourteen distinct codes were actually driven. A loop that " +
         "renders nothing satisfies every assertion inside it and reports " +
         "agreement forever — which is worse than having no guard at all.",
-    ).toBeGreaterThanOrEqual(11);
+    ).toBeGreaterThanOrEqual(14);
 
     // The forced choice must be absent from the WHOLE observed set, stated
     // once more as a set-level claim so a per-row `continue` cannot hide it.
@@ -2174,5 +2390,186 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
         controls.length === 1 && controls[0] === "key-replacement",
     );
     expect(forced.map(([code]) => code)).toEqual([]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 140.4-12 / SEAMRIM-11 (C-3) — THE RESUME FRESHNESS PROBE.
+//
+// The LAST unchecked PostgREST read in this file, and the one 140.4-02's
+// seven-member conversion never reached: it sits ~530 lines ABOVE that
+// `Promise.all`, in the mount effect. 140.4-14's `no-unchecked-supabase-read`
+// rule reports it as its single true positive, which is why that rule's glob
+// could not admit this file.
+//
+// ⚠️ A READ FAILURE AND AN ABSENT ROW ARE DIFFERENT FACTS, AND THAT IS THE
+// WHOLE POINT. `.maybeSingle()` answers a genuinely missing row with
+// `{ data: null, error: null }` — the normal first-time-draft case this probe
+// EXISTS to detect. An RLS denial or a statement timeout answers
+// `{ data: null, error: <PostgrestError> }`. Unchecked, the two were
+// byte-identical here: both silently produced `isComplete === false` and
+// nothing anywhere recorded that a read had failed.
+//
+// Both polarities are pinned. Asserting only the failure half would be
+// satisfied by an implementation that logged unconditionally — which would
+// re-label every legitimate absence as a fault and is the over-refusal
+// 140.4-01 carved PGRST116 out to avoid.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[140.4-12 / SEAMRIM-11] SyncPreviewStep — the resume freshness probe binds error", () => {
+  /**
+   * The needle, HAND-TYPED here and never imported from the component. It
+   * names the READ, so a log that fired from some other site cannot satisfy
+   * it.
+   */
+  const READ_FAILURE_NEEDLE = "resume freshness probe read failed";
+
+  /** Freshness probe answers `outcome`; everything else is inert. */
+  function installProbeClient(outcome: { data: unknown; error: unknown }) {
+    currentClientFactory = () => ({
+      from: () => ({
+        select: (cols: string) => ({
+          eq: () => ({
+            maybeSingle: () =>
+              Promise.resolve(
+                cols === "computation_status, computed_at"
+                  ? outcome
+                  : { data: null, error: null },
+              ),
+          }),
+        }),
+      }),
+    });
+  }
+
+  function loggedReadFailures(spy: {
+    mock: { calls: unknown[][] };
+  }): unknown[][] {
+    return spy.mock.calls.filter((call: unknown[]) =>
+      String(call[0]).includes(READ_FAILURE_NEEDLE),
+    );
+  }
+
+  beforeEach(() => {
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    installProbeClient({ data: null, error: null });
+  });
+
+  it("a FAILED freshness probe is REPORTED — not silently read as 'this draft has no analytics row'", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installProbeClient({
+      data: null,
+      error: {
+        message: "canceling statement due to statement timeout",
+        code: "57014",
+        details: "",
+        hint: "",
+      },
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "compute failed" }), {
+          status: 500,
+        }),
+      );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      loggedReadFailures(errSpy).length,
+      "The freshness probe read FAILED and nothing recorded it. supabase-js " +
+        "resolves a failed read AS A VALUE, so an unbound `error` makes a " +
+        "statement timeout indistinguishable from a draft that simply has no " +
+        "analytics row yet — the C-3 shape, at the last unchecked read in " +
+        "this file.",
+    ).toBe(1);
+
+    // ...and the resume degrades to a COLD START rather than to a terminal
+    // state. This half is the anti-over-refusal guard: the probe is an
+    // OPTIMISATION (skip the kickoff when the row is complete and fresh), so a
+    // transient blip on it must not end the wizard. A fix that threw here
+    // would pass the assertion above and fail this one.
+    expect(
+      fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/api/keys/sync"))
+        .length,
+      "A failed freshness probe must fall through to the kickoff POST — the " +
+        "same thing a cold start does. Refusing instead would be a " +
+        "self-inflicted outage on a read that only ever saves a round-trip.",
+    ).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  it("an ABSENT analytics row stays SILENT — an absence is not a failure", async () => {
+    // `.maybeSingle()` on zero rows: `data: null, error: null`. This is the
+    // ordinary first-time-draft path. It must produce no fault signal at all,
+    // or the log becomes noise and the distinction the fix exists to draw is
+    // erased from the other side.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installProbeClient({ data: null, error: null });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(
+        new Response(JSON.stringify({ error: "compute failed" }), {
+          status: 500,
+        }),
+      );
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await screen.findByTestId("error-envelope");
+
+    expect(
+      loggedReadFailures(errSpy),
+      "A genuinely absent analytics row was reported as a read failure. " +
+        "`maybeSingle()` answers no-rows with `error: null`; treating that as " +
+        "a fault re-labels every first-time draft as broken.",
+    ).toEqual([]);
+    expect(
+      fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/api/keys/sync"))
+        .length,
+    ).toBe(1);
+    errSpy.mockRestore();
+  });
+
+  it("a COMPLETE + FRESH row still takes the WIZ-05 skip — the probe's success path is untouched", async () => {
+    // The positive counterpart. Both assertions above are about what happens
+    // when the probe returns nothing usable; without this case an
+    // implementation that ignored `data` entirely would satisfy both.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    installProbeClient({
+      data: {
+        computation_status: "complete",
+        computed_at: new Date().toISOString(),
+      },
+      error: null,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+
+    render(<SyncPreviewStep {...baseProps} />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", {
+          name: /computing your verified factsheet/i,
+        }),
+      ).toBeInTheDocument(),
+    );
+
+    expect(
+      fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/api/keys/sync"))
+        .length,
+      "A COMPLETE + FRESH row must still skip the kickoff. If the freshness " +
+        "derivation moved behind the new error branch, this is what notices.",
+    ).toBe(0);
+    expect(loggedReadFailures(errSpy)).toEqual([]);
+    errSpy.mockRestore();
   });
 });

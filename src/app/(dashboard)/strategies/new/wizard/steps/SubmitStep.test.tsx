@@ -780,6 +780,141 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     ).toBeInTheDocument();
   });
 
+  // ============================================================
+  // Phase 140.4-12 / SEAMRIM-08 — THE TRANSLATION TABLE IS THE AUTHORITY.
+  //
+  // `140.3-01` added `VALIDATION_FAILED` and `RATE_LIMITED` to the ONE
+  // wire->wizard table (`SEAM_CODE_TO_WIZARD_CODE`). Neither is a member of
+  // this file's SECOND allow-list, `KNOWN_FINALIZE_CODES`, so a successful
+  // translation was overruled by an independently-maintained membership check
+  // and both collapsed back to UNKNOWN. The honest RATE_LIMITED copy — "the cap
+  // is ours, not your exchange's" — EXISTED AND WAS UNREACHABLE.
+  //
+  // The remedy deletes the second roster's JURISDICTION rather than widening
+  // it: a translated code is surfaced as translated, and `KNOWN_FINALIZE_CODES`
+  // keeps only its own domain (the wizard codes this app's OWN route mints).
+  // The membership check is NOT weakened — the negative control below proves an
+  // unrecognised wire code still resolves to UNKNOWN by both paths.
+  //
+  // ⚠️ ORACLE INDEPENDENCE: every expected sentence is a LITERAL typed here.
+  // Reading `WIZARD_ERROR_COPY[code]` on the expected side would agree with any
+  // reword, including a reword back to the dead end (validation hazard #6).
+  // ============================================================
+
+  it("[140.4-12] a RATE_LIMITED wire code renders the HONEST rate-limit copy — the cap is OURS", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "RATE_LIMITED",
+          human_message: "Too many requests.",
+          correlation_id: "corr-rl-1",
+        },
+        429,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // Funnel truth first: pre-fix this reads "UNKNOWN" — the measured proof
+    // that 140.3-01 shipped with zero user-visible effect for this code.
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("RATE_LIMITED");
+    expect(findWizardError()!.code).not.toBe("UNKNOWN");
+
+    // RATE_LIMITED's own title, typed as a literal.
+    expect(
+      await screen.findByText("You have reached our request limit."),
+    ).toBeInTheDocument();
+    // …and the load-bearing half of its cause: the limit is OURS.
+    expect(
+      screen.getByText(/the cap is ours, not your exchange's/i),
+    ).toBeInTheDocument();
+
+    // Both wrong renders are gone. Asserting only the presence of the new copy
+    // would still pass if the generic envelope rendered alongside it.
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("The exchange rate-limited this request."),
+      "C-5 measured the exchange-blaming copy emitted for OUR OWN limiter. " +
+        "This code is the honest alternative; it must not render beside it.",
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.4-12] a VALIDATION_FAILED wire code renders its own member, not UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { ok: false, code: "VALIDATION_FAILED", human_message: "bad shape" },
+        422,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("VALIDATION_FAILED");
+    expect(findWizardError()!.code).not.toBe("UNKNOWN");
+
+    expect(
+      await screen.findByText("We could not read that request."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+  });
+
+  it("[140.4-12] the NESTED python envelope's code is read — a top-level-only reader misses 21 codes", async () => {
+    // `body.detail.code` is the shape every `service_error()` answer carries.
+    // A reader that looks only at the top level answers `undefined` here, which
+    // is byte-identical to a body that carried no code at all.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          detail: {
+            code: "RATE_LIMITED",
+            dependency: null,
+            retryable: true,
+            detail: "Rate limit exceeded.",
+            correlation_id: "nested-rl-9c1f2a30-5b71-4e63-9d18-4a7c2e5f8b06",
+          },
+        },
+        429,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(
+      findWizardError()!.code,
+      "The nested envelope carried RATE_LIMITED and the render did not see " +
+        "it. The flat and nested shapes must produce the SAME state — the " +
+        "leaf that reads both already exists and is already imported here.",
+    ).toBe("RATE_LIMITED");
+
+    expect(
+      await screen.findByText("You have reached our request limit."),
+    ).toBeInTheDocument();
+  });
+
+  it("[140.4-12] NEGATIVE CONTROL — a real seam wire code with no wizard member still resolves to UNKNOWN", async () => {
+    // `SEAM_DEGRADED` is named in `SEAM_CODE_TO_WIZARD_CODE`'s own docblock as
+    // the code an IDENTITY rule (`code as WizardErrorCode`) would silently
+    // admit. It is a genuine wire code, not a garbled one, which is what makes
+    // it the sharp control: if this case ever goes green on the code itself,
+    // the explicit table has been replaced by a cast and the membership check
+    // has been deleted rather than re-scoped.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ ok: false, code: "SEAM_DEGRADED" }, 503),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("UNKNOWN");
+    expect(
+      await screen.findByText("Something went wrong."),
+    ).toBeInTheDocument();
+  });
+
   it("[140.3-15 / TS-20] a HOSTILE id is refused and the local one still renders", async () => {
     // On the app-global handlers `correlation_id` is
     // `request.headers.get("x-correlation-id")` \u2014 caller-supplied and echoed
