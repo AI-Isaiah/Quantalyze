@@ -10,6 +10,9 @@ import {
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — `captureToSentry` scrubs at its own chokepoint;
+// `console.*` has none, so the log site below wraps the caught value here.
+import { scrubSeamError } from "@/lib/seam-redaction";
 import {
   simulatorLimiter,
   checkLimit,
@@ -216,7 +219,7 @@ export async function POST(req: NextRequest) {
     // violation string (Python schema field names) and FastAPI 5xx detail to
     // authenticated allocators — the byte-identical defect F5 closed in the
     // sister /api/bridge route. Keep the detail server-side only.
-    console.error("[simulator] Simulation failed:", err);
+    console.error("[simulator] Simulation failed:", scrubSeamError(err));
     captureToSentry(err, {
       tags: { route: "api/simulator", op: "simulateAddCandidate" },
     });

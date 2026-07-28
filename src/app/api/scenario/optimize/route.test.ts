@@ -315,9 +315,18 @@ describe("POST /api/scenario/optimize", () => {
     expect(JSON.stringify(body)).not.toContain("boom-internal-detail");
     // ...but the operator MUST still get it. "Static body" must not be
     // satisfiable by discarding the diagnostic.
+    //
+    // 140.4-08 / SEAMRIM-06 — pinned to the SCRUBBED rendering. `expect.any(Error)`
+    // pinned the raw instance in place, so it failed on correct code once the
+    // site was wrapped. The replacement is strictly stronger: it pins that the
+    // value went through `scrubSeamError` (a string, not the Error) AND that
+    // the diagnosis survived the scrub. That second half is the A-10 non-drop
+    // check, and it is the only mechanism in this tree that reddens if someone
+    // "fixes" a future scrub finding by deleting the value instead — the source
+    // predicate scores a dropped value clean.
     expect(errorSpy).toHaveBeenCalledWith(
       "[scenario/optimize] unexpected error",
-      expect.any(Error),
+      expect.stringContaining("boom-internal-detail"),
     );
   });
 

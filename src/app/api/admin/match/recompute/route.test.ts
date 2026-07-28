@@ -298,8 +298,16 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(raw).not.toContain("boom");
     expect(raw).not.toContain("localhost");
     expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
-    // ...and the detail is not simply discarded — it goes to the server log.
-    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), leaky);
+    // ...and the detail is not simply discarded — it goes to the server log,
+    // SCRUBBED (140.4-08 / SEAMRIM-06). Same strengthening as the sibling
+    // route's, for the same reason: pinning the raw object pinned the leak in
+    // place, while pinning the scrubbed rendering pins BOTH that the value went
+    // through `scrubSeamError` and that the diagnosis survived — the A-10
+    // non-drop half, which the source predicate is structurally unable to see.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("boom with http://localhost:8002 secret detail"),
+    );
   });
 
   it("returns 500 with the same STATIC copy when recomputeMatch throws a non-Error value", async () => {

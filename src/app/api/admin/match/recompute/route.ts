@@ -17,6 +17,11 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // deliberately NOT duplicated here: two copies of a policy is how two policies
 // start. Read it before adding, moving or removing any capture in this file.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — the CONSOLE half, and it follows the sibling route
+// verbatim for the same reason the capture policy does. `captureToSentry`
+// scrubs at its own chokepoint; `console.*` has none, so every site standing
+// over the caught value wraps it here.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -133,7 +138,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
     // A timed-out Python round-trip is a gateway timeout, not a server fault.
     if (err instanceof AnalyticsTimeoutError) {
-      console.error("[api/admin/match/recompute] upstream timeout:", err);
+      console.error(
+        "[api/admin/match/recompute] upstream timeout:",
+        scrubSeamError(err),
+      );
       return NextResponse.json(
         { error: TIMEOUT_COPY },
         { status: 504, headers: NO_STORE_HEADERS },
@@ -169,8 +177,13 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     ) {
       // Status and machine code only — never the message, which is already
       // going to the client and would double the disclosure surface in the log.
+      //
+      // ⚠️ Both reads go through the leaf even though both are safe values —
+      // the reasoning is written out once, at the sibling site in
+      // `src/app/api/admin/match/eval/route.ts`, and is not duplicated here.
       console.error(
-        `[api/admin/match/recompute] upstream ${err.status} (${err.seamCode ?? "no code"})`,
+        `[api/admin/match/recompute] upstream ${scrubSeamError(err.status)} ` +
+          `(${scrubSeamError(err.seamCode ?? "no code")})`,
       );
       // 140.3-11 / TS-18 — `dependency` rides along so a 424 can be rendered as
       // the CALLER'S venue failing rather than as our outage. It is `null` on
@@ -198,7 +211,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     captureToSentry(err, {
       tags: { surface: "admin-match-recompute", step: "upstream-error" },
     });
-    console.error("[api/admin/match/recompute] error:", err);
+    console.error(
+      "[api/admin/match/recompute] error:",
+      scrubSeamError(err),
+    );
     return NextResponse.json(
       { error: GENERIC_COPY },
       { status: 500, headers: NO_STORE_HEADERS },

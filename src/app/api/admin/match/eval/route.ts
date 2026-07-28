@@ -16,6 +16,12 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // and stack, while re-creating the per-caller convention the chokepoint exists
 // to replace. See the CAPTURE POLICY docblock below.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — the CONSOLE half of the same rule. `captureToSentry`
+// scrubs at its own chokepoint (above); `console.*` has no chokepoint, so every
+// site standing over the caught value wraps it here. The two are not
+// alternatives: the Sentry call keeps the Error instance for grouping, the log
+// keeps a scrubbed rendering, and undici's header-inlining is covered on both.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -182,7 +188,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
     // A timed-out Python round-trip is a gateway timeout, not a server fault.
     if (err instanceof AnalyticsTimeoutError) {
-      console.error("[api/admin/match/eval] upstream timeout:", err);
+      console.error(
+        "[api/admin/match/eval] upstream timeout:",
+        scrubSeamError(err),
+      );
       return NextResponse.json(
         { error: TIMEOUT_COPY },
         { status: 504, headers: NO_STORE_HEADERS },
@@ -214,8 +223,20 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     ) {
       // Status and machine code only — never the message, which is already
       // going to the client and would double the disclosure surface in the log.
+      //
+      // ⚠️ BOTH READS GO THROUGH THE LEAF EVEN THOUGH BOTH ARE SAFE VALUES, and
+      // the reason is the guard, not the value. `status` is a `number` and
+      // `seamCode` a machine code from a closed set (`analytics-client.ts:66,78`),
+      // so the scrub is a rendering no-op on each — but the source guard
+      // (`seam-log-coverage.test.ts`) cannot know a type, and its allowlist is
+      // `retryAfterS` / `deadlineExceeded` / `code` only. The two other ways to
+      // clear it here are both worse: passing `scrubSeamError(err)` would put
+      // `err.message` — the thing this comment exists to keep OUT of the log —
+      // back in, and binding the reads to non-error-shaped locals would hide
+      // them behind the one-hop alias hole that plan 140.4-09 exists to close.
       console.error(
-        `[api/admin/match/eval] upstream ${err.status} (${err.seamCode ?? "no code"})`,
+        `[api/admin/match/eval] upstream ${scrubSeamError(err.status)} ` +
+          `(${scrubSeamError(err.seamCode ?? "no code")})`,
       );
       // 140.3-11 / TS-18 — `dependency` rides along so a 424 can be rendered as
       // the CALLER'S venue failing rather than as our outage. It is `null` on
@@ -242,7 +263,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       tags: { surface: "admin-match-eval", step: "upstream-error" },
       extra: { lookback_days: lookback },
     });
-    console.error("[api/admin/match/eval] upstream error:", err);
+    console.error(
+      "[api/admin/match/eval] upstream error:",
+      scrubSeamError(err),
+    );
     return NextResponse.json(
       { error: GENERIC_COPY },
       { status: 500, headers: NO_STORE_HEADERS },
