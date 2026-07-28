@@ -82,6 +82,29 @@ const SERVICE_DEPENDENCIES: readonly string[] = Object.freeze([
 /** The prefix every breaker key carries. Never interpolated from caller input. */
 const BREAKER_KEY_PREFIX = "breaker:";
 
+/**
+ * The shape a `correlation_id` must have before it may be DISPLAYED.
+ *
+ * ⚠️ HAND-TYPED HERE, DUPLICATING `CORRELATION_ID_SHAPE` in
+ * `src/lib/correlation-id.ts`, and the duplication is forced rather than lazy:
+ * that module opens with `import "server-only"` and `import { headers } from
+ * "next/headers"`, so this leaf can never import it without ending the two
+ * properties its purity test exists to defend. The duplication is also the
+ * falsifier — two independent literals can be compared; one shared literal
+ * cannot disagree with itself.
+ *
+ * ⚠️ IT IS A GUARD, NOT DECORATION. On the app-global handlers the value is
+ * `request.headers.get("x-correlation-id")` (`analytics-service/main.py`) —
+ * CALLER-SUPPLIED and echoed straight back — and a consumer renders it VERBATIM
+ * into the DOM and copies it to the user's clipboard in the `QUANTALYZE_DIAG`
+ * block. The allowlist excludes CR, LF, NUL and every whitespace and control
+ * character, so a hostile value cannot split a log record or smuggle markup;
+ * the 128-char bound exists because a value arriving over the wire has no
+ * length of its own. A UUID (36), a `wizard:<uuid>` (43) and a 32-hex Sentry
+ * trace id all pass cleanly, so the bound is a bound and not a ban.
+ */
+const CORRELATION_ID_SHAPE = /^[A-Za-z0-9._:-]{1,128}$/;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -255,6 +278,61 @@ export function seamDependencyName(body: unknown): string | null {
   // Ours, not the caller's — see the defence-in-depth note above.
   if (SERVICE_DEPENDENCIES.includes(dependency)) return null;
   return dependency;
+}
+
+/**
+ * The upstream `correlation_id`, safe to DISPLAY — the diagnostic 140.1-04
+ * relocated rather than deleted.
+ *
+ * 140.3-15 / TS-20, and it is the FIFTH member of this leaf's exported surface,
+ * added on EXACTLY the mechanism `140.3-11` recorded for `seamDependencyName`
+ * one plan earlier: ONE narrow, purpose-named extractor over the private
+ * `nestedDetail`, with `EXPECTED_EXPORTS` in `seam-discriminator.purity.test.ts`
+ * edited in the SAME commit. That plan rejected exporting `nestedDetail` itself
+ * (it hands every consumer the whole envelope and makes the next hand-rolled
+ * `body.detail` branch a one-liner) and rejected a generic
+ * `seamDetailField(body, name)` getter (an export set that cannot say WHICH
+ * fields are reachable guards nothing). Reusing its decision is what keeps ONE
+ * reader on record for this leaf instead of two rival ones.
+ *
+ * WHY IT EXISTS. Plan `140.1-04` moved the diagnostic OUT of the seam body — it
+ * had been leaking raw exception text including table names, row payloads and
+ * DSNs — and replaced it with this id. It is the cheapest support channel this
+ * system will ever get, and if nobody renders it the diagnostic was not
+ * relocated, it was deleted.
+ *
+ * ⚠️ IT MIRRORS `seamErrorCode`'s BOTH-SHAPE READ, and that is the whole point:
+ * `correlation_id` is NESTED inside `service_error` envelopes (§2) and
+ * TOP-LEVEL on the flat ones (§2.1 — `main.py`'s 422/429 handlers and
+ * `process_key.py`'s own error envelopes). A nested-only reader would answer
+ * `null` on every body from the other family, and a `null` here is
+ * indistinguishable from a correctly-absent value — which is precisely how
+ * `140.3-11`'s M77c stayed GREEN across 3163 tests.
+ *
+ * ⚠️ IT IS FOR DISPLAY ONLY and is consumed for NO breaker decision (TS-16).
+ * `seamBreakerVerdict` below does not call it, and must not: a breaker key may
+ * only ever come from the closed service set (T-140-01), and this value is
+ * caller-influenceable on the app-global handlers.
+ *
+ * Returns `null` rather than throwing on every malformed shape and on every
+ * value that fails `CORRELATION_ID_SHAPE`: a caller that gets `null` has
+ * learned "the wire named no usable id" and must fall back to its own.
+ */
+export function seamCorrelationId(body: unknown): string | null {
+  const detail = nestedDetail(body);
+  const raw =
+    detail !== null
+      ? detail.correlation_id
+      : isPlainObject(body)
+        ? body.correlation_id
+        : undefined;
+  if (typeof raw !== "string") return null;
+  // NOT trimmed first. `correlation-id.ts` trims because it is normalising an
+  // INBOUND header before re-broadcasting it; here the value is already a body
+  // field and a surrounding space is a sign the id is not what it claims to be,
+  // so the honest answer is to fall back rather than to repair it.
+  if (!CORRELATION_ID_SHAPE.test(raw)) return null;
+  return raw;
 }
 
 /**

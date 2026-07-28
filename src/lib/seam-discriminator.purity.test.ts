@@ -69,7 +69,7 @@ const LEAF_CODE = stripComments(
 /**
  * The leaf's exported surface, typed HERE as a literal.
  *
- * FOUR members, and deliberately a SET rather than a lower bound. The closed
+ * FIVE members, and deliberately a SET rather than a lower bound. The closed
  * service-dependency vocabulary and the global-key literal are NOT exported and
  * must not become so: everything exported from a leaf is browser-reachable and
  * survives every wholesale seam mock, and a consumer that imported the
@@ -85,14 +85,25 @@ const LEAF_CODE = stripComments(
  * `140.3-01` closed. A generic getter would have made this set unable to say
  * WHICH fields are reachable, which is the only thing it is for.
  *
- * ⚠️ `140.3-15` needs `correlation_id` from the same envelope. It must add a
- * FIFTH narrow member here (`seamCorrelationId`) built on the same private
- * `nestedDetail`, NOT a private reader of its own and NOT a widening of this
- * one. Two plans each inventing a reader for one leaf is the drift this
- * programme exists to close.
+ * ✅ `140.3-15` / TS-20 DID EXACTLY THAT. `seamCorrelationId` is the FIFTH
+ * member, built on the same private `nestedDetail`, mirroring `seamErrorCode`'s
+ * both-shape read because `correlation_id` is TOP-LEVEL on the app-global flat
+ * envelopes and NESTED on `service_error`. It is neither a private reader of
+ * its own nor a widening of `seamDependencyName`, so there is ONE recorded
+ * mechanism for this leaf rather than two rival ones — which is the drift this
+ * programme exists to close. The instruction above is preserved as the record
+ * of the decision it was routed under.
+ *
+ * ⚠️ The value it returns is rendered VERBATIM into a user's DOM and copied to
+ * their clipboard, and on the app-global handlers it originates as a
+ * caller-supplied request header. Its SHAPE guard lives at its declaration in
+ * the leaf and duplicates `CORRELATION_ID_SHAPE` in `src/lib/correlation-id.ts`
+ * by necessity — that module imports `server-only` and `next/headers`, both of
+ * which this file's first four assertions forbid here.
  */
 const EXPECTED_EXPORTS: string[] = [
   "seamBreakerVerdict",
+  "seamCorrelationId",
   "seamDependencyName",
   "seamErrorCode",
   "seamHumanMessage",

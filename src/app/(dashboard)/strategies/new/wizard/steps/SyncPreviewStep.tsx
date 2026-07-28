@@ -20,6 +20,10 @@ import {
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
+// 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
+// reader for this envelope's fields; a hand-rolled `failure.detail?.correlation_id`
+// branch here is the drift class 140.3-01 closed.
+import { seamCorrelationId } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
@@ -444,6 +448,22 @@ export function SyncPreviewStep({
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
   // every sync request, so a copied envelope id matches server logs.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 140.3-15 / TS-20 — the UPSTREAM correlation id, when the failure carried
+   * one. `/api/keys/sync` does `if (!result.ok) return result.response`, so
+   * `process-key-client`'s envelope — including the id the ANALYTICS SERVICE
+   * logged — reaches this component verbatim. `correlationId` above is minted
+   * in the browser and memoized per PAGE LOAD, so on a seam failure it is the
+   * weaker of the two for support to search on.
+   *
+   * PER-FAILURE state. Only the kickoff arm has a body to read it from; every
+   * other error path in this component sets a code with no upstream id, and the
+   * retry handler clears it, so a stale id can never outlive the failure it
+   * belongs to.
+   */
+  const [upstreamCorrelationId, setUpstreamCorrelationId] = useState<
+    string | null
+  >(null);
   // useRef initializer must be a non-impure value for React Compiler's
   // purity rule. Real start time is set in the mount effect.
   const startedAtRef = useRef<number>(0);
@@ -590,8 +610,15 @@ export function SyncPreviewStep({
           // touch it" is exactly how a check stops discriminating. (Third
           // occurrence of that trap in this phase — see 140.3-09's FINDING-C.)
           const advertisedWait = parseRetryAfterSeconds(res.headers);
+          // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
+          // shapes (top-level on the flat envelopes, nested inside
+          // `service_error`) and refuses a value that is not correlation-id
+          // shaped. Set from the SAME body as the code above, so the id and the
+          // state can never describe different failures.
+          const upstreamId = seamCorrelationId(failure);
           if (mountedRef.current) {
             setRetryAfterSeconds(advertisedWait);
+            setUpstreamCorrelationId(upstreamId);
             setErrorCode(surfaced);
             setPhase("gate_failed");
           }
@@ -1235,8 +1262,15 @@ export function SyncPreviewStep({
     }
   }, [retrying, strategyId]);
 
+  // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
+  // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
+  // upstream id WINS when the wire carried a usable one; today's browser-minted
+  // id remains the fallback, so nothing that previously rendered an id stops
+  // doing so. No second field was added — the render slot expects exactly one
+  // value, and two ids in a diagnostics block is a support ticket asking which
+  // one to search.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId, {
+    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId, {
         trades: gateResult?.detail?.trades as number | undefined,
         days: gateResult?.detail?.days as number | undefined,
         computationError: computationError,
@@ -1263,6 +1297,10 @@ export function SyncPreviewStep({
   const handleKickoffRetry = useCallback(() => {
     setErrorCode(null);
     setRetryAfterSeconds(null);
+    // 140.3-15 / TS-20 — cleared with the code it belongs to. Leaving it would
+    // let a second failure on a DIFFERENT path render the first one's id, which
+    // is worse than rendering none: it points support at the wrong request.
+    setUpstreamCorrelationId(null);
     setPhase("kicking_off");
     setKickoffNonce((n) => n + 1);
   }, []);

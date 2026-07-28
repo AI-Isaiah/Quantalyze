@@ -11,6 +11,10 @@ import {
   type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
+// 140.3-15 / TS-20 — the dependency-free leaf, imported directly. It is the ONE
+// reader for this envelope's fields; a hand-rolled `data.detail?.correlation_id`
+// branch here is the drift class 140.3-01 closed.
+import { seamCorrelationId } from "@/lib/seam-discriminator";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SyncPreviewSnapshot } from "./SyncPreviewStep";
@@ -62,10 +66,27 @@ export function SubmitStep({
   // UX-02: the wizard session correlation id — the SAME id wizardFetch sends on
   // the finalize-wizard request, so a copied envelope id matches server logs.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 140.3-15 / TS-20 — the UPSTREAM correlation id, when the failure carried
+   * one. `finalize-wizard` forwards the seam envelope verbatim, so the id the
+   * ANALYTICS SERVICE logged arrives here; `correlationId` above is minted in
+   * the browser and memoized per PAGE LOAD, so on a seam failure it is the
+   * weaker of the two for support to search on.
+   *
+   * PER-FAILURE state, reset on every submit alongside `errorCode`, so a second
+   * attempt can never render the first attempt's id.
+   */
+  const [upstreamCorrelationId, setUpstreamCorrelationId] = useState<
+    string | null
+  >(null);
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
     setErrorCode(null);
+    // 140.3-15 / TS-20 — cleared with the code it belongs to. Leaving it would
+    // let a retry render the PREVIOUS failure's id, which is worse than
+    // rendering none: it points support at the wrong request.
+    setUpstreamCorrelationId(null);
     setSubmitting(true);
 
     try {
@@ -190,6 +211,12 @@ export function SubmitStep({
             ? (candidate as WizardErrorCode)
             : "UNKNOWN";
         setErrorCode(surfaced);
+        // 140.3-15 / TS-20 — read through the leaf, which handles BOTH wire
+        // shapes (top-level on the flat envelopes, nested inside
+        // `service_error`) and refuses a value that is not correlation-id
+        // shaped. Set beside the code, from the SAME body, so the two can never
+        // describe different failures.
+        setUpstreamCorrelationId(seamCorrelationId(data));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "submit",
@@ -224,8 +251,15 @@ export function SubmitStep({
     }
   }, [submitting, strategyId, metadata, onSubmitted, wizardSessionId, entryContext]);
 
+  // 140.3-15 / TS-20 — ONE id field, the one `ErrorEnvelope` already renders and
+  // `buildDiagBlock` already copies into the QUANTALYZE_DIAG payload. The
+  // upstream id WINS when the wire carried a usable one, and today's browser-
+  // minted id remains the fallback, so nothing that previously rendered an id
+  // stops doing so. No second field was added: the render slot expects exactly
+  // one value, and two ids in a diagnostics block is a support ticket asking
+  // which one to search.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId)
+    ? buildEnvelope(errorCode, upstreamCorrelationId ?? correlationId)
     : null;
 
   const summaryMetrics: FactsheetPreviewMetric[] = snapshot.metrics;
