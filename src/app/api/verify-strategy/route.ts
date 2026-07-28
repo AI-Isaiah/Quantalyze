@@ -4,7 +4,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { assertSameOrigin } from "@/lib/csrf";
 import { UI_EXCHANGE_CODES } from "@/lib/utils";
 import { isSfoxEnabledServer, type SupportedExchange } from "@/lib/closed-sets";
-import { publicIpLimiter, checkLimit, getClientIp } from "@/lib/ratelimit";
+import {
+  publicIpLimiter,
+  checkLimit,
+  getClientIp,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { postProcessKey } from "@/lib/process-key-client";
 import { createClient } from "@/lib/supabase/server";
 // 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
@@ -53,10 +58,17 @@ export async function POST(req: NextRequest) {
   const ip = getClientIp(req.headers);
   const rl = await checkLimit(publicIpLimiter, `verify-strategy:${ip}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests" },
-      { status: 429, headers: { "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — the 503-vs-429 decision is the CHOKEPOINT'S, not
+    // this route's. Before this, every deny here was a 429, so an Upstash
+    // outage told an anonymous visitor evaluating us for the first time that
+    // THEY were being throttled. `rateLimitDenyJson` answers 503 on
+    // `ratelimit_misconfigured` so the outage reaches the canary instead.
+    //
+    // No options: this route's genuine 429 body and headers ALREADY are the
+    // builder's defaults — `{error: "Too many requests"}` with `Retry-After`
+    // and nothing else (it is the one seam route with no NO_STORE_HEADERS).
+    // Byte-identical by construction rather than by transcription.
+    return rateLimitDenyJson(rl);
   }
 
   let body: Record<string, unknown>;

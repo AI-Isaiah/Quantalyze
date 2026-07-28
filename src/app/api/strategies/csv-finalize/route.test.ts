@@ -30,12 +30,30 @@ vi.mock("@/lib/api/withAuth", () => ({
 }));
 
 const checkLimitMock = vi.hoisted(() =>
-  vi.fn(async () => ({ success: true, retryAfter: 0 })),
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
+  vi.fn(
+    async (): Promise<{
+      success: boolean;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    }> => ({ success: true, retryAfter: 0 }),
+  ),
 );
-vi.mock("@/lib/ratelimit", () => ({
-  csvValidateLimiter: {},
-  checkLimit: checkLimitMock,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). The pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision —
+// a hand-written double that always answered 429 would make this file green on
+// the exact bug the plan closes.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    csvValidateLimiter: {},
+    checkLimit: checkLimitMock,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 // rpc mock records (name, args); default returns a valid strategy_id so both
 // the finalize_csv_strategy and persist_csv_daily_returns calls succeed.
@@ -167,6 +185,70 @@ describe("POST /api/strategies/csv-finalize — CONTRIB-02 private-by-default co
       ok: true,
       status: 200,
       body: { ok: true, strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
+    });
+  });
+
+  /**
+   * 140.4-13 / SEAMRIM-05 — the limiter deny arm, all three outcomes.
+   *
+   * This is the CSV submit step. A 429 here reads as "you are submitting too
+   * fast"; during an Upstash outage it was emitted on the FIRST submit, and the
+   * user's next move — retry — could not succeed either.
+   */
+  describe("[140.4-13 / SEAMRIM-05] the limiter deny arm", () => {
+    it("ratelimit_misconfigured → 503 in the SAME v0 envelope, code SEAM_MISCONFIGURED", async () => {
+      checkLimitMock.mockResolvedValue({
+        success: false,
+        retryAfter: 60,
+        reason: "ratelimit_misconfigured",
+      });
+
+      const res = await POST(makeRequest(validBody()));
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.code).toBe("SEAM_MISCONFIGURED");
+      expect(body.code).not.toBe("CSV_RATE_LIMIT");
+      expect(body.human_message).toContain("fault on our side");
+      // The correlation_id is the REAL per-request one, not the `null` the
+      // csv-validate envelope carries — that difference is pre-existing and
+      // must survive the adoption.
+      expect(typeof body.correlation_id).toBe("string");
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(postProcessKeyMock).not.toHaveBeenCalled();
+      expect(rpcCall("finalize_csv_strategy")).toBeUndefined();
+    });
+
+    it("a genuine throttle → 429 with the BYTE-IDENTICAL v0 envelope", async () => {
+      checkLimitMock.mockResolvedValue({ success: false, retryAfter: 25 });
+
+      const res = await POST(makeRequest(validBody()));
+
+      expect(res.status).toBe(429);
+      const body = await res.json();
+      // Hand-typed from the pre-adoption source — all five fields, same order.
+      expect(body.ok).toBe(false);
+      expect(body.code).toBe("CSV_RATE_LIMIT");
+      expect(body.human_message).toBe(
+        "Too many requests. Wait a minute and try again.",
+      );
+      expect(body.debug_context).toEqual({});
+      expect(typeof body.correlation_id).toBe("string");
+      expect(res.headers.get("Retry-After")).toBe("25");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(postProcessKeyMock).not.toHaveBeenCalled();
+    });
+
+    it("success → the deny arm does not fire", async () => {
+      checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+
+      const res = await POST(makeRequest(validBody()));
+
+      expect(res.status).not.toBe(429);
+      expect(res.status).not.toBe(503);
+      expect(postProcessKeyMock).toHaveBeenCalledTimes(1);
     });
   });
 

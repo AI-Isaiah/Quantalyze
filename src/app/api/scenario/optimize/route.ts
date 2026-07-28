@@ -9,7 +9,7 @@ import {
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
@@ -150,10 +150,21 @@ export async function POST(req: NextRequest) {
   // one of the caller's own tokens.
   const rl = await checkLimit(userActionLimiter, `scenario-optimize:${user.id}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many optimize requests. Try again shortly." },
-      { status: 429, headers: NO_STORE_HEADERS },
-    );
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503.
+    //
+    // ⚠️ `retryAfterHeader: "misconfigured-only"` IS NOT A STYLE CHOICE. This is
+    // the ONE seam route whose 429 carries no `Retry-After` today, and the
+    // measured contract is what this plan must preserve — its brief is the
+    // 503 SPLIT, not a header audit. The 503 still carries one, because the
+    // canary that the fail-CLOSED status exists to reach needs to know when to
+    // look again. Adding `Retry-After` to the 429 is a defensible improvement
+    // and it belongs to whoever owns this route's response contract.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      retryAfterHeader: "misconfigured-only",
+      throttledBody: { error: "Too many optimize requests. Try again shortly." },
+    });
   }
 
   try {

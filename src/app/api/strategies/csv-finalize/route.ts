@@ -3,7 +3,7 @@ import type { User } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
-import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
+import { csvValidateLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -1066,16 +1066,35 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-csv-finalize:${user.id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      {
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503.
+    //
+    // ⚠️ THE 429 STAYS THE CSV v0 ENVELOPE, ALL FIVE FIELDS IN THE SAME ORDER.
+    // `CsvSubmitStep` reads `human_message` off the wire and reports `code` into
+    // the wizard_error funnel; flattening this onto the builder's
+    // `{error: "…"}` default would blank the rendered sentence AND lose the
+    // funnel's discriminator. The 503 keeps the SAME envelope shape — so the
+    // step renders an honest sentence about OUR configuration rather than
+    // falling back to the generic CSV copy — with `SEAM_MISCONFIGURED`, an
+    // existing WizardErrorCode, rather than a newly minted one.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: {
         ok: false,
         code: "CSV_RATE_LIMIT",
         human_message: "Too many requests. Wait a minute and try again.",
         debug_context: {},
         correlation_id,
       },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+      misconfiguredBody: {
+        ok: false,
+        code: "SEAM_MISCONFIGURED",
+        human_message:
+          "Our rate limiter is unavailable, so we stopped before submitting anything. This is a fault on our side, not your file. Nothing was saved — try again in a minute.",
+        debug_context: {},
+        correlation_id,
+      },
+    });
   }
 
   // CONTRIB-02 (Phase 110) — a contribution finalizes to an owner-only

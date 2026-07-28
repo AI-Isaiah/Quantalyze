@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, keysSyncUserLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  keysSyncUserLimiter,
+  checkLimit,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -113,22 +118,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // synonym. Each site is pinned by its own case, driven through its own
   // bucket key with its own wait, so a code dropped from one does not hide
   // behind the other's assertion.
+  //
+  // ⚠️ 140.4-13 / SEAMRIM-05 — AND THE SAME "TWO DISTINCT SITES" WARNING NOW
+  // APPLIES TO THE 503 SPLIT. Both arms deny through `rateLimitDenyJson`, and
+  // both are pinned by their own case driven through their own bucket. A guard
+  // that only asked "does this FILE mention the builder" would stay green with
+  // the second arm reverted to an inlined 429 — which is exactly the mutation
+  // this plan's ledger row M105 runs.
+  //
+  // The 429 body and headers below are UNCHANGED: `{error, code:"RATE_LIMITED"}`
+  // in that key order, with NO_STORE_HEADERS + Retry-After. The `code` is a live
+  // contract — `SyncPreviewStep`'s KNOWN_KICKOFF_CODES maps `RATE_LIMITED` — so
+  // flattening it onto the builder's default body would have been a regression,
+  // not a simplification.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
-    return NextResponse.json(
-      { error: "Too many requests", code: "RATE_LIMITED" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
-    );
+    return rateLimitDenyJson(userRl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
   const rl = await checkLimit(
     userActionLimiter,
     `keys-sync:${user.id}:${strategy_id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests", code: "RATE_LIMITED" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   // Verify ownership via the user-scoped client so we get a clean

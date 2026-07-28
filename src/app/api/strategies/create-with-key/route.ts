@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { validateKey, encryptKey } from "@/lib/analytics-client";
 import { createClient } from "@/lib/supabase/server";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { STRATEGY_NAMES } from "@/lib/constants";
 import { isUuid } from "@/lib/utils";
 import {
@@ -225,13 +225,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-create-with-key:${user.id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { code: "KEY_RATE_LIMIT", error: "Too many requests" },
-      {
-        status: 429,
-        headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503 instead of the 429 below.
+    //
+    // ⚠️ THIS IS THE SHARPEST SITE IN THE CLASS. `KEY_RATE_LIMIT`'s copy tells
+    // the user the throttle is "a transient, exchange-side throttle and not a
+    // problem with your key". While Upstash is down that was emitted to EVERY
+    // user on their FIRST click — our outage, blamed on their exchange. The
+    // 429 body is UNCHANGED (`{code, error}` in that order, NO_STORE_HEADERS +
+    // Retry-After) because it is the correct answer to a REAL throttle; what
+    // changed is that a misconfiguration no longer reaches it.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      misconfiguredBody: {
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
       },
-    );
+    });
   }
 
   // F6 (H-0304/H-0311): idempotency fence BEFORE the expensive Railway

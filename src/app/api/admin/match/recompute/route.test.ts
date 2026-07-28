@@ -100,10 +100,28 @@ vi.mock("@/lib/admin", () => ({
   isAdminUser: async () => adminFlag.isAdmin,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  adminActionLimiter: {},
-  checkLimit: async () => ({ success: true, retryAfter: 0 }),
+/**
+ * 140.4-13 / SEAMRIM-05 — the limiter verdict this file drives the route with.
+ * Hoisted so the factory closes over it; default is the ALLOW every pre-existing
+ * test was written against, and the SEAMRIM-05 describe restores it.
+ */
+const limiter = vi.hoisted(() => ({
+  result: { success: true, retryAfter: 0 } as
+    | { success: true; retryAfter?: number }
+    | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
 }));
+
+// ⚠️ EXTENDED, NOT REPLACED. The pure helpers come from `importActual` so this
+// mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    adminActionLimiter: {},
+    checkLimit: async () => limiter.result,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 // Capture every call to recomputeMatch so we can assert the third arg.
 const recomputeCalls: Array<{
@@ -236,6 +254,67 @@ describe("POST /api/admin/match/recompute — actor binding (C-PR5-01)", () => {
     const res = await POST(buildPostRequest({ force: false }));
     expect(res.status).toBe(400);
     expect(recomputeCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * 140.4-13 / SEAMRIM-05 — the ADMIN auth shape of the three this plan pins
+ * behaviourally.
+ *
+ * ⚠️ WHY THE ADMIN SURFACE MATTERS HERE AND NOT LESS. This route already maps a
+ * breaker trip to 503, so an operator reading the logs during an outage sees
+ * 503s from the seam and — until this plan — 429s from the limiter beside it,
+ * for the SAME incident. The limiter runs FIRST, so during an Upstash outage
+ * the breaker never even gets to trip: the 429 was the only signal, and it says
+ * "an admin is clicking too fast".
+ */
+describe("[140.4-13 / SEAMRIM-05] POST /api/admin/match/recompute — the limiter deny arm", () => {
+  async function postAsAdmin() {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest({ allocator_id: "alloc-1", force: false }));
+  }
+
+  afterEach(() => {
+    limiter.result = { success: true, retryAfter: 0 };
+    vi.restoreAllMocks();
+  });
+
+  it("ratelimit_misconfigured → 503, not a 429 that reads as admin over-clicking", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const res = await postAsAdmin();
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(recomputeCalls).toHaveLength(0);
+  });
+
+  it("a genuine throttle → 429 with a BYTE-IDENTICAL body and headers", async () => {
+    limiter.result = { success: false, retryAfter: 42 };
+    const res = await postAsAdmin();
+
+    expect(res.status).toBe(429);
+    // Hand-typed from the pre-adoption source, not read back off the builder.
+    expect(await res.json()).toEqual({ error: "Too many requests" });
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(recomputeCalls).toHaveLength(0);
+  });
+
+  it("success → the deny arm does not fire", async () => {
+    limiter.result = { success: true, retryAfter: 0 };
+    const res = await postAsAdmin();
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(recomputeCalls.length).toBeGreaterThan(0);
   });
 });
 

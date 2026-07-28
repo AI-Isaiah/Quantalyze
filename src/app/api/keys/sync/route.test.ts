@@ -71,9 +71,16 @@ const {
   // per-user ceiling short-circuits before the per-strategy bucket is read),
   // so a per-bucket override is what lets each site be driven — and reddened —
   // on its own.
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
   rateLimitByBucket: {} as Record<
     string,
-    { success: boolean; retryAfter: number }
+    {
+      success: boolean;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    }
   >,
   ownershipResult: {
     // 89-02: api_key_id joins the ownership row — null identifies a POSSIBLE
@@ -254,20 +261,30 @@ vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: mockPostProcessKey,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: null,
-  keysSyncUserLimiter: null,
-  checkLimit: (...args: unknown[]) => {
-    checkLimitMock(...args);
-    // 140.3-10: a per-bucket override wins over the shared default, so a test
-    // can let the per-user ceiling PASS and deny only the per-strategy bucket
-    // — the only way to reach the second throttle site at all. With no
-    // override registered the behaviour is byte-identical to before.
-    const bucket = typeof args[1] === "string" ? args[1] : "";
-    const override = rateLimitByBucket[bucket];
-    return Promise.resolve(override ?? rateLimitResult);
-  },
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+// The per-bucket override below is what makes the TWO arms independently
+// drivable, which 140.4-13's ledger row M105 depends on.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: null,
+    keysSyncUserLimiter: null,
+    checkLimit: (...args: unknown[]) => {
+      checkLimitMock(...args);
+      // 140.3-10: a per-bucket override wins over the shared default, so a test
+      // can let the per-user ceiling PASS and deny only the per-strategy bucket
+      // — the only way to reach the second throttle site at all. With no
+      // override registered the behaviour is byte-identical to before.
+      const bucket = typeof args[1] === "string" ? args[1] : "";
+      const override = rateLimitByBucket[bucket];
+      return Promise.resolve(override ?? rateLimitResult);
+    },
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
@@ -1224,6 +1241,120 @@ describe("[140.3-10] POST /api/keys/sync — a code on every arm, and the TRAP-3
           "fact, one token, across both routes.",
       ).toBe("GATE_DRAFT_GONE");
       expect(body.error).toBe("Strategy not found");
+    });
+  });
+
+  /**
+   * ══════════════════════════════════════════════════════════════════
+   * 140.4-13 / SEAMRIM-05 — a limiter MISCONFIGURATION is not a throttle.
+   *
+   * ⚠️ THE PER-ARM SPLIT IS THE POINT, AND IT IS WHY THIS PLAN'S LEDGER ROW
+   * MUTATES ARM 4 SPECIFICALLY. `keys/sync` has TWO `checkLimit` sites. A guard
+   * — or a reviewer — asking "does this FILE route its deny through
+   * `rateLimitDenyJson`?" stays satisfied with the second arm reverted to an
+   * inlined 429, because the first arm still does. Only a case that drives that
+   * specific bucket sees it. Each arm below is denied ALONE, with a DIFFERENT
+   * `Retry-After`, so neither case can be satisfied by the other site answering.
+   *
+   * The AUTHENTICATED auth shape of the three this plan pins behaviourally.
+   * ══════════════════════════════════════════════════════════════════
+   */
+  describe("[140.4-13 / SEAMRIM-05] the limiter's misconfiguration answers 503, per ARM", () => {
+    it("ARM 3 (per-user ceiling) — ratelimit_misconfigured → 503, not 429", async () => {
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: false,
+        retryAfter: 60,
+        reason: "ratelimit_misconfigured",
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(
+        res.status,
+        "Our Upstash store being unreachable is OUR outage. A 429 here tells " +
+          "the allocator they are syncing too fast, which is false, and hides " +
+          "the outage from the canary that watches 5xx.",
+      ).toBe(503);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(res.headers.get("Retry-After")).toBe("60");
+      const body = await res.json();
+      expect(body.code).toBe("SEAM_MISCONFIGURED");
+      // The per-strategy bucket was never consulted — this is ARM 3 answering.
+      expect(checkLimitMock).toHaveBeenCalledTimes(1);
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+    });
+
+    it("ARM 4 (per-(user, strategy) bucket) — ratelimit_misconfigured → 503, not 429", async () => {
+      // Ceiling PASSES; only the second bucket is misconfigured. This case is
+      // reachable ONLY through the second call site.
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: false,
+        retryAfter: 60,
+        reason: "ratelimit_misconfigured",
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(
+        res.status,
+        "The SECOND arm. Reverting only this call site to an inlined 429 " +
+          "leaves every file-level 'does it mention rateLimitDenyJson' check " +
+          "green — that is exactly the mutation row M105 runs.",
+      ).toBe(503);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      const body = await res.json();
+      expect(body.code).toBe("SEAM_MISCONFIGURED");
+      expect(checkLimitMock).toHaveBeenCalledTimes(2);
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+    });
+
+    it("ARM 4 — a GENUINE throttle still answers 429 with its own byte-identical body", async () => {
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: false,
+        retryAfter: 9,
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("9");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      // Hand-typed from the pre-adoption source — `{error, code}` in THAT key
+      // order — not read back off the builder.
+      expect(await res.json()).toEqual({
+        error: "Too many requests",
+        code: "RATE_LIMITED",
+      });
+    });
+
+    it("both buckets allowing → neither deny arm fires and the sync runs", async () => {
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).not.toBe(429);
+      expect(res.status).not.toBe(503);
+      expect(checkLimitMock).toHaveBeenCalledTimes(2);
+      expect(mockPostProcessKey).toHaveBeenCalled();
     });
   });
 
