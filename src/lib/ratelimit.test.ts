@@ -3,7 +3,10 @@ import {
   checkLimit,
   getClientIp,
   isRateLimitMisconfigured,
+  rateLimitDenyJson,
+  rateLimitDenyText,
   sanitizeInetForDb,
+  type RateLimitDenyOptions,
 } from "./ratelimit";
 import type { Ratelimit } from "@upstash/ratelimit";
 
@@ -437,6 +440,187 @@ describe("isRateLimitMisconfigured", () => {
         reason: "ratelimit_misconfigured",
       }),
     ).toBe(true);
+  });
+});
+
+/**
+ * SEAMRIM-05 — the deny chokepoint, EXTENDED so a route can keep its own body
+ * and headers while the artefact keeps the 503-vs-429 decision.
+ *
+ * ⚠️ WHY THE EXTENSION EXISTS RATHER THAN A BLANKET ADOPTION. Measured on the
+ * untouched tree, four seam routes' genuine 429s are NOT interchangeable with
+ * this builder's fixed body: `strategies/create-with-key` and
+ * `strategies/composite/add-key` carry `code: "KEY_RATE_LIMIT"`, `keys/sync`
+ * carries `code: "RATE_LIMITED"` at BOTH of its arms, `strategies/csv-validate`
+ * and `strategies/csv-finalize` carry the CSV v0 envelope, and
+ * `scenario/optimize` carries a bespoke sentence with NO `Retry-After` at all.
+ * Converging them onto the fixed body would drop those `code`s (which the wizard
+ * branches on) and drop `NO_STORE_HEADERS` (re-opening a cache-contract
+ * finding). `bridge/route.ts`'s own docblock says exactly this. So the artefact
+ * owns the DECISION and the route owns its BODY.
+ *
+ * ⚠️ THE NEGATIVE CASES BELOW ARE THE POINT. An options bag that let a caller
+ * pick its own status would re-open the finding at twelve call sites while
+ * looking, to a "the option is honoured" criterion, like a pass.
+ */
+describe("[SEAMRIM-05] rateLimitDenyJson / rateLimitDenyText — the deny chokepoint", () => {
+  const MISCONFIGURED = {
+    success: false as const,
+    retryAfter: 60,
+    reason: "ratelimit_misconfigured" as const,
+  };
+  const THROTTLED = { success: false as const, retryAfter: 42 };
+
+  /** Header names present on a response, lowercased, minus the ones NextResponse stamps itself. */
+  function ownHeaderNames(res: Response): string[] {
+    return [...res.headers.keys()]
+      .map((k) => k.toLowerCase())
+      .filter((k) => k !== "content-type")
+      .sort();
+  }
+
+  describe("no options — byte-identical to the pre-extension contract", () => {
+    it("misconfigured → 503, the fixed body, and Retry-After as its ONLY own header", async () => {
+      const res = rateLimitDenyJson(MISCONFIGURED);
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+      expect(res.headers.get("Retry-After")).toBe("60");
+      expect(ownHeaderNames(res)).toEqual(["retry-after"]);
+    });
+
+    it("throttled → 429, the fixed body, and Retry-After as its ONLY own header", async () => {
+      const res = rateLimitDenyJson(THROTTLED);
+      expect(res.status).toBe(429);
+      expect(await res.json()).toEqual({ error: "Too many requests" });
+      expect(res.headers.get("Retry-After")).toBe("42");
+      expect(ownHeaderNames(res)).toEqual(["retry-after"]);
+    });
+
+    it("rateLimitDenyText is unchanged on BOTH branches", async () => {
+      const bad = rateLimitDenyText(MISCONFIGURED);
+      expect(bad.status).toBe(503);
+      expect(await bad.text()).toBe("Service temporarily unavailable");
+      expect(bad.headers.get("Retry-After")).toBe("60");
+
+      const busy = rateLimitDenyText(THROTTLED);
+      expect(busy.status).toBe(429);
+      expect(await busy.text()).toBe("Rate limit exceeded");
+      expect(busy.headers.get("Retry-After")).toBe("42");
+    });
+  });
+
+  describe("the route keeps its body and its headers", () => {
+    it("merges caller headers WITHOUT dropping Retry-After", () => {
+      const res = rateLimitDenyJson(THROTTLED, {
+        headers: { "Cache-Control": "private, no-store", Vary: "Cookie" },
+      });
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(res.headers.get("Vary")).toBe("Cookie");
+      expect(res.headers.get("Retry-After")).toBe("42");
+    });
+
+    it("a caller CANNOT clobber Retry-After through the headers bag", () => {
+      const res = rateLimitDenyJson(THROTTLED, {
+        headers: { "Retry-After": "1" },
+      });
+      expect(res.headers.get("Retry-After")).toBe("42");
+    });
+
+    it("honours the 429 body override, KEY ORDER included", async () => {
+      const res = rateLimitDenyJson(THROTTLED, {
+        throttledBody: { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      });
+      expect(res.status).toBe(429);
+      const body = await res.json();
+      expect(body).toEqual({ code: "KEY_RATE_LIMIT", error: "Too many requests" });
+      // Byte-identity, not just deep equality: `create-with-key` emits
+      // `{code, error}` and `keys/sync` emits `{error, code}`, and a builder
+      // that rebuilt the object would silently normalise one into the other.
+      expect(JSON.stringify(body)).toBe(
+        '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+      );
+    });
+
+    it("honours the 503 body override", async () => {
+      const res = rateLimitDenyJson(MISCONFIGURED, {
+        misconfiguredBody: { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({
+        code: "SEAM_MISCONFIGURED",
+        error: "Rate limiter unavailable",
+      });
+    });
+
+    it("uses the 429 override ONLY on the 429 branch, and the 503 override ONLY on the 503 branch", async () => {
+      const opts: RateLimitDenyOptions = {
+        throttledBody: { marker: "throttled" },
+        misconfiguredBody: { marker: "misconfigured" },
+      };
+      expect(await rateLimitDenyJson(THROTTLED, opts).json()).toEqual({
+        marker: "throttled",
+      });
+      expect(await rateLimitDenyJson(MISCONFIGURED, opts).json()).toEqual({
+        marker: "misconfigured",
+      });
+    });
+
+    it("retryAfterHeader:'misconfigured-only' drops Retry-After from the 429 but NEVER from the 503", () => {
+      // `scenario/optimize` is the one seam route whose 429 carries no
+      // Retry-After today. Preserving that is the whole reason this option
+      // exists — and the 503 keeps one regardless, because the canary needs it.
+      const busy = rateLimitDenyJson(THROTTLED, {
+        retryAfterHeader: "misconfigured-only",
+      });
+      expect(busy.status).toBe(429);
+      expect(busy.headers.get("Retry-After")).toBeNull();
+
+      const bad = rateLimitDenyJson(MISCONFIGURED, {
+        retryAfterHeader: "misconfigured-only",
+      });
+      expect(bad.status).toBe(503);
+      expect(bad.headers.get("Retry-After")).toBe("60");
+    });
+  });
+
+  describe("the STATUS is the artefact's, and no option can take it", () => {
+    /**
+     * ⚠️ THIS IS THE CRITERION THAT MATTERS. "The option is honoured" would be
+     * satisfied by an implementation that let a route answer 429 on a limiter
+     * misconfiguration — the exact defect this plan closes at twelve sites. The
+     * casts below are deliberate: they smuggle in every plausible status-shaped
+     * key a future caller might reach for, so the assertion is about the RUNTIME
+     * behaviour and not about the type signature (which a cast defeats anyway).
+     */
+    const STATUS_SHAPED_KEYS = {
+      status: 429,
+      statusCode: 429,
+      code: 429,
+      misconfigured: false,
+      reason: undefined,
+      throttledStatus: 503,
+      misconfiguredStatus: 429,
+    } as unknown as RateLimitDenyOptions;
+
+    it("a misconfiguration answers 503 even when the options bag says otherwise", () => {
+      expect(rateLimitDenyJson(MISCONFIGURED, STATUS_SHAPED_KEYS).status).toBe(503);
+      expect(rateLimitDenyText(MISCONFIGURED).status).toBe(503);
+    });
+
+    it("a genuine throttle answers 429 even when the options bag says otherwise", () => {
+      expect(rateLimitDenyJson(THROTTLED, STATUS_SHAPED_KEYS).status).toBe(429);
+      expect(rateLimitDenyText(THROTTLED).status).toBe(429);
+    });
+
+    it("a body override does not carry a status with it", () => {
+      // A route passing its OWN 429 body must not be able to make the
+      // misconfigured branch render that body at 429.
+      const res = rateLimitDenyJson(MISCONFIGURED, {
+        throttledBody: { error: "Too many requests" },
+        headers: { "Cache-Control": "private, no-store" },
+      });
+      expect(res.status).toBe(503);
+    });
   });
 });
 

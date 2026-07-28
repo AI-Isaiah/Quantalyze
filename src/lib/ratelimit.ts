@@ -254,37 +254,127 @@ export function isRateLimitMisconfigured(
 /**
  * PR-2 simplify (2026-05-28): canonical deny-response builder for the
  * misconfig-503 / throttled-429 split. Pre-extract, the admin mutator
- * surface inlined an identical 8-line branch per callsite. Routes whose
- * tests vi.mock("@/lib/ratelimit") still inline the branch to keep their
- * existing mocks intact — this helper is for the admin surface where
- * the real ratelimit module loads (withAdminAuth, kill-switch,
- * decisions, preferences, intro-request).
+ * surface inlined an identical 8-line branch per callsite.
+ *
+ * ── 140.4-13 / SEAMRIM-05 — WHY THIS DOCBLOCK WAS REWRITTEN ─────────────────
+ *
+ * ⚠️ IT USED TO SAY: *"Routes whose tests vi.mock("@/lib/ratelimit") still
+ * inline the branch to keep their existing mocks intact — this helper is for
+ * the admin surface where the real ratelimit module loads."*
+ *
+ * That sentence was the FIX'S OWN JUSTIFICATION FOR LEAVING THE CLASS OPEN, and
+ * it is why eleven seam routes — every route that reaches the analytics service —
+ * answered a limiter MISCONFIGURATION with a 429 for two years. A 429 tells the
+ * caller "you are being throttled"; on the key-connect path the wizard renders
+ * that as `KEY_RATE_LIMIT`, whose copy says the throttle is *"a transient,
+ * exchange-side throttle and not a problem with your key"*. During an Upstash
+ * outage that sentence is false for EVERY user on their FIRST click, and it
+ * blames the user's exchange for our own outage.
+ *
+ * Test-mock convenience is not a reason to leave a correctness class open. The
+ * six wholesale `vi.mock("@/lib/ratelimit", …)` factories that motivated the old
+ * sentence were extended with `importActual` for the pure helpers, which costs
+ * six lines and cannot drift from this implementation.
+ *
+ * ── THE DIVISION OF OWNERSHIP, AND WHY IT IS NOT A BLANKET ADOPTION ─────────
+ *
+ * THE ARTEFACT OWNS: the status (`isRateLimitMisconfigured(rl) ? 503 : 429`) and
+ * the `Retry-After` VALUE. Neither is reachable from `options` — see the named
+ * negative cases in `ratelimit.test.ts`. An options bag that let a route pick
+ * its own status would re-open the finding at twelve call sites while still
+ * satisfying a criterion that only checked "the override is honoured".
+ *
+ * THE ROUTE OWNS: its body and its extra headers. Measured on the untouched
+ * tree, converging the seam onto this builder's FIXED body would have regressed
+ * six live 429 contracts — `create-with-key` and `composite/add-key`
+ * (`code: "KEY_RATE_LIMIT"`), `keys/sync` at BOTH arms (`code: "RATE_LIMITED"`),
+ * `csv-validate` and `csv-finalize` (the CSV v0 envelope), and
+ * `scenario/optimize` (a bespoke sentence with NO `Retry-After`) — and dropped
+ * `NO_STORE_HEADERS` from ten of them, re-opening a cache-contract finding.
+ * `bridge/route.ts`'s docblock states that hazard verbatim.
  */
 type DenyResult = { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" };
 
-export function rateLimitDenyJson(rl: DenyResult): NextResponse {
+export type RateLimitDenyOptions = {
+  /**
+   * Extra response headers. Merged UNDERNEATH the artefact's own `Retry-After`,
+   * so a caller cannot clobber the value (asserted).
+   */
+  headers?: Record<string, string>;
+  /** Body for the genuine-throttle (429) branch. Passed through VERBATIM — key order included. */
+  throttledBody?: unknown;
+  /** Body for the limiter-misconfigured (503) branch. Passed through VERBATIM. */
+  misconfiguredBody?: unknown;
+  /**
+   * Where to stamp `Retry-After`. Defaults to `"always"`, which is the
+   * pre-extension behaviour.
+   *
+   * `"misconfigured-only"` exists for exactly one route: `scenario/optimize`'s
+   * 429 carries no `Retry-After` today, and adding one would change a live
+   * response contract this plan is not entitled to change. The 503 branch keeps
+   * its header under BOTH settings, because the canary/health check that the
+   * fail-CLOSED 503 exists to reach needs to know when to look again.
+   */
+  retryAfterHeader?: "always" | "misconfigured-only";
+};
+
+/**
+ * THE status decision, single-sourced. Both builders call this and nothing else
+ * computes it — that is the property the twelve seam adoptions inherit.
+ */
+function denyStatus(rl: DenyResult): 503 | 429 {
+  return isRateLimitMisconfigured(rl) ? 503 : 429;
+}
+
+/** The header set, with `Retry-After` stamped LAST so the caller's bag cannot win. */
+function denyHeaders(
+  rl: DenyResult,
+  options?: RateLimitDenyOptions,
+): Record<string, string> {
+  const stamp =
+    isRateLimitMisconfigured(rl) ||
+    (options?.retryAfterHeader ?? "always") === "always";
+  return {
+    ...options?.headers,
+    ...(stamp ? { "Retry-After": String(rl.retryAfter) } : {}),
+  };
+}
+
+export function rateLimitDenyJson(
+  rl: DenyResult,
+  options?: RateLimitDenyOptions,
+): NextResponse {
   const misconfigured = isRateLimitMisconfigured(rl);
-  return NextResponse.json(
-    { error: misconfigured ? "Rate limiter unavailable" : "Too many requests" },
-    {
-      status: misconfigured ? 503 : 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
-    },
-  );
+  const fallback = {
+    error: misconfigured ? "Rate limiter unavailable" : "Too many requests",
+  };
+  const override = misconfigured
+    ? options?.misconfiguredBody
+    : options?.throttledBody;
+  return NextResponse.json(override ?? fallback, {
+    status: denyStatus(rl),
+    headers: denyHeaders(rl, options),
+  });
 }
 
 /**
  * Plain-text twin of rateLimitDenyJson for routes whose CDN cache contract
  * disallows JSON bodies (PDF + image routes typically). Same status/headers
  * shape; body is a short human-readable string instead of a JSON envelope.
+ *
+ * 140.4-13: deliberately NOT given the options bag. It has ZERO call sites today
+ * (measured: `grep -rnE "rateLimitDeny(Json|Text)\(" src/` finds only its own
+ * definition), so an options argument here would be speculative surface. What it
+ * DOES now share is `denyStatus` / `denyHeaders` — so if the 503-vs-429 decision
+ * ever moves, it moves for both twins at once and cannot drift apart.
  */
 export function rateLimitDenyText(rl: DenyResult): NextResponse {
   const misconfigured = isRateLimitMisconfigured(rl);
   return new NextResponse(
     misconfigured ? "Service temporarily unavailable" : "Rate limit exceeded",
     {
-      status: misconfigured ? 503 : 429,
-      headers: { "Retry-After": String(rl.retryAfter) },
+      status: denyStatus(rl),
+      headers: denyHeaders(rl),
     },
   );
 }
