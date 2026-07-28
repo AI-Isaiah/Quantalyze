@@ -416,45 +416,76 @@ class TestCensusEqualsQuarantine:
 
 
 class TestQuarantinedStatuses:
-    def test_every_member_is_500_or_carries_an_explicit_reason(self) -> None:
+    """⚠️ Every assertion here reads the status off the **derived census**, never
+    off ``QUARANTINE``.
+
+    This is not a stylistic choice, it is a defect that ledger row **M95**
+    caught in this very file. The first draft iterated the hand-typed roster:
+    ``[key for key in QUARANTINE if key[2] != 500 …]``. Under the M95 mutation
+    (a real ``status_code=500 → 502`` at ``portfolio.py``'s ``verify_strategy``)
+    those assertions stayed **GREEN** — the roster still said 500, so they were
+    comparing the roster to itself and could not fail for any change to the
+    tree. A status gate that reads its expected value out of the roster is the
+    self-referential oracle this programme keeps re-learning. Deriving first
+    makes the gate LIVE.
+    """
+
+    def test_every_raw_5xx_site_in_the_tree_is_500_or_carries_an_explicit_reason(
+        self,
+    ) -> None:
         """``_validate``: *the only permanent 5xx in this contract is 500.*
 
-        A 502 or 504 anywhere in this roster is the M11 defect: the seam's
-        global breaker keys on the status line, so the wrong 5xx re-arms a
+        A 502 or 504 raised raw is the M11 defect: the TypeScript seam's
+        **global** breaker keys on the status line, so the wrong 5xx re-arms a
         global-outage harm that a 500 would not.
         """
-        undocumented = [
+        undocumented = sorted(
             key
-            for key in QUARANTINE
+            for key in derive_census()
             if key[2] != 500 and key not in NON_500_REASONS
-        ]
+        )
         assert undocumented == [], (
-            "a quarantined site carries a non-500 5xx with no recorded reason: "
-            f"{sorted(undocumented)}. error_contract._validate: 'the only "
-            "permanent 5xx in this contract is 500; a transient fault is 503, an "
-            "exchange fault is 424'. Either re-home the site or add its reason "
-            "to NON_500_REASONS as a decision."
+            "a raw 5xx site carries a non-500 status with no recorded reason: "
+            f"{undocumented}. error_contract._validate: 'the only permanent 5xx "
+            "in this contract is 500, got {status}; a transient fault is 503, an "
+            "exchange fault is 424'. Either re-home the site onto "
+            "service_error(), or add its reason to NON_500_REASONS as a decision."
         )
 
-    def test_no_quarantined_site_uses_a_banned_5xx(self) -> None:
-        """502 and 504 are banned outright — no reason string can license one."""
-        banned = sorted(key for key in QUARANTINE if key[2] in (502, 504))
+    def test_no_raw_5xx_site_in_the_tree_uses_a_banned_5xx(self) -> None:
+        """502 and 504 are banned outright — no reason string can license one.
+
+        This is the assertion that speaks directly to ledger row M11.
+        """
+        banned = sorted(key for key in derive_census() if key[2] in (502, 504))
         assert banned == [], (
-            f"banned 5xx status in the quarantine: {banned}. _validate refuses "
-            "502/504 for callers that reach it; a raw raise must not smuggle one "
-            "past it. This is ledger row M11's defect, now guarded."
+            f"BANNED 5xx status raised raw: {banned}. _validate refuses 502/504 "
+            "for every caller that reaches it, and a direct raise must not "
+            "smuggle one past it: the seam's global breaker counts a 502 that a "
+            "500 would not. This is ledger row M11's defect, now guarded."
         )
 
     def test_the_only_non_500_status_in_use_is_503(self) -> None:
-        """A positive counterpart: pin what the roster DOES contain, not only what it must not.
+        """Positive counterpart: pin what the tree DOES contain, not only what it must not.
 
-        A negative-only oracle goes vacuous when the population empties.
+        A negative-only oracle goes vacuous the moment the population empties.
         """
-        statuses = {key[2] for key in QUARANTINE}
-        assert statuses == {500, 503}, f"unexpected statuses in the roster: {sorted(statuses)}"
-        assert set(NON_500_REASONS) == {key for key in QUARANTINE if key[2] != 500}, (
-            "NON_500_REASONS has drifted from the roster's non-500 members — a "
-            "reason for a site that no longer exists is a stale exemption"
+        statuses = {key[2] for key in derive_census()}
+        assert statuses == {500, 503}, (
+            f"the set of raw 5xx statuses in the tree changed: {sorted(statuses)}"
+        )
+
+    def test_no_reason_is_recorded_for_a_site_that_no_longer_exists(self) -> None:
+        """The exemption list may not outlive the sites it exempts.
+
+        Same discipline as the QUARANTINE equality: a repair must not be able to
+        leave a stale exemption behind.
+        """
+        census = derive_census()
+        assert set(NON_500_REASONS) == {key for key in census if key[2] != 500}, (
+            "NON_500_REASONS has drifted from the tree's non-500 sites: "
+            f"stale={sorted(set(NON_500_REASONS) - set(census))}, "
+            f"unexplained={sorted(k for k in census if k[2] != 500 and k not in NON_500_REASONS)}"
         )
         for key, reason in NON_500_REASONS.items():
             assert reason.strip(), f"empty reason recorded for {key}"
