@@ -551,4 +551,101 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     // the copy/paste log-matching contract.
     expect(screen.getByText(sentId!)).toBeInTheDocument();
   });
+
+  // ============================================================
+  // Phase 140.3-15 / TS-38 — OUR CONFIG FAULT, AT THE RENDER.
+  //
+  // `process-key-client` now answers a `SeamConfigError` with the wire code
+  // `SEAM_MISCONFIGURED` (500) instead of `UPSTREAM_NETWORK_ERROR` (502), and
+  // `finalize-wizard` forwards that envelope verbatim. `SEAM_MISCONFIGURED` is
+  // a WIRE code that is ALSO a wizard member, so it must survive BOTH the
+  // wire->wizard translation and this membership set — either one missing and
+  // the user sees the generic dead end while every route-side test is green.
+  // That is `140.3-14`'s M81, one plan ago, on a different code.
+  //
+  // ⚠️ ORACLE INDEPENDENCE: every expected sentence is a LITERAL typed here.
+  // ============================================================
+
+  it("[140.3-15 / TS-38] the config-fault code reaches its OWN copy, not the generic dead end", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          ok: false,
+          code: "SEAM_MISCONFIGURED",
+          human_message:
+            "We could not send this request \u2014 our own configuration is wrong. Retrying will not clear it.",
+          recoverable: false,
+        },
+        500,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("SEAM_MISCONFIGURED");
+    expect(findWizardError()!.code).not.toBe("UNKNOWN");
+
+    expect(
+      await screen.findByText(
+        "We could not send this request \u2014 our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+    // Both dead ends are gone: asserting only the new copy would still pass if
+    // the generic envelope rendered alongside it.
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("We could not reach our own service."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.3-15 / TS-38] renders NO Retry control — a redeploy is the only thing that clears it", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ ok: false, code: "SEAM_MISCONFIGURED" }, 500),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // POSITIVE first. "No Retry appeared" is also true when NOTHING appeared.
+    expect(
+      await screen.findByText(
+        "We could not send this request \u2014 our own configuration is wrong.",
+      ),
+    ).toBeInTheDocument();
+
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "A configuration fault is permanent until we fix it and redeploy. A " +
+        "Retry control here is a control that can never succeed.",
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.3-15 / TS-38] ANTI-REGRESSION: the two transport codes still render their own recoverable copy", async () => {
+    // The new member sits beside them in the SAME translation table and the
+    // SAME membership set. A sweep that re-pointed either would be invisible to
+    // the two cases above.
+    for (const wireCode of ["UPSTREAM_NETWORK_ERROR", "UPSTREAM_TIMEOUT"]) {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        jsonResponse({ ok: false, code: wireCode }, 502),
+      );
+      const view = render(
+        <SubmitStep
+          strategyId="strat-1"
+          snapshot={SNAPSHOT}
+          metadata={METADATA}
+          onSubmitted={vi.fn()}
+        />,
+      );
+      fireEvent.click(screen.getAllByTestId("wizard-submit-for-review")[0]);
+      expect(
+        await screen.findAllByText("We could not reach our own service."),
+      ).not.toHaveLength(0);
+      expect(
+        await screen.findAllByRole("button", { name: "Retry" }),
+        "A genuine transport failure lost its Retry control \u2014 the config-fault " +
+          "arm swallowed a sibling.",
+      ).not.toHaveLength(0);
+      view.unmount();
+    }
+  });
 });

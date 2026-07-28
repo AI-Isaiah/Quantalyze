@@ -1732,3 +1732,109 @@ describe("[140.3-14 / TS-37] the composite member cap is a PERMANENT condition a
     expect(a.cause).not.toBe(b.cause);
   });
 });
+
+/**
+ * Phase 140.3-15 / TS-38 — THE CONFIG FAULT GETS ITS OWN COPY, AND NO RETRY.
+ *
+ * `process-key-client` now answers a `SeamConfigError` with the wire code
+ * `SEAM_MISCONFIGURED` instead of `UPSTREAM_NETWORK_ERROR`. The wire vocabulary
+ * and the wizard vocabulary are not the same set, so the code needs BOTH a
+ * translation entry (`recogniseSeamErrorCode`) and copy of its own — without
+ * the translation it lands on `UNKNOWN` and the obligation ships invisible with
+ * every route-side test green (that is `140.3-14`'s M81, one plan ago).
+ *
+ * ⚠️ WHY A NEW MEMBER RATHER THAN AN ALIAS ONTO AN EXISTING ONE. This file's
+ * own convention is that a second member with the same meaning is how a
+ * vocabulary starts lying, so the three near-misses were read first and each
+ * asserts something FALSE here:
+ *   · SERVICE_UNREACHABLE — "We sent the request and never got an answer".
+ *     `SeamConfigError` is raised BEFORE any store or network I/O, so no
+ *     request was ever sent. It is also recoverable, and this is not.
+ *   · SERVICE_UNAVAILABLE_RETRY — "We paused outbound requests … wait a moment,
+ *     then try the same action again". True of a breaker, false of a config
+ *     typo: waiting changes nothing until we redeploy.
+ *   · VALIDATION_FAILED — "We sent a request that failed its shape check".
+ *     Closest on BEHAVIOUR (non-recoverable, our software's fault) and wrong on
+ *     the FACT: nothing was sent and nothing was shape-checked.
+ *
+ * ORACLE INDEPENDENCE: every expected sentence below is typed in this file.
+ */
+describe("[140.3-15 / TS-38] SEAM_MISCONFIGURED — our fault, permanent, no retry", () => {
+  const CODE = "SEAM_MISCONFIGURED" as const;
+
+  it("the wire code TRANSLATES to the wizard member — it does not fall to UNKNOWN", () => {
+    expect(recogniseSeamErrorCode("SEAM_MISCONFIGURED")).toBe(CODE);
+  });
+
+  it("the copy exists and names the fault as ours, in hand-typed sentences", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    expect(copy.title).toBe(
+      "We could not send this request — our own configuration is wrong.",
+    );
+    expect(copy.cause).toBe(
+      "A setting on our side is wrong, so we stopped before sending the request. Nothing was submitted and nothing was changed. Retrying will not clear it: the setting stays wrong until we fix it and redeploy. This is not your key, your exchange or your data.",
+    );
+  });
+
+  it("renders NO retry control — the condition is permanent until we redeploy", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    // `RECOVERABLE_ACTIONS` in src/lib/envelope.ts is exactly
+    // {clear_and_retry, try_another_key}; carrying neither is what makes
+    // `buildEnvelope` derive `recoverable: false`, which is what suppresses
+    // ErrorEnvelope's Retry control. The absence IS the fix, not a side effect.
+    expect(copy.actions).not.toContain("clear_and_retry");
+    expect(copy.actions).not.toContain("try_another_key");
+    // ...but it is not a dead end either: a code offering NOTHING would satisfy
+    // every negative above while being strictly worse.
+    expect(copy.actions.length).toBeGreaterThan(0);
+    expect(copy.actions).toContain("request_call");
+  });
+
+  it("blames neither the upstream, the user's key, nor the exchange", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    const all = [copy.title, copy.cause, ...copy.fix].join(" ").toLowerCase();
+    expect(all).not.toContain("could not reach");
+    expect(all).not.toContain("ingestion service");
+    expect(all).not.toMatch(/railway|upstash|vercel|supabase|localhost/);
+    expect(all).not.toMatch(/https?:/);
+    // No env var name, no internal identifier: the entry is user-facing copy.
+    expect(all).not.toContain("analytics_service_url");
+  });
+
+  it("does not invite a retry anywhere in its copy, including the fix lines", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    // The fix lines are where a retry invitation hides from a title-only scan —
+    // two of the nine claims 140.3-12 removed lived ONLY in `fix[]`.
+    const fixText = copy.fix.join(" ").toLowerCase();
+    expect(fixText).not.toMatch(/try (the same action|again)/);
+    expect(fixText).not.toMatch(/wait a moment/);
+    expect(copy.fix.join(" ")).toContain("security@quantalyze.com");
+  });
+
+  it("is DISTINCT copy from the three near-misses, not an alias of one of them", () => {
+    const mine = WIZARD_ERROR_COPY[CODE];
+    for (const other of [
+      WIZARD_ERROR_COPY.SERVICE_UNREACHABLE,
+      WIZARD_ERROR_COPY.SERVICE_UNAVAILABLE_RETRY,
+      WIZARD_ERROR_COPY.VALIDATION_FAILED,
+    ]) {
+      expect(mine.title).not.toBe(other.title);
+      expect(mine.cause).not.toBe(other.cause);
+    }
+  });
+
+  it("ANTI-REGRESSION: the two transport wire codes still translate as they did", () => {
+    // The new entry sits beside them in the ONE wire->wizard table. A sweep that
+    // re-pointed the table would be invisible to every assertion above.
+    expect(recogniseSeamErrorCode("UPSTREAM_NETWORK_ERROR")).toBe(
+      "SERVICE_UNREACHABLE",
+    );
+    expect(recogniseSeamErrorCode("UPSTREAM_TIMEOUT")).toBe(
+      "SERVICE_UNREACHABLE",
+    );
+    expect(recogniseSeamErrorCode("CIRCUIT_OPEN")).toBe(
+      "SERVICE_UNAVAILABLE_RETRY",
+    );
+    expect(recogniseSeamErrorCode("NOT_A_SEAM_CODE")).toBe("UNKNOWN");
+  });
+});
