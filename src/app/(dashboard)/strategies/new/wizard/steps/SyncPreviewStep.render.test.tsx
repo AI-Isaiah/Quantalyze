@@ -98,9 +98,22 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
     expect(
       await screen.findByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED. This used to assert `wizard-try-another-key`,
+    // using the DESTRUCTIVE control as a proxy for "the terminal state
+    // rendered". SYNC_FAILED's actions are clear_and_retry + request_call, so
+    // it no longer earns that control. Re-pointed at the machine-readable code
+    // plus the exit affordance, which is strictly stronger: the old line passed
+    // for ANY error code, this one names the state and still proves it is not a
+    // dead end.
     await waitFor(() =>
-      expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument(),
+      expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+        "data-error-code",
+        "SYNC_FAILED",
+      ),
     );
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -110,9 +123,18 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
 
     render(<SyncPreviewStep {...baseProps} />);
 
+    // ⚠️ 140.4-11 RE-POINTED, same reason — and this one gains a real
+    // discrimination it never had: the old assertion could not tell a
+    // network-timeout apart from the generic SYNC_FAILED fallback.
     await waitFor(() =>
-      expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument(),
+      expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+        "data-error-code",
+        "KEY_NETWORK_TIMEOUT",
+      ),
     );
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
     errSpy.mockRestore();
   });
 });
@@ -365,7 +387,14 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(
       screen.getByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED off the destructive control (SYNC_FAILED does not
+    // earn it) onto the code + the exit affordance. Strictly stronger: it now
+    // names WHICH state the escalation produced.
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "SYNC_FAILED",
+    );
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -388,7 +417,12 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(
       screen.getByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED, same reason as H-0197 above.
+    expect(screen.getByTestId("error-envelope")).toHaveAttribute(
+      "data-error-code",
+      "SYNC_FAILED",
+    );
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
     errSpy.mockRestore();
   });
 
@@ -683,7 +717,11 @@ describe("[H-0197] SyncPreviewStep — persistent heavy-fetch fault escalates", 
       screen.getByText(/We could not verify this strategy/i),
     ).toBeInTheDocument();
     expect(screen.getByText(/Sync failed\./i)).toBeInTheDocument();
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
+    // ⚠️ 140.4-11 RE-POINTED off the destructive control onto the exit
+    // affordance. The point of the line is "the wizard is not a dead end after
+    // the escalation", and a way out that does not delete the draft makes it
+    // better, not weaker.
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
 
     // The status read genuinely kept succeeding each tick (the precondition
     // that defeats a shared counter) — so this is the heavy-fetch path, not
@@ -1602,20 +1640,40 @@ describe("[140.3-10] SyncPreviewStep reads the kickoff's machine code", () => {
     errSpy.mockRestore();
   });
 
-  it("ANTI-REGRESSION — every OTHER error state keeps 'Try another key'", async () => {
+  // ⚠️ 140.4-11 REPLACED "ANTI-REGRESSION — every OTHER error state keeps 'Try
+  // another key'", whose CLAIM this plan inverts. That case asserted the
+  // destructive control renders for SYNC_FAILED and that no exit link renders
+  // beside it — i.e. it PINNED the [Retry, destructive] pairing TRAP-4 forbids.
+  // Its legitimate half (the state is not a dead end, and the roster is not
+  // applied blanket-wide) survives here, strictly stronger: it names the
+  // machine-readable code, keeps the Retry pin, and additionally proves the
+  // remaining way out destroys nothing.
+  it("ANTI-REGRESSION — a transient state keeps its Retry and gains a NON-destructive exit", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ error: "compute failed" }), { status: 500 }),
     );
 
     render(<SyncPreviewStep {...baseProps} />);
-    await screen.findByTestId("error-envelope");
+    const envelope = await screen.findByTestId("error-envelope");
 
-    // The guard is scoped to the one state where the control is wrong. A
-    // blanket removal would have broken the primary recovery affordance for
-    // every key-related failure in the wizard.
-    expect(screen.getByTestId("wizard-try-another-key")).toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-back-to-strategies")).toBeNull();
+    expect(envelope).toHaveAttribute("data-error-code", "SYNC_FAILED");
+    // SYNC_FAILED asks for `clear_and_retry`, so the Retry is genuine and MUST
+    // survive the inversion. A change that dropped every control from every
+    // state would satisfy the two negatives below on their own.
+    expect(
+      screen.getByRole("button", { name: "Retry" }),
+      "SEAMUX-06 still holds: a transient seam failure offers a retry.",
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("wizard-back-to-strategies"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+      "SYNC_FAILED's actions are clear_and_retry + request_call. Swapping the " +
+        "key is not this state's remedy, and the control that would do it " +
+        "deletes the draft on the way.",
+    ).toBeNull();
     errSpy.mockRestore();
   });
 });
