@@ -923,18 +923,36 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             },
           },
         );
-        // The ENVELOPE is deliberately the existing membership-unknown one,
-        // byte-identical to the member-list-read failure above: a list this
-        // route cannot trust to be complete IS an undetermined membership, and
-        // phase 140.2 authors no user-facing copy (that fence is 140.3's). The
-        // operator-facing half — which is where "cap", not "transient", is the
-        // true word — is the log line and the Sentry step tag above. 140.3
-        // owns giving this arm its own code and copy; the retry affordance the
-        // shared envelope renders is wrong for a permanent condition.
+        // ✅ 140.3-14 / TS-37 — THE HAND-OVER THIS COMMENT USED TO REQUEST IS
+        // DISCHARGED HERE. Until now the envelope was deliberately the existing
+        // membership-unknown one, byte-identical to the member-list-read failure
+        // above, because phase 140.2 authored no user-facing copy (that fence is
+        // 140.3's). The consequence was a PERMANENT condition wearing transient
+        // copy: an oversized draft was told "please retry" and handed a Retry
+        // control that could only ever fail again.
+        //
+        // ⚠️ THIS IS ONE ARM OF FOUR, AND THE OTHER THREE DELIBERATELY KEEP
+        // `COMPOSITE_MEMBERSHIP_UNKNOWN` AND THEIR RETRY. The membership-count
+        // probe (~:817), the member-list read (~:872) and the unified arm's
+        // probe (~:1465) are genuine transient reads — the condition really does
+        // clear on retry there. Re-coding any of them would strip a correct
+        // retry from a real transient fault, which is the inverse of the defect
+        // this arm fixes.
+        //
+        // The operator half was ALREADY distinct and is unchanged: the log line
+        // says "EXCEEDED the …-member cap" and the Sentry event above is tagged
+        // `step: "composite-member-cap"`. Only the USER half was missing.
+        //
+        // The status stays 503, unchanged: this plan owns the code and the copy,
+        // not the wire status. `SubmitStep` maps off `code` alone (never status),
+        // so the permanent/transient distinction is carried entirely by the code.
         return NextResponse.json(
           {
-            error: "Could not load composite members; please retry.",
-            code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            error:
+              `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
+              `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
+              `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`,
+            code: "COMPOSITE_TOO_MANY_MEMBERS",
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );

@@ -402,6 +402,111 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     ).toBeInTheDocument();
   });
 
+  // ============================================================
+  // Phase 140.3-14 / TS-37 — the composite MEMBER CAP, split off the code
+  // above. The route emits `COMPOSITE_TOO_MANY_MEMBERS` on the same 503; this
+  // set is the choke point every finalize code passes through, so a code the
+  // route emits but this set does not admit falls straight to UNKNOWN and the
+  // user sees the generic dead end instead of the limit and the remedy.
+  //
+  // ⚠️ ORACLE INDEPENDENCE: every expected sentence below is a LITERAL typed in
+  // this file, never `WIZARD_ERROR_COPY[code].title`.
+  // ============================================================
+
+  it("[140.3-14] the cap code (503) reaches its OWN copy — the limit, its number, and the remedy", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          error:
+            "This draft has more than 10 keys attached; a multi-key strategy can hold at most 10. Remove keys until 10 or fewer remain, then submit again.",
+          code: "COMPOSITE_TOO_MANY_MEMBERS",
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // Funnel truth: the code survives KNOWN_FINALIZE_CODES. Without the
+    // same-commit membership edit this reads "UNKNOWN".
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    expect(findWizardError()!.code).not.toBe("UNKNOWN");
+
+    // The limit, named with its number.
+    expect(
+      await screen.findByText("This draft has more than 10 keys attached."),
+    ).toBeInTheDocument();
+    // The remedy.
+    expect(
+      screen.getByText(
+        "Go back to the keys step and remove keys until 10 or fewer remain, then submit again.",
+      ),
+    ).toBeInTheDocument();
+
+    // …and BOTH dead ends are gone. Asserting only the presence of the new copy
+    // would still pass if the generic envelope rendered alongside it.
+    expect(screen.queryByText("Something went wrong.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("We couldn't confirm this strategy's key membership."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.3-14] the cap code renders NO Retry control — retrying cannot clear a permanent condition", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        { error: "too many keys", code: "COMPOSITE_TOO_MANY_MEMBERS" },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    // POSITIVE first: the envelope really rendered. A step rendering NOTHING
+    // would satisfy the absence assertion below vacuously — "no Retry appeared"
+    // is also true when no error appeared at all.
+    expect(
+      await screen.findByText("This draft has more than 10 keys attached."),
+    ).toBeInTheDocument();
+
+    // …and only THEN the absence.
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+      "The permanent cap condition is still offering a Retry control. The " +
+        "draft holds more keys than the route can re-probe; pressing Retry " +
+        "produces the identical 503 forever.",
+    ).not.toBeInTheDocument();
+  });
+
+  it("[140.3-14] ANTI-REGRESSION: a TRANSIENT membership failure still returns the old code AND still renders a retry", async () => {
+    // ⚠️ THE CASE THAT CATCHES A FIX APPLIED TO THE WRONG ARM. Three of the
+    // route's four `COMPOSITE_MEMBERSHIP_UNKNOWN` emissions are genuine
+    // transient reads. Re-coding one of THEM — or removing the code from this
+    // set — would strip a correct retry from a real transient fault, which is
+    // the inverse of the defect the cap split fixes, and every assertion in the
+    // two cases above would stay green.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          error: "Could not load composite members; please retry.",
+          code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        },
+        503,
+      ),
+    );
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await vi.waitFor(() => expect(findWizardError()).toBeDefined());
+    expect(findWizardError()!.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+    expect(findWizardError()!.code).not.toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    expect(
+      await screen.findByRole("button", { name: "Retry" }),
+      "The transient membership failure lost its Retry control. The split was " +
+        "applied to the wrong arm.",
+    ).toBeInTheDocument();
+  });
+
   // A 409 stale-state ('draft_state_invalid' — not a WizardErrorCode) maps to
   // UNKNOWN, which is recoverable, so the legitimately-retryable refresh path
   // keeps its Retry button (RED-TEAM R1 regression guard).

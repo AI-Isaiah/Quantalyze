@@ -134,6 +134,19 @@ export function SubmitStep({
             // Recoverable copy renders the Retry affordance rather than
             // degrading to the generic UNKNOWN envelope.
             "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            // Phase 140.3-14 / TS-37 — the composite MEMBER CAP, split off the
+            // code above. It arrives on the SAME 503 from the SAME route, and
+            // it is admitted HERE IN THE SAME COMMIT that the route started
+            // emitting it. Without this line the new code fails the membership
+            // check below, falls through to UNKNOWN, and the user sees the
+            // generic dead end instead of the limit and the remedy — the whole
+            // obligation ships invisible while every route-side test is green.
+            //
+            // ⚠️ Its copy is deliberately NON-recoverable, so unlike every other
+            // member of this set it renders NO Retry control. That is correct:
+            // the draft really does hold more keys than the route can re-probe,
+            // and retrying cannot change the count.
+            "COMPOSITE_TOO_MANY_MEMBERS",
             // Phase 140.3-05 / SEAMUX-01 + SEAMUX-08 — the two members the
             // seam's own outage codes translate onto. Before this, a breaker
             // trip mid-outage rendered "Our team has been notified" AND

@@ -138,6 +138,30 @@ export type WizardErrorCode =
   // RECOVERABLE and the Retry affordance renders. Both the unified and legacy
   // finalize arms emit this same code so the client maps ONE consistent copy.
   | "COMPOSITE_MEMBERSHIP_UNKNOWN"
+  // Phase 140.3-14 / TS-37 — the composite MEMBER CAP, split off the code above.
+  //
+  // ⚠️ THE SPLIT IS THE POINT, AND IT IS ONE ARM OF FOUR. `finalize-wizard`
+  // emits `COMPOSITE_MEMBERSHIP_UNKNOWN` at four sites. THREE are genuinely
+  // transient member-list reads (the hoist's membership-count probe, the
+  // member-list read, and the unified arm's probe) and KEEP that code and its
+  // retry. The FOURTH — the `members.length > MAX_COMPOSITE_MEMBERS` refusal —
+  // is PERMANENT: the draft really does hold more keys than the route can
+  // re-probe, and no amount of retrying changes the count. It shipped wearing
+  // the transient envelope byte-identically, so the user got a Retry control
+  // that could only ever fail again, with no explanation and no path forward.
+  //
+  // NOT recoverable, deliberately: `actions` carries no `clear_and_retry` and no
+  // `try_another_key`, so `RECOVERABLE_ACTIONS` derives `recoverable: false` and
+  // `ErrorEnvelope` renders NO Retry control. That is the fix, not a side
+  // effect — the whole defect was a retry affordance on a condition retrying
+  // cannot clear.
+  //
+  // The copy names the LIMIT WITH ITS NUMBER (DESIGN.md §Voice: state the
+  // limitation with its threshold attached) and the remedy (remove keys). The
+  // number is pinned cross-file to `MAX_COMPOSITE_MEMBERS` in
+  // `finalize-wizard/route.ts` by a test that reads the route's own declaration,
+  // so the sentence cannot drift away from the constant it describes.
+  | "COMPOSITE_TOO_MANY_MEMBERS"
   // Phase 94.1 / RT-FINDING-3 — the wizard connect step's on-mount rehydration
   // GET (/api/strategies/composite/members) failed transiently. NEUTRAL copy:
   // it fires for ANY api draft (the client can't yet know single-key vs
@@ -882,7 +906,32 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     docsHref: "/security#sync-timing",
     // Recoverable transient fault: keep `clear_and_retry` so the Retry control
     // renders instead of falling through to the generic UNKNOWN envelope.
+    //
+    // ⚠️ 140.3-14 SPLIT THE CAP ARM OFF THIS ENTRY. This copy stays exactly as
+    // it is, and it stays RECOVERABLE, because the three arms that still reach
+    // it are genuinely transient. Do not "unify" it with
+    // COMPOSITE_TOO_MANY_MEMBERS below: merging them re-creates either a retry
+    // on a permanent condition or the loss of a correct retry on three real
+    // transient faults, which is the inverse defect.
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  COMPOSITE_TOO_MANY_MEMBERS: {
+    title: "This draft has more than 10 keys attached.",
+    cause:
+      "A multi-key strategy can hold at most 10 keys, because we re-check every one of them against its exchange before submitting. This draft came back with more than 10, so we stopped rather than finalise a strategy whose extra keys were never re-checked. Nothing was submitted, and retrying will not change the count.",
+    fix: [
+      "Go back to the keys step and remove keys until 10 or fewer remain, then submit again.",
+      "Splitting the extra keys into a second strategy also works — each strategy carries its own limit of 10.",
+      "If you need more than 10 keys in one strategy, email security@quantalyze.com with your draft ID. The limit is ours, not your exchange's.",
+    ],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts). Their absence is what makes
+    // `recoverable` false and suppresses the Retry control, and it is the
+    // BEHAVIOUR this entry exists to change. `request_call` keeps a
+    // non-destructive way out; `expand_log` opens the diagnostics.
+    actions: ["request_call", "expand_log"],
   },
 
   WIZARD_KEYS_LOAD_FAILED: {

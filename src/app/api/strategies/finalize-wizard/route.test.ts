@@ -2260,7 +2260,25 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
     // Fail CLOSED, exactly as an un-enumerable member list does.
     expect(res.status).toBe(503);
     const body = await res.json();
-    expect(body.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+    // ⚠️ RE-PINNED by 140.3-14 / TS-37, NOT weakened. This assertion previously
+    // read `COMPOSITE_MEMBERSHIP_UNKNOWN` — the byte this plan deliberately
+    // changes — so it could not survive unmodified; the plan's "both pinned
+    // cases stay unmodified" is satisfiable for the ME-02 cap-is-not-off-by-one
+    // case (which asserts no code at all) and structurally impossible for this
+    // one. It is STRICTLY STRONGER now: it asserts the exact new code AND the
+    // absence of the transient one, so a revert of the split reddens here
+    // rather than passing on a substring.
+    expect(body.code).toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    expect(
+      body.code,
+      "The permanent cap refusal is answering with the TRANSIENT membership " +
+        "code again, which renders 'please retry' and a Retry control for a " +
+        "condition that never clears (TS-37).",
+    ).not.toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+    // The wire message names the limit and the remedy, hand-typed here: this is
+    // the only user-facing string a non-wizard caller of this route sees.
+    expect(body.error).toContain("more than 10 keys");
+    expect(body.error).toContain("Remove keys until 10 or fewer remain");
 
     // ZERO probes: the refusal happens BEFORE the loop, so a truncated list
     // never even spends the fan-out it could not bound.
@@ -2276,10 +2294,10 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
       STATE.adminRpcCalls.find((c) => c.name === "enqueue_compute_job"),
     ).toBeUndefined();
 
-    // The operator gets a DISTINCT step tag: the user-facing envelope is
-    // deliberately the existing membership-unknown one (this phase authors no
-    // copy — 140.3's fence), so the log/Sentry side is the only place the cap
-    // is nameable.
+    // The operator gets a DISTINCT step tag. It was distinct BEFORE the user
+    // half was (140.3-14 / TS-37): the log line and this tag were the only
+    // places the cap was nameable while the envelope was shared. Both halves
+    // now say "cap", and this assertion pins the operator one unchanged.
     const sentry = STATE.captureToSentryCalls.find(
       (c) => c.options.tags.step === "composite-member-cap",
     );
@@ -2289,6 +2307,69 @@ describe("POST /api/strategies/finalize-wizard — SEAMCORE-10 composite fan-out
         "`composite-member-cap`. A truncation that finalises unprobed keys " +
         "must be alertable, not merely refused (ledger row M48).",
     ).toBeDefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("[140.3-14 / TS-37] ANTI-REGRESSION: the member-list-read arm — BYTE-IDENTICAL to the cap arm until now — KEEPS the transient code", async () => {
+    // ⚠️ THE CASE THAT CATCHES A FIX APPLIED TO THE WRONG ARM, AND IT TARGETS
+    // THE ARM MOST LIKELY TO BE HIT BY ONE. `finalize-wizard` emits
+    // `COMPOSITE_MEMBERSHIP_UNKNOWN` at FOUR sites; exactly ONE (the cap) is a
+    // permanent condition. This arm — the member-list READ failure ~40 lines
+    // above the cap — returned a byte-identical envelope to the cap arm, so an
+    // executor fixing "the composite membership arms" as a group, or grepping
+    // the old envelope string and replacing every hit, strips a CORRECT retry
+    // from a genuinely transient fault. That is the inverse of the defect
+    // TS-37 fixes, and every cap-side assertion in this file stays green
+    // through it.
+    //
+    // The other two transient arms are asserted by their own cases and by their
+    // own Sentry step tags — `composite-membership-probe` (the hoist's count
+    // probe) and `unified-composite-probe` (the unified arm) — so the four arms
+    // are covered by four independent oracles, not one shared one.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => readOnlyResponse());
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 3;
+    STATE.strategyKeysListError = {
+      code: "57014",
+      message: "canceling statement due to statement timeout",
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    // Hand-typed on both sides. The transient code SURVIVES here…
+    expect(body.code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+    // …and the permanent one must NOT have leaked onto it. A statement timeout
+    // reading the member list really does clear on retry; telling that user
+    // their draft holds too many keys is a fresh lie (TRAP-3).
+    expect(
+      body.code,
+      "The permanent cap code leaked onto the transient member-list-read arm. " +
+        "The split was applied to more than the one arm that is permanent.",
+    ).not.toBe("COMPOSITE_TOO_MANY_MEMBERS");
+    expect(body.error).toBe("Could not load composite members; please retry.");
+
+    // Its own operator tag, distinct from the cap's — this is what makes the
+    // two arms separable in Sentry as well as on the wire.
+    expect(
+      STATE.captureToSentryCalls.find(
+        (c) => c.options.tags.step === "composite-member-list",
+      ),
+    ).toBeDefined();
+    expect(
+      STATE.captureToSentryCalls.find(
+        (c) => c.options.tags.step === "composite-member-cap",
+      ),
+      "A member-list READ failure raised the cap alert. The two arms are no " +
+        "longer separable for an operator either.",
+    ).toBeUndefined();
 
     consoleErr.mockRestore();
     fetchSpy.mockRestore();

@@ -1322,7 +1322,11 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
   ];
 
   /**
-   * HAND-TYPED SIZE GUARD. 53 entries at 140.3-10.
+   * HAND-TYPED SIZE GUARD. 53 entries at 140.3-10; **54 at 140.3-14**, which
+   * added `COMPOSITE_TOO_MANY_MEMBERS` (TS-37 — the composite member cap split
+   * off `COMPOSITE_MEMBERSHIP_UNKNOWN`). Its `actions` are `request_call` +
+   * `expand_log`: no destructive member, so the guard below is unaffected in
+   * substance and the number is the only thing that moved.
    *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
@@ -1330,8 +1334,10 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    *
    * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
    * subject to build the expectation is how a guard stops being able to fail.
+   * Bumping the LITERAL when the table legitimately grows is the intended
+   * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 53;
+  const EXPECTED_TABLE_SIZE = 54;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1458,8 +1464,13 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
   /**
    * HAND-TYPED SIZE GUARD, mirroring 140.3-10's. A scan over an emptied table
    * passes every assertion below vacuously.
+   *
+   * 53 at 140.3-12; **54 at 140.3-14** (`COMPOSITE_TOO_MANY_MEMBERS`). The new
+   * entry was read against every FORBIDDEN fragment by hand before the number
+   * moved — bumping the literal without re-running the reasoning is how a
+   * growing table smuggles a lie past a size guard.
    */
-  const EXPECTED_TABLE_SIZE = 53;
+  const EXPECTED_TABLE_SIZE = 54;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1577,5 +1588,143 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
         "capture. Say nothing, not the opposite.",
     ).not.toContain("not been alerted");
     expect(all).not.toContain("no one has been");
+  });
+});
+
+/**
+ * Phase 140.3-14 / TS-37 — THE COMPOSITE MEMBER CAP GETS ITS OWN CODE.
+ *
+ * `finalize-wizard` emitted `COMPOSITE_MEMBERSHIP_UNKNOWN` at FOUR sites. Three
+ * are genuinely transient member-list reads and keep that code AND its retry.
+ * The fourth — `members.length > MAX_COMPOSITE_MEMBERS` — is PERMANENT, and it
+ * shipped wearing the transient envelope byte-identically, so an oversized draft
+ * was handed a Retry control that could only ever fail again.
+ *
+ * ⚠️ ORACLE INDEPENDENCE. Every expected sentence below is a LITERAL typed in
+ * this file. The ONE derived value is the cap NUMBER, and it is read from
+ * `finalize-wizard/route.ts` — a DIFFERENT file from the subject — so the
+ * assertion binds the copy to the constant it claims to describe rather than to
+ * itself. That is the same cross-file discipline `seam-budgets.invariant.test.ts`
+ * applies to the same constant.
+ */
+describe("[140.3-14 / TS-37] the composite member cap is a PERMANENT condition and says so", () => {
+  const CODE = "COMPOSITE_TOO_MANY_MEMBERS" as const;
+
+  /**
+   * Read the cap from the ROUTE's own declaration. Hand-typing 10 on both sides
+   * would let the constant and the sentence drift apart silently, which is the
+   * exact failure DESIGN.md's "state the limitation with its threshold attached"
+   * rule exists to prevent — a threshold that is stated but wrong is worse than
+   * one that is omitted.
+   */
+  const MAX_COMPOSITE_MEMBERS_DECL = /^const MAX_COMPOSITE_MEMBERS = (\d+)/m;
+  const ROUTE_PATH = resolve(
+    __dirname,
+    "../app/api/strategies/finalize-wizard/route.ts",
+  );
+
+  function capFromRoute(): number {
+    const src = readFileSync(ROUTE_PATH, "utf-8");
+    const m = MAX_COMPOSITE_MEMBERS_DECL.exec(src);
+    if (!m) {
+      throw new Error(
+        "finalize-wizard/route.ts has no `const MAX_COMPOSITE_MEMBERS = <n>` " +
+          "declaration, so the number this copy quotes is bound to nothing. " +
+          "Restore the constant — do NOT relax this test.",
+      );
+    }
+    return Number(m[1]);
+  }
+
+  it("the code exists in the table (without it the route's new code renders as UNKNOWN)", () => {
+    expect(Object.keys(WIZARD_ERROR_COPY)).toContain(CODE);
+  });
+
+  it("names the LIMIT WITH ITS NUMBER, and the number is the route's own cap", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    const cap = capFromRoute();
+    const all = [copy.title, copy.cause, ...copy.fix].join("   ");
+
+    // A digit at all — DESIGN.md §Voice: name the threshold, do not gesture at
+    // it. "more than we can handle" is the banned shape.
+    expect(
+      /\d/.test(all),
+      "The cap copy quotes no number. A limitation stated without its " +
+        "threshold tells the user nothing they can act on.",
+    ).toBe(true);
+
+    // …and the RIGHT digit, read from the route rather than typed twice here.
+    expect(
+      all.includes(String(cap)),
+      `The copy does not mention the route's declared cap of ${cap}. The ` +
+        "sentence and the constant have drifted apart, so the user is being " +
+        "given a threshold that is not the one enforced.",
+    ).toBe(true);
+  });
+
+  it("gives the REMEDY — remove keys — not a retry instruction", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    const all = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+
+    expect(all).toContain("remove keys");
+    // The lie this split exists to kill. "please retry" on a condition that
+    // never clears is a dead end dressed as an affordance.
+    expect(
+      all,
+      "The permanent cap copy is still telling the user to retry. Retrying " +
+        "cannot reduce the number of keys on the draft.",
+    ).not.toContain("please retry");
+    expect(all).not.toContain("try again — the check usually succeeds");
+  });
+
+  it("verbatim title and first fix line — drift detection on the two sentences the user actually reads", () => {
+    const copy = WIZARD_ERROR_COPY[CODE];
+    expect(copy.title).toBe("This draft has more than 10 keys attached.");
+    expect(copy.fix[0]).toBe(
+      "Go back to the keys step and remove keys until 10 or fewer remain, then submit again.",
+    );
+  });
+
+  it("carries NEITHER recoverable action, so `recoverable` is false and no Retry renders", () => {
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+
+    // Hand-typed: these two ARE `RECOVERABLE_ACTIONS` in src/lib/envelope.ts.
+    // Importing that set would let a future edit that ADDS a member to it
+    // silently satisfy this assertion.
+    expect(actions).not.toContain("clear_and_retry");
+    expect(actions).not.toContain("try_another_key");
+
+    // POSITIVE half: it is not simply actionless. A code offering the user
+    // nothing at all would satisfy both negatives above and be a worse dead end
+    // than the one this replaces.
+    expect(
+      actions.length,
+      "The permanent cap code offers the user no control at all. Removing the " +
+        "wrong affordance is only half the fix; there must still be a way out.",
+    ).toBeGreaterThan(0);
+    expect(actions).toContain("request_call");
+  });
+
+  it("ANTI-REGRESSION: the THREE transient arms' code keeps its retry — the split went one way only", () => {
+    // ⚠️ THE CASE THAT CATCHES A FIX APPLIED TO THE WRONG ARM. Three of the four
+    // `COMPOSITE_MEMBERSHIP_UNKNOWN` emissions in finalize-wizard are genuine
+    // transient reads; stripping their retry is the INVERSE defect and it would
+    // be invisible to every assertion above.
+    const transient = WIZARD_ERROR_COPY.COMPOSITE_MEMBERSHIP_UNKNOWN;
+    expect(transient.actions).toContain("clear_and_retry");
+    expect(transient.title).toBe(
+      "We couldn't confirm this strategy's key membership.",
+    );
+  });
+
+  it("the two codes are DISTINCT copy, not one entry aliased twice", () => {
+    // A "split" implemented by pointing the new key at the old object would
+    // pass the existence check and every actions assertion above only by
+    // accident — and would re-create the byte-identical envelope this plan
+    // exists to remove.
+    const a = WIZARD_ERROR_COPY[CODE];
+    const b = WIZARD_ERROR_COPY.COMPOSITE_MEMBERSHIP_UNKNOWN;
+    expect(a.title).not.toBe(b.title);
+    expect(a.cause).not.toBe(b.cause);
   });
 });
