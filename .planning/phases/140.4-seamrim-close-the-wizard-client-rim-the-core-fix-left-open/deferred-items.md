@@ -35,3 +35,32 @@ cleanup on unmount — but it is outside plan 02's fence and is **not** caused b
 **Recommended owner:** the phase gate, or whichever plan next touches
 `SavedScenariosList.tsx`. Raising `testTimeout` would mask the contention rather than fix the
 leak, so the `SavedScenariosList` cleanup is the item with real content here.
+
+---
+
+## DEF-140.4-B — Vercel plugin recommends Workflow DevKit for `create-with-key`'s retry loop
+
+**Found by:** plan `140.4-13`, via the `PostToolUse` validation hook, which fired on every
+route/test file it edited.
+
+**The one recommendation with real content:**
+`src/app/api/strategies/create-with-key/route.ts:259` and `:270` — *"Manual retry logic
+detected. Use Vercel Workflow DevKit for automatic retries with durable execution."*
+
+**NOT ACTED ON, and the reason is a scope fence, not an oversight.** `140.4-CONTEXT.md` §6
+puts retry work out of scope in as many words: *"**Phase 141's retry work.** 141 owns retry;
+this phase must not add one."* Adopting Workflow DevKit would also be a **package install**,
+and `140.4-VALIDATION.md`'s Wave-0 contract is *"this phase installs ZERO packages"*, verified
+at the gate by `git diff <phase base>..HEAD -- package.json package-lock.json` → EMPTY. Plan
+13's diff touches neither file. The retry code at those lines is pre-existing and was not
+modified by this plan.
+
+**Recommended owner:** Phase 141, which owns retry, together with a package-legitimacy check
+on `workflow` before any install.
+
+**The remaining hook firings were noise and are recorded so nobody re-investigates them:** the
+hook also reported *"Long-running or polling logic detected in a serverless handler"* against
+`src/app/api/**/route.test.ts` files at lines plan 13 never touched — these are **test files**,
+not serverless handlers, and the flagged lines are pre-existing fixtures. It also suggested the
+`next-cache-components` skill on every `app/**` read; plan 13 adds no caching directive and
+`next.config.ts` is explicitly out of its fence.
