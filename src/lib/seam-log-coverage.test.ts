@@ -876,11 +876,25 @@ describe("[SEAMCORE-06 / SC6] no seam log site passes a raw caught error", () =>
   );
 
   it("HI-02: every route that spends a CREDENTIAL-BEARING budget is on the roster", () => {
-    // ⚠️ THE ROSTER IS THE CLASS, AND A HAND-TYPED LIST CANNOT CLOSE A CLASS ON
-    // ITS OWN. `SEAM_FILES` is hand-typed for a good reason (a derived list
-    // would silently widen or narrow whenever SEAM_ROUTE_BUDGETS moved), but
-    // that leaves exactly one failure mode: a route that BELONGS on it and was
-    // never added. `create-with-key` and `composite/add-key` sat in that gap —
+    // ⚠️ THE ROSTER IS THE CLASS, AND NEITHER MECHANISM CLOSES IT ALONE.
+    //
+    // 140.4-16 / WR-05 — CORRECTED. This paragraph used to read "`SEAM_FILES`
+    // is hand-typed for a good reason (a derived list would silently widen or
+    // narrow whenever SEAM_ROUTE_BUDGETS moved)". That is the opposite of what
+    // the file does: `SEAM_FILES` (:184-187) is the hand-typed LIB half PLUS
+    // `deriveSeamRouteFiles("src/app/api")`, and the route half — the half this
+    // assertion is about — was DERIVED by plan 140.4-10, 700 lines above, under
+    // a banner reading "THE ROSTER IS DERIVED FROM THE IMPORT EDGE". A reader
+    // landing here was told the opposite of the code, and told it using the
+    // argument this same file spends sixty lines refuting.
+    //
+    // The failure mode this case actually defends is real and is NOT closed by
+    // the derivation: a route that BELONGS on the roster and does not stand on
+    // the IMPORT EDGE — because it reaches the seam through a wrapper the edge
+    // does not yet model, or through a transitive hop. The derivation cannot
+    // see such a route; only a budget-based membership test can. That is a
+    // different sentence from "the roster is hand-typed", and it is the one
+    // that justifies this assertion. `create-with-key` and `composite/add-key` sat in that gap —
     // both spend the validate-key + encrypt-key budgets, both were edited by
     // this very phase, and both logged a raw `err.message`. Neither was on this
     // roster, so the guard could not see them, while the REGISTRY entry claimed
