@@ -223,7 +223,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       ),
       misconfiguredBody: csvErrorBody(
         "SEAM_MISCONFIGURED",
-        "Our rate limiter is unavailable, so we stopped before checking your file. This is a fault on our side, not your data. Nothing was uploaded — try again in a minute.",
+        // 140.4-16 / WR-07 — "Nothing was uploaded" WAS FALSE HERE, and the
+        // ordering is why. `req.formData()` runs ~50 lines above this
+        // deny, so the multipart body — the whole file, up to 10 MB — has
+        // already been received and buffered by the time the limiter is
+        // consulted. `SEAM_MISCONFIGURED`'s own entry EARNS its "Nothing
+        // was submitted" clause because `SeamConfigError` is raised before
+        // any I/O and says so explicitly; here the ordering is the other
+        // way round. What IS true is that nothing was saved and nothing was
+        // validated — same reassurance, and checkable.
+        "Our rate limiter is unavailable, so we stopped before checking your file. This is a fault on our side, not your data. Nothing was saved and nothing was validated — try again in a minute.",
       ),
     });
   }
