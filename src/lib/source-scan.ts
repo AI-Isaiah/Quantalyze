@@ -401,8 +401,18 @@ export function stripCommentsPreserveLines(
   source: string,
   lang: SourceLang = "ts",
 ): string {
-  void lang;
-  return source; // TDD RED — not implemented yet
+  const spans = commentSpans(source, lang);
+  if (spans.length === 0) return source;
+
+  let out = "";
+  let cursor = 0;
+  for (const span of spans) {
+    out += source.slice(cursor, span.start);
+    out += source.slice(span.start, span.end).replace(/[^\n]/g, " ");
+    cursor = span.end;
+  }
+  out += source.slice(cursor);
+  return out;
 }
 
 /**
@@ -414,7 +424,17 @@ export function extractComments(
   source: string,
   lang: SourceLang = "ts",
 ): CommentSpan[] {
-  void source;
-  void lang;
-  return []; // TDD RED — not implemented yet
+  const spans = commentSpans(source, lang);
+  if (spans.length === 0) return [];
+
+  const lineAt = lineNumberLookup(source);
+  const out: CommentSpan[] = [];
+  for (const span of spans) {
+    let offset = span.start;
+    for (const part of source.slice(span.start, span.end).split("\n")) {
+      if (part.length > 0) out.push({ line: lineAt(offset), text: part });
+      offset += part.length + 1;
+    }
+  }
+  return out;
 }
