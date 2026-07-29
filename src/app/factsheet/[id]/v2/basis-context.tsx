@@ -542,9 +542,16 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // options book ATTEMPTS the MTM second pass (job_worker.py:2307-2310) and
       // degrades to one of those, never to `unsmoothed_options_book`. And a
       // composite→single transition explicitly DROPS a stale composite-era
-      // reason (analytics_runner.py:2387-2390, `not _was_composite`). So the
-      // "composites…" wording is correctly attributed and never renders under a
-      // single-key options factsheet.
+      // reason — the `if _mtm_reason and not _was_composite:` guard inside
+      // `analytics_runner.run_csv_strategy_analytics` (grep `_was_composite`).
+      // So the "composites…" wording is correctly attributed and never renders
+      // under a single-key options factsheet.
+      //
+      // (140.5-04) That last reference used to carry a line range into
+      // `analytics_runner.py`. The file SHRANK under its citers in a refactor, so
+      // the range pointed past EOF — every past-EOF citation into that file is
+      // that ONE event, not one independent rot per citer. Anchored on the symbol
+      // instead: a name survives the next shrink, a coordinate does not.
       return "Mark-to-market unavailable: composites that include an options book report cash settlement only.";
     case "mtm_basis_unavailable_for_venue":
       return "Mark-to-market unavailable for this venue.";

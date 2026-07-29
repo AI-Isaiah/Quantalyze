@@ -102,8 +102,16 @@ const EquityCurvePointSchema = z.object({
 });
 
 // audit-2026-05-07 M-0912: partial_history is derivable from
-// overlap_days < PARTIAL_HISTORY_THRESHOLD (126 trading days, mirrors
-// `simulator_scoring.py:438`). Keep both fields for wire compatibility
+// overlap_days < PARTIAL_HISTORY_THRESHOLD (126 trading days, mirroring the
+// module-level `PARTIAL_HISTORY_THRESHOLD` in
+// `analytics-service/services/simulator_scoring.py`, which
+// `simulate_add_candidate` compares `overlap_days` against). Keep both fields
+// for wire compatibility
+//
+// (140.5-04) The Python side used to be cited by line. That file SHRANK under
+// its citers in a refactor and the coordinate went past EOF. The constant's NAME
+// is the durable anchor — and unlike a line number it is greppable on both sides,
+// which is the whole point of pinning two copies of the same threshold.
 // AND refine to refuse contradictory rows (e.g. partial_history=false
 // with overlap_days=5).
 export const PARTIAL_HISTORY_THRESHOLD = 126;

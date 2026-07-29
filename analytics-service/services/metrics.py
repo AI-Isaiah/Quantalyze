@@ -285,9 +285,10 @@ class MetricsResult:
     # HARD-04 (#67): DQ annotation lifted by BOTH callers into
     # strategy_analytics.data_quality_flags (job_worker composite merged_flags +
     # analytics_runner single-key). It rides a FIELD, NOT a metrics_json key, on
-    # purpose: analytics_runner.py:1925/:2373 spread `metrics_json` into the
-    # strategy_analytics UPSERT as top-level columns, and job_worker.py
-    # :3386/:3506/:3595 copy `metrics_json` wholesale into metrics_json_by_basis.
+    # purpose: `analytics_runner.run_csv_strategy_analytics` spreads `metrics_json`
+    # into the strategy_analytics UPSERT as top-level columns, and job_worker
+    # copies `metrics_json` wholesale into metrics_json_by_basis (grep
+    # `metrics_json_by_basis` there).
     # A new metrics_json key would therefore become an UNKNOWN upsert column
     # (PostgREST failure) and mutate every full-dict golden. Annotation-only: the
     # CAGR value it flags is byte-identical with or without this field set.

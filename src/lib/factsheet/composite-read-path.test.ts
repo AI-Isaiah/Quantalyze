@@ -350,8 +350,9 @@ describe("HARD-03 readCompositeFactsheet — prefer persisted cumulative_method 
 
 /**
  * Finding B (Phase 92 hardening) — the SINGLE-KEY `insufficient_window` DQ flag is
- * persisted server-side (analytics_runner.py :1839/:2367, with a passing lift
- * test) but was NEVER rendered on the factsheet: both FactsheetView-consumer
+ * persisted server-side (the `HARD-04` lift in
+ * `analytics_runner.run_csv_strategy_analytics`, with a passing lift test)
+ * but was NEVER rendered on the factsheet: both FactsheetView-consumer
  * surfaces (the `/factsheet/[id]/v2` route + the discovery detail page) assigned
  * `buildOpts` ONLY on their composite arm, so a single-key strategy built
  * `buildOpts=undefined` → `payload.dataQuality` undefined → the FactsheetView

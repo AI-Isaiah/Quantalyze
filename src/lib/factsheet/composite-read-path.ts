@@ -361,8 +361,11 @@ export async function readCompositeFactsheet(
 /**
  * HARD-04 (#67) — the SINGLE-KEY counterpart of the composite `dataQuality` opt
  * built in `readCompositeFactsheet` above. A single-key strategy persists
- * `insufficient_window` at the analytics_runner CAGR site
- * (analytics_runner.py :1839 stored-trades / :2367 CSV-broker) exactly like a
+ * `insufficient_window` — computed at the CAGR site in `metrics.compute_all_metrics`
+ * and carried on the `MetricsResult.insufficient_window` FIELD, then lifted into
+ * `data_quality_flags` by both runners: the `HARD-04` lift in
+ * `analytics_runner.run_csv_strategy_analytics` and its mirror in
+ * `job_worker.run_stitch_composite_job` — exactly like a
  * composite, but has NO composite read-path to thread it. Finding B: because the
  * factsheet route (`/factsheet/[id]/v2`) and the discovery detail page
  * (`/discovery/[slug]/[strategyId]`) each assigned `buildOpts` ONLY on their
@@ -397,8 +400,11 @@ export function singleKeyDataQuality(
  * Two load-bearing invariants (falsifiable in composite-read-path.test.ts):
  *   - F-4 (T-102-01): `available` is gated on `computationStatus ∈ {complete,
  *     complete_with_warnings}` — the EXACT terminal-success literals the runner
- *     writes (analytics_runner.py:1938-1940 stored-trades, :2392 CSV-broker; the
- *     same pair the PDF route admits at pdf/route.ts:231-232). A failed/computing
+ *     writes (the `csv_status` assignment in
+ *     `analytics_runner.run_csv_strategy_analytics`; the same pair the PDF route
+ *     admits — grep `complete_with_warnings` in
+ *     `src/app/api/factsheet/[id]/pdf/route.ts`).
+ *     A failed/computing
  *     row NEVER exposes a live-looking MTM object: `metricsByBasis` is threaded
  *     ONLY when `available`, so the payload is structurally MTM-free otherwise.
  *   - SC-4 (T-102-SC keystone): thread ONLY the `mark_to_market` key, NEVER the raw

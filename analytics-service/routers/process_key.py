@@ -514,10 +514,12 @@ def _resolve_asset_class(
         "crypto" WITHOUT a DB read — matches the #597 backfill convention that
         api_key-sourced rows are crypto.
       - source == "csv" ⇒ read `strategies.asset_class` for the REAL strategy_id
-        present in every sync csv run (the :614 guard returns early when it is
-        missing). This is the SAME signal finalize reads
-        (analytics_runner.py:2313-2314), keeping preview and finalize
-        annualization on one clock.
+        present in every sync csv run (`process_key`'s `MISSING_STRATEGY_ID`
+        422 guard returns before this helper is ever called when it is
+        missing). This is the SAME signal finalize reads — the
+        `periods_per_year_for_asset_class(_strategy_row.get("asset_class"))`
+        call in `analytics_runner.run_csv_strategy_analytics` — keeping preview
+        and finalize annualization on one clock.
     A missing/None row or any lookup failure ⇒ None (fail-soft to
     periods_per_year_for_asset_class(None) = 252, the DB column's own DEFAULT
     'traditional'). Reads ONLY asset_class; no value is echoed to the caller.
@@ -559,7 +561,8 @@ def _derive_return_scalars(
 
     Single `derive_basis_series` call, annualized by asset_class (#597 / D2 —
     crypto √365 / traditional √252). geometric + calendar are the analytics
-    seam defaults (analytics_runner.py:2316-2317); the teaser has no
+    seam defaults (the `_cumulative_method` / `_day_basis` assignments in
+    `analytics_runner.run_csv_strategy_analytics`); the teaser has no
     denominator_config and passes no scalar_returns/densify_policy (no
     byte-identity machinery — Pitfall 4).
 
