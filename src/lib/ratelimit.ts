@@ -326,7 +326,25 @@ function denyStatus(rl: DenyResult): 503 | 429 {
   return isRateLimitMisconfigured(rl) ? 503 : 429;
 }
 
-/** The header set, with `Retry-After` stamped LAST so the caller's bag cannot win. */
+/**
+ * The header set. The artefact OWNS `Retry-After` in both directions.
+ *
+ * ⚠️ 140.4-16 / WR-08 — THE INVARIANT WAS STATED UNCONDITIONALLY AND HELD
+ * CONDITIONALLY. The options type documents "merged UNDERNEATH the artefact's
+ * own `Retry-After`, so a caller cannot clobber the value (asserted)". That was
+ * true only in the `"always"` mode: under `retryAfterHeader:
+ * "misconfigured-only"` on the **429** branch `stamp` is false, nothing was
+ * spread on top, and a caller-supplied `Retry-After` in `options.headers`
+ * survived verbatim — the exact clobber the sentence promised was impossible.
+ * The asserting test exercised only the default mode.
+ *
+ * Latent rather than live (`scenario/optimize` is the sole consumer of that
+ * mode and passes `NO_STORE_HEADERS` only), and fixed as a DELETION rather than
+ * left as a narrowed docblock: `"misconfigured-only"` exists to say "this 429
+ * carries no wait", so a caller header that puts one back contradicts the mode
+ * it asked for. Stamping and stripping are the same decision, and the artefact
+ * makes it either way.
+ */
 function denyHeaders(
   rl: DenyResult,
   options?: RateLimitDenyOptions,
@@ -334,10 +352,17 @@ function denyHeaders(
   const stamp =
     isRateLimitMisconfigured(rl) ||
     (options?.retryAfterHeader ?? "always") === "always";
-  return {
-    ...options?.headers,
-    ...(stamp ? { "Retry-After": String(rl.retryAfter) } : {}),
-  };
+  const merged: Record<string, string> = { ...options?.headers };
+  if (stamp) {
+    merged["Retry-After"] = String(rl.retryAfter);
+  } else {
+    // Case-insensitively, because a header bag is a plain object here and
+    // `retry-after` is as valid on the wire as `Retry-After`.
+    for (const k of Object.keys(merged)) {
+      if (k.toLowerCase() === "retry-after") delete merged[k];
+    }
+  }
+  return merged;
 }
 
 export function rateLimitDenyJson(

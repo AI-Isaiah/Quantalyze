@@ -560,6 +560,54 @@ describe("[SEAMRIM-05] rateLimitDenyJson / rateLimitDenyText — the deny chokep
       expect(ownHeaderNames(res)).toEqual(["retry-after"]);
     });
 
+    it("[140.4-16 / WR-08] a caller cannot clobber Retry-After in EITHER mode", () => {
+      // ⚠️ THE INVARIANT WAS STATED UNCONDITIONALLY AND HELD CONDITIONALLY.
+      // `RateLimitDenyOptions` documents "merged UNDERNEATH the artefact's own
+      // `Retry-After`, so a caller cannot clobber the value (asserted)" — and
+      // the asserting case exercised only the DEFAULT mode. Under
+      // `retryAfterHeader: "misconfigured-only"` on the 429 branch nothing was
+      // spread on top, so a caller header survived verbatim.
+      //
+      // Both modes are driven here, and both polarities of the mode: this is a
+      // second-member case by construction.
+      const clobber = { "Retry-After": "99999" };
+
+      // Default mode — the artefact's value wins (this half always held).
+      expect(
+        rateLimitDenyJson(THROTTLED, { headers: clobber }).headers.get(
+          "Retry-After",
+        ),
+      ).toBe("42");
+
+      // misconfigured-only, 503 branch — still stamped, still the artefact's.
+      expect(
+        rateLimitDenyJson(MISCONFIGURED, {
+          headers: clobber,
+          retryAfterHeader: "misconfigured-only",
+        }).headers.get("Retry-After"),
+      ).toBe("60");
+
+      // misconfigured-only, 429 branch — THE HOLE. The mode means "this 429
+      // carries no wait"; a caller header that puts one back contradicts the
+      // mode it asked for, so the artefact strips it.
+      expect(
+        rateLimitDenyJson(THROTTLED, {
+          headers: clobber,
+          retryAfterHeader: "misconfigured-only",
+        }).headers.get("Retry-After"),
+        "a caller-supplied Retry-After survived on the one branch the mode " +
+          "exists to keep free of it — the documented invariant is false here",
+      ).toBeNull();
+
+      // …and the caller's OTHER headers are untouched. Without this the strip
+      // is satisfiable by dropping the whole bag.
+      const res = rateLimitDenyJson(THROTTLED, {
+        headers: { ...clobber, "Cache-Control": "private, no-store" },
+        retryAfterHeader: "misconfigured-only",
+      });
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
     it("rateLimitDenyText is unchanged on BOTH branches", async () => {
       const bad = rateLimitDenyText(MISCONFIGURED);
       expect(bad.status).toBe(503);
