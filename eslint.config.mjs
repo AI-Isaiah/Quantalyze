@@ -172,15 +172,30 @@ const eslintConfig = defineConfig([
   //   - 140.4-01 → src/app/api/admin/strategy-review/route.ts — the rule
   //     reports 0 sites. Its six-member Promise.all binds `error` on every
   //     member, so the ratchet is real teeth on a real array-form surface.
-  //   - 140.4-02 → SyncPreviewStep.tsx — NOT admitted. The rule reports 1 site
-  //     (:521, `const { data: existing } = await supabase.from(
-  //     "strategy_analytics")…`), a genuine member of the same class that
-  //     140.4-02's conversion did not reach. Admitting the file would red-CI
-  //     the tree; silencing the site would be the weakening this rule exists to
-  //     prevent. It joins the glob when that read is converted — that is what
-  //     "ratchet" means here.
+  //   - 140.4-02 → SyncPreviewStep.tsx — ADMITTED (140.4-16 / WR-02). It was
+  //     held out on a measurement that this phase's OWN later plan falsified,
+  //     and the paragraph recording the hold-out outlived the reason for it.
+  //     The text here used to read: "the rule reports 1 site (:521, `const {
+  //     data: existing } = await supabase.from("strategy_analytics")…`) … it
+  //     joins the glob when that read is converted." Plan 140.4-12 converted
+  //     exactly that read, in this same phase (`SyncPreviewStep.tsx` now binds
+  //     `error` there), and nobody came back to advance the ratchet — the same
+  //     plan-12/plan-13 hand-off hole that left `SEAM_MISCONFIGURED`
+  //     unreachable, occurring a second time. Re-measured at HEAD before
+  //     widening:
+  //
+  //       $ npx eslint --rule '{"quantalyze/no-unchecked-supabase-read":"error"}' \
+  //           "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx"
+  //       (no output — 0 violations, exit 0)
+  //
+  //     ⚠️ THE MEASUREMENT IS THE ENTRY CRITERION, NOT THE COMMENT. Re-run the
+  //     command above before adding a file here; a paragraph asserting a count
+  //     is exactly what went stale last time.
   {
-    files: ["src/app/api/admin/strategy-review/route.ts"],
+    files: [
+      "src/app/api/admin/strategy-review/route.ts",
+      "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
+    ],
     rules: { "quantalyze/no-unchecked-supabase-read": "error" },
   },
   // Phase 52 (v1.4) strangler ratchet — per-surface / per-file no-raw-font-px
