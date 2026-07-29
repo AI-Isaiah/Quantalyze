@@ -1332,6 +1332,19 @@ describe("[140.3-10] POST /api/keys/sync — a code on every arm, and the TRAP-3
       expect(res.headers.get("Cache-Control")).toBe("private, no-store");
       // Hand-typed from the pre-adoption source — `{error, code}` in THAT key
       // order — not read back off the builder.
+      //
+      // ⚠️ 140.4-16 / WR-03 — ASSERTED BYTE-WISE, BECAUSE `toEqual` DOES NOT
+      // HOLD THE PROPERTY THIS COMMENT NAMES. `res.json()` parses to an object
+      // and `toEqual` is a structural deep-equality: key order is not compared.
+      // Measured — swapping the two keys at `keys/sync/route.ts:138` left this
+      // case and its three siblings GREEN. Four receipts across four files were
+      // asserting a property no assertion held, in the one phase that exists
+      // because unfalsifiable receipts shipped. `res.text()` is the shape that
+      // reddens. The structural claim is kept beside it, because a byte
+      // comparison alone reports "strings differ" rather than which field moved.
+      expect(await res.clone().text()).toBe(
+        '{"error":"Too many requests","code":"RATE_LIMITED"}',
+      );
       expect(await res.json()).toEqual({
         error: "Too many requests",
         code: "RATE_LIMITED",

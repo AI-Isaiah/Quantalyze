@@ -767,6 +767,12 @@ describe("[140.4-13 / SEAMRIM-05] behavioural — the 503 reaches the wire, acro
 
       expect(res.status).toBe(429);
       // Hand-typed: `{error, code}` in THAT key order.
+      // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
+      // compare key order (measured: a swap at `keys/sync/route.ts:138` left
+      // all four receipts green). See the note in `keys/sync/route.test.ts`.
+      expect(await res.clone().text()).toBe(
+        '{"error":"Too many requests","code":"RATE_LIMITED"}',
+      );
       expect(await res.json()).toEqual({
         error: "Too many requests",
         code: "RATE_LIMITED",

@@ -565,6 +565,12 @@ describe("POST /api/strategies/composite/add-key — B15 limiter ordering", () =
     // 140.4-13 / SEAMRIM-05 — the FULL body and headers, byte-unchanged by the
     // chokepoint adoption. Hand-typed from the pre-adoption source: `{code,
     // error}` in THAT key order, with NO_STORE_HEADERS and Retry-After.
+    // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
+    // compare key order (measured: a swap left all four receipts green). See
+    // the note in `keys/sync/route.test.ts`.
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_RATE_LIMIT","error":"Too many requests"}',
+    );
     expect(await res.json()).toEqual({
       code: "KEY_RATE_LIMIT",
       error: "Too many requests",
