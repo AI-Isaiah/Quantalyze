@@ -1055,3 +1055,146 @@ describe("[140.3-15 / TS-38] a config fault returns OUR envelope, not the upstre
     });
   });
 });
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 — THE `Retry-After` RELAY, and why it is not a
+ * status branch.
+ *
+ * ⭐ HARD PREREQUISITE FOR PHASE 141. 141's retry-with-backoff consumes
+ * `Retry-After`. Before this block, the forwarded non-2xx arm of
+ * `postProcessKey` reconstructed the response from the BODY and the STATUS
+ * only, so every upstream header died at the choke point. `/process-key` is
+ * rate-limited on the Python side (two stacked `@limiter.limit` decorators on
+ * `process_key.py`'s handler; `main.py`'s `RateLimitExceeded` handler answers
+ * 429 with `headers={"Retry-After": str(retry_after)}`), so a Python-side 429
+ * reached the browser as a 429 CARRYING NO WAIT AT ALL.
+ *
+ * WHY THESE TESTS LIVE HERE AND NOT AT FIVE CALL SITES. Five callers pass
+ * through this one arm — `csv-validate`, `csv-finalize`, `finalize-wizard`,
+ * `keys/sync`, `verify-strategy` — and each does
+ * `if (!result.ok) return result.response;`. One relay reaches all five
+ * (coverage-law row 1). It reaches ZERO wizard SURFACES on its own: the client
+ * threads must also read the header, which is the other half of this plan.
+ *
+ * ⚠️ THE HEADER IS RELAYED, NEVER PARSED. `parseRetryAfterSeconds` is the ONE
+ * parser and it lives on the READ side. `main.py` also puts
+ * `retry_after_seconds` in the BODY, which makes a second extraction path
+ * available here — do not take it. Two extraction paths for one fact is the
+ * substring-cascade shape this milestone exists to remove.
+ */
+describe("[140.5-03 / SEAMPROSE-02] postProcessKey relays Retry-After on a forwarded non-2xx", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+    // A leaked fetch stub is this repo's known CI-only (Node 22) failure cause.
+    vi.unstubAllGlobals();
+  });
+
+  function respondWith(
+    body: unknown,
+    status: number,
+    extraHeaders: Record<string, string> = {},
+  ) {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json", ...extraHeaders },
+        }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  async function call() {
+    return postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: { key_id: "k1" },
+      userId: "u1",
+      correlationId: "c-retry-after",
+      routeTag: "keys/sync",
+    });
+  }
+
+  it("a 429 with `Retry-After: 17` forwards the header STRING-IDENTICALLY", async () => {
+    respondWith(
+      { ok: false, code: "RATE_LIMITED", retry_after_seconds: 17 },
+      429,
+      { "Retry-After": "17" },
+    );
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(429);
+    // The literal is hand-typed, and it is a STRING: the relay must not coerce
+    // to a number and re-serialise, because that is parsing wearing a disguise.
+    expect(response.headers.get("Retry-After")).toBe("17");
+  });
+
+  it("relays an HTTP-date value BYTE-IDENTICALLY — no parsing server-side", async () => {
+    // RFC 9110 §10.2.3 permits the HTTP-date form and a CDN or WAF upstream of
+    // our route may legitimately emit it. A choke point that parsed would have
+    // to decide what to do with an unparseable value; a relay does not, and
+    // `parseRetryAfterSeconds` on the read side already resolves this form
+    // against the response's own `Date` header.
+    const httpDate = "Wed, 21 Oct 2026 07:28:00 GMT";
+    respondWith({ ok: false, code: "RATE_LIMITED" }, 429, {
+      "Retry-After": httpDate,
+    });
+    const response = failureResponse(await call());
+
+    expect(response.headers.get("Retry-After")).toBe(httpDate);
+  });
+
+  it("an upstream WITHOUT the header produces a response WITHOUT it — absence is not zero", async () => {
+    // TRAP-3. A relay that defaulted to `"0"` would hand every consumer a wait
+    // nobody advertised, and `0` fed to a backoff is the NEW-C05-01
+    // thundering-herd root cause the ONE parser exists to make unrepresentable.
+    respondWith({ ok: false, code: "GATE_NOT_ENOUGH_DATA" }, 422);
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(422);
+    expect(response.headers.get("Retry-After")).toBeNull();
+  });
+
+  it("POSITIVE CONTROL: the 403 write-capable-key verdict still forwards body and status VERBATIM", async () => {
+    // The arm being edited is the one whose 45-line docblock forbids branching
+    // on status. This case is the receipt that the relay did not become one:
+    // the PYAPI-10b 403 envelope must pass through exactly as before, header
+    // absent because the upstream sent none.
+    const verdict = {
+      ok: false,
+      code: "KEY_HAS_TRADING_PERMS",
+      human_message: "This key can trade.",
+      correlation_id: "c-retry-after",
+    };
+    respondWith(verdict, 403);
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual(verdict);
+    expect(response.headers.get("Retry-After")).toBeNull();
+  });
+
+  it("relays the header on a 503 too — the relay is not keyed to 429", async () => {
+    // ⭐ THE POINT OF THE WHOLE ARM, asserted rather than narrated: no code path
+    // here selects behaviour by status. A relay that only fired on 429 would be
+    // the status branch the docblock forbids, and it would drop the wait our own
+    // breaker's 503 envelope advertises (`resilient-fetch`'s BREAKER_COOLDOWN_S
+    // is stamped as a `Retry-After` on that arm).
+    respondWith({ ok: false, code: "CIRCUIT_OPEN" }, 503, {
+      "Retry-After": "30",
+    });
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("30");
+  });
+});
