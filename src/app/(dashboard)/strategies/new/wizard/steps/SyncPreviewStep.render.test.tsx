@@ -117,7 +117,7 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
     errSpy.mockRestore();
   });
 
-  it("transitions to gate_failed with a network-timeout when the sync POST throws", async () => {
+  it("transitions to gate_failed with SERVICE_UNREACHABLE when the sync POST throws", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
 
@@ -126,11 +126,24 @@ describe("[H-0194] SyncPreviewStep — kickoff render states", () => {
     // ⚠️ 140.4-11 RE-POINTED, same reason — and this one gains a real
     // discrimination it never had: the old assertion could not tell a
     // network-timeout apart from the generic SYNC_FAILED fallback.
+    //
+    // ⚠️ 140.5-03 / SEAMPROSE-03 RE-POINTED AGAIN, and the code itself changed.
+    // This was the FIFTH and last of the transport catches asserting a VENUE
+    // fault for a fault on our own hop: the kickoff POST to `/api/keys/sync`
+    // never completed, so the exchange may never have been contacted, while
+    // KEY_NETWORK_TIMEOUT's copy reads "We could not reach the exchange".
     await waitFor(() =>
       expect(screen.getByTestId("error-envelope")).toHaveAttribute(
         "data-error-code",
-        "KEY_NETWORK_TIMEOUT",
+        "SERVICE_UNREACHABLE",
       ),
+    );
+    // The negative half: a partial rename would satisfy the positive alone.
+    expect(screen.getByTestId("error-envelope")).not.toHaveTextContent(
+      "We could not reach the exchange.",
+    );
+    expect(screen.getByTestId("error-envelope")).toHaveTextContent(
+      "We could not reach our own service.",
     );
     expect(
       screen.getByTestId("wizard-back-to-strategies"),
@@ -2319,11 +2332,18 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     ];
 
     const observed = new Map<string, string[]>();
+    // 140.5-03 — counted SEPARATELY from `observed.size`. Two scenarios can
+    // legitimately share a code (they do, since the kickoff catch and the
+    // transport deadline both answer SERVICE_UNREACHABLE), and conflating
+    // "rows that ran" with "codes seen" makes a shrinking reachable set
+    // indistinguishable from a loop that stopped driving.
+    let driven = 0;
 
     for (const scenario of scenarios) {
       await scenario.drive();
 
       const envelope = screen.getByTestId("error-envelope");
+      driven += 1;
       const code = envelope.getAttribute("data-error-code");
       expect(
         code,
@@ -2372,16 +2392,40 @@ describe("[140.4-11] SyncPreviewStep — the destructive control must be EARNED"
     // CONTEXT §4, independently re-derived by the pattern-mapper); 140.4-12
     // raised it to FOURTEEN by making the kickoff arm translate before it
     // membership-checks, which admits SERVICE_UNAVAILABLE_RETRY,
-    // SERVICE_UNREACHABLE and SEAM_MISCONFIGURED. The literal is hand-typed —
-    // never `scenarios.length`, which would measure the loop against itself —
-    // and it is RAISED rather than left at 11, so the three new rows cannot
-    // silently stop driving anything.
+    // SERVICE_UNREACHABLE and SEAM_MISCONFIGURED. The literals are hand-typed —
+    // never `scenarios.length`, which would measure the loop against itself.
+    //
+    // ⚠️ 140.5-03 — THE DISTINCT-CODE FLOOR CAME DOWN TO THIRTEEN, AND THAT IS
+    // NOT A LOOSENING. Read this before "restoring" 14.
+    //
+    // The kickoff CATCH used to render `KEY_NETWORK_TIMEOUT` — "We could not
+    // reach the exchange" — for a POST to OUR OWN route that never completed.
+    // 140.5-03 replaced it with `SERVICE_UNREACHABLE`, which the "kickoff 504
+    // on a seam transport deadline" row ALREADY produces. Two scenarios now
+    // land on ONE code, so the DISTINCT count is honestly 13 while the number
+    // of scenarios driven is unchanged at 14. `KEY_NETWORK_TIMEOUT` is no
+    // longer a reachable terminal code at this surface at all — that is the
+    // point of the change, and a floor of 14 would pin this pin to a false
+    // attribution.
+    //
+    // ⭐ THE FENCE IS STRICTLY STRONGER FOR IT. A collapsing distinct-code
+    // count is exactly what a loop going blind ALSO looks like, so the two are
+    // now separated: `driven` counts scenarios that actually rendered an
+    // envelope and is pinned at the full 14, which no code-level collapse can
+    // satisfy. Lower `driven` only when a scenario is genuinely deleted.
     expect(
-      observed.size,
-      "Fewer than fourteen distinct codes were actually driven. A loop that " +
-        "renders nothing satisfies every assertion inside it and reports " +
+      driven,
+      "Fewer than fourteen scenarios actually rendered an envelope. A loop " +
+        "that renders nothing satisfies every assertion inside it and reports " +
         "agreement forever — which is worse than having no guard at all.",
     ).toBeGreaterThanOrEqual(14);
+    expect(
+      observed.size,
+      "Fewer than thirteen DISTINCT codes were driven. Two scenarios share " +
+        "SERVICE_UNREACHABLE since 140.5-03 (the transport deadline and the " +
+        "kickoff catch), so 13 is the honest distinct-code floor; anything " +
+        "below it means rows stopped reaching the codes they name.",
+    ).toBeGreaterThanOrEqual(13);
 
     // The forced choice must be absent from the WHOLE observed set, stated
     // once more as a set-level claim so a per-row `continue` cannot hide it.

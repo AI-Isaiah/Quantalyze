@@ -561,8 +561,9 @@ export function SyncPreviewStep({
               "treating this resume as a COLD START, not as an absent " +
               "analytics row:",
             // 140.4-16 / WR-04 — `.message` is THE BANNED SHAPE, not a
-            // mitigation of it: `keys/sync/route.ts:408-412` says so in those
-            // words three files away, in this same phase. A PostgREST error's
+            // mitigation of it: `keys/sync/route.ts` says so in those words
+            // three files away, in this same phase, in the SEAMRIM-06 comment
+            // on its `catch (sessionErr)` arm. A PostgREST error's
             // `message` is where postgrest inlines what it was handed. This is
             // a browser console rather than a Vercel log, so the blast radius
             // is the user's own session — which is a reason it was missed, not
@@ -735,9 +736,24 @@ export function SyncPreviewStep({
           setPhase("waiting_for_complete");
         }
       } catch (err) {
+        // TRAP-1 re-checked at this edit as a PROPERTY: `wizardFetch` sets
+        // exactly one header (`X-Correlation-Id`) and this route authenticates
+        // by COOKIE, so no credential value is on the request for a rejection
+        // to embed. This step never holds key plaintext at all.
         console.error("[wizard:SyncPreviewStep] kickoff threw:", err);
         if (mountedRef.current) {
-          setErrorCode("KEY_NETWORK_TIMEOUT");
+          // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S. The kickoff
+          // POST to `/api/keys/sync` never completed, so the exchange may never
+          // have been contacted. `KEY_NETWORK_TIMEOUT`'s copy ("We could not
+          // reach the exchange") asserted a venue fault for a fault on our own
+          // hop — the rule `wizardErrors.ts` states by name beside that entry,
+          // and this was the last of the five sites breaking it.
+          setErrorCode("SERVICE_UNREACHABLE");
+          // No response exists on this path, so no wait was advertised.
+          // Explicit rather than inherited: the first-attempt thread may have
+          // left one in state, and rendering it here would name a duration this
+          // failure never mentioned (TRAP-3).
+          setRetryAfterSeconds(null);
           setPhase("gate_failed");
         }
       }
@@ -1402,6 +1418,10 @@ export function SyncPreviewStep({
   const handleRetrySync = useCallback(async () => {
     if (retrying) return;
     setRetrying(true);
+    // 140.5-03 / SEAMPROSE-02 — a fresh attempt clears the previous failure's
+    // wait BEFORE the request, so nothing from attempt N can render under
+    // attempt N+1 (TRAP-3). Same reset point as `handleKickoffRetry`.
+    setRetryAfterSeconds(null);
     try {
       const res = await wizardFetch("/api/keys/sync", {
         method: "POST",
@@ -1427,8 +1447,59 @@ export function SyncPreviewStep({
         setSyncProgress((prev) =>
           prev ? { ...prev, stalled: false } : prev,
         );
+      } else if (mountedRef.current) {
+        /**
+         * ⭐ 140.5-03 / SEAMPROSE-02 — THE SIXTH THREAD, AND THE ONE NOBODY HAD
+         * NAMED. This is the exact path phase 141's retry-with-backoff builds
+         * on, which is why it is called out rather than folded in.
+         *
+         * WHAT STOOD HERE: nothing. `if (res.ok && mountedRef.current) { … }`
+         * with NO else. A non-2xx retry therefore (a) discarded the
+         * `Retry-After` the route had just stamped and (b) rendered no envelope
+         * at all — the amber banner simply stayed up and the button re-enabled,
+         * so a user throttled at 60 s could hammer Retry with no feedback and no
+         * way to know why nothing happened. The one surface that DOES honour the
+         * wait on its first attempt discarded it on every retry.
+         *
+         * WHY THE SAME CLASSIFICATION AS THE FIRST ATTEMPT: this is the SAME
+         * route, the SAME method and the SAME body as the kickoff (that is the
+         * point of the idempotent re-POST), so a second classifier for it would
+         * be two answers to one question. The translate-first-then-membership
+         * order and the read-through-the-leaf rule are inherited wholesale.
+         *
+         * WHY `gate_failed`: `errorEnvelope` renders only in that phase. The
+         * alternative — a second inline envelope surface inside the banner —
+         * would be a second place for this copy to drift, and the poll is
+         * already not advancing (that is why the banner is up). Recovery is
+         * intact: the envelope's Retry runs `handleKickoffRetry`, which re-POSTs
+         * the same idempotent kickoff and returns the step to
+         * `waiting_for_complete`.
+         *
+         * ⚠️ NO AUTOMATIC RETRY IS ADDED HERE. 141 owns retry; this plan only
+         * makes the wait ARRIVE.
+         */
+        const failure = (await res.json().catch(() => null)) as {
+          code?: unknown;
+        } | null;
+        const wireCode = seamErrorCode(failure);
+        const translated = recogniseSeamErrorCode(wireCode);
+        const surfaced: WizardErrorCode =
+          translated !== "UNKNOWN"
+            ? translated
+            : (wireCode !== null && KNOWN_KICKOFF_CODES[wireCode]) ||
+              "SYNC_FAILED";
+        // The wait rides the HEADER, read through the ONE parser — the same
+        // state the first-attempt thread writes, so there is one wait for one
+        // surface. Absent header ⇒ `null` ⇒ no duration named (TRAP-3).
+        setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
+        setUpstreamCorrelationId(seamCorrelationId(failure));
+        setErrorCode(surfaced);
+        setPhase("gate_failed");
       }
     } catch (retryErr) {
+      // TRAP-1 re-checked as a PROPERTY: `wizardFetch` sets one header
+      // (`X-Correlation-Id`) and this route authenticates by COOKIE, so no
+      // credential value is on the request for a rejection to embed.
       console.warn(
         "[wizard:SyncPreviewStep] retry sync POST failed:",
         retryErr,
