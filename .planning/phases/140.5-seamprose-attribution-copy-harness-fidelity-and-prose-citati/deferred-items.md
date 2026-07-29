@@ -48,3 +48,48 @@ contention, and if not, hoist the actual import out of the factory. Until then, 
 red run of this ONE case as unproven rather than as a regression — **and re-run before
 concluding**, exactly as `DEF-140.4-A` already instructs for the four load-dependent 5s
 timeouts.
+
+---
+
+## DEF-140.5-B — TWO more suites are red on the untouched wave-2 base, and NEITHER is DEF-140.5-A
+
+**Found by:** 140.5-02, measuring the pre-change baseline at `0210c0ad` (wave 1 merged).
+**Status:** OPEN. Not caused by this plan; not fixed by it. Both are outside 140.5-02's
+`files_modified` fence, so the SCOPE BOUNDARY rule forbids touching them here.
+
+**Measured on the untouched base, working tree porcelain-clean, no edits present:**
+
+| run | result |
+|---|---|
+| 1 (full suite, clean tree) | **2 files failed** — 721 passed \| 19 skipped (742 files); 10077 passed \| 287 skipped \| **2 failed** |
+
+⚠️ The documented wave-2 baseline is **723 passed / 0 failed (742 files) · 10079 passed /
+287 skipped / 0 failed**. The measured base is **721 / 2 failed · 10077 / 2 failed** — the
+two "missing" passing files are exactly these two.
+
+The two files, each reproduced IN ISOLATION (so neither is worker contention alone):
+
+1. `src/__tests__/contracts/contracts-registry.test.ts`
+   → `[B25] eslint-plugin-quantalyze wiring integrity > resolves every quantalyze rule to
+   "error" for a representative src file` — **`Error: Test timed out in 5000ms.`**
+   Isolated: `1 failed | 55 passed`.
+2. `src/app/(dashboard)/allocations/AllocationsTabs.scenario-state-preservation.test.tsx`
+   → `TestingLibraryElementError: Unable to find an element by:
+   [data-testid="kpi-strip-mock"]` from a `findByTestId` wait, alongside
+   `TypeError: Failed to parse URL from /api/allocator/scenario/saved`.
+   Isolated: **`2 failed`** (both of its cases) — i.e. it fails HARDER in isolation than in
+   the full run, where only one of its two cases failed.
+
+**Both are TIMEOUT-shaped, which is the `DEF-140.4-A` class** (load-dependent 5s timeouts),
+not the module-registry race of `DEF-140.5-A`. Neither is
+`src/app/api/admin/strategy-review/route.test.ts`.
+
+**Why it matters:** every plan in this phase is asked to compare a post-change full-suite run
+against a figure recorded as `0 failed`. That figure does not reproduce on this machine at
+this base. A plan that reads its own post-change run as "2 regressions" would be wrong, and a
+plan that reads it as "0 failed, as documented" would be reporting a number it did not
+measure. **Compare against the MEASURED base (2 failed, these two files), not the recorded
+one, and name the files.**
+
+**Not attempted here:** raising the 5s `testTimeout` for these two, or investigating the
+`Failed to parse URL` relative-fetch warning in `AllocationsTabs`. Both are out of fence.

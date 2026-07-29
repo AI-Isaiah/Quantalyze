@@ -241,15 +241,28 @@ describe("wizardErrors", () => {
       );
     });
 
+    // ⚠️ 140.5-02 — BOTH TITLES BELOW WERE RE-POINTED, in the same commit as
+    // the copy change, and the old strings are recorded here rather than simply
+    // overwritten:
+    //   CSV_VALIDATION_FAILED was "Validation failed. See per-row breakdown
+    //     below." — a promise measured FALSE on both arms of the route
+    //     (RESEARCH §12.4). It is reached as the ENVELOPE HEADING via
+    //     `CsvUploadStep`'s `data.human_message ?? …title` fallback, so a
+    //     forwarded 401 printed it verbatim.
+    //   CSV_UPSTREAM_FAIL was "Validation service returned an unexpected
+    //     response. Retry shortly." — replaced by the FOUNDER-AUTHORED §4a
+    //     sentence, which is pre-approved and not open to a reword.
+    // A pin that survives the change it was written to catch is worse than no
+    // pin, so these move deliberately, with the reason attached.
     it("CSV_VALIDATION_FAILED preserves the verbatim user-visible title", () => {
       expect(WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED.title).toBe(
-        "Validation failed. See per-row breakdown below.",
+        "Your file did not pass validation.",
       );
     });
 
     it("CSV_UPSTREAM_FAIL preserves the verbatim user-visible title", () => {
       expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
-        "Validation service returned an unexpected response. Retry shortly.",
+        "We couldn't check your file just now.",
       );
     });
 
@@ -608,6 +621,19 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     ["Your IP is not on the allowlist", "KEY_IP_ALLOWLIST", 502],
     ["Rate limit exceeded", "KEY_RATE_LIMIT", 503],
     ["429 Too Many Requests", "KEY_RATE_LIMIT", 503],
+    // ⚠️ 140.5-02 / B-02 — RE-POINTED IN THE SAME COMMIT AS THE FIX, and the
+    // re-pointing is the load-bearing part. This row used to read
+    // `"connect ETIMEDOUT 10.0.0.1:443"` and it was the ONLY case exercising
+    // the `timeout|etimedout` branch — so the suite read as covering that arm.
+    // It does not: that is a RAW UNDICI SYSCALL STRING, and `analytics-client`
+    // wraps every transport failure before rethrowing, so no producer can put
+    // it in front of this classifier. The arm it "covered" was dead, and the
+    // real messages ("Analytics service timed out after 15000ms on …", "…is
+    // not reachable…") both fell to UNKNOWN/500. Their replay now lives in the
+    // B-02 block below, against the TYPE marker. The substring branch survives
+    // as a LAST RESORT for a raw syscall string that reaches the classifier
+    // unwrapped from somewhere new, and this row says so out loud rather than
+    // implying production coverage it does not have.
     ["connect ETIMEDOUT 10.0.0.1:443", "KEY_NETWORK_TIMEOUT", 502],
     ["Could not verify the key's permission scopes", "KEY_PROBE_FAILED", 503],
     ["This key has trading permissions", "KEY_HAS_TRADING_PERMS", 400],
@@ -1287,7 +1313,8 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * HAND-TYPED. Never derived from the module under test — deriving either set
    * from `wizardErrors.ts` would make this a self-referential oracle that
    * cannot fail when the module changes, which is the exact defect the phase's
-   * economic-invariant rule names.
+   * economic-invariant rule names. (140.5-02 bumps the size literal below to
+   * 57; see the twin guard's note for the per-entry reasoning re-run.)
    *
    * `start_fresh` is destructive because WizardClient's handler DELETEs the
    * draft row, cascading away every `strategy_keys` member under it. It is the
@@ -1336,6 +1363,12 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * without re-running it is how a growing table smuggles a violation past a
    * size guard.
    *
+   * **57 at 140.5-02**, which added `KEY_MISSING_READ_SCOPE` and
+   * `KEY_PERMISSION_DENIED` (SEAMPROSE-03 — two venue wire codes that had no
+   * honest verdict). Both carry `try_another_key` + `request_call`: NO
+   * destructive member, so this guard is unaffected in substance. The
+   * reasoning below was re-run over both new entries BEFORE the number moved.
+   *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
@@ -1345,7 +1378,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 55;
+  const EXPECTED_TABLE_SIZE = 57;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1487,8 +1520,19 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * it says "nothing was changed", which is NOT the banned string and, unlike
    * the CSV case that fragment came from, is knowable — `SeamConfigError` is
    * raised before any store or network I/O, so no write could have landed.
+   *
+   * **57 at 140.5-02** (`KEY_MISSING_READ_SCOPE`, `KEY_PERMISSION_DENIED`).
+   * Both were read against all four FORBIDDEN fragments by hand before the
+   * number moved. Neither mentions notification, trade fetching, or a session
+   * field name. The one needing care is "data is unchanged": neither entry
+   * asserts anything about server state at all — both describe the EXCHANGE's
+   * refusal and the user's remedy, and the key was never stored on either path.
+   * The §4a entry `CSV_UPSTREAM_FAIL` (this plan's other copy change) says
+   * "not your data" and "Nothing was saved", neither of which is the banned
+   * string, and "Nothing was saved" is verified true at its arm at three
+   * layers rather than asserted.
    */
-  const EXPECTED_TABLE_SIZE = 55;
+  const EXPECTED_TABLE_SIZE = 57;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1883,5 +1927,421 @@ describe("[140.3-15 / TS-38] SEAM_MISCONFIGURED — our fault, permanent, no ret
       "SERVICE_UNAVAILABLE_RETRY",
     );
     expect(recogniseSeamErrorCode("NOT_A_SEAM_CODE")).toBe("UNKNOWN");
+  });
+});
+
+// ===========================================================================
+// Phase 140.5-02 / SEAMPROSE-03 — the §4a vocabulary
+// ===========================================================================
+
+describe("[140.5-02 / SEAMPROSE-03] DEF-140.4-C — ONE sentence for an unrecognised upstream failure", () => {
+  /**
+   * ORACLE INDEPENDENCE. Every expected string below is a LITERAL, transcribed
+   * by hand from `140.5-CONTEXT.md` §4a (founder-authored, pre-approved copy).
+   * Nothing here is imported from, or derived from, the module under test — a
+   * `toBe(WIZARD_ERROR_COPY.X.title)` assertion passes for any implementation.
+   *
+   * ⚠️ SCOPE OF THIS ENTRY, from the CORRECTED §6c. `CSV_UPSTREAM_FAIL` is the
+   * code for the UNRECOGNISED-OR-CODELESS upstream failure only. The CSV
+   * routes' OWN caller-fault codes (`CSV_FILE_TOO_LARGE`, `CSV_INVALID_FORMAT`,
+   * `CSV_RATE_LIMIT`, `CSV_SESSION_REUSED`, `CSV_PERSIST_FAIL`,
+   * `CSV_FINALIZE_FAIL`) keep their own copy and must NEVER reach this entry:
+   * "This is on our side, not your data" is FALSE for an 11 MB upload, and
+   * "Nothing was saved" may be affirmatively false for `CSV_PERSIST_FAIL`.
+   * Routing the three-way arm that enforces that is 140.5-05's, with negative
+   * controls; this plan publishes only the vocabulary it consumes.
+   */
+  it("carries the founder heading VERBATIM", () => {
+    expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
+      "We couldn't check your file just now.",
+    );
+  });
+
+  it("splits the two founder sentences across cause/fix WITHOUT rewording either", () => {
+    const copy = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    expect(copy.cause).toBe(
+      "This is on our side, not your data. Nothing was saved.",
+    );
+    expect(copy.fix).toEqual([
+      "Try again in a moment — if it keeps happening, send us this reference.",
+    ]);
+  });
+
+  it("offers the retry control its own sentence promises (polarity re-derived, not copied)", () => {
+    // `envelope.ts`'s RECOVERABLE_ACTIONS is {clear_and_retry, try_another_key}.
+    // The copy says "try again in a moment", so without `clear_and_retry` the
+    // envelope renders no Retry CTA and the sentence names a control that does
+    // not exist. `request_call` is the "send us this reference" affordance.
+    const { actions } = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    expect(actions).toContain("clear_and_retry");
+    expect(actions).toContain("request_call");
+    // Not destructive: this failure is ours, so nothing here offers to delete
+    // the user's draft.
+    expect(actions).not.toContain("start_fresh");
+  });
+
+  it("keeps the copy's dynamic-value count at ONE — correlation_id, rendered by the component", () => {
+    // PATTERNS §9 static-copy rule. No URL, no status, no hostname, no env
+    // name, and no interpolation token: `correlation_id` is printed by
+    // `CsvValidationEnvelope`'s own footer line, never embedded in a string
+    // here. A placeholder in the table would be a SECOND dynamic value.
+    const copy = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ");
+    expect(blob).not.toMatch(/\{[^}]*\}/);
+    expect(blob).not.toMatch(/\$\{/);
+    expect(blob).not.toMatch(/https?:\/\//);
+    expect(blob.toLowerCase()).not.toContain("correlation_id");
+  });
+
+  it("PROMISE PIN — no CSV copy on this surface promises a per-row breakdown", () => {
+    // ⚠️ THE PROMISE IS FALSE ON **BOTH** ARMS (RESEARCH §12.4), not only the
+    // forwarded-upstream one: `csv_adapter.py` emits the rows under
+    // `debug_context.violations`, `CsvValidationEnvelope` reads
+    // `debug_context.pandera_errors` (zero Python hits), and `_envelope_error`
+    // discards `debug_context` before the wire. The `<details>` blocks never
+    // render, so the sentence is a promise the UI cannot keep.
+    //
+    // ABSENCE **and** PRESENCE, both halves. An absence-only assertion is
+    // satisfied by deleting the entry, which would leave the user with less
+    // information rather than honest information.
+    const copy = WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob).not.toContain("per-row breakdown");
+    expect(blob).not.toContain("row-level breakdown");
+    expect(copy.title).toBe("Your file did not pass validation.");
+  });
+
+  it("CSV_RATE_LIMIT is an EXPLICIT row in the wire table — the CSV surface's name for the RATE_LIMITED fact", () => {
+    // The CSV routes stamp `Retry-After` on their 429 and mint the
+    // surface-local code `CSV_RATE_LIMIT`. Without this row the code resolves
+    // "UNKNOWN" and the one CSV wait the seam actually advertises is dropped.
+    // `RATE_LIMITED`'s copy deliberately carries no duration — the figure is
+    // the server's own header, rendered by `ErrorEnvelope`.
+    expect(recogniseSeamErrorCode("CSV_RATE_LIMIT")).toBe("RATE_LIMITED");
+  });
+
+  it("CSV_RATE_LIMIT is NOT a WizardErrorCode, and that absence is load-bearing", () => {
+    // ⚠️ DO NOT "FIX" THIS BY MINTING A `CSV_RATE_LIMIT` MEMBER OR ADDING IT TO
+    // A `KNOWN_*` ROSTER. 140.5-05's three-way arm tries branch (1) — the code
+    // is already a known wizard/route code, keep today's copy — BEFORE branch
+    // (2), the wire-table hop. If `CSV_RATE_LIMIT` were admitted by branch (1)
+    // it would keep today's copy and the stamped wait would never reach the
+    // shared envelope. The ABSENCE is what routes it through the table.
+    expect(Object.keys(WIZARD_ERROR_COPY)).not.toContain("CSV_RATE_LIMIT");
+  });
+
+  it("ANTI-REGRESSION: the pre-existing wire-table rows still answer as they did", () => {
+    // A new row lands in the ONE shared table. A sweep that re-pointed the
+    // table would be invisible to every assertion above.
+    expect(recogniseSeamErrorCode("RATE_LIMITED")).toBe("RATE_LIMITED");
+    expect(recogniseSeamErrorCode("VALIDATION_FAILED")).toBe("VALIDATION_FAILED");
+    expect(recogniseSeamErrorCode("CIRCUIT_OPEN")).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(recogniseSeamErrorCode("SEAM_MISCONFIGURED")).toBe("SEAM_MISCONFIGURED");
+    expect(recogniseSeamErrorCode("CSV_VALIDATION_FAILED")).toBe("UNKNOWN");
+  });
+});
+
+describe("[140.5-02 / SEAMPROSE-03] the four scope/permission wire codes, answered BY TABLE", () => {
+  /**
+   * ⚠️ COVERAGE-LAW ROW 2. `VENUE_WIRE_CODE_TO_VERDICT` is a HAND-TYPED ROSTER
+   * and these four rows are **PARTIAL BY CONSTRUCTION**, in those words. The
+   * companion parity guard does not promote it to row 1 — what it adds is
+   * fail-loud ARRIVAL for a newly-emitted code.
+   *
+   * ORACLE INDEPENDENCE: every `detail` below is hand-transcribed BYTE-FOR-BYTE
+   * from the Python source that emits it. That byte-identity is the
+   * cross-language contract — a reword on the Python side must red here.
+   * Nothing is imported from, or derived from, the module under test.
+   */
+  function seamThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  // exchange.py, the deribit scope-precheck arm, via key_permissions.py's
+  // `scope_detail`.
+  const MISSING_SCOPE_DETAIL = "key is missing required scope 'account:read'";
+  // exchange.py, the ccxt.PermissionDenied arm.
+  const PERMISSION_DENIED_DETAIL =
+    "Key denied permission. Confirm the key has read-only scope and that your IP allowlist includes our service.";
+  // exchange.py, the has_withdraw / has_trade arms.
+  const WITHDRAW_SCOPE_DETAIL =
+    "Key has withdrawal permissions. Please use a read-only key.";
+  const TRADE_SCOPE_DETAIL =
+    "Key has trading permissions. Please use a read-only key.";
+
+  it("MISSING_SCOPE stops being UNKNOWN/500 — the DOGFOOD-3 dead end for a fixable key scope", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(MISSING_SCOPE_DETAIL, "MISSING_SCOPE"),
+    );
+    expect(
+      verdict.code,
+      "A user was told 'we could not classify this failure' about their own " +
+        "key's scope, which the exchange named precisely and which they can fix " +
+        "in two clicks.",
+    ).toBe("KEY_MISSING_READ_SCOPE");
+    expect(verdict.status, "a caller fault is not a 5xx").toBe(400);
+    // The same message with NO code still lands where it always did. This is
+    // what proves the CODE — not a reworded predicate — moved the verdict.
+    expect(classifyKeyValidationError(new Error(MISSING_SCOPE_DETAIL))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("PERMISSION_DENIED stops asserting an IP allowlist it never observed", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(PERMISSION_DENIED_DETAIL, "PERMISSION_DENIED"),
+    );
+    expect(verdict.code).toBe("KEY_PERMISSION_DENIED");
+    expect(
+      verdict.code,
+      "TRAP-3: the exchange named TWO possible causes and we picked one.",
+    ).not.toBe("KEY_IP_ALLOWLIST");
+    expect(verdict.status, "a permission refusal is the CALLER's fault").toBe(400);
+    // ⭐ The mis-map is real, not hypothetical: the identical sentence with no
+    // machine code STILL reaches KEY_IP_ALLOWLIST through the cascade, because
+    // the `ip` + `allow` branch matches the REMEDY half of the sentence. That
+    // is the measurement of what the table row bought.
+    expect(classifyKeyValidationError(new Error(PERMISSION_DENIED_DETAIL))).toEqual(
+      { code: "KEY_IP_ALLOWLIST", status: 502 },
+    );
+    // And the new copy must name BOTH candidates without asserting either.
+    const copy = WIZARD_ERROR_COPY.KEY_PERMISSION_DENIED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob, "the scope candidate is missing").toContain("scope");
+    expect(blob, "the allowlist candidate is missing").toContain("allowlist");
+    // The old entry states the allowlist cause as observed fact. This one must
+    // not, or the member was pointless.
+    expect(blob).not.toContain("you enabled ip pinning");
+    expect(
+      WIZARD_ERROR_COPY.KEY_IP_ALLOWLIST.cause.toLowerCase(),
+      "the ANTI-CONTROL: the entry we stopped routing here still makes the " +
+        "single-cause claim, which is exactly why it is the wrong answer.",
+    ).toContain("you enabled ip pinning");
+  });
+
+  it("WITHDRAW_SCOPE stops rendering copy that says TRADING", () => {
+    expect(
+      classifyKeyValidationError(
+        seamThrow(WITHDRAW_SCOPE_DETAIL, "WITHDRAW_SCOPE"),
+      ),
+    ).toEqual({ code: "KEY_HAS_WITHDRAW_PERMS", status: 400 });
+    // The cascade's `trading|withdraw` branch answered KEY_HAS_TRADING_PERMS
+    // for BOTH, so a withdrawal-capable key was told its problem was trading.
+    expect(classifyKeyValidationError(new Error(WITHDRAW_SCOPE_DETAIL))).toEqual({
+      code: "KEY_HAS_TRADING_PERMS",
+      status: 400,
+    });
+    // The copy the correct member renders must name WITHDRAWAL, not trading.
+    const copy = WIZARD_ERROR_COPY.KEY_HAS_WITHDRAW_PERMS;
+    expect(copy.title.toLowerCase()).toContain("withdraw");
+  });
+
+  it("TRADE_SCOPE is right BY TABLE, not by an accident of substring order", () => {
+    // ⭐ This row changes nothing today. That is the point: it is what stops the
+    // next reword on either side from changing it. Asserted alongside the
+    // accident it replaces so the difference is visible.
+    expect(
+      classifyKeyValidationError(seamThrow(TRADE_SCOPE_DETAIL, "TRADE_SCOPE")),
+    ).toEqual({ code: "KEY_HAS_TRADING_PERMS", status: 400 });
+  });
+
+  it("the six pre-existing venue rows still answer exactly as they did", () => {
+    // ANTI-REGRESSION. Four rows landed in a shared table; a sweep that
+    // re-pointed it would be invisible to every assertion above.
+    const unchanged: Array<[string, WizardErrorCode, number]> = [
+      ["RATE_LIMITED", "KEY_RATE_LIMIT", 503],
+      ["PROBE_FAILED", "KEY_PROBE_FAILED", 503],
+      ["AUTH_FAILED", "KEY_AUTH_FAILED", 400],
+      ["EXCHANGE_UNAVAILABLE", "KEY_EXCHANGE_UNAVAILABLE", 503],
+      ["NETWORK_UNAVAILABLE", "KEY_NETWORK_TIMEOUT", 502],
+      ["DDOS_PROTECTION", "KEY_VENUE_TRANSIENT", 503],
+    ];
+    for (const [wire, code, status] of unchanged) {
+      expect(
+        classifyKeyValidationError(seamThrow("irrelevant prose", wire)),
+        `the ${wire} row moved`,
+      ).toEqual({ code, status });
+    }
+  });
+
+  it("the two EXEMPT venue codes still reach the verdicts their reasons claim", () => {
+    // ⚠️ The exemption reasons in `VENUE_WIRE_CODES_WITHOUT_VERDICT` are claims
+    // about runtime behaviour. A reason nobody executes is prose. These two are
+    // the ones whose reason says "reaches the cascade's terminal UNKNOWN/500,
+    // and that is the honest answer" — so replay them and check.
+    expect(
+      classifyKeyValidationError(
+        seamThrow("Unsupported exchange for permission verification.", "UNSUPPORTED_EXCHANGE"),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Key validation failed unexpectedly. Contact support if this persists.",
+          "VALIDATION_UNEXPECTED",
+        ),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+});
+
+describe("[140.5-02 / B-02] the three real analytics-client messages, replayed", () => {
+  /**
+   * ⚠️ B-02 WAS OPEN AT HEAD, CONFIRMED BY EXECUTION, NOT BY READING. The
+   * cascade's transport branch tests `lower.includes("timeout")`, and the
+   * message this client actually produces says **"timed out"**. `"timed out"`
+   * does not contain `"timeout"`. Replayed against the whole cascade before the
+   * fix, all three of the client's real messages answered `UNKNOWN`/500 — the
+   * "we could not classify this" terminal, with no retry affordance — and the
+   * breaker cannot rescue it, because it needs 5 failures in 30 s and a Railway
+   * outage arrives at human retry cadence with the breaker still CLOSED.
+   *
+   * THE FIX IS BY TYPE, NOT BY A WIDER SUBSTRING. Adding `"timed out"` to the
+   * needle is a per-site edit that the next reword re-breaks (coverage-law
+   * row 3), and it would still answer `KEY_NETWORK_TIMEOUT` — copy that blames
+   * the EXCHANGE for a failure of our own hop.
+   *
+   * ORACLE INDEPENDENCE: the two message strings below are hand-transcribed
+   * literals, byte-identical to what `analytics-client.ts` constructs. That
+   * byte-identity is the cross-module contract — a reword on either side must
+   * red here rather than silently reopening the dead arm.
+   */
+  const TIMED_OUT_MESSAGE =
+    "Analytics service timed out after 15000ms on /process-key";
+  const NOT_REACHABLE_MESSAGE =
+    "Analytics service is not reachable. Please ensure it is running.";
+
+  /** A transport throw from the seam client: the own marker, as assigned. */
+  function transportThrow(message: string, seamTransportCode: string): Error {
+    return Object.assign(new Error(message), { seamTransportCode });
+  }
+
+  it("a deadline miss reaches SERVICE_UNREACHABLE, not UNKNOWN/500", () => {
+    expect(
+      classifyKeyValidationError(
+        transportThrow(TIMED_OUT_MESSAGE, "UPSTREAM_TIMEOUT"),
+      ),
+    ).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("a connection that never completed reaches SERVICE_UNREACHABLE too", () => {
+    expect(
+      classifyKeyValidationError(
+        transportThrow(NOT_REACHABLE_MESSAGE, "UPSTREAM_NETWORK_ERROR"),
+      ),
+    ).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("the MARKER moved the verdict — the same prose with no marker still cannot earn it", () => {
+    // ⭐ THE MEASUREMENT OF WHAT THE TYPE BRANCH BOUGHT, and the proof the fix
+    // is not substring-carried. Both messages, unmarked, still answer exactly
+    // what they answered before this plan.
+    expect(classifyKeyValidationError(new Error(TIMED_OUT_MESSAGE))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(NOT_REACHABLE_MESSAGE))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    // And the token that makes the dead branch dead, stated as an assertion so
+    // a reword on either side is caught: "timed out" ∌ "timeout".
+    expect(TIMED_OUT_MESSAGE.toLowerCase()).not.toContain("timeout");
+  });
+
+  it("the THIRD real message — an upstream non-2xx — is untouched by this branch", () => {
+    // NEGATIVE CONTROL. RESEARCH lists three producible messages; only two are
+    // transport failures. An upstream error carries a body, so it is the
+    // `seamCode` branch's business, and a marker branch that swallowed it would
+    // report a service that ANSWERED as one we could not reach.
+    expect(
+      classifyKeyValidationError(new Error("Analytics service error (502)")),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("SERVICE_UNREACHABLE's copy does NOT borrow the breaker's 'nothing was submitted'", () => {
+    // ⚠️ 140.3-12 fixed this once and it must not be re-merged. The breaker
+    // DECLINED to send, so "nothing was submitted" is knowable there. A
+    // deadline firing tells us nothing about whether the far side processed the
+    // request — it is the canonical case where the work may well have
+    // completed. This branch routes timeouts here, so the distinction is now
+    // load-bearing for a second producer.
+    const copy = WIZARD_ERROR_COPY.SERVICE_UNREACHABLE;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob).not.toContain("nothing was submitted");
+    expect(WIZARD_ERROR_COPY.SERVICE_UNAVAILABLE_RETRY.cause.toLowerCase()).toContain(
+      "nothing was submitted",
+    );
+  });
+
+  it("a non-string marker is ignored and never decides a verdict", () => {
+    // Same fence as the `seamCode` read: the property is data, and data can be
+    // anything. Prototype-shaped strings must not resolve through the table
+    // either.
+    for (const bogus of [42, null, {}, [], true, undefined]) {
+      expect(
+        classifyKeyValidationError(
+          Object.assign(new Error("some unclassified string"), {
+            seamTransportCode: bogus,
+          }),
+        ),
+      ).toEqual({ code: "UNKNOWN", status: 500 });
+    }
+    expect(
+      classifyKeyValidationError(
+        Object.assign(new Error("some unclassified string"), {
+          seamTransportCode: "constructor",
+        }),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the CircuitOpenError type check still outranks the marker", () => {
+    // Ordering is load-bearing: the breaker verdict must never be decided by
+    // anything an upstream — or a marker on a wrapped error — can set.
+    const breakerTrip = Object.assign(new CircuitOpenError(30), {
+      seamTransportCode: "UPSTREAM_TIMEOUT",
+    });
+    expect(classifyKeyValidationError(breakerTrip)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("COLLISION INVARIANT, re-derived for this branch (not copied)", () => {
+    // The branch is a table lookup, so it cannot collide with a substring the
+    // way the cascade's members do. What it CAN do is shadow an earlier
+    // verdict, so the invariant to re-run is: neither real message matches any
+    // cascade branch that would otherwise have claimed it. Asserted rather than
+    // asserted-in-a-comment.
+    for (const message of [TIMED_OUT_MESSAGE, NOT_REACHABLE_MESSAGE]) {
+      const lower = message.toLowerCase();
+      for (const needle of [
+        "signature",
+        "invalid secret",
+        "authentication failed",
+        "invalid_credentials",
+        "master password",
+        "broker server",
+        "allow",
+        "rate",
+        "429",
+        "timeout",
+        "etimedout",
+        "could not verify",
+        "permission scope",
+        "probe",
+        "trading",
+        "withdraw",
+      ]) {
+        expect(
+          lower.includes(needle),
+          `"${message}" contains "${needle}" — the cascade would have claimed ` +
+            `it, so the marker branch is now SHADOWING a verdict rather than ` +
+            `rescuing an unclassified one. Re-derive before moving either side.`,
+        ).toBe(false);
+      }
+    }
   });
 });

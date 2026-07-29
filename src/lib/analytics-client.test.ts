@@ -1976,3 +1976,129 @@ describe("[140.4-09 / SEAMRIM-06] parseResponse's THROWN message is scrubbed, li
     expect(err.message).toContain("btc_perp");
   });
 });
+
+// ===========================================================================
+// Phase 140.5-02 / SEAMPROSE-03 — B-02: the transport failure carries a MARKER
+// ===========================================================================
+
+describe("[140.5-02 / B-02] our own transport failures carry a machine marker, not just prose", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * ⚠️ WHY A MARKER AT ALL. `wizardErrors.ts` classified these two failures by
+   * sniffing `err.message`, and the needle it used was `"timeout"` while the
+   * message this module actually produces says `"timed out"`. `"timed out"`
+   * does not contain `"timeout"`, so the commonest Railway outage rendered as
+   * `UNKNOWN`/500 — "we could not classify this" — with no retry affordance.
+   * Reproduced by execution before the fix (RESEARCH §6.1).
+   *
+   * The marker is an OWN DATA PROPERTY read with `typeof`, never a class the
+   * consumer must `instanceof`: every route test that mocks a seam client
+   * wholesale replaces this module with a bare factory, under which the class
+   * is `undefined` and `instanceof undefined` throws from inside a catch block.
+   *
+   * ORACLE INDEPENDENCE: the expected code strings below are LITERALS, not
+   * imported from the module under test.
+   */
+  async function caughtFromRejectingFetch(rejection: unknown): Promise<unknown> {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(rejection);
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+        options: { budgetKey: string; tenantId: string },
+      ) => Promise<unknown>;
+    };
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
+      );
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  }
+
+  it("a deadline miss carries seamTransportCode = UPSTREAM_TIMEOUT", async () => {
+    const abort = Object.assign(new Error("aborted"), { name: "AbortError" });
+    const caught = await caughtFromRejectingFetch(abort);
+    expect((caught as Error).name).toBe("AnalyticsTimeoutError");
+    expect((caught as { seamTransportCode?: unknown }).seamTransportCode).toBe(
+      "UPSTREAM_TIMEOUT",
+    );
+    // The prose that made the substring branch dead is UNCHANGED — the fix is
+    // the marker, not a reword. If this ever reads "timeout", the old branch
+    // starts working again by accident and hides the real mechanism.
+    expect((caught as Error).message).toContain("timed out");
+    expect((caught as Error).message).not.toContain("timeout");
+  });
+
+  it("a connection that never completed carries seamTransportCode = UPSTREAM_NETWORK_ERROR", async () => {
+    const caught = await caughtFromRejectingFetch(new Error("ECONNREFUSED"));
+    expect((caught as Error).message).toBe(
+      "Analytics service is not reachable. Please ensure it is running.",
+    );
+    expect((caught as { seamTransportCode?: unknown }).seamTransportCode).toBe(
+      "UPSTREAM_NETWORK_ERROR",
+    );
+  });
+
+  it("the not-reachable throw is STILL a plain Error — no new type escapes to the wrappers", async () => {
+    // The taxonomy the wrappers branch on is fixed: AnalyticsTimeoutError,
+    // AnalyticsUpstreamError, CircuitOpenError and the generic not-reachable
+    // Error. Minting a class for the marker would reach every caller with no
+    // arm for it, which is what the mapBodyReadFailure docblock refuses.
+    const caught = await caughtFromRejectingFetch(new Error("ECONNREFUSED"));
+    const mod = await import("./analytics-client");
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).name).toBe("Error");
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect(caught).not.toBeInstanceOf(mod.AnalyticsTimeoutError);
+  });
+
+  it("an UPSTREAM error carries NO transport marker — the two facts stay separate", async () => {
+    // ⚠️ NEGATIVE CONTROL, and it is a security property, not tidiness. The
+    // upstream's own body fills `seamCode`; `seamTransportCode` records what
+    // OUR hop observed. If one field carried both, an upstream could put
+    // "UPSTREAM_TIMEOUT" in its envelope and be handed our transport verdict.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "nope" }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const mod = await import("./analytics-client");
+    type Internal = {
+      __INTERNAL_analyticsRequest: (
+        path: string,
+        body: Record<string, unknown> | null,
+        options: { budgetKey: string; tenantId: string },
+      ) => Promise<unknown>;
+    };
+    let caught: unknown;
+    try {
+      await (mod as unknown as Internal).__INTERNAL_analyticsRequest(
+        "/test",
+        { ping: 1 },
+        { budgetKey: "validate-key", tenantId: TENANT.userId },
+      );
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(mod.AnalyticsUpstreamError);
+    expect(
+      (caught as { seamTransportCode?: unknown }).seamTransportCode,
+    ).toBeUndefined();
+  });
+});
