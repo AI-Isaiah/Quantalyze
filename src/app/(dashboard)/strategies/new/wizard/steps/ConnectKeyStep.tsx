@@ -226,7 +226,12 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
  * `recogniseSeamErrorCode`) is the single artefact (row 1) and already carried
  * the entry. This mirrors `SyncPreviewStep.tsx`'s kickoff arm exactly.
  *
- * ORDER IS THE WHOLE CHANGE, AND IT IS SAFE BY MEASUREMENT: the table's key set
+ * ORDER IS THE WHOLE CHANGE, AND IT IS SAFE BY MEASUREMENT — NOW ASSERTED, NOT
+ * NARRATED (140.4-16 / WR-11). `seam-ratelimit-posture.invariant.test.ts`
+ * derives both vocabularies from disk and fails when a code they SHARE gets
+ * different answers. That is the necessary condition; disjointness below is a
+ * sufficient one that happens to hold HERE and does NOT hold at every surface
+ * (`KNOWN_KICKOFF_CODES` shares `RATE_LIMITED`). The table's key set
  * (`VALIDATION_FAILED`, `RATE_LIMITED`, `CIRCUIT_OPEN`, `UPSTREAM_TIMEOUT`,
  * `UPSTREAM_NETWORK_ERROR`, `SEAM_MISCONFIGURED`) and this set intersect in
  * NOTHING, so translating first cannot change what any existing member renders.

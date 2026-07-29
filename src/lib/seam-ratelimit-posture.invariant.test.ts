@@ -294,6 +294,201 @@ describe("[140.4-13 / SEAMRIM-05] structural — every seam limiter deny goes th
   });
 });
 
+// ══════════════════════════════════════════════════════════════════════════
+// 140.4-16 / WR-11 — the fact three docblocks rest on, finally asserted.
+// ══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Extract the STRING LITERAL members of a named roster declaration, from disk.
+ *
+ * ⚠️ WHY FROM DISK AND NOT BY IMPORT. None of the four rosters is exported, and
+ * exporting three module-private constants so a test can read them would widen
+ * production surface for the test's convenience. More importantly, a disk scan
+ * catches a roster this file has never heard of: the failure mode WR-11 names
+ * is a FUTURE edit adding `RATE_LIMITED` to one of these lists, and the same
+ * edit could equally mint a fifth roster at a fourth surface. The scan finds
+ * any `const KNOWN_*_CODES`, so it does not need to be told.
+ *
+ * Comment-stripped first (DEF-16-2): a roster's own docblock quotes the very
+ * code names being counted, and a raw scan would read those quotations as
+ * members.
+ */
+function extractRosters(
+  path: string,
+): Array<{ name: string; answers: Map<string, string> }> {
+  const lines = stripComments(
+    readFileSync(join(process.cwd(), path), "utf8"),
+  ).split("\n");
+  const out: Array<{ name: string; answers: Map<string, string> }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    const decl = /const\s+(KNOWN_[A-Z0-9_]*CODES)\b/.exec(lines[i]);
+    if (!decl) continue;
+    // Line-scan to the initializer's terminator rather than regexing across it:
+    // the two shapes end `]);` and `};`, and a non-greedy `[\s\S]*?` across
+    // either one silently swallows the NEXT declaration — which is how the
+    // first draft of this scan found three rosters where four exist.
+    const body: string[] = [];
+    for (let j = i; j < lines.length; j++) {
+      body.push(lines[j]);
+      if (/^\s*(\]\s*\)|\]|\})\s*;\s*$/.test(lines[j])) break;
+    }
+    const block = body.join("\n");
+    const answers = new Map<string, string>();
+    if (block.includes("new Set")) {
+      // SET SHAPE — `new Set<WizardErrorCode>(["A", "B"])`. Membership means
+      // "surface this wire string AS the wizard code", so the roster's answer
+      // for a member is the member itself.
+      for (const m of block.matchAll(/"([A-Z][A-Z0-9_]{2,})"/g)) {
+        answers.set(m[1], m[1]);
+      }
+    } else {
+      // RECORD SHAPE — `{ WIRE_KEY: "WIZARD_CODE" }`. The KEY is unquoted and
+      // is what the membership check indexes with; the VALUE is the answer.
+      // A quoted-token scan reads only the values, which is the wrong side.
+      for (const m of block.matchAll(
+        /^\s*([A-Z][A-Z0-9_]{2,})\s*:\s*"([A-Z][A-Z0-9_]{2,})"/gm,
+      )) {
+        answers.set(m[1], m[2]);
+      }
+    }
+    out.push({ name: decl[1], answers });
+  }
+  return out;
+}
+
+/** The ONE wire→wizard table, read from `wizardErrors.ts` on disk. */
+function extractWireTable(): Map<string, string> {
+  const src = stripComments(
+    readFileSync(join(process.cwd(), "src/lib/wizardErrors.ts"), "utf8"),
+  );
+  const table = /SEAM_CODE_TO_WIZARD_CODE[\s\S]*?\]\s*\)\s*;/.exec(src);
+  const out = new Map<string, string>();
+  if (!table) return out;
+  // Each entry is `["WIRE_CODE", "WIZARD_CODE"]`.
+  for (const m of table[0].matchAll(
+    /\[\s*"([A-Z][A-Z0-9_]+)"\s*,\s*"([A-Z][A-Z0-9_]+)"\s*\]/g,
+  )) {
+    out.set(m[1], m[2]);
+  }
+  return out;
+}
+
+const WIZARD_ROSTER_FILES = [
+  "src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx",
+  "src/app/(dashboard)/strategies/new/wizard/steps/MultiKeyConnectStep.tsx",
+  "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
+] as const;
+
+describe("[140.4-16 / WR-11] no wizard roster is SHADOWED into a different answer", () => {
+  const wireTable = extractWireTable();
+  const rosters = WIZARD_ROSTER_FILES.flatMap((f) =>
+    extractRosters(f).map((r) => ({ ...r, file: f })),
+  );
+
+  /** Every (roster, code) the translate-first hop decides instead of the roster. */
+  function shadowed(r: { answers: Map<string, string> }) {
+    return [...r.answers.entries()].filter(([code]) => wireTable.has(code));
+  }
+
+  it("VACUITY FENCE — both sides of the comparison actually found something", () => {
+    // A scanner that matches nothing reports agreement forever, which is how a
+    // source guard becomes worse than none. Hand-typed anchors on both sides.
+    expect(
+      [...wireTable.keys()],
+      "SEAM_CODE_TO_WIZARD_CODE was not found or not parsed — every " +
+        "assertion below is vacuous",
+    ).toContain("SEAM_MISCONFIGURED");
+    expect(wireTable.size).toBeGreaterThanOrEqual(6);
+    expect(
+      rosters.map((r) => r.name).sort(),
+      "a roster stopped being found by the scan. Either it was renamed out of " +
+        "the KNOWN_*_CODES convention — in which case this scan no longer sees " +
+        "it and the guard is silently narrower than it reads — or it was " +
+        "deleted.",
+    ).toEqual([
+      "KNOWN_ADD_KEY_CODES",
+      "KNOWN_CREATE_WITH_KEY_CODES",
+      "KNOWN_KICKOFF_CODES",
+      "KNOWN_SET_MEMBERS_CODES",
+    ]);
+    for (const r of rosters) {
+      expect(r.answers.size, `${r.name} parsed as empty`).toBeGreaterThan(0);
+    }
+    // The RECORD shape must be read on its KEY side. `KNOWN_KICKOFF_CODES` maps
+    // two wire codes onto ONE wizard code, so a value-side read would lose a
+    // key and quietly narrow the guard.
+    const kickoff = rosters.find((r) => r.name === "KNOWN_KICKOFF_CODES")!;
+    expect(kickoff.answers.get("MISSING_STRATEGY_ID")).toBe("VALIDATION_FAILED");
+  });
+
+  it.each([
+    "KNOWN_CREATE_WITH_KEY_CODES",
+    "KNOWN_ADD_KEY_CODES",
+    "KNOWN_KICKOFF_CODES",
+  ])("%s: where the wire table shadows it, the two AGREE", (name) => {
+    // ⚠️ THIS IS THE FACT THREE DOCBLOCKS REST ON, AND THE SHARP FORM IS NOT
+    // THE ONE THEY STATE. 140.4-12 and 140.4-15 reordered these surfaces to
+    // TRANSLATE FIRST, then membership-check, and justified it as safe because
+    // "the table's key set and this set intersect in NOTHING". Measured here,
+    // that sentence is FALSE for `KNOWN_KICKOFF_CODES`: `RATE_LIMITED` is in
+    // both. The reorder is safe anyway — but for a DIFFERENT reason, and the
+    // difference is the whole point of this guard.
+    //
+    // What actually makes it safe is that where they overlap they AGREE, so
+    // which hop wins cannot change what the user sees. Disjointness is a
+    // sufficient condition that happens to hold for the two Set rosters and
+    // NOT for the Record one; agreement is the necessary one, and it is what
+    // is asserted. A future edit that maps a shared code to a DIFFERENT wizard
+    // code in one of the two places — the plausible edit, since the routes mint
+    // sibling codes — makes the roster's answer unreachable, silently. That is
+    // the defect class this phase exists to close, and nothing reddened on it.
+    const roster = rosters.find((r) => r.name === name);
+    expect(roster, `${name} not found`).toBeDefined();
+    const disagreements = shadowed(roster!)
+      .filter(([code, answer]) => wireTable.get(code) !== answer)
+      .map(([code, answer]) => `${code}: roster=${answer} wire=${wireTable.get(code)}`);
+    expect(
+      disagreements,
+      `${name} and SEAM_CODE_TO_WIZARD_CODE disagree on a code they BOTH ` +
+        `carry. The translate-first hop runs first, so the wire table wins and ` +
+        `the roster's answer is unreachable. Decide which vocabulary owns the ` +
+        `code — do not leave both.`,
+    ).toEqual([]);
+  });
+
+  it("records WHICH codes are shadowed today, so a new overlap is visible in review", () => {
+    // Not a safety property — a visibility one. An overlap is only harmless
+    // while it agrees, and "it agrees" is easy to preserve accidentally and
+    // easy to break accidentally. Hand-typed, so a NEW overlap shows up as a
+    // diff on this line rather than as silence.
+    const overlaps = rosters
+      .flatMap((r) => shadowed(r).map(([code]) => `${r.name}.${code}`))
+      .sort();
+    //
+    // MEASURED, not assumed — and the measurement corrected a guess made while
+    // writing this very case. Exactly ONE overlap exists across all four
+    // rosters, and it is on the Record-shaped one:
+    //   · KNOWN_KICKOFF_CODES.RATE_LIMITED → "RATE_LIMITED", and the wire table
+    //     maps RATE_LIMITED → "RATE_LIMITED". They agree, so the hop's
+    //     precedence is invisible to the user.
+    // The two Set rosters (create-with-key, add-key) and KNOWN_SET_MEMBERS_CODES
+    // are genuinely disjoint from the wire vocabulary, which is what their
+    // docblocks claim — the claim is simply not true of all four.
+    expect(overlaps).toEqual(["KNOWN_KICKOFF_CODES.RATE_LIMITED"]);
+  });
+
+  it("the needle self-test — the agreement assertion CAN fail", () => {
+    // Without this, "no disagreements" is indistinguishable from "the extractor
+    // returned nothing". A synthetic roster that answers a REAL wire code
+    // DIFFERENTLY must be caught by the same expression the cases above use.
+    const synthetic = new Map([["SEAM_MISCONFIGURED", "UNKNOWN"]]);
+    const disagreements = [...synthetic.entries()]
+      .filter(([code]) => wireTable.has(code))
+      .filter(([code, answer]) => wireTable.get(code) !== answer);
+    expect(disagreements).toEqual([["SEAM_MISCONFIGURED", "UNKNOWN"]]);
+  });
+});
+
 describe("[140.4-13 / SEAMRIM-05] the needle self-test — BOTH polarities", () => {
   /** Classify an in-test source SAMPLE exactly as the scan above classifies a file. */
   function classify(sample: string): "no-limiter" | "routed" | "inlined" {

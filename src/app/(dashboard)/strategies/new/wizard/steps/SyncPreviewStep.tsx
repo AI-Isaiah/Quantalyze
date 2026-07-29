@@ -641,11 +641,22 @@ export function SyncPreviewStep({
           //
           // Until this, the lookup below was the ONLY hop and it indexed the
           // RAW WIRE STRING. `KNOWN_KICKOFF_CODES` holds wizard codes OUR OWN
-          // route mints, and its intersection with the seam's wire vocabulary
-          // (`CIRCUIT_OPEN`, `UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR`,
-          // `SEAM_MISCONFIGURED`) is EMPTY — so a breaker trip or a dead
-          // upstream during the kickoff rendered SYNC_FAILED, which asks the
-          // user which step failed about a computation that never started.
+          // route mints, and it carries no member for `CIRCUIT_OPEN`,
+          // `UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR` or
+          // `SEAM_MISCONFIGURED` — so a breaker trip or a dead upstream during
+          // the kickoff rendered SYNC_FAILED, which asks the user which step
+          // failed about a computation that never started.
+          //
+          // ⚠️ 140.4-16 / WR-11 — CORRECTION. This paragraph used to say the
+          // two vocabularies "intersect in EMPTY", listing only four of the
+          // wire table's six keys. Measured, that is FALSE: `RATE_LIMITED` is
+          // in BOTH, so the hop below genuinely shadows this roster for that
+          // code. It is harmless — both answer `RATE_LIMITED`, so the
+          // precedence is invisible — but "they are disjoint" was the wrong
+          // reason to believe it, and the right one is now asserted rather
+          // than narrated. `seam-ratelimit-posture.invariant.test.ts` derives
+          // both sides from disk and fails when a shared code gets DIFFERENT
+          // answers. Do not restore the disjointness sentence.
           // `SubmitStep` has had the translation hop since 140.3-05; this
           // sibling arm never did.
           //

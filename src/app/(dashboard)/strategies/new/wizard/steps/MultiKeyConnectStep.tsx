@@ -197,7 +197,12 @@ const MULTI_KEY_FUNNEL_STEP = "connect_key_multi";
  * FIRST — coverage-law row 1 — not a member here, which would be a hand-typed
  * allow-list edit owed again at every surface the next wire code reaches. The
  * table's key set and this set intersect in NOTHING, so the ordering cannot
- * change what any member below renders. See `ConnectKeyStep`'s
+ * change what any member below renders — and 140.4-16 / WR-11 turned that
+ * measurement into an assertion in `seam-ratelimit-posture.invariant.test.ts`,
+ * which derives both vocabularies from disk. Note the guard asserts the
+ * NECESSARY condition (a shared code must get the SAME answer) rather than
+ * disjointness: disjointness holds here but NOT at `KNOWN_KICKOFF_CODES`,
+ * which shares `RATE_LIMITED`. See `ConnectKeyStep`'s
  * `KNOWN_CREATE_WITH_KEY_CODES` docblock for the full reasoning; both key-entry
  * steps take the change together because both routes emit the code.
  */
