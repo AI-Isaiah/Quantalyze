@@ -42,7 +42,9 @@ import type { User } from "@supabase/supabase-js";
  * Two cache layers stack here:
  *   1. Python in-memory TTL cache — 15 minutes per (api_key_id, exchange_id),
  *      configurable via KEY_PERMISSION_CACHE_TTL.
- *   2. This Next layer — 60 seconds via unstable_cache. Conservative window
+ *   2. This Next layer — the `revalidate` window on the `unstable_cache` call
+ *      in `makeCachedFetcher` below (the ONE place that number lives; see
+ *      the note there for why it is not restated in prose). Conservative
  *      because the Python tier already absorbs the longer cool-down; this
  *      Next layer just collapses concurrent in-flight requests / refresh
  *      bursts so we don't flood the internal endpoint per render pass.
@@ -163,8 +165,19 @@ function readSeamFailureCause(err: unknown): SeamFailureCause | null {
 
 /**
  * Fetch the live permission triple from the Python service. Wrapped in
- * unstable_cache so concurrent callers + repeat hits inside 5 minutes
- * collapse to a single upstream request.
+ * unstable_cache so concurrent callers + repeat hits inside the `revalidate`
+ * window configured on the `unstable_cache` options below collapse to a single
+ * upstream request.
+ *
+ * (140.5-04) This sentence used to name a FIVE-MINUTE window. That was a 5x
+ * overstatement of the `revalidate` value set below — and it contradicted this
+ * file's own header, which describes the same Next layer correctly. One file
+ * disagreeing with itself about one constant is exactly what a derived
+ * reference prevents, so the duration now has a single home (the `revalidate`
+ * option) and this sentence points at it rather than restating it. Restating it
+ * as "60 seconds" would recreate the class on the next tuning edit: never write
+ * an integer or a duration in prose that a reader can derive from the code
+ * beside it.
  *
  * The cache tag/key array includes the keyId so a future invalidation hook
  * (e.g., on key rotation) can call revalidateTag.

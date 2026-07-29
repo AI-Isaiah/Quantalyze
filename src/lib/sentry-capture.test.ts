@@ -4,14 +4,26 @@ import { captureToSentry } from "./sentry-capture";
 /**
  * Phase 140.2 / SEAMCORE-06 — scrubbing is folded INTO the one capture helper.
  *
- * ⚠️ THE SENTRY CLAUSE IS ADDITIVE, NOT A LEAK BEING PLUGGED. A grep for
- * `captureException` / `captureMessage` across the seam core, both clients and
- * every seam route file returns ZERO at HEAD: the seam captures nothing to
- * Sentry today. What DOES exist is ten `captureToSentry` calls on the two
- * key-bearing routes, and those are the ones this helper now covers. Saying
- * "we fixed a Sentry leak" would be false.
+ * ⚠️ THE SENTRY CLAUSE IS ADDITIVE, NOT A LEAK BEING PLUGGED — but not for the
+ * reason this header used to give. It asserted that the seam sent NOTHING to
+ * Sentry at HEAD, resting that on a `captureException` / `captureMessage` grep
+ * returning ZERO, and put the real figure at ten `captureToSentry` calls on two
+ * routes. Both halves were false: the seam captures via `captureToSentry`, from
+ * every seam route file, and the grep returned zero only because those two
+ * symbols appear nowhere but inside `captureToSentry`'s own body. ⭐ A LITERALLY
+ * TRUE GREP DEFENDING A FALSE SENTENCE — CONTEXT §3's purest specimen, corrected
+ * in 140.5-04 at BOTH of its sites (this header and the `sentry-capture.ts`
+ * docblock), because the claim was duplicated and fixing one is the
+ * instance-not-class defect inside a single file pair.
  *
- * WHY THE MECHANISM IS HERE AND NOT AT THE TEN CALL SITES. Ten sites each
+ * Saying "we fixed a Sentry leak" would still be false — the captures were
+ * already happening and were already unscrubbed; this helper is where they
+ * became safe. That is the claim this header actually needs, and it needs no
+ * integer to make it. (The population's size depends on which roster you ask
+ * about; see the `sentry-capture.ts` docblock for the predicates. A count in
+ * prose that a script can derive is a future false claim.)
+ *
+ * WHY THE MECHANISM IS HERE AND NOT AT THE CALL SITES. Every call site
  * remembering to scrub is TRAP-5's "3 of 5" shape waiting to happen — the exact
  * instance-not-class defect that cost this programme thirty-seven scrapped
  * commits. This helper is already the single chokepoint for the lazy-Sentry
