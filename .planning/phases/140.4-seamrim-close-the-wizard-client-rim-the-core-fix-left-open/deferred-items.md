@@ -64,3 +64,34 @@ hook also reported *"Long-running or polling logic detected in a serverless hand
 not serverless handlers, and the flagged lines are pre-existing fixtures. It also suggested the
 `next-cache-components` skill on every `app/**` read; plan 13 adds no caching directive and
 `next.config.ts` is explicitly out of its fence.
+
+---
+
+## DEF-140.4-C — forwarded upstream 4xx still renders as "your CSV is invalid" (→ 140.5)
+
+**Found by:** a live authed QA pass on localhost (2026-07-29), uploading a real founder CSV
+through the wizard. Independently rediscovered from the server side by the code reviewer as
+**CR-02**. Full browser detail in `.gstack/qa-reports/qa-report-localhost-2026-07-29.md`
+(ISSUE-003) — ⚠️ that path is **gitignored**, hence this tracked copy.
+
+**What the fix round closed.** `csv-validate/route.ts:346` returned *"CSV validation failed.
+Try again shortly."* on the arm its own docblock defines as transport failure / missing config
+/ contract drift; it now renders `CSV_UPSTREAM_FAIL.title`. And `CsvValidationEnvelope.tsx:56,69`
+rendered `human_message` as **both** heading and cause when `errors.length === 0`, which is why
+the browser showed one sentence twice with nothing beneath it. Both fixed.
+
+**What is still live, and why it was NOT patched here.** The failure actually observed in the
+browser arrives on the **`!result.ok` arm**, forwarded verbatim from upstream — a *different*
+arm from the 502 that was fixed. A forwarded upstream 4xx still lands on
+`CSV_VALIDATION_FAILED`, so the user is told their data is bad when the truth is an auth or
+routing fault.
+
+**Deliberately carried to 140.5 rather than point-fixed.** The question is a CLASS one — what
+does the wizard render for *any* forwarded upstream status? — and 140.5/SEAMPROSE owns exactly
+that. Fixing the 401 alone would leave 403/404/409 behaving identically wrong, which is the
+instance-not-class shape phase 140.4 exists to stop.
+
+**Also still open on the same panel:** the copy promises a per-row breakdown that does not
+render when there are no row-level errors.
+
+**Recommended owner:** phase 140.5, as a single rule covering every forwarded upstream status.
