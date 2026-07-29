@@ -873,7 +873,7 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
     """G15-006 — ``_records_to_series`` must sort by date and dedupe
     same-date entries (keep='last'). Storage drift — duplicate-date
     backfill writes or out-of-order imports — would otherwise silently
-    break the downstream ``cumprod()`` in simulator_scoring.py:634.
+    break the downstream ``cumprod()`` in ``simulator_scoring._cumulative_curve``.
     """
 
     def test_out_of_order_records_are_sorted(self):

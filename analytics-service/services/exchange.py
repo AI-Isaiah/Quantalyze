@@ -1000,12 +1000,22 @@ async def aclose_exchange(exchange: "ccxt.Exchange | Any") -> None:
 # model, and ``routers/process_key.py`` mirrors it via ``val.error_code is
 # not None``.
 #
-# ``MISSING_SCOPE`` IS reachable and IS permanent: the deribit scope_detail arm
-# at :1043-1059 below sets ``read_only=False`` + ``error_code="MISSING_SCOPE"``
-# and returns WITHOUT ever setting ``valid=True``, so the consumers' scope gate
-# fires with that code. A permanently-missing read scope cannot be fixed by
-# retrying, so omitting it here would mint an infinitely-retried key — a NEW
-# bug of exactly the class this constant closes.
+# ``MISSING_SCOPE`` IS reachable and IS permanent: the ``if exchange.id ==
+# "deribit"`` / ``if scope_detail:`` arm inside ``validate_key_permissions``
+# below sets ``read_only=False`` + ``error_code="MISSING_SCOPE"`` and returns
+# WITHOUT ever setting ``valid=True``, so the consumers' scope gate fires with
+# that code. A permanently-missing read scope cannot be fixed by retrying, so
+# omitting it here would mint an infinitely-retried key — a NEW bug of exactly
+# the class this constant closes.
+#
+# (140.5-04) That reference used to be a bare ``:NNNN-NNNN`` coordinate "below",
+# and it had drifted well past the arm it names. ⚠️ A SELF-RELATIVE citation —
+# a line number with no path, naming a spot in the file it is written in — is
+# INVISIBLE to any path-based citation guard, so nothing could ever have caught
+# this one. That is why it is anchored on the branch condition instead of
+# re-numbered: for this variant the only durable fix is removing the coordinate.
+# The same variant appears throughout the repo and is named as a residual in
+# 140.5-04's SUMMARY.
 #
 # DELIBERATE DIVERGENCE (Phase 140.1.1, recorded not overlooked):
 # ``long_fetch.py``'s local ``permanent_codes`` is NOT re-pointed at this set

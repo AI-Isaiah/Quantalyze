@@ -390,8 +390,17 @@ export type LiquidityPreference = (typeof LIQUIDITY_PREFERENCES)[number];
 // --- strategy_analytics.computation_status closed set ----------------------
 // SoT for the strategy_analytics.computation_status column. The analytics
 // worker writes 'complete_with_warnings' when a computation SUCCEEDS but used a
-// consumer-specific fallback (used_heuristic_capital / balance_error —
-// analytics_runner.py:1765); the frontend read-gates (B3) admit it; and the DB
+// consumer-specific fallback (the `used_heuristic_capital` / `balance_error` DQ
+// flags). The status literal itself is written by the `csv_status` assignment in
+// `analytics_runner.run_csv_strategy_analytics`, by `composite_status` in
+// `job_worker.run_stitch_composite_job`, and by `final_status` in
+// `job_worker.run_poll_allocator_positions_job`. For the CURRENT producer set,
+// grep `"complete_with_warnings" if` under `analytics-service/services/` — a
+// comment cannot keep a population current, so the predicate is written here
+// instead of a count. (140.5-04: this reference used to be a line number into
+// `analytics_runner.py`; that file SHRANK under its citers in a refactor and the
+// coordinate went past EOF. Symbols survive a shrink.)
+// The frontend read-gates (B3) admit it; and the DB
 // CHECK permits exactly this set (supabase/migrations/
 // 20260602120000_strategy_analytics_computation_status_add_complete_with_warnings.sql).
 // 'stale' is deliberately ABSENT — it was never a valid status (the #399 cron

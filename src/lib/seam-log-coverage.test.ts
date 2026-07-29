@@ -174,12 +174,23 @@ const HAND_TYPED_LIB_MODULES: readonly string[] = [
  * The roster this guard inspects: the hand-typed lib half PLUS every seam route
  * on disk.
  *
- * ⚠️ EIGHT SINCE HI-02, AND THE LAST TWO WERE THE HOLE — the reason the
- * derivation exists. `create-with-key` and `composite/add-key` both spend the
- * `validate-key` + `encrypt-key` budgets, both were edited by phase 140.2, and
- * both logged a raw `err.message`. Neither was on the hand-typed roster NOR in
- * `SEAM_EXCLUSIONS`, so this guard could not see them while the REGISTRY entry
- * claimed class closure. A hand-typed roster cannot close a class by itself.
+ * ⚠️ THE ROUTE HALF IS DERIVED FROM DISK, AND THE FILES THAT FORCED THAT are
+ * the reason to keep it so. `create-with-key` and `composite/add-key` both spend
+ * the `validate-key` + `encrypt-key` budgets, both were edited by phase 140.2,
+ * and both logged a raw `err.message`. Neither was on the hand-typed roster NOR
+ * in `SEAM_EXCLUSIONS`, so this guard could not see them while the REGISTRY
+ * entry claimed class closure. A hand-typed roster cannot close a class by
+ * itself.
+ *
+ * (140.5-04) This warning used to open by naming the roster's SIZE — a figure
+ * from before `deriveSeamRouteFiles` existed, left behind when the derivation
+ * replaced the typed list and stale ever since. It is not restated here, and it
+ * was deliberately not "corrected" to a different integer either: the phase
+ * brief that scheduled this very fix carried the SAME stale figure forward
+ * without re-measuring, so correcting on its authority would have swapped one
+ * false integer for another. Read the size off `SEAM_FILES` /
+ * `EXPECTED_SEAM_FILES` below — they derive it, they cannot go stale, and a
+ * comment restating them can only ever be a future lie.
  */
 const SEAM_FILES: readonly string[] = [
   ...HAND_TYPED_LIB_MODULES,

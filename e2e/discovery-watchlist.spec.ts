@@ -412,9 +412,10 @@ test.describe("DISCO-01 watchlist", () => {
       page.waitForSelector("text=/no strategies/i", { timeout: 15000 }),
     ]);
 
-    // Per WatchlistTabs.tsx:69-91 the "My Watchlist" tab is ALWAYS
-    // rendered; only the count badge span (lines 86-90) is conditional
-    // on `count > 0`. So user-B (zero favorites) sees the tab present
+    // Per `WatchlistTabs` (src/components/strategy/WatchlistTabs.tsx) the
+    // "My Watchlist" `TabsTrigger` is ALWAYS rendered; only the
+    // `data-testid="watchlist-count-badge"` span nested inside it is
+    // conditional on `count > 0`. So user-B (zero favorites) sees the tab present
     // with no digit in its text; the plain text is literally
     // "My Watchlist". A leaked count would surface as a digit anywhere
     // in the tab text.

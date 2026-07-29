@@ -21,17 +21,57 @@ import { scrubSeamError, scrubSeamString } from "./seam-redaction";
  *
  * ── SEAMCORE-06 (Phase 140.2): scrubbing is folded in HERE ──────────────────
  *
- * ⚠️ THIS IS ADDITIVE INSTRUMENTATION, NOT A LEAK BEING PLUGGED. The seam
- * captures nothing to Sentry at HEAD — a `captureException` / `captureMessage`
- * grep across the resilience core, both seam clients and every seam route file
- * returns ZERO. What exists is ten `captureToSentry` calls on the two
- * key-bearing routes, and this is where they become safe.
+ * ⚠️ THIS IS ADDITIVE INSTRUMENTATION, NOT A LEAK BEING PLUGGED — the seam DOES
+ * capture to Sentry, and every one of those captures comes through HERE.
  *
- * WHY HERE AND NOT AT THE CALL SITES. Ten sites each remembering to scrub is
+ * ── (140.5-04) THE SENTENCE THAT USED TO SIT HERE WAS FALSE ─────────────────
+ *
+ * It asserted that the seam sent NOTHING to Sentry at HEAD — resting that on a
+ * `captureException` / `captureMessage` grep across the resilience core, both
+ * seam clients and every seam route file returning ZERO — and put the real
+ * figure at ten `captureToSentry` calls confined to the two key-bearing routes.
+ *
+ * ⚠️ That is a PARAPHRASE, not a quotation, and the difference is load-bearing.
+ * Quoting the false sentence verbatim inside its own correction would re-seed
+ * the exact phrase every absence check greps for, so the check would fail on
+ * CORRECTED code and an author would "fix" it by deleting the correction. Same
+ * hazard as DEF-16-2, one level up: a correction's own prose is scanner input.
+ *
+ * ⭐ THE GREP IT CITED IS LITERALLY TRUE AND THE SENTENCE IT DEFENDED IS FALSE.
+ * `captureException` / `captureMessage` really do return ZERO across the seam
+ * roster — because the ONLY place those two symbols appear is inside THIS
+ * function's body. The seam captures via `captureToSentry`, at sites spread
+ * across EVERY seam route file, not on two of them. An author reading the
+ * justification would have re-run the grep, seen zero, and shipped the false
+ * claim forward. This is CONTEXT §3's purest specimen: **a grep proves a state;
+ * only a guard proves the state is held**, and a grep for the wrong symbol
+ * proves nothing at all.
+ *
+ * NO INTEGER IS WRITTEN HERE, DELIBERATELY. The old sentence's "ten" is how it
+ * rotted, and the true number is not one number — it depends entirely on which
+ * population you ask about. Run the one you mean (comment-strip first: this very
+ * docblock contains the needle, DEF-16-2):
+ *
+ *   - the `EXPECTED_SEAM_FILES` roster in `src/lib/seam-log-coverage.test.ts`
+ *   - its `src/app/api/**` members only
+ *   - repo-wide tracked non-test `src/**`, excluding this file
+ *
+ * Those three answered with three different integers when this note was written,
+ * and none of them was "ten". A count in prose that a script can derive is a
+ * future false claim; the predicate is what belongs in a comment.
+ *
+ * WHY HERE AND NOT AT THE CALL SITES. Every call site remembering to scrub is
  * the "3 of 5" shape this programme has already paid for: a mechanism at the
- * chokepoint cannot be forgotten by an eleventh caller, and Sentry is a THIRD
+ * chokepoint cannot be forgotten by the next caller, and Sentry is a THIRD
  * PARTY — anything captured leaves our infrastructure, so "the caller will
  * remember" is not an acceptable control.
+ *
+ * ⚠️ WHAT THIS DOES NOT CLOSE. This helper is the chokepoint for the SEAM, not
+ * for the repo. Non-seam routes still reach `@sentry/nextjs` directly through
+ * their own `import("@sentry/nextjs")` — `alert-digest/route.ts` and
+ * `preferences/route.ts` both call `Sentry.captureException` without passing
+ * through this scrub. Nothing structurally forbids a seam file from doing the
+ * same tomorrow; that would need a guard, and this docblock is not one.
  *
  * WHAT IS DISPATCHED. An `Error` is rebuilt with a scrubbed `name`, `message`
  * and `stack`, and its `cause` chain is FOLDED INTO the scrubbed message rather
