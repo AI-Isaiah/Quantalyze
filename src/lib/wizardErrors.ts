@@ -24,14 +24,14 @@ import type { GateFailureCode } from "./strategyGate";
 // `undefined` at runtime and the `instanceof` below would throw from inside a
 // catch block. Nothing mocks the leaf.
 //
-// ⚠️ 140.5-02 / SEAMPROSE-04 — THE INTEGER THAT USED TO SIT HERE IS GONE, NOT
-// CORRECTED. It said "sixteen", and "sixteen" is defensible under exactly one
-// of five predicates: the same population measures 26 raw, 23 comment-stripped,
-// 15 restricted to `src/app/api/**` route tests, 16 with the route test that
-// lives outside that tree, and 19 with the csv-finalize suites. Replacing one
-// bare integer with another is how this file would keep lying with a different
-// number, so the PREDICATE is named instead of a count. (140.4's own fix round
-// shipped two such corrections; this milestone exists because of them.)
+// ⚠️ 140.5-02 / SEAMPROSE-04 — THE BARE INTEGER THAT USED TO SIT HERE IS GONE,
+// NOT CORRECTED, and this note is why nobody should put one back. The
+// population it counted measures 26 raw, 23 comment-stripped, 15 restricted to
+// `src/app/api/**` route tests, 16 once the route test living outside that tree
+// is included, and 19 with the csv-finalize suites — five predicates, five
+// answers, and the number that stood here was defensible under exactly one of
+// them. Replacing one bare integer with another is how this file would keep
+// lying with a different number, so the PREDICATE is named instead of a count.
 import { CircuitOpenError } from "@/lib/seam-errors";
 
 export type WizardErrorCode =
@@ -1745,8 +1745,9 @@ export function classifyKeyValidationError(error: unknown): {
   // branch keeps winning, which is exactly how DDOS_PROTECTION was rendering as
   // KEY_IP_ALLOWLIST).
   //
-  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`. Sixteen
-  // route test files `vi.mock("@/lib/analytics-client")` wholesale, so
+  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`. Every
+  // route test that mocks a seam client wholesale does
+  // `vi.mock("@/lib/analytics-client")`, so
   // `AnalyticsUpstreamError` is `undefined` inside those suites and an
   // `instanceof` here would throw from inside a catch block. `seamCode` is an
   // own property assigned in that class's constructor (140.3-01), so this read
