@@ -297,10 +297,17 @@ Plans:
 
 ⚠️ **Two false premises 140.4 left corrected — do not re-derive them from stale docblocks**: (a) the wire→wizard table and the client rosters are **NOT disjoint** — `KNOWN_KICKOFF_CODES` shares `RATE_LIMITED` — so the safety property is **agreement**, not disjointness; (b) `VALIDATION.md`'s "no guard to falsify" claim for the thrown twin was false (row M109), and the surviving "no row possible" count is **two**, not three.
 
-**Plans:** 0 plans
+**Plans:** 8 plans in 4 waves (worktree-parallel; same-wave `files_modified` proven disjoint)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 140.5 to break down)
+- [ ] **W1** · 01 — harness fidelity flip + `source-scan.ts` + purity needles *(lands ALONE: the leak closure is TRAP-8 sequence-sensitive, and it creates the comment-handling module every later guard imports)*
+- [ ] **W2** · 02 — `wizardErrors` vocabulary owner + B-02 + venue codes *(publishes the §4a interface plan 05 consumes)*
+- [ ] **W2** · 03 — `Retry-After` travels + `SERVICE_UNREACHABLE` at all five transport catches ⭐ *HARD PREREQUISITE FOR 141*
+- [ ] **W2** · 04 — citation/prose corrections, repo-wide
+- [ ] **W3** · 05 — the CSV class fix ⭐ *DEF-140.4-C and the §6 hand-off hole closed as ONE defect at row 1*
+- [ ] **W3** · 06 — test fidelity + spec-disabling guard
+- [ ] **W3** · 07 — type invariants
+- [ ] **W4** · 08 — seam-surface conversion remainder + the citation guard + ALL guard registrations + phase gate *(guard lands AFTER conversions — "fix before guard"; single owner of `contracts-registry.test.ts`, which kills the same-wave floor-bump conflict that made plans 10 and 13 collide in 140.4)*
 
 ### Phase 141: SEAM — Retry-with-backoff, gated on the idempotency audit
 **Goal**: Transient Railway blips self-heal — but ONLY for calls with a traced idempotency proof, so a retry can never double-execute a side effect
