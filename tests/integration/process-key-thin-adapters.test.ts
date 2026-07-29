@@ -113,6 +113,15 @@ vi.mock("@/lib/supabase/server", () => ({
             data: { id: TEST_STRATEGY_ID, user_id: TEST_USER.id },
             error: null,
           }),
+          // CR-01: csv-finalize probes `csv_daily_returns` for rows OUTSIDE the
+          // incoming payload's date range before persisting (the
+          // cross-submission merge fence). "Nothing already stored" is the
+          // first-submit state these adapter tests model. The fence's own
+          // behaviour is guarded in
+          // src/__tests__/csv-finalize-cross-submission-merge.test.ts.
+          or: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
         }),
       }),
     }),
