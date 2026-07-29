@@ -195,11 +195,17 @@ const UNUSABLE_RESPONSE_STATUS = 502;
  *
  * DUPLICATED, byte-for-byte, in `src/lib/analytics-client.ts`, and guarded by a
  * comment-stripped drift check in `analytics-client.test.ts`. It is duplicated
- * rather than shared because neither client may import from the other (sixteen
- * route test files replace one or the other wholesale with a full factory, under
- * which a cross-client import evaluates to `undefined`), and it cannot move to
- * the dependency-free error leaf either — that leaf's exported surface is pinned
- * to a two-member hand-typed set.
+ * rather than shared because neither client may import from the other (EVERY
+ * ROUTE TEST THAT MOCKS A SEAM CLIENT WHOLESALE with a full factory replaces it
+ * entirely, and under such a mock a cross-client import evaluates to
+ * `undefined`), and it cannot move to the dependency-free error leaf either —
+ * that leaf's exported surface is pinned to a two-member hand-typed set.
+ *
+ * 140.5-03 / WP-15 — the integer that used to stand where the predicate now
+ * does was a COUNT of those route tests. It was already stale, and correcting a
+ * stale count to a fresh one only resets the clock on the same defect: the
+ * reason holds for one such test or for fifty, so the predicate is the honest
+ * form and there is nothing left to go out of date.
  *
  * Only the MEDIA TYPE is echoed, lower-cased and length-capped: the raw header
  * is upstream-controlled and its parameters carry nothing an operator needs.
@@ -639,11 +645,51 @@ export async function postProcessKey(
    * wrong (all three arms are CALLER-class and breaker-inert) but it is coarse.
    * It needs its own plan; handling the envelope by `ok` makes it a non-issue
    * here either way.
+   *
+   * ---------------------------------------------------------------------------
+   * 140.5-03 / SEAMPROSE-02 — WHY THE `Retry-After` RELAY BELOW IS NOT THE
+   * STATUS BRANCH THIS DOCBLOCK FORBIDS. Read this before reverting it.
+   *
+   * The prohibition above is about BEHAVIOUR SELECTION: no code path here may
+   * decide WHAT TO DO by reading `res.status`, because the two `ok`s disagree in
+   * both directions and any status-keyed choice is wrong on one of the paths.
+   * That contract is untouched. The relay is unconditional on status — a 429, a
+   * 403 and a 503 all take the identical path, and the header is copied when the
+   * upstream sent one and not otherwise. `res.status` is still used for exactly
+   * one thing, the thing it was always used for: forwarding itself.
+   *
+   * The header is METADATA THIS CONTRACT NEVER GOVERNED. `body` verbatim and
+   * `body.ok` as the verdict remain the whole of the semantic story; a wait is
+   * not a verdict. Dropping it was not a decision anyone recorded — this arm
+   * reconstructed the response from body + status, so every upstream header died
+   * here silently. `/process-key` is rate-limited on the Python side (stacked
+   * `@limiter.limit` decorators on `process_key.py`'s handler; `main.py`'s
+   * `RateLimitExceeded` handler answers 429 with
+   * `headers={"Retry-After": str(retry_after)}`), so a Python 429 reached the
+   * browser with `retry_after_seconds` in the BODY and no header at all.
+   *
+   * ⚠️ RELAY, NEVER PARSE. `parseRetryAfterSeconds` (`src/lib/retry/retry-after.ts`)
+   * is the ONE parser and it belongs to the READ side, where a hostile or
+   * HTTP-date value is resolved against the response's own `Date` header. The
+   * body's `retry_after_seconds` field is deliberately NOT consulted here: two
+   * extraction paths for one fact is the substring-cascade shape this milestone
+   * exists to remove. Copy the string, change nothing about it.
+   *
+   * ⭐ THIS IS HALF A FIX AND THE OTHER HALF IS IN THE WIZARD STEPS. Five callers
+   * pass through this arm (`csv-validate`, `csv-finalize`, `finalize-wizard`,
+   * `keys/sync`, `verify-strategy`), so one edit restores the header on all five
+   * — and reaches ZERO user-visible surfaces until each client reads it into its
+   * envelope. Neither half is useful alone.
    */
   if (!res.ok) {
+    const forwarded = NextResponse.json(body, { status: res.status });
+    const advertisedWait = res.headers.get("Retry-After");
+    if (advertisedWait !== null) {
+      forwarded.headers.set("Retry-After", advertisedWait);
+    }
     return {
       ok: false,
-      response: NextResponse.json(body, { status: res.status }),
+      response: forwarded,
     };
   }
 
