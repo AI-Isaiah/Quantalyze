@@ -22,6 +22,25 @@ export default defineConfig({
     // Vitest 4.x: maxWorkers is the top-level cap on parallel workers
     // (replaces the 3.x `poolOptions.threads.maxThreads` shape).
     maxWorkers: MAX_THREADS,
+    // Phase 140.5-01 / SEAMPROSE-04 — restore stubbed globals and stubbed env
+    // vars BEFORE each test. DEF-16-1, this repo's known CI-only failure cause
+    // (green on local Node 25, red on CI Node 22), is an ORDERING defect: 81
+    // files call `vi.stubGlobal` and 38 of them never clean up, so with the
+    // threads pool sharing one `globalThis` per worker the suite's verdict
+    // depends on which file the worker happened to run first.
+    //
+    // Config rather than an `afterEach` in src/test-setup.ts, deliberately: the
+    // config option runs BEFORE each test and cannot be shadowed by a
+    // file-local `afterEach`, whereas a setup-file hook can. Coverage-law row 1
+    // either way — every test file inherits it with no edit.
+    //
+    // ⚠️ `unstubEnvs` covers ONLY vars set through `vi.stubEnv()`. The 54 files
+    // that assign `process.env.X =` directly are covered by the snapshot
+    // restore in src/test-setup.ts, which is a SEPARATE mechanism; neither one
+    // makes the other redundant. `src/test-setup.leak-canary.test.ts` fails if
+    // either is removed (ledger rows SC-HARNESS-1 and SC-ENV-1).
+    unstubGlobals: true,
+    unstubEnvs: true,
     include: [
       "src/**/*.test.{ts,tsx}",
       "tests/a11y/**/*.test.ts",

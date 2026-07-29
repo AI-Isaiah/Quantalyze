@@ -17,7 +17,7 @@
  * unfixed tree (positive-offset outline / no explicit ring) → GREEN after 117-02
  * Task 2 repoints the className at each enumerated overflow site.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
@@ -50,7 +50,15 @@ const localStorageMock = {
   key: vi.fn(() => null),
   length: 0,
 };
-vi.stubGlobal("localStorage", localStorageMock);
+// Phase 140.5-01 / SEAMPROSE-04 — installed PER TEST, not at module scope.
+// `vitest.config.ts` sets `unstubGlobals: true`, which restores stubbed globals
+// before every test, so a stub applied once at import time is gone by the time
+// the first test runs. Re-applying it here also removes a real leak: a stub set
+// at module scope is never undone, so it reaches every later file in the same
+// worker (DEF-16-1).
+beforeEach(() => {
+  vi.stubGlobal("localStorage", localStorageMock);
+});
 Object.defineProperty(window, "localStorage", {
   value: localStorageMock,
   configurable: true,
