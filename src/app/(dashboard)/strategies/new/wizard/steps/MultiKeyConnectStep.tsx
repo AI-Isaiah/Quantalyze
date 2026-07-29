@@ -26,6 +26,10 @@ import {
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
 import { seamErrorCode } from "@/lib/seam-discriminator";
+// 140.5-03 / SEAMPROSE-02 — the ONE `Retry-After` parser (HTTP-date safe, never
+// NaN/0/negative). A raw `Number(res.headers.get(...))` is a repo-wide ESLint
+// error by design.
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -262,6 +266,18 @@ interface PanelState {
   status: "editing" | "validating" | "validated";
   apiKeyId: string | null;
   errorCode: WizardErrorCode | null;
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait THIS PANEL's failing add-key response
+   * advertised, in seconds, or `null` when it advertised none.
+   *
+   * PER-PANEL and not per-step: each panel validates independently against
+   * `composite/add-key`, and that route is rate-limited per identity, so panel
+   * 3 hitting the limiter says nothing about panel 1. A single step-level wait
+   * would render panel 3's duration under panel 1's error.
+   *
+   * Cleared on every fresh validate attempt beside `errorCode` (TRAP-3).
+   */
+  retryAfterSeconds: number | null;
   confirmingRemove: boolean;
 }
 
@@ -280,6 +296,7 @@ function newPanel(): PanelState {
     status: "editing",
     apiKeyId: null,
     errorCode: null,
+    retryAfterSeconds: null,
     confirmingRemove: false,
   };
 }
@@ -447,6 +464,7 @@ function toRehydratedPanel(member: {
     status: "validated",
     apiKeyId: member.api_key_id,
     errorCode: null,
+    retryAfterSeconds: null,
     confirmingRemove: false,
   };
 }
@@ -465,6 +483,18 @@ export function MultiKeyConnectStep({
   const [continueError, setContinueError] = useState<WizardErrorCode | null>(
     null,
   );
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait the failing `set-members` response
+   * advertised, in seconds, or `null` when it advertised none.
+   *
+   * STEP-LEVEL, unlike the per-panel field on `PanelState`: Continue is one
+   * request for the whole set, so there is exactly one failure to describe.
+   *
+   * Cleared on every fresh Continue attempt beside `continueError` (TRAP-3).
+   */
+  const [continueRetryAfterSeconds, setContinueRetryAfterSeconds] = useState<
+    number | null
+  >(null);
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
   // Phase 94.1 / F3 — rehydration lifecycle. "loading" while the WIZ-01
   // members GET is in flight, "error" when it fails (non-ok / throw /
@@ -726,7 +756,15 @@ export function MultiKeyConnectStep({
       const activeOption = EXCHANGES.find((e) => e.id === p.exchange);
       const requiresPassphrase = activeOption?.requiresPassphrase ?? false;
       const requiresSecret = activeOption?.requiresSecret ?? true;
-      updatePanel(idx, { status: "validating", errorCode: null });
+      // 140.5-03 — the wait is cleared WITH the code it belongs to, on every
+      // fresh attempt. This is the half a copy-paste of the working thread
+      // drops: a wait left from attempt 1 rendered under attempt 2's failure
+      // names a duration nobody advertised (TRAP-3).
+      updatePanel(idx, {
+        status: "validating",
+        errorCode: null,
+        retryAfterSeconds: null,
+      });
       try {
         const res = await wizardFetch("/api/strategies/composite/add-key", {
           method: "POST",
@@ -753,8 +791,29 @@ export function MultiKeyConnectStep({
           //
           // 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
           // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12 and
-          // `ConnectKeyStep`'s sibling arm adopts alongside this one. The two
-          // vocabularies are disjoint, so neither hop shadows the other.
+          // `ConnectKeyStep`'s sibling arm adopts alongside this one.
+          //
+          // ⚠️ 140.5-03 / SEAMPROSE-03 — CORRECTION. This paragraph used to end
+          // "the two vocabularies are disjoint, so neither hop shadows the
+          // other". THE WRONG REASON FOR A TRUE CONCLUSION, and one this file's
+          // own `KNOWN_ADD_KEY_CODES` header does not claim.
+          //
+          // THE NECESSARY PROPERTY IS AGREEMENT; DISJOINTNESS IS ONLY
+          // SUFFICIENT. Where the vocabularies overlap the table wins by the
+          // order above, and that is harmless because both sides answer the
+          // SAME code — not because they never meet.
+          //
+          // Measured at 140.5-03, predicate stated because a line-based grep
+          // gets it wrong: intersect KEY SETS against
+          // `SEAM_CODE_TO_WIZARD_CODE`'s keys, never values. Under that
+          // predicate `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED} and
+          // `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}; this file's two
+          // sets and `ConnectKeyStep`'s intersect in NOTHING. Both real
+          // overlaps AGREE at HEAD, and
+          // `seam-ratelimit-posture.invariant.test.ts` reddens if a shared code
+          // ever gets different answers. Do not restore the disjointness
+          // sentence as the REASON — an empty intersection here is a fact about
+          // today's rosters, and the safety does not rest on it.
           // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
           // The commit that added this hop claimed it "mirrors
           // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
@@ -774,7 +833,14 @@ export function MultiKeyConnectStep({
               : data.code && KNOWN_ADD_KEY_CODES.has(data.code as WizardErrorCode)
                 ? (data.code as WizardErrorCode)
                 : "UNKNOWN";
-          updatePanel(idx, { status: "editing", errorCode: code });
+          // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through
+          // the ONE parser, from the SAME response as the code. Absent header
+          // ⇒ `null` ⇒ no wait rendered rather than a zero nobody advertised.
+          updatePanel(idx, {
+            status: "editing",
+            errorCode: code,
+            retryAfterSeconds: parseRetryAfterSeconds(res.headers),
+          });
           trackForQuantsEventClient("wizard_error", {
             wizard_session_id: wizardSessionId,
             step: MULTI_KEY_FUNNEL_STEP,
@@ -801,16 +867,37 @@ export function MultiKeyConnectStep({
           passphrase: "",
         });
       } catch (err) {
+        // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S. ⚠️ THIS CATCH
+        // AND ITS SIBLING IN `handleContinue` WERE MISSED BY EVERY PRIOR
+        // CENSUS: the synthesis named three transport catches and this file
+        // holds two of the five. The request to
+        // `/api/strategies/composite/add-key` never completed, so the exchange
+        // may never have been contacted; `KEY_NETWORK_TIMEOUT`'s copy ("We
+        // could not reach the exchange") asserted a venue fault for a fault on
+        // our own hop, the rule `wizardErrors.ts` states by name beside it.
+        //
+        // ⚠️ BOTH OCCURRENCES. The telemetry payload below carried the same
+        // wrong code, which is the identical false attribution in
+        // machine-readable form — an operator reading that funnel would
+        // conclude the VENUES are flaky when the fault is ours.
         updatePanel(idx, {
           status: "editing",
-          errorCode: "KEY_NETWORK_TIMEOUT",
+          errorCode: "SERVICE_UNREACHABLE",
+          // No response exists on this path, so no wait was advertised.
+          // Explicit rather than inherited: a wait surviving from a previous
+          // attempt would render under this failure (TRAP-3).
+          retryAfterSeconds: null,
         });
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: MULTI_KEY_FUNNEL_STEP,
-          code: "KEY_NETWORK_TIMEOUT",
+          code: "SERVICE_UNREACHABLE",
         });
-        // Logs only `err`, never credential fields (T-88-18).
+        // Logs only `err`, never credential fields (T-88-18). TRAP-1 re-checked
+        // at this edit as a PROPERTY: `wizardFetch` sets exactly one header
+        // (`X-Correlation-Id`) and this route authenticates by COOKIE, so no
+        // credential value is on the request for a rejection to embed. The
+        // typed key material lives in React state, never in `err`.
         console.error("[wizard:MultiKeyConnectStep] add-key threw:", err);
       }
     },
@@ -883,12 +970,21 @@ export function MultiKeyConnectStep({
           // recoverable so ErrorEnvelope renders Retry (showRetry = recoverable
           // && Boolean(onRetry)). Keep the table entry summary-only — do NOT
           // pollute wizardErrors.ts.
-          ...buildEnvelope(continueError, correlationId),
+          ...buildEnvelope(continueError, correlationId, {
+            retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
+          }),
           cause:
             "We couldn't save these key windows — the server rejected them, most likely a clock or timing mismatch between your browser and our servers. Review the dates and try again.",
           recoverable: true,
         }
-      : buildEnvelope(continueError, correlationId)
+      : // 140.5-03 / SEAMPROSE-02 — ONE handler, one state, BOTH arms. The two
+        // `buildEnvelope` calls here are the same failure rendered two ways
+        // (the windows-invalid arm spreads and overrides), so threading only
+        // the arm an author happens to read first would leave the other silent.
+        // `?? undefined` because ABSENCE IS NOT ZERO (140.3-10's rule).
+        buildEnvelope(continueError, correlationId, {
+          retryAfterSeconds: continueRetryAfterSeconds ?? undefined,
+        })
     : null;
 
   const handleContinue = useCallback(async () => {
@@ -896,6 +992,9 @@ export function MultiKeyConnectStep({
     if (continuing || !strategyId) return;
     setContinuing(true);
     setContinueError(null);
+    // 140.5-03 — the wait dies with the code it belongs to, on every fresh
+    // attempt (TRAP-3).
+    setContinueRetryAfterSeconds(null);
     try {
       const keys = buildSetMembersKeys(current);
       const res = await wizardFetch("/api/strategies/composite/set-members", {
@@ -915,6 +1014,9 @@ export function MultiKeyConnectStep({
             ? (data.code as WizardErrorCode)
             : "UNKNOWN";
         setContinueError(code);
+        // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through the
+        // ONE parser, from the SAME response as the code above.
+        setContinueRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: MULTI_KEY_FUNNEL_STEP,
@@ -933,13 +1035,31 @@ export function MultiKeyConnectStep({
         exchange: first.exchange,
       });
     } catch (err) {
-      setContinueError("KEY_NETWORK_TIMEOUT");
+      // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S, and here the
+      // old code was doubly wrong: `set-members` performs NO key validation at
+      // all (it never calls `classifyKeyValidationError` — see
+      // `KNOWN_SET_MEMBERS_CODES` above), so it never touches an exchange on
+      // any path. "We could not reach the exchange" named a venue that was
+      // provably not involved, for a request that only persists date windows.
+      //
+      // ⚠️ BOTH OCCURRENCES, telemetry included — same false attribution,
+      // machine-readable.
+      setContinueError("SERVICE_UNREACHABLE");
+      // No response exists on this path, so no wait was advertised. Explicit,
+      // because a value surviving from a previous attempt would render under
+      // this failure (TRAP-3).
+      setContinueRetryAfterSeconds(null);
       trackForQuantsEventClient("wizard_error", {
         wizard_session_id: wizardSessionId,
         step: MULTI_KEY_FUNNEL_STEP,
-        code: "KEY_NETWORK_TIMEOUT",
+        code: "SERVICE_UNREACHABLE",
       });
       setContinuing(false);
+      // TRAP-1 re-checked at this edit as a PROPERTY: `wizardFetch` sets
+      // exactly one header (`X-Correlation-Id`) and this route authenticates by
+      // COOKIE, so no credential value is on the request for a rejection to
+      // embed. The Continue payload carries `{api_key_id, window_start,
+      // window_end}` only — no plaintext key material exists on this path.
       console.error("[wizard:MultiKeyConnectStep] set-members threw:", err);
     }
   }, [continuing, strategyId, onSuccess, wizardSessionId]);
@@ -1175,7 +1295,13 @@ function KeyPanel({
   const windowEndId = `key-${index}-window-end`;
 
   const errorEnvelope = p.errorCode
-    ? buildEnvelope(p.errorCode, correlationId)
+    ? buildEnvelope(p.errorCode, correlationId, {
+        // 140.5-03 / SEAMPROSE-02 — THIS panel's advertised wait, not the
+        // step's. `?? undefined` because ABSENCE IS NOT ZERO (140.3-10's rule):
+        // `null` in the envelope slot renders as a `0`-second wait we were
+        // never told about.
+        retryAfterSeconds: p.retryAfterSeconds ?? undefined,
+      })
     : null;
 
   const canValidate =
@@ -1467,7 +1593,13 @@ function KeyPanel({
           <div className="mt-3">
             <WizardErrorEnvelope
               envelope={errorEnvelope}
-              onRetry={() => onUpdate(index, { errorCode: null })}
+              onRetry={() =>
+                // 140.5-03 — the wait is cleared WITH the code, mirroring
+                // `SyncPreviewStep`'s `handleKickoffRetry`. Belt and braces
+                // with the clear in `validatePanel`: whichever path dismisses
+                // the error, no wait survives it.
+                onUpdate(index, { errorCode: null, retryAfterSeconds: null })
+              }
             />
           </div>
         )}

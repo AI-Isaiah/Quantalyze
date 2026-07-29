@@ -249,17 +249,38 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     expect(onSubmitted).not.toHaveBeenCalled();
   });
 
-  it("maps a thrown fetch to KEY_NETWORK_TIMEOUT", async () => {
+  /**
+   * ⚠️ 140.5-03 / SEAMPROSE-03 — RE-POINTED. This case used to be titled "maps
+   * a thrown fetch to KEY_NETWORK_TIMEOUT" and asserted only that SOME Retry
+   * button rendered, so it stayed green for any recoverable code — including
+   * the wrong one it was named after.
+   *
+   * A rejected `wizardFetch` means the POST to `/api/strategies/finalize-wizard`
+   * — our own route — never completed. `KEY_NETWORK_TIMEOUT`'s copy is "We
+   * could not reach the exchange", a VENUE fault asserted for a fault on our
+   * own hop. The code is now asserted by name and the old one negatively, so a
+   * revert cannot pass.
+   */
+  it("maps a thrown fetch (our own hop failing) to SERVICE_UNREACHABLE, not the venue-fault code", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
     renderStep();
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
-    // No wizard_error telemetry on the catch path (only setErrorCode), so
-    // assert the rendered envelope instead. KEY_NETWORK_TIMEOUT is a
-    // recoverable code, so the envelope renders the Retry affordance
-    // (aria-label="Retry") wired to onRetry.
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveAttribute("data-error-code", "SERVICE_UNREACHABLE");
+    expect(envelope).not.toHaveAttribute(
+      "data-error-code",
+      "KEY_NETWORK_TIMEOUT",
+    );
+    // The copy the user reads, as a hand-typed literal rather than an import
+    // of the table entry under test.
+    expect(envelope).toHaveTextContent("We could not reach our own service.");
+    expect(envelope).not.toHaveTextContent("We could not reach the exchange.");
+    // Still recoverable, so the Retry affordance survives the code change —
+    // SEAMUX-06 forbids a recoverable error with no way to act on it.
     await screen.findByRole("button", { name: "Retry" });
+    // No wizard_error telemetry on this catch path (only setErrorCode).
     expect(findWizardError()).toBeUndefined();
     errSpy.mockRestore();
   });
@@ -935,5 +956,81 @@ describe("[H-0193] SubmitStep — finalize-wizard error mapping", () => {
     const localId = new Headers(init.headers).get("X-Correlation-Id");
     expect(await screen.findByText(localId!)).toBeInTheDocument();
     expect(screen.queryByText("<script>alert(1)</script>")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 — `Retry-After` ARRIVES at this surface.
+ *
+ * ⭐ HARD PREREQUISITE FOR PHASE 141. `finalize-wizard` stamps `Retry-After` on
+ * three arms of its own, and since the choke-point relay landed in this same
+ * plan it also forwards the ANALYTICS SERVICE's 429 wait through
+ * `postProcessKey`. The header arrived at the browser and was discarded.
+ *
+ * ⚠️ Polarity re-derived per site: `ErrorEnvelope` renders the wait only when
+ * `showRetry` (recoverable AND an `onRetry` supplied). `RATE_LIMITED` is
+ * `clear_and_retry` and this step always supplies `onRetry`, so the wait is
+ * reachable here. It would NOT be on a non-recoverable code.
+ */
+describe("[140.5-03 / SEAMPROSE-02] SubmitStep — the advertised wait reaches the envelope", () => {
+  beforeEach(() => {
+    trackMock.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function throttled(retryAfter?: string) {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (retryAfter !== undefined) headers["Retry-After"] = retryAfter;
+    // `RATE_LIMITED` is a WIRE code: it reaches the wizard vocabulary through
+    // `SEAM_CODE_TO_WIZARD_CODE`, which is the hop this step already had.
+    return new Response(JSON.stringify({ code: "RATE_LIMITED" }), {
+      status: 429,
+      headers,
+    });
+  }
+
+  it("a 429 carrying `Retry-After: 45` renders the wait", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(throttled("45"));
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    const wait = await screen.findByTestId("error-envelope-wait");
+    expect(wait).toHaveTextContent("45s");
+  });
+
+  it("a 429 with NO header renders NO wait — absence is not zero (TRAP-3)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(throttled());
+    renderStep();
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    await screen.findByTestId("error-envelope");
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+  });
+
+  it("a SECOND failure with no header does NOT render the FIRST one's wait", async () => {
+    // The clear-on-fresh-attempt half. Without the reset in `handleSubmit`,
+    // attempt 2's envelope names attempt 1's duration.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(throttled("45"))
+      .mockResolvedValueOnce(throttled());
+    renderStep();
+
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    expect(await screen.findByTestId("error-envelope-wait")).toHaveTextContent(
+      "45s",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+    await screen.findByTestId("error-envelope");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
   });
 });
