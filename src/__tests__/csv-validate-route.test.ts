@@ -154,6 +154,19 @@ vi.mock("@/lib/supabase/server", () => ({
         };
         return eqChain;
       },
+      // CR-01: csv-finalize now probes `csv_daily_returns` for rows OUTSIDE the
+      // incoming payload's date range before persisting (the cross-submission
+      // merge fence). This double reports "nothing already stored", which is
+      // the first-submit state every csv-finalize case in this file models.
+      // The fence's own behaviour is guarded in
+      // csv-finalize-cross-submission-merge.test.ts, not here.
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          or: (_filter: string) => ({
+            limit: async (_n: number) => ({ data: [], error: null }),
+          }),
+        }),
+      }),
     }),
   }),
 }));
@@ -440,7 +453,16 @@ describe("/api/strategies/csv-validate", () => {
       "the thrown text reached the wizard error panel — H-1062 requires a static sentence here",
     ).not.toContain("ANALYTICS_SERVICE_URL");
     // Hand-typed literal, never read off the route — the sentence is the oracle.
-    expect(json.human_message).toBe("CSV validation failed. Try again shortly.");
+    //
+    // 140.4-16 / CR-02 — THE LITERAL MOVED, AND IT MOVED BECAUSE IT WAS WRONG.
+    // This case guards the NO-ECHO property and still does. What changed is the
+    // sentence it pins: "CSV validation failed" blamed the user's file on an
+    // arm that is the unclassified residue by construction. Two `toBe`
+    // assertions were holding that misattribution in place, which is why the
+    // correction has to land here as well as in the route.
+    expect(json.human_message).toBe(
+      "Validation service returned an unexpected response. Retry shortly.",
+    );
     expect(json.correlation_id).toBeNull();
   });
 
@@ -474,7 +496,10 @@ describe("/api/strategies/csv-validate", () => {
         JSON.stringify(json),
         "an arbitrary thrown message reached the wizard error panel — the 502 is echoing, not answering statically",
       ).not.toContain("zq7f4e-marker");
-      expect(json.human_message).toBe("CSV validation failed. Try again shortly.");
+      // 140.4-16 / CR-02 — see the note at the sibling case above.
+      expect(json.human_message).toBe(
+        "Validation service returned an unexpected response. Retry shortly.",
+      );
 
       const logged = errorSpy.mock.calls
         .map((call) => call.map((arg) => String(arg)).join(" "))
@@ -483,6 +508,53 @@ describe("/api/strategies/csv-validate", () => {
         logged,
         "the detail was DROPPED from the log instead of being scrubbed — that is the A-10 defect, and it leaves the operator able to see THAT the seam failed and never WHY",
       ).toContain("zq7f4e-marker");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("[140.4-16 / CR-02] the 502 arm does not blame the user's FILE for our own outage", async () => {
+    // ⚠️ WHAT THIS ARM IS, BY CONSTRUCTION. `postProcessKey` classifies every
+    // outcome it can into the `!result.ok` envelope, so a THROW reaching the
+    // catch is the unclassified residue — a transport failure, a missing-config
+    // throw, a contract-drift parse throw. The route's own docblock says so.
+    // NONE of those is the user's data. 140.4-09 correctly replaced a leaky
+    // `err.message` echo with a static sentence and then chose the wrong
+    // sentence: "CSV validation failed." — which is the milestone's signature
+    // defect (our fault presented as someone else's) authored by the phase that
+    // exists to remove it, on the wizard's highest-traffic error surface.
+    //
+    // ⚠️ CORROBORATED FROM A REAL BROWSER, not only from reading the code. A QA
+    // pass on localhost drove a well-formed 5-row CSV into an upstream failure
+    // and read back "Validation failed. See per-row breakdown below." with no
+    // breakdown beneath it (qa-report-localhost-2026-07-29, ISSUE-003).
+    //
+    // The oracle is HAND-TYPED here and READ FROM THE TABLE in the route. That
+    // asymmetry is the point: if the route ever drifts back to authoring its
+    // own sentence, this literal is what disagrees with it.
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(new Error("fetch failed"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = new File(["x"], "x.csv", { type: "text/csv" });
+      const req = makeMultipartRequest(file, "daily_returns");
+      const { POST } = await import("@/app/api/strategies/csv-validate/route");
+      const res = await POST(req);
+      expect(res.status).toBe(502);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_UPSTREAM_FAIL");
+      expect(
+        json.human_message,
+        "the terminal arm is telling the user their CSV failed validation for " +
+          "a fault that is ours by construction — the code's own authored copy " +
+          "already says the true thing and is being shadowed",
+      ).toBe("Validation service returned an unexpected response. Retry shortly.");
+      // The class, not the instance: no sentence on this arm may name the
+      // user's data as the thing that failed.
+      expect(
+        /validation failed|your (csv|file|data)/i.test(json.human_message),
+        "a user-blaming phrase is back on the arm defined as NOT-the-user's-data",
+      ).toBe(false);
     } finally {
       errorSpy.mockRestore();
     }

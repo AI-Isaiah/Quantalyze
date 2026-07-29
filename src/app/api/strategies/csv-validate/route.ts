@@ -32,6 +32,9 @@ import { captureToSentry } from "@/lib/sentry-capture";
 // what this import fixes: an unscrubbed console line. Do not re-derive the
 // stronger claim from the fact that this import is new.
 import { scrubSeamError } from "@/lib/seam-redaction";
+// CR-02: the terminal arm renders this code's OWN authored title rather than a
+// second sentence about the user's file. One table, one sentence.
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -339,11 +342,28 @@ async function unifiedCsvValidateHandler(args: {
     );
     return csvErrorEnvelope(
       "CSV_UPSTREAM_FAIL",
-      // The route's OWN existing fallback sentence, kept rather than authored
-      // fresh: this arm already read "CSV validation failed" for a non-Error
-      // throw, and "Try again shortly." is the retry clause its sibling seam
-      // routes already use. 140.3-12 owns new sentences; this is not one.
-      "CSV validation failed. Try again shortly.",
+      // ⚠️ 140.4-16 / CR-02 — READ THE ARM'S OWN DEFINITION BEFORE CHANGING
+      // THIS SENTENCE. Everything reaching here is, by construction, the
+      // UNCLASSIFIED RESIDUE: a transport failure, a missing-config throw, a
+      // contract-drift parse throw. `postProcessKey` classifies every other
+      // outcome into the `!result.ok` envelope above. None of those is the
+      // user's data.
+      //
+      // 140.4-09 replaced a leaky `err.message` echo with a static sentence —
+      // correct — and picked "CSV validation failed. Try again shortly.",
+      // which tells a user whose file is perfectly valid that their file is
+      // not. That is the milestone's signature defect, authored by the phase
+      // that exists to remove it, on the wizard's highest-traffic error
+      // surface, and it WIDENED the misattribution: before, that sentence
+      // applied only to the non-Error throw branch. A live QA pass reproduced
+      // it in a browser (qa-report-localhost-2026-07-29, ISSUE-003).
+      //
+      // The code already OWNS an honest sentence. Read it from the ONE copy
+      // table rather than restating it here: a second copy of a sentence is a
+      // second thing to drift. `csv-validate-route.test.ts` hand-types the
+      // expected literal, so the table and the assertion are independent
+      // oracles.
+      WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title,
       {},
       502,
     );
