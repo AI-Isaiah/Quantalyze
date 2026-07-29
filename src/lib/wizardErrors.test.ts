@@ -241,15 +241,28 @@ describe("wizardErrors", () => {
       );
     });
 
+    // ⚠️ 140.5-02 — BOTH TITLES BELOW WERE RE-POINTED, in the same commit as
+    // the copy change, and the old strings are recorded here rather than simply
+    // overwritten:
+    //   CSV_VALIDATION_FAILED was "Validation failed. See per-row breakdown
+    //     below." — a promise measured FALSE on both arms of the route
+    //     (RESEARCH §12.4). It is reached as the ENVELOPE HEADING via
+    //     `CsvUploadStep`'s `data.human_message ?? …title` fallback, so a
+    //     forwarded 401 printed it verbatim.
+    //   CSV_UPSTREAM_FAIL was "Validation service returned an unexpected
+    //     response. Retry shortly." — replaced by the FOUNDER-AUTHORED §4a
+    //     sentence, which is pre-approved and not open to a reword.
+    // A pin that survives the change it was written to catch is worse than no
+    // pin, so these move deliberately, with the reason attached.
     it("CSV_VALIDATION_FAILED preserves the verbatim user-visible title", () => {
       expect(WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED.title).toBe(
-        "Validation failed. See per-row breakdown below.",
+        "Your file did not pass validation.",
       );
     });
 
     it("CSV_UPSTREAM_FAIL preserves the verbatim user-visible title", () => {
       expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
-        "Validation service returned an unexpected response. Retry shortly.",
+        "We couldn't check your file just now.",
       );
     });
 
@@ -608,6 +621,19 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     ["Your IP is not on the allowlist", "KEY_IP_ALLOWLIST", 502],
     ["Rate limit exceeded", "KEY_RATE_LIMIT", 503],
     ["429 Too Many Requests", "KEY_RATE_LIMIT", 503],
+    // ⚠️ 140.5-02 / B-02 — RE-POINTED IN THE SAME COMMIT AS THE FIX, and the
+    // re-pointing is the load-bearing part. This row used to read
+    // `"connect ETIMEDOUT 10.0.0.1:443"` and it was the ONLY case exercising
+    // the `timeout|etimedout` branch — so the suite read as covering that arm.
+    // It does not: that is a RAW UNDICI SYSCALL STRING, and `analytics-client`
+    // wraps every transport failure before rethrowing, so no producer can put
+    // it in front of this classifier. The arm it "covered" was dead, and the
+    // real messages ("Analytics service timed out after 15000ms on …", "…is
+    // not reachable…") both fell to UNKNOWN/500. Their replay now lives in the
+    // B-02 block below, against the TYPE marker. The substring branch survives
+    // as a LAST RESORT for a raw syscall string that reaches the classifier
+    // unwrapped from somewhere new, and this row says so out loud rather than
+    // implying production coverage it does not have.
     ["connect ETIMEDOUT 10.0.0.1:443", "KEY_NETWORK_TIMEOUT", 502],
     ["Could not verify the key's permission scopes", "KEY_PROBE_FAILED", 503],
     ["This key has trading permissions", "KEY_HAS_TRADING_PERMS", 400],
@@ -1994,5 +2020,165 @@ describe("[140.5-02 / SEAMPROSE-03] DEF-140.4-C — ONE sentence for an unrecogn
     expect(recogniseSeamErrorCode("CIRCUIT_OPEN")).toBe("SERVICE_UNAVAILABLE_RETRY");
     expect(recogniseSeamErrorCode("SEAM_MISCONFIGURED")).toBe("SEAM_MISCONFIGURED");
     expect(recogniseSeamErrorCode("CSV_VALIDATION_FAILED")).toBe("UNKNOWN");
+  });
+});
+
+describe("[140.5-02 / B-02] the three real analytics-client messages, replayed", () => {
+  /**
+   * ⚠️ B-02 WAS OPEN AT HEAD, CONFIRMED BY EXECUTION, NOT BY READING. The
+   * cascade's transport branch tests `lower.includes("timeout")`, and the
+   * message this client actually produces says **"timed out"**. `"timed out"`
+   * does not contain `"timeout"`. Replayed against the whole cascade before the
+   * fix, all three of the client's real messages answered `UNKNOWN`/500 — the
+   * "we could not classify this" terminal, with no retry affordance — and the
+   * breaker cannot rescue it, because it needs 5 failures in 30 s and a Railway
+   * outage arrives at human retry cadence with the breaker still CLOSED.
+   *
+   * THE FIX IS BY TYPE, NOT BY A WIDER SUBSTRING. Adding `"timed out"` to the
+   * needle is a per-site edit that the next reword re-breaks (coverage-law
+   * row 3), and it would still answer `KEY_NETWORK_TIMEOUT` — copy that blames
+   * the EXCHANGE for a failure of our own hop.
+   *
+   * ORACLE INDEPENDENCE: the two message strings below are hand-transcribed
+   * literals, byte-identical to what `analytics-client.ts` constructs. That
+   * byte-identity is the cross-module contract — a reword on either side must
+   * red here rather than silently reopening the dead arm.
+   */
+  const TIMED_OUT_MESSAGE =
+    "Analytics service timed out after 15000ms on /process-key";
+  const NOT_REACHABLE_MESSAGE =
+    "Analytics service is not reachable. Please ensure it is running.";
+
+  /** A transport throw from the seam client: the own marker, as assigned. */
+  function transportThrow(message: string, seamTransportCode: string): Error {
+    return Object.assign(new Error(message), { seamTransportCode });
+  }
+
+  it("a deadline miss reaches SERVICE_UNREACHABLE, not UNKNOWN/500", () => {
+    expect(
+      classifyKeyValidationError(
+        transportThrow(TIMED_OUT_MESSAGE, "UPSTREAM_TIMEOUT"),
+      ),
+    ).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("a connection that never completed reaches SERVICE_UNREACHABLE too", () => {
+    expect(
+      classifyKeyValidationError(
+        transportThrow(NOT_REACHABLE_MESSAGE, "UPSTREAM_NETWORK_ERROR"),
+      ),
+    ).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("the MARKER moved the verdict — the same prose with no marker still cannot earn it", () => {
+    // ⭐ THE MEASUREMENT OF WHAT THE TYPE BRANCH BOUGHT, and the proof the fix
+    // is not substring-carried. Both messages, unmarked, still answer exactly
+    // what they answered before this plan.
+    expect(classifyKeyValidationError(new Error(TIMED_OUT_MESSAGE))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(NOT_REACHABLE_MESSAGE))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    // And the token that makes the dead branch dead, stated as an assertion so
+    // a reword on either side is caught: "timed out" ∌ "timeout".
+    expect(TIMED_OUT_MESSAGE.toLowerCase()).not.toContain("timeout");
+  });
+
+  it("the THIRD real message — an upstream non-2xx — is untouched by this branch", () => {
+    // NEGATIVE CONTROL. RESEARCH lists three producible messages; only two are
+    // transport failures. An upstream error carries a body, so it is the
+    // `seamCode` branch's business, and a marker branch that swallowed it would
+    // report a service that ANSWERED as one we could not reach.
+    expect(
+      classifyKeyValidationError(new Error("Analytics service error (502)")),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("SERVICE_UNREACHABLE's copy does NOT borrow the breaker's 'nothing was submitted'", () => {
+    // ⚠️ 140.3-12 fixed this once and it must not be re-merged. The breaker
+    // DECLINED to send, so "nothing was submitted" is knowable there. A
+    // deadline firing tells us nothing about whether the far side processed the
+    // request — it is the canonical case where the work may well have
+    // completed. This branch routes timeouts here, so the distinction is now
+    // load-bearing for a second producer.
+    const copy = WIZARD_ERROR_COPY.SERVICE_UNREACHABLE;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob).not.toContain("nothing was submitted");
+    expect(WIZARD_ERROR_COPY.SERVICE_UNAVAILABLE_RETRY.cause.toLowerCase()).toContain(
+      "nothing was submitted",
+    );
+  });
+
+  it("a non-string marker is ignored and never decides a verdict", () => {
+    // Same fence as the `seamCode` read: the property is data, and data can be
+    // anything. Prototype-shaped strings must not resolve through the table
+    // either.
+    for (const bogus of [42, null, {}, [], true, undefined]) {
+      expect(
+        classifyKeyValidationError(
+          Object.assign(new Error("some unclassified string"), {
+            seamTransportCode: bogus,
+          }),
+        ),
+      ).toEqual({ code: "UNKNOWN", status: 500 });
+    }
+    expect(
+      classifyKeyValidationError(
+        Object.assign(new Error("some unclassified string"), {
+          seamTransportCode: "constructor",
+        }),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the CircuitOpenError type check still outranks the marker", () => {
+    // Ordering is load-bearing: the breaker verdict must never be decided by
+    // anything an upstream — or a marker on a wrapped error — can set.
+    const breakerTrip = Object.assign(new CircuitOpenError(30), {
+      seamTransportCode: "UPSTREAM_TIMEOUT",
+    });
+    expect(classifyKeyValidationError(breakerTrip)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("COLLISION INVARIANT, re-derived for this branch (not copied)", () => {
+    // The branch is a table lookup, so it cannot collide with a substring the
+    // way the cascade's members do. What it CAN do is shadow an earlier
+    // verdict, so the invariant to re-run is: neither real message matches any
+    // cascade branch that would otherwise have claimed it. Asserted rather than
+    // asserted-in-a-comment.
+    for (const message of [TIMED_OUT_MESSAGE, NOT_REACHABLE_MESSAGE]) {
+      const lower = message.toLowerCase();
+      for (const needle of [
+        "signature",
+        "invalid secret",
+        "authentication failed",
+        "invalid_credentials",
+        "master password",
+        "broker server",
+        "allow",
+        "rate",
+        "429",
+        "timeout",
+        "etimedout",
+        "could not verify",
+        "permission scope",
+        "probe",
+        "trading",
+        "withdraw",
+      ]) {
+        expect(
+          lower.includes(needle),
+          `"${message}" contains "${needle}" — the cascade would have claimed ` +
+            `it, so the marker branch is now SHADOWING a verdict rather than ` +
+            `rescuing an unclassified one. Re-derive before moving either side.`,
+        ).toBe(false);
+      }
+    }
   });
 });

@@ -16,13 +16,22 @@ import type { GateFailureCode } from "./strategyGate";
 // `@/lib/resilient-fetch` — either re-export drags `@upstash/redis`,
 // `@upstash/ratelimit` and a top-level `Redis.fromEnv()` singleton into the
 // wizard bundle for every user. (The mirror-image convention is the
-// `import "server-only"` guard at `src/lib/analytics.ts:1`.)
+// `import "server-only"` directive at the top of `src/lib/analytics.ts`.)
 //
-// The leaf path is also the only one that survives the test suite: sixteen
-// route test files `vi.mock("@/lib/analytics-client")` with BARE factories, so
-// a class reached through that re-export would be `undefined` at runtime and
-// the `instanceof` below would throw from inside a catch block. Nothing mocks
-// the leaf.
+// The leaf path is also the only one that survives the test suite: EVERY ROUTE
+// TEST THAT MOCKS A SEAM CLIENT WHOLESALE `vi.mock("@/lib/analytics-client")`
+// with a BARE factory, so a class reached through that re-export would be
+// `undefined` at runtime and the `instanceof` below would throw from inside a
+// catch block. Nothing mocks the leaf.
+//
+// ⚠️ 140.5-02 / SEAMPROSE-04 — THE INTEGER THAT USED TO SIT HERE IS GONE, NOT
+// CORRECTED. It said "sixteen", and "sixteen" is defensible under exactly one
+// of five predicates: the same population measures 26 raw, 23 comment-stripped,
+// 15 restricted to `src/app/api/**` route tests, 16 with the route test that
+// lives outside that tree, and 19 with the csv-finalize suites. Replacing one
+// bare integer with another is how this file would keep lying with a different
+// number, so the PREDICATE is named instead of a count. (140.4's own fix round
+// shipped two such corrections; this milestone exists because of them.)
 import { CircuitOpenError } from "@/lib/seam-errors";
 
 export type WizardErrorCode =
@@ -814,26 +823,92 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     actions: ["clear_and_retry"],
   },
 
+  // 140.5-02 / SEAMPROSE-03 — THE BREAKDOWN PROMISE IS GONE, because the
+  // breakdown never renders. Not on the forwarded-upstream arm, and — the part
+  // that makes this a copy fix rather than a routing fix — NOT ON THE GENUINE
+  // VALIDATION ARM EITHER. Three independent reasons, each measured:
+  //   1. KEY MISMATCH. `csv_adapter.py`'s CSV `ValidationResult` puts the row
+  //      errors under `debug_context={"violations": …}`; the panel reads
+  //      `debug_context.pandera_errors`, and `pandera_errors` has ZERO hits
+  //      anywhere in `analytics-service/`.
+  //   2. THE FIELD DIES BEFORE THE WIRE. `process_key.py`'s `_run_validate_only`
+  //      calls `_envelope_error(...)`, which rebuilds `debug_context` from the
+  //      verification id alone and never reads `val.debug_context`.
+  //   3. THE CODE IS A RULE NAME. `csv_adapter.py`'s CSV validation arm sets
+  //      `error_code` from `first_rule.upper()` (e.g. `COLUMN_IN_DATAFRAME`),
+  //      so this entry is reached mainly through `CsvUploadStep`'s
+  //      `data.code ?? "CSV_VALIDATION_FAILED"` fallback.
+  //
+  // ⚠️ ONLY THE COPY HALF IS DONE HERE. Fixing the DATA half means forwarding
+  // `violations`, whose pandera messages embed raw cell values — the PII
+  // surface QA ISSUE-005 is fenced around. Carried forward deliberately, named
+  // in `140.5-02-SUMMARY.md`'s `## OPEN`, NOT silently absorbed.
+  //
+  // The replacement states the limitation WITH what we do report (DESIGN.md
+  // §Voice) instead of promising a list. Claude-drafted; founder review owed.
   CSV_VALIDATION_FAILED: {
-    title: "Validation failed. See per-row breakdown below.",
+    title: "Your file did not pass validation.",
     cause:
-      "One or more rows in your file failed schema or business-rule checks.",
+      "At least one row failed a schema or business-rule check. We report the first rule that failed, not a list of every affected row.",
     fix: [
-      "Expand each rule below to see the row-level breakdown.",
-      "Fix the offending rows and re-upload.",
+      "Check your file against the CSV format reference, then upload it again.",
+      "If the reason above is not specific enough to act on, contact security@quantalyze.com with the reference below.",
     ],
     docsHref: "/security#csv-format",
     actions: ["clear_and_retry"],
   },
 
+  // 140.5-02 / SEAMPROSE-03 (DEF-140.4-C, founder decision §4a) — THE ONE
+  // SENTENCE FOR EVERY UNRECOGNISED-OR-CODELESS UPSTREAM FAILURE ON THE CSV
+  // SURFACE. The strings below are FOUNDER-AUTHORED and are reproduced
+  // VERBATIM; they are not Claude-drafted and are not open to a reword. The
+  // rationale, in the founder's words: the user cannot act differently on a 403
+  // than on a 404 — both mean "not your fault, try again or contact us" — so
+  // per-status copy was rejected as a hand-typed roster.
+  //
+  // ⚠️ SCOPE — READ THIS BEFORE ROUTING ANYTHING NEW HERE (corrected §6c).
+  // This entry's population is the upstream failure carrying NO recognisable
+  // top-level code. It is NOT "every `!res.ok`". The CSV routes emit their own
+  // caller-fault codes with real top-level names — `CSV_FILE_TOO_LARGE`,
+  // `CSV_INVALID_FORMAT`, `CSV_RATE_LIMIT`, `CSV_SESSION_REUSED`,
+  // `CSV_PERSIST_FAIL`, `CSV_FINALIZE_FAIL` — and every one of them keeps its
+  // own copy. Collapsing those onto this entry would tell a user who uploaded
+  // an 11 MB file that the failure is "on our side, not your data", and would
+  // assert "Nothing was saved" where `CSV_PERSIST_FAIL` may make that
+  // affirmatively false. 140.5-05 owns the three-way arm and its negative
+  // controls.
+  //
+  // "NOTHING WAS SAVED" IS VERIFIED, NOT ASSERTED, at the arm this entry serves
+  // (`strategies/csv-validate`). Three layers: the Next route performs zero
+  // writes (no supabase client, no insert/upsert/update, no audit event);
+  // Python's `_run_validate_only` runs `adapter.validate()` only, with no DB
+  // insert, no state-machine transition and no fingerprint/encryption; and the
+  // `strategies` row is created on the CSV path only by `finalize_csv_strategy`
+  // at the FINALIZE step. The 401/403/429 arms short-circuit before any of it.
+  // ⚠️ ONE CAVEAT, recorded so nobody has to rediscover it: a `wizard_error`
+  // PostHog funnel event does fire on this path. That is TELEMETRY, not user
+  // data, and the sentence reads as being about the user's file.
+  //
+  // WHY THIS CODE AND NOT A NEW ONE. `CSV_UPSTREAM_FAIL` already exists,
+  // already means "upstream failure on this surface" and already has emitters
+  // at the csv-validate route. A second code for the same fact is exactly the
+  // two-names-one-fact drift `seam-copy.ts` exists to prevent, so reuse beats
+  // the naming preference against a `CSV_` prefix. Deliberate, recorded.
+  //
+  // The `correlation_id` the copy points at is rendered by
+  // `CsvValidationEnvelope`'s own footer line — it is deliberately NOT
+  // interpolated here, which keeps this entry's dynamic-value count at ONE.
   CSV_UPSTREAM_FAIL: {
-    title: "Validation service returned an unexpected response. Retry shortly.",
-    cause: "Our analytics service returned an envelope without preview data.",
+    title: "We couldn't check your file just now.",
+    cause: "This is on our side, not your data. Nothing was saved.",
     fix: [
-      "Wait 30 seconds and click Retry.",
-      "If it persists, contact security@quantalyze.com.",
+      "Try again in a moment — if it keeps happening, send us this reference.",
     ],
     docsHref: "/security#sync-timing",
+    // `clear_and_retry` is required, not decorative: `envelope.ts` derives
+    // `recoverable` from `actions`, and without it the copy would say "try
+    // again in a moment" beside an envelope that renders no Retry control.
+    // `request_call` is the "send us this reference" affordance.
     actions: ["clear_and_retry", "request_call"],
   },
 
@@ -1288,7 +1363,8 @@ export function formatKeyError(
 
   if (code === "GATE_INSUFFICIENT_DAYS" && context?.days !== undefined) {
     // Floor-round so a sub-7 value never displays as "7.0". The gate
-    // compares strictly `< 7` (see strategyGate.ts:89), but `.toFixed(1)`
+    // compares strictly `< 7` (see `strategyGate.ts`'s
+    // `spanDays < STRATEGY_GATE_MIN_DAYS` check), but `.toFixed(1)`
     // rounds half-up, so a real span of 6.95 was rendered as "7.0" — a
     // user reading "we found 7.0 days" sees a passing-looking number
     // alongside a failure and is justifiably confused. Floor at 1
@@ -1515,6 +1591,56 @@ export function classifyKeyValidationError(error: unknown): {
     if (verdict !== undefined) return verdict;
   }
 
+  // ⚠️ Phase 140.5-02 / SEAMPROSE-03 — B-02. OUR OWN TRANSPORT, READ BEFORE THE
+  // MESSAGE IS SNIFFED, AND FOR THE SAME REASON THE BLOCK ABOVE IS.
+  //
+  // WHAT WAS BROKEN. The cascade below tests `lower.includes("timeout")`, and
+  // the message `analytics-client` actually constructs says **"timed out"**.
+  // `"timed out"` does not contain `"timeout"`. Replayed against the whole
+  // cascade, all three of the client's producible messages answered
+  // `{UNKNOWN, 500}` — the terminal that admits knowing nothing, with no retry
+  // affordance — and the breaker cannot rescue it, because it needs 5 failures
+  // in 30 s while a Railway outage arrives at human retry cadence with the
+  // breaker still CLOSED. The ONE test that appeared to cover that branch
+  // pinned `"connect ETIMEDOUT …"`, a raw undici syscall string this client
+  // wraps before rethrowing, so it could never reach here.
+  //
+  // WHY BY TYPE AND NOT A WIDER NEEDLE. Adding `"timed out"` to the substring
+  // is a per-site edit the next reword re-breaks, and it would still answer
+  // `KEY_NETWORK_TIMEOUT` — copy that blames the EXCHANGE for a failure of our
+  // own hop.
+  //
+  // A PLAIN OWN DATA PROPERTY, READ WITH `typeof` — NOT `instanceof`, for
+  // exactly the mock-survival reason spelled out in the block above, and
+  // resolved through the SHARED wire→wizard table rather than a second private
+  // vocabulary. Both values (`UPSTREAM_TIMEOUT`, `UPSTREAM_NETWORK_ERROR`) are
+  // already rows there, mapping to `SERVICE_UNREACHABLE`.
+  //
+  // WHY IT IS A SEPARATE FIELD FROM `seamCode`, and why the two cannot collide:
+  // `seamCode` is what an UPSTREAM'S BODY declared; this is what OUR TRANSPORT
+  // observed, on a path where no body exists. They are mutually exclusive by
+  // construction, and keeping them apart is a security property — one field
+  // carrying both would let an upstream put `"UPSTREAM_TIMEOUT"` in its
+  // envelope and be handed our transport verdict.
+  //
+  // ⚠️ DO NOT COPY `SERVICE_UNAVAILABLE_RETRY`'s "Nothing was submitted" onto
+  // this path. That claim is knowable for a breaker that DECLINED to send; it
+  // is false-by-construction for a request that WAS issued and never answered.
+  // 140.3-12 fixed that once. `SERVICE_UNREACHABLE`'s copy is the one that
+  // states the uncertainty, which is why this maps there and not one line up.
+  const transportCode = (
+    error as { seamTransportCode?: unknown } | null | undefined
+  )?.seamTransportCode;
+  if (typeof transportCode === "string") {
+    const wizardCode = recogniseSeamErrorCode(transportCode);
+    // No `??` fallback, same as above: an unrecognised marker falls through to
+    // the cascade rather than short-circuiting to UNKNOWN. 502 is the status
+    // the seam already uses for "we could not reach it" (the venue table's
+    // NETWORK_UNAVAILABLE row and the cascade branch this replaces both say
+    // 502), so the wire answer is unchanged; only the code and its copy move.
+    if (wizardCode !== "UNKNOWN") return { code: wizardCode, status: 502 };
+  }
+
   // `String(error)` keeps the classifier TOTAL: `throw {…}` / `throw undefined`
   // are legal JS, and a second throw from inside a catch block would surface as
   // an unhandled 500 rather than a classified response. Both fall through to
@@ -1649,6 +1775,23 @@ const SEAM_CODE_TO_WIZARD_CODE: ReadonlyMap<string, WizardErrorCode> = new Map<
   // admit `SEAM_DEGRADED`, `MT5_GATEWAY_UNREACHABLE` and every venue code too,
   // which is the reason this table is explicit at all.
   ["SEAM_MISCONFIGURED", "SEAM_MISCONFIGURED"],
+  // 140.5-02 / SEAMPROSE-03 — AN ALIAS, in the `CIRCUIT_OPEN` sense rather than
+  // the `SEAM_MISCONFIGURED` one: the CSV surface's LOCAL NAME for a fact
+  // `RATE_LIMITED` already stands for. Both CSV routes answer their own
+  // per-session throttle with `code: "CSV_RATE_LIMIT"` and a stamped
+  // `Retry-After`; that header is the ONE wait the CSV surface actually
+  // advertises, and without this row the code resolves "UNKNOWN" and the wait
+  // is discarded on the way to the envelope.
+  //
+  // ⚠️ IT IS DELIBERATELY NOT A `WizardErrorCode`, AND THE ABSENCE IS
+  // LOAD-BEARING — do not "complete" this by minting a member or adding it to a
+  // `KNOWN_*` roster. 140.5-05's arm tries the already-known-code branch BEFORE
+  // this table; admitting `CSV_RATE_LIMIT` there would keep the route's local
+  // copy and the stamped wait would never reach the shared envelope.
+  //
+  // Listed EXPLICITLY, like every other row: an identity rule would silently
+  // admit every future `CSV_*` name too.
+  ["CSV_RATE_LIMIT", "RATE_LIMITED"],
 ]);
 
 export function recogniseSeamErrorCode(
@@ -1717,8 +1860,8 @@ export const CSV_SUBMIT_STEP_HEADINGS = {
  * Pandera rule labels surfaced by `CsvValidationEnvelope` per-rule
  * `<details>` summaries. Locked verbatim by 15-UI-SPEC §8.8 +
  * 17-UI-SPEC §14.3. Phase 17 relocates them from
- * `CsvValidationEnvelope.tsx:30-37` so wizardErrors.ts owns every
- * user-visible CSV-branch string.
+ * `CsvValidationEnvelope.tsx`'s `CsvValidationEnvelopeProps` so
+ * `wizardErrors.ts` owns every user-visible CSV-branch string.
  */
 export const CSV_RULE_LABELS: Readonly<Record<string, string>> = {
   monotonic_dates: "Dates must be strictly increasing",
