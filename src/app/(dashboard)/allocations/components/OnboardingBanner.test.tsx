@@ -48,7 +48,15 @@ const sessionStorageMock = {
   key: vi.fn(() => null),
   length: 0,
 };
-vi.stubGlobal("sessionStorage", sessionStorageMock);
+// Phase 140.5-01 / SEAMPROSE-04 — installed PER TEST, not at module scope.
+// `vitest.config.ts` sets `unstubGlobals: true`, which restores stubbed globals
+// before every test, so a stub applied once at import time is gone by the time
+// the first test runs. Re-applying it here also removes a real leak: a stub set
+// at module scope is never undone, so it reaches every later file in the same
+// worker (DEF-16-1).
+beforeEach(() => {
+  vi.stubGlobal("sessionStorage", sessionStorageMock);
+});
 
 beforeEach(() => {
   ssStore.clear();
