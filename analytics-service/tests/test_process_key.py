@@ -4041,8 +4041,16 @@ def test_seamrim03_csv_finalize_23505_answers_200_with_existing_strategy(client)
     user_sb = _RecordingSupabase(
         rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
         responses={
+            # CR-01: `name` is part of the real row shape now that the arm reads
+            # it to establish its precondition. Carrying the SAME name the post
+            # sends keeps this case on the true-repeat path it has always
+            # tested, instead of passing through a null-name bypass.
             ("strategies", "select"): [
-                {"id": _EXISTING_CSV_STRATEGY_ID, "status": "pending_review"}
+                {
+                    "id": _EXISTING_CSV_STRATEGY_ID,
+                    "status": "pending_review",
+                    "name": "Test Strategy",
+                }
             ]
         },
     )
@@ -4107,6 +4115,91 @@ def test_seamrim03_csv_finalize_23505_refetch_is_tenant_and_source_scoped(client
     assert sb.selects("strategies") == [], (
         "the re-fetch must not run on the service-role client"
     )
+
+
+def test_cr01_csv_finalize_23505_refuses_a_DIFFERENT_submission(client):
+    """CR-01 — the fence must establish its precondition before asserting it.
+
+    ⚠️ THE DEFECT THIS PINS, IN ONE SENTENCE: the 23505 arm resolved the row by
+    (user_id, wizard_session_id, source) and echoed its id at 200 **without ever
+    comparing the request to the row it found**. `wizard_session_id` identifies a
+    SESSION, not a SUBMISSION, and `clearWizardState` fires only on
+    success/delete-draft/start-fresh (`localStorage.ts:390-393`, stated there as
+    load-bearing) — so a user whose first submit failed can rename, upload a
+    DIFFERENT file, and resubmit under the SAME session id.
+
+    Pre-fix the route answered `{ok: true, strategy_id: S}` and the Next.js route
+    then applied THIS request's metadata and returns to THAT strategy. Result: a
+    strategy named after file A, carrying A ∪ B returns, reported as success.
+    On a product whose value is a trustworthy verified track record that is a
+    fabricated series presented as verified.
+
+    The fence is for a REPEAT — the retry `CSV_SUBMIT_FAILED` instructs. A
+    changed submission is not a repeat and must not be resolved to the old row.
+    """
+    sb = _RecordingSupabase()
+    user_sb = _RecordingSupabase(
+        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
+        responses={
+            # The row that already exists carries the FIRST submission's name.
+            # `_csv_finalize_post` sends "Test Strategy" — a different one.
+            ("strategies", "select"): [
+                {
+                    "id": _EXISTING_CSV_STRATEGY_ID,
+                    "status": "pending_review",
+                    "name": "Alpha 2024",
+                }
+            ]
+        },
+    )
+
+    r = _csv_finalize_post(client, sb, user_sb)
+
+    assert r.status_code != 200, (
+        "a DIFFERENT submission wearing a reused session id was resolved to the "
+        "existing strategy. The caller will now apply this request's payload to "
+        "that row — a cross-submission merge, reported as success."
+    )
+    payload = r.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "CSV_SESSION_REUSED", payload
+    # The id must NOT be echoed: handing it back is what lets a caller write to it.
+    assert not payload.get("strategy_id"), (
+        "the existing strategy id was echoed on a refusal — the caller can still "
+        "target it, so the refusal only moves the merge one call downstream"
+    )
+    # Same absence half every sibling case asserts.
+    body = r.text.lower()
+    for leak in ("duplicate key", "unique constraint", "23505", "strategies_user_wizard"):
+        assert leak not in body, f"raw Postgres text {leak!r} reached the response body"
+
+
+def test_cr01_csv_finalize_23505_still_resolves_a_TRUE_repeat(client):
+    """CR-01, the POSITIVE counterpart — a refuse-everything arm would be worse.
+
+    Without this, the guard above is satisfied by an arm that dead-ends EVERY
+    duplicate, which re-opens the exact defect SEAMRIM-03 closed: the retry the
+    product's own copy instructs becomes a 422 the user cannot escape.
+    """
+    sb = _RecordingSupabase()
+    user_sb = _RecordingSupabase(
+        rpc_responses={"finalize_csv_strategy": [_csv_finalize_dup_key_error()]},
+        responses={
+            ("strategies", "select"): [
+                {
+                    "id": _EXISTING_CSV_STRATEGY_ID,
+                    "status": "pending_review",
+                    # Byte-identical to what `_csv_finalize_post` sends.
+                    "name": "Test Strategy",
+                }
+            ]
+        },
+    )
+
+    r = _csv_finalize_post(client, sb, user_sb)
+
+    assert r.status_code == 200, r.text
+    assert r.json()["strategy_id"] == _EXISTING_CSV_STRATEGY_ID
 
 
 def test_seamrim03_csv_finalize_23505_refetch_miss_does_not_fabricate_success(client):

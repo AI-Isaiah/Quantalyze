@@ -1134,7 +1134,11 @@ async def process_key(
                     try:
                         existing = one(
                             user_sb.table("strategies")
-                            .select("id, status")
+                            # CR-01: `name` is SELECTed because the arm must
+                            # compare the request to the row before it asserts
+                            # they are the same submission. See the refusal
+                            # below.
+                            .select("id, status, name")
                             .eq("user_id", user_id)
                             .eq("wizard_session_id", wsid)
                             .eq("source", "csv")
@@ -1153,6 +1157,75 @@ async def process_key(
                         )
                         existing = None
                     if existing:
+                        # ⚠️ CR-01 — ESTABLISH THE PRECONDITION BEFORE ASSERTING
+                        # IDEMPOTENCY. This arm used to echo the resolved id at
+                        # 200 without ever comparing the request to the row it
+                        # found, and that is not idempotency — it is "any
+                        # submission wearing this session id gets that
+                        # strategy".
+                        #
+                        # `wizard_session_id` identifies a SESSION, not a
+                        # SUBMISSION. `clearWizardState` fires only on success /
+                        # delete-draft / start-fresh (localStorage.ts:390-393
+                        # says so, and says it is load-bearing), so after a
+                        # FAILED submit the id survives. A user who follows
+                        # `CSV_SUBMIT_FAILED`'s instruction can step back,
+                        # rename, upload a DIFFERENT file and submit — and the
+                        # arm resolved that to the first strategy. The caller
+                        # (src/app/api/strategies/csv-finalize/route.ts) then
+                        # applies THIS request's metadata and returns to THAT
+                        # id, and persist_csv_daily_returns is an upsert with no
+                        # delete outside the new range: the row ends up named
+                        # after file A, carrying A ∪ B, reported as success.
+                        #
+                        # WHY REFUSE RATHER THAN OVERWRITE. Overwriting would
+                        # need a stale-range delete, a name update, and a
+                        # re-verification — and `status` here may already be
+                        # 'published'. Silently replacing the data under a
+                        # PUBLISHED verified track record through a CREATE
+                        # endpoint is a worse failure than the one being fixed.
+                        # A changed track record is a NEW strategy.
+                        #
+                        # WHY `name` AND WHY IT IS A FLOOR, STATED HONESTLY.
+                        # `name` is the only submission-identifying field this
+                        # arm both receives and can read back: the daily-return
+                        # series never reaches this service (the Next.js route
+                        # persists it separately), and the existing row may
+                        # legitimately carry NO rows yet — that is exactly the
+                        # recovery case the fence exists for, so "compare the
+                        # series" cannot be the test HERE. The residual — same
+                        # name, different file — is closed one layer out, at the
+                        # site of the merge itself, by the stale-range fence in
+                        # persistDailyReturnsOrErrorResponse. Neither layer is
+                        # sufficient alone; both are cheap.
+                        existing_name = existing.get("name")
+                        if (
+                            isinstance(existing_name, str)
+                            and isinstance(strategy_name, str)
+                            and existing_name != strategy_name
+                        ):
+                            log.warning(
+                                "process_key.csv_finalize_session_reused_with_new_payload",
+                                strategy_id=str(existing["id"]),
+                            )
+                            return JSONResponse(
+                                status_code=409,
+                                content=_envelope_error(
+                                    "CSV_SESSION_REUSED",
+                                    # No id, no name, no file name: the refusal
+                                    # names the STATE, and the remedy is the one
+                                    # action that cannot merge anything.
+                                    "This wizard session already created a "
+                                    "strategy under a different name. Start a "
+                                    "new strategy to upload a different track "
+                                    "record.",
+                                    correlation_id,
+                                    None,
+                                    # Retrying the identical action re-raises the
+                                    # identical 23505 and lands here again.
+                                    recoverable=False,
+                                ),
+                            )
                         # Distinguishable from a first submit in the logs, so an
                         # operator can tell a dedup from a create. Mirrors
                         # `process_key.idempotent_race_resolved`.
