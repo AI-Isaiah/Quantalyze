@@ -57,10 +57,35 @@ and the three `check-*` CI-gate scripts). Edit that array + this file together w
 adding or removing a guard.
 
 ⚠️ **This prose table is a SUBSET of the array, and always has been** — 16 rows
-against 44 before plan 140.4-10, 23 against 51 after it (that plan added one prose
-row per array row it added, and did not backfill the pre-existing gap). Nothing
-asserts the two are in step, so the drift is invisible to CI. Read the array as
-authoritative and this table as the annotated part of it.
+against 44 before plan 140.4-10, **24 against 52** after it (that plan added one
+prose row per array row it added, and did not backfill the pre-existing gap).
+Nothing asserts the two are in step, so the drift is invisible to CI. Read the
+array as authoritative and this table as the annotated part of it.
+
+**Corrected 140.4-16 / WR-01** — this paragraph read *"23 against 51"* and the
+array's own docblock read *"51 … (44 + 7)"*, while the assertion beside it said
+`toBeGreaterThanOrEqual(52)`. Eight rows landed, not seven. The predicates, so
+the next reader re-measures instead of trusting:
+
+```
+$ grep -c '^  { path:' src/__tests__/contracts/contracts-registry.test.ts   # 52
+$ git show a77d607e:src/__tests__/contracts/contracts-registry.test.ts \
+    | grep -c '^  { path:'                                                 # 44
+$ awk '/^\| Guard/{t=1;next} /^$/{t=0} t&&/^\| `/{n++} END{print n}' \
+    src/__tests__/contracts/REGISTRY.md                                    # 24
+```
+
+⚠️ **That third predicate is deliberately not `grep -c '^| \`'`.** The obvious
+one scores **31**, because this file has TWO tables — the eslint *Rule* table at
+the top and the *Guard* table below — and a line-anchored grep cannot tell them
+apart. The first draft of this very correction published the wrong predicate
+beside the right number, which is the WR-01 defect reproduced while fixing it.
+A number and a predicate that do not agree is worse than no number.
+
+The floor itself was always correct and has zero slack, so nothing was
+under-guarded — but a bare integer without its predicate is unowned by
+construction, and this one drifted inside the artefact raised to close numeric
+slack.
 
 ⚠️ **Two phase-140.4 guards are NOT registerable here and are residuals, not
 omissions:** `analytics-service/tests/test_raw_5xx_census.py` (the raw-5xx census,

@@ -225,11 +225,23 @@ const CONTRACT_GUARDS: Guard[] = [
 
 describe("[B25] contracts registry — by-construction invariant guards", () => {
   it("registers a non-trivial set (fail-loud on accidental truncation)", () => {
-    // ⚠️ RAISED 20 → 51 BY PLAN 140.4-10, AND THE OLD NUMBER IS WHY. The floor
+    // ⚠️ RAISED 20 → 52 BY PLAN 140.4-10, AND THE OLD NUMBER IS WHY. The floor
     // was 20 against 44 real rows, so TWENTY-FOUR ROWS WERE DELETABLE WITH
     // GREEN CI — in a file whose entire purpose is that a guard cannot be
-    // deleted with green CI. 51 is the measured count after this plan's seven
-    // additions (44 + 7).
+    // deleted with green CI.
+    //
+    // THE COUNT, WITH THE PREDICATE THAT PRODUCED IT (140.4-16 / WR-01 — this
+    // paragraph said "51 … (44 + 7)" while the assertion below said 52, in the
+    // one artefact this phase raised specifically to close numeric slack):
+    //
+    //   $ grep -c '^  { path:' src/__tests__/contracts/contracts-registry.test.ts
+    //   52                                   # at HEAD
+    //   $ git show a77d607e:… | grep -c '^  { path:'
+    //   44                                   # at the phase base
+    //
+    // 44 + 8 = 52. EIGHT rows were added, not seven. Quote the predicate beside
+    // any number you write here — a bare integer is unowned by construction
+    // (Oracle Independence hazard #9), which is exactly how this one drifted.
     //
     // ⚠️ THIS CLOSES SLACK, NOT A CLASS. Raising the floor stops rows being
     // dropped silently; it does nothing about guards that were never
