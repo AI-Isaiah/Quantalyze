@@ -1885,3 +1885,114 @@ describe("[140.3-15 / TS-38] SEAM_MISCONFIGURED — our fault, permanent, no ret
     expect(recogniseSeamErrorCode("NOT_A_SEAM_CODE")).toBe("UNKNOWN");
   });
 });
+
+// ===========================================================================
+// Phase 140.5-02 / SEAMPROSE-03 — the §4a vocabulary
+// ===========================================================================
+
+describe("[140.5-02 / SEAMPROSE-03] DEF-140.4-C — ONE sentence for an unrecognised upstream failure", () => {
+  /**
+   * ORACLE INDEPENDENCE. Every expected string below is a LITERAL, transcribed
+   * by hand from `140.5-CONTEXT.md` §4a (founder-authored, pre-approved copy).
+   * Nothing here is imported from, or derived from, the module under test — a
+   * `toBe(WIZARD_ERROR_COPY.X.title)` assertion passes for any implementation.
+   *
+   * ⚠️ SCOPE OF THIS ENTRY, from the CORRECTED §6c. `CSV_UPSTREAM_FAIL` is the
+   * code for the UNRECOGNISED-OR-CODELESS upstream failure only. The CSV
+   * routes' OWN caller-fault codes (`CSV_FILE_TOO_LARGE`, `CSV_INVALID_FORMAT`,
+   * `CSV_RATE_LIMIT`, `CSV_SESSION_REUSED`, `CSV_PERSIST_FAIL`,
+   * `CSV_FINALIZE_FAIL`) keep their own copy and must NEVER reach this entry:
+   * "This is on our side, not your data" is FALSE for an 11 MB upload, and
+   * "Nothing was saved" may be affirmatively false for `CSV_PERSIST_FAIL`.
+   * Routing the three-way arm that enforces that is 140.5-05's, with negative
+   * controls; this plan publishes only the vocabulary it consumes.
+   */
+  it("carries the founder heading VERBATIM", () => {
+    expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
+      "We couldn't check your file just now.",
+    );
+  });
+
+  it("splits the two founder sentences across cause/fix WITHOUT rewording either", () => {
+    const copy = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    expect(copy.cause).toBe(
+      "This is on our side, not your data. Nothing was saved.",
+    );
+    expect(copy.fix).toEqual([
+      "Try again in a moment — if it keeps happening, send us this reference.",
+    ]);
+  });
+
+  it("offers the retry control its own sentence promises (polarity re-derived, not copied)", () => {
+    // `envelope.ts`'s RECOVERABLE_ACTIONS is {clear_and_retry, try_another_key}.
+    // The copy says "try again in a moment", so without `clear_and_retry` the
+    // envelope renders no Retry CTA and the sentence names a control that does
+    // not exist. `request_call` is the "send us this reference" affordance.
+    const { actions } = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    expect(actions).toContain("clear_and_retry");
+    expect(actions).toContain("request_call");
+    // Not destructive: this failure is ours, so nothing here offers to delete
+    // the user's draft.
+    expect(actions).not.toContain("start_fresh");
+  });
+
+  it("keeps the copy's dynamic-value count at ONE — correlation_id, rendered by the component", () => {
+    // PATTERNS §9 static-copy rule. No URL, no status, no hostname, no env
+    // name, and no interpolation token: `correlation_id` is printed by
+    // `CsvValidationEnvelope`'s own footer line, never embedded in a string
+    // here. A placeholder in the table would be a SECOND dynamic value.
+    const copy = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ");
+    expect(blob).not.toMatch(/\{[^}]*\}/);
+    expect(blob).not.toMatch(/\$\{/);
+    expect(blob).not.toMatch(/https?:\/\//);
+    expect(blob.toLowerCase()).not.toContain("correlation_id");
+  });
+
+  it("PROMISE PIN — no CSV copy on this surface promises a per-row breakdown", () => {
+    // ⚠️ THE PROMISE IS FALSE ON **BOTH** ARMS (RESEARCH §12.4), not only the
+    // forwarded-upstream one: `csv_adapter.py` emits the rows under
+    // `debug_context.violations`, `CsvValidationEnvelope` reads
+    // `debug_context.pandera_errors` (zero Python hits), and `_envelope_error`
+    // discards `debug_context` before the wire. The `<details>` blocks never
+    // render, so the sentence is a promise the UI cannot keep.
+    //
+    // ABSENCE **and** PRESENCE, both halves. An absence-only assertion is
+    // satisfied by deleting the entry, which would leave the user with less
+    // information rather than honest information.
+    const copy = WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob).not.toContain("per-row breakdown");
+    expect(blob).not.toContain("row-level breakdown");
+    expect(copy.title).toBe("Your file did not pass validation.");
+  });
+
+  it("CSV_RATE_LIMIT is an EXPLICIT row in the wire table — the CSV surface's name for the RATE_LIMITED fact", () => {
+    // The CSV routes stamp `Retry-After` on their 429 and mint the
+    // surface-local code `CSV_RATE_LIMIT`. Without this row the code resolves
+    // "UNKNOWN" and the one CSV wait the seam actually advertises is dropped.
+    // `RATE_LIMITED`'s copy deliberately carries no duration — the figure is
+    // the server's own header, rendered by `ErrorEnvelope`.
+    expect(recogniseSeamErrorCode("CSV_RATE_LIMIT")).toBe("RATE_LIMITED");
+  });
+
+  it("CSV_RATE_LIMIT is NOT a WizardErrorCode, and that absence is load-bearing", () => {
+    // ⚠️ DO NOT "FIX" THIS BY MINTING A `CSV_RATE_LIMIT` MEMBER OR ADDING IT TO
+    // A `KNOWN_*` ROSTER. 140.5-05's three-way arm tries branch (1) — the code
+    // is already a known wizard/route code, keep today's copy — BEFORE branch
+    // (2), the wire-table hop. If `CSV_RATE_LIMIT` were admitted by branch (1)
+    // it would keep today's copy and the stamped wait would never reach the
+    // shared envelope. The ABSENCE is what routes it through the table.
+    expect(Object.keys(WIZARD_ERROR_COPY)).not.toContain("CSV_RATE_LIMIT");
+  });
+
+  it("ANTI-REGRESSION: the pre-existing wire-table rows still answer as they did", () => {
+    // A new row lands in the ONE shared table. A sweep that re-pointed the
+    // table would be invisible to every assertion above.
+    expect(recogniseSeamErrorCode("RATE_LIMITED")).toBe("RATE_LIMITED");
+    expect(recogniseSeamErrorCode("VALIDATION_FAILED")).toBe("VALIDATION_FAILED");
+    expect(recogniseSeamErrorCode("CIRCUIT_OPEN")).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(recogniseSeamErrorCode("SEAM_MISCONFIGURED")).toBe("SEAM_MISCONFIGURED");
+    expect(recogniseSeamErrorCode("CSV_VALIDATION_FAILED")).toBe("UNKNOWN");
+  });
+});
