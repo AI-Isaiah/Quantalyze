@@ -252,19 +252,31 @@ vi.mock("next/server", async () => {
  * production. `sentry-capture.test.ts` owns the scrub contract; this file owns
  * only "did the sink reach the chokepoint, and was the result scheduled".
  */
-vi.mock("./sentry-capture", () => ({
-  captureToSentry: (err: unknown, options: Record<string, unknown>) => {
-    shared.captures.push({
-      err,
-      options: options as {
-        tags?: Record<string, string>;
-        extra?: Record<string, unknown>;
-        level?: string;
-      },
-    });
-    return Promise.resolve();
-  },
-}));
+vi.mock("./sentry-capture", async () => {
+  // ⚠️ ORACLE-INDEPENDENCE HAZARD #7. This factory REPLACES the module, so any
+  // export not listed here is `undefined` at the call site and throws from
+  // inside a catch block. 140.4-16 added `shouldCaptureNow` to the leaf and
+  // wired it into both breaker arms below; it is re-exported from the REAL
+  // module rather than faked, because the throttle semantics are what the WR-06
+  // cases assert — a fake would be testing the fake.
+  const actual = await vi.importActual<typeof import("./sentry-capture")>(
+    "./sentry-capture",
+  );
+  return {
+    ...actual,
+    captureToSentry: (err: unknown, options: Record<string, unknown>) => {
+      shared.captures.push({
+        err,
+        options: options as {
+          tags?: Record<string, string>;
+          extra?: Record<string, unknown>;
+          level?: string;
+        },
+      });
+      return Promise.resolve();
+    },
+  };
+});
 
 vi.mock("@upstash/redis", async () => {
   const { fakeRedisFor } = await import("@/test/helpers/upstash-breaker");
@@ -503,8 +515,15 @@ function configureUpstash(): void {
   process.env.UPSTASH_REDIS_REST_TOKEN = "fake-token";
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetModules();
+  // 140.4-16 / WR-06 — the capture throttle is MODULE-LEVEL state. Without this
+  // reset the first case to trip a breaker arm arms it, and every later case
+  // records zero captures — turning real guards green for the wrong reason.
+  // `vi.resetModules()` above does NOT clear it: `vi.mock` factories do not
+  // re-run on resetModules (measured, vitest 4.1.10 — Oracle hazard #8).
+  const { __resetCaptureThrottleForTests } = await import("./sentry-capture");
+  __resetCaptureThrottleForTests();
   shared.store.clear();
   shared.ctx.store = shared.store;
   shared.mode.sharedStore = true;
@@ -2702,6 +2721,40 @@ describe("[SEAMRIM-04] the breaker's transitions and store failures reach the ca
     expect(
       errorSpy.mock.calls.map((c) => String(c[0])).join("\n"),
     ).toContain("breaker check failed");
+  });
+
+  it("[140.4-16 / WR-06] a SUSTAINED store failure captures ONCE, and logs EVERY time", async () => {
+    // Same failure mode as `ratelimit.ts`' posture-2 arm: this fires once per
+    // REQUEST, not once per transition, and it sits on the seam's
+    // highest-volume path. During a store outage every request emits an
+    // `import("@sentry/nextjs")` + `captureException` held alive by `after()`,
+    // which burns the quota and drops OTHER alerts while the incident is live.
+    //
+    // ⚠️ KEYED ON (surface, stage), NOT ON `budgetKey`. Twelve budgets going
+    // down together is ONE incident; keying per budget would restore twelve
+    // times the storm, which is why the loop below walks DIFFERENT budgets.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.mode.throwOnGet = true;
+    const mod = await import("./resilient-fetch");
+
+    const budgets = ["bridge", "simulator", "portfolio-optimizer"] as const;
+    for (let i = 0; i < 12; i++) {
+      await mod.isBreakerOpen(budgets[i % budgets.length]);
+    }
+    await settleScheduled();
+
+    expect(
+      shared.captures.length,
+      "12 probes across 3 budgets during one outage produced 12 captures. " +
+        "An outage that hits several budgets is one incident, not several.",
+    ).toBe(1);
+    expect(
+      errorSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("breaker check failed"),
+      ).length,
+      "the local log was throttled too — the operator can no longer see how " +
+        "many requests ran with the breaker blind",
+    ).toBe(12);
   });
 
   it("recordSeamFailure's store rejection captures at `error` and still swallows", async () => {

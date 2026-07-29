@@ -4,7 +4,7 @@ import { Redis } from "@upstash/redis";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { seamBreakerVerdict } from "./seam-discriminator";
 import { scrubSeamError } from "./seam-redaction";
-import { captureToSentry } from "./sentry-capture";
+import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -1103,13 +1103,22 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
     // unconditionally (and rebuilds the Error so Sentry's grouping and stack
     // survive), whereas pre-rendering it to a string here would hand Sentry a
     // stackless message for no security gain.
-    scheduleSeamCapture(
-      captureToSentry(err, {
-        tags: { surface: "seam-breaker", stage: "check", budgetKey },
-        level: "error",
-      }),
-      "seam.breaker.check_failed",
-    );
+    // 140.4-16 / WR-06 — EDGE-TRIGGERED, same reasoning as `ratelimit.ts`'
+    // posture-2 arm: this fires on EVERY request whose breaker probe rejects,
+    // which during a store outage is every request. The console.error above is
+    // unconditional; only the remote capture is throttled. Keyed on the
+    // (surface, stage) pair rather than on `budgetKey`, deliberately — an
+    // outage that hits twelve budgets is ONE incident, and keying per budget
+    // would restore twelve times the storm.
+    if (shouldCaptureNow("seam-breaker:check")) {
+      scheduleSeamCapture(
+        captureToSentry(err, {
+          tags: { surface: "seam-breaker", stage: "check", budgetKey },
+          level: "error",
+        }),
+        "seam.breaker.check_failed",
+      );
+    }
     return { open: false };
   }
 }
@@ -1322,13 +1331,18 @@ export async function recordSeamFailure(
     // catch arm, so a throw here would replace the real upstream error — but a
     // breaker whose bookkeeping is failing is a breaker that will not trip when
     // it should, and that was invisible beyond this one console line.
-    scheduleSeamCapture(
-      captureToSentry(err, {
-        tags: { surface: "seam-breaker", stage: "record", breakerKey },
-        level: "error",
-      }),
-      "seam.breaker.record_failed",
-    );
+    // 140.4-16 / WR-06 — EDGE-TRIGGERED. See the `check` arm above; this one
+    // runs inside the caller's catch, so during a correlated upstream incident
+    // it fires once per FAILED REQUEST.
+    if (shouldCaptureNow("seam-breaker:record")) {
+      scheduleSeamCapture(
+        captureToSentry(err, {
+          tags: { surface: "seam-breaker", stage: "record", breakerKey },
+          level: "error",
+        }),
+        "seam.breaker.record_failed",
+      );
+    }
   }
 }
 

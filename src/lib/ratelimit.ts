@@ -2,7 +2,7 @@ import { NextResponse, after } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { scrubSeamError } from "./seam-redaction";
-import { captureToSentry } from "./sentry-capture";
+import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
 
 /**
  * Upstash rate-limit helpers for sensitive routes.
@@ -473,15 +473,25 @@ export async function checkLimit(
             "request (fail-OPEN). This is the store being unreachable, not the " +
             "caller being under the limit.",
         );
-        scheduleLimiterCapture(
-          captureToSentry(
-            new Error("[ratelimit] store timeout — cap not enforced"),
-            {
-              tags: { surface: "ratelimit", posture: "fail_open_timeout" },
-              level: "warning",
-            },
-          ),
-        );
+        // 140.4-16 / WR-06 — EDGE-TRIGGERED. The console.warn above is
+        // UNCONDITIONAL and stays that way: it is how an operator counts how
+        // many requests ran uncapped. The remote capture is throttled, because
+        // a sustained store outage fires this arm on EVERY request and each
+        // capture is an `import("@sentry/nextjs")` held alive by `after()` —
+        // exhausting the quota, and dropping other alerts, during the very
+        // incident this exists to surface. `captureToSentry` is not merely
+        // discarded when suppressed; it is not CALLED.
+        if (shouldCaptureNow("ratelimit:fail_open_timeout")) {
+          scheduleLimiterCapture(
+            captureToSentry(
+              new Error("[ratelimit] store timeout — cap not enforced"),
+              {
+                tags: { surface: "ratelimit", posture: "fail_open_timeout" },
+                level: "warning",
+              },
+            ),
+          );
+        }
       }
       return { success: true };
     }

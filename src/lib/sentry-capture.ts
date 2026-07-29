@@ -192,3 +192,55 @@ export function captureToSentry(
     return Promise.resolve();
   }
 }
+
+/**
+ * 140.4-16 / WR-06 — EDGE-TRIGGER FOR THE HIGH-VOLUME CAPTURE SITES.
+ *
+ * ⚠️ THE PROBLEM THIS SOLVES IS AN ALERT STORM DURING THE EXACT INCIDENT THE
+ * INSTRUMENTATION EXISTS TO OBSERVE. Three capture sites added by SEAMRIM-04
+ * fire once per REQUEST rather than once per state TRANSITION:
+ *   · `ratelimit.ts`' posture-2 arm — every request that wins the 5 s fail-open
+ *     race, i.e. every request for the whole duration of an Upstash outage;
+ *   · `resilient-fetch`'s `isBreakerOpen` catch — every request whose breaker
+ *     probe rejects;
+ *   · `recordSeamFailure`'s catch — every failure whose bookkeeping write fails.
+ * All three sit on the seam's highest-volume paths, and each capture is an
+ * `import("@sentry/nextjs")` + `captureException` held alive by `after()`. A
+ * sustained store outage therefore burns the Sentry quota and DROPS OTHER
+ * ALERTS during the same incident. `emitBreakerTransition` was already bounded
+ * to open/close edges; these were not.
+ *
+ * WHY A TIME WINDOW AND NOT A TRUE EDGE. An "edge" needs a prior state to
+ * compare against, and these three are stateless catch arms — there is nothing
+ * that says "the store was healthy a moment ago". A coarse window is the honest
+ * approximation: it keeps the FIRST occurrence of a burst, which is the one an
+ * operator needs, and re-arms so a long incident still produces a heartbeat.
+ *
+ * ⚠️ THE LOG LINE MUST STAY UNCONDITIONAL AT EVERY CALL SITE. This suppresses
+ * the REMOTE capture only. Dropping the local `console.warn`/`console.error`
+ * too would make the Vercel trace lie about how many requests were affected,
+ * which is the measurement an operator sizes the incident with.
+ *
+ * In-memory and per-instance by construction: serverless instances do not share
+ * it, so N instances emit up to N captures per window. That is the correct
+ * trade — a cross-instance store would put a network call on the failure path
+ * of the thing whose network call is already failing.
+ */
+const CAPTURE_WINDOW_MS = 60_000;
+const lastCapturedAtMs = new Map<string, number>();
+
+export function shouldCaptureNow(
+  key: string,
+  now: number = Date.now(),
+  windowMs: number = CAPTURE_WINDOW_MS,
+): boolean {
+  const last = lastCapturedAtMs.get(key);
+  if (last !== undefined && now - last < windowMs) return false;
+  lastCapturedAtMs.set(key, now);
+  return true;
+}
+
+/** Test-only reset. Never called from production code. */
+export function __resetCaptureThrottleForTests(): void {
+  lastCapturedAtMs.clear();
+}

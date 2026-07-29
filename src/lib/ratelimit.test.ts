@@ -41,22 +41,35 @@ vi.mock("next/server", async () => {
   };
 });
 
-vi.mock("./sentry-capture", () => ({
-  // RETURNS A PROMISE, as the real leaf does since plan 140.4-06 task 1: a
-  // double returning `undefined` would make the production `after(() => p…)`
-  // shape throw here and nowhere else.
-  captureToSentry: (err: unknown, options: Record<string, unknown>) => {
-    seam.captures.push({
-      err,
-      options: options as {
-        tags?: Record<string, string>;
-        level?: string;
-        extra?: Record<string, unknown>;
-      },
-    });
-    return Promise.resolve();
-  },
-}));
+vi.mock("./sentry-capture", async () => {
+  // ⚠️ ORACLE-INDEPENDENCE HAZARD #7, AND IT BIT ONCE ALREADY IN THIS PHASE.
+  // This factory REPLACES the whole module, so anything not listed here
+  // evaluates to `undefined` at the call site and throws from inside a catch
+  // block. 140.4-16 added `shouldCaptureNow` to the leaf; it is re-exported
+  // from the REAL module rather than faked, because the throttle semantics are
+  // the thing under test in the WR-06 cases below — a fake would be testing
+  // the fake.
+  const actual = await vi.importActual<typeof import("./sentry-capture")>(
+    "./sentry-capture",
+  );
+  return {
+    ...actual,
+    // RETURNS A PROMISE, as the real leaf does since plan 140.4-06 task 1: a
+    // double returning `undefined` would make the production `after(() => p…)`
+    // shape throw here and nowhere else.
+    captureToSentry: (err: unknown, options: Record<string, unknown>) => {
+      seam.captures.push({
+        err,
+        options: options as {
+          tags?: Record<string, string>;
+          level?: string;
+          extra?: Record<string, unknown>;
+        },
+      });
+      return Promise.resolve();
+    },
+  };
+});
 
 /**
  * Unit tests for the Upstash rate limit helpers. These do NOT touch a real
@@ -82,11 +95,17 @@ describe("checkLimit", () => {
   const ORIGINAL_VERCEL_ENV = process.env.VERCEL_ENV;
   const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.restoreAllMocks();
     seam.captures.length = 0;
     seam.afterTasks.length = 0;
     seam.afterSettled.length = 0;
+    // 140.4-16 / WR-06 — the capture throttle is MODULE-LEVEL state and would
+    // otherwise leak between cases: the first test to trip posture 2 would arm
+    // it and every later one would silently record zero captures, turning real
+    // guards green for the wrong reason.
+    const { __resetCaptureThrottleForTests } = await import("./sentry-capture");
+    __resetCaptureThrottleForTests();
   });
 
   afterEach(() => {
@@ -369,6 +388,51 @@ describe("checkLimit", () => {
     expect(
       warnSpy.mock.calls.map((c) => String(c[0])).join("\n"),
     ).toContain("[ratelimit]");
+  });
+
+  it("[140.4-16 / WR-06] a SUSTAINED store outage captures ONCE, and logs EVERY time", async () => {
+    // ⚠️ THE FAILURE MODE IS AN ALERT STORM DURING THE EXACT INCIDENT THE
+    // INSTRUMENTATION EXISTS TO OBSERVE. This arm fires on every request that
+    // wins the 5 s fail-open race — i.e. every request, for the whole duration
+    // of an Upstash outage — and each one is an `import("@sentry/nextjs")` +
+    // `captureException` held alive by `after()`. The predictable outcome is
+    // quota exhaustion, which DROPS OTHER ALERTS during the same incident.
+    // `emitBreakerTransition` was already bounded to open/close edges; these
+    // three SEAMRIM-04 sites were not.
+    //
+    // ⚠️ THE SECOND HALF IS WHAT KEEPS THE FIX HONEST. Suppressing the local
+    // `console.warn` too would make the Vercel trace under-report how many
+    // requests ran with the cap unenforced — and that count is how an operator
+    // sizes the incident. The capture is remote and expensive; the log is local
+    // and free. Only the first is throttled.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mockLimiter = {
+      limit: vi.fn().mockResolvedValue({
+        success: true,
+        limit: 0,
+        remaining: 0,
+        reset: 0,
+        reason: "timeout",
+      }),
+    } as unknown as Ratelimit;
+
+    for (let i = 0; i < 25; i++) {
+      await checkLimit(mockLimiter, `user:${i}`);
+    }
+    await Promise.all(seam.afterSettled);
+
+    expect(
+      seam.captures.length,
+      "25 requests during one outage window produced 25 Sentry captures. " +
+        "During a sustained store outage this exhausts the quota and drops " +
+        "OTHER alerts while the incident is live.",
+    ).toBe(1);
+    expect(
+      warnSpy.mock.calls.length,
+      "the local log was throttled too — the Vercel trace now under-reports " +
+        "how many requests ran with the cap unenforced, which is the number an " +
+        "operator sizes the incident with",
+    ).toBe(25);
   });
 
   it("SEAMRIM-04 NEGATIVE CONTROL — a genuine allow records NOTHING", async () => {
