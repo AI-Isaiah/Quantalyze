@@ -210,7 +210,14 @@ export function checkStrategyGate(input: StrategyGateInput): StrategyGateResult 
     if (spanDays === null) {
       throw new StrategyGateUnevaluableError(input.tradeCount);
     }
-    if (spanDays !== null && spanDays < STRATEGY_GATE_MIN_DAYS) {
+    // 140.4-16 / WR-10 — the `spanDays !== null &&` conjunct is GONE, not
+    // merely redundant. It is the EXACT token the refusal above was written
+    // to remove: while it stood, a reader could conclude the throw was the
+    // belt to its braces rather than its replacement, and could "restore"
+    // the fail-open by deleting the throw. The narrowing also now comes
+    // from the type system rather than from a runtime check nothing can
+    // reach.
+    if (spanDays < STRATEGY_GATE_MIN_DAYS) {
       return {
         passed: false,
         code: "INSUFFICIENT_DAYS",
