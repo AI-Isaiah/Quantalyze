@@ -29,6 +29,7 @@ import { buildEnvelope } from "@/lib/envelope";
 import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
 import { isComputedAnalytics } from "@/lib/closed-sets";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import { cn } from "@/lib/utils";
@@ -559,7 +560,15 @@ export function SyncPreviewStep({
             "[wizard:SyncPreviewStep] resume freshness probe read failed — " +
               "treating this resume as a COLD START, not as an absent " +
               "analytics row:",
-            existingErr.message,
+            // 140.4-16 / WR-04 — `.message` is THE BANNED SHAPE, not a
+            // mitigation of it: `keys/sync/route.ts:408-412` says so in those
+            // words three files away, in this same phase. A PostgREST error's
+            // `message` is where postgrest inlines what it was handed. This is
+            // a browser console rather than a Vercel log, so the blast radius
+            // is the user's own session — which is a reason it was missed, not
+            // a reason to keep it. `seam-redaction` is dependency-free and
+            // client-safe (zero imports).
+            scrubSeamError(existingErr),
           );
         }
         const computedAtMs = existing?.computed_at

@@ -1356,3 +1356,88 @@ describe("POST /api/admin/strategy-review — B9 M-1143 review_note length cap",
     expect(body.error).toMatch(/invalid request/i);
   });
 });
+
+// ══════════════════════════════════════════════════════════════════════════
+// 140.4-16 / WR-04 — the scrub predicate, applied to a file the CLASS guard is
+// structurally blind to.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[140.4-16 / WR-04] no console site passes a caught value unscrubbed", () => {
+  /**
+   * ⚠️ WHY THIS GUARD IS COLOCATED AND NOT A ROSTER ENTRY.
+   *
+   * `seam-log-coverage.test.ts` derives its route roster from the SEAM IMPORT
+   * EDGE — a file joins when it imports `analytics-client`, `resilient-fetch`
+   * or `process-key-client`. This route imports none of them, so
+   * `deriveSeamRouteFiles` cannot reach it and `it.each(SEAM_FILES)` never
+   * inspects it. That derivation is correct and is this phase's flagship; the
+   * honest response is not to smuggle a route into the file's HAND-TYPED **lib
+   * module** half (a category error that would also make the derived-vs-typed
+   * set equality assert something it does not mean), but to run the same
+   * predicate here, where the file lives.
+   *
+   * The exposure is real, not theoretical. Plan 140.4-01 converted six
+   * `Promise.all` members to checked reads — the C-3 fix — and every one of the
+   * seven new `console.error` sites it added passes the raw PostgREST error
+   * object straight into the log. Those objects carry `message` / `details` /
+   * `hint`; a constraint-violation `details` string can contain row values,
+   * which is precisely why `describeThrown`'s plain-object branch exists in
+   * `seam-redaction.ts`. Five credential leaks have already been found in this
+   * milestone.
+   */
+  const ROUTE = "src/app/api/admin/strategy-review/route.ts";
+
+  /** Strip comments so a docblock quoting `console.error(err)` is not counted. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  }
+
+  it("every console.* argument that is an error binding goes through scrubSeamError", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const src = stripComments(
+      readFileSync(join(process.cwd(), ROUTE), "utf8"),
+    );
+
+    // Every `console.<level>( ... )` call, arguments captured to the closing
+    // paren of the call. Route sites are short and never nest a paren-heavy
+    // expression, so a non-greedy scan to `);` is sufficient here — and the
+    // vacuity fence below proves the scan found them.
+    const calls = [...src.matchAll(/console\.\w+\(([\s\S]*?)\);/g)].map(
+      (m) => m[1],
+    );
+
+    // VACUITY FENCE. A scan that matches nothing reports compliance forever.
+    expect(
+      calls.length,
+      "the console scan found nothing — every assertion below is vacuous",
+    ).toBeGreaterThanOrEqual(13);
+
+    // An "error binding" is any identifier this route binds off a Supabase read
+    // or a catch. Naming the SHAPE rather than the identifiers keeps the guard
+    // from going stale the moment a new read is added.
+    const ERRORISH = /\b([A-Za-z_$][\w$]*(?:[eE]rr|[eE]rror)\w*)\b/;
+    const offenders: string[] = [];
+    for (const args of calls) {
+      const m = ERRORISH.exec(args);
+      if (!m) continue;
+      // `?? "..."` fallbacks and `.code` reads are allowlisted for the same
+      // reason the class guard allowlists them: a five-character SQLSTATE and a
+      // hand-typed string carry nothing.
+      if (!/scrubSeamError\s*\(/.test(args)) {
+        offenders.push(args.trim().replace(/\s+/g, " ").slice(0, 90));
+      }
+    }
+
+    expect(
+      offenders,
+      "a caught value or PostgREST error object reaches console.* unscrubbed. " +
+        "undici embeds OUTGOING HEADERS in err.message, and a PostgREST error " +
+        "carries `details`/`hint` which can contain row values. Wrap it: " +
+        "scrubSeamError(x) from @/lib/seam-redaction. Do NOT answer this by " +
+        "dropping the value — that is the A-10 defect.",
+    ).toEqual([]);
+  });
+});
