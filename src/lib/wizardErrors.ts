@@ -38,6 +38,22 @@ export type WizardErrorCode =
   // Key validation (ConnectKeyStep)
   | "KEY_HAS_TRADING_PERMS"
   | "KEY_HAS_WITHDRAW_PERMS"
+  // 140.5-02 / SEAMPROSE-03 — two wire codes that had no honest verdict.
+  //   KEY_MISSING_READ_SCOPE = the exchange authenticated the key and reported
+  //     that a REQUIRED READ scope is absent. Distinct from KEY_NOT_READ_ONLY
+  //     (which is "we could not confirm read-only and observed no write scope")
+  //     and from KEY_HAS_TRADING_PERMS (which is a write grant we DID observe):
+  //     here the key is too NARROW, not too broad, and the remedy is the
+  //     opposite one — grant a scope rather than remove one. It rendered
+  //     UNKNOWN/500 for a plainly fixable Deribit key scope.
+  //   KEY_PERMISSION_DENIED = the exchange refused the request on permission
+  //     grounds and named TWO possible causes in one sentence (scope OR IP
+  //     allowlist). It rendered 502 KEY_IP_ALLOWLIST — a SERVER status for a
+  //     CALLER fault, asserting one of the two causes as if it were observed.
+  //     This member exists so the copy can name both without picking one; that
+  //     is the same DOGFOOD-3 discipline KEY_NOT_READ_ONLY was minted under.
+  | "KEY_MISSING_READ_SCOPE"
+  | "KEY_PERMISSION_DENIED"
   // Phase 110.1 / DOGFOOD-3 FIX 3: honest reasons that do not assert an
   // unobserved scope. KEY_NOT_READ_ONLY = a bare read_only:false with no
   // observed permission scopes (the validator could not confirm read-only,
@@ -310,6 +326,66 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Paste the new key here.",
     ],
     docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
+  // 140.5-02 / SEAMPROSE-03. Claude-drafted per DESIGN.md §Voice; founder
+  // review owed (CONTEXT §8.1) and named in 140.5-02-SUMMARY.md's `## OPEN`.
+  //
+  // The real wire sentence this replaces reaching the user as UNKNOWN/500 is
+  // `key is missing required scope 'account:read'` — a fact about their key,
+  // rendered as "we could not classify this failure". `actions` are
+  // `try_another_key`-shaped and the polarity was RE-DERIVED, not copied: the
+  // remedy is a DIFFERENT key (or the same key re-scoped and re-pasted), never
+  // a retry of the identical credentials, so `clear_and_retry` is deliberately
+  // absent — it would render a Retry control that re-fails identically.
+  //
+  // ⚠️ The scope NAME is not interpolated. It arrives in the wire `detail`,
+  // which the classifier never returns to the client (only the code crosses),
+  // and inventing a name here would be worse than omitting it.
+  KEY_MISSING_READ_SCOPE: {
+    title: "This key is missing a read permission we need.",
+    cause:
+      "The exchange accepted the key and told us a required read scope is not granted on it. The key is too narrow rather than too broad — nothing about it is unsafe, we simply cannot read the account with it.",
+    fix: [
+      "Open your exchange API Management page and edit this key.",
+      "Enable every Read scope, including account and trade history reads. Leave every trading and withdrawal scope off.",
+      "Save, then paste the key here again — or create a fresh read-only key with all read scopes enabled.",
+    ],
+    docsHref: "/security#readonly-key",
+    actions: ["try_another_key", "request_call"],
+  },
+
+  // 140.5-02 / SEAMPROSE-03. Claude-drafted per DESIGN.md §Voice; founder
+  // review owed (CONTEXT §8.1).
+  //
+  // ⚠️ THIS ENTRY EXISTS TO NAME TWO CAUSES WITHOUT ASSERTING EITHER (TRAP-3).
+  // The wire sentence is "Key denied permission. Confirm the key has read-only
+  // scope and that your IP allowlist includes our service." — the exchange told
+  // us it refused on permission grounds and NOT which of the two it was. Before
+  // this entry the `ip` + `allow` substring branch matched that REMEDY sentence
+  // and answered `KEY_IP_ALLOWLIST`, whose copy states as fact that the user
+  // enabled IP pinning and that our egress is not on their list. On the half of
+  // the population where the real cause is scope, that is a specific claim
+  // about a setting we never observed, and it sends the user to edit a list
+  // that was never the problem.
+  //
+  // The status moves 502 -> 400 with it: a permission refusal is a CALLER
+  // fault, and a 5xx tells every dashboard and SLO consumer that our own
+  // service was at fault.
+  //
+  // The fix list orders the two candidates by base rate — scope first — and
+  // says which is which, rather than presenting one as the diagnosis.
+  KEY_PERMISSION_DENIED: {
+    title: "The exchange refused this key's permissions.",
+    cause:
+      "The exchange rejected the request on permission grounds without telling us which of two settings caused it: the key may be missing a required read scope, or it may be pinned to an IP allowlist that does not include us. We are not guessing between them.",
+    fix: [
+      "First, check the key's scopes: every Read scope on, every trading and withdrawal scope off.",
+      "Then, if the key is pinned to specific IPs, either remove the restriction or add our egress IPs — see the docs link below.",
+      "Save, then paste the key here again.",
+    ],
+    docsHref: "/security#egress-ips",
     actions: ["try_another_key", "request_call"],
   },
 
@@ -1495,7 +1571,7 @@ export function gateFailureToWizardError(code: GateFailureCode): WizardErrorCode
  * The divergence is deliberate, and pinned in the parity test. Do not wire
  * either into an automated retry loop; retry is Phase 141 (rider W-4).
  */
-const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
+export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   string,
   { code: WizardErrorCode; status: number }
 > = new Map([
@@ -1511,7 +1587,104 @@ const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // meaning.
   ["NETWORK_UNAVAILABLE", { code: "KEY_NETWORK_TIMEOUT", status: 502 }],
   ["DDOS_PROTECTION", { code: "KEY_VENUE_TRANSIENT", status: 503 }],
+  // ── 140.5-02 / SEAMPROSE-03 — the four SCOPE/PERMISSION codes ─────────────
+  //
+  // ⚠️ COVERAGE-LAW ROW 2. This table is a HAND-TYPED ROSTER and adding rows to
+  // it is **PARTIAL BY CONSTRUCTION**, in those words. The row-1 version is a
+  // `WireErrorCode` union this phase does not schedule. What the parity guard
+  // in `seam-venue-vocabulary.invariant.test.ts` adds is NOT row 1 either — it
+  // adds FAIL-LOUD ARRIVAL: its population is derived from the REAL Python
+  // emitters, so a newly-emitted code reddens CI until someone writes its
+  // disposition. A roster that cannot silently miss a new member is still a
+  // roster.
+  //
+  //   MISSING_SCOPE — rendered UNKNOWN/500 ("we could not classify this") for a
+  //     plainly fixable key scope. It matched NO cascade branch: the real
+  //     detail is `key is missing required scope 'account:read'`, and the
+  //     cascade has no needle for it. This is the milestone's signature defect,
+  //     live at HEAD, and the Python side documents that MISSING_SCOPE IS
+  //     reachable and IS permanent.
+  //   PERMISSION_DENIED — rendered KEY_IP_ALLOWLIST/502: a server status for a
+  //     caller fault, asserting ONE of two possible causes. It matched the
+  //     `ip` + `allow` branch on the REMEDY half of its own sentence.
+  //   WITHDRAW_SCOPE — reached KEY_HAS_TRADING_PERMS through the
+  //     `trading|withdraw` branch, so a withdrawal-capable key was told its
+  //     problem was TRADING. The correct member already existed.
+  //   TRADE_SCOPE — correct today only by an ACCIDENT OF SUBSTRING ORDER (the
+  //     same branch, reached by the other half of the same `||`). Listed so the
+  //     verdict is decided by the table rather than by which token appears.
+  //     ⭐ It is included precisely BECAUSE it is already right: a row that
+  //     changes nothing today is what stops the next reword from changing it.
+  ["MISSING_SCOPE", { code: "KEY_MISSING_READ_SCOPE", status: 400 }],
+  ["PERMISSION_DENIED", { code: "KEY_PERMISSION_DENIED", status: 400 }],
+  ["WITHDRAW_SCOPE", { code: "KEY_HAS_WITHDRAW_PERMS", status: 400 }],
+  ["TRADE_SCOPE", { code: "KEY_HAS_TRADING_PERMS", status: 400 }],
 ]);
+
+/**
+ * 140.5-02 / SEAMPROSE-03 — the wire codes `VENUE_WIRE_CODE_TO_VERDICT`
+ * deliberately does NOT answer for, each with the reason, MEASURED.
+ *
+ * Exported for the parity guard in `seam-venue-vocabulary.invariant.test.ts`,
+ * which derives the emitted-code population from the Python sources and
+ * requires every member of it to have a disposition: a row above, or an entry
+ * here. Without this half the guard would demand a verdict row for codes that
+ * correctly have none, and the pressure would be to invent one.
+ *
+ * ⚠️ EVERY REASON BELOW WAS VERIFIED BY REPLAYING THE REAL PYTHON DETAIL STRING
+ * THROUGH `classifyKeyValidationError`, not guessed. The guard's companion unit
+ * tests assert the replayed verdicts, so a reason that stops being true reds.
+ */
+export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
+  new Map([
+    [
+      "UNSUPPORTED_EXCHANGE",
+      "Detail: 'Unsupported exchange for permission verification.' Reaches the " +
+        "cascade's terminal UNKNOWN/500, and that is the HONEST answer: it is " +
+        "our own configuration gap (the exchange is absent from EXCHANGE_CLASSES), " +
+        "not a fault in the user's key, and no KEY_* copy would be true of it. " +
+        "A dedicated member is a real improvement and is NOT this plan's.",
+    ],
+    [
+      "VALIDATION_UNEXPECTED",
+      "Detail: 'Key validation failed unexpectedly. Contact support if this " +
+        "persists.' It is BY DEFINITION the unclassified residue of the Python " +
+        "side's own classification, so mapping it to a specific wizard verdict " +
+        "would manufacture a diagnosis the producer explicitly declined to make. " +
+        "UNKNOWN/500 is the correct answer for an unclassified throw.",
+    ],
+    [
+      "MT5_MASTER_PASSWORD",
+      "Already reaches KEY_MT5_MASTER_PASSWORD/400 through the cascade's " +
+        "'master password' branch, whose collision invariant is stated and " +
+        "checked in-file. A table row would be correct but redundant, and the " +
+        "MT5 detail strings are pinned byte-identically against closed_sets.py " +
+        "so a Python reword reds there rather than silently here.",
+    ],
+    [
+      "MT5_WRONG_SERVER",
+      "Same as MT5_MASTER_PASSWORD: reaches KEY_MT5_WRONG_SERVER/400 through " +
+        "the 'broker server' branch, pinned byte-identically.",
+    ],
+    [
+      "CSV_TOO_LARGE",
+      "CSV-surface code. It never reaches classifyKeyValidationError at all — " +
+        "the CSV branch renders through the route's own vocabulary and " +
+        "WIZARD_ERROR_COPY.CSV_FILE_TOO_LARGE, which interpolates the observed " +
+        "size. Disposition is BY FAMILY, not by row.",
+    ],
+    [
+      "CSV_FORMAT_UNSUPPORTED",
+      "CSV-surface code, same family disposition as CSV_TOO_LARGE: rendered by " +
+        "the route vocabulary, never by the key-validation classifier.",
+    ],
+    [
+      "CSV_VALIDATION_FAILED",
+      "CSV-surface code AND the static fallback of the DYNAMIC emitter below. " +
+        "Rendered by CsvValidationEnvelope through WIZARD_ERROR_COPY, never by " +
+        "this classifier.",
+    ],
+  ]);
 
 /**
  * Classify a caught key-validation exception into a stable wizard error code +

@@ -1313,7 +1313,8 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * HAND-TYPED. Never derived from the module under test — deriving either set
    * from `wizardErrors.ts` would make this a self-referential oracle that
    * cannot fail when the module changes, which is the exact defect the phase's
-   * economic-invariant rule names.
+   * economic-invariant rule names. (140.5-02 bumps the size literal below to
+   * 57; see the twin guard's note for the per-entry reasoning re-run.)
    *
    * `start_fresh` is destructive because WizardClient's handler DELETEs the
    * draft row, cascading away every `strategy_keys` member under it. It is the
@@ -1362,6 +1363,12 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * without re-running it is how a growing table smuggles a violation past a
    * size guard.
    *
+   * **57 at 140.5-02**, which added `KEY_MISSING_READ_SCOPE` and
+   * `KEY_PERMISSION_DENIED` (SEAMPROSE-03 — two venue wire codes that had no
+   * honest verdict). Both carry `try_another_key` + `request_call`: NO
+   * destructive member, so this guard is unaffected in substance. The
+   * reasoning below was re-run over both new entries BEFORE the number moved.
+   *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
@@ -1371,7 +1378,7 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
    */
-  const EXPECTED_TABLE_SIZE = 55;
+  const EXPECTED_TABLE_SIZE = 57;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1513,8 +1520,19 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * it says "nothing was changed", which is NOT the banned string and, unlike
    * the CSV case that fragment came from, is knowable — `SeamConfigError` is
    * raised before any store or network I/O, so no write could have landed.
+   *
+   * **57 at 140.5-02** (`KEY_MISSING_READ_SCOPE`, `KEY_PERMISSION_DENIED`).
+   * Both were read against all four FORBIDDEN fragments by hand before the
+   * number moved. Neither mentions notification, trade fetching, or a session
+   * field name. The one needing care is "data is unchanged": neither entry
+   * asserts anything about server state at all — both describe the EXCHANGE's
+   * refusal and the user's remedy, and the key was never stored on either path.
+   * The §4a entry `CSV_UPSTREAM_FAIL` (this plan's other copy change) says
+   * "not your data" and "Nothing was saved", neither of which is the banned
+   * string, and "Nothing was saved" is verified true at its arm at three
+   * layers rather than asserted.
    */
-  const EXPECTED_TABLE_SIZE = 55;
+  const EXPECTED_TABLE_SIZE = 57;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2020,6 +2038,151 @@ describe("[140.5-02 / SEAMPROSE-03] DEF-140.4-C — ONE sentence for an unrecogn
     expect(recogniseSeamErrorCode("CIRCUIT_OPEN")).toBe("SERVICE_UNAVAILABLE_RETRY");
     expect(recogniseSeamErrorCode("SEAM_MISCONFIGURED")).toBe("SEAM_MISCONFIGURED");
     expect(recogniseSeamErrorCode("CSV_VALIDATION_FAILED")).toBe("UNKNOWN");
+  });
+});
+
+describe("[140.5-02 / SEAMPROSE-03] the four scope/permission wire codes, answered BY TABLE", () => {
+  /**
+   * ⚠️ COVERAGE-LAW ROW 2. `VENUE_WIRE_CODE_TO_VERDICT` is a HAND-TYPED ROSTER
+   * and these four rows are **PARTIAL BY CONSTRUCTION**, in those words. The
+   * companion parity guard does not promote it to row 1 — what it adds is
+   * fail-loud ARRIVAL for a newly-emitted code.
+   *
+   * ORACLE INDEPENDENCE: every `detail` below is hand-transcribed BYTE-FOR-BYTE
+   * from the Python source that emits it. That byte-identity is the
+   * cross-language contract — a reword on the Python side must red here.
+   * Nothing is imported from, or derived from, the module under test.
+   */
+  function seamThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  // exchange.py, the deribit scope-precheck arm, via key_permissions.py's
+  // `scope_detail`.
+  const MISSING_SCOPE_DETAIL = "key is missing required scope 'account:read'";
+  // exchange.py, the ccxt.PermissionDenied arm.
+  const PERMISSION_DENIED_DETAIL =
+    "Key denied permission. Confirm the key has read-only scope and that your IP allowlist includes our service.";
+  // exchange.py, the has_withdraw / has_trade arms.
+  const WITHDRAW_SCOPE_DETAIL =
+    "Key has withdrawal permissions. Please use a read-only key.";
+  const TRADE_SCOPE_DETAIL =
+    "Key has trading permissions. Please use a read-only key.";
+
+  it("MISSING_SCOPE stops being UNKNOWN/500 — the DOGFOOD-3 dead end for a fixable key scope", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(MISSING_SCOPE_DETAIL, "MISSING_SCOPE"),
+    );
+    expect(
+      verdict.code,
+      "A user was told 'we could not classify this failure' about their own " +
+        "key's scope, which the exchange named precisely and which they can fix " +
+        "in two clicks.",
+    ).toBe("KEY_MISSING_READ_SCOPE");
+    expect(verdict.status, "a caller fault is not a 5xx").toBe(400);
+    // The same message with NO code still lands where it always did. This is
+    // what proves the CODE — not a reworded predicate — moved the verdict.
+    expect(classifyKeyValidationError(new Error(MISSING_SCOPE_DETAIL))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("PERMISSION_DENIED stops asserting an IP allowlist it never observed", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(PERMISSION_DENIED_DETAIL, "PERMISSION_DENIED"),
+    );
+    expect(verdict.code).toBe("KEY_PERMISSION_DENIED");
+    expect(
+      verdict.code,
+      "TRAP-3: the exchange named TWO possible causes and we picked one.",
+    ).not.toBe("KEY_IP_ALLOWLIST");
+    expect(verdict.status, "a permission refusal is the CALLER's fault").toBe(400);
+    // ⭐ The mis-map is real, not hypothetical: the identical sentence with no
+    // machine code STILL reaches KEY_IP_ALLOWLIST through the cascade, because
+    // the `ip` + `allow` branch matches the REMEDY half of the sentence. That
+    // is the measurement of what the table row bought.
+    expect(classifyKeyValidationError(new Error(PERMISSION_DENIED_DETAIL))).toEqual(
+      { code: "KEY_IP_ALLOWLIST", status: 502 },
+    );
+    // And the new copy must name BOTH candidates without asserting either.
+    const copy = WIZARD_ERROR_COPY.KEY_PERMISSION_DENIED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob, "the scope candidate is missing").toContain("scope");
+    expect(blob, "the allowlist candidate is missing").toContain("allowlist");
+    // The old entry states the allowlist cause as observed fact. This one must
+    // not, or the member was pointless.
+    expect(blob).not.toContain("you enabled ip pinning");
+    expect(
+      WIZARD_ERROR_COPY.KEY_IP_ALLOWLIST.cause.toLowerCase(),
+      "the ANTI-CONTROL: the entry we stopped routing here still makes the " +
+        "single-cause claim, which is exactly why it is the wrong answer.",
+    ).toContain("you enabled ip pinning");
+  });
+
+  it("WITHDRAW_SCOPE stops rendering copy that says TRADING", () => {
+    expect(
+      classifyKeyValidationError(
+        seamThrow(WITHDRAW_SCOPE_DETAIL, "WITHDRAW_SCOPE"),
+      ),
+    ).toEqual({ code: "KEY_HAS_WITHDRAW_PERMS", status: 400 });
+    // The cascade's `trading|withdraw` branch answered KEY_HAS_TRADING_PERMS
+    // for BOTH, so a withdrawal-capable key was told its problem was trading.
+    expect(classifyKeyValidationError(new Error(WITHDRAW_SCOPE_DETAIL))).toEqual({
+      code: "KEY_HAS_TRADING_PERMS",
+      status: 400,
+    });
+    // The copy the correct member renders must name WITHDRAWAL, not trading.
+    const copy = WIZARD_ERROR_COPY.KEY_HAS_WITHDRAW_PERMS;
+    expect(copy.title.toLowerCase()).toContain("withdraw");
+  });
+
+  it("TRADE_SCOPE is right BY TABLE, not by an accident of substring order", () => {
+    // ⭐ This row changes nothing today. That is the point: it is what stops the
+    // next reword on either side from changing it. Asserted alongside the
+    // accident it replaces so the difference is visible.
+    expect(
+      classifyKeyValidationError(seamThrow(TRADE_SCOPE_DETAIL, "TRADE_SCOPE")),
+    ).toEqual({ code: "KEY_HAS_TRADING_PERMS", status: 400 });
+  });
+
+  it("the six pre-existing venue rows still answer exactly as they did", () => {
+    // ANTI-REGRESSION. Four rows landed in a shared table; a sweep that
+    // re-pointed it would be invisible to every assertion above.
+    const unchanged: Array<[string, WizardErrorCode, number]> = [
+      ["RATE_LIMITED", "KEY_RATE_LIMIT", 503],
+      ["PROBE_FAILED", "KEY_PROBE_FAILED", 503],
+      ["AUTH_FAILED", "KEY_AUTH_FAILED", 400],
+      ["EXCHANGE_UNAVAILABLE", "KEY_EXCHANGE_UNAVAILABLE", 503],
+      ["NETWORK_UNAVAILABLE", "KEY_NETWORK_TIMEOUT", 502],
+      ["DDOS_PROTECTION", "KEY_VENUE_TRANSIENT", 503],
+    ];
+    for (const [wire, code, status] of unchanged) {
+      expect(
+        classifyKeyValidationError(seamThrow("irrelevant prose", wire)),
+        `the ${wire} row moved`,
+      ).toEqual({ code, status });
+    }
+  });
+
+  it("the two EXEMPT venue codes still reach the verdicts their reasons claim", () => {
+    // ⚠️ The exemption reasons in `VENUE_WIRE_CODES_WITHOUT_VERDICT` are claims
+    // about runtime behaviour. A reason nobody executes is prose. These two are
+    // the ones whose reason says "reaches the cascade's terminal UNKNOWN/500,
+    // and that is the honest answer" — so replay them and check.
+    expect(
+      classifyKeyValidationError(
+        seamThrow("Unsupported exchange for permission verification.", "UNSUPPORTED_EXCHANGE"),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Key validation failed unexpectedly. Contact support if this persists.",
+          "VALIDATION_UNEXPECTED",
+        ),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
   });
 });
 
