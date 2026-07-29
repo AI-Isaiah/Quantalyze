@@ -25,6 +25,7 @@ import {
   getWizardCorrelationId,
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
+import { seamErrorCode } from "@/lib/seam-discriminator";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -754,7 +755,19 @@ export function MultiKeyConnectStep({
           // same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12 and
           // `ConnectKeyStep`'s sibling arm adopts alongside this one. The two
           // vocabularies are disjoint, so neither hop shadows the other.
-          const translated = recogniseSeamErrorCode(data.code);
+          // 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
+          // The commit that added this hop claimed it "mirrors
+          // `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
+          // `SubmitStep` both read `seamErrorCode(body)`, which handles the
+          // nested `service_error` shape (`body.detail.code`), while this one
+          // read `data.code` and saw only the flat shape. Harmless today —
+          // this route funnels every caught value through
+          // `classifyKeyValidationError` and never forwards a nested
+          // envelope — but an undisclosed divergence under a comment
+          // asserting equivalence is how the next reader inherits a wrong
+          // premise. The leaf exists precisely so a nested envelope is never
+          // read as "a body carrying no code".
+          const translated = recogniseSeamErrorCode(seamErrorCode(data));
           const code: WizardErrorCode =
             translated !== "UNKNOWN"
               ? translated

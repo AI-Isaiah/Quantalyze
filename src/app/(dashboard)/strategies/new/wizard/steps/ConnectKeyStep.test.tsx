@@ -820,6 +820,40 @@ describe("[140.4-15 / SEAMRIM-08] ConnectKeyStep — a seam WIRE code is transla
     ).toBeInTheDocument();
   });
 
+  it("[140.4-16 / WR-09] the NESTED python envelope's code is read here too", async () => {
+    // `body.detail.code` is the shape every `service_error()` answer carries.
+    // A top-level-only reader answers `undefined` on it — byte-identical to a
+    // body that carried no code at all, which is how 21 codes stay invisible.
+    // `SyncPreviewStep` and `SubmitStep` have read through the leaf since
+    // 140.3-05 / 140.4-12; the two key-entry surfaces claimed to "mirror
+    // SyncPreviewStep exactly" while reading `data.code` directly. This case is
+    // what makes the claim true rather than aspirational.
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          detail: {
+            code: "SEAM_MISCONFIGURED",
+            dependency: null,
+            retryable: false,
+            detail: "Rate limiter unavailable.",
+            correlation_id: "srv-nested-8b2d1f40-6c93-4a55-b027-1e5f9a3c7d64",
+          },
+        },
+        503,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(
+      envelope,
+      "the nested envelope carried the code and this arm did not see it. The " +
+        "flat and nested shapes must produce the SAME state.",
+    ).toHaveAttribute("data-error-code", "SEAM_MISCONFIGURED");
+  });
+
   it("the translation hop does not shadow the roster: a wire code with no table entry is still UNKNOWN", async () => {
     // `SEAM_DEGRADED` is a real seam wire code that is deliberately ABSENT
     // from SEAM_CODE_TO_WIZARD_CODE — the table is explicit, not an identity
