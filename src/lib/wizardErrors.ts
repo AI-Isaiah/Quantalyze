@@ -884,7 +884,8 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Your file passed validation, then the save step returned an error. The error does not tell us whether the save completed, so we cannot promise it did or that it did not.",
     fix: [
       "Open /strategies in another tab first. If your strategy is listed, the save did complete and you are done.",
-      "If it is not listed, submit again. Submitting again from this same wizard cannot create a second copy — a repeat submit resolves to the strategy that already exists.",
+      "If it is not listed, submit the same file again. An unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one.",
+      "To upload a different file, or to use a different name, start a new strategy. We refuse a changed resubmit from this wizard rather than mixing it into the one you already started.",
       "If you are unsure, contact security@quantalyze.com with your wizard session id and the diagnostics below.",
     ],
     docsHref: "/security#sync-timing",
@@ -929,8 +930,29 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // It must STILL NOT be widened to the API path — that call site's guarantee
     // is a different index scope — and a promise made ahead of its mechanism is
     // how this whole class of copy started.
+    //
+    // ⚠️ 140.4-16 / CR-01 — THE PROMISE IS NOW SCOPED TO AN *UNCHANGED*
+    // RESUBMIT, AND THAT THIS SENTENCE HAS MOVED A THIRD TIME IS THE LESSON.
+    // The mechanism above is keyed on `wizard_session_id`, which identifies a
+    // SESSION and not a SUBMISSION; `clearWizardState` fires only on success /
+    // delete-draft / start-fresh, so the id survives the very failure this copy
+    // is shown for. A user who followed the old sentence could rename, pick a
+    // DIFFERENT file and submit — and the 23505 arm resolved that to the FIRST
+    // strategy, whose series then became A ∪ B, because
+    // persist_csv_daily_returns is an upsert with no delete outside the
+    // incoming range. The old sentence was instructing the action that
+    // triggered a silent cross-submission merge, reported as success.
+    //
+    // Both halves are refused now — routers/process_key.py's name check, before
+    // any write, and the stale-range fence in csv-finalize/route.ts at the site
+    // of the merge — so the copy owes the user the escape those refusals imply:
+    // START A NEW STRATEGY. `wizardErrors.test.ts` asserts that escape is
+    // present on BOTH resubmit entries, rather than banning a phrase: a
+    // fragment ban is satisfiable by deleting the sentence, which would leave
+    // the user with less information than before, not more.
     fix: [
-      "Submit again. On the CSV path a repeat submit of the same wizard session cannot create a second strategy.",
+      "Submit the same file again. On the CSV path an unchanged resubmit of the same wizard session resolves to the strategy that already exists instead of creating a second one.",
+      "To upload a different file, or to use a different name, start a new strategy. We refuse a changed resubmit rather than mixing it into the first one.",
       "If it persists, contact security@quantalyze.com.",
     ],
     docsHref: "/security#sync-timing",
