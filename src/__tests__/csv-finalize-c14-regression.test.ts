@@ -61,6 +61,17 @@ vi.mock("@/lib/supabase/server", () => ({
           eq: (_c2: string, _v2: unknown) => updateMock(),
         }),
       }),
+      // CR-01: the route now probes `csv_daily_returns` for rows OUTSIDE the
+      // incoming payload's date range before persisting (the cross-submission
+      // merge fence). This double reports "nothing already stored", which is
+      // the first-submit state every case in this file models.
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          or: (_filter: string) => ({
+            limit: async (_n: number) => ({ data: [], error: null }),
+          }),
+        }),
+      }),
     }),
   }),
 }));

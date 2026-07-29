@@ -519,6 +519,98 @@ async function persistDailyReturnsOrErrorResponse(
   opts: { logPrefix: string; correlationId: string },
 ): Promise<NextResponse | null> {
   if (rows.length === 0) return null;
+
+  // ⚠️ CR-01 — THE STALE-RANGE FENCE. Read this before "simplifying" it away.
+  //
+  // `persist_csv_daily_returns` is `INSERT … ON CONFLICT (strategy_id, date)
+  // DO UPDATE` with NO delete outside the incoming range
+  // (schema/functions/persist_csv_daily_returns.sql:87-93). That is exactly
+  // right for the case it was written for — re-running the SAME payload — and
+  // it is a data-fabrication engine the moment `strategyId` can be a strategy
+  // some OTHER submission created.
+  //
+  // SEAMRIM-03's fence made that reachable: a repeat submit now resolves to the
+  // existing strategy at 200 (routers/process_key.py's 23505 arm), which is
+  // correct and is the retry `CSV_SUBMIT_FAILED` instructs. But
+  // `wizard_session_id` identifies a SESSION, not a SUBMISSION, and it survives
+  // a failed submit (localStorage.ts:390-393). So a user can upload 2024.csv,
+  // fail at this very step, upload 2025.csv, and land on the first strategy —
+  // whose series then becomes 2024 ∪ 2025, because the upsert only touches the
+  // dates it was handed. Neither file. Reported as success.
+  //
+  // THE PREDICATE IS THE FABRICATION ITSELF, not a proxy for it. Rows already
+  // present OUTSIDE [min, max] of this payload are precisely the rows that
+  // would SURVIVE this write and merge into the result. Inside the range the
+  // upsert overwrites, so the outcome is exactly the submitted series — an
+  // overwrite, not a fabrication, and not this fence's business.
+  //   · first submit          → 0 rows       → passes (the common case, one
+  //                                            index probe returning nothing)
+  //   · true repeat / retry   → all in range → passes (the recovery the fence
+  //                                            exists to allow)
+  //   · A then B              → A outside B  → REFUSED
+  //
+  // It is deliberately at the SITE OF THE MERGE rather than at the 23505 arm:
+  // this helper is the ONE call both the legacy and unified paths make, so the
+  // property holds for both without either knowing how it got its strategy id.
+  // The 23505 arm's name check is the other half and neither is sufficient
+  // alone — that one catches a rename before any write, this one catches a
+  // changed FILE under an unchanged name.
+  let minDate = rows[0].date;
+  let maxDate = rows[0].date;
+  for (const r of rows) {
+    if (r.date < minDate) minDate = r.date;
+    if (r.date > maxDate) maxDate = r.date;
+  }
+  // `date` is `YYYY-MM-DD`, regex- AND calendar-validated by
+  // `parseDailyReturnsSeries` before it can reach here, so it is safe in a
+  // PostgREST filter expression. Lexicographic and chronological order coincide
+  // for that format, which is why the min/max scan above is correct.
+  const { data: staleRows, error: staleErr } = await supabase
+    .from("csv_daily_returns")
+    .select("date")
+    .eq("strategy_id", strategyId)
+    .or(`date.lt.${minDate},date.gt.${maxDate}`)
+    .limit(1);
+  if (staleErr) {
+    // FAIL CLOSED. supabase-js RESOLVES on a read failure rather than throwing,
+    // so an unchecked `staleRows` would be `null` here and read as "no stale
+    // rows" — a failed read rendered as a measurement, which is the C-3 defect
+    // this milestone exists to close. We cannot establish the precondition, so
+    // we do not proceed to a write that depends on it.
+    console.error(
+      `${opts.logPrefix} stale-range probe failed [correlation_id=${opts.correlationId}]:`,
+      staleErr.code,
+      scrubSeamError(staleErr),
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_PERSIST_FAIL",
+        human_message:
+          "We could not confirm what is already saved for this strategy, so we stopped before writing. Nothing was changed. Try again shortly.",
+        debug_context: { strategy_id: strategyId },
+        correlation_id: opts.correlationId,
+      },
+      { status: 503, headers: NO_STORE_HEADERS },
+    );
+  }
+  if ((staleRows?.length ?? 0) > 0) {
+    console.warn(
+      `${opts.logPrefix} refused a cross-submission merge [correlation_id=${opts.correlationId}] strategy_id=${strategyId}`,
+    );
+    return NextResponse.json(
+      {
+        ok: false,
+        code: "CSV_SESSION_REUSED",
+        human_message:
+          "This strategy already holds a different track record, so we stopped before writing. Nothing was changed. Start a new strategy to upload a different file.",
+        debug_context: { strategy_id: strategyId },
+        correlation_id: opts.correlationId,
+      },
+      { status: 409, headers: NO_STORE_HEADERS },
+    );
+  }
+
   const { error: persistError } = await (
     supabase.rpc as unknown as (
       fn: "persist_csv_daily_returns",
