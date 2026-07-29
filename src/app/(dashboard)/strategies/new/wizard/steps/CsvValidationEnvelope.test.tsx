@@ -98,6 +98,87 @@ describe("[140.4-16 / CR-02] CsvValidationEnvelope — no duplicated sentence", 
     ).toHaveLength(1);
   });
 
+  // ── 140.5-05 / D-§4a bullet 3 — THE DOUBLE-RENDER PIN, BOTH POLARITIES ─────
+  //
+  // CR-02 fixed the INSTANCE. This pins the PROPERTY, in the shape
+  // `LiveRegion.test.tsx` uses for the same class of defect: count the
+  // occurrences, and pair the count with a positive counterpart so "renders
+  // once" cannot be satisfied by rendering zero times.
+
+  it("🔴 PIN: with no per-row errors and a code we have no copy for, the heading renders EXACTLY once", () => {
+    // The precise configuration that produced the browser screenshot: no
+    // breakdown to show, and a code the copy table does not carry, so both the
+    // heading slot and the cause slot fall back to the same string.
+    const SENTENCE = "The upload could not be checked.";
+    renderEnvelope("ZZ_NO_TABLE_ENTRY_AT_ALL", SENTENCE);
+
+    expect(
+      screen.queryAllByText(SENTENCE),
+      "the panel printed one sentence in both of its copy slots. The user reads " +
+        "the same words twice and learns nothing the second time — reproduced " +
+        "in a browser on a real founder CSV (ISSUE-003).",
+    ).toHaveLength(1);
+    expect(
+      screen.queryByText(/rows? failed validation/),
+      "a breakdown region rendered with no rows to break down — the copy would " +
+        "be promising something that is not on screen.",
+    ).not.toBeInTheDocument();
+  });
+
+  it("POSITIVE COUNTERPART of the pin: with row errors, the heading renders once AND the breakdown region appears", () => {
+    // Without this, the pin above is satisfied by deleting the panel's body.
+    renderEnvelope("CSV_VALIDATION_FAILED", "ignored — rows win the heading", [
+      { rule: "not_nullable", row: 4, message: "daily_return is null" },
+      { rule: "not_nullable", row: 9, message: "daily_return is null" },
+    ]);
+
+    expect(screen.queryAllByText("2 rows failed validation")).toHaveLength(1);
+    // The per-rule <details> region — the thing the panel exists for.
+    expect(screen.getByText(/Failing values \(2 rows\)|not_nullable \(2 rows\)/)).toBeInTheDocument();
+  });
+
+  // ── 140.5-05 — the CONTRADICTION guard, found by a negative control ────────
+
+  it("⭐ does NOT paste the generic SEAM_MISCONFIGURED cause under the route's corrected sentence", () => {
+    // On the untouched tree this panel rendered, in order:
+    //   "…we stopped before checking your file. … Nothing was saved … try again
+    //    in a minute."            ← the route's WR-07-corrected sentence, TRUE
+    //   "…Nothing was submitted and nothing was changed. Retrying will not
+    //    clear it…"               ← the table's cause, FALSE at this emitter
+    // Two contradictory accounts of one failure, in one panel. The table entry
+    // is true where it was authored (a pre-I/O `SeamConfigError`) and false
+    // here, because `req.formData()` buffers the whole upload ~50 lines above
+    // the deny that emits this code.
+    const ROUTE_CORRECTED =
+      "Our rate limiter is unavailable, so we stopped before checking your " +
+      "file. This is a fault on our side, not your data. Nothing was saved and " +
+      "nothing was validated — try again in a minute.";
+    renderEnvelope("SEAM_MISCONFIGURED", ROUTE_CORRECTED);
+
+    expect(screen.getByText(ROUTE_CORRECTED)).toBeInTheDocument();
+    const panel = screen.getByTestId("wizard-csv-error");
+    expect(panel.textContent).not.toContain("Nothing was submitted");
+    expect(panel.textContent).not.toContain("Retrying will not clear it");
+    // …and no substitute sentence was invented in its place: exactly one copy
+    // paragraph, the route's own.
+    const copyParagraphs = [...panel.querySelectorAll("p")].filter(
+      (p) => !p.textContent?.startsWith("correlation_id:"),
+    );
+    expect(copyParagraphs).toHaveLength(1);
+  });
+
+  it("ANTI-CONTROL: suppression is targeted — a code whose cause IS true here still renders it", () => {
+    // Without this, the fix above is satisfiable by deleting the second line
+    // for every code, which would undo CR-02 entirely.
+    renderEnvelope(
+      "CSV_FILE_TOO_LARGE",
+      "Maximum file size is 10 MB. Your file is 11.3 MB.",
+    );
+    expect(
+      screen.getByText(WIZARD_ERROR_COPY.CSV_FILE_TOO_LARGE.cause),
+    ).toBeInTheDocument();
+  });
+
   it("POSITIVE COUNTERPART: the per-row cause line is untouched", () => {
     // Without this, "render no second line" is satisfied by deleting the cause
     // line entirely, which would remove the panel's real per-row summary — the

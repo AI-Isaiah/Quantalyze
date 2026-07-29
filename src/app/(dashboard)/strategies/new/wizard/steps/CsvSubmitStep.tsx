@@ -6,10 +6,20 @@ import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import {
   CSV_SUBMIT_STEP_HEADINGS,
   WIZARD_ERROR_COPY,
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
 } from "@/lib/wizardErrors";
 import { CsvValidationEnvelope } from "./CsvValidationEnvelope";
+import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
+import { buildEnvelope, type ErrorEnvelope } from "@/lib/envelope";
+import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import { scrubSeamError } from "@/lib/seam-redaction";
 import type { MetadataDraft } from "./MetadataStep";
-import { wizardFetch } from "@/lib/wizard/wizard-correlation";
+import {
+  getWizardCorrelationId,
+  wizardFetch,
+} from "@/lib/wizard/wizard-correlation";
 
 /**
  * Phase 15 / CSV-01..CSV-02 — sub-step 3 of the CSV branch.
@@ -53,9 +63,18 @@ export interface CsvSubmitStepProps {
   /**
    * Phase 19.1 — parsed daily-return rows from the csv-validate envelope.
    * Forwarded to csv-finalize as `daily_returns_series` (snake_case).
-   * REQUIRED for `fmt=daily_returns`/`daily_nav` (route.ts:748 rejects
-   * with CSV_INVALID_FORMAT "received 0 rows" if missing/empty);
-   * undefined/empty is the expected shape for `fmt=trades`.
+   * REQUIRED for `fmt=daily_returns`/`daily_nav`: `parseDailyReturnsSeries` in
+   * `src/app/api/strategies/csv-finalize/route.ts` rejects a missing or empty
+   * series with `CSV_INVALID_FORMAT`. Undefined/empty is the expected shape for
+   * `fmt=trades`.
+   *
+   * ⚠️ 140.5-05 / SEAMPROSE-02 — a bare `file:line` citation naming line 748 of
+   * a file called `route.ts` stood here. It was wrong (that line is not the
+   * check) and unresolvable (140.5-04's census measured that basename as
+   * **88-way ambiguous** in this repo). Replaced by a symbol anchor, which
+   * survives every edit above it. The old citation is DESCRIBED rather than
+   * quoted: a quoted `file:line` would keep the census counting this file as
+   * carrying a live citation — DEF-16-2 pointed at itself.
    */
   dailyReturnsSeries?: { date: string; daily_return: number }[];
   /**
@@ -88,6 +107,55 @@ const CSV_SUBMIT_STEP_HEADINGS_CONTRIBUTION = {
   submittingCtaLabel: "Adding…",
 } as const;
 
+/**
+ * 140.5-05 / SEAMPROSE-08 — every code `POST /api/strategies/csv-finalize` puts
+ * on the wire in its OWN vocabulary. The twin of `KNOWN_CSV_VALIDATE_CODES` in
+ * `CsvUploadStep.tsx`, and DELIBERATELY A SECOND APPLICATION rather than a
+ * shared two-client abstraction: the shared artefacts here are the hop, the
+ * envelope, the copy table and the guard. A bespoke "shared CSV error handler"
+ * would be a THIRD vocabulary surface admitting each route's codes at the
+ * other — the reason `KNOWN_CREATE_WITH_KEY_CODES` and `KNOWN_ADD_KEY_CODES`
+ * are also kept apart.
+ *
+ * ── COVERAGE-LAW ROW (CONTEXT §2), STATED ────────────────────────────────────
+ * A hand-typed roster — **row 2, PARTIAL BY CONSTRUCTION**. Row 1 in this file
+ * is the other half of the arm: the shared `SEAM_CODE_TO_WIZARD_CODE` hop and
+ * the shared `ErrorEnvelope`. The row-2 half is fail-louded, not trusted:
+ * `seam-wire-vocabulary.invariant.test.ts` derives this route's emitted codes
+ * from its comment-stripped source and reddens BY NAME when one is missing here.
+ *
+ * ── THE ENUMERATION PREDICATE ────────────────────────────────────────────────
+ * Comment-strip `src/app/api/strategies/csv-finalize/route.ts`, then collect the
+ * first string-literal argument of every `csvErrorEnvelope(` / `csvErrorBody(`
+ * call plus every `code: "UPPER_SNAKE"` property. That yields SIX:
+ * `CSV_FINALIZE_FAIL`, `CSV_INVALID_FORMAT` (×20 sites), `CSV_PERSIST_FAIL`,
+ * `CSV_RATE_LIMIT`, `CSV_SESSION_REUSED`, `SEAM_MISCONFIGURED`. The route's one
+ * dynamic emitter, `parsedSeries.code`, is not a gap: `parseDailyReturnsSeries`
+ * only ever yields `CSV_INVALID_FORMAT`, which is already a member.
+ *
+ * ── THE TWO NON-MECHANICAL MEMBERSHIP DECISIONS, same as the sibling ─────────
+ * `SEAM_MISCONFIGURED` is IN, and the arm tries this set BEFORE the wire table
+ * so the route's own corrected sentence wins. `CSV_RATE_LIMIT` is OUT, so it
+ * falls to the hop and the `Retry-After` this route stamps reaches the only CSV
+ * panel that can render a wait.
+ *
+ * ⭐ `CSV_PERSIST_FAIL` is the member that matters most. Its route sentence says
+ * the strategy WAS created and the series was NOT saved, so routing it to §4a —
+ * whose copy asserts *"Nothing was saved."* — would print a reassurance the
+ * route has just contradicted. A negative control asserts that phrase is absent
+ * from the DOM on this code, so the unreachability is tested, not intended.
+ *
+ * ⚠️ TYPED `string`, NOT `WizardErrorCode`: five of the six are the ROUTE's
+ * vocabulary and are not members of that union.
+ */
+const KNOWN_CSV_FINALIZE_CODES: ReadonlySet<string> = new Set<string>([
+  "CSV_FINALIZE_FAIL",
+  "CSV_INVALID_FORMAT",
+  "CSV_PERSIST_FAIL",
+  "CSV_SESSION_REUSED",
+  "SEAM_MISCONFIGURED",
+]);
+
 // Format-picker labels are component-local UI taxonomy (read-only summary
 // row), not error/heading copy — they stay inline. wizardErrors.ts owns
 // user-visible CSV error / heading strings only.
@@ -110,6 +178,32 @@ export function CsvSubmitStep({
 }: CsvSubmitStepProps) {
   const [submitting, setSubmitting] = useState(false);
   const [envelope, setEnvelope] = useState<ValidationEnvelope | null>(null);
+  /**
+   * 140.5-05 — the SHARED envelope, for branches 2 and 3. A second piece of
+   * state rather than a widening of `envelope`: only this panel can carry a
+   * `Retry-After` (PATTERNS §5). Exactly one of the two is ever non-null, and
+   * the two writers below make that structural.
+   */
+  const [seamEnvelope, setSeamEnvelope] = useState<ErrorEnvelope | null>(null);
+  /**
+   * Generated once per mount and identical to the `X-Correlation-Id` header
+   * `wizardFetch` stamps on every request, so an id always renders even when
+   * the wire names none — `—` was half of DEF-140.4-C.
+   */
+  const [correlationId] = useState<string>(() => getWizardCorrelationId());
+
+  /** The ONE writer for the CSV panel; it clears the shared one. */
+  const showCsvEnvelope = useCallback((next: ValidationEnvelope | null) => {
+    setEnvelope(next);
+    setSeamEnvelope(null);
+  }, []);
+
+  /** The mirror image. Two accounts of one failure must never co-exist. */
+  const showSeamEnvelope = useCallback((next: ErrorEnvelope) => {
+    setSeamEnvelope(next);
+    setEnvelope(null);
+  }, []);
+
   const headings =
     entryContext === "contribution"
       ? CSV_SUBMIT_STEP_HEADINGS_CONTRIBUTION
@@ -117,7 +211,9 @@ export function CsvSubmitStep({
 
   const handleSubmit = useCallback(async () => {
     if (submitting) return;
-    setEnvelope(null);
+    // Clears BOTH panels, so a wait advertised by the previous response cannot
+    // survive into this attempt (TRAP-3).
+    showCsvEnvelope(null);
     setSubmitting(true);
 
     try {
@@ -134,10 +230,12 @@ export function CsvSubmitStep({
           // terminal-status guard (plan 110-01) is the real enforcement.
           entry_context: entryContext,
           // Phase 19.1 — REQUIRED for fmt=daily_returns/daily_nav. The
-          // csv-finalize route rejects with CSV_INVALID_FORMAT "received
-          // 0 rows" if this is absent (route.ts:748). Omitted when the
-          // wizard never received the field from csv-validate (legacy
-          // pre-19.1 envelopes; fmt=trades).
+          // csv-finalize route rejects with CSV_INVALID_FORMAT if this is
+          // absent — see `parseDailyReturnsSeries` in that route. Omitted when
+          // the wizard never received the field from csv-validate (legacy
+          // pre-19.1 envelopes; fmt=trades). 140.5-05: the bare `file:line`
+          // citation that stood here is described in the `dailyReturnsSeries`
+          // prop docblock above and was replaced for the reason recorded there.
           ...(dailyReturnsSeries !== undefined
             ? { daily_returns_series: dailyReturnsSeries }
             : {}),
@@ -188,38 +286,92 @@ export function CsvSubmitStep({
       const isIdempotentSuccess = res.status === 409 && data.ok === true;
 
       if (!res.ok && !isIdempotentSuccess) {
-        const errEnvelope: ValidationEnvelope = {
-          code: data.code ?? "CSV_SUBMIT_FAILED",
-          human_message:
-            data.human_message ??
-            data.error ??
-            WIZARD_ERROR_COPY.CSV_SUBMIT_FAILED.title,
-          debug_context: data.debug_context ?? {},
-          correlation_id: data.correlation_id ?? null,
-        };
-        setEnvelope(errEnvelope);
+        // ⛔ 140.5-05 / SEAMPROSE-08 — THE THREE-WAY ARM, SECOND APPLICATION.
+        //
+        // WHAT WAS HERE. `data.code ?? "CSV_SUBMIT_FAILED"` — a TOP-LEVEL read.
+        // This route forwards NESTED bodies whose code sits at `detail.code`
+        // (the 424 from `process_key.py`, the per-key 429 from `internal.py`),
+        // plus `withAuth`'s codeless 401. Every one of them missed the read and
+        // rendered *"We could not confirm whether your strategy was saved"* —
+        // a sentence about an outcome we never established, for failures where
+        // the answer was on the wire the whole time.
+        //
+        // ORDER IS BINDING AND IS NOT A STYLE CHOICE. Roster first, because
+        // `SEAM_MISCONFIGURED` is in BOTH vocabularies and this route's emitter
+        // sits below `req.json()`; the generic entry's *"Nothing was
+        // submitted"* / *"never left our servers"* would be false here. See
+        // `KNOWN_CSV_FINALIZE_CODES` above for both membership decisions.
+        if (data.code !== undefined && KNOWN_CSV_FINALIZE_CODES.has(data.code)) {
+          // BRANCH 1 — the route's own vocabulary, body forwarded UNCHANGED.
+          const errEnvelope: ValidationEnvelope = {
+            code: data.code,
+            human_message:
+              data.human_message ??
+              data.error ??
+              WIZARD_ERROR_COPY.CSV_SUBMIT_FAILED.title,
+            debug_context: data.debug_context ?? {},
+            correlation_id: data.correlation_id ?? null,
+          };
+          showCsvEnvelope(errEnvelope);
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "csv_submit",
+            code: errEnvelope.code,
+          });
+          // NEW-C14-01: re-enable Submit on errors that are safe to retry.
+          // The route is now idempotent for wizard_session_id conflicts
+          // (23505 → 409), so retrying after CSV_FINALIZE_FAIL is safe.
+          // Keep button disabled for:
+          //   CSV_PERSIST_FAIL — strategy exists but series not saved, contact support.
+          //   CSV_DUPLICATE_SESSION — admin lookup failed after 23505; retrying will
+          //     hit 23505 again and loop indefinitely. The error copy already says
+          //     "Refresh the page to see your submitted strategy."
+          //     RED-TEAM-L2: without this guard, Submit was re-enabled and the user
+          //     could trigger an infinite 23505 → lookup-fails → 409 CSV_DUPLICATE_SESSION
+          //     → re-enabled Submit cycle.
+          //
+          // ⚠️ 140.5-05 — THE FENCE MOVED WITH THE READ, DELIBERATELY, AND IT
+          // LIVES ON BRANCH 1 ONLY. Both codes it names are route-minted, so
+          // only this branch can carry them; leaving it below the arm would
+          // have made it read as if it also governed the hop and fallback
+          // branches, where it can never fire. A regression test pins that
+          // CSV_PERSIST_FAIL still leaves Submit disabled — the pre-existing
+          // behaviour is a property, not an accident of statement order.
+          if (
+            data.code !== "CSV_PERSIST_FAIL" &&
+            data.code !== "CSV_DUPLICATE_SESSION"
+          ) {
+            setSubmitting(false);
+          }
+          return;
+        }
+
+        // BRANCHES 2 AND 3 — read through the LEAF, which handles the flat AND
+        // the nested `service_error` shapes. This is the hop `CsvSubmitStep`
+        // never had; its absence is why the §6 hand-off hole reopened here.
+        const translated = recogniseSeamErrorCode(seamErrorCode(data));
+        const code: WizardErrorCode =
+          translated !== "UNKNOWN" ? translated : "CSV_UPSTREAM_FAIL";
+        const surfacedId =
+          seamCorrelationId(data) ?? data.correlation_id ?? correlationId;
+        // Through the ONE parser (`quantalyze/no-raw-retry-after-parse` is a
+        // repo-wide lint error), off the SAME response as the code, and
+        // `?? undefined` because absence is not zero.
+        const advertisedWait = parseRetryAfterSeconds(res.headers);
+        showSeamEnvelope(
+          buildEnvelope(code, surfacedId, {
+            retryAfterSeconds: advertisedWait ?? undefined,
+          }),
+        );
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "csv_submit",
-          code: errEnvelope.code,
+          code,
         });
-        // NEW-C14-01: re-enable Submit on errors that are safe to retry.
-        // The route is now idempotent for wizard_session_id conflicts
-        // (23505 → 409), so retrying after CSV_FINALIZE_FAIL is safe.
-        // Keep button disabled for:
-        //   CSV_PERSIST_FAIL — strategy exists but series not saved, contact support.
-        //   CSV_DUPLICATE_SESSION — admin lookup failed after 23505; retrying will
-        //     hit 23505 again and loop indefinitely. The error copy already says
-        //     "Refresh the page to see your submitted strategy."
-        //     RED-TEAM-L2: without this guard, Submit was re-enabled and the user
-        //     could trigger an infinite 23505 → lookup-fails → 409 CSV_DUPLICATE_SESSION
-        //     → re-enabled Submit cycle.
-        if (
-          data.code !== "CSV_PERSIST_FAIL" &&
-          data.code !== "CSV_DUPLICATE_SESSION"
-        ) {
-          setSubmitting(false);
-        }
+        // Nothing on these two branches is a persist failure — the retry fence
+        // below is keyed on codes only branch 1 can carry — so Submit
+        // re-enables, which is correct for a transport or upstream refusal.
+        setSubmitting(false);
         return;
       }
 
@@ -241,7 +393,7 @@ export function CsvSubmitStep({
           debug_context: {},
           correlation_id: data.correlation_id ?? null,
         };
-        setEnvelope(errEnvelope);
+        showCsvEnvelope(errEnvelope);
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "csv_submit",
@@ -257,7 +409,13 @@ export function CsvSubmitStep({
       });
       onSubmitted(data.strategy_id);
     } catch (err) {
-      console.error("[wizard:CsvSubmitStep] threw:", err);
+      // 140.5-05 / TRAP-1, as a PROPERTY: a caught transport error must not be
+      // logged in a form that can carry credential material. `scrubSeamError`
+      // is the ONE entry point every seam log site uses and is total by
+      // construction, which matters inside a catch arm. AN INSTANCE FIX — the
+      // log-coverage roster does not cover `.tsx` files, so this site was
+      // invisible to it and its siblings still are (named open in the SUMMARY).
+      console.error("[wizard:CsvSubmitStep] threw:", scrubSeamError(err));
       // Phase 17 / DESIGN-05: unified with CsvUploadStep variant. UI-SPEC §14.1
       // row 7 declares the canonical text as "click Retry to try again" — both
       // step files now share the same single-source-of-truth title.
@@ -267,7 +425,7 @@ export function CsvSubmitStep({
         debug_context: {},
         correlation_id: null,
       };
-      setEnvelope(errEnvelope);
+      showCsvEnvelope(errEnvelope);
       trackForQuantsEventClient("wizard_error", {
         wizard_session_id: wizardSessionId,
         step: "csv_submit",
@@ -275,7 +433,7 @@ export function CsvSubmitStep({
       });
       setSubmitting(false);
     }
-  }, [submitting, wizardSessionId, fmt, strategyName, dailyReturnsSeries, metadata, onSubmitted, entryContext]);
+  }, [submitting, wizardSessionId, fmt, strategyName, dailyReturnsSeries, metadata, onSubmitted, entryContext, correlationId, showCsvEnvelope, showSeamEnvelope]);
 
   return (
     <section aria-labelledby="wizard-csv-submit-heading">
@@ -318,6 +476,20 @@ export function CsvSubmitStep({
               debug_context: envelope.debug_context,
               correlation_id: envelope.correlation_id,
             }}
+          />
+        </div>
+      )}
+
+      {/* 140.5-05 — the SHARED envelope, for branches 2 and 3. `onRetry` is
+          load-bearing, not decoration: `ErrorEnvelope` gates the advertised
+          wait behind `showRetry = recoverable && Boolean(onRetry)`, so without
+          it this client could never render the `Retry-After` its route stamps
+          (SC-CSV-4's subject). */}
+      {seamEnvelope && (
+        <div className="mt-4">
+          <WizardErrorEnvelope
+            envelope={seamEnvelope}
+            onRetry={() => setSeamEnvelope(null)}
           />
         </div>
       )}
