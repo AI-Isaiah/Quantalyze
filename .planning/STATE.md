@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.16
 milestone_name: Production Resilience & Reliability
 status: executing
-stopped_at: Completed 140.2-09-PLAN.md
-last_updated: "2026-07-30T11:52:16.974Z"
+stopped_at: v1.16 SEAM + error-surface phases 140–140.5 all shipped to main (@ 4f45dcab); analytics worker deployed & healthy. Next: Phase 141.
+last_updated: "2026-07-30T20:15:00.000Z"
 last_activity: 2026-07-30
 progress:
   total_phases: 14
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 80
-  completed_plans: 79
-  percent: 50
+  completed_plans: 80
+  percent: 57
 ---
 
 # Project State — Quantalyze
@@ -46,9 +46,8 @@ RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md
 
 ## Current Position
 
-Phase: 140.5 (seamprose-attribution-copy-harness-fidelity-and-prose-citations) — EXECUTING
-Plan: 1 of 8
-Status: Executing Phase 140.5
+Phase: v1.16 SEAM + error-surface COMPLETE — phases 140 → 140.5 all shipped to main (@ `4f45dcab`); the analytics worker is deployed (`git_sha 4f45dcab`, `/health` ok, ticking). **Next: Phase 141 (SEAM retry-with-backoff, gated on the idempotency audit) via `/gsd-autonomous --from 141`.**
+Status: 140.1.2 + 140.5 VERIFICATION **passed**. 140.3 + 140.4 shipped with named residuals (VERIFICATION `gaps_found`) accepted as tracked tech-debt — 2 are user-facing (SEAMUX-03 typed-envelope on 9 routes; SEAM_MISCONFIGURED→UNKNOWN on 2 wizard clients), 2 are test/doc-hygiene. See TODOS "v1.16 carried-forward residuals". Decide at 141 kickoff whether to fold the two user-facing gaps into a 140.3/140.4 gap-closure pass first.
         ---- 140.2-05 (wave 5, 2026-07-27) ----
         **ROADMAP SC1 CLOSED.** The classification window now covers the response-body
         read and excludes caller/config faults. A stalling upstream (headers fast, body
