@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
 
   // Audit-2026-05-07 C-0108 (red-team c5): assertPortfolioOwnership is
   // verified to perform an explicit `.eq('id', portfolioId).eq('user_id',
-  // user.id)` query (src/lib/queries.ts:974) — NOT RLS-visibility-only —
+  // user.id)` query (`assertPortfolioOwnership` in src/lib/queries.ts) — NOT RLS-visibility-only —
   // so it correctly rejects an admin user trying to optimise a non-owned
   // portfolio. The IDOR concern is mitigated; rate-limit above closes the
   // CSRF-amplification-via-CSRF chain.

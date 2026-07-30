@@ -15,7 +15,7 @@ import {
  * §8.8 (per-rule label table). Mirrors the ConnectKeyStep error block.
  *
  * The correlation_id null slot is rendered as a dash in Phase 15. Phase
- * 16 / OBSERV-06 wires real values via analytics-client.ts:66 without
+ * 16 / OBSERV-06 wires real values via the seam client in analytics-client.ts without
  * changing the DOM shape.
  *
  * Phase 17 / DESIGN-05: rule-label map and cause-string templates live

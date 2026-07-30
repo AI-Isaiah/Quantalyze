@@ -213,7 +213,7 @@ export async function POST(req: NextRequest) {
     if (err instanceof AnalyticsUpstreamError) {
       // Never echo the raw upstream detail (schema/internal leak) — log it, return a clean message.
       //
-      // ⚠️ `err.status` is a `number` we set (`analytics-client.ts:66`), so the
+      // ⚠️ `err.status` is a `number` we set (on `AnalyticsUpstreamError` in `analytics-client.ts`), so the
       // leaf is a rendering no-op on it. It goes through anyway because the
       // source guard cannot know a type and its safe-property allowlist is
       // `retryAfterS` / `deadlineExceeded` / `code` only — and the alternatives

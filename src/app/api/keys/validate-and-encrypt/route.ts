@@ -50,7 +50,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // This relaxes credential PRESENCE for exactly one exchange — every ccxt exchange
   // (binance/okx/bybit/deribit) still requires a secret below, byte-identically. The
   // empty secret flows through the SAME validateKey/encryptKey trim chokepoint
-  // (analytics-client.ts:169; trimCredential("") === ""), never a parallel path.
+  // (`trimCredential` in analytics-client.ts; trimCredential("") === ""), never a parallel path.
   // Security-reviewed (T-119-08/09/11).
   // WR-01: match sfox case-INSENSITIVELY, aligning with the create-with-key /
   // composite-add-key siblings (`exchange.toLowerCase() === "sfox"`). A caller

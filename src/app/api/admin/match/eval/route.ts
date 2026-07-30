@@ -43,8 +43,8 @@ export const maxDuration = 300;
  * echoed `err.message`, which on this seam carries Python contract-drift
  * strings (the multi-line Zod issue list `parseResponse()` throws), FastAPI
  * 5xx `detail`, and the analytics service's base URL. Same defect and same
- * fix as bridge H-1062 (`src/app/api/bridge/route.ts:142-145`) and
- * portfolio-optimizer M-0333 (`src/app/api/portfolio-optimizer/route.ts:144-147`);
+ * fix as bridge H-1062 (the breaker arm in `src/app/api/bridge/route.ts`) and
+ * portfolio-optimizer M-0333 (the ownership-check arm in `src/app/api/portfolio-optimizer/route.ts`);
  * these two admin/match routes were simply never included in those passes.
  * The diagnosable half stays in `console.error`, server-side only.
  *
@@ -180,7 +180,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
           status: 503,
           headers: {
             ...NO_STORE_HEADERS,
-            // Same pairing as rateLimitDenyJson (`src/lib/ratelimit.ts:263-288`).
+            // Same pairing as rateLimitDenyJson (in `src/lib/ratelimit.ts`).
             "Retry-After": String(err.retryAfterS),
           },
         },
@@ -206,7 +206,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // signature failure, so both counts are asserted per file.
     //
     // THE RANGE SPLIT IS THE POINT, copied from
-    // `src/app/api/simulator/route.ts:201` rather than invented. Only 4xx
+    // the 4xx-forward arm in `src/app/api/simulator/route.ts` rather than invented. Only 4xx
     // forwards: a 4xx `detail` is operator-curated copy, while a 5xx `message`
     // carries the FastAPI detail, the `parseResponse()` contract-drift string
     // and this service's base URL — what the STATIC-bodies docblock above
@@ -226,7 +226,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       //
       // ⚠️ BOTH READS GO THROUGH THE LEAF EVEN THOUGH BOTH ARE SAFE VALUES, and
       // the reason is the guard, not the value. `status` is a `number` and
-      // `seamCode` a machine code from a closed set (`analytics-client.ts:66,78`),
+      // `seamCode` a machine code from a closed set (`AnalyticsUpstreamError` in `analytics-client.ts`),
       // so the scrub is a rendering no-op on each — but the source guard
       // (`seam-log-coverage.test.ts`) cannot know a type, and its allowlist is
       // `retryAfterS` / `deadlineExceeded` / `code` only. The two other ways to

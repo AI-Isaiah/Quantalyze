@@ -97,7 +97,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // every ccxt exchange (binance/okx/bybit/deribit) keeps the byte-identical <8-char
   // KEY_INVALID_FORMAT rejection below. Security-reviewed (T-119-08/09/11). The empty
   // secret flows through the SAME trim/validate/encrypt chokepoint
-  // (analytics-client.ts:169; trimCredential("") === ""), not a parallel path.
+  // (`trimCredential` in analytics-client.ts; trimCredential("") === ""), not a parallel path.
   // Matches this file's existing `exchange.toLowerCase() === "okx"` convention.
   const isSfox = exchange.toLowerCase() === "sfox";
   // Computed BEFORE the api_key/api_secret shape checks (RED-TEAM): mt5's slots
@@ -359,7 +359,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // Envelope-encryption contract: the Python service stores all credentials
     // (api_key + api_secret + passphrase) inside `api_key_encrypted` as a single
     // ciphertext blob, and intentionally returns `api_secret_encrypted: null`
-    // (analytics-service/services/encryption.py:80-82). Migration 031 makes the
+    // (the envelope-encryption return in analytics-service/services/encryption.py). Migration 031 makes the
     // matching DB column nullable to accept this. Only `api_key_encrypted` is
     // required here.
     if (!api_key_encrypted) {

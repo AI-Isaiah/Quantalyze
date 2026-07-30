@@ -198,7 +198,7 @@ export const scenarioPeerLimiter = makeLimiter(60, "60 s");
 // shared userActionLimiter (5/min) collides with attestation + deletion
 // budgets: a user iterating on a CSV burns the bucket and 429s their
 // next sensitive POST with no visible link between the surfaces. The
-// upstream Python service has its own 30/hour cap (routers/csv.py:28),
+// upstream Python service has its own 30/hour cap (the CSV router's limiter in analytics-service/routers/csv.py),
 // so 20/min on the Next.js edge is aligned with both end-user iteration
 // and the upstream budget. Used by /api/strategies/csv-validate AND
 // /api/strategies/csv-finalize so the wizard's validate→submit cycle
